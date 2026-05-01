@@ -1,0 +1,12 @@
+[Unit]
+Description=Lumen health watchdog
+After=network-online.target lumen-api.service lumen-web.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/lumen/deploy/scripts/lumen_health_watchdog.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lumen-health-watchdog
+

@@ -1,0 +1,33 @@
+[Unit]
+Description=Lumen Web
+After=network-online.target lumen-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lumen
+Group=lumen
+WorkingDirectory=/opt/lumen/apps/web
+EnvironmentFile=-/opt/lumen/.env
+# LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
+Environment=NODE_ENV=production
+ExecStart=/opt/lumen/apps/web/node_modules/.bin/next start -H 127.0.0.1 -p 3000
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+CapabilityBoundingSet=
+ReadWritePaths=/opt/lumendata /opt/lumen/apps/web/.next/cache
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lumen-web
+
+[Install]
+WantedBy=multi-user.target

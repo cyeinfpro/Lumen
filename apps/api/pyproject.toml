@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lumen-api"
+version = "0.1.0"
+description = "Lumen FastAPI — DESIGN.md §5 REST + SSE"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "pydantic[email]>=2.7,<3.0",
+    "pydantic-settings>=2.3,<3.0",
+    "sqlalchemy[asyncio]>=2.0.30,<3.0",
+    "asyncpg>=0.29,<1.0",
+    "psycopg2>=2.9,<3.0",
+    "alembic>=1.13,<2.0",
+    "redis>=5.0,<7.0",
+    "arq>=0.26,<1.0",
+    "httpx[socks]>=0.27,<1.0",
+    "sse-starlette>=2.1,<4.0",
+    "argon2-cffi>=23.1,<26.0",
+    "python-multipart>=0.0.9,<1.0",
+    "pillow>=10.3,<13.0",
+    "lumen-core",
+    # 观测层（V1.0 收尾）
+    "sentry-sdk[fastapi]>=2.0,<3.0",
+    "prometheus-fastapi-instrumentator>=7.0,<8.0",
+    "prometheus-client>=0.20,<1.0",
+    "opentelemetry-api>=1.25,<2.0",
+    "opentelemetry-sdk>=1.25,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25,<2.0",
+    "opentelemetry-instrumentation-fastapi>=0.46b0,<1.0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.46b0,<1.0",
+    "opentelemetry-instrumentation-httpx>=0.46b0,<1.0",
+    "opentelemetry-instrumentation-redis>=0.46b0,<1.0",
+]
+
+[tool.uv.sources]
+lumen-core = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

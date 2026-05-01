@@ -1,0 +1,12 @@
+[Unit]
+Description=Lumen periodic backup (every 4 hours)
+
+[Timer]
+# 每 4 小时触发：00/04/08/12/16/20 点整
+OnCalendar=*-*-* 00,04,08,12,16,20:00:00
+# 系统开机/timer 恢复时若已错过触发点，立即补跑一次
+Persistent=true
+Unit=lumen-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Lumen periodic backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/opt/lumen/.env
+ExecStart=/opt/lumen/scripts/backup.sh
+StandardOutput=journal
+StandardError=journal

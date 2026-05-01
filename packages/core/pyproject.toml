@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lumen-core"
+version = "0.1.0"
+description = "Lumen shared core: SQLAlchemy models, Pydantic schemas, sizing resolver, constants"
+requires-python = ">=3.12"
+dependencies = [
+    "sqlalchemy>=2.0.30,<3.0",
+    "pydantic>=2.7,<3.0",
+    "uuid7>=0.1.0,<1.0",
+    # P1-4: 精确 token 计数。≥0.7 是因为 o200k_base encoding 在 0.7.0 引入；
+    # 与现有 estimate_text_tokens 并存，import 失败时静默回落。
+    "tiktoken>=0.7,<1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["lumen_core"]

@@ -1,0 +1,24 @@
+[Unit]
+Description=sub2api image async job sidecar
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/image-job
+Environment=IMAGE_JOB_UPSTREAM_BASE_URL=http://127.0.0.1:8081
+Environment=IMAGE_JOB_PUBLIC_BASE_URL=https://example.com
+Environment=IMAGE_JOB_DATA_DIR=/opt/image-job/data
+Environment=IMAGE_JOB_STATE_DIR=/var/lib/image-job/state
+Environment=IMAGE_JOB_DB_PATH=/var/lib/image-job/state/image_jobs.sqlite3
+Environment=IMAGE_JOB_CONCURRENCY=2
+Environment=IMAGE_JOB_UPSTREAM_TIMEOUT_S=1800
+Environment=IMAGE_JOB_RETENTION_DAYS=1
+Environment=IMAGE_JOB_MAX_RETENTION_DAYS=1
+Environment=IMAGE_JOB_JOB_TTL_DAYS=1
+ExecStart=/opt/image-job/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8091
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

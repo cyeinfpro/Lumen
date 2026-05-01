@@ -1,0 +1,71 @@
+# Lumen infrastructure stack.
+# API / Worker / Web are deployed by deploy/systemd/* on the target server.
+
+x-service-hardening: &service-hardening
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *service-hardening
+    image: postgres:16.6-alpine
+    container_name: lumen-pg
+    user: "70:70"
+    restart: unless-stopped
+    shm_size: "256m"
+    environment:
+      POSTGRES_USER: "${DB_USER:?Set DB_USER in .env}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD in .env}"
+      POSTGRES_DB: "${DB_NAME:?Set DB_NAME in .env}"
+    cpus: "1.0"
+    mem_limit: 1g
+    ports:
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:5432:5432"
+    volumes:
+      - lumen_pg_data:/var/lib/postgresql/data
+    networks:
+      - lumen_backend
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DB_USER:?Set DB_USER in .env}", "-d", "${DB_NAME:?Set DB_NAME in .env}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    <<: *service-hardening
+    image: redis:7.4-alpine
+    container_name: lumen-redis
+    user: "999:999"
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
+    cpus: "0.5"
+    mem_limit: 512m
+    ports:
+      - "${REDIS_BIND_HOST:-127.0.0.1}:6379:6379"
+    entrypoint: ["/bin/sh", "/usr/local/bin/lumen-redis-entrypoint"]
+    volumes:
+      - lumen_redis_data:/data
+      - ./deploy/redis/redis-entrypoint.sh:/usr/local/bin/lumen-redis-entrypoint:ro
+    networks:
+      - lumen_backend
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  lumen_pg_data:
+  lumen_redis_data:
+
+networks:
+  lumen_backend:
+    driver: bridge

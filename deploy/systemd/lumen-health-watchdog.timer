@@ -1,0 +1,12 @@
+[Unit]
+Description=Lumen health watchdog timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=lumen-health-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,136 @@
+# ============================================================================
+# 本文件是 Lumen 反代最小可用配置；任何瘦身（去除 buffering off / read_timeout
+# / body size）会导致 413 / SSE 断流。
+#
+# 关键不变量（不要随意调整）：
+#   - client_max_body_size 60m   ：与 next.config 60MB 上传上限对齐
+#   - proxy_buffering off        ：SSE 必需，否则前端长时间收不到事件
+#   - proxy_request_buffering off：上传大图时不要先缓存到磁盘
+#   - proxy_cache off            ：动态接口不缓存
+#   - proxy_read_timeout 600s    ：4K 图像最多 360s + 余量
+#   - gzip off                   ：SSE 帧不能压缩，会破坏 event-stream
+#   - HTTP/1.1 + Connection ""   ：keep-alive 复用 upstream 长连接
+#   - TLS hardening              ：HSTS + TLSv1.2/1.3 + 强加密
+#   - rate limit                 ：API/SSE 基础限流，防止绕过应用层限流打满 upstream
+# ============================================================================
+
+limit_req_zone $binary_remote_addr zone=lumen_api:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=lumen_events:10m rate=30r/m;
+
+upstream lumen_web {
+    # Next.js 监听本机 3000；keepalive 池保持长连接，
+    # 避免每条 SSE 都重建 TCP/TLS 握手。
+    server 127.0.0.1:3000;
+    keepalive 32;
+}
+
+# 可选：API 直连（如果 Next.js rewrites 已经把 /api 转发到上游，这里也可以保留为空）
+# upstream lumen_api {
+#     server 127.0.0.1:8000;
+#     keepalive 32;
+# }
+
+# HTTP -> HTTPS 强制跳转
+server {
+    listen 80;
+    listen [::]:80;
+    server_name lumen.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name lumen.example.com;
+
+    # ----- TLS 硬化（不要降级）---------------------------------------------
+    ssl_certificate     /etc/letsencrypt/live/lumen.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/lumen.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    limit_req_status    429;
+
+    # HSTS：浏览器缓存一年强制 HTTPS
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referer-Policy "strict-origin-when-cross-origin" always;
+
+    # ----- Body / 上传 -----------------------------------------------------
+    # 与 apps/web/next.config 保持一致的 60MB 上限；瘦身到 1m/10m 会触发 413。
+    client_max_body_size 60m;
+    client_body_buffer_size 1m;
+
+    # ----- 压缩 ------------------------------------------------------------
+    # SSE event-stream 不能压缩，否则会被 nginx 缓冲到 gzip 边界才下发，
+    # 导致前端 “长时间无事件 -> 一次性收到一堆” 的 buffering 表现。
+    gzip off;
+
+    # ----- 通用 proxy headers ---------------------------------------------
+    proxy_http_version  1.1;
+    # Connection "" 配合 keepalive 复用上游长连接（HTTP/1.1 默认 keep-alive）
+    proxy_set_header    Connection        "";
+    proxy_set_header    Host              $host;
+    proxy_set_header    X-Real-IP         $remote_addr;
+    proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header    X-Forwarded-Proto $scheme;
+    proxy_set_header    X-Forwarded-Host  $host;
+
+    # 连接 / 读 / 写 超时
+    proxy_connect_timeout 30s;
+    proxy_send_timeout    600s;   # 大图上传场景
+    proxy_read_timeout    600s;   # 4K 图像渲染最多 360s + 余量
+
+    # ----- /events SSE 专用 location（必须最先匹配）------------------------
+    # 这一段是 Lumen 的核心数据通路，任何 buffering / cache / 压缩都不能开。
+    location /events {
+        limit_req               zone=lumen_events burst=10 nodelay;
+        proxy_pass              http://lumen_web;
+        proxy_http_version      1.1;
+        proxy_set_header        Connection        "";
+        proxy_set_header        Host              $host;
+        proxy_set_header        X-Real-IP         $remote_addr;
+        proxy_set_header        X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header        X-Forwarded-Proto $scheme;
+
+        # SSE 三件套：不能改 / 不能瘦身
+        proxy_buffering         off;
+        proxy_cache             off;
+        proxy_request_buffering off;
+
+        # SSE 长连接：浏览器侧 30~60min 不应被反代切断
+        proxy_connect_timeout   30s;
+        proxy_send_timeout      600s;
+        proxy_read_timeout      600s;
+
+        # 给下游禁用代理缓存的提示（部分 CDN 会读这个 header）
+        add_header              X-Accel-Buffering no always;
+        # 关闭 chunked 缓冲
+        chunked_transfer_encoding on;
+    }
+
+    # ----- /api 后端 ------------------------------------------------------
+    location /api/ {
+        limit_req               zone=lumen_api burst=30 nodelay;
+        proxy_pass              http://lumen_web;
+        proxy_buffering         off;
+        proxy_cache             off;
+        proxy_request_buffering off;
+        proxy_connect_timeout   30s;
+        proxy_send_timeout      600s;
+        proxy_read_timeout      600s;
+    }
+
+    # ----- Next.js 静态资源 / 页面 ----------------------------------------
+    location / {
+        proxy_pass              http://lumen_web;
+        proxy_connect_timeout   30s;
+        proxy_send_timeout      600s;
+        proxy_read_timeout      600s;
+        # 页面响应允许 nginx buffer（非 SSE / 非上传）
+        proxy_buffering         on;
+    }
+}

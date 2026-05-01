@@ -1,0 +1,62 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Generated artifacts
+output/
+generated-images/
+/flux-*.png
+tmp/
+
+# Runtime data (用户数据，rsync 部署需整目录排除)
+apps/worker/var/
+var/storage/
+var/test-storage-worker/
+**/scheduled_tasks*.json
+**/scheduled_tasks*.lock
+
+# Local archive (本机归档，不入库)
+.archive/
+
+# Remote/backup copies pulled from production
+*.remote
+*.bak
+*.bak.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# AI agent workflow
+.claude/
+docs/superpowers/
+
+# Internal planning / audit / fix-plans (本机保留，不入库)
+docs/internal/
+
+# 一次性整理 checklist
+RELEASE-CHECKLIST.md

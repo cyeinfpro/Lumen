@@ -1,0 +1,34 @@
+[Unit]
+Description=Lumen Telegram Bot
+After=network-online.target lumen-api.service
+Wants=network-online.target
+PartOf=lumen-api.service
+
+[Service]
+Type=simple
+User=lumen
+Group=lumen
+WorkingDirectory=/opt/lumen/apps/tgbot
+EnvironmentFile=-/opt/lumen/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/lumen/.venv/bin/python -m app.main
+# 改 always 而非 on-failure：管理后台「重启 bot」按钮触发 sys.exit(0) 是 clean exit，
+# 需要 Restart=always 才会被 systemd 拉起；同时正常崩溃也仍然会自动恢复。
+Restart=always
+RestartSec=3s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+CapabilityBoundingSet=
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lumen-tgbot
+
+[Install]
+WantedBy=multi-user.target

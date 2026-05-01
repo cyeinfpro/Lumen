@@ -1,0 +1,800 @@
+@import "tailwindcss";
+
+@theme {
+  /* 兼容别名：数值等价于 --amber-400 / --bg-0，保留硬编码值是因为
+     @theme 在 Tailwind v4 中仅接受字面量，不能用 var()。语义层面走
+     :root 里的 --color-lumen-amber / --color-lumen-dark 变量（映射到
+     --amber-400 / --bg-0）。 */
+  --color-lumen-amber: #F2A93A;
+  --color-lumen-amber-soft: rgba(242, 169, 58, 0.12);
+  --color-lumen-amber-border: rgba(242, 169, 58, 0.28);
+  --color-lumen-dark: #08080A;
+  --color-lumen-surface: rgba(24, 24, 24, 0.6);
+}
+
+@layer base {
+  :root {
+    /* === Darkroom 令牌（V1 Mobile Redesign, 2026-04-24） ===
+       默认按暗色兜底；无 cookie 时下面的 prefers-color-scheme 会接管系统亮色。
+       .dark 类保留向后兼容；旧 --accent / --bg-* 别名同步维持。 */
+    color-scheme: dark;
+
+    /* 底层 4 阶 */
+    --bg-0: #08080A;
+    --bg-1: #0F0F12;
+    --bg-2: #17181C;
+    --bg-3: #1F2025;
+
+    /* 前景 4 阶（略偏暖，银盐感） */
+    --fg-0: #F5F1EA;
+    --fg-1: #B8B1A4;
+    --fg-2: #6B675F;
+    --fg-3: #3E3B36;
+
+    /* 琥珀 7 档 */
+    --amber-100: #FDEBC8;
+    --amber-200: #FAD089;
+    --amber-300: #F5B858;
+    --amber-400: #F2A93A;
+    --amber-500: #E0932A;
+    --amber-600: #B8751D;
+    --amber-glow: rgba(242, 169, 58, 0.35);
+    --amber-glow-strong: rgba(242, 169, 58, 0.55);
+
+    /* 语义 */
+    --danger: #E5484D;
+    --danger-soft: rgba(229, 72, 77, 0.16);
+    --success: #30A46C;
+    --success-soft: rgba(48, 164, 108, 0.16);
+    --ok: #30A46C;
+    --warning: #F2A93A;
+    --warning-soft: rgba(242, 169, 58, 0.16);
+    --info: #3E9EFF;
+    --info-soft: rgba(62, 158, 255, 0.16);
+
+    /* 描边（带暖色） */
+    --border-subtle: rgba(245, 241, 234, 0.06);
+    --border:        rgba(245, 241, 234, 0.10);
+    --border-strong: rgba(245, 241, 234, 0.18);
+    --border-amber:  rgba(242, 169, 58, 0.30);
+
+    /* 焦点环（双层：暗房底 + 琥珀光晕） */
+    --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--amber-glow-strong);
+
+    /* 兼容别名（旧组件依赖 & spec 4.1 语义映射） */
+    --color-lumen-amber: var(--amber-400);
+    --color-lumen-dark:  var(--bg-0);
+    --accent:        var(--amber-400);
+    --accent-soft:   rgba(242, 169, 58, 0.12);
+    --accent-border: var(--border-amber);
+    --surface:       rgba(24, 24, 24, 0.6);
+
+    /* 字体家族（spec §4.2）
+       --font-display / --font-body / --font-mono 由 next/font 在 body class
+       上覆盖写入 —— 下面的定义作为 next/font 未载入（SSR 首屏 / 降级）时的
+       fallback 链，避免 body 掉回浏览器默认。 */
+    --font-display:    "Instrument Serif", "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+    --font-body:       "Geist", "SourceHanSans-VF", -apple-system, system-ui, sans-serif;
+    --font-mono:       "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --font-zh-display: "LXGW WenKai Screen", "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+    --font-zh-body:    "SourceHanSans-VF", "PingFang SC", "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
+
+    /* 排版阶梯（移动端特化） */
+    --text-display-xl: 36px;
+    --text-display-lg: 28px;
+    --text-title-md:   18px;
+    --text-body-lg:    17px;
+    --text-body-md:    15px;
+    --text-body-sm:    13px;
+    --text-caption:    11px;
+    --text-mono-sm:    12px;
+    --text-mono-xs:    10px;
+
+    /* 间距（4px 基） */
+    --space-1: 4px;  --space-2: 8px;   --space-3: 12px; --space-4: 16px;
+    --space-5: 20px; --space-6: 24px;  --space-8: 32px; --space-10: 40px;
+    --space-12: 48px; --space-16: 64px; --space-20: 80px;
+
+    /* 圆角 */
+    --radius-xs: 4px; --radius-sm: 8px; --radius-md: 12px;
+    --radius-lg: 16px; --radius-xl: 20px; --radius-2xl: 24px;
+    --radius-pill: 999px;
+
+    /* 阴影（暗房浓度） */
+    --shadow-1: 0 1px 2px rgba(0,0,0,0.60);
+    --shadow-2: 0 8px 24px -6px rgba(0,0,0,0.65), 0 0 0 1px rgba(245,241,234,0.04);
+    --shadow-3: 0 24px 64px -12px rgba(0,0,0,0.80), 0 0 0 1px rgba(245,241,234,0.06);
+    --shadow-amber: 0 0 24px -4px var(--amber-glow), 0 0 0 1px var(--border-amber);
+    --shadow-shutter: 0 0 0 1px rgba(242,169,58,0.60), 0 0 28px 4px var(--amber-glow-strong);
+
+    /* 兼容旧阴影令牌 */
+    --elev-1: var(--shadow-1);
+    --elev-2: var(--shadow-2);
+    --elev-3: var(--shadow-3);
+
+    /* 动效曲线 */
+    --ease-shutter: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-develop: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-curtain: cubic-bezier(0.80, 0, 0.20, 1);
+    --dur-fast: 140ms;
+    --dur-base: 220ms;
+    --dur-slow: 420ms;
+    --dur-develop: 2400ms;
+
+/* === Duration 补档（V1 Polish, 2026-04-24） === */
+--dur-instant: 80ms;    /* 微反馈：pressable / 光标切换 */
+--dur-quick:   140ms;   /* 别名 = --dur-fast */
+--dur-normal:  220ms;   /* 别名 = --dur-base */
+--dur-page:    280ms;   /* Tab 路由切换 */
+
+/* === Opacity 档（V1 Polish） === */
+--op-hover:    0.92;
+--op-press:    0.88;
+--op-disabled: 0.40;
+--op-hint:     0.60;
+
+/* === Interaction（V1 Polish） === */
+--hit-min: 44px;
+--press-scale-tight: 0.96;
+--press-scale-soft:  0.98;
+
+    /* z-index 层级 */
+    --z-base: 0;
+    --z-header: 10;
+    --z-tabbar: 20;
+    --z-composer: 40;
+    --z-composer-expanded: 45;
+    --z-tray: 50;
+    --z-lightbox: 80;
+    --z-dialog: 90;
+    --z-toast: 100;
+  }
+
+  /* .dark 保留作 opt-in：与 :root 等价，便于 <html class="dark"> 现有写法继续 work */
+  .theme-dark,
+  .dark {
+    color-scheme: dark;
+    --bg-0: #08080A;
+    --bg-1: #0F0F12;
+    --bg-2: #17181C;
+    --bg-3: #1F2025;
+    --fg-0: #F5F1EA;
+    --fg-1: #B8B1A4;
+    --fg-2: #6B675F;
+    --fg-3: #3E3B36;
+    --border-subtle: rgba(245, 241, 234, 0.06);
+    --border:        rgba(245, 241, 234, 0.10);
+    --border-strong: rgba(245, 241, 234, 0.18);
+    --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--amber-glow-strong);
+    --color-lumen-dark: var(--bg-0);
+    --surface: rgba(24, 24, 24, 0.6);
+    --shadow-1: 0 1px 2px rgba(0,0,0,0.60);
+    --shadow-2: 0 8px 24px -6px rgba(0,0,0,0.65), 0 0 0 1px rgba(245,241,234,0.04);
+    --shadow-3: 0 24px 64px -12px rgba(0,0,0,0.80), 0 0 0 1px rgba(245,241,234,0.06);
+  }
+
+  .theme-light {
+    color-scheme: light;
+    --bg-0: #F8F4EA;
+    --bg-1: #FFFDF8;
+    --bg-2: #ECE4D5;
+    --bg-3: #DED3C0;
+    --fg-0: #211F1A;
+    --fg-1: #5D574C;
+    --fg-2: #8B8375;
+    --fg-3: #BDB3A3;
+    --border-subtle: rgba(33, 31, 26, 0.08);
+    --border:        rgba(33, 31, 26, 0.12);
+    --border-strong: rgba(33, 31, 26, 0.20);
+    --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px rgba(184, 117, 29, 0.34);
+    --color-lumen-dark: var(--bg-0);
+    --surface: rgba(255, 253, 248, 0.72);
+    --shadow-1: 0 1px 2px rgba(72, 54, 31, 0.12);
+    --shadow-2: 0 8px 24px -8px rgba(72, 54, 31, 0.22), 0 0 0 1px rgba(33,31,26,0.05);
+    --shadow-3: 0 24px 64px -18px rgba(72, 54, 31, 0.28), 0 0 0 1px rgba(33,31,26,0.08);
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not(.theme-dark):not(.dark) {
+      color-scheme: light;
+      --bg-0: #F8F4EA;
+      --bg-1: #FFFDF8;
+      --bg-2: #ECE4D5;
+      --bg-3: #DED3C0;
+      --fg-0: #211F1A;
+      --fg-1: #5D574C;
+      --fg-2: #8B8375;
+      --fg-3: #BDB3A3;
+      --border-subtle: rgba(33, 31, 26, 0.08);
+      --border:        rgba(33, 31, 26, 0.12);
+      --border-strong: rgba(33, 31, 26, 0.20);
+      --ring: 0 0 0 2px var(--bg-0), 0 0 0 4px rgba(184, 117, 29, 0.34);
+      --color-lumen-dark: var(--bg-0);
+      --surface: rgba(255, 253, 248, 0.72);
+      --shadow-1: 0 1px 2px rgba(72, 54, 31, 0.12);
+      --shadow-2: 0 8px 24px -8px rgba(72, 54, 31, 0.22), 0 0 0 1px rgba(33,31,26,0.05);
+      --shadow-3: 0 24px 64px -18px rgba(72, 54, 31, 0.28), 0 0 0 1px rgba(33,31,26,0.08);
+    }
+  }
+}
+
+@layer base {
+  * {
+    @apply border-white/10;
+  }
+  html {
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    height: 100%;
+    /* iOS PWA standalone 模式下，dvh 不一定覆盖 home indicator 安全区，
+       底部会露出 webview 默认色（白条）。给 html 一个兜底背景色，
+       即使页面没撑满 safe-area，露出的也是 lumen 主题色。 */
+    background-color: var(--bg-0);
+  }
+  @supports (height: 100dvh) {
+    html { height: 100dvh; }
+  }
+  /* lvh = largest viewport（永远包含 safe-area），iOS standalone 下比 dvh
+     更稳。两条 @supports 分开写：dvh 不支持的浏览器仍走 100%；都不支持
+     的极老浏览器仍走 100%。lvh 在最后，优先级最高。 */
+  @supports (height: 100lvh) {
+    html { min-height: 100lvh; }
+  }
+  body {
+    background-color: var(--bg-0);
+    color: var(--fg-0);
+    overflow-x: hidden;
+    font-family: var(--font-body, "Geist", -apple-system, system-ui, sans-serif);
+    font-feature-settings: "ss01", "ss03";
+    font-optical-sizing: auto;
+    overscroll-behavior-y: none;
+    -webkit-overflow-scrolling: touch;
+    position: relative;
+  }
+  /* iOS PWA standalone 兜底：layout.tsx 给 body 设了 min-h-[100dvh]，
+     某些 webview 实现下 dvh 不含 safe-area-inset-bottom，叠加这一行
+     用 lvh 撑满整个屏幕（含 home indicator 区域）。 */
+  @supports (min-height: 100lvh) {
+    body { min-height: 100lvh; }
+  }
+
+  /* ——— 全屏 noise grain（Darkroom 胶片感） ——— */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0.035;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/%3E%3CfeColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  @supports not (mix-blend-mode: overlay) {
+    body::before { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body::before { opacity: 0.015; }
+  }
+  @media (max-width: 767px) {
+    body::before {
+      display: none;
+    }
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--ring);
+    border-radius: inherit;
+  }
+  button:focus,
+  a:focus,
+  input:focus,
+  textarea:focus,
+  select:focus {
+    outline: none;
+  }
+
+  ::selection {
+    background: rgba(242, 169, 58, 0.3);
+    color: inherit;
+  }
+
+  h1 { @apply text-3xl font-semibold tracking-tight; line-height: 1.2; }
+  h2 { @apply text-2xl font-semibold tracking-tight; line-height: 1.25; }
+  h3 { @apply text-lg font-medium tracking-tight; line-height: 1.35; }
+}
+
+@layer utilities {
+  .theme-light .text-neutral-50,
+  .theme-light .text-neutral-100,
+  .theme-light .text-neutral-200 {
+    color: var(--fg-0) !important;
+  }
+  .theme-light .text-neutral-300,
+  .theme-light .text-neutral-400 {
+    color: var(--fg-1) !important;
+  }
+  .theme-light .text-neutral-500,
+  .theme-light .text-neutral-600 {
+    color: var(--fg-2) !important;
+  }
+  .theme-light .border-white\/5,
+  .theme-light .border-white\/8,
+  .theme-light .border-white\/10,
+  .theme-light .border-white\/12,
+  .theme-light .border-white\/15 {
+    border-color: var(--border) !important;
+  }
+  .theme-light .bg-white\/5 {
+    background-color: rgba(33, 31, 26, 0.04) !important;
+  }
+  .theme-light .bg-white\/10 {
+    background-color: rgba(33, 31, 26, 0.08) !important;
+  }
+  .theme-light .bg-black\/30,
+  .theme-light .bg-black\/40 {
+    background-color: rgba(255, 253, 248, 0.72) !important;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not(.theme-dark):not(.dark) .text-neutral-50,
+    :root:not(.theme-dark):not(.dark) .text-neutral-100,
+    :root:not(.theme-dark):not(.dark) .text-neutral-200 {
+      color: var(--fg-0) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .text-neutral-300,
+    :root:not(.theme-dark):not(.dark) .text-neutral-400 {
+      color: var(--fg-1) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .text-neutral-500,
+    :root:not(.theme-dark):not(.dark) .text-neutral-600 {
+      color: var(--fg-2) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .border-white\/5,
+    :root:not(.theme-dark):not(.dark) .border-white\/8,
+    :root:not(.theme-dark):not(.dark) .border-white\/10,
+    :root:not(.theme-dark):not(.dark) .border-white\/12,
+    :root:not(.theme-dark):not(.dark) .border-white\/15 {
+      border-color: var(--border) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .bg-white\/5 {
+      background-color: rgba(33, 31, 26, 0.04) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .bg-white\/10 {
+      background-color: rgba(33, 31, 26, 0.08) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .bg-black\/30,
+    :root:not(.theme-dark):not(.dark) .bg-black\/40 {
+      background-color: rgba(255, 253, 248, 0.72) !important;
+    }
+  }
+
+  .text-balance { text-wrap: balance; }
+  .text-pretty  { text-wrap: pretty; }
+
+  /* Darkroom 字体 utility —— 业务层面按语义引用 */
+  .font-display { font-family: var(--font-display, "Instrument Serif", serif); }
+  .font-body    { font-family: var(--font-body, "Geist", system-ui, sans-serif); }
+  .font-mono    { font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, Menlo, monospace); }
+  .font-zh-display { font-family: var(--font-zh-display); }
+  .font-zh-body    { font-family: var(--font-zh-body); }
+
+  .text-display-xl { font-size: var(--text-display-xl); line-height: 40px; letter-spacing: -0.02em; }
+  .text-display-lg { font-size: var(--text-display-lg); line-height: 34px; letter-spacing: -0.015em; }
+  .text-title-md   { font-size: var(--text-title-md);   line-height: 26px; letter-spacing: -0.005em; }
+  .text-body-lg    { font-size: var(--text-body-lg);    line-height: 24px; }
+  .text-body-md    { font-size: var(--text-body-md);    line-height: 22px; }
+  .text-body-sm    { font-size: var(--text-body-sm);    line-height: 20px; }
+  .text-caption    { font-size: var(--text-caption);    line-height: 16px; letter-spacing: 0.02em; }
+  .text-mono-sm    { font-size: var(--text-mono-sm);    line-height: 18px; }
+  .text-mono-xs    { font-size: var(--text-mono-xs);    line-height: 14px; letter-spacing: 0.04em; }
+
+  /* 细滚动条 */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 9999px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+
+  /* 卡片阴影兼容别名 */
+  .shadow-lumen-card { box-shadow: var(--shadow-2); }
+  .shadow-lumen-card-hover { box-shadow: var(--shadow-3); }
+  .shadow-lumen-pop { box-shadow: var(--shadow-3), 0 0 0 1px rgba(255, 255, 255, 0.06); }
+  .shadow-amber { box-shadow: var(--shadow-amber); }
+  .shadow-shutter { box-shadow: var(--shadow-shutter); }
+
+  /* 骨架 shimmer */
+  .animate-shimmer {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .animate-shimmer::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.12) 50%,
+      transparent 100%
+    );
+    transform: translateX(-100%);
+    animation: lumen-shimmer 1.6s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes lumen-shimmer {
+    100% { transform: translateX(100%); }
+  }
+
+  .animate-lumen-shimmer {
+    animation: lumen-shimmer-bg 1.8s linear infinite;
+  }
+  @keyframes lumen-shimmer-bg {
+    from { background-position: 200% 0; }
+    to   { background-position: -200% 0; }
+  }
+
+  .lumen-studio-bg {
+    background:
+      radial-gradient(circle at 50% -10%, rgba(242, 169, 58, 0.14), transparent 30rem),
+      radial-gradient(circle at 88% 12%, rgba(255, 255, 255, 0.05), transparent 22rem),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 18rem),
+      var(--bg-0);
+  }
+
+  .lumen-bottom-fade {
+    pointer-events: none;
+    position: sticky;
+    bottom: 0;
+    height: 4rem;
+    margin-top: -4rem;
+    background: linear-gradient(to top, var(--bg-0), transparent);
+    z-index: 20;
+  }
+
+  .animate-pulse-soft {
+    animation: lumen-pulse-soft 2s ease-in-out infinite;
+  }
+  @keyframes lumen-pulse-soft {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.65; }
+  }
+
+  .animate-fade-in {
+    animation: lumen-fade-in 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes lumen-fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .animate-stream-tile-in {
+    animation: stream-tile-in 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes stream-tile-in {
+    from { opacity: 0; transform: translateY(10px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .animate-stream-img-in {
+    animation: stream-img-in 400ms ease both;
+  }
+  @keyframes stream-img-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  .stream-tile-shell {
+    content-visibility: auto;
+    contain: layout paint style;
+    contain-intrinsic-size: 1px 360px;
+  }
+  @supports not (content-visibility: auto) {
+    .stream-tile-shell {
+      contain: paint;
+    }
+  }
+  .share-tile-shell {
+    content-visibility: auto;
+    contain: layout paint style;
+    contain-intrinsic-size: 1px 320px;
+  }
+  @supports not (content-visibility: auto) {
+    .share-tile-shell {
+      contain: paint;
+    }
+  }
+  .share-dialog-in {
+    animation: share-dialog-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes share-dialog-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  .stream-collapse {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 250ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .stream-collapse.open {
+    grid-template-rows: 1fr;
+  }
+  .stream-collapse > * {
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  /* ——— 显影扫光（生成中图覆盖层） ——— */
+  @keyframes lumen-develop {
+    0%   { background-position: -200% 0; opacity: 0.4; }
+    50%  { opacity: 0.9; }
+    100% { background-position: 200% 0; opacity: 0.4; }
+  }
+  .lumen-developing {
+    background: linear-gradient(90deg,
+      transparent 0%,
+      rgba(242,169,58,0.08) 35%,
+      rgba(242,169,58,0.25) 50%,
+      rgba(242,169,58,0.08) 65%,
+      transparent 100%);
+    background-size: 200% 100%;
+    animation: lumen-develop var(--dur-develop) var(--ease-develop) infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .lumen-developing {
+      animation: none;
+      background: linear-gradient(90deg,
+        transparent 0%,
+        rgba(242,169,58,0.18) 50%,
+        transparent 100%);
+    }
+  }
+
+  /* ——— Lightbox 环境光（图自身虚化作 halo） ———
+     桌面端 blur(80px) 做 halo；移动端 GPU 扛不住 80px 对 140% viewport 的模糊，
+     会长时间独占合成线程导致页面卡死——降级为纯暗底（无 filter）。 */
+  .lumen-ambient {
+    position: absolute;
+    inset: -20%;
+    background-image: var(--bg-img);
+    background-size: cover;
+    background-position: center;
+    filter: blur(80px) saturate(1.4) brightness(0.38);
+    transform: scale(1.3);
+    opacity: 0.9;
+    pointer-events: none;
+    will-change: opacity;
+  }
+  @media (max-width: 767px) {
+    .lumen-ambient {
+      /* 不采样图 / 不 blur：背景直接暗底，避免 GPU 合成卡顿 */
+      background-image: none !important;
+      filter: none !important;
+      transform: none !important;
+      background: var(--bg-0);
+      opacity: 1;
+    }
+  }
+  @supports not (filter: blur(80px)) {
+    .lumen-ambient { filter: none; background: var(--bg-0); opacity: 1; }
+  }
+
+  /* ——— SafeArea 扩展 ——— */
+  .safe-tabbar   { padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+  .safe-composer { padding-bottom: calc(56px + 56px + 12px + env(safe-area-inset-bottom, 0px)); }
+
+  @media (max-width: 767px) {
+    .mobile-perf-surface {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+      filter: none !important;
+      will-change: auto !important;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ——— Markdown (Agent C) ——— */
+@import "highlight.js/styles/github-dark.css";
+
+/* ——— 移动端触控优化 ——— */
+@media (hover: none) and (pointer: coarse) {
+  .scrollbar-thin {
+    scrollbar-width: auto;
+    scrollbar-color: unset;
+  }
+  .scrollbar-thin::-webkit-scrollbar { display: none; }
+  button:not(.lumen-md button):not([data-inline]),
+  [role="tab"],
+  [role="button"]:not(.lumen-md [role="button"]) {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  a:not(.lumen-md a):not([data-inline]) {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  kbd, .lumen-md a, .lumen-md button, [data-inline] {
+    min-height: 0;
+    min-width: 0;
+  }
+  .lumen-md a { padding: 2px 0; }
+  .lumen-md pre + div button,
+  .lumen-md pre ~ div button {
+    opacity: 0.8;
+  }
+  .lumen-md .overflow-x-auto {
+    box-shadow: inset -20px 0 10px -15px rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* Safe-area utility classes */
+.safe-bottom  { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.safe-top     { padding-top: env(safe-area-inset-top, 0px); }
+.safe-x {
+  padding-left:  env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.safe-left  { padding-left: env(safe-area-inset-left, 0px); }
+.safe-right { padding-right: env(safe-area-inset-right, 0px); }
+.safe-area {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+.safe-bottom-plus {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+}
+
+/* ——— 移动端表单补强 ——— */
+@media (max-width: 640px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+  .mobile-compact h1 { font-size: 1.5rem; line-height: 1.2; }
+  .mobile-compact h2 { font-size: 1.25rem; line-height: 1.25; }
+}
+
+/* ——— 移动横屏 safe 扩展 ——— */
+@media (orientation: landscape) and (max-height: 480px) {
+  .safe-bottom {
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
+  }
+}
+
+/* ——— Markdown lumen-md（保持原样） ——— */
+.lumen-md {
+  color: var(--fg-0);
+  font-size: inherit;
+  line-height: 1.75;
+  word-wrap: break-word;
+}
+.lumen-md > * + * { margin-top: 0.85rem; }
+.lumen-md p { margin: 0; max-width: 65ch; }
+.lumen-md.lumen-md-desktop-compact {
+  line-height: 1.46;
+}
+.lumen-md.lumen-md-desktop-compact > * + * {
+  margin-top: 0.5rem;
+}
+.lumen-md.lumen-md-desktop-compact p,
+.lumen-md.lumen-md-desktop-compact li {
+  max-width: 100%;
+}
+.lumen-md h1,
+.lumen-md h2,
+.lumen-md h3,
+.lumen-md h4 {
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--fg-0);
+  margin-top: 1.25rem;
+  letter-spacing: -0.01em;
+}
+.lumen-md h1 { font-size: 1.5rem; }
+.lumen-md h2 { font-size: 1.25rem; }
+.lumen-md h3 { font-size: 1.1rem; }
+.lumen-md h4 { font-size: 1rem; }
+.lumen-md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(242, 169, 58, 0.5);
+  transition: text-decoration-color 160ms ease;
+}
+.lumen-md a:hover { text-decoration-color: var(--accent); }
+.lumen-md ul,
+.lumen-md ol { padding-left: 1.25rem; margin: 0; }
+.lumen-md ul { list-style: disc; }
+.lumen-md ol { list-style: decimal; }
+.lumen-md li { margin: 0.35rem 0; max-width: 65ch; }
+.lumen-md li > p { display: inline; }
+.lumen-md blockquote {
+  border-left: 2px solid rgba(242, 169, 58, 0.3);
+  padding-left: 0.875rem;
+  color: var(--fg-1);
+  margin: 0;
+}
+.lumen-md hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 1rem 0;
+}
+.lumen-md code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85em;
+}
+.lumen-md :not(pre) > code {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  color: var(--fg-0);
+}
+.lumen-md pre {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 0.875rem 1rem;
+  overflow-x: auto;
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+.lumen-md pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.lumen-md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.lumen-md th,
+.lumen-md td {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+.lumen-md th {
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 600;
+}
+.lumen-md tbody tr {
+  transition: background-color 140ms ease;
+}
+.lumen-md tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.lumen-md img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+.lumen-md input[type="checkbox"] {
+  margin-right: 0.35rem;
+  accent-color: var(--accent);
+}
