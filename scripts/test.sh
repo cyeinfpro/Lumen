@@ -17,6 +17,21 @@ cd "$(dirname "$0")/.."
 : "${STORAGE_ROOT:=/tmp/lumen-test-storage}"
 export STORAGE_ROOT
 
+ensure_web_deps() {
+    if [ -x "apps/web/node_modules/.bin/eslint" ] &&
+       [ -x "apps/web/node_modules/.bin/tsc" ] &&
+       [ -x "apps/web/node_modules/.bin/next" ]; then
+        return
+    fi
+
+    echo
+    echo "==> apps/web dependencies"
+    (
+        cd apps/web
+        npm ci
+    )
+}
+
 echo "==> apps/worker/tests"
 uv run pytest apps/worker/tests "$@"
 
@@ -38,6 +53,8 @@ echo "==> apps/tgbot/tests"
 echo
 echo "==> image-job/tests"
 uv run pytest image-job/tests "$@"
+
+ensure_web_deps
 
 echo
 echo "==> apps/web lint"
