@@ -46,6 +46,23 @@ MAX_IMAGE_BYTES = int(os.getenv("IMAGE_JOB_MAX_IMAGE_BYTES", str(80 * 1024 * 102
 QUEUE_MAX = max(1, int(os.getenv("IMAGE_JOB_QUEUE_MAX", "1000")))
 RETRY_NETWORK_MAX = max(0, int(os.getenv("IMAGE_JOB_RETRY_NETWORK_MAX", "1")))
 RETRY_BACKOFF_S = float(os.getenv("IMAGE_JOB_RETRY_BACKOFF_S", "2"))
+RETRY_RESPONSES_STREAM_MAX = max(
+    0,
+    int(os.getenv("IMAGE_JOB_RETRY_RESPONSES_STREAM_MAX", str(RETRY_NETWORK_MAX))),
+)
+RETRY_UPSTREAM_5XX_MAX = max(0, int(os.getenv("IMAGE_JOB_RETRY_UPSTREAM_5XX_MAX", "1")))
+RESPONSES_STRIP_PARTIAL_IMAGES = os.getenv(
+    "IMAGE_JOB_RESPONSES_STRIP_PARTIAL_IMAGES", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+RESPONSES_STREAM_MAX_BYTES = int(
+    os.getenv(
+        "IMAGE_JOB_RESPONSES_STREAM_MAX_BYTES",
+        str(max(MAX_IMAGE_BYTES * 2, 64 * 1024 * 1024)),
+    )
+)
+JOB_HEARTBEAT_INTERVAL_S = max(
+    5, int(os.getenv("IMAGE_JOB_HEARTBEAT_INTERVAL_S", "15"))
+)
 RETENTION_SWEEP_INTERVAL_S = max(60, int(os.getenv("IMAGE_JOB_RETENTION_SWEEP_INTERVAL_S", "3600")))
 DEFAULT_RETENTION_DAYS = min(30, max(1, int(os.getenv("IMAGE_JOB_RETENTION_DAYS", "1"))))
 MAX_RETENTION_DAYS = min(
@@ -367,6 +384,8 @@ def normalize_payload_body(endpoint: str, body: dict[str, Any]) -> dict[str, Any
             for tool in tools:
                 if isinstance(tool, dict) and tool.get("type") == "image_generation":
                     normalize_image_output_options(tool)
+                    if RESPONSES_STRIP_PARTIAL_IMAGES:
+                        tool.pop("partial_images", None)
     return normalized
 
 
@@ -435,6 +454,13 @@ async def mark_running(job_id: str) -> None:
         "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), "
         "updated_at = ?, attempts = attempts + 1 WHERE job_id = ?",
         (now, now, job_id),
+    )
+
+
+async def touch_running(job_id: str) -> None:
+    await db_exec(
+        "UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'running'",
+        (iso(), job_id),
     )
 
 
@@ -774,6 +800,29 @@ def parse_sse_json_objects(text: str) -> list[Any]:
     return objects
 
 
+def _try_parse_sse_data(data: str) -> Any | None:
+    data = data.strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        return None
+
+
+def _sse_data_from_lines(lines: list[str]) -> str | None:
+    parts: list[str] = []
+    for raw in lines:
+        if raw.startswith("data:"):
+            data = raw[5:]
+            if data.startswith(" "):
+                data = data[1:]
+            parts.append(data)
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
 def _first_stream_error(events: Iterable[Any]) -> dict[str, Any] | None:
     for event in events:
         if not isinstance(event, dict):
@@ -858,6 +907,107 @@ async def extract_response_images(
             continue
         candidates.extend(await extract_candidates(obj, client, cache=cache))
     return candidates
+
+
+async def extract_responses_stream_images(
+    resp: httpx.Response,
+    client: httpx.AsyncClient,
+    *,
+    job_id: str,
+) -> list[ImageCandidate]:
+    """Consume a /v1/responses SSE stream and return only final image candidates.
+
+    Partial-image frames are progress previews. If the stream ends before a final
+    image appears, treat it as a network-style interruption so the caller can
+    retry or fail over instead of saving a partial preview as the result.
+    """
+    cache: dict[str, ImageCandidate] = {}
+    event_lines: list[str] = []
+    events_seen = 0
+    bytes_seen = 0
+    partial_candidates: list[ImageCandidate] = []
+    final_candidates: list[ImageCandidate] = []
+    saw_done = False
+    last_touch = time.monotonic()
+
+    async def handle_event(obj: Any) -> None:
+        nonlocal partial_candidates, final_candidates
+        stream_error = _first_stream_error([obj])
+        if stream_error is not None:
+            raise JobFailure(
+                _stream_error_message(stream_error),
+                upstream_status=resp.status_code,
+                upstream_body=stream_error,
+                error_class=_classify_stream_error(stream_error),
+            )
+        extracted = await extract_candidates(obj, client, cache=cache)
+        if not extracted:
+            return
+        if _is_responses_partial_event(obj):
+            partial_candidates.extend(extracted)
+        else:
+            final_candidates.extend(extracted)
+
+    async for line in resp.aiter_lines():
+        bytes_seen += len(line) + 1
+        if bytes_seen > RESPONSES_STREAM_MAX_BYTES:
+            raise JobFailure(
+                "Responses stream exceeded sidecar byte budget before final image",
+                upstream_status=resp.status_code,
+                error_class=ERROR_CLASS_NETWORK,
+            )
+        now = time.monotonic()
+        if now - last_touch >= JOB_HEARTBEAT_INTERVAL_S:
+            await touch_running(job_id)
+            last_touch = now
+
+        if line == "":
+            data = _sse_data_from_lines(event_lines)
+            event_lines = []
+            obj = _try_parse_sse_data(data or "")
+            if obj is None:
+                if data and data.strip() == "[DONE]":
+                    saw_done = True
+                continue
+            events_seen += 1
+            await handle_event(obj)
+            continue
+        event_lines.append(line)
+
+    if event_lines:
+        data = _sse_data_from_lines(event_lines)
+        obj = _try_parse_sse_data(data or "")
+        if obj is not None:
+            events_seen += 1
+            await handle_event(obj)
+        elif data and data.strip() == "[DONE]":
+            saw_done = True
+
+    if final_candidates:
+        return final_candidates
+
+    # No final image. Do not save partial previews as "successful" output.
+    detail = {
+        "events_seen": events_seen,
+        "partial_images_seen": len(partial_candidates),
+        "saw_done": saw_done,
+        "bytes_seen": bytes_seen,
+    }
+    if partial_candidates:
+        raise JobFailure(
+            "Responses stream ended after partial images but before final image",
+            upstream_status=resp.status_code,
+            upstream_body=detail,
+            retryable=True,
+            error_class=ERROR_CLASS_NETWORK,
+        )
+    raise JobFailure(
+        "Responses stream ended before returning an image",
+        upstream_status=resp.status_code,
+        upstream_body=detail,
+        retryable=True,
+        error_class=ERROR_CLASS_NETWORK,
+    )
 
 
 def image_metadata(data: bytes, mime_type: str | None) -> tuple[int | None, int | None, str]:
@@ -1040,11 +1190,148 @@ def _classify_httpx_error(exc: httpx.HTTPError) -> bool:
         (
             httpx.ConnectError,
             httpx.ConnectTimeout,
+            httpx.ReadTimeout,
             httpx.ReadError,
             httpx.RemoteProtocolError,
             httpx.PoolTimeout,
+            httpx.WriteError,
+            httpx.WriteTimeout,
         ),
     )
+
+
+def _is_retryable_job_failure(exc: JobFailure) -> bool:
+    if exc.retryable:
+        return True
+    if exc.error_class == ERROR_CLASS_NETWORK:
+        return True
+    if exc.error_class == ERROR_CLASS_UPSTREAM_5XX:
+        return True
+    return False
+
+
+def _retry_budget_for_failure(exc: JobFailure, *, endpoint: str) -> int:
+    if exc.error_class == ERROR_CLASS_NETWORK and endpoint == "/v1/responses":
+        return max(RETRY_NETWORK_MAX, RETRY_RESPONSES_STREAM_MAX)
+    if exc.error_class == ERROR_CLASS_NETWORK:
+        return RETRY_NETWORK_MAX
+    if exc.error_class == ERROR_CLASS_UPSTREAM_5XX:
+        return RETRY_UPSTREAM_5XX_MAX
+    return 0
+
+
+async def _extract_non_stream_response_images(
+    resp: httpx.Response,
+    client: httpx.AsyncClient,
+) -> list[ImageCandidate]:
+    content = await resp.aread()
+    buffered = httpx.Response(
+        resp.status_code,
+        headers=resp.headers,
+        content=content,
+    )
+    return await extract_response_images(buffered, client)
+
+
+async def _call_upstream_once(
+    row: sqlite3.Row,
+    *,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    endpoint: str,
+) -> tuple[int, list[dict[str, Any]]]:
+    assert _http_client is not None
+    if endpoint == "/v1/responses":
+        async with _http_client.stream("POST", url, headers=headers, json=body) as resp:
+            if resp.status_code >= 400:
+                content = await resp.aread()
+                ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
+                raise JobFailure(
+                    f"上游返回 HTTP {resp.status_code}",
+                    upstream_status=resp.status_code,
+                    upstream_body=body_preview(content),
+                    error_class=ec,
+                )
+            content_type = resp.headers.get("content-type", "").lower()
+            if "text/event-stream" in content_type:
+                try:
+                    candidates = await extract_responses_stream_images(
+                        resp,
+                        _http_client,
+                        job_id=row["job_id"],
+                    )
+                except (JobFailure, httpx.HTTPError):
+                    raise
+                except Exception as exc:
+                    raise JobFailure(
+                        f"解析上游流式响应失败: {exc.__class__.__name__}: {exc}",
+                        upstream_status=resp.status_code,
+                        error_class=ERROR_CLASS_IMAGE_SAVE,
+                    ) from exc
+            else:
+                try:
+                    candidates = await _extract_non_stream_response_images(resp, _http_client)
+                except (JobFailure, httpx.HTTPError):
+                    raise
+                except Exception as exc:
+                    raise JobFailure(
+                        f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
+                        upstream_status=resp.status_code,
+                        error_class=ERROR_CLASS_IMAGE_SAVE,
+                    ) from exc
+        status_code = resp.status_code
+    else:
+        resp = await _http_client.post(url, headers=headers, json=body)
+        status_code = resp.status_code
+        if resp.status_code >= 400:
+            ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
+            raise JobFailure(
+                f"上游返回 HTTP {resp.status_code}",
+                upstream_status=resp.status_code,
+                upstream_body=body_preview(resp.content),
+                error_class=ec,
+            )
+        try:
+            candidates = await extract_response_images(resp, _http_client)
+        except (JobFailure, httpx.HTTPError):
+            raise
+        except Exception as exc:
+            raise JobFailure(
+                f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
+                upstream_status=resp.status_code,
+                upstream_body=body_preview(resp.content),
+                error_class=ERROR_CLASS_IMAGE_SAVE,
+            ) from exc
+
+    if not candidates:
+        # Most common cause: caller asked /v1/images/generations against a
+        # provider that only speaks /v1/responses (or vice versa). Surface
+        # `no_image` so the caller can switch endpoint, not just provider.
+        raise JobFailure(
+            "上游没有返回可保存的图片",
+            upstream_status=status_code,
+            error_class=ERROR_CLASS_NO_IMAGE,
+        )
+    try:
+        images = await save_images(
+            row["job_id"], row["created_at"], row["retention_days"], candidates
+        )
+    except JobFailure:
+        raise
+    except Exception as exc:
+        raise JobFailure(
+            f"保存图片失败: {exc.__class__.__name__}: {exc}",
+            upstream_status=status_code,
+            error_class=ERROR_CLASS_IMAGE_SAVE,
+        ) from exc
+    if not images:
+        raise JobFailure(
+            "没有保存任何图片",
+            upstream_status=status_code,
+            error_class=ERROR_CLASS_IMAGE_SAVE,
+        )
+    return status_code, images
 
 
 async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
@@ -1057,7 +1344,8 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
             "job is missing Authorization header", error_class=ERROR_CLASS_INTERNAL
         )
 
-    url = f"{UPSTREAM_BASE_URL}{payload['endpoint']}"
+    endpoint = payload["endpoint"]
+    url = f"{UPSTREAM_BASE_URL}{endpoint}"
     headers = {
         "Authorization": auth_header,
         "Content-Type": "application/json",
@@ -1065,90 +1353,60 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
     }
 
     body = payload["body"]
-    if payload["endpoint"] == "/v1/images/edits" and isinstance(body, dict):
+    if endpoint == "/v1/images/edits" and isinstance(body, dict):
         body = await materialize_edit_input_urls(row, body)
 
-    last_exc: httpx.HTTPError | None = None
-    resp: httpx.Response | None = None
-    for attempt in range(RETRY_NETWORK_MAX + 1):
+    last_failure: JobFailure | None = None
+    max_budget = max(RETRY_NETWORK_MAX, RETRY_RESPONSES_STREAM_MAX, RETRY_UPSTREAM_5XX_MAX)
+    for attempt in range(max_budget + 1):
         try:
-            resp = await _http_client.post(url, headers=headers, json=body)
-            break
+            return await _call_upstream_once(
+                row,
+                url=url,
+                headers=headers,
+                body=body,
+                endpoint=endpoint,
+            )
         except httpx.HTTPError as exc:
-            last_exc = exc
-            if attempt < RETRY_NETWORK_MAX and _classify_httpx_error(exc):
-                LOG.warning(
-                    "image job %s upstream network error, retry %d/%d: %s",
-                    row["job_id"],
-                    attempt + 1,
-                    RETRY_NETWORK_MAX,
-                    exc,
-                )
-                await asyncio.sleep(RETRY_BACKOFF_S * (2**attempt))
-                continue
-            raise JobFailure(
+            failure = JobFailure(
                 f"上游请求失败: {exc.__class__.__name__}: {exc}",
                 retryable=_classify_httpx_error(exc),
                 error_class=ERROR_CLASS_NETWORK,
-            ) from exc
-    if resp is None:  # defensive — loop above always sets or raises
-        raise JobFailure(
-            f"上游请求失败: {last_exc}" if last_exc else "上游请求失败",
-            error_class=ERROR_CLASS_NETWORK,
-        )
+            )
+        except JobFailure as exc:
+            failure = exc
 
-    if resp.status_code >= 400:
-        ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
-        raise JobFailure(
-            f"上游返回 HTTP {resp.status_code}",
-            upstream_status=resp.status_code,
-            upstream_body=body_preview(resp.content),
-            error_class=ec,
-        )
+        last_failure = failure
+        retry_budget = _retry_budget_for_failure(failure, endpoint=endpoint)
+        if attempt < retry_budget and _is_retryable_job_failure(failure):
+            LOG.warning(
+                "image job %s upstream retryable failure, retry %d/%d endpoint=%s class=%s: %s",
+                row["job_id"],
+                attempt + 1,
+                retry_budget,
+                endpoint,
+                failure.error_class,
+                failure.error,
+            )
+            await asyncio.sleep(RETRY_BACKOFF_S * (2**attempt))
+            continue
+        raise failure
 
-    try:
-        candidates = await extract_response_images(resp, _http_client)
-    except JobFailure:
-        raise
-    except Exception as exc:
-        raise JobFailure(
-            f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
-            upstream_status=resp.status_code,
-            upstream_body=body_preview(resp.content),
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        ) from exc
-    if not candidates:
-        # Most common cause: caller asked /v1/images/generations against a
-        # provider that only speaks /v1/responses (or vice versa). Surface
-        # `no_image` so the caller can switch endpoint, not just provider.
-        raise JobFailure(
-            "上游没有返回可保存的图片",
-            upstream_status=resp.status_code,
-            upstream_body=body_preview(resp.content),
-            error_class=ERROR_CLASS_NO_IMAGE,
-        )
-    try:
-        images = await save_images(
-            row["job_id"], row["created_at"], row["retention_days"], candidates
-        )
-    except JobFailure:
-        raise
-    except Exception as exc:
-        raise JobFailure(
-            f"保存图片失败: {exc.__class__.__name__}: {exc}",
-            upstream_status=resp.status_code,
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        ) from exc
-    if not images:
-        raise JobFailure(
-            "没有保存任何图片",
-            upstream_status=resp.status_code,
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        )
-    return resp.status_code, images
+    if last_failure is not None:
+        raise last_failure
+    raise JobFailure("upstream retry loop exited unexpectedly", error_class=ERROR_CLASS_INTERNAL)
 
 
 # --- Worker loop -------------------------------------------------------------
+
+
+async def running_heartbeat(job_id: str) -> None:
+    try:
+        while True:
+            await asyncio.sleep(JOB_HEARTBEAT_INTERVAL_S)
+            await touch_running(job_id)
+    except asyncio.CancelledError:
+        raise
 
 
 async def process_job(job_id: str) -> None:
@@ -1160,6 +1418,7 @@ async def process_job(job_id: str) -> None:
     await mark_running(job_id)
     started = time.monotonic()
     endpoint_used = row["endpoint"]
+    heartbeat = asyncio.create_task(running_heartbeat(job_id), name=f"image-job-heartbeat-{job_id}")
     try:
         fresh_row = await db_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
         if fresh_row is None:
@@ -1210,6 +1469,10 @@ async def process_job(job_id: str) -> None:
             endpoint_used=endpoint_used,
         )
         LOG.exception("image job %s crashed", job_id)
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
 
 
 async def worker_loop(worker_id: int) -> None:
