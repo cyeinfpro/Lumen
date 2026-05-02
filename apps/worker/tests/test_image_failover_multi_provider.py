@@ -40,9 +40,15 @@ class RecordingPool:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []  # (method, name, kwargs)
 
     async def select(
-        self, *, route: str = "text", ignore_cooldown: bool = False
+        self,
+        *,
+        route: str = "text",
+        ignore_cooldown: bool = False,
+        endpoint_kind: str | None = None,
+        acquire_inflight: bool = True,
+        task_id: str | None = None,
     ) -> list[provider_pool.ResolvedProvider]:
-        _ = route, ignore_cooldown
+        _ = route, ignore_cooldown, endpoint_kind, acquire_inflight, task_id
         return [
             provider_pool.ResolvedProvider(
                 name=n, base_url=f"https://{n}.example", api_key=f"sk-{n}"
@@ -56,7 +62,9 @@ class RecordingPool:
     def report_failure(self, name: str) -> None:
         self.calls.append(("report_failure", name, {}))
 
-    def report_image_success(self, name: str) -> None:
+    def report_image_success(self, name: str, *, endpoint_kind: str | None = None) -> None:
+        # endpoint_kind 仅作为 inflight 排序维度副产物；老 assertion 不关心，记 {}。
+        _ = endpoint_kind
         self.calls.append(("report_image_success", name, {}))
 
     def report_image_failure(self, name: str) -> None:
@@ -68,6 +76,13 @@ class RecordingPool:
         self.calls.append(
             ("report_image_rate_limited", name, {"retry_after_s": retry_after_s})
         )
+
+    def acquire_image_inflight(self, name: str, endpoint_kind: str | None) -> None:
+        # inflight 是选号排序优化；mock 默认 noop，需要时可在测试里替换。
+        _ = name, endpoint_kind
+
+    def release_image_inflight(self, name: str, endpoint_kind: str | None) -> None:
+        _ = name, endpoint_kind
 
     def get_redis(self) -> Any:
         return None

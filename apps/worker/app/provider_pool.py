@@ -134,6 +134,14 @@ class ProviderHealth:
     image_rate_limited_until: float | None = None
     # image-job per-endpoint 统计（仅 image_jobs 路由用到；其他路径不影响）
     endpoint_stats: dict[str, EndpointStat] = field(default_factory=dict)
+    # 当前正在跑的 image 请求计数，按 endpoint_kind 维度（"" = 未指定/聚合）。
+    # 选号排序的最高优先级；让并发请求自然落到不同号上，避免 image_last_used_at
+    # 只在 success 时更新带来的"select-then-update"雪崩。
+    image_inflight: dict[str, int] = field(default_factory=dict)
+    # image_last_used_at 的 endpoint_kind 维度版本——避免一个号在 responses lane
+    # 成功后污染 generations lane 的排序（典型坏果：generations 流量长期堆在
+    # 某个 priority=0 / 永远 None 的号上）。
+    image_last_used_at_per_ek: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -451,6 +459,7 @@ class ProviderPool:
         ignore_cooldown: bool = False,
         task_id: str | None = None,
         endpoint_kind: str | None = None,
+        acquire_inflight: bool = True,
     ) -> list[ResolvedProvider]:
         await self._maybe_reload()
         if route == "image":
@@ -458,12 +467,14 @@ class ProviderPool:
                 ignore_cooldown=ignore_cooldown,
                 task_id=task_id,
                 endpoint_kind=endpoint_kind,
+                acquire_inflight=acquire_inflight,
             )
         if route == "image_jobs":
             return await self._select_for_image(
                 ignore_cooldown=ignore_cooldown,
                 task_id=task_id,
                 endpoint_kind=endpoint_kind,
+                acquire_inflight=acquire_inflight,
             )
         if route == "text":
             endpoint_kind = endpoint_kind or "responses"
@@ -492,13 +503,24 @@ class ProviderPool:
         ignore_cooldown: bool = False,
         task_id: str | None = None,
         endpoint_kind: str | None = None,
+        acquire_inflight: bool = True,
     ) -> list[ResolvedProvider]:
         """按账号视角选号：跳过熔断 / image cooldown / 配额耗尽的账号，
-        剩余候选按 `image_last_used_at` 升序（最久未用优先）轮询。
+        剩余候选按 `(inflight[ek], image_last_used_at[ek], -priority)` 升序排序。
 
         ignore_cooldown=True 时，单任务遍历场景下跳过 image_cooldown / image_rate_limited
         过滤——上次失败不代表下次失败，让任务把所有 enabled 账号都试一遍。
         text 熔断（auth 类硬故障）和 quota 耗尽仍然过滤。
+
+        排序最高优先级是当前 endpoint_kind 维度的 in-flight 计数：让并发请求
+        自然落到不同号上，避免 image_last_used_at 只在 success 时更新带来的
+        "select-then-update"雪崩（多个 task 同时看到同一个候选第一名）。
+        次优先级是 image_last_used_at_per_ek（按 endpoint_kind 维度，避免一个号
+        在 responses lane 成功后污染 generations lane 的排序），最后是 priority。
+
+        acquire_inflight=True（默认）时，return 前对列表第 0 个候选 incr inflight；
+        caller 必须用 try/finally 保证最终 release（无论是否实际使用第 0 个）。
+        Reserve 等只为"挑号占 zset"不真正发请求的路径应传 False。
 
         这一层是 sub2api"一号一 key"部署形态下的核心调度：让多次生图请求自然
         分散到不同账号，避免单号被打到 OpenAI quota 上限。配额检查走
@@ -597,14 +619,19 @@ class ProviderPool:
                 h.image_rate_limited_until = now + max(1.0, retry_after)
                 skipped.append((p.name, f"quota_exhausted retry_after={retry_after:.0f}s"))
                 continue
-            # None（从未用过）排最前；不能用 `or 0.0`，因为 monotonic() 在
-            # 进程启动初期可能 < 0 之外的任意正小值，会把"从未用过"误排到中间。
-            sort_key = (
-                h.image_last_used_at
-                if h.image_last_used_at is not None
-                else float("-inf")
+            ek_key = endpoint_kind or ""
+            inflight = h.image_inflight.get(ek_key, 0)
+            # last_used_at 严格按 endpoint_kind 维度查；不 fallback 到全局
+            # image_last_used_at——一个号在 responses lane 成功后，那次成功不应
+            # 推后它在 generations lane 的排序，否则 generations 流量会长期堆在
+            # "从没在 generations 上成功过"的号上（典型坏果：Cybersol 永远排第一）。
+            # None（从未在该 endpoint 上成功）→ -inf 排最前；不能用 `or 0.0`，
+            # 因为 monotonic() 可能 < 0 之外的任意正小值，会把"从未用过"误排到中间。
+            last_used = h.image_last_used_at_per_ek.get(ek_key)
+            last_used_key = (
+                last_used if last_used is not None else float("-inf")
             )
-            candidates.append((p, sort_key))
+            candidates.append((p, (inflight, last_used_key)))
 
         if not candidates:
             # P1-8: 若所有 enabled provider 都在 avoid set 里，退化为忽略 avoid
@@ -624,6 +651,7 @@ class ProviderPool:
                     ignore_cooldown=ignore_cooldown,
                     task_id=None,
                     endpoint_kind=endpoint_kind,
+                    acquire_inflight=acquire_inflight,
                 )
             detail = ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
             raise UpstreamError(
@@ -633,12 +661,14 @@ class ProviderPool:
                 payload={"skipped": skipped},
             )
 
-        # 最久未用优先；并列再按 priority(降序)/weight 加权 RR 维持长跑公平。
+        # 排序键 = (inflight[ek], last_used[ek], -priority)。inflight 排在最前
+        # 让并发请求自然分散；last_used 让"最久未用"优先；priority 在前两者并列
+        # 时维持配置层的优先级。
         # 注：endpoint_kind lock 过滤已在 candidate gather 阶段（上方循环里
         # endpoint_kind_allowed）完成，到这里 candidates 必然只剩可用号；不再做
         # 二次过滤，避免维护双份失败信息。
-        candidates.sort(key=lambda x: (x[1], -x[0].priority))
-        return [
+        candidates.sort(key=lambda x: (x[1][0], x[1][1], -x[0].priority))
+        result = [
             ResolvedProvider(
                 name=p.name,
                 base_url=p.base_url,
@@ -652,6 +682,13 @@ class ProviderPool:
             )
             for p, _ in candidates
         ]
+        # 软占座：在 return 之前对列表第 0 个 incr inflight，让紧接着发起 select
+        # 的并发 task 看到不同的排序结果（A 落到第二位、原本第二的 B 上位）。
+        # caller 必须用 try/finally 调 release_image_inflight 释放——典型做法见
+        # upstream._dispatch_image 的 for 循环。
+        if acquire_inflight and result:
+            self.acquire_image_inflight(result[0].name, endpoint_kind)
+        return result
 
     def report_success(self, provider_name: str, *, is_probe: bool = False) -> None:
         h = self._health.get(provider_name)
@@ -688,8 +725,42 @@ class ProviderPool:
 
     # ---- image route 专用上报 -------------------------------------------
 
-    def report_image_success(self, provider_name: str) -> None:
+    def acquire_image_inflight(
+        self, provider_name: str, endpoint_kind: str | None
+    ) -> None:
+        """记一次"开始用某 provider 跑 image 请求"，给 _select_for_image 排序看。
+
+        endpoint_kind=None 时落到 "" 这个聚合 key——dual_race reserve 等不区分
+        endpoint 的路径会用到。caller 必须保证最终调一次 release_image_inflight。
+        """
+        h = self._health.setdefault(provider_name, ProviderHealth())
+        k = endpoint_kind or ""
+        h.image_inflight[k] = h.image_inflight.get(k, 0) + 1
+
+    def release_image_inflight(
+        self, provider_name: str, endpoint_kind: str | None
+    ) -> None:
+        """配 acquire_image_inflight 用，无论请求成功 / 失败 / cancel 都要在 finally
+        段里调一次。下界保护：减到 0 就 pop key，不允许出现负数。
+        """
+        h = self._health.get(provider_name)
+        if h is None:
+            return
+        k = endpoint_kind or ""
+        cur = h.image_inflight.get(k, 0)
+        if cur <= 1:
+            h.image_inflight.pop(k, None)
+        else:
+            h.image_inflight[k] = cur - 1
+
+    def report_image_success(
+        self, provider_name: str, *, endpoint_kind: str | None = None
+    ) -> None:
         """成功一次 image_generation：清空 image 失败计数 + 记 last_used_at。
+
+        endpoint_kind 给定时，按维度更新 image_last_used_at_per_ek，避免一个号
+        在 responses lane 成功后污染 generations lane 排序。同时保留全局
+        image_last_used_at 双写（observability/旧调用方仍读它）。
 
         不会重置 image_rate_limited_until——那是上游 quota 强约束，必须等到
         retry-after 过去；此处只动 health 维度。
@@ -700,6 +771,8 @@ class ProviderPool:
         h.image_consecutive_failures = 0
         h.image_cooldown_until = None
         h.image_last_used_at = now
+        if endpoint_kind:
+            h.image_last_used_at_per_ek[endpoint_kind] = now
         h.last_success_at = now  # 同时更新全局 last_success_at（探活逻辑会用）
         self._record_request_stats(h, total=1, success=1)
         try:
