@@ -1,13 +1,87 @@
 #!/usr/bin/env bash
 # Lumen 一键安装脚本
 # 用法：  bash scripts/install.sh
-# 行为：检查依赖 -> 写 .env -> 起 PG/Redis -> uv sync -> alembic upgrade
-#       -> 创建 admin -> npm ci -> 可选 build。
+# 行为：检查/自动安装依赖 -> 写 .env -> 起 PG/Redis -> uv sync
+#       -> alembic upgrade -> 创建 admin -> npm ci -> 可选 build。
 # 重复执行安全（幂等），中途任何失败都会立即停止。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+
+raw_have_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+raw_refresh_tool_paths() {
+    if [ -d /opt/homebrew/bin ]; then
+        PATH="/opt/homebrew/bin:${PATH}"
+    fi
+    if [ -d /usr/local/bin ]; then
+        PATH="/usr/local/bin:${PATH}"
+    fi
+    export PATH
+}
+
+raw_run_as_root() {
+    if [ "${EUID:-$(id -u 2>/dev/null || echo 1)}" -eq 0 ]; then
+        "$@"
+    elif raw_have_cmd sudo; then
+        sudo "$@"
+    else
+        return 1
+    fi
+}
+
+raw_install_packages() {
+    if raw_have_cmd apt-get; then
+        raw_run_as_root env DEBIAN_FRONTEND=noninteractive apt-get update
+        raw_run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+    elif raw_have_cmd dnf; then
+        raw_run_as_root dnf install -y "$@"
+    elif raw_have_cmd yum; then
+        raw_run_as_root yum install -y "$@"
+    elif raw_have_cmd pacman; then
+        raw_run_as_root pacman -Sy --noconfirm "$@"
+    elif raw_have_cmd zypper; then
+        raw_run_as_root zypper --non-interactive install "$@"
+    elif raw_have_cmd apk; then
+        raw_run_as_root apk add --no-cache "$@"
+    else
+        return 1
+    fi
+}
+
+raw_install_git() {
+    printf '[INFO] 缺少 git，尝试自动安装。\n'
+    raw_refresh_tool_paths
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin)
+            if raw_have_cmd brew; then
+                brew install git
+            elif raw_have_cmd curl; then
+                printf '[INFO] 缺少 Homebrew，尝试先自动安装 Homebrew。\n'
+                NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                if [ -x /opt/homebrew/bin/brew ]; then
+                    /opt/homebrew/bin/brew install git
+                elif [ -x /usr/local/bin/brew ]; then
+                    /usr/local/bin/brew install git
+                else
+                    return 1
+                fi
+                raw_refresh_tool_paths
+            else
+                return 1
+            fi
+            ;;
+        Linux)
+            raw_install_packages git ca-certificates curl
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
 bootstrap_from_raw_script() {
     local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
@@ -19,7 +93,17 @@ bootstrap_from_raw_script() {
     printf '[INFO] 分支：%s\n' "${branch}"
     printf '[INFO] 目录：%s\n' "${install_dir}"
 
-    if ! command -v git >/dev/null 2>&1; then
+    if ! raw_have_cmd git; then
+        if ! raw_install_git || ! raw_have_cmd git; then
+            printf '[ERROR] 缺少 git，且自动安装失败，无法从 GitHub 拉取 Lumen。\n' >&2
+            printf '        请确认当前用户有 sudo 权限，或手动安装 git 后重试。\n' >&2
+            printf '        手动拉取命令：git clone %s\n' "${repo_url}" >&2
+            exit 1
+        fi
+        printf '[INFO] git 已安装。\n'
+    fi
+
+    if ! raw_have_cmd git; then
         printf '[ERROR] 缺少 git，无法从 GitHub 拉取 Lumen。\n' >&2
         printf '        请先安装 git，或手动执行：git clone %s\n' "${repo_url}" >&2
         exit 1
@@ -216,7 +300,7 @@ import sys
 
 path = Path(sys.argv[1])
 lines = path.read_text(encoding="utf-8").splitlines()
-values: dict[str, str] = {}
+values = {}
 for line in lines:
     if not line or line.lstrip().startswith("#") or "=" not in line:
         continue
@@ -239,15 +323,15 @@ if missing and (not db_user or not db_password or not db_name):
     )
 for key, value in (("DB_USER", db_user), ("DB_PASSWORD", db_password), ("DB_NAME", db_name)):
     if any(ord(ch) < 32 for ch in value) or "'" in value:
-        raise SystemExit(f"{key} derived from DATABASE_URL contains unsupported characters")
+        raise SystemExit("{} derived from DATABASE_URL contains unsupported characters".format(key))
 
-append: list[str] = []
+append = []
 if "DB_USER" not in values:
-    append.append(f"DB_USER={db_user}")
+    append.append("DB_USER={}".format(db_user))
 if "DB_PASSWORD" not in values:
-    append.append(f"DB_PASSWORD='{db_password}'")
+    append.append("DB_PASSWORD='{}'".format(db_password))
 if "DB_NAME" not in values:
-    append.append(f"DB_NAME={db_name}")
+    append.append("DB_NAME={}".format(db_name))
 if append:
     with path.open("a", encoding="utf-8") as f:
         f.write("\n# Backfilled for docker-compose variable interpolation.\n")
@@ -260,6 +344,471 @@ PY
 available_kb_for_path() {
     local path="$1"
     python3 -c 'import shutil, sys; print(shutil.disk_usage(sys.argv[1]).free // 1024)' "${path}" 2>/dev/null
+}
+
+AUTO_INSTALL_DEPS="${LUMEN_AUTO_INSTALL_DEPS:-1}"
+APT_UPDATED=0
+DOCKER_USE_SUDO=0
+
+auto_install_enabled() {
+    case "${AUTO_INSTALL_DEPS}" in
+        0|false|FALSE|False|no|NO|No|off|OFF|Off) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+have_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+prepend_path_if_dir() {
+    local dir="$1"
+    if [ -d "${dir}" ]; then
+        case ":${PATH}:" in
+            *":${dir}:"*) ;;
+            *) export PATH="${dir}:${PATH}" ;;
+        esac
+    fi
+}
+
+refresh_tool_paths() {
+    prepend_path_if_dir "${HOME:-}/.local/bin"
+    prepend_path_if_dir "${HOME:-}/.cargo/bin"
+    prepend_path_if_dir "/opt/homebrew/bin"
+    prepend_path_if_dir "/usr/local/bin"
+
+    if have_cmd brew; then
+        local prefix
+        for formula in node@20 python@3.12 openssl@3 libpq; do
+            prefix="$(brew --prefix "${formula}" 2>/dev/null || true)"
+            if [ -n "${prefix}" ]; then
+                prepend_path_if_dir "${prefix}/bin"
+                prepend_path_if_dir "${prefix}/libexec/bin"
+            fi
+        done
+    fi
+}
+
+run_as_root() {
+    if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+        "$@"
+    elif have_cmd sudo; then
+        sudo "$@"
+    else
+        return 1
+    fi
+}
+
+require_auto_install() {
+    local name="$1"
+    local hint="$2"
+    if auto_install_enabled; then
+        return 0
+    fi
+    log_error "缺少或不满足依赖：${name}。已按 LUMEN_AUTO_INSTALL_DEPS=0 跳过自动安装。"
+    printf '       建议安装方式：%s\n' "${hint}" >&2
+    exit 1
+}
+
+linux_package_manager() {
+    if have_cmd apt-get; then
+        printf 'apt'
+    elif have_cmd dnf; then
+        printf 'dnf'
+    elif have_cmd yum; then
+        printf 'yum'
+    elif have_cmd pacman; then
+        printf 'pacman'
+    elif have_cmd zypper; then
+        printf 'zypper'
+    elif have_cmd apk; then
+        printf 'apk'
+    else
+        printf 'unknown'
+    fi
+}
+
+apt_update_once() {
+    if [ "${APT_UPDATED}" -eq 0 ]; then
+        run_as_root env DEBIAN_FRONTEND=noninteractive apt-get update
+        APT_UPDATED=1
+    fi
+}
+
+install_linux_packages() {
+    local pm
+    pm="$(linux_package_manager)"
+    case "${pm}" in
+        apt)
+            apt_update_once
+            run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+            ;;
+        dnf)
+            run_as_root dnf install -y "$@"
+            ;;
+        yum)
+            run_as_root yum install -y "$@"
+            ;;
+        pacman)
+            run_as_root pacman -Sy --noconfirm "$@"
+            ;;
+        zypper)
+            run_as_root zypper --non-interactive install "$@"
+            ;;
+        apk)
+            run_as_root apk add --no-cache "$@"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ensure_linux_base_tools() {
+    if [ "${OS}" != "linux" ]; then
+        return 0
+    fi
+    case "$(linux_package_manager)" in
+        apt) install_linux_packages ca-certificates curl gnupg ;;
+        dnf|yum) install_linux_packages ca-certificates curl gnupg2 ;;
+        pacman) install_linux_packages ca-certificates curl gnupg ;;
+        zypper) install_linux_packages ca-certificates curl gpg2 ;;
+        apk) install_linux_packages ca-certificates curl gnupg ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_homebrew() {
+    if [ "${OS}" != "macos" ]; then
+        return 1
+    fi
+    refresh_tool_paths
+    if have_cmd brew; then
+        return 0
+    fi
+    require_auto_install "Homebrew" "安装 Homebrew：https://brew.sh/"
+    if ! have_cmd curl; then
+        log_error "缺少 curl，无法自动安装 Homebrew。"
+        exit 1
+    fi
+    log_info "缺少 Homebrew，尝试自动安装。"
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    refresh_tool_paths
+    if ! have_cmd brew; then
+        log_error "Homebrew 自动安装后仍不可用。请按 https://brew.sh/ 完成安装后重试。"
+        exit 1
+    fi
+}
+
+brew_install_formula() {
+    local formula="$1"
+    ensure_homebrew
+    if ! brew list --formula "${formula}" >/dev/null 2>&1; then
+        brew install "${formula}"
+    fi
+    refresh_tool_paths
+}
+
+brew_install_cask() {
+    local cask="$1"
+    ensure_homebrew
+    if ! brew list --cask "${cask}" >/dev/null 2>&1; then
+        brew install --cask "${cask}"
+    fi
+    refresh_tool_paths
+}
+
+install_linux_docker() {
+    require_auto_install "Docker" "${DOCKER_HINT}"
+    ensure_linux_base_tools
+    local get_docker_script
+    get_docker_script="$(mktemp)"
+    log_info "缺少 Docker 或 docker compose v2，尝试通过 Docker 官方脚本安装。"
+    curl -fsSL https://get.docker.com -o "${get_docker_script}"
+    run_as_root sh "${get_docker_script}"
+    rm -f "${get_docker_script}"
+}
+
+install_linux_compose_plugin() {
+    local pm
+    pm="$(linux_package_manager)"
+    case "${pm}" in
+        apt) install_linux_packages docker-compose-plugin ;;
+        dnf|yum) install_linux_packages docker-compose-plugin ;;
+        pacman) install_linux_packages docker-compose ;;
+        zypper) install_linux_packages docker-compose-plugin ;;
+        apk) install_linux_packages docker-cli-compose ;;
+        *) return 1 ;;
+    esac
+}
+
+docker_cli() {
+    if [ "${DOCKER_USE_SUDO}" = "1" ]; then
+        sudo docker "$@"
+    else
+        docker "$@"
+    fi
+}
+
+start_linux_docker_service() {
+    if have_cmd systemctl; then
+        run_as_root systemctl enable --now docker || run_as_root systemctl start docker || true
+    elif have_cmd service; then
+        run_as_root service docker start || true
+    fi
+}
+
+wait_for_docker_daemon() {
+    local i
+    for i in $(seq 1 60); do
+        if docker_cli info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+ensure_docker_access_for_current_run() {
+    DOCKER_USE_SUDO=0
+    if docker info >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ "${OS}" = "linux" ]; then
+        start_linux_docker_service
+        if docker info >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ "${EUID:-$(id -u)}" -ne 0 ] && have_cmd sudo; then
+            DOCKER_USE_SUDO=1
+            if wait_for_docker_daemon; then
+                if ! id -nG | tr ' ' '\n' | grep -qx docker; then
+                    log_warn "当前用户不在 docker 组，本次安装将自动用 sudo 执行 docker 命令。"
+                    if getent group docker >/dev/null 2>&1; then
+                        run_as_root usermod -aG docker "$(id -un)" || true
+                        log_warn "已尝试把当前用户加入 docker 组；重新登录后可免 sudo 使用 docker。"
+                    fi
+                fi
+                return 0
+            fi
+        fi
+        DOCKER_USE_SUDO=0
+    elif [ "${OS}" = "macos" ]; then
+        if have_cmd open; then
+            log_info "Docker daemon 未运行，尝试启动 Docker Desktop。"
+            open -a Docker >/dev/null 2>&1 || true
+            wait_for_docker_daemon && return 0
+        fi
+    fi
+    return 1
+}
+
+ensure_docker_ready() {
+    if ! have_cmd docker; then
+        case "${OS}" in
+            macos)
+                require_auto_install "Docker Desktop" "${DOCKER_HINT}"
+                log_info "缺少 Docker，尝试安装 Docker Desktop。"
+                brew_install_cask docker
+                ;;
+            linux)
+                install_linux_docker
+                ;;
+        esac
+    fi
+    if ! have_cmd docker; then
+        log_error "Docker 自动安装后仍不可用。"
+        printf '       安装提示：%s\n' "${DOCKER_HINT}" >&2
+        exit 1
+    fi
+
+    if ! docker_cli compose version >/dev/null 2>&1; then
+        case "${OS}" in
+            macos)
+                require_auto_install "docker compose v2" "${DOCKER_HINT}"
+                brew_install_cask docker
+                ;;
+            linux)
+                require_auto_install "docker compose v2" "${DOCKER_HINT}"
+                install_linux_compose_plugin || install_linux_docker
+                ;;
+        esac
+    fi
+    if ! docker_cli compose version >/dev/null 2>&1; then
+        log_error "未检测到 docker compose v2 子命令，自动安装后仍不可用。"
+        printf '       安装提示：%s\n' "${DOCKER_HINT}" >&2
+        exit 1
+    fi
+
+    if ! ensure_docker_access_for_current_run; then
+        log_error "Docker daemon 未运行或当前用户无法访问 Docker。"
+        if [ "${OS}" = "macos" ]; then
+            printf '       请确认 Docker Desktop 已启动并完成首次初始化。\n' >&2
+        else
+            printf '       请确认 systemd/service 可启动 docker，或当前用户有 sudo 权限。\n' >&2
+        fi
+        exit 1
+    fi
+}
+
+ensure_uv_ready() {
+    refresh_tool_paths
+    if ! have_cmd uv; then
+        require_auto_install "uv" "${UV_HINT}"
+        if [ "${OS}" = "linux" ]; then
+            ensure_linux_base_tools
+        elif [ "${OS}" = "macos" ] && ! have_cmd curl; then
+            brew_install_formula curl
+        fi
+        log_info "缺少 uv，尝试通过官方安装脚本安装。"
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        refresh_tool_paths
+    fi
+    if ! have_cmd uv; then
+        log_error "uv 自动安装后仍不可用。"
+        printf '       安装提示：%s\n' "${UV_HINT}" >&2
+        exit 1
+    fi
+    log_info "确保 uv 可用 Python 3.12。"
+    uv python install 3.12 >/dev/null
+}
+
+install_linux_node20() {
+    require_auto_install "Node.js >= 20 + npm" "${NODE_HINT}"
+    ensure_linux_base_tools
+    case "$(linux_package_manager)" in
+        apt)
+            run_as_root bash -c 'curl -fsSL https://deb.nodesource.com/setup_20.x | bash -'
+            install_linux_packages nodejs
+            ;;
+        dnf|yum)
+            run_as_root bash -c 'curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -'
+            install_linux_packages nodejs
+            ;;
+        pacman)
+            install_linux_packages nodejs npm
+            ;;
+        zypper)
+            install_linux_packages nodejs20 npm20 || install_linux_packages nodejs npm
+            ;;
+        apk)
+            if ! install_linux_packages nodejs-current npm; then
+                install_linux_packages nodejs npm
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+node_major_version() {
+    node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+}
+
+ensure_node_ready() {
+    refresh_tool_paths
+    local node_major
+    node_major="$(node_major_version)"
+    if ! have_cmd node || ! have_cmd npm || [ "${node_major}" -lt 20 ] 2>/dev/null; then
+        case "${OS}" in
+            macos)
+                require_auto_install "Node.js >= 20 + npm" "${NODE_HINT}"
+                log_info "缺少 Node.js >= 20/npm，尝试安装 node@20。"
+                brew_install_formula node@20
+                ;;
+            linux)
+                log_info "缺少 Node.js >= 20/npm，尝试自动安装 Node.js 20。"
+                install_linux_node20
+                ;;
+        esac
+        refresh_tool_paths
+        node_major="$(node_major_version)"
+    fi
+    if ! have_cmd node || ! have_cmd npm || [ "${node_major}" -lt 20 ] 2>/dev/null; then
+        log_error "Node.js/npm 自动安装后仍不满足要求：需要 Node.js >= 20。"
+        printf '       当前 node：%s\n' "$(node -v 2>/dev/null || echo missing)" >&2
+        printf '       当前 npm：%s\n' "$(npm -v 2>/dev/null || echo missing)" >&2
+        printf '       安装提示：%s\n' "${NODE_HINT}" >&2
+        exit 1
+    fi
+}
+
+ensure_python_helper_ready() {
+    refresh_tool_paths
+    if ! have_cmd python3; then
+        require_auto_install "python3" "${PYTHON_HINT}"
+        case "${OS}" in
+            macos)
+                log_info "缺少 python3，尝试安装 python@3.12。"
+                brew_install_formula python@3.12
+                ;;
+            linux)
+                log_info "缺少 python3，尝试安装 Python 运行时。"
+                case "$(linux_package_manager)" in
+                    apt) install_linux_packages python3 python3-venv python3-pip ;;
+                    dnf|yum) install_linux_packages python3 python3-pip ;;
+                    pacman) install_linux_packages python python-pip ;;
+                    zypper) install_linux_packages python3 python3-pip ;;
+                    apk) install_linux_packages python3 py3-pip ;;
+                    *) return 1 ;;
+                esac
+                ;;
+        esac
+        refresh_tool_paths
+    fi
+    if ! have_cmd python3; then
+        log_error "python3 自动安装后仍不可用。"
+        printf '       安装提示：%s\n' "${PYTHON_HINT}" >&2
+        exit 1
+    fi
+}
+
+ensure_openssl_ready() {
+    refresh_tool_paths
+    if ! have_cmd openssl; then
+        require_auto_install "OpenSSL" "macOS: brew install openssl@3；Linux: 安装 openssl 包"
+        case "${OS}" in
+            macos)
+                log_info "缺少 openssl，尝试安装 openssl@3。"
+                brew_install_formula openssl@3
+                ;;
+            linux)
+                log_info "缺少 openssl，尝试安装 openssl 包。"
+                install_linux_packages openssl
+                ;;
+        esac
+        refresh_tool_paths
+    fi
+    if ! have_cmd openssl; then
+        log_error "openssl 自动安装后仍不可用。"
+        exit 1
+    fi
+}
+
+ensure_build_dependencies() {
+    if have_cmd gcc && have_cmd make && have_cmd pg_config; then
+        return 0
+    fi
+    require_auto_install "Python 编译依赖（gcc/make/pg_config）" \
+        "Debian/Ubuntu: apt install build-essential libpq-dev pkg-config；macOS: brew install libpq"
+    case "${OS}" in
+        macos)
+            brew_install_formula libpq
+            ;;
+        linux)
+            case "$(linux_package_manager)" in
+                apt) install_linux_packages build-essential libpq-dev pkg-config ;;
+                dnf|yum) install_linux_packages gcc gcc-c++ make postgresql-devel pkgconf-pkg-config ;;
+                pacman) install_linux_packages base-devel postgresql-libs pkgconf ;;
+                zypper) install_linux_packages gcc gcc-c++ make postgresql-devel pkg-config ;;
+                apk) install_linux_packages build-base postgresql-dev pkgconf ;;
+                *) log_warn "无法识别包管理器，跳过编译依赖自动安装。" ;;
+            esac
+            ;;
+    esac
+    refresh_tool_paths
 }
 
 trap 'on_error ${LINENO}' ERR
@@ -293,53 +842,15 @@ case "${OS}" in
         ;;
 esac
 
-ensure_cmd docker "${DOCKER_HINT}"
-if ! docker compose version >/dev/null 2>&1; then
-    log_error "未检测到 docker compose v2 子命令。请升级 Docker Desktop / 安装 docker-compose-plugin。"
-    printf '       安装提示：%s\n' "${DOCKER_HINT}" >&2
-    exit 1
-fi
-if ! docker info >/dev/null 2>&1; then
-    log_error "Docker daemon 未运行（docker info 失败）。"
-    if [ "${OS}" = "macos" ]; then
-        printf '       请先启动 Docker Desktop（打开 /Applications/Docker.app），等待图标变绿后重试。\n' >&2
-    else
-        printf '       请先启动服务：sudo systemctl start docker  （或对应发行版方式）。\n' >&2
-    fi
-    exit 1
-fi
-if [ "${OS}" = "linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    if ! id -nG | tr ' ' '\n' | grep -qx docker; then
-        log_warn "当前用户不在 docker 组，后续 docker 命令会反复要求 sudo。"
-        log_warn "建议：sudo usermod -aG docker \$USER  然后重新登录或执行 newgrp docker。"
-        if ! confirm "仍要继续？"; then
-            exit 0
-        fi
-    fi
-fi
-ensure_cmd uv "${UV_HINT}"
-ensure_cmd node "${NODE_HINT}"
-ensure_cmd npm "${NODE_HINT}"
-ensure_cmd python3 "${PYTHON_HINT}"
-ensure_cmd openssl "macOS 自带；Linux: apt install openssl"
+refresh_tool_paths
+ensure_python_helper_ready
+ensure_openssl_ready
+ensure_node_ready
+ensure_uv_ready
+ensure_build_dependencies
+ensure_docker_ready
 
-# Node 版本 >= 20
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-if [ "${NODE_MAJOR}" -lt 20 ] 2>/dev/null; then
-    log_error "Node.js 版本过低：当前 $(node -v)，需要 >= 20。"
-    printf '       建议安装方式：%s\n' "${NODE_HINT}" >&2
-    exit 1
-fi
-
-# Python 版本 >= 3.12
-PY_OK="$(python3 -c 'import sys; print(1 if sys.version_info >= (3,12) else 0)' 2>/dev/null || echo 0)"
-if [ "${PY_OK}" != "1" ]; then
-    log_error "Python 版本过低：当前 $(python3 --version 2>&1)，需要 >= 3.12。"
-    printf '       建议安装方式：%s\n' "${PYTHON_HINT}" >&2
-    exit 1
-fi
-
-log_info "依赖检查通过：docker / docker compose / uv / node $(node -v) / python $(python3 -V 2>&1 | awk '{print $2}')"
+log_info "依赖就绪：docker / docker compose / uv / node $(node -v) / python3 $(python3 -V 2>&1 | awk '{print $2}') / uv python 3.12"
 
 # ---------------------------------------------------------------------------
 # 2. 进入项目根
@@ -366,8 +877,8 @@ fi
 
 # 同名容器存在但不属于 docker compose -- 直接冲突，要求用户手清
 for CNAME in lumen-pg lumen-redis; do
-    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CNAME}"; then
-        OWNER="$(docker inspect "${CNAME}" --format '{{ index .Config.Labels "com.docker.compose.project" }}' 2>/dev/null || true)"
+    if docker_cli ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CNAME}"; then
+        OWNER="$(docker_cli inspect "${CNAME}" --format '{{ index .Config.Labels "com.docker.compose.project" }}' 2>/dev/null || true)"
         if [ -z "${OWNER}" ]; then
             log_error "已存在同名容器 ${CNAME}，但不属于 docker compose 项目。"
             log_error "请手动清理后重跑：docker rm -f ${CNAME}"
@@ -382,7 +893,7 @@ for PORT in 5432 6379; do
         5432) OWN_CNAME=lumen-pg ;;
         6379) OWN_CNAME=lumen-redis ;;
     esac
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${OWN_CNAME}"; then
+    if docker_cli ps --format '{{.Names}}' 2>/dev/null | grep -qx "${OWN_CNAME}"; then
         continue
     fi
     if port_in_use "${PORT}"; then
@@ -524,22 +1035,36 @@ if [ -e "${DATA_ROOT}" ] && [ ! -d "${DATA_ROOT}" ]; then
 fi
 if [ ! -d "${DATA_ROOT}" ]; then
     if [ ! -d /opt ]; then
-        log_error "/opt 不存在，且脚本不会自动创建系统级目录。"
-        log_error "请先执行：sudo mkdir -p /opt/lumendata && sudo chown -R $(id -un):$(id -gn) /opt/lumendata"
-        exit 1
+        log_info "/opt 不存在，尝试自动创建。"
+        run_as_root mkdir -p /opt || {
+            log_error "无法创建 /opt。请确认当前用户有 sudo 权限后重试。"
+            exit 1
+        }
     fi
-    if [ ! -w /opt ]; then
-        log_error "当前用户无权创建 ${DATA_ROOT}。"
-        log_error "请先执行：sudo mkdir -p /opt/lumendata && sudo chown -R $(id -un):$(id -gn) /opt/lumendata"
-        exit 1
+    log_info "创建本地存储目录：${DATA_ROOT}"
+    if ! mkdir -p "${DATA_ROOT}" 2>/dev/null; then
+        run_as_root mkdir -p "${DATA_ROOT}" || {
+            log_error "无法创建 ${DATA_ROOT}。请确认当前用户有 sudo 权限后重试。"
+            exit 1
+        }
     fi
 fi
 if [ -d "${DATA_ROOT}" ] && [ ! -w "${DATA_ROOT}" ]; then
-    log_error "当前用户无权写入 ${DATA_ROOT}。"
-    log_error "请先执行：sudo chown -R $(id -un):$(id -gn) /opt/lumendata"
+    log_info "修正 ${DATA_ROOT} 所有权为当前用户。"
+    if ! run_as_root chown -R "$(id -un):$(id -gn)" "${DATA_ROOT}"; then
+        log_error "当前用户无权写入 ${DATA_ROOT}，且自动 chown 失败。"
+        log_error "请确认当前用户有 sudo 权限后重试。"
+        exit 1
+    fi
+fi
+mkdir -p "${DATA_ROOT}/storage" "${DATA_ROOT}/backup/pg" "${DATA_ROOT}/backup/redis" 2>/dev/null || {
+    run_as_root mkdir -p "${DATA_ROOT}/storage" "${DATA_ROOT}/backup/pg" "${DATA_ROOT}/backup/redis"
+    run_as_root chown -R "$(id -un):$(id -gn)" "${DATA_ROOT}"
+}
+if [ ! -w "${DATA_ROOT}/storage" ] || [ ! -w "${DATA_ROOT}/backup/pg" ] || [ ! -w "${DATA_ROOT}/backup/redis" ]; then
+    log_error "本地存储目录创建后仍不可写：${DATA_ROOT}"
     exit 1
 fi
-mkdir -p "${DATA_ROOT}/storage" "${DATA_ROOT}/backup/pg" "${DATA_ROOT}/backup/redis"
 log_info "存储目录就绪：${DATA_ROOT}/{storage,backup}"
 
 # ---------------------------------------------------------------------------
@@ -565,7 +1090,7 @@ log_info "  三者并行执行；主进程会等到全部完成后再继续。"
 
 (
     set +e
-    docker compose pull >"${DOCKER_LOG}" 2>&1
+    docker_cli compose pull >"${DOCKER_LOG}" 2>&1
     echo $? > "${DOCKER_RC}"
 ) &
 PARALLEL_PIDS+=("$!")
@@ -620,7 +1145,7 @@ fi
 # 5. 启动 PG / Redis 并等待健康（compose 自带 healthcheck，--wait 替代手写循环）
 # ---------------------------------------------------------------------------
 log_step "启动 PostgreSQL / Redis 并等待健康（docker compose up -d --wait）"
-if ! docker compose up -d --wait; then
+if ! docker_cli compose up -d --wait; then
     log_error "容器启动或健康检查失败。请运行 'docker compose logs' 排查。"
     log_error "提示：如果你的 docker compose 版本过旧不识别 --wait，请升级 Docker Desktop / docker-compose-plugin。"
     exit 1
