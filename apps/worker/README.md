@@ -8,7 +8,7 @@ docker compose up -d
 
 # Worker
 cd apps/worker
-uv run arq app.main.WorkerSettings
+uv run python -m arq app.main.WorkerSettings
 ```
 
 ## 目录

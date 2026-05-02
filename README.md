@@ -181,7 +181,7 @@ uv run uvicorn app.main:app --reload --port 8000
 
 # 3. Worker
 cd apps/worker
-uv run arq app.main.WorkerSettings
+uv run python -m arq app.main.WorkerSettings
 
 # 4. Web
 cd apps/web
