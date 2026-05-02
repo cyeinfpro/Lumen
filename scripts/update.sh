@@ -21,15 +21,7 @@ log_info "项目根目录：${ROOT}"
 # ---------------------------------------------------------------------------
 # 1. 依赖快查（更新阶段假设 install 已经做过完整检查，这里只确认必备工具仍在）
 # ---------------------------------------------------------------------------
-ensure_cmd docker "请安装 Docker 后重试"
-if ! docker compose version >/dev/null 2>&1; then
-    log_error "未检测到 docker compose v2。请升级 Docker。"
-    exit 1
-fi
-if ! docker info >/dev/null 2>&1; then
-    log_error "Docker daemon 未运行。请先启动 Docker Desktop 或 'sudo systemctl start docker' 后重试。"
-    exit 1
-fi
+lumen_require_docker_access
 ensure_cmd uv "curl -LsSf https://astral.sh/uv/install.sh | sh"
 ensure_cmd npm "请安装 Node.js >= 20"
 
@@ -68,8 +60,8 @@ fi
 # 3. 确保容器在跑
 # ---------------------------------------------------------------------------
 log_step "确保 PostgreSQL / Redis 容器在运行并就绪（docker compose up -d --wait）"
-if ! docker compose up -d --wait; then
-    log_error "容器启动或健康检查失败。请运行 'docker compose logs' 排查。"
+if ! lumen_docker compose up -d --wait; then
+    log_error "容器启动或健康检查失败。请运行 '$(lumen_docker_command_label) compose logs' 排查。"
     exit 1
 fi
 
@@ -89,7 +81,7 @@ log_step "应用新的数据库迁移（alembic upgrade head）"
 (
     cd "${ROOT}/apps/api"
     if ! uv run alembic upgrade head; then
-        log_error "数据库迁移失败。请检查容器与 DATABASE_URL，可用 'docker compose logs postgres' 排查。"
+        log_error "数据库迁移失败。请检查容器与 DATABASE_URL，可用 '$(lumen_docker_command_label) compose logs postgres' 排查。"
         exit 1
     fi
 )

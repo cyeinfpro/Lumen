@@ -45,6 +45,8 @@ log_step() {
         "${LUMEN_C_BOLD}" "$*" "${LUMEN_C_RESET}"
 }
 
+LUMEN_DOCKER_USE_SUDO="${LUMEN_DOCKER_USE_SUDO:-0}"
+
 # lumen_acquire_lock <root> <script_name>
 # update / uninstall 共用同一把维护锁，避免同时操作 compose、迁移和依赖目录。
 lumen_release_lock() {
@@ -148,6 +150,77 @@ ensure_cmd() {
     log_error "缺少命令 \"${name}\"。请先安装后重试。"
     if [ -n "${hint}" ]; then
         printf '       建议安装方式：%s\n' "${hint}" >&2
+    fi
+    exit 1
+}
+
+sudo_has_tty() {
+    [ -r /dev/tty ] && [ -w /dev/tty ]
+}
+
+lumen_sudo() {
+    if sudo_has_tty; then
+        sudo "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
+lumen_docker() {
+    if [ "${LUMEN_DOCKER_USE_SUDO:-0}" = "1" ]; then
+        lumen_sudo docker "$@"
+    else
+        docker "$@"
+    fi
+}
+
+lumen_docker_command_label() {
+    if [ "${LUMEN_DOCKER_USE_SUDO:-0}" = "1" ]; then
+        printf 'sudo docker'
+    else
+        printf 'docker'
+    fi
+}
+
+lumen_detect_docker_access() {
+    LUMEN_DOCKER_USE_SUDO=0
+    command -v docker >/dev/null 2>&1 || return 1
+
+    if docker compose version >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ "$(detect_os)" = "linux" ] \
+        && [ "${EUID:-$(id -u)}" -ne 0 ] \
+        && command -v sudo >/dev/null 2>&1; then
+        if lumen_sudo docker compose version >/dev/null 2>&1 \
+            && lumen_sudo docker info >/dev/null 2>&1; then
+            LUMEN_DOCKER_USE_SUDO=1
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+lumen_require_docker_access() {
+    ensure_cmd docker "请安装 Docker 后重试"
+    if lumen_detect_docker_access; then
+        if [ "${LUMEN_DOCKER_USE_SUDO:-0}" = "1" ]; then
+            log_warn "当前用户无法直接访问 Docker，本次将自动使用 sudo docker。"
+        fi
+        return 0
+    fi
+
+    if ! docker compose version >/dev/null 2>&1; then
+        log_error "未检测到 docker compose v2。请升级 Docker。"
+    else
+        log_error "Docker daemon 未运行，或当前用户无权访问 Docker。"
+    fi
+    if [ "$(detect_os)" = "linux" ]; then
+        log_error "请先启动 Docker：sudo systemctl start docker；若是权限问题，可将用户加入 docker 组后重新登录。"
+    else
+        log_error "请确认 Docker Desktop 已启动并完成初始化。"
     fi
     exit 1
 }

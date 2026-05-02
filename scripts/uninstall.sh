@@ -46,13 +46,20 @@ fi
 # 跟踪做了什么/没做什么，最后汇总
 declare -a DONE=()
 declare -a KEPT=()
+DOCKER_AVAILABLE=0
+if lumen_detect_docker_access; then
+    DOCKER_AVAILABLE=1
+    if [ "${LUMEN_DOCKER_USE_SUDO:-0}" = "1" ]; then
+        log_warn "当前用户无法直接访问 Docker，本次将自动使用 sudo docker。"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # 2. docker compose down（仅停容器）
 # ---------------------------------------------------------------------------
 log_step "停止容器（docker compose down）"
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    if docker compose down; then
+if [ "${DOCKER_AVAILABLE}" -eq 1 ]; then
+    if lumen_docker compose down; then
         DONE+=("已停止 lumen-pg / lumen-redis 容器")
     else
         log_warn "docker compose down 返回非零；容器可能仍在运行。继续后续可选清理。"
@@ -69,11 +76,14 @@ fi
 log_step "数据卷"
 log_warn "数据卷包含所有用户、对话、生成图记录。删除后无法恢复。"
 if confirm "删除 PG / Redis 数据卷（docker compose down -v）？"; then
-    if docker compose down -v; then
+    if [ "${DOCKER_AVAILABLE}" -ne 1 ]; then
+        log_error "未检测到可用的 docker / docker compose v2，无法删除数据卷。"
+        KEPT+=("数据卷未删除（无可用 docker 命令）")
+    elif lumen_docker compose down -v; then
         # compose 删卷时若 volume 仍被其它容器挂载会沉默跳过，主动 ls 一次校验。
-        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qE '(^|_)lumen_(pg|redis)_data$'; then
+        if lumen_docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qE '(^|_)lumen_(pg|redis)_data$'; then
             log_warn "卷未完全删除（可能仍被其它容器挂载，或 compose project 名不一致）。"
-            log_warn "请运行 'docker volume ls | grep lumen' 排查，必要时手动 'docker volume rm <name>'."
+            log_warn "请运行 '$(lumen_docker_command_label) volume ls | grep lumen' 排查，必要时手动 '$(lumen_docker_command_label) volume rm <name>'."
             DONE+=("尝试删除数据卷（部分卷未清，详见上方提示）")
         else
             DONE+=("已删除数据卷 lumen_pg_data / lumen_redis_data")

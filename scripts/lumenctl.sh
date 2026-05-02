@@ -110,18 +110,35 @@ validate_no_whitespace() {
     return 0
 }
 
-validate_domain_list() {
+validate_nginx_token() {
     local name="$1"
     local value="$2"
     validate_no_control_chars "${name}" "${value}" || return 1
+    if [[ "${value}" =~ [\;\{\}\'\"\\] ]]; then
+        log_error "${name} 不能包含 ; { } 引号或反斜杠。"
+        return 1
+    fi
+    return 0
+}
+
+validate_domain_list() {
+    local name="$1"
+    local value="$2"
+    validate_nginx_token "${name}" "${value}" || return 1
     if [ -z "${value}" ]; then
         log_error "${name} 不能为空。"
         return 1
     fi
-    if [[ "${value}" =~ [\;\{\}] ]]; then
-        log_error "${name} 不能包含 ; { }。"
-        return 1
-    fi
+    local token
+    local tokens=()
+    IFS=' ' read -r -a tokens <<< "${value}"
+    for token in "${tokens[@]}"; do
+        [ -n "${token}" ] || continue
+        if [[ ! "${token}" =~ ^(\*\.[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+|_)$ ]]; then
+            log_error "${name} 包含无效 server_name：${token}"
+            return 1
+        fi
+    done
     return 0
 }
 
@@ -129,6 +146,7 @@ validate_url_like() {
     local name="$1"
     local value="$2"
     validate_no_whitespace "${name}" "${value}" || return 1
+    validate_nginx_token "${name}" "${value}" || return 1
     if [[ ! "${value}" =~ ^https?:// ]]; then
         log_error "${name} 必须以 http:// 或 https:// 开头。"
         return 1
@@ -140,8 +158,92 @@ validate_host_port_target() {
     local name="$1"
     local value="$2"
     validate_no_whitespace "${name}" "${value}" || return 1
+    validate_nginx_token "${name}" "${value}" || return 1
     if [ -z "${value}" ]; then
         log_error "${name} 不能为空。"
+        return 1
+    fi
+    return 0
+}
+
+validate_tcp_port() {
+    local name="$1"
+    local value="$2"
+    validate_no_control_chars "${name}" "${value}" || return 1
+    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+        log_error "${name} 必须是数字。"
+        return 1
+    fi
+    if [ "${value}" -lt 1 ] || [ "${value}" -gt 65535 ]; then
+        log_error "${name} 必须在 1-65535 之间。"
+        return 1
+    fi
+    return 0
+}
+
+validate_positive_int() {
+    local name="$1"
+    local value="$2"
+    validate_no_control_chars "${name}" "${value}" || return 1
+    if [[ ! "${value}" =~ ^[0-9]+$ ]] || [ "${value}" -lt 1 ]; then
+        log_error "${name} 必须是 >= 1 的整数。"
+        return 1
+    fi
+    return 0
+}
+
+validate_path_value() {
+    local name="$1"
+    local value="$2"
+    validate_no_whitespace "${name}" "${value}" || return 1
+    if [ -z "${value}" ]; then
+        log_error "${name} 不能为空。"
+        return 1
+    fi
+    if [[ "${value}" =~ [[:cntrl:]\;\{\}\'\"\\] ]]; then
+        log_error "${name} 不能包含控制字符、;、{ }、引号或反斜杠。"
+        return 1
+    fi
+    if [ "${value}" = "/" ]; then
+        log_error "${name} 不能是根目录 /。"
+        return 1
+    fi
+    return 0
+}
+
+validate_absolute_path() {
+    local name="$1"
+    local value="$2"
+    validate_path_value "${name}" "${value}" || return 1
+    if [[ "${value}" != /* ]]; then
+        log_error "${name} 必须是绝对路径。"
+        return 1
+    fi
+    return 0
+}
+
+validate_service_user_name() {
+    local name="$1"
+    local value="$2"
+    validate_no_whitespace "${name}" "${value}" || return 1
+    if [[ ! "${value}" =~ ^[A-Za-z_][A-Za-z0-9_.-]*\$?$ ]] && [ "${value}" != "root" ]; then
+        log_error "${name} 不是有效的 Linux 用户名：${value}"
+        return 1
+    fi
+    return 0
+}
+
+validate_python_command() {
+    local name="$1"
+    local value="$2"
+    validate_no_whitespace "${name}" "${value}" || return 1
+    if [[ "${value}" = */* ]]; then
+        if [[ "${value}" != /* ]]; then
+            log_error "${name} 如包含 /，必须是绝对路径。"
+            return 1
+        fi
+    elif [[ ! "${value}" =~ ^[A-Za-z0-9_.+-]+$ ]]; then
+        log_error "${name} 不是有效命令名：${value}"
         return 1
     fi
     return 0
@@ -227,25 +329,16 @@ install_image_job() {
     python_bin="$(read_or_default 'Python 命令' 'python3')"
     service_user="$(read_or_default 'systemd 运行用户' 'image-job')"
 
-    validate_no_whitespace "应用目录" "${app_dir}" || exit 1
-    validate_no_whitespace "数据目录" "${data_dir}" || exit 1
-    validate_no_whitespace "状态目录" "${state_dir}" || exit 1
-    validate_no_whitespace "上游同步图片 API" "${upstream_base}" || exit 1
-    validate_no_whitespace "image-job 公网 base URL" "${public_base}" || exit 1
-    validate_no_whitespace "监听地址" "${listen_host}" || exit 1
-    validate_no_control_chars "监听端口" "${listen_port}" || exit 1
-    validate_no_control_chars "图片任务并发" "${concurrency}" || exit 1
-    validate_no_whitespace "Python 命令" "${python_bin}" || exit 1
-    validate_no_whitespace "systemd 运行用户" "${service_user}" || exit 1
-
-    if [[ ! "${listen_port}" =~ ^[0-9]+$ ]]; then
-        log_error "监听端口必须是数字。"
-        exit 1
-    fi
-    if [[ ! "${concurrency}" =~ ^[0-9]+$ ]] || [ "${concurrency}" -lt 1 ]; then
-        log_error "图片任务并发必须是 >= 1 的整数。"
-        exit 1
-    fi
+    validate_absolute_path "应用目录" "${app_dir}" || exit 1
+    validate_absolute_path "数据目录" "${data_dir}" || exit 1
+    validate_absolute_path "状态目录" "${state_dir}" || exit 1
+    validate_url_like "上游同步图片 API" "${upstream_base}" || exit 1
+    validate_url_like "image-job 公网 base URL" "${public_base}" || exit 1
+    validate_host_port_target "监听地址" "${listen_host}" || exit 1
+    validate_tcp_port "监听端口" "${listen_port}" || exit 1
+    validate_positive_int "图片任务并发" "${concurrency}" || exit 1
+    validate_python_command "Python 命令" "${python_bin}" || exit 1
+    validate_service_user_name "systemd 运行用户" "${service_user}" || exit 1
     ensure_python_min_version "${python_bin}" 3 11
 
     ensure_service_user "${service_user}" "${app_dir}"
@@ -335,6 +428,9 @@ uninstall_image_job() {
     app_dir="$(read_or_default '应用目录' '/opt/image-job')"
     state_root="$(read_or_default '状态根目录' '/var/lib/image-job')"
     service_user="$(read_or_default 'systemd 运行用户' 'image-job')"
+    validate_absolute_path "应用目录" "${app_dir}" || exit 1
+    validate_absolute_path "状态根目录" "${state_root}" || exit 1
+    validate_service_user_name "systemd 运行用户" "${service_user}" || exit 1
 
     if systemctl list-unit-files image-job.service >/dev/null 2>&1; then
         as_sudo systemctl disable --now image-job || true
@@ -436,8 +532,8 @@ nginx_scan() {
     collect_nginx_files
     if [ "${#NGINX_FILES[@]}" -eq 0 ]; then
         log_warn "未在常见目录找到 nginx 站点配置。"
-        log_warn "已扫描：/etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /www/server/panel/vhost/nginx"
-        return 1
+        log_warn "已扫描：/etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /www/server/panel/vhost/nginx /usr/local/etc/nginx/servers /usr/local/etc/nginx/conf.d"
+        return 0
     fi
 
     local i=1 file
@@ -466,6 +562,18 @@ default_nginx_output_file() {
     fi
 }
 
+nginx_backup_path() {
+    local target_file="$1"
+    local timestamp="$2"
+    local backup_dir safe
+    backup_dir="${LUMEN_NGINX_BACKUP_DIR:-/var/backups/lumenctl/nginx}"
+    safe="$(printf '%s' "${target_file}" | tr '/' '_' | tr -c 'A-Za-z0-9_.-' '-')"
+    safe="${safe##-}"
+    safe="${safe%%-}"
+    as_sudo install -d -m 0750 "${backup_dir}"
+    printf '%s/%s.lumenctl.%s.bak' "${backup_dir}" "${safe:-nginx}" "${timestamp}"
+}
+
 install_nginx_config_file() {
     local tmp_file="$1"
     local target_file="$2"
@@ -479,7 +587,7 @@ install_nginx_config_file() {
     as_sudo install -d "${target_dir}"
 
     if [ -f "${target_file}" ]; then
-        backup="${target_file}.lumenctl.${timestamp}.bak"
+        backup="$(nginx_backup_path "${target_file}" "${timestamp}")"
         as_sudo cp -p "${target_file}" "${backup}"
         log_info "已备份：${backup}"
     else
@@ -812,12 +920,12 @@ nginx_lumen_proxy() {
         http_redirect=1
         cert_file="$(read_or_default 'ssl_certificate' "/etc/letsencrypt/live/$(printf '%s' "${server_names}" | awk '{print $1}')/fullchain.pem")"
         key_file="$(read_or_default 'ssl_certificate_key' "/etc/letsencrypt/live/$(printf '%s' "${server_names}" | awk '{print $1}')/privkey.pem")"
-        validate_no_whitespace "ssl_certificate" "${cert_file}" || exit 1
-        validate_no_whitespace "ssl_certificate_key" "${key_file}" || exit 1
+        validate_absolute_path "ssl_certificate" "${cert_file}" || exit 1
+        validate_absolute_path "ssl_certificate_key" "${key_file}" || exit 1
     fi
 
     target_file="$(read_or_default '写入 nginx 配置文件' "$(default_nginx_output_file lumen "${server_names}")")"
-    validate_no_whitespace "nginx 配置文件" "${target_file}" || exit 1
+    validate_absolute_path "nginx 配置文件" "${target_file}" || exit 1
 
     tmp_file="$(mktemp)"
     write_lumen_nginx_config "${tmp_file}" "${server_names}" "${web_upstream}" "${http_redirect}" "${tls_mode}" "${cert_file}" "${key_file}"
@@ -842,11 +950,11 @@ nginx_sub2api_proxy() {
         listen_port=443
         cert_file="$(read_or_default 'ssl_certificate' "/etc/letsencrypt/live/$(printf '%s' "${server_names}" | awk '{print $1}')/fullchain.pem")"
         key_file="$(read_or_default 'ssl_certificate_key' "/etc/letsencrypt/live/$(printf '%s' "${server_names}" | awk '{print $1}')/privkey.pem")"
-        validate_no_whitespace "ssl_certificate" "${cert_file}" || exit 1
-        validate_no_whitespace "ssl_certificate_key" "${key_file}" || exit 1
+        validate_absolute_path "ssl_certificate" "${cert_file}" || exit 1
+        validate_absolute_path "ssl_certificate_key" "${key_file}" || exit 1
     fi
     target_file="$(read_or_default '写入 nginx 配置文件' "$(default_nginx_output_file sub2api "${server_names}")")"
-    validate_no_whitespace "nginx 配置文件" "${target_file}" || exit 1
+    validate_absolute_path "nginx 配置文件" "${target_file}" || exit 1
 
     tmp_file="$(mktemp)"
     write_sub2api_nginx_config "${tmp_file}" "${server_names}" "${upstream}" "${tls_mode}" "${cert_file}" "${key_file}" "${listen_port}" "1"
@@ -864,14 +972,10 @@ nginx_sub2api_inner_proxy() {
     listen_port="$(read_or_default '内层监听端口' '18081')"
     upstream="$(strip_trailing_slash "$(read_or_default '本机 sub2api 上游地址' 'http://127.0.0.1:8081')")"
     validate_domain_list "内层 server_name" "${server_names}" || exit 1
-    validate_host_port_target "内层监听端口" "${listen_port}" || exit 1
+    validate_tcp_port "内层监听端口" "${listen_port}" || exit 1
     validate_url_like "本机 sub2api 上游地址" "${upstream}" || exit 1
-    if [[ ! "${listen_port}" =~ ^[0-9]+$ ]]; then
-        log_error "内层监听端口必须是数字。"
-        exit 1
-    fi
     target_file="$(read_or_default '写入 nginx 配置文件' "$(default_nginx_output_file sub2api-inner "${server_names}")")"
-    validate_no_whitespace "nginx 配置文件" "${target_file}" || exit 1
+    validate_absolute_path "nginx 配置文件" "${target_file}" || exit 1
 
     tmp_file="$(mktemp)"
     write_sub2api_nginx_config "${tmp_file}" "${server_names}" "${upstream}" "0" "" "" "${listen_port}" "0"
@@ -895,11 +999,11 @@ nginx_sub2api_outer_proxy() {
     if [ "${tls_mode}" = "1" ]; then
         cert_file="$(read_or_default 'ssl_certificate' "/etc/letsencrypt/live/$(printf '%s' "${server_names}" | awk '{print $1}')/fullchain.pem")"
         key_file="$(read_or_default 'ssl_certificate_key' "/etc/letsencrypt/live/$(printf '%s' "${server_names}" | awk '{print $1}')/privkey.pem")"
-        validate_no_whitespace "ssl_certificate" "${cert_file}" || exit 1
-        validate_no_whitespace "ssl_certificate_key" "${key_file}" || exit 1
+        validate_absolute_path "ssl_certificate" "${cert_file}" || exit 1
+        validate_absolute_path "ssl_certificate_key" "${key_file}" || exit 1
     fi
     target_file="$(read_or_default '写入 nginx 配置文件' "$(default_nginx_output_file sub2api-outer "${server_names}")")"
-    validate_no_whitespace "nginx 配置文件" "${target_file}" || exit 1
+    validate_absolute_path "nginx 配置文件" "${target_file}" || exit 1
 
     tmp_file="$(mktemp)"
     write_sub2api_outer_nginx_config "${tmp_file}" "${server_names}" "${inner_base}" "${tls_mode}" "${cert_file}" "${key_file}"
@@ -1166,6 +1270,10 @@ nginx_image_job_locations() {
     fi
 
     nginx_scan
+    if [ "${#NGINX_FILES[@]}" -eq 0 ]; then
+        log_warn "没有可优化的 nginx 配置文件，已跳过 image-job 路由注入。"
+        return 0
+    fi
 
     local choice target_file upstream_base data_dir server_filter tmp_file backup timestamp
     choice="$(read_or_default '选择要优化的配置编号' '1')"
@@ -1181,12 +1289,12 @@ nginx_image_job_locations() {
     server_filter="$(read_or_default 'server_name 过滤（留空=该文件内 HTTPS server）' '')"
     upstream_base="$(strip_trailing_slash "$(read_or_default 'image-job 本机代理地址' 'http://127.0.0.1:8091')")"
     data_dir="$(strip_trailing_slash "$(read_or_default 'image-job 数据目录' '/opt/image-job/data')")"
-    validate_no_control_chars "server_name 过滤" "${server_filter}" || exit 1
-    validate_no_whitespace "image-job 本机代理地址" "${upstream_base}" || exit 1
-    validate_no_whitespace "image-job 数据目录" "${data_dir}" || exit 1
+    validate_nginx_token "server_name 过滤" "${server_filter}" || exit 1
+    validate_url_like "image-job 本机代理地址" "${upstream_base}" || exit 1
+    validate_absolute_path "image-job 数据目录" "${data_dir}" || exit 1
 
     timestamp="$(date '+%Y%m%d%H%M%S')"
-    backup="${target_file}.lumenctl.${timestamp}.bak"
+    backup="$(nginx_backup_path "${target_file}" "${timestamp}")"
     as_sudo cp -p "${target_file}" "${backup}"
     log_info "已备份：${backup}"
 

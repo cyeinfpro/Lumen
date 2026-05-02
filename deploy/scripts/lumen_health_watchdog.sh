@@ -21,8 +21,8 @@ is_active() {
 
 probe() {
   local url="$1"
-  local attempt
-  for attempt in $(seq 1 "$ATTEMPTS"); do
+  local _attempt
+  for _attempt in $(seq 1 "$ATTEMPTS"); do
     if curl -fsS \
       --connect-timeout "$CONNECT_TIMEOUT" \
       --max-time "$MAX_TIME" \
@@ -72,4 +72,3 @@ if is_active "$WEB_SERVICE"; then
 else
   log "$WEB_SERVICE is not active; skipping web probe"
 fi
-
