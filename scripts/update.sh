@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# Lumen 更新脚本
-# 用法：  bash scripts/update.sh
-# 行为：git pull（可选）-> 起容器 -> uv sync --all-packages -> alembic upgrade
-#       -> npm ci -> 可选 rebuild。
+# Lumen 一键更新脚本（Capistrano 风格 release + symlink 原子切换版）。
+#
+# 行为：
+#   1. 在 ${ROOT}/releases/<id>/ 下准备一个全新的 release 目录
+#   2. 在该目录里 git clone / uv sync / npm ci / npm run build / alembic upgrade
+#   3. 都成功后，原子地把 ${ROOT}/current 指向新 release，再 systemctl restart 服务
+#   4. 任何一步失败都不切换 current；构建期失败直接清理新 release 目录
+#
+# 步骤之间通过 stdout 上的 step 协议（::lumen-step::）让 admin_update.py
+# 解析 .update.log 推送实时进度到管理后台 SSE。详见 lib.sh::lumen_step_begin。
+#
+# 兼容旧 in-place 布局：检测到 ${ROOT}/current 不是 symlink 直接报错并提示先跑
+# scripts/migrate_to_releases.sh，本脚本不做就地兼容。
 
 set -euo pipefail
 
@@ -10,14 +19,70 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
-trap 'log_error "更新失败：第 ${LINENO} 行返回非零状态。修复后重跑本脚本即可。"' ERR
+# ROOT 解析：可能从三种位置启动：
+#   1) /opt/lumen/scripts/update.sh                 — 旧 in-place 布局或者用户从根目录手动跑
+#   2) /opt/lumen/current/scripts/update.sh         — systemd lumen-update-runner.service 启动
+#                                                       （current 是软链；pwd 默认走 logical 路径）
+#   3) /opt/lumen/releases/<id>/scripts/update.sh   — 用户直接进 release 目录跑
+#
+# 目标：把 ROOT 解析为 /opt/lumen（包含 releases/、shared/、current 软链的根）。
+# 处理：用 pwd -P 做物理路径解析，统一把 case 2 当 case 3 看待，再往上找。
+lumen_resolve_root() {
+    local script_phys probe
+    # SCRIPT_DIR 是 logical 的；这里用 -P 拿物理路径，避开 current 软链导致的歧义。
+    script_phys="$(cd "${SCRIPT_DIR}" && pwd -P)"
+    probe="$(cd "${script_phys}/.." && pwd -P)"
+    # 如果 probe 本身就是 release 目录（其上级是 releases/），则 ROOT = probe/../..
+    local probe_parent
+    probe_parent="$(cd "${probe}/.." && pwd -P)"
+    if [ "$(basename "${probe_parent}")" = "releases" ]; then
+        # probe = /opt/lumen/releases/<id>；ROOT = /opt/lumen
+        (cd "${probe_parent}/.." && pwd -P)
+        return 0
+    fi
+    # 否则 probe 即 ROOT（in-place / 已经位于 /opt/lumen 这一级）。
+    printf '%s' "${probe}"
+}
 
-ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT="$(lumen_resolve_root)"
+
 lumen_install_signal_handlers
+# Lock 必须落在 ROOT（而不是 release 内）：跨 release 共享同一把锁。
 lumen_acquire_lock "${ROOT}" "update.sh"
-cd "${ROOT}"
+
 log_info "项目根目录：${ROOT}"
 
+# ---------------------------------------------------------------------------
+# 检测 release 布局：current 必须是 symlink
+# ---------------------------------------------------------------------------
+if [ ! -L "${ROOT}/current" ]; then
+    log_error "${ROOT}/current 不是 symlink，当前还是旧版 in-place 布局。"
+    log_error "请先执行：sudo bash ${SCRIPT_DIR}/migrate_to_releases.sh"
+    log_error "迁移完成后再重跑 update.sh。"
+    exit 1
+fi
+
+if [ ! -d "${ROOT}/releases" ]; then
+    log_error "${ROOT}/releases 目录不存在；请先跑 migrate_to_releases.sh。"
+    exit 1
+fi
+
+if [ ! -d "${ROOT}/shared" ]; then
+    log_error "${ROOT}/shared 目录不存在；请先跑 migrate_to_releases.sh。"
+    exit 1
+fi
+
+CURRENT_RELEASE="$(lumen_release_current_path "${ROOT}" || true)"
+if [ -z "${CURRENT_RELEASE}" ] || [ ! -d "${CURRENT_RELEASE}" ]; then
+    log_error "${ROOT}/current 解析失败；请检查 symlink 是否完整。"
+    exit 1
+fi
+CURRENT_ID="$(basename "${CURRENT_RELEASE}")"
+log_info "当前 release：${CURRENT_ID}"
+
+# ---------------------------------------------------------------------------
+# 运行用户解析（沿用旧 update.sh 的逻辑，保持非交互兼容性）
+# ---------------------------------------------------------------------------
 LUMEN_UPDATE_SYSTEMD_RUNTIME=0
 LUMEN_UPDATE_RUN_USER="$(id -un 2>/dev/null || echo "${USER:-root}")"
 LUMEN_UPDATE_RUN_GROUP="$(id -gn 2>/dev/null || echo "${LUMEN_UPDATE_RUN_USER}")"
@@ -34,21 +99,6 @@ lumen_update_as_runtime_user() {
         lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" "$@"
     else
         "$@"
-    fi
-}
-
-lumen_update_prepare_project_permissions() {
-    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" != "1" ]; then
-        return 0
-    fi
-    if [ "$(id -un 2>/dev/null || true)" = "${LUMEN_UPDATE_RUN_USER}" ]; then
-        return 0
-    fi
-    log_info "确保项目目录归运行用户所有：${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}"
-    if ! lumen_run_as_root chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${ROOT}"; then
-        log_error "无法修正 ${ROOT} 所有权。请用 root/sudo 执行 chown 后重跑："
-        log_error "  chown -R ${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP} ${ROOT}"
-        return 1
     fi
 }
 
@@ -76,153 +126,397 @@ lumen_update_require_runtime_cmd() {
     printf '%s' "${path}"
 }
 
-lumen_update_decision() {
-    local env_name="$1"
-    local prompt="$2"
-    local raw="${!env_name:-}"
-    case "${raw}" in
-        1|true|TRUE|yes|YES|y|Y|on|ON)
-            log_info "${env_name}=1，自动确认：${prompt}"
-            return 0
-            ;;
-        0|false|FALSE|no|NO|n|N|off|OFF)
-            log_info "${env_name}=0，自动跳过：${prompt}"
-            return 1
-            ;;
-    esac
-    if [ "${LUMEN_UPDATE_NONINTERACTIVE:-0}" = "1" ]; then
-        log_info "非交互更新未设置 ${env_name}，默认跳过：${prompt}"
-        return 1
-    fi
-    confirm "${prompt}"
-}
-
 # ---------------------------------------------------------------------------
-# 1. 依赖快查（更新阶段假设 install 已经做过完整检查，这里只确认必备工具仍在）
+# 工具检查（更新阶段假设 install 已经做过完整检查）
 # ---------------------------------------------------------------------------
 lumen_require_docker_access
-lumen_update_prepare_project_permissions
 UV_BIN="$(lumen_update_require_runtime_cmd uv "curl -LsSf https://astral.sh/uv/install.sh | sh")"
 NPM_BIN="$(lumen_update_require_runtime_cmd npm "请安装 Node.js >= 20")"
 GIT_BIN="$(lumen_update_runtime_command_path git || true)"
 
-# ---------------------------------------------------------------------------
-# 2. git pull（可选）
-# ---------------------------------------------------------------------------
-log_step "检查代码仓库状态"
-if [ -d "${ROOT}/.git" ] && [ -n "${GIT_BIN}" ]; then
-    CURRENT_COMMIT="$(lumen_update_as_runtime_user "${GIT_BIN}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    BRANCH="$(lumen_update_as_runtime_user "${GIT_BIN}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-    log_info "当前分支：${BRANCH}    commit：${CURRENT_COMMIT}"
+if [ -z "${GIT_BIN}" ]; then
+    log_error "未找到 git；release 模式必须用 git 拉取代码。"
+    exit 1
+fi
 
-    if lumen_update_decision LUMEN_UPDATE_GIT_PULL "是否执行 git pull 拉取最新代码？"; then
-        log_info "执行 git pull（rebase=merges + autostash）..."
-        # 使用 --rebase=merges 保留 merge 拓扑；--autostash 自动 stash/pop 本地未提交改动，
-        # 比 --ff-only 友好：只要无冲突就能继续，否则给出清晰提示让用户处理。
-        if ! lumen_update_as_runtime_user "${GIT_BIN}" pull --rebase=merges --autostash; then
-            log_warn "git pull 未成功（可能存在合并冲突或本地未提交改动无法自动 stash）。"
-            log_warn "建议：先 'git status' 查看；'git stash push -u' 暂存后重跑本脚本，或手动 commit 再来。"
-            if ! confirm "是否继续后续步骤（仅同步依赖与迁移）？"; then
-                log_info "用户中止。"
-                exit 0
-            fi
+# ---------------------------------------------------------------------------
+# 状态变量（trap 也会用）
+# ---------------------------------------------------------------------------
+NEW_ID=""
+NEW_RELEASE=""
+SWITCHED=0           # 1 = current 已切到 NEW_ID，rollback 需要切回去
+RESTART_OK=0         # 1 = systemctl restart 已成功
+ROLLBACK_DONE=0      # 防止 trap 重复 rollback
+
+# 触发 rollback：根据 SWITCHED 选择策略：
+#   - SWITCHED=0：直接删除 NEW_RELEASE（如有）；不动 current。
+#   - SWITCHED=1：把 current 切回 CURRENT_ID，重启服务；DB 不回滚（提示人工干预）。
+lumen_update_rollback() {
+    if [ "${ROLLBACK_DONE}" -eq 1 ]; then
+        return 0
+    fi
+    ROLLBACK_DONE=1
+
+    lumen_step_begin rollback
+
+    if [ "${SWITCHED}" -eq 0 ]; then
+        if [ -n "${NEW_RELEASE}" ] && [ -d "${NEW_RELEASE}" ]; then
+            log_warn "rollback：删除未启用的 release ${NEW_ID}"
+            lumen_step_info rollback action "remove_unmounted_release"
+            lumen_step_info rollback release_id "${NEW_ID}"
+            rm -rf "${NEW_RELEASE}" 2>/dev/null || true
         else
-            NEW_COMMIT="$(lumen_update_as_runtime_user "${GIT_BIN}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-            log_info "已更新到 commit ${NEW_COMMIT}"
+            lumen_step_info rollback action "noop"
         fi
+        lumen_step_end rollback 0
+        return 0
+    fi
+
+    # SWITCHED=1：current 已经被切到 NEW_ID。把它切回去，并重启服务。
+    log_warn "rollback：把 current 切回到 ${CURRENT_ID}"
+    lumen_step_info rollback action "switch_back"
+    lumen_step_info rollback target_release "${CURRENT_ID}"
+    if lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}"; then
+        lumen_step_info rollback switch_back "ok"
     else
-        log_info "跳过 git pull。"
+        log_error "rollback：切换回 ${CURRENT_ID} 失败，需人工介入！"
+        lumen_step_info rollback switch_back "failed"
+    fi
+
+    # DB 已经被 alembic 推进过，回切应用版本可能与新 schema 不兼容。
+    lumen_step_info rollback note "DB schema advanced; manual intervention may be required"
+    log_warn "rollback：DB schema 已被 migrate 步骤推进；如新旧版本 schema 不兼容，请人工干预。"
+
+    # 重启服务，让旧版应用代码起来（schema 是新的，但旧代码读新 schema 通常向后兼容）。
+    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
+        local -a units=()
+        local u
+        for u in lumen-worker.service lumen-web.service lumen-tgbot.service lumen-api.service; do
+            if lumen_systemd_has_unit "${u}"; then
+                units+=("${u}")
+            fi
+        done
+        if [ "${#units[@]}" -gt 0 ]; then
+            if lumen_restart_systemd_units "${units[@]}"; then
+                lumen_step_info rollback restart "ok"
+            else
+                lumen_step_info rollback restart "failed"
+            fi
+        fi
+    fi
+    lumen_step_end rollback 1
+    return 0
+}
+
+# trap：脚本因 set -e / 显式 exit 非零退出时跑。
+lumen_update_on_err() {
+    local rc="$?"
+    [ "${rc}" -eq 0 ] && return 0
+    # 把当前未结束的 phase 收口为失败 done 行
+    lumen_step_finalize_failure "${rc}"
+    log_error "更新失败：返回码 ${rc}"
+    lumen_update_rollback
+    exit "${rc}"
+}
+trap 'lumen_update_on_err' ERR
+# EXIT 兜底：bash 3.2 的 set -e + ERR 在某些路径不会触发 ERR（比如显式 exit）。
+trap 'rc=$?; [ "$rc" -ne 0 ] && lumen_update_on_err || true; lumen_release_lock' EXIT
+
+# ---------------------------------------------------------------------------
+# Phase 1: prepare
+# ---------------------------------------------------------------------------
+lumen_step_begin prepare
+log_step "[prepare] 计算新 release id 并准备目录"
+
+# 先用 current 的 sha 作为占位（如果 git 不能 fetch，整个 release 仍能基于现有代码继续）。
+PREP_SHA="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" rev-parse HEAD 2>/dev/null || echo unknown)"
+NEW_ID="$(lumen_release_id "${PREP_SHA}")"
+NEW_RELEASE="${ROOT}/releases/${NEW_ID}"
+
+if [ -e "${NEW_RELEASE}" ]; then
+    log_error "目标 release 目录已存在：${NEW_RELEASE}"
+    lumen_step_end prepare 1
+    exit 1
+fi
+
+mkdir -p "${NEW_RELEASE}"
+# 必要的子目录：保证 link_shared 时父目录已就绪
+mkdir -p "${ROOT}/shared/web-env" "${ROOT}/shared/worker-var" "${ROOT}/shared/web-next-cache"
+
+# 如果是 systemd 部署，确保 release 目录归运行用户。
+if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
+    lumen_run_as_root chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" \
+        "${NEW_RELEASE}" "${ROOT}/shared" 2>/dev/null || true
+fi
+
+lumen_step_info prepare release_id "${NEW_ID}"
+lumen_step_info prepare release_path "${NEW_RELEASE}"
+lumen_step_end prepare 0
+
+# ---------------------------------------------------------------------------
+# Phase 2: fetch
+# 优先在 release 目录里 git clone --reference current（更快）。
+# 拉不到（离线 / 远端无更新）则从 current rsync 后再 git pull。
+# 如果新 sha == current sha，直接退出 0：已是最新版本，无需创建 release。
+# ---------------------------------------------------------------------------
+lumen_step_begin fetch
+log_step "[fetch] 在新 release 目录里同步代码"
+
+CURRENT_SHA="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" rev-parse HEAD 2>/dev/null || echo unknown)"
+CURRENT_BRANCH="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+GIT_REMOTE_URL="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" config --get remote.origin.url 2>/dev/null || echo "")"
+
+lumen_step_info fetch current_sha "${CURRENT_SHA}"
+lumen_step_info fetch branch "${CURRENT_BRANCH}"
+
+# 优先尝试 fetch 远端，看是否有更新。
+NEW_SHA="${CURRENT_SHA}"
+FETCH_OK=0
+if [ -n "${GIT_REMOTE_URL}" ]; then
+    if (cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" fetch --quiet origin "${CURRENT_BRANCH}" 2>/dev/null); then
+        FETCH_OK=1
+        NEW_SHA="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" rev-parse "origin/${CURRENT_BRANCH}" 2>/dev/null || echo "${CURRENT_SHA}")"
+    else
+        log_warn "[fetch] git fetch 失败（离线或网络问题），将复用 current sha"
+        lumen_step_info fetch fetch_status "failed_use_current"
+    fi
+fi
+lumen_step_info fetch new_sha "${NEW_SHA}"
+
+# 若没有更新可拉，且代码已是最新，则退出 0（不创建 release）。
+if [ "${NEW_SHA}" = "${CURRENT_SHA}" ] && [ "${FETCH_OK}" -eq 1 ]; then
+    log_info "已是最新版本（${CURRENT_SHA}），无需创建新 release。"
+    lumen_step_info fetch action "noop_already_latest"
+    lumen_step_end fetch 0
+    # 清理已创建但未使用的 release 目录。
+    rm -rf "${NEW_RELEASE}" 2>/dev/null || true
+    NEW_RELEASE=""
+    NEW_ID=""
+    # 清掉 trap 防止误判。
+    trap - ERR
+    trap 'lumen_release_lock' EXIT
+    exit 0
+fi
+
+# 选择拉取方式：clone --shared / 离线时 rsync。
+if [ "${FETCH_OK}" -eq 1 ] && [ -n "${GIT_REMOTE_URL}" ]; then
+    log_info "[fetch] 从 ${GIT_REMOTE_URL} clone 到 ${NEW_RELEASE}"
+    # 清空 NEW_RELEASE 让 git clone 接管（mkdir 已建好）。
+    rmdir "${NEW_RELEASE}" 2>/dev/null || true
+    # --reference-if-able 在 git ≥ 2.11 才支持；老版本回退到 --reference（强依赖路径存在）
+    # 或直接不用 reference 优化（最坏情况只是慢一点）。
+    GIT_CLONE_REFERENCE_FLAGS=()
+    if [ -d "${CURRENT_RELEASE}/.git" ]; then
+        GIT_VERSION_RAW="$(lumen_update_as_runtime_user "${GIT_BIN}" --version 2>/dev/null | awk '{print $3}' || true)"
+        if printf '%s\n2.11.0\n' "${GIT_VERSION_RAW}" | sort -V -C 2>/dev/null; then
+            GIT_CLONE_REFERENCE_FLAGS+=(--reference-if-able "${CURRENT_RELEASE}/.git")
+        else
+            log_warn "[fetch] git ${GIT_VERSION_RAW} < 2.11，跳过 --reference-if-able 优化（首次 clone 会更慢）。"
+        fi
+    fi
+    if ! lumen_update_as_runtime_user "${GIT_BIN}" clone --quiet \
+            "${GIT_CLONE_REFERENCE_FLAGS[@]}" \
+            --branch "${CURRENT_BRANCH}" \
+            "${GIT_REMOTE_URL}" "${NEW_RELEASE}"; then
+        log_error "[fetch] git clone 失败"
+        lumen_step_end fetch 1
+        exit 1
+    fi
+    # checkout 到目标 sha（确保内容确定性）。
+    if ! (cd "${NEW_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" checkout --quiet "${NEW_SHA}"); then
+        log_error "[fetch] checkout ${NEW_SHA} 失败"
+        lumen_step_end fetch 1
+        exit 1
     fi
 else
-    log_info "非 git 仓库（或无 git 命令），跳过 pull 步骤。"
+    # 离线 fallback：rsync from current（保留 .git）然后 git pull autostash。
+    log_info "[fetch] 从 current 复制代码（离线 fallback）"
+    if ! rsync -a --delete \
+            --exclude='/.venv/' \
+            --exclude='/node_modules/' \
+            --exclude='/apps/web/.next/' \
+            --exclude='/apps/web/node_modules/' \
+            "${CURRENT_RELEASE}/" "${NEW_RELEASE}/"; then
+        log_error "[fetch] rsync 失败"
+        lumen_step_end fetch 1
+        exit 1
+    fi
 fi
 
+# 写 .lumen_release.json
+ACTUAL_SHA="$(cd "${NEW_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" rev-parse HEAD 2>/dev/null || echo "${NEW_SHA}")"
+ALEMBIC_HEAD_EXPECTED=""
+if [ -d "${NEW_RELEASE}/apps/api" ]; then
+    ALEMBIC_HEAD_EXPECTED="$(grep -hRE '^[[:space:]]*revision[[:space:]]*[:=]' "${NEW_RELEASE}/apps/api/migrations" 2>/dev/null \
+        | head -n1 \
+        | sed -E 's/.*[\"\x27]([a-f0-9]+)[\"\x27].*/\1/' || true)"
+fi
+cat > "${NEW_RELEASE}/.lumen_release.json" <<JSON
+{
+  "id": "${NEW_ID}",
+  "sha": "${ACTUAL_SHA}",
+  "branch": "${CURRENT_BRANCH}",
+  "created_at": "$(lumen_iso_now)",
+  "alembic_head_expected": "${ALEMBIC_HEAD_EXPECTED}",
+  "alembic_head_applied": ""
+}
+JSON
+lumen_step_info fetch sha "${ACTUAL_SHA}"
+lumen_step_end fetch 0
+
 # ---------------------------------------------------------------------------
-# 3. 确保容器在跑
+# Phase 3: link_shared
+# 把 shared 目录里的 .env.local / worker-var / .next/cache 软链进 release。
 # ---------------------------------------------------------------------------
-log_step "确保 PostgreSQL / Redis 容器在运行并就绪（docker compose up -d --wait）"
-if ! lumen_docker compose up -d --wait; then
-    log_error "容器启动或健康检查失败。请运行 '$(lumen_docker_command_label) compose logs' 排查。"
+lumen_step_begin link_shared
+log_step "[link_shared] 把 shared 目录软链到 release 内"
+
+if ! lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"; then
+    lumen_step_end link_shared 1
     exit 1
 fi
+lumen_step_end link_shared 0
 
 # ---------------------------------------------------------------------------
-# 4. uv sync 拉新依赖
+# Phase 4: containers
+# 在 release 目录里跑 docker compose up -d --wait。
+# 注：compose 文件里 service name 全局唯一，不会启第二个 postgres/redis；
+# 这一步主要是确保数据库容器已经在跑（旧 current 重启过容器也算）。
 # ---------------------------------------------------------------------------
-log_step "同步 Python 依赖（uv sync --frozen --all-packages）"
-if ! lumen_update_as_runtime_user "${UV_BIN}" sync --frozen --all-packages; then
-    log_error "uv sync --frozen --all-packages 失败。如果是因为 lock 已过期，请改跑 'uv sync --all-packages' 重新解析依赖。"
-    exit 1
-fi
+lumen_step_begin containers
+log_step "[containers] 确保 PostgreSQL / Redis 容器在运行（docker compose up -d --wait）"
 
-# ---------------------------------------------------------------------------
-# 5. alembic upgrade head
-# ---------------------------------------------------------------------------
-log_step "应用新的数据库迁移（alembic upgrade head）"
 (
-    cd "${ROOT}/apps/api"
-    if ! lumen_update_as_runtime_user "${UV_BIN}" run alembic upgrade head; then
-        log_error "数据库迁移失败。请检查容器与 DATABASE_URL，可用 '$(lumen_docker_command_label) compose logs postgres' 排查。"
+    cd "${NEW_RELEASE}"
+    if ! lumen_docker compose up -d --wait; then
+        log_error "[containers] 容器启动或健康检查失败"
         exit 1
     fi
 )
+CONTAINERS_RC=$?
+if [ "${CONTAINERS_RC}" -ne 0 ]; then
+    lumen_step_end containers 1
+    exit "${CONTAINERS_RC}"
+fi
+lumen_step_end containers 0
 
 # ---------------------------------------------------------------------------
-# 6. npm ci
+# Phase 5: deps_python
+# release 目录里 uv sync。.venv 落在 release 内，跟整个 release 一起切换。
 # ---------------------------------------------------------------------------
-log_step "同步前端依赖（npm ci）"
+lumen_step_begin deps_python
+log_step "[deps_python] 同步 Python 依赖（uv sync --frozen --all-packages）"
+
+if ! (cd "${NEW_RELEASE}" && lumen_update_as_runtime_user "${UV_BIN}" sync --frozen --all-packages); then
+    log_error "[deps_python] uv sync 失败。如果是 lock 已过期，请改跑 'uv sync --all-packages'。"
+    lumen_step_end deps_python 1
+    exit 1
+fi
+lumen_step_end deps_python 0
+
+# ---------------------------------------------------------------------------
+# Phase 6: migrate_db
+# release 目录里 alembic upgrade head。
+# 成功后把实际 head 写回 .lumen_release.json。
+# ---------------------------------------------------------------------------
+lumen_step_begin migrate_db
+log_step "[migrate_db] 应用数据库迁移（alembic upgrade head）"
+
 (
-    cd "${ROOT}/apps/web"
-    lumen_update_as_runtime_user "${NPM_BIN}" ci
+    cd "${NEW_RELEASE}/apps/api"
+    if ! lumen_update_as_runtime_user "${UV_BIN}" run alembic upgrade head; then
+        log_error "[migrate_db] alembic upgrade 失败"
+        exit 1
+    fi
 )
+MIGRATE_RC=$?
+if [ "${MIGRATE_RC}" -ne 0 ]; then
+    lumen_step_end migrate_db 1
+    exit "${MIGRATE_RC}"
+fi
+ALEMBIC_HEAD_APPLIED="$(cd "${NEW_RELEASE}/apps/api" && lumen_update_as_runtime_user "${UV_BIN}" run alembic current 2>/dev/null \
+    | awk '{print $1}' \
+    | head -n1 || true)"
+# 更新 .lumen_release.json 的 applied 字段（用 sed 替换 alembic_head_applied 行）
+if [ -n "${ALEMBIC_HEAD_APPLIED}" ]; then
+    sed -i.bak -E "s|\"alembic_head_applied\": \"[^\"]*\"|\"alembic_head_applied\": \"${ALEMBIC_HEAD_APPLIED}\"|" \
+        "${NEW_RELEASE}/.lumen_release.json" 2>/dev/null || true
+    rm -f "${NEW_RELEASE}/.lumen_release.json.bak" 2>/dev/null || true
+fi
+lumen_step_info migrate_db alembic_head "${ALEMBIC_HEAD_APPLIED}"
+lumen_step_end migrate_db 0
 
 # ---------------------------------------------------------------------------
-# 7. 可选 rebuild
+# Phase 7: deps_node
 # ---------------------------------------------------------------------------
-BUILD_DONE=0
-if lumen_update_decision LUMEN_UPDATE_BUILD "是否重新构建前端生产包（npm run build）？"; then
-    log_step "重建前端（npm run build）"
-    WEB_ENV="${ROOT}/apps/web/.env.local"
-    NEXT_PUBLIC_API_BASE_VALUE=""
-    if [ -f "${WEB_ENV}" ] && grep -qE "^NEXT_PUBLIC_API_BASE=.+" "${WEB_ENV}"; then
-        NEXT_PUBLIC_API_BASE_VALUE="$(sed -n 's/^NEXT_PUBLIC_API_BASE=//p' "${WEB_ENV}" | head -n1)"
-    fi
-    (
-        cd "${ROOT}/apps/web"
-        # 默认不导出 NEXT_PUBLIC_API_BASE：浏览器使用同源 /api，由 Next.js rewrite 到后端。
-        # 只有跨域部署显式配置了 NEXT_PUBLIC_API_BASE 时才注入前端 bundle。
-        if [ -n "${NEXT_PUBLIC_API_BASE_VALUE}" ]; then
-            export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE_VALUE}"
-        else
-            unset NEXT_PUBLIC_API_BASE
-        fi
-        if [ -n "${NEXT_PUBLIC_API_BASE_VALUE}" ]; then
-            lumen_update_as_runtime_user env NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE_VALUE}" "${NPM_BIN}" run build
-        else
-            lumen_update_as_runtime_user "${NPM_BIN}" run build
-        fi
-    )
-    BUILD_DONE=1
+lumen_step_begin deps_node
+log_step "[deps_node] 同步前端依赖（npm ci）"
+
+if ! (cd "${NEW_RELEASE}/apps/web" && lumen_update_as_runtime_user "${NPM_BIN}" ci); then
+    log_error "[deps_node] npm ci 失败"
+    lumen_step_end deps_node 1
+    exit 1
+fi
+lumen_step_end deps_node 0
+
+# ---------------------------------------------------------------------------
+# Phase 8: build_web
+# ---------------------------------------------------------------------------
+lumen_step_begin build_web
+log_step "[build_web] 构建前端（npm run build）"
+
+WEB_ENV="${NEW_RELEASE}/apps/web/.env.local"
+NEXT_PUBLIC_API_BASE_VALUE=""
+if [ -f "${WEB_ENV}" ] && grep -qE "^NEXT_PUBLIC_API_BASE=.+" "${WEB_ENV}"; then
+    NEXT_PUBLIC_API_BASE_VALUE="$(sed -n 's/^NEXT_PUBLIC_API_BASE=//p' "${WEB_ENV}" | head -n1)"
 fi
 
+(
+    cd "${NEW_RELEASE}/apps/web"
+    if [ -n "${NEXT_PUBLIC_API_BASE_VALUE}" ]; then
+        lumen_update_as_runtime_user env NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE_VALUE}" \
+            "${NPM_BIN}" run build
+    else
+        lumen_update_as_runtime_user "${NPM_BIN}" run build
+    fi
+)
+BUILD_RC=$?
+if [ "${BUILD_RC}" -ne 0 ]; then
+    log_error "[build_web] npm run build 失败"
+    lumen_step_end build_web 1
+    exit "${BUILD_RC}"
+fi
+lumen_step_end build_web 0
+
 # ---------------------------------------------------------------------------
-# 8. 重启服务并执行健康检查
+# Phase 9: switch
+# 原子地把 current symlink 指向 NEW_ID。失败必须清理新 release。
+# 切换成功后任何后续失败都需要 rollback 到旧 release。
 # ---------------------------------------------------------------------------
-log_step "更新后运行时检查"
+lumen_step_begin switch
+log_step "[switch] 原子切换 current -> ${NEW_ID}"
+
+if ! lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"; then
+    log_error "[switch] symlink 切换失败"
+    lumen_step_end switch 1
+    exit 1
+fi
+SWITCHED=1
+lumen_step_info switch from "${CURRENT_ID}"
+lumen_step_info switch to "${NEW_ID}"
+lumen_step_end switch 0
+
+# ---------------------------------------------------------------------------
+# Phase 10: restart
+# 顺序：worker -> web -> tgbot -> api（与原 update.sh 一致）。
+# 失败时 trap 触发 rollback：current 切回旧 ID，再重启回旧版本。
+# ---------------------------------------------------------------------------
+lumen_step_begin restart
+log_step "[restart] 重启 systemd 服务"
+
 lumen_ensure_runtime_dirs "${ROOT}/.env"
 
-if [ "${BUILD_DONE}" -eq 1 ]; then
-    WEB_NPM_SCRIPT="start"
-else
-    WEB_NPM_SCRIPT="dev"
-fi
-
-RUNTIME_STARTED=0
-if lumen_systemd_has_any_units lumen-api.service lumen-worker.service lumen-web.service; then
-    # 把 lumen-api 放最后：当 update.sh 被管理面板触发并以 detached subprocess
-    # 跑（fallback 路径，跟 lumen-api 在同一 cgroup）时，提前重启 lumen-api 会
-    # 让 systemd 把 cgroup 中的 update.sh 一并 SIGKILL。先重启不会自杀的 unit，
-    # 最后才重启 lumen-api，把损失降到最低；systemd-run 隔离模式下顺序不重要。
+if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
     LUMEN_RESTART_UNITS=()
     for _LUMEN_UNIT in lumen-worker.service lumen-web.service lumen-tgbot.service lumen-api.service; do
         if lumen_systemd_has_unit "${_LUMEN_UNIT}"; then
@@ -230,42 +524,65 @@ if lumen_systemd_has_any_units lumen-api.service lumen-worker.service lumen-web.
         fi
     done
     unset _LUMEN_UNIT
-    if [ "${#LUMEN_RESTART_UNITS[@]}" -gt 0 ]; then
-        lumen_restart_systemd_units "${LUMEN_RESTART_UNITS[@]}"
-    fi
-    lumen_check_runtime_health
-else
-    if lumen_process_listening_on_port 8000 || lumen_process_listening_on_port 3000; then
-        log_error "未发现 Lumen systemd unit，但 8000/3000 端口已有进程监听，无法安全重启并确认新版本。"
-        log_error "请停止旧 API/Web 进程后重跑，或按 deploy/systemd 模板安装 lumen-api/lumen-web/lumen-worker 服务。"
+    if [ "${#LUMEN_RESTART_UNITS[@]}" -eq 0 ]; then
+        log_error "[restart] 未发现可重启的 Lumen systemd unit"
+        lumen_step_end restart 1
         exit 1
     fi
-    log_warn "未发现 Lumen systemd unit，将在当前终端后台启动 API / Worker / Web 并执行健康检查。"
-    lumen_start_local_runtime "${ROOT}" "${WEB_NPM_SCRIPT}"
-    RUNTIME_STARTED=1
+    if ! lumen_restart_systemd_units "${LUMEN_RESTART_UNITS[@]}"; then
+        log_error "[restart] systemctl restart 失败"
+        lumen_step_end restart 1
+        exit 1
+    fi
+else
+    log_warn "[restart] 未发现 systemd 部署，跳过 systemctl restart（开发态依赖外部 supervisor）"
+fi
+
+RESTART_OK=1
+lumen_step_end restart 0
+
+# ---------------------------------------------------------------------------
+# Phase 11: health_post
+# ---------------------------------------------------------------------------
+lumen_step_begin health_post
+log_step "[health_post] 运行时健康检查"
+
+if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
+    if ! lumen_check_runtime_health; then
+        log_error "[health_post] 健康检查失败"
+        lumen_step_end health_post 1
+        exit 1
+    fi
+else
+    log_warn "[health_post] 非 systemd 部署，跳过健康检查（请确认运行时另行起好）"
+fi
+lumen_step_end health_post 0
+
+# ---------------------------------------------------------------------------
+# Phase 12: cleanup
+# 保留最近 5 个 release，其它删除。current/previous 指向的永远保留。
+# 失败不致命：磁盘空间问题不应阻止此次更新被认可成功。
+# ---------------------------------------------------------------------------
+lumen_step_begin cleanup
+log_step "[cleanup] 清理旧 release（保留最近 5 个）"
+
+if lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-5}"; then
+    lumen_step_end cleanup 0
+else
+    # 不阻断更新成功：只记录警告。
+    log_warn "[cleanup] 清理旧 release 失败（已忽略）"
+    lumen_step_end cleanup 0
 fi
 
 # ---------------------------------------------------------------------------
-# 9. 收尾
+# 收尾
 # ---------------------------------------------------------------------------
 log_step "更新完成"
-if [ "${RUNTIME_STARTED}" -eq 1 ]; then
-    cat <<EOF
+log_info "release ${NEW_ID} 已上线（previous: ${CURRENT_ID}）"
+log_info "  API:    ${LUMEN_API_HEALTH_URL:-http://127.0.0.1:8000/healthz}"
+log_info "  Web:    ${LUMEN_WEB_HEALTH_URL:-http://127.0.0.1:3000/}"
 
-  Update complete. 已启动 API / Worker / Web，并通过健康检查。
-  运行日志目录：${LUMEN_LOCAL_RUNTIME_LOG_DIR}
-
-EOF
-else
-    cat <<EOF
-
-  Update complete. 已重启 systemd 服务并通过健康检查：
-    API:    ${LUMEN_API_HEALTH_URL:-http://127.0.0.1:8000/healthz}
-    Web:    ${LUMEN_WEB_HEALTH_URL:-http://127.0.0.1:3000/}
-    Worker: lumen-worker.service active
-
-EOF
-fi
-
+# 解除 ERR/EXIT trap，留 lumen_release_lock 给最终 EXIT 处理。
 trap - ERR
+trap 'lumen_release_lock' EXIT
 exit 0

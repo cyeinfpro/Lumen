@@ -462,6 +462,7 @@ from .routes import telegram as telegram_router  # noqa: E402
 from .routes import admin_proxies as admin_proxies_router  # noqa: E402
 from .routes import admin_telegram as admin_telegram_router  # noqa: E402
 from .routes import admin_update as admin_update_router  # noqa: E402
+from .routes import admin_release as admin_release_router  # noqa: E402
 
 app.include_router(admin_router.router)
 app.include_router(admin_backups_router.router)  # /admin/backups
@@ -481,6 +482,7 @@ app.include_router(telegram_router.router_bot, tags=["telegram"])  # /telegram/*
 app.include_router(admin_proxies_router.router)  # /admin/proxies/*
 app.include_router(admin_telegram_router.router)  # /admin/telegram/restart
 app.include_router(admin_update_router.router)  # /admin/update
+app.include_router(admin_release_router.router)  # /admin/release
 
 # Prometheus /metrics（路由挂载后）
 if settings.metrics_enabled:

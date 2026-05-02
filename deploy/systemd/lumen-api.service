@@ -9,12 +9,13 @@ StartLimitBurst=5
 Type=simple
 User=lumen
 Group=lumen
-WorkingDirectory=/opt/lumen/apps/api
+# release 布局：current 是软链，systemd 在 chdir 时按 cwd= 软链解引用进入物理 release 目录。
+WorkingDirectory=/opt/lumen/current/apps/api
 EnvironmentFile=-/opt/lumen/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=+/bin/sh -c 'if findmnt -T /opt/lumendata >/dev/null 2>&1 && [ "$$(findmnt -T /opt/lumendata -no FSTYPE)" = "cifs" ]; then /bin/mount -o remount,uid=$$(id -u lumen),gid=$$(id -g lumen),forceuid,forcegid,file_mode=0664,dir_mode=0775 /opt/lumendata || true; fi'
-ExecStart=/opt/lumen/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --limit-max-requests 10000 --limit-max-requests-jitter 1000 --timeout-keep-alive 60 --timeout-graceful-shutdown 30 --timeout-worker-healthcheck 10
+ExecStart=/opt/lumen/current/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --limit-max-requests 10000 --limit-max-requests-jitter 1000 --timeout-keep-alive 60 --timeout-graceful-shutdown 30 --timeout-worker-healthcheck 10
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=30s
@@ -27,7 +28,10 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateDevices=true
 CapabilityBoundingSet=
-ReadWritePaths=/opt/lumendata
+# ProtectSystem=strict 解引用 symlink 后按物理路径判定 ReadWritePaths：
+# worker var / .env.local 走 shared，所以必须把 /opt/lumen/shared 标记为可写。
+# /opt/lumen/releases 不需要写权限（API 只读代码 + .venv）。
+ReadWritePaths=/opt/lumendata /opt/lumen/shared
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lumen-api

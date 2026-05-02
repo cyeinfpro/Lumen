@@ -62,24 +62,37 @@ def test_install_script_defaults_to_starting_runtime_after_install() -> None:
     assert "未启动前，浏览器访问 3000 不会有响应" in text
 
 
-def test_update_script_supports_noninteractive_env_decisions() -> None:
+def test_update_script_requires_release_layout_and_prepares_new_release() -> None:
     text = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
-    assert "LUMEN_UPDATE_NONINTERACTIVE" in text
-    assert "LUMEN_UPDATE_GIT_PULL" in text
-    assert "LUMEN_UPDATE_BUILD" in text
-    assert 'lumen_update_decision LUMEN_UPDATE_GIT_PULL "是否执行 git pull 拉取最新代码？"' in text
-    assert 'lumen_update_decision LUMEN_UPDATE_BUILD "是否重新构建前端生产包（npm run build）？"' in text
+    assert "Capistrano 风格 release + symlink 原子切换版" in text
+    assert 'if [ ! -L "${ROOT}/current" ]; then' in text
+    assert "migrate_to_releases.sh" in text
+    assert 'NEW_RELEASE="${ROOT}/releases/${NEW_ID}"' in text
+    assert 'lumen_release_id "${PREP_SHA}"' in text
+    assert 'GIT_BIN}" clone --quiet' in text
+    assert '"${GIT_REMOTE_URL}" "${NEW_RELEASE}"' in text
+    assert 'cat > "${NEW_RELEASE}/.lumen_release.json" <<JSON' in text
+    assert 'lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"' in text
 
 
 def test_update_script_restarts_services_and_health_checks_after_update() -> None:
     text = UPDATE.read_text(encoding="utf-8")
-    assert 'log_step "更新后运行时检查"' in text
+    assert 'lumen_step_begin switch' in text
+    assert 'lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"' in text
+    assert 'lumen_step_begin restart' in text
+    assert 'log_step "[restart] 重启 systemd 服务"' in text
     assert 'lumen_ensure_runtime_dirs "${ROOT}/.env"' in text
-    assert "lumen_restart_systemd_units lumen-api.service lumen-worker.service lumen-web.service" in text
+    assert (
+        "for _LUMEN_UNIT in lumen-worker.service lumen-web.service "
+        "lumen-tgbot.service lumen-api.service; do"
+    ) in text
+    assert 'LUMEN_RESTART_UNITS+=("${_LUMEN_UNIT}")' in text
+    assert 'lumen_restart_systemd_units "${LUMEN_RESTART_UNITS[@]}"' in text
+    assert 'lumen_step_begin health_post' in text
     assert "lumen_check_runtime_health" in text
-    assert "无法安全重启并确认新版本" in text
-    assert 'lumen_start_local_runtime "${ROOT}" "${WEB_NPM_SCRIPT}"' in text
-    assert "已重启 systemd 服务并通过健康检查" in text
+    assert 'lumen_step_begin cleanup' in text
+    assert 'lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-5}"' in text
+    assert 'log_info "release ${NEW_ID} 已上线（previous: ${CURRENT_ID}）"' in text
 
 
 def test_update_script_runs_dependency_steps_as_systemd_runtime_user() -> None:

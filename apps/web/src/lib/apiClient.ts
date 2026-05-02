@@ -957,12 +957,55 @@ export function restoreBackup(
 
 // ——— Admin: one-click Lumen update ———
 
+// 后端阶段枚举：保持开放（string）以容忍后端新增 phase 不破坏前端类型。
+// UI 侧用一个映射表把已知 phase 翻成中文；未知 phase 直接显示原始 key。
+export type UpdatePhase =
+  | "prepare"
+  | "fetch"
+  | "link_shared"
+  | "containers"
+  | "deps_python"
+  | "migrate_db"
+  | "deps_node"
+  | "build_web"
+  | "switch"
+  | "restart"
+  | "health_post"
+  | "cleanup"
+  | "rollback";
+
+export interface UpdateStepRecord {
+  phase: UpdatePhase | string;
+  status: "running" | "done";
+  started_at: string;
+  ended_at?: string | null;
+  rc?: number | null;
+  dur_ms?: number | null;
+  info?: Record<string, string>;
+}
+
+export interface ReleaseInfo {
+  id: string;
+  created_at: string;
+  sha: string;
+  branch?: string;
+  alembic_head_expected?: string | null;
+  alembic_head_applied?: string | null;
+  is_current: boolean;
+  is_previous: boolean;
+}
+
+// 扩展现有 AdminUpdateStatusOut（保留旧字段；新字段全部可选，旧消费者仍可工作）。
 export interface AdminUpdateStatusOut {
   running: boolean;
   pid?: number | null;
   unit?: string | null;
   started_at?: string | null;
   log_tail: string;
+  phases?: UpdateStepRecord[];
+  current_release?: ReleaseInfo | null;
+  previous_release?: ReleaseInfo | null;
+  releases?: ReleaseInfo[];
 }
 
 export interface AdminUpdateTriggerOut {
@@ -975,6 +1018,12 @@ export interface AdminUpdateTriggerOut {
   note: string;
 }
 
+export interface AdminRollbackOut {
+  accepted: boolean;
+  target: ReleaseInfo;
+  started_at: string;
+}
+
 export function getAdminUpdateStatus(): Promise<AdminUpdateStatusOut> {
   return apiFetch<AdminUpdateStatusOut>("/admin/update/status");
 }
@@ -984,6 +1033,26 @@ export function triggerAdminUpdate(): Promise<AdminUpdateTriggerOut> {
     method: "POST",
     body: JSON.stringify({}),
   });
+}
+
+export function listAdminReleases(): Promise<ReleaseInfo[]> {
+  // 后端契约：返回 top 10 release。直接返回数组（无 envelope）。
+  return apiFetch<ReleaseInfo[]>("/admin/release");
+}
+
+export function rollbackAdminRelease(
+  release_id: string,
+): Promise<AdminRollbackOut> {
+  return apiFetch<AdminRollbackOut>("/admin/release/rollback", {
+    method: "POST",
+    body: JSON.stringify({ release_id }),
+  });
+}
+
+// SSE 端点。EventSource 不允许自定义 header，但 cookie 由 withCredentials 自动带；
+// 后端用 cookie 鉴权 + CSRF 不适用于 GET。
+export function adminUpdateStreamUrl(): string {
+  return `${API_BASE.replace(/\/$/, "")}/admin/update/stream`;
 }
 
 // ——— Me: usage ———

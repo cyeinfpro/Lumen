@@ -52,7 +52,9 @@ import {
   getAdminUpdateStatus,
   getConversationContext,
   listAdminProxies,
+  listAdminReleases,
   restartTelegramBot,
+  rollbackAdminRelease,
   testAdminProxy,
   testAllAdminProxies,
   triggerAdminUpdate,
@@ -115,6 +117,7 @@ export const qk = {
   providerStats: () => ["admin", "providers", "stats"] as const,
   adminProxies: () => ["admin", "proxies"] as const,
   adminUpdateStatus: () => ["admin", "update", "status"] as const,
+  adminReleases: () => ["admin", "releases"] as const,
   systemPrompts: () => ["system_prompts"] as const,
   mySessions: () => ["me", "sessions"] as const,
   conversations: (opts?: ListConversationsOpts) =>
@@ -698,6 +701,41 @@ export function useTriggerAdminUpdateMutation(
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.invalidateQueries({ queryKey: qk.adminUpdateStatus() });
+      qc.invalidateQueries({ queryKey: qk.adminReleases() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+// Release 列表（top 10）。和 update status 拆分以便单独刷新。
+// 不主动轮询：依赖 trigger / rollback / SSE done 后 invalidate。
+export function useAdminReleasesQuery(
+  options?: Omit<
+    UseQueryOptions<import("./apiClient").ReleaseInfo[]>,
+    "queryKey" | "queryFn"
+  >,
+) {
+  return useQuery<import("./apiClient").ReleaseInfo[]>({
+    queryKey: qk.adminReleases(),
+    queryFn: listAdminReleases,
+    ...options,
+  });
+}
+
+export function useRollbackReleaseMutation(
+  options?: Omit<
+    UseMutationOptions<import("./apiClient").AdminRollbackOut, Error, string>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<import("./apiClient").AdminRollbackOut, Error, string>({
+    mutationFn: (release_id: string) => rollbackAdminRelease(release_id),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      // 回滚也是后台异步任务，立即把 status / releases 标 stale，让 SSE / 下次 fetch 反映
+      qc.invalidateQueries({ queryKey: qk.adminUpdateStatus() });
+      qc.invalidateQueries({ queryKey: qk.adminReleases() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import grp
+import json
 import os
 import pwd
+import re
 import shlex
 import shutil
 import subprocess
@@ -13,10 +15,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, TextIO
+from typing import Annotated, AsyncIterator, TextIO
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
@@ -39,6 +42,31 @@ _UPDATE_TRIGGER_NAME = ".update.trigger"
 _UPDATE_RUNNER_ENV_NAME = ".update.env"
 _UPDATE_RUNNER_UNIT = "lumen-update-runner.service"
 _LOG_TAIL_CHARS = 6000
+
+# Release directory layout — overridable via env so unit tests / non-prod
+# installs can point at a sandbox without touching config.py schema.
+_LUMEN_ROOT = os.environ.get("LUMEN_ROOT", "/opt/lumen")
+
+_RELEASE_LIST_LIMIT = 10
+
+# Step protocol regexes — see update.sh contract.
+_STEP_LINE_RE = re.compile(
+    r"^::lumen-step::\s+phase=(?P<phase>[A-Za-z0-9_]+)\s+status=(?P<status>start|done)"
+    r"(?:\s+rc=(?P<rc>-?\d+))?"
+    r"(?:\s+dur_ms=(?P<dur_ms>-?\d+))?"
+    r"(?:\s+ts=(?P<ts>\S+))?"
+    r"\s*$"
+)
+_INFO_LINE_RE = re.compile(
+    r"^::lumen-info::\s+phase=(?P<phase>[A-Za-z0-9_]+)\s+key=(?P<key>[A-Za-z0-9_]+)\s+value=(?P<value>.*)$"
+)
+_TRIGGER_DELIMITER_RE = re.compile(r"^=== update (?:trigger|unit started) ", re.MULTILINE)
+
+# SSE knobs — keep in sync with nginx idle / proxy_read_timeout.
+_SSE_HEARTBEAT_SEC = 15.0
+_SSE_MAX_DURATION_SEC = 60 * 60  # 1h hard cap to prevent leaks
+_SSE_LOG_POLL_SEC = 0.3  # tail-F poll interval
+_SSE_LOG_BATCH_WINDOW_SEC = 0.2  # coalesce raw log lines into bursts
 
 
 @dataclass(frozen=True)
@@ -70,6 +98,14 @@ def _update_trigger_path() -> Path:
 
 def _update_runner_env_path() -> Path:
     return Path(settings.backup_root).expanduser() / _UPDATE_RUNNER_ENV_NAME
+
+
+def _lumen_root() -> Path:
+    """Return the Lumen install root (releases/, current, previous live here).
+
+    Resolved per-call so tests can override LUMEN_ROOT mid-process.
+    """
+    return Path(os.environ.get("LUMEN_ROOT", _LUMEN_ROOT)).expanduser()
 
 
 def _runner_unit_available() -> bool:
@@ -209,6 +245,21 @@ def _read_log_tail() -> str:
         return ""
 
 
+def _read_log_full() -> str:
+    """Read the entire .update.log. Used by status/SSE for step parsing.
+
+    We only ever scan the segment after the *last* ``=== update ... ===`` header
+    so cross-update phase repetitions don't pollute the current view.
+    """
+    path = _update_log_path()
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return ""
+
+
 def _clean_proxy_env(env: dict[str, str]) -> None:
     for key in (
         "HTTP_PROXY",
@@ -256,6 +307,7 @@ def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
         "LUMEN_API_HEALTH_",
         "LUMEN_WEB_HEALTH_",
         "LUMEN_HEALTH_",
+        "LUMEN_ROLLBACK_",
     )
     keys = {
         "PATH",
@@ -345,6 +397,54 @@ printf '=== update unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "$LUME
     return cmd
 
 
+def _systemd_run_inline_command(
+    *,
+    unit: str,
+    root: Path,
+    log_path: Path,
+    inline_script: str,
+    user_mode: bool = False,
+) -> list[str]:
+    """Build a systemd-run command that executes an inline shell snippet.
+
+    Used by the rollback endpoint — there is no wrapper EnvironmentFile, the
+    script is passed verbatim. stdout/stderr are appended to ``log_path`` so
+    the existing SSE stream surfaces the rollback progress with no extra wiring.
+    """
+    wrapper = r"""
+set -euo pipefail
+log_path="$1"
+inline="$2"
+exec >>"$log_path" 2>&1
+printf '=== rollback unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "${LUMEN_UPDATE_SYSTEMD_UNIT:-unknown}"
+/usr/bin/env bash -c "$inline"
+"""
+    cmd: list[str] = ["systemd-run"]
+    if user_mode:
+        cmd.append("--user")
+    cmd += [
+        "--unit",
+        unit,
+        "--collect",
+        "--property",
+        f"WorkingDirectory={root}",
+        "--setenv",
+        f"LUMEN_UPDATE_SYSTEMD_UNIT={unit}",
+    ]
+    if not user_mode:
+        cmd += _current_service_identity_properties()
+    cmd += [
+        "/usr/bin/env",
+        "bash",
+        "-lc",
+        wrapper,
+        "bash",
+        str(log_path),
+        inline_script,
+    ]
+    return cmd
+
+
 def _systemd_run_available() -> bool:
     return shutil.which("systemd-run") is not None and shutil.which("systemctl") is not None
 
@@ -396,6 +496,38 @@ def _systemd_run_attempts(
         log_path=log_path,
         env_file=env_file,
         marker_path=marker_path,
+        user_mode=True,
+    )
+    attempts: list[tuple[str, list[str]]] = [("systemd-run", system_cmd)]
+    if shutil.which("sudo") is not None:
+        attempts.append(("sudo -n systemd-run", ["sudo", "-n", *system_cmd]))
+    attempts.append(("systemd-run --user", user_cmd))
+    return attempts
+
+
+def _systemd_run_inline_attempts(
+    *,
+    unit: str,
+    root: Path,
+    log_path: Path,
+    inline_script: str,
+) -> list[tuple[str, list[str]]]:
+    """Same fallback chain as ``_systemd_run_attempts`` but for inline shell.
+
+    Used by the rollback endpoint to reuse the path-unit / sudo / user-mode
+    cascade without having to involve update.sh.
+    """
+    system_cmd = _systemd_run_inline_command(
+        unit=unit,
+        root=root,
+        log_path=log_path,
+        inline_script=inline_script,
+    )
+    user_cmd = _systemd_run_inline_command(
+        unit=unit,
+        root=root,
+        log_path=log_path,
+        inline_script=inline_script,
         user_mode=True,
     )
     attempts: list[tuple[str, list[str]]] = [("systemd-run", system_cmd)]
@@ -568,6 +700,266 @@ async def _resolve_update_proxy(
     return proxy, proxy_url
 
 
+# ---------------------------------------------------------------------------
+# Step protocol parsing
+# ---------------------------------------------------------------------------
+
+
+class StepRecord(BaseModel):
+    """One phase entry parsed from .update.log step lines.
+
+    ``status`` is "running" until we see a ``status=done`` for the same phase.
+    ``info`` collects every ``::lumen-info::`` key/value emitted under that phase.
+    """
+
+    phase: str
+    status: str  # "running" | "done"
+    started_at: str | None = None
+    ended_at: str | None = None
+    rc: int | None = None
+    dur_ms: int | None = None
+    info: dict[str, str] = Field(default_factory=dict)
+
+
+def _truncate_to_last_run(log_text: str) -> str:
+    """Return log content from the last ``=== update [trigger|unit started] ... ===`` onward.
+
+    Why: phases like ``switch`` recur on every update; we must not mix
+    yesterday's done with today's running. The trigger header is always written
+    by trigger_update / the rollback path so its presence is reliable.
+    """
+    if not log_text:
+        return log_text
+    matches = list(_TRIGGER_DELIMITER_RE.finditer(log_text))
+    if not matches:
+        return log_text
+    return log_text[matches[-1].start():]
+
+
+def _parse_steps(log_text: str) -> list[StepRecord]:
+    """Single-pass scan of step / info lines into per-phase StepRecords.
+
+    Phases keep their *first* start (so ``started_at`` reflects when this
+    update began the phase) but accept the *last* done — guarding against the
+    rare case where a phase logs done twice. ``info`` is append-merged.
+    """
+    text = _truncate_to_last_run(log_text)
+    if not text:
+        return []
+    by_phase: dict[str, StepRecord] = {}
+    order: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = _STEP_LINE_RE.match(line)
+        if m:
+            phase = m.group("phase")
+            status = m.group("status")
+            ts = m.group("ts")
+            rc = m.group("rc")
+            dur = m.group("dur_ms")
+            existing = by_phase.get(phase)
+            if existing is None:
+                existing = StepRecord(
+                    phase=phase,
+                    status="running" if status == "start" else "done",
+                    started_at=ts if status == "start" else None,
+                    ended_at=ts if status == "done" else None,
+                    rc=int(rc) if rc is not None and status == "done" else None,
+                    dur_ms=int(dur) if dur is not None and status == "done" else None,
+                )
+                by_phase[phase] = existing
+                order.append(phase)
+                continue
+            if status == "start":
+                # Keep the latest start so a phase that re-runs reflects the
+                # most recent attempt; ended_at gets cleared because we're
+                # back to running.
+                existing.started_at = ts
+                existing.status = "running"
+                existing.ended_at = None
+                existing.rc = None
+                existing.dur_ms = None
+            else:
+                existing.status = "done"
+                existing.ended_at = ts
+                if rc is not None:
+                    try:
+                        existing.rc = int(rc)
+                    except ValueError:
+                        existing.rc = None
+                if dur is not None:
+                    try:
+                        existing.dur_ms = int(dur)
+                    except ValueError:
+                        existing.dur_ms = None
+            continue
+        m = _INFO_LINE_RE.match(line)
+        if m:
+            phase = m.group("phase")
+            key = m.group("key")
+            value = m.group("value").rstrip()
+            existing = by_phase.get(phase)
+            if existing is None:
+                existing = StepRecord(phase=phase, status="running")
+                by_phase[phase] = existing
+                order.append(phase)
+            # info dict is mutated in-place; pydantic keeps the reference
+            existing.info[key] = value
+    return [by_phase[p] for p in order]
+
+
+# ---------------------------------------------------------------------------
+# Release listing
+# ---------------------------------------------------------------------------
+
+
+class ReleaseInfo(BaseModel):
+    id: str
+    created_at: str | None = None
+    sha: str | None = None
+    branch: str | None = None
+    alembic_head_expected: str | None = None
+    alembic_head_applied: str | None = None
+    is_current: bool = False
+    is_previous: bool = False
+
+
+def _readlink_target(link: Path) -> str | None:
+    """Resolve a symlink to its (relative or absolute) target name.
+
+    We only care about the final basename — releases live as ``releases/<id>``,
+    so a relative symlink ``releases/2025...`` and an absolute one both end up
+    matching by ``Path.name``.
+    """
+    try:
+        if not link.is_symlink():
+            return None
+        return os.readlink(link)
+    except OSError:
+        return None
+
+
+def _extract_release_id(link_target: str | None) -> str | None:
+    if not link_target:
+        return None
+    return Path(link_target).name or None
+
+
+def _read_release_metadata(release_dir: Path) -> dict[str, object]:
+    meta_path = release_dir / ".lumen_release.json"
+    try:
+        raw = meta_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _release_info_from_dir(release_dir: Path) -> ReleaseInfo | None:
+    if not release_dir.is_dir():
+        return None
+    meta = _read_release_metadata(release_dir)
+    rid = str(meta.get("id") or release_dir.name)
+    return ReleaseInfo(
+        id=rid,
+        created_at=str(meta["created_at"]) if meta.get("created_at") else None,
+        sha=str(meta["sha"]) if meta.get("sha") else None,
+        branch=str(meta["branch"]) if meta.get("branch") else None,
+        alembic_head_expected=(
+            str(meta["alembic_head_expected"])
+            if meta.get("alembic_head_expected")
+            else None
+        ),
+        alembic_head_applied=(
+            str(meta["alembic_head_applied"])
+            if meta.get("alembic_head_applied")
+            else None
+        ),
+    )
+
+
+def _list_releases(lumen_root: Path | None = None) -> list[ReleaseInfo]:
+    """Scan ``<root>/releases/<id>/`` and return ReleaseInfo for each, newest first.
+
+    ``current`` and ``previous`` are flagged via readlink. Releases without a
+    ``.lumen_release.json`` still get listed (id = directory name) but with
+    most fields ``None`` — better to surface the directory than to drop it.
+    """
+    root = lumen_root or _lumen_root()
+    releases_dir = root / "releases"
+    if not releases_dir.is_dir():
+        return []
+
+    current_id = _extract_release_id(_readlink_target(root / "current"))
+    previous_id = _extract_release_id(_readlink_target(root / "previous"))
+
+    items: list[ReleaseInfo] = []
+    try:
+        children = list(releases_dir.iterdir())
+    except OSError:
+        return []
+    for child in children:
+        # Hidden / non-dir entries (e.g. tarballs left by the build) are skipped.
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        info = _release_info_from_dir(child)
+        if info is None:
+            continue
+        if current_id and info.id == current_id:
+            info = info.model_copy(update={"is_current": True})
+        if previous_id and info.id == previous_id:
+            info = info.model_copy(update={"is_previous": True})
+        items.append(info)
+
+    # Newest first by created_at when available; fall back to id (which is
+    # typically a sortable timestamp). Releases lacking created_at sort *last*
+    # — we deliberately split the sort into two passes so the "missing field
+    # last" rule survives the reverse=True flip used to put newest on top.
+    typed_items = [r for r in items if r.created_at]
+    typed_items.sort(key=lambda r: (r.created_at or "", r.id), reverse=True)
+    untyped_items = [r for r in items if not r.created_at]
+    untyped_items.sort(key=lambda r: r.id, reverse=True)
+    return (typed_items + untyped_items)[:_RELEASE_LIST_LIMIT]
+
+
+def _resolve_release(lumen_root: Path, release_id: str) -> Path | None:
+    """Validate that ``release_id`` is a real subdirectory of ``releases/``.
+
+    Returns ``None`` for missing or path-traversal attempts (any id containing
+    ``..`` / ``/`` / leading dot is rejected).
+    """
+    if not release_id or "/" in release_id or ".." in release_id or release_id.startswith("."):
+        return None
+    target = lumen_root / "releases" / release_id
+    try:
+        # Resolve and confirm we did not escape releases/.
+        resolved = target.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        return None
+    releases_root = (lumen_root / "releases").resolve()
+    try:
+        resolved.relative_to(releases_root)
+    except ValueError:
+        return None
+    if not resolved.is_dir():
+        return None
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
+
 class UpdateTriggerOut(BaseModel):
     accepted: bool
     pid: int | None = None
@@ -584,19 +976,280 @@ class UpdateStatusOut(BaseModel):
     unit: str | None = None
     started_at: str | None = None
     log_tail: str
+    phases: list[StepRecord] = Field(default_factory=list)
+    current_release: ReleaseInfo | None = None
+    previous_release: ReleaseInfo | None = None
+    releases: list[ReleaseInfo] = Field(default_factory=list)
 
 
-@router.get("/status", response_model=UpdateStatusOut)
-async def update_status(_admin: AdminUser) -> UpdateStatusOut:
+def _build_status_snapshot() -> UpdateStatusOut:
+    """Single source of truth for status assembly. Used by both the polling
+    endpoint and the SSE initial state event so the two never drift.
+    """
     marker = _read_marker()
+    log_text = _read_log_full()
+    phases = _parse_steps(log_text)
+    releases = _list_releases()
+    current = next((r for r in releases if r.is_current), None)
+    previous = next((r for r in releases if r.is_previous), None)
     if marker is None:
-        return UpdateStatusOut(running=False, log_tail=_read_log_tail())
+        return UpdateStatusOut(
+            running=False,
+            log_tail=_read_log_tail(),
+            phases=phases,
+            current_release=current,
+            previous_release=previous,
+            releases=releases,
+        )
     return UpdateStatusOut(
         running=True,
         pid=marker.pid or None,
         unit=marker.unit,
         started_at=marker.started_at,
         log_tail=_read_log_tail(),
+        phases=phases,
+        current_release=current,
+        previous_release=previous,
+        releases=releases,
+    )
+
+
+@router.get("/status", response_model=UpdateStatusOut)
+async def update_status(_admin: AdminUser) -> UpdateStatusOut:
+    return await asyncio.to_thread(_build_status_snapshot)
+
+
+# ---------------------------------------------------------------------------
+# SSE stream
+# ---------------------------------------------------------------------------
+
+
+def _sse_format(event: str, data: object) -> str:
+    """Wire-encode one SSE event. Always JSON-serialised data.
+
+    Keeps newlines escaped — a multi-line value would otherwise break the
+    ``event:\ndata:\n\n`` framing and confuse browsers.
+    """
+    payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _classify_log_line(line: str) -> tuple[str, dict[str, object]]:
+    """Map a raw log line to an SSE (event_name, payload) pair.
+
+    Step / info lines get parsed into structured deltas; everything else falls
+    through to a generic ``log`` event so the operator sees stdout in real time.
+    """
+    stripped = line.rstrip("\n").rstrip("\r")
+    m = _STEP_LINE_RE.match(stripped.strip())
+    if m:
+        rc = m.group("rc")
+        dur = m.group("dur_ms")
+        return "step", {
+            "phase": m.group("phase"),
+            "status": m.group("status"),
+            "ts": m.group("ts"),
+            "rc": int(rc) if rc is not None else None,
+            "dur_ms": int(dur) if dur is not None else None,
+        }
+    m = _INFO_LINE_RE.match(stripped.strip())
+    if m:
+        return "info", {
+            "phase": m.group("phase"),
+            "key": m.group("key"),
+            "value": m.group("value").rstrip(),
+        }
+    return "log", {"line": stripped}
+
+
+def _read_incremental(path: Path, last_pos: int) -> tuple[str, int]:
+    """Read everything appended after ``last_pos``; return (text, new_pos).
+
+    If the file shrunk (rotation / truncation / reboot wiped the marker
+    directory) we reset to 0 so we don't read garbage.
+    """
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return "", last_pos
+    except OSError:
+        return "", last_pos
+    if size < last_pos:
+        last_pos = 0
+    if size == last_pos:
+        return "", last_pos
+    try:
+        with path.open("rb") as fh:
+            fh.seek(last_pos)
+            chunk = fh.read(size - last_pos)
+    except OSError:
+        return "", last_pos
+    return chunk.decode("utf-8", errors="replace"), size
+
+
+async def _stream_update_events(request: Request) -> AsyncIterator[str]:
+    """Async generator powering ``GET /admin/update/stream``.
+
+    Order of operations:
+    1. Emit an initial ``state`` snapshot so a fresh client lands on a known view.
+    2. Poll ``.update.log`` every 300ms; classify each new line and emit
+       ``step`` / ``info`` / ``log`` events. Raw ``log`` events are coalesced
+       within a 200ms window to keep the wire small under noisy phases.
+    3. Heartbeat every 15s (no payload, just keeps reverse proxies open).
+    4. End when the marker disappears (update finished) or when 1h cap hits.
+    5. Detect client disconnect on every iteration and exit cleanly.
+    """
+    log_path = _update_log_path()
+    deadline = time.monotonic() + _SSE_MAX_DURATION_SEC
+
+    # 1) Initial snapshot. Run sync IO in a thread to keep the loop responsive.
+    snapshot = await asyncio.to_thread(_build_status_snapshot)
+    yield _sse_format("state", snapshot.model_dump(mode="json"))
+
+    # Track pre-existing log size so we only stream lines appended after this
+    # connection opened. New connections do NOT re-emit the entire log; the
+    # initial snapshot already includes phases/log_tail.
+    try:
+        last_pos = log_path.stat().st_size
+    except (FileNotFoundError, OSError):
+        last_pos = 0
+
+    last_heartbeat = time.monotonic()
+    line_buffer: list[str] = []
+    last_flush = time.monotonic()
+    marker_gone_at: float | None = None
+
+    try:
+        while True:
+            # Hard deadline guard. Breaks the connection cleanly so the client
+            # can reconnect with a fresh budget.
+            if time.monotonic() >= deadline:
+                yield _sse_format("done", {"reason": "max_duration"})
+                return
+
+            # Client closed the EventSource (browser tab closed / nginx hung up).
+            if await request.is_disconnected():
+                return
+
+            # Pull whatever has been appended since the last poll.
+            chunk, last_pos = await asyncio.to_thread(
+                _read_incremental, log_path, last_pos
+            )
+            if chunk:
+                # ``splitlines(keepends=False)`` plus a manual trailing-newline
+                # check: incomplete lines stay in the buffer until the next
+                # write completes them. Phase / info lines are emitted
+                # immediately; raw log lines accumulate.
+                lines = chunk.splitlines()
+                # If the chunk did not end with a newline the last "line" may
+                # be a partial write — still emit it as a log event because
+                # update.sh writes with line-buffered redirection so partials
+                # are rare. Erring on the side of low latency.
+                for line in lines:
+                    event_name, payload = _classify_log_line(line)
+                    if event_name in ("step", "info"):
+                        # Flush any pending raw log batch first to preserve
+                        # ordering relative to step transitions.
+                        if line_buffer:
+                            yield _sse_format("log", {"lines": line_buffer})
+                            line_buffer = []
+                            last_flush = time.monotonic()
+                        yield _sse_format(event_name, payload)
+                    else:
+                        line_buffer.append(payload["line"])  # type: ignore[arg-type]
+
+            now = time.monotonic()
+            # Flush coalesced raw lines on a short window so a chatty phase
+            # doesn't spam the client one-event-per-line.
+            if line_buffer and now - last_flush >= _SSE_LOG_BATCH_WINDOW_SEC:
+                yield _sse_format("log", {"lines": line_buffer})
+                line_buffer = []
+                last_flush = now
+
+            # Heartbeat keeps idle proxies (nginx 60s default) from killing us.
+            if now - last_heartbeat >= _SSE_HEARTBEAT_SEC:
+                yield _sse_format("ping", {})
+                last_heartbeat = now
+
+            # Marker disappearance signals end-of-update. Wait one extra tick
+            # so the final ``::lumen-step:: phase=cleanup status=done`` line
+            # has time to flush from the runner's stdout buffer before we
+            # close the stream — without this delay clients sometimes miss
+            # the terminal phase event.
+            marker = await asyncio.to_thread(_read_marker)
+            if marker is None:
+                if marker_gone_at is None:
+                    marker_gone_at = now
+                elif now - marker_gone_at >= 1.0:
+                    # Drain any final tail before saying goodbye.
+                    chunk, last_pos = await asyncio.to_thread(
+                        _read_incremental, log_path, last_pos
+                    )
+                    if chunk:
+                        for line in chunk.splitlines():
+                            event_name, payload = _classify_log_line(line)
+                            if event_name in ("step", "info"):
+                                if line_buffer:
+                                    yield _sse_format("log", {"lines": line_buffer})
+                                    line_buffer = []
+                                yield _sse_format(event_name, payload)
+                            else:
+                                line_buffer.append(payload["line"])  # type: ignore[arg-type]
+                        if line_buffer:
+                            yield _sse_format("log", {"lines": line_buffer})
+                            line_buffer = []
+                    final = await asyncio.to_thread(_build_status_snapshot)
+                    yield _sse_format(
+                        "done",
+                        {
+                            "final_status": {
+                                "running": final.running,
+                                "phases": [p.model_dump(mode="json") for p in final.phases],
+                                "current_release": (
+                                    final.current_release.model_dump(mode="json")
+                                    if final.current_release
+                                    else None
+                                ),
+                            }
+                        },
+                    )
+                    return
+            else:
+                marker_gone_at = None
+
+            await asyncio.sleep(_SSE_LOG_POLL_SEC)
+    except asyncio.CancelledError:
+        # FastAPI cancels generators on disconnect; re-raise so upstream
+        # cleanup runs. Buffered raw lines are simply dropped — the client
+        # has already gone away.
+        raise
+
+
+@router.get("/stream")
+async def update_stream(request: Request, _admin: AdminUser) -> StreamingResponse:
+    """SSE feed of update progress.
+
+    Browsers consume via ``new EventSource('/api/admin/update/stream')``.
+    Events:
+      - ``state``  full UpdateStatusOut snapshot, sent once on connect
+      - ``step``   StepRecord delta (phase transitioned)
+      - ``info``   k/v from ::lumen-info:: lines
+      - ``log``    raw log lines (batched) for free-form output
+      - ``ping``   heartbeat every 15s
+      - ``done``   final state + reason; client should close
+    """
+    return StreamingResponse(
+        _stream_update_events(request),
+        media_type="text/event-stream",
+        headers={
+            # ``no-cache`` + ``X-Accel-Buffering: no`` are belt-and-suspenders
+            # against intermediaries (nginx/cloudflare) buffering the response.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            # Force Connection: keep-alive even if the proxy strips upstream
+            # signalling — SSE is fundamentally a long-lived GET.
+            "Connection": "keep-alive",
+        },
     )
 
 
@@ -723,12 +1376,28 @@ async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
 
 __all__ = [
     "router",
+    "ReleaseInfo",
+    "StepRecord",
+    "UpdateStatusOut",
     "_apply_proxy_env",
+    "_build_status_snapshot",
     "_clean_proxy_env",
+    "_list_releases",
+    "_lumen_root",
+    "_open_update_log",
+    "_parse_steps",
     "_pid_is_running",
     "_read_marker",
+    "_resolve_release",
     "_resolve_update_proxy",
+    "_systemd_run_available",
     "_systemd_run_command",
+    "_systemd_run_inline_attempts",
+    "_systemd_run_inline_command",
     "_systemd_unit_name",
+    "_unit_is_running",
+    "_update_log_path",
+    "_update_marker_path",
     "_update_script",
+    "_write_marker",
 ]
