@@ -54,6 +54,10 @@ echo
 echo "==> image-job/tests"
 uv run pytest image-job/tests "$@"
 
+echo
+echo "==> tests (operations scripts)"
+uv run pytest tests "$@"
+
 ensure_web_deps
 
 echo

@@ -8,7 +8,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+if SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"; then
+    :
+else
+    SCRIPT_DIR="$(pwd)"
+fi
 
 raw_have_cmd() {
     command -v "$1" >/dev/null 2>&1
@@ -663,8 +667,8 @@ start_linux_docker_service() {
 }
 
 wait_for_docker_daemon() {
-    local i
-    for i in $(seq 1 60); do
+    local _attempt
+    for _attempt in $(seq 1 60); do
         if docker_cli info >/dev/null 2>&1; then
             return 0
         fi
