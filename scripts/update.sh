@@ -219,9 +219,19 @@ fi
 
 RUNTIME_STARTED=0
 if lumen_systemd_has_any_units lumen-api.service lumen-worker.service lumen-web.service; then
-    lumen_restart_systemd_units lumen-api.service lumen-worker.service lumen-web.service
-    if lumen_systemd_has_unit lumen-tgbot.service; then
-        lumen_restart_systemd_units lumen-tgbot.service
+    # 把 lumen-api 放最后：当 update.sh 被管理面板触发并以 detached subprocess
+    # 跑（fallback 路径，跟 lumen-api 在同一 cgroup）时，提前重启 lumen-api 会
+    # 让 systemd 把 cgroup 中的 update.sh 一并 SIGKILL。先重启不会自杀的 unit，
+    # 最后才重启 lumen-api，把损失降到最低；systemd-run 隔离模式下顺序不重要。
+    LUMEN_RESTART_UNITS=()
+    for _LUMEN_UNIT in lumen-worker.service lumen-web.service lumen-tgbot.service lumen-api.service; do
+        if lumen_systemd_has_unit "${_LUMEN_UNIT}"; then
+            LUMEN_RESTART_UNITS+=("${_LUMEN_UNIT}")
+        fi
+    done
+    unset _LUMEN_UNIT
+    if [ "${#LUMEN_RESTART_UNITS[@]}" -gt 0 ]; then
+        lumen_restart_systemd_units "${LUMEN_RESTART_UNITS[@]}"
     fi
     lumen_check_runtime_health
 else
