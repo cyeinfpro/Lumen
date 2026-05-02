@@ -5,14 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/lumen
+# release 布局：runner 始终从 current 启动 update.sh；update.sh 内部会把 ROOT
+# 解析回 /opt/lumen，并在 ${ROOT}/releases/<new_id>/ 下做新一轮发布。
+WorkingDirectory=/opt/lumen/current
 EnvironmentFile=-/opt/lumendata/backup/.update.env
 Environment=LUMEN_UPDATE_NONINTERACTIVE=1
 Environment=LUMEN_UPDATE_GIT_PULL=1
 Environment=LUMEN_UPDATE_BUILD=1
 StandardOutput=append:/opt/lumendata/backup/.update.log
 StandardError=append:/opt/lumendata/backup/.update.log
-ExecStart=/usr/bin/env bash /opt/lumen/scripts/update.sh
+ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/update.sh
 # update.sh 任何非零退出（git 冲突、依赖装失败、next build 失败等）都被当作
 # success，避免 unit 进 failed 状态导致 path 单元下一次 PathChanged 不再触发
 # StartUnit。真正的失败信息在 .update.log 里，前端 log_tail 直接能看到。

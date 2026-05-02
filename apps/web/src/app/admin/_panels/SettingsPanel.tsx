@@ -3,8 +3,8 @@
 // Lumen 管理面板：系统设置。
 // UI 目标：把工程 key 翻译成可理解的任务语言，同时保留 key 作为排错辅助信息。
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
@@ -14,9 +14,11 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  Circle,
   Database,
   Gauge,
   Globe,
+  History,
   ImageIcon,
   Info,
   Loader2,
@@ -27,27 +29,37 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Terminal,
   Timer,
+  Undo2,
+  X,
   Zap,
   type LucideIcon,
 } from "lucide-react";
 
 import {
+  qk,
   useAdminModelsQuery,
   useAdminProxiesQuery,
+  useAdminReleasesQuery,
   useAdminUpdateStatusQuery,
   useProvidersQuery,
+  useRollbackReleaseMutation,
   useSystemSettingsQuery,
   useTriggerAdminUpdateMutation,
   useUpdateSystemSettingsMutation,
 } from "@/lib/queries";
 import {
+  adminUpdateStreamUrl,
   ApiError,
   getAdminContextHealth,
-  getAdminUpdateStatus,
+  type AdminUpdateStatusOut,
+  type ReleaseInfo,
+  type UpdateStepRecord,
 } from "@/lib/apiClient";
 import type { SystemSettingItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { ConfirmDialog } from "@/components/ui/primitives";
 import { ErrorBlock } from "../page";
 
 type Op = { kind: "set"; value: string } | { kind: "clear" };
@@ -626,7 +638,17 @@ export function SettingsPanel() {
   const adminModelsQ = useAdminModelsQuery({ retry: false });
   const providersQ = useProvidersQuery({ retry: false });
   const proxiesQ = useAdminProxiesQuery({ retry: false });
-  const updateStatusQ = useAdminUpdateStatusQuery({ retry: false });
+  // SSE 已连接时关闭 status 轮询，避免 5s GET 整体覆盖 SSE 增量造成 checklist 闪烁。
+  // streamConnectedRef 由下方 useEffect 与 useAdminUpdateStream 的 streamStatus 同步。
+  const streamConnectedRef = useRef(false);
+  const updateStatusQ = useAdminUpdateStatusQuery({
+    retry: false,
+    refetchInterval: (query) => {
+      if (streamConnectedRef.current) return false;
+      return query.state.data?.running ? 5000 : false;
+    },
+  });
+  const releasesQ = useAdminReleasesQuery({ retry: false });
   const contextHealthQ = useQuery({
     queryKey: ["admin", "context", "health"],
     queryFn: getAdminContextHealth,
@@ -656,6 +678,35 @@ export function SettingsPanel() {
       setUpdateBanner({ kind: "error", text: `触发更新失败：${msg}` });
     },
   });
+  const rollbackMut = useRollbackReleaseMutation({
+    onSuccess: (result) => {
+      setUpdateBanner({
+        kind: "success",
+        text: `回滚已启动，目标 release ${result.target.id}`,
+      });
+    },
+    onError: (err) => {
+      const msg = err instanceof ApiError ? err.message : err.message || "触发回滚失败";
+      setUpdateBanner({ kind: "error", text: `触发回滚失败：${msg}` });
+    },
+  });
+
+  // SSE 实时流：跑动时打开，连接 /admin/update/stream
+  // 该 hook 直接管理 status query data + 本地 log buffer（done 事件触发 invalidate）。
+  // running 端为 true → 开流；false 时不打开（避免没必要的连接）。
+  // 用户主动触发更新/回滚后，前端把 banner 设了，但 status 还是旧的（异步轮询），
+  // 所以 enable 条件除了 running 还看 mutation pending，确保点击后立刻开流。
+  const sseEnabled =
+    Boolean(updateStatusQ.data?.running) ||
+    triggerUpdateMut.isPending ||
+    rollbackMut.isPending;
+  const { logBuffer, streamStatus, clearLogs } = useAdminUpdateStream(sseEnabled);
+
+  // 把 streamStatus 桥接到 streamConnected，给 useAdminUpdateStatusQuery 的
+  // refetchInterval 用。connecting / broken / error 状态都视为"未连接"，让轮询兜底。
+  useEffect(() => {
+    streamConnectedRef.current = streamStatus === "open";
+  }, [streamStatus]);
 
   useEffect(() => {
     if (savedAt == null) return;
@@ -998,11 +1049,29 @@ export function SettingsPanel() {
         error={updateStatusQ.error}
         triggering={triggerUpdateMut.isPending}
         banner={updateBanner}
+        releases={releasesQ.data}
+        releasesLoading={releasesQ.isLoading}
+        releasesError={releasesQ.error}
+        rollbackPendingId={
+          rollbackMut.isPending ? rollbackMut.variables ?? null : null
+        }
+        logBuffer={logBuffer}
+        streamStatus={streamStatus}
         onTrigger={() => {
           setUpdateBanner(null);
+          clearLogs();
           triggerUpdateMut.mutate();
         }}
-        onRefresh={() => void updateStatusQ.refetch()}
+        onRefresh={() => {
+          void updateStatusQ.refetch();
+          void releasesQ.refetch();
+        }}
+        onRollback={(releaseId) => {
+          setUpdateBanner(null);
+          clearLogs();
+          rollbackMut.mutate(releaseId);
+        }}
+        onClearBanner={() => setUpdateBanner(null)}
       />
 
       <div className="space-y-3">
@@ -1903,29 +1972,397 @@ function ResetEditButton({
   );
 }
 
+// ——— Lumen 一键更新：phase 中文映射 + 默认顺序 ———
+// 后端契约里 phase 是开放枚举；前端列出"标准 12 phase + rollback"做骨架。
+// 顺序对齐 update.sh 实际执行顺序；rollback 默认隐藏，只在 status.phases 出现时显示。
+const PHASE_ORDER: readonly string[] = [
+  "prepare",
+  "fetch",
+  "link_shared",
+  "containers",
+  "deps_python",
+  "migrate_db",
+  "deps_node",
+  "build_web",
+  "switch",
+  "restart",
+  "health_post",
+  "cleanup",
+];
+
+const PHASE_LABEL: Record<string, string> = {
+  prepare: "准备",
+  fetch: "拉代码",
+  link_shared: "链接共享",
+  containers: "容器",
+  deps_python: "Python 依赖",
+  migrate_db: "数据库迁移",
+  deps_node: "Node 依赖",
+  build_web: "前端构建",
+  switch: "原子切换",
+  restart: "重启服务",
+  health_post: "健康检查",
+  cleanup: "清理旧版本",
+  rollback: "回滚",
+};
+
+function phaseLabel(phase: string): string {
+  return PHASE_LABEL[phase] ?? phase;
+}
+
+function formatDuration(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSec = ms / 1000;
+  if (totalSec < 60) return `${totalSec.toFixed(1)}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = Math.round(totalSec - m * 60);
+  return `${m}m${s.toString().padStart(2, "0")}s`;
+}
+
+function shortReleaseId(id: string): string {
+  if (id.length <= 28) return id;
+  return id.slice(0, 28) + "…";
+}
+
+function shortSha(sha: string): string {
+  return sha.length > 7 ? sha.slice(0, 7) : sha;
+}
+
+// ——— SSE 实时流 hook ———
+//
+// 设计：
+//  - enabled=true 时打开 EventSource；enabled→false 立即关闭（避免漏关）
+//  - state 事件 → 整体替换 status query 缓存（snapshot 同步）
+//  - step 事件 → 局部合并 phases（按 phase 名匹配；不存在则 append）
+//  - log 事件 → push 到 ringbuffer（最多 500 行）
+//  - done → 关闭流 + invalidate（拿一次最新 status / releases）
+//  - error → 自动重连，指数退避 1/2/5/15s，最多 5 次后停止显示"连接中断"
+//  - URL 用同源 /api/admin/update/stream（apiClient.adminUpdateStreamUrl）
+//
+// 注意：EventSource 命名事件必须用 addEventListener；onmessage 只接默认 message。
+const LOG_BUFFER_MAX = 500;
+const SSE_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 15000];
+const SSE_MAX_RETRIES = SSE_RETRY_DELAYS_MS.length;
+
+type AdminStreamStatus = "idle" | "connecting" | "open" | "error" | "broken";
+
+interface AdminUpdateStreamHandle {
+  logBuffer: string[];
+  streamStatus: AdminStreamStatus;
+  clearLogs: () => void;
+}
+
+function useAdminUpdateStream(enabled: boolean): AdminUpdateStreamHandle {
+  // QueryClient 实例在 Provider 之下保持稳定，不需要 ref 包装。
+  const qc = useQueryClient();
+  const [logBuffer, setLogBuffer] = useState<string[]>([]);
+  const [streamStatus, setStreamStatus] = useState<AdminStreamStatus>("idle");
+
+  // qc 在 effect 内被 closure 捕获；同时同步到 ref 必须在 effect 内（React 19
+  // refs lint 不允许 render 期间写 ref.current）。
+  const qcRef = useRef(qc);
+  useEffect(() => {
+    qcRef.current = qc;
+  });
+
+  const clearLogs = useCallback(() => {
+    setLogBuffer([]);
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) {
+      // 异步置 idle，避免 effect 同步 setState 级联（react-hooks/set-state-in-effect）
+      const t = setTimeout(() => setStreamStatus("idle"), 0);
+      return () => clearTimeout(t);
+    }
+    if (typeof window === "undefined" || typeof EventSource === "undefined") {
+      const t = setTimeout(() => setStreamStatus("idle"), 0);
+      return () => clearTimeout(t);
+    }
+
+    let es: EventSource | null = null;
+    let retryAttempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+
+    const clearRetry = () => {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
+    const close = () => {
+      clearRetry();
+      if (es) {
+        try {
+          es.close();
+        } catch {
+          /* ignore */
+        }
+        es = null;
+      }
+    };
+
+    const mergeStep = (step: UpdateStepRecord) => {
+      qcRef.current.setQueryData<AdminUpdateStatusOut | undefined>(
+        qk.adminUpdateStatus(),
+        (prev) => {
+          if (!prev) {
+            return {
+              running: step.status === "running",
+              log_tail: "",
+              phases: [step],
+            };
+          }
+          const phases = prev.phases ? [...prev.phases] : [];
+          const idx = phases.findIndex((p) => p.phase === step.phase);
+          if (idx >= 0) {
+            phases[idx] = { ...phases[idx], ...step };
+          } else {
+            phases.push(step);
+          }
+          return { ...prev, phases };
+        },
+      );
+    };
+
+    const mergeInfo = (payload: { phase: string; key: string; value: string }) => {
+      qcRef.current.setQueryData<AdminUpdateStatusOut | undefined>(
+        qk.adminUpdateStatus(),
+        (prev) => {
+          if (!prev) return prev;
+          const phases = prev.phases ? [...prev.phases] : [];
+          const idx = phases.findIndex((p) => p.phase === payload.phase);
+          if (idx < 0) return prev;
+          const cur = phases[idx];
+          phases[idx] = {
+            ...cur,
+            info: { ...(cur.info ?? {}), [payload.key]: payload.value },
+          };
+          return { ...prev, phases };
+        },
+      );
+    };
+
+    const open = () => {
+      if (disposed) return;
+      close();
+      setStreamStatus("connecting");
+      try {
+        es = new EventSource(adminUpdateStreamUrl(), { withCredentials: true });
+      } catch {
+        setStreamStatus("error");
+        scheduleRetry();
+        return;
+      }
+
+      es.onopen = () => {
+        retryAttempt = 0;
+        setStreamStatus("open");
+      };
+
+      const parseData = <T,>(raw: string): T | null => {
+        try {
+          return JSON.parse(raw) as T;
+        } catch {
+          return null;
+        }
+      };
+
+      es.addEventListener("state", (ev: MessageEvent) => {
+        const snapshot = parseData<AdminUpdateStatusOut>(ev.data);
+        if (!snapshot) return;
+        qcRef.current.setQueryData(qk.adminUpdateStatus(), snapshot);
+        if (snapshot.releases) {
+          qcRef.current.setQueryData(qk.adminReleases(), snapshot.releases);
+        }
+      });
+
+      es.addEventListener("step", (ev: MessageEvent) => {
+        const step = parseData<UpdateStepRecord>(ev.data);
+        if (!step || !step.phase) return;
+        mergeStep(step);
+      });
+
+      es.addEventListener("info", (ev: MessageEvent) => {
+        const info = parseData<{ phase: string; key: string; value: string }>(
+          ev.data,
+        );
+        if (!info || !info.phase || !info.key) return;
+        mergeInfo(info);
+      });
+
+      es.addEventListener("log", (ev: MessageEvent) => {
+        const payload = parseData<{ line?: string }>(ev.data);
+        if (!payload || typeof payload.line !== "string") return;
+        const line = payload.line;
+        setLogBuffer((prev) => {
+          const next =
+            prev.length >= LOG_BUFFER_MAX
+              ? prev.slice(-(LOG_BUFFER_MAX - 1))
+              : prev.slice();
+          next.push(line);
+          return next;
+        });
+      });
+
+      es.addEventListener("done", (ev: MessageEvent) => {
+        const payload = parseData<{ final_status?: AdminUpdateStatusOut }>(
+          ev.data,
+        );
+        if (payload?.final_status) {
+          qcRef.current.setQueryData(
+            qk.adminUpdateStatus(),
+            payload.final_status,
+          );
+        }
+        qcRef.current.invalidateQueries({ queryKey: qk.adminUpdateStatus() });
+        qcRef.current.invalidateQueries({ queryKey: qk.adminReleases() });
+        close();
+        setStreamStatus("idle");
+      });
+
+      es.onerror = () => {
+        setStreamStatus("error");
+        close();
+        scheduleRetry();
+      };
+    };
+
+    const scheduleRetry = () => {
+      if (disposed) return;
+      clearRetry();
+      if (retryAttempt >= SSE_MAX_RETRIES) {
+        setStreamStatus("broken");
+        return;
+      }
+      const delay = SSE_RETRY_DELAYS_MS[retryAttempt] ?? 15000;
+      retryAttempt += 1;
+      retryTimer = setTimeout(() => {
+        if (!disposed) open();
+      }, delay);
+    };
+
+    open();
+
+    return () => {
+      disposed = true;
+      close();
+    };
+  }, [enabled]);
+
+  return { logBuffer, streamStatus, clearLogs };
+}
+
+// ——— 主组件 ———
+
+interface LumenUpdateBlockProps {
+  status: AdminUpdateStatusOut | undefined;
+  loading: boolean;
+  error: Error | null;
+  triggering: boolean;
+  banner: { kind: "success" | "error" | "info"; text: string } | null;
+  releases: ReleaseInfo[] | undefined;
+  releasesLoading: boolean;
+  releasesError: Error | null;
+  rollbackPendingId: string | null;
+  logBuffer: string[];
+  streamStatus: AdminStreamStatus;
+  onTrigger: () => void;
+  onRefresh: () => void;
+  onRollback: (releaseId: string) => void;
+  onClearBanner: () => void;
+}
+
 function LumenUpdateBlock({
   status,
   loading,
   error,
   triggering,
   banner,
+  releases,
+  releasesLoading,
+  releasesError,
+  rollbackPendingId,
+  logBuffer,
+  streamStatus,
   onTrigger,
   onRefresh,
-}: {
-  status: Awaited<ReturnType<typeof getAdminUpdateStatus>> | undefined;
-  loading: boolean;
-  error: Error | null;
-  triggering: boolean;
-  banner: { kind: "success" | "error" | "info"; text: string } | null;
-  onTrigger: () => void;
-  onRefresh: () => void;
-}) {
+  onRollback,
+  onClearBanner,
+}: LumenUpdateBlockProps) {
   const running = Boolean(status?.running);
-  const disabled = triggering || running;
-  const runningTarget = status?.unit ? `unit ${status.unit}` : `pid ${status?.pid ?? "-"}`;
+  const isRollingBack = rollbackPendingId != null;
+  const disabled = triggering || running || isRollingBack;
+  const runningTarget = status?.unit
+    ? `unit ${status.unit}`
+    : `pid ${status?.pid ?? "-"}`;
+  const phases = useMemo(() => status?.phases ?? [], [status?.phases]);
+  const phaseByName = useMemo(() => {
+    const m = new Map<string, UpdateStepRecord>();
+    for (const p of phases) m.set(p.phase, p);
+    return m;
+  }, [phases]);
+
+  // checklist 显示策略：默认 12 标准 phase；如出现非标准 phase（如 rollback）追加在末尾
+  const checklist = useMemo<string[]>(() => {
+    const order = [...PHASE_ORDER];
+    const seen = new Set(order);
+    for (const p of phases) {
+      if (!seen.has(p.phase)) {
+        order.push(p.phase);
+        seen.add(p.phase);
+      }
+    }
+    return order;
+  }, [phases]);
+
+  const failed = useMemo(
+    () => phases.some((p) => p.status === "done" && p.rc != null && p.rc !== 0),
+    [phases],
+  );
+
+  const [logOpen, setLogOpen] = useState(false);
+  const logRef = useRef<HTMLPreElement | null>(null);
+  const userScrolledRef = useRef(false);
+  useEffect(() => {
+    if (!logOpen) return;
+    const el = logRef.current;
+    if (!el) return;
+    if (!userScrolledRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [logOpen, logBuffer]);
+  const onLogScroll: React.UIEventHandler<HTMLPreElement> = (e) => {
+    const el = e.currentTarget;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    userScrolledRef.current = distanceFromBottom > 16;
+  };
+
+  const [pendingRollback, setPendingRollback] = useState<ReleaseInfo | null>(null);
+
+  // banner 自动消失：success / info 6s 后清；error 不动
+  useEffect(() => {
+    if (!banner) return;
+    if (banner.kind === "error") return;
+    const t = setTimeout(() => onClearBanner(), 6000);
+    return () => clearTimeout(t);
+  }, [banner, onClearBanner]);
+
+  const effectiveBanner =
+    banner ??
+    (failed && !running
+      ? {
+          kind: "error" as const,
+          text: "上次更新失败，请查看 checklist 中的红色 phase 或日志。",
+        }
+      : null);
 
   return (
     <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm">
+      {/* —— 顶部状态条 —— */}
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="flex min-w-0 gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
@@ -1936,7 +2373,7 @@ function LumenUpdateBlock({
               一键更新 Lumen
             </h3>
             <p className="mt-1 text-xs leading-5 text-neutral-500">
-              后台执行更新脚本，代理设置在“Lumen 更新”分组里保存后生效。
+              后台执行更新脚本，失败可在下方 release 历史里回滚到旧版本。
             </p>
           </div>
         </div>
@@ -1973,20 +2410,56 @@ function LumenUpdateBlock({
         </div>
       </div>
 
+      {/* —— 状态徽章 —— */}
       <div className="mt-4 flex flex-wrap gap-2 text-xs">
         <span
           className={cn(
             "rounded-md border px-2 py-1",
             running
-              ? "border-sky-500/25 bg-sky-500/10 text-sky-200"
-              : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300",
+              ? isRollingBack
+                ? "border-amber-500/25 bg-amber-500/10 text-amber-200"
+                : "border-sky-500/25 bg-sky-500/10 text-sky-200"
+              : failed
+                ? "border-red-500/25 bg-red-500/10 text-red-200"
+                : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300",
           )}
         >
-          {running ? `运行中 · ${runningTarget}` : "当前没有更新任务"}
+          {running
+            ? `${isRollingBack ? "回滚运行中" : "更新运行中"} · ${runningTarget}`
+            : failed
+              ? "上次任务失败"
+              : phases.length > 0
+                ? "上次任务完成"
+                : "当前没有更新任务"}
         </span>
         {status?.started_at && (
           <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-neutral-400">
             启动时间 {formatDateTime(status.started_at)}
+          </span>
+        )}
+        {running && (
+          <span
+            className={cn(
+              "rounded-md border px-2 py-1",
+              streamStatus === "open"
+                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+                : streamStatus === "connecting"
+                  ? "border-sky-500/25 bg-sky-500/10 text-sky-200"
+                  : streamStatus === "broken"
+                    ? "border-red-500/25 bg-red-500/10 text-red-200"
+                    : "border-white/10 bg-white/[0.04] text-neutral-400",
+            )}
+          >
+            实时流：
+            {streamStatus === "open"
+              ? "已连接"
+              : streamStatus === "connecting"
+                ? "连接中"
+                : streamStatus === "broken"
+                  ? "中断，请刷新"
+                  : streamStatus === "error"
+                    ? "重连中"
+                    : "未连接"}
           </span>
         )}
       </div>
@@ -1996,27 +2469,301 @@ function LumenUpdateBlock({
           更新状态读取失败：{error.message}
         </p>
       )}
-      {banner && (
+
+      {effectiveBanner && (
         <div
           className={cn(
-            "mt-3 rounded-xl border px-3 py-2 text-sm",
-            banner.kind === "success"
+            "mt-3 flex items-start justify-between gap-3 rounded-xl border px-3 py-2 text-sm",
+            effectiveBanner.kind === "success"
               ? "border-emerald-500/30 bg-emerald-500/8 text-emerald-200"
-              : banner.kind === "error"
+              : effectiveBanner.kind === "error"
                 ? "border-red-500/30 bg-red-500/8 text-red-200"
                 : "border-sky-500/30 bg-sky-500/8 text-sky-200",
           )}
         >
-          {banner.text}
+          <span className="min-w-0 break-words">{effectiveBanner.text}</span>
+          <button
+            type="button"
+            onClick={onClearBanner}
+            className="shrink-0 rounded p-0.5 hover:bg-white/8"
+            aria-label="关闭提示"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
 
-      {status?.log_tail && (
-        <pre className="mt-4 max-h-64 overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs leading-5 text-neutral-300">
-          {status.log_tail}
-        </pre>
-      )}
+      {/* —— Step Checklist —— */}
+      <div className="mt-4 rounded-xl border border-white/10 bg-black/20">
+        <div className="flex items-center justify-between border-b border-white/5 px-3 py-2">
+          <span className="text-xs font-medium text-neutral-300">执行步骤</span>
+          {phases.length > 0 && (
+            <span className="text-[11px] text-neutral-500">
+              {phases.filter((p) => p.status === "done" && (p.rc ?? 0) === 0).length} /{" "}
+              {checklist.length} 完成
+            </span>
+          )}
+        </div>
+        <ol className="divide-y divide-white/5">
+          {checklist.map((phase) => (
+            <PhaseRow key={phase} phase={phase} record={phaseByName.get(phase)} />
+          ))}
+        </ol>
+      </div>
+
+      {/* —— 实时 Log —— */}
+      <div className="mt-3">
+        <button
+          type="button"
+          onClick={() => setLogOpen((v) => !v)}
+          className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-neutral-300 transition-colors hover:bg-white/8"
+        >
+          <Terminal className="h-3.5 w-3.5" />
+          {logOpen ? "收起实时输出" : "查看实时输出"}
+          {logBuffer.length > 0 && (
+            <span className="rounded-full bg-white/8 px-1.5 py-0.5 font-mono text-[10px] text-neutral-400">
+              {logBuffer.length}
+            </span>
+          )}
+        </button>
+        <AnimatePresence initial={false}>
+          {logOpen && (
+            <motion.div
+              key="log-panel"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.18 }}
+              className="overflow-hidden"
+            >
+              <pre
+                ref={logRef}
+                onScroll={onLogScroll}
+                className="mt-2 max-h-72 overflow-auto rounded-xl border border-white/10 bg-black/40 p-3 font-mono text-[11px] leading-5 text-neutral-300"
+              >
+                {logBuffer.length > 0
+                  ? logBuffer.join("\n")
+                  : status?.log_tail
+                    ? status.log_tail
+                    : "（暂无输出）"}
+              </pre>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* —— Release 历史 —— */}
+      <div className="mt-5 rounded-xl border border-white/10 bg-black/20">
+        <div className="flex items-center gap-2 border-b border-white/5 px-3 py-2">
+          <History className="h-3.5 w-3.5 text-neutral-400" />
+          <span className="text-xs font-medium text-neutral-300">Release 历史</span>
+          <span className="text-[11px] text-neutral-500">最近 10 个版本</span>
+        </div>
+        {releasesError ? (
+          <p className="px-3 py-3 text-xs text-red-300">
+            读取 release 列表失败：{releasesError.message}
+          </p>
+        ) : releasesLoading && !releases ? (
+          <div className="space-y-1.5 p-3">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="h-10 animate-pulse rounded-md bg-white/5"
+                style={{ animationDelay: `${i * 60}ms` }}
+              />
+            ))}
+          </div>
+        ) : !releases || releases.length === 0 ? (
+          <p className="px-3 py-3 text-xs text-neutral-500">暂无 release 记录。</p>
+        ) : (
+          <ul className="divide-y divide-white/5">
+            {releases.map((r) => (
+              <ReleaseRow
+                key={r.id}
+                release={r}
+                rollingBack={rollbackPendingId === r.id}
+                disabled={disabled}
+                onRollback={() => setPendingRollback(r)}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={pendingRollback != null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRollback(null);
+        }}
+        title="回滚到此版本？"
+        description={
+          pendingRollback
+            ? `回滚到 release ${pendingRollback.id}？将切回旧代码并重启 Lumen 服务（约 30 秒不可用）。数据库不会回滚，仅切代码。`
+            : ""
+        }
+        confirmText="确认回滚"
+        cancelText="取消"
+        tone="danger"
+        confirming={isRollingBack}
+        onConfirm={() => {
+          if (!pendingRollback) return;
+          const id = pendingRollback.id;
+          setPendingRollback(null);
+          onRollback(id);
+        }}
+      />
     </div>
+  );
+}
+
+// ——— 同文件内子组件 ———
+
+function PhaseRow({
+  phase,
+  record,
+}: {
+  phase: string;
+  record: UpdateStepRecord | undefined;
+}) {
+  const status = record?.status;
+  const rc = record?.rc;
+  const isDone = status === "done";
+  const isRunning = status === "running";
+  const isFailed = isDone && rc != null && rc !== 0;
+  const isOk = isDone && (rc == null || rc === 0);
+  const dur = formatDuration(record?.dur_ms);
+  const infoEntries = record?.info ? Object.entries(record.info) : [];
+
+  return (
+    <li className="flex items-start gap-3 px-3 py-2">
+      <span
+        className={cn(
+          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px]",
+          isRunning
+            ? "border-sky-400/40 bg-sky-500/15 text-sky-200"
+            : isOk
+              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-300"
+              : isFailed
+                ? "border-red-500/40 bg-red-500/15 text-red-300"
+                : "border-white/15 bg-white/[0.03] text-neutral-500",
+        )}
+        aria-hidden="true"
+      >
+        {isRunning ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : isOk ? (
+          <Check className="h-3 w-3" />
+        ) : isFailed ? (
+          <X className="h-3 w-3" />
+        ) : (
+          <Circle className="h-2 w-2" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span
+            className={cn(
+              "text-xs",
+              isRunning
+                ? "text-sky-200"
+                : isFailed
+                  ? "text-red-200"
+                  : isOk
+                    ? "text-neutral-200"
+                    : "text-neutral-500",
+            )}
+          >
+            {phaseLabel(phase)}
+          </span>
+          <span className="font-mono text-[10px] text-neutral-600">{phase}</span>
+          {isFailed && rc != null && (
+            <span className="rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 font-mono text-[10px] text-red-300">
+              rc={rc}
+            </span>
+          )}
+        </div>
+        {infoEntries.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
+            {infoEntries.map(([k, v]) => (
+              <span key={k} className="font-mono">
+                {k}={v}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      {dur && (
+        <span className="ml-2 shrink-0 self-center text-[11px] tabular-nums text-neutral-500">
+          {dur}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function ReleaseRow({
+  release,
+  rollingBack,
+  disabled,
+  onRollback,
+}: {
+  release: ReleaseInfo;
+  rollingBack: boolean;
+  disabled: boolean;
+  onRollback: () => void;
+}) {
+  const alembic = release.alembic_head_applied || release.alembic_head_expected;
+  const showRollback = !release.is_current;
+  return (
+    <li className="flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="font-mono text-xs text-neutral-200" title={release.id}>
+            {shortReleaseId(release.id)}
+          </span>
+          {release.is_current && (
+            <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+              当前
+            </span>
+          )}
+          {release.is_previous && !release.is_current && (
+            <span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] text-neutral-400">
+              上一个
+            </span>
+          )}
+        </div>
+        <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
+          <span>{formatDateTime(release.created_at)}</span>
+          <span className="font-mono" title={release.sha}>
+            sha {shortSha(release.sha)}
+          </span>
+          {release.branch && <span>分支 {release.branch}</span>}
+          {alembic && (
+            <span className="font-mono" title={alembic}>
+              alembic {alembic.slice(0, 12)}
+            </span>
+          )}
+        </div>
+      </div>
+      {showRollback && (
+        <button
+          type="button"
+          onClick={onRollback}
+          disabled={disabled}
+          className="inline-flex min-h-[34px] shrink-0 cursor-pointer items-center justify-center gap-1.5 self-start rounded-md border border-white/10 bg-white/5 px-2.5 text-[11px] text-neutral-300 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 sm:self-center"
+        >
+          {rollingBack ? (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin" /> 回滚中
+            </>
+          ) : (
+            <>
+              <Undo2 className="h-3 w-3" /> 回滚到此版本
+            </>
+          )}
+        </button>
+      )}
+    </li>
   );
 }
 

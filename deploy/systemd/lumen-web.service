@@ -7,11 +7,11 @@ Wants=network-online.target
 Type=simple
 User=lumen
 Group=lumen
-WorkingDirectory=/opt/lumen/apps/web
+WorkingDirectory=/opt/lumen/current/apps/web
 EnvironmentFile=-/opt/lumen/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=NODE_ENV=production
-ExecStart=/opt/lumen/apps/web/node_modules/.bin/next start -H 127.0.0.1 -p 3000
+ExecStart=/opt/lumen/current/apps/web/node_modules/.bin/next start -H 127.0.0.1 -p 3000
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=30s
@@ -24,7 +24,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateDevices=true
 CapabilityBoundingSet=
-ReadWritePaths=/opt/lumendata /opt/lumen/apps/web/.next/cache
+# .next/cache 在 release 内是软链 → /opt/lumen/shared/web-next-cache。
+# ProtectSystem 解引用后判定，因此 ReadWritePaths 必须列物理路径（shared/web-next-cache）。
+ReadWritePaths=/opt/lumendata /opt/lumen/shared/web-next-cache
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lumen-web

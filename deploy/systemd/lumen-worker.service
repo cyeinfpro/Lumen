@@ -7,16 +7,20 @@ Wants=network-online.target
 Type=simple
 User=lumen
 Group=lumen
-WorkingDirectory=/opt/lumen/apps/worker
+WorkingDirectory=/opt/lumen/current/apps/worker
 EnvironmentFile=-/opt/lumen/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=+/bin/sh -c 'if findmnt -T /opt/lumendata >/dev/null 2>&1 && [ "$$(findmnt -T /opt/lumendata -no FSTYPE)" = "cifs" ]; then /bin/mount -o remount,uid=$$(id -u lumen),gid=$$(id -g lumen),forceuid,forcegid,file_mode=0664,dir_mode=0775 /opt/lumendata || true; fi'
-ExecStart=/opt/lumen/.venv/bin/python -m arq app.main.WorkerSettings
+ExecStart=/opt/lumen/current/.venv/bin/python -m arq app.main.WorkerSettings
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=30s
-TimeoutStopSec=20s
+# worker 在 update / rollback 时被 systemctl restart 触发，arq 收到 SIGTERM 会
+# 停止接新任务并等待 in-flight job 完成。给 180s 让大多数短任务（≤60s）干净结束；
+# 4K 长任务（per project_lumen_4k_timeout_envelope.md 可达 1500s）超时仍会 SIGKILL，
+# 由 image queue failover 机制重新入队。这比原来 20s 大幅降低中断概率。
+TimeoutStopSec=180s
 KillSignal=SIGTERM
 KillMode=mixed
 NoNewPrivileges=true
@@ -25,7 +29,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateDevices=true
 CapabilityBoundingSet=
-ReadWritePaths=/opt/lumendata
+# worker 的 var/ 在 release 内是软链 → shared/worker-var；ProtectSystem 解引用后落在
+# 物理路径上，所以 ReadWritePaths 必须列 shared 而不是 release 内路径。
+ReadWritePaths=/opt/lumendata /opt/lumen/shared
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lumen-worker

@@ -45,6 +45,132 @@ log_step() {
         "${LUMEN_C_BOLD}" "$*" "${LUMEN_C_RESET}"
 }
 
+# ---------------------------------------------------------------------------
+# Step protocol（结构化阶段协议）
+# 由 admin_update.py 通过 .update.log 解析；格式必须严格保持。
+# 三种行：
+#   ::lumen-step:: phase=<name> status=start ts=<ISO8601>
+#   ::lumen-step:: phase=<name> status=done  rc=<int> dur_ms=<int> ts=<ISO>
+#   ::lumen-info:: phase=<name> key=<k> value=<v>
+# ---------------------------------------------------------------------------
+
+# 当前正在进行中的 phase（由 lumen_step_begin 设置，lumen_step_end 清除）。
+# 可以被 trap/error handler 读取以输出 status=done rc=非零。
+LUMEN_CURRENT_PHASE=""
+# 该 phase 的起始时间（毫秒），用于计算 dur_ms。
+LUMEN_CURRENT_PHASE_START_MS=""
+
+# 所有合法的 phase 枚举（与 update.sh 严格对齐）。
+# rollback 是异常分支，不计入正常流程，但允许在 begin/end 中使用。
+LUMEN_VALID_PHASES="prepare fetch link_shared containers deps_python migrate_db deps_node build_web switch restart health_post cleanup rollback"
+
+lumen_iso_now() {
+    # GNU date / BSD date 都支持 -u +%FT%TZ
+    date -u +%FT%TZ 2>/dev/null || date
+}
+
+# 当前时间，毫秒级（用于 dur_ms 计算）。
+# 优先 GNU date %N；BSD date 没有 %N，则用 perl/python 兜底；最后退回到秒×1000。
+lumen_now_ms() {
+    local out
+    out="$(date -u +%s%3N 2>/dev/null || true)"
+    case "${out}" in
+        ''|*[!0-9]*) ;;
+        *N*) ;;
+        *)
+            # GNU date: 已经是毫秒数
+            printf '%s' "${out}"
+            return 0
+            ;;
+    esac
+    if command -v perl >/dev/null 2>&1; then
+        perl -MTime::HiRes=time -e 'printf "%d", time()*1000' 2>/dev/null && return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import time;print(int(time.time()*1000))' 2>/dev/null && return 0
+    fi
+    # 兜底：秒级精度。dur_ms 会偏差 0~999ms，但仍可读。
+    printf '%s000' "$(date -u +%s 2>/dev/null || echo 0)"
+}
+
+lumen_step_phase_is_valid() {
+    local phase="$1"
+    case " ${LUMEN_VALID_PHASES} " in
+        *" ${phase} "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# lumen_step_begin <phase>
+# 输出 ::lumen-step:: phase=<name> status=start ts=<iso>
+# 同时记录 LUMEN_CURRENT_PHASE / 起始时间，便于 lumen_step_end 计算 dur_ms。
+lumen_step_begin() {
+    local phase="$1"
+    if [ -z "${phase}" ]; then
+        log_warn "lumen_step_begin: 空 phase 参数。"
+        return 0
+    fi
+    if ! lumen_step_phase_is_valid "${phase}"; then
+        log_warn "lumen_step_begin: 未登记的 phase=${phase}（允许列表：${LUMEN_VALID_PHASES}）。"
+    fi
+    LUMEN_CURRENT_PHASE="${phase}"
+    LUMEN_CURRENT_PHASE_START_MS="$(lumen_now_ms)"
+    printf '::lumen-step:: phase=%s status=start ts=%s\n' \
+        "${phase}" "$(lumen_iso_now)"
+}
+
+# lumen_step_end <phase> <rc>
+# 输出 ::lumen-step:: phase=<name> status=done rc=<int> dur_ms=<int> ts=<iso>
+# 在成功路径里手动调用；失败时由 trap 调用（rc 由 trap 计算）。
+lumen_step_end() {
+    local phase="$1"
+    local rc="${2:-0}"
+    local dur_ms=0
+    if [ -z "${phase}" ]; then
+        return 0
+    fi
+    if [ -n "${LUMEN_CURRENT_PHASE_START_MS:-}" ]; then
+        local now_ms
+        now_ms="$(lumen_now_ms)"
+        # 纯算术：bash 内置即可；避开外部 expr 的字符串风险。
+        dur_ms=$(( now_ms - LUMEN_CURRENT_PHASE_START_MS ))
+        if [ "${dur_ms}" -lt 0 ]; then
+            dur_ms=0
+        fi
+    fi
+    printf '::lumen-step:: phase=%s status=done rc=%s dur_ms=%s ts=%s\n' \
+        "${phase}" "${rc}" "${dur_ms}" "$(lumen_iso_now)"
+    # 只在结束的是“当前”phase 时清空，避免乱序调用导致状态被错误清空。
+    if [ "${LUMEN_CURRENT_PHASE:-}" = "${phase}" ]; then
+        LUMEN_CURRENT_PHASE=""
+        LUMEN_CURRENT_PHASE_START_MS=""
+    fi
+}
+
+# lumen_step_info <phase> <key> <value...>
+# 输出 ::lumen-info:: phase=<name> key=<k> value=<v>
+# value 中的换行 / CR 会被替换为空格，避免破坏单行协议。
+lumen_step_info() {
+    local phase="$1"
+    local key="$2"
+    shift 2 || true
+    local raw="$*"
+    local value
+    # 把 CR/LF 折叠成空格，防止输出多行污染协议。
+    value="$(printf '%s' "${raw}" | tr '\r\n' '  ')"
+    printf '::lumen-info:: phase=%s key=%s value=%s\n' \
+        "${phase}" "${key}" "${value}"
+}
+
+# 在 ERR/EXIT trap 里调用：如果当前还有进行中的 phase，输出失败的 done 行。
+# 防止协议解析方因为缺少 done 行而把整个 phase 误判为悬挂。
+lumen_step_finalize_failure() {
+    local rc="${1:-1}"
+    if [ -n "${LUMEN_CURRENT_PHASE:-}" ]; then
+        lumen_step_end "${LUMEN_CURRENT_PHASE}" "${rc}"
+    fi
+}
+
 LUMEN_DOCKER_USE_SUDO="${LUMEN_DOCKER_USE_SUDO:-0}"
 
 # lumen_acquire_lock <root> <script_name>
@@ -941,4 +1067,263 @@ read_secret() {
         fi
     fi
     printf '%s' "${reply}"
+}
+
+# ---------------------------------------------------------------------------
+# Release / shared 目录工具
+# 用于 Capistrano 风格的 release 切换：
+#   ${ROOT}/current      -> releases/<active>
+#   ${ROOT}/previous     -> releases/<previous>
+#   ${ROOT}/releases/<id>/   全量代码 + .venv + node_modules + .next
+#   ${ROOT}/shared/web-env/.env.local
+#   ${ROOT}/shared/worker-var/
+#   ${ROOT}/shared/web-next-cache/
+# ---------------------------------------------------------------------------
+
+# release id：UTC 时间 + sha7。按字典序排序即时间序，便于 cleanup 保留最近 N 个。
+lumen_release_id() {
+    local sha="${1:-unknown}"
+    # 截断到 7 位：与 git rev-parse --short 保持一致；不足 7 位时直接补字面量。
+    local short
+    short="$(printf '%s' "${sha}" | cut -c1-7)"
+    [ -n "${short}" ] || short="unknown"
+    printf '%sZ-%s' "$(date -u +%Y%m%dT%H%M%S)" "${short}"
+}
+
+# 读取 ${ROOT}/current 当前指向的 release 目录的绝对路径。
+# 不是 symlink 时返回空串。
+lumen_release_current_path() {
+    local root="$1"
+    local cur="${root}/current"
+    [ -L "${cur}" ] || return 0
+    if command -v readlink >/dev/null 2>&1; then
+        # readlink -f 在 BSD 也可用（macOS 12+ 的 coreutils）；不行就回退到自己拼。
+        local target
+        target="$(readlink -f "${cur}" 2>/dev/null || true)"
+        if [ -n "${target}" ]; then
+            printf '%s' "${target}"
+            return 0
+        fi
+        target="$(readlink "${cur}" 2>/dev/null || true)"
+        case "${target}" in
+            /*) printf '%s' "${target}" ;;
+            '') ;;
+            *) printf '%s/%s' "${root}" "${target}" ;;
+        esac
+    fi
+}
+
+# 读取 ${ROOT}/current 指向 release 的 id（即目录名），不是 symlink 返回空串。
+lumen_release_current_id() {
+    local root="$1"
+    local target
+    target="$(lumen_release_current_path "${root}" || true)"
+    [ -n "${target}" ] || return 0
+    basename "${target}"
+}
+
+# 检测 GNU mv 是否支持 -T 选项（用于真正原子的 symlink 替换）。
+# 0 = 支持；1 = 不支持（macOS / BSD 默认）。
+lumen_mv_has_T() {
+    # `mv --version` GNU 才支持；BSD mv 会报 illegal option。
+    mv --version >/dev/null 2>&1 || return 1
+    # GNU mv 全部支持 -T（since coreutils 6.x）。
+    return 0
+}
+
+# lumen_atomic_replace_symlink <link_target> <link_path>
+# 跨平台原子替换 symlink。优先级：
+#   1. GNU `mv -T`（rename(2) syscall，POSIX 保证原子）
+#   2. python3 os.replace（也是 rename(2) 一次完成，BSD/macOS 上严格原子）
+#   3. `ln -sfn`（unlink+symlink 两步，存在 µs 级窗口；最后兜底）
+# link_target 是软链内容（通常相对路径如 "releases/<id>"）；link_path 是绝对路径。
+lumen_atomic_replace_symlink() {
+    local link_target="$1"
+    local link_path="$2"
+    local link_dir
+    link_dir="$(dirname "${link_path}")"
+    local link_name
+    link_name="$(basename "${link_path}")"
+    local tmp="${link_dir}/.${link_name}.tmp.$$"
+
+    rm -f "${tmp}" 2>/dev/null || true
+    if ! ln -s "${link_target}" "${tmp}"; then
+        return 1
+    fi
+
+    if lumen_mv_has_T; then
+        if mv -T "${tmp}" "${link_path}"; then
+            return 0
+        fi
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        # os.replace 直接 rename(2)，跨平台原子；目标是 symlink 本身（不解引用）。
+        if python3 -c "import os, sys; os.replace(sys.argv[1], sys.argv[2])" "${tmp}" "${link_path}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # 最后兜底：ln -sfn。窗口极短，仅作 fallback。
+    rm -f "${tmp}" 2>/dev/null || true
+    ln -sfn "${link_target}" "${link_path}" 2>/dev/null || return 1
+    return 0
+}
+
+# lumen_release_atomic_switch <root> <new_id>
+# 原子地把 ${root}/current 切到 releases/<new_id>，并把旧 release 写入 ${root}/previous。
+# 注意：current/previous 都是相对软链（指 "releases/<id>"），便于整体迁移到不同前缀。
+lumen_release_atomic_switch() {
+    local root="$1"
+    local new_id="$2"
+    local old_id=""
+    old_id="$(lumen_release_current_id "${root}" || true)"
+
+    if [ -z "${new_id}" ]; then
+        log_error "lumen_release_atomic_switch：new_id 为空。"
+        return 1
+    fi
+    if [ ! -d "${root}/releases/${new_id}" ]; then
+        log_error "lumen_release_atomic_switch：不存在 releases/${new_id}。"
+        return 1
+    fi
+
+    if ! lumen_atomic_replace_symlink "releases/${new_id}" "${root}/current"; then
+        log_error "切换 ${root}/current → releases/${new_id} 失败。"
+        return 1
+    fi
+
+    # 更新 previous 软链（指向旧 release）。失败不致命。
+    if [ -n "${old_id}" ] && [ "${old_id}" != "${new_id}" ] \
+        && [ -d "${root}/releases/${old_id}" ]; then
+        lumen_atomic_replace_symlink "releases/${old_id}" "${root}/previous" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# lumen_release_link_shared <release_dir> <shared_dir>
+# 把 shared 目录下的几条已知路径软链到 release 内对应位置。
+# 调用前 release 内的同名文件/目录如果存在会被备份到 .pre-link 后再删除（避免 ln 报错）。
+lumen_release_link_shared() {
+    local release_dir="$1"
+    local shared_dir="$2"
+    if [ ! -d "${release_dir}" ]; then
+        log_error "lumen_release_link_shared：release 目录不存在：${release_dir}"
+        return 1
+    fi
+    if [ ! -d "${shared_dir}" ]; then
+        log_error "lumen_release_link_shared：shared 目录不存在：${shared_dir}"
+        return 1
+    fi
+
+    # 三条软链。第二个字段为 shared 下的物理路径，第三个字段为 release 内目标路径。
+    # 用换行分隔，避开复杂关联数组（兼容 bash 3.2 / macOS）。
+    local mapping="
+web-env/.env.local|apps/web/.env.local
+worker-var|apps/worker/var
+web-next-cache|apps/web/.next/cache
+"
+    local line src_rel dst_rel src dst dst_parent
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        src_rel="${line%%|*}"
+        dst_rel="${line#*|}"
+        src="${shared_dir}/${src_rel}"
+        dst="${release_dir}/${dst_rel}"
+        dst_parent="$(dirname "${dst}")"
+
+        # shared 下的源不存在则跳过（例如 .env.local 在某些环境可能没有）。
+        if [ ! -e "${src}" ] && [ ! -L "${src}" ]; then
+            log_warn "shared 中缺少 ${src_rel}，跳过软链 ${dst_rel}。"
+            continue
+        fi
+
+        mkdir -p "${dst_parent}" 2>/dev/null || true
+
+        # 若 release 内已经有同名实体，先移走（不删除，备份成 .pre-link.<ts>）。
+        if [ -e "${dst}" ] || [ -L "${dst}" ]; then
+            local backup="${dst}.pre-link.$(date -u +%Y%m%d%H%M%S)"
+            if ! mv "${dst}" "${backup}" 2>/dev/null; then
+                rm -rf "${dst}" 2>/dev/null || true
+            fi
+        fi
+
+        if ! ln -s "${src}" "${dst}"; then
+            log_error "无法软链 ${dst} -> ${src}"
+            return 1
+        fi
+    done <<EOF
+${mapping}
+EOF
+    return 0
+}
+
+# lumen_release_cleanup_old <root> <keep>
+# 保留按字典序最新的 <keep> 个 release，其余删除。
+# 任何被 current/previous 指向的 release 都不会被删，即使它落在保留窗口外。
+lumen_release_cleanup_old() {
+    local root="$1"
+    local keep="${2:-5}"
+    local releases_dir="${root}/releases"
+    [ -d "${releases_dir}" ] || return 0
+
+    # 取出 current/previous 指向的 release id（仅 basename，避免跨平台
+    # readlink/canonical 路径不一致——macOS /tmp -> /private/tmp 等情况）。
+    local current_id previous_id
+    current_id="$(lumen_release_current_id "${root}" || true)"
+    previous_id=""
+    if [ -L "${root}/previous" ]; then
+        local prev_link
+        prev_link="$(readlink "${root}/previous" 2>/dev/null || true)"
+        if [ -n "${prev_link}" ]; then
+            previous_id="$(basename "${prev_link}")"
+        fi
+    fi
+
+    # 列出所有 release 子目录，按字典序倒排（最新的在前）。
+    local -a all_ids=()
+    local entry
+    for entry in "${releases_dir}"/*; do
+        [ -d "${entry}" ] || continue
+        all_ids+=("$(basename "${entry}")")
+    done
+    if [ "${#all_ids[@]}" -le "${keep}" ]; then
+        return 0
+    fi
+
+    # bash 3.2 没有 mapfile，用排序+逐行读。
+    local -a sorted=()
+    local id
+    while IFS= read -r id; do
+        sorted+=("${id}")
+    done < <(printf '%s\n' "${all_ids[@]}" | sort -r)
+
+    local kept=0
+    local target removed=0
+    for id in "${sorted[@]}"; do
+        target="${releases_dir}/${id}"
+        # 当前 current 或 previous 指向的，无条件保留。
+        if [ -n "${current_id}" ] && [ "${id}" = "${current_id}" ]; then
+            kept=$((kept+1))
+            continue
+        fi
+        if [ -n "${previous_id}" ] && [ "${id}" = "${previous_id}" ]; then
+            kept=$((kept+1))
+            continue
+        fi
+        if [ "${kept}" -lt "${keep}" ]; then
+            kept=$((kept+1))
+        else
+            # 删除。Linux 上 rm -rf 数百 MB 通常 < 1s。
+            if rm -rf "${target}" 2>/dev/null; then
+                removed=$((removed+1))
+            fi
+        fi
+    done
+    if [ "${removed}" -gt 0 ]; then
+        log_info "release cleanup：删除 ${removed} 个旧 release，保留 ${keep} 个。"
+    fi
+    return 0
 }
