@@ -76,12 +76,10 @@ Next.js Web ---------------> FastAPI API
 ## 系统要求
 
 - macOS 或 Linux
-- Docker Desktop / Docker Engine + docker compose v2
-- Python >= 3.12
-- [`uv`](https://docs.astral.sh/uv/)
-- Node.js >= 20 + npm
-- OpenSSL
-- Debian/Ubuntu 如需编译 PostgreSQL 驱动：`build-essential libpq-dev`
+- 一键安装脚本会自动补齐缺失的运行依赖：Docker Desktop / Docker Engine + compose v2、[`uv`](https://docs.astral.sh/uv/)、Python 3.12（由 uv 管理）、Node.js >= 20 + npm、OpenSSL、常见 Python 编译依赖（如 `build-essential/libpq-dev`）
+- Linux 自动安装系统包需要 root 或 sudo 权限；macOS 会优先使用 Homebrew，缺失 Homebrew 时会尝试安装
+- Docker daemon 仍需要可启动：Linux 会尝试 `systemctl/service` 启动，macOS 会尝试打开 Docker Desktop；如果 Docker Desktop 首次初始化需要人工确认，完成后重跑脚本即可
+- 如需只检查不自动安装依赖，可设置 `LUMEN_AUTO_INSTALL_DEPS=0`
 
 ## 快速安装
 
@@ -153,8 +151,9 @@ nginx 写入逻辑会先备份目标配置，写入后执行 `nginx -t`；如果
 
 安装脚本会执行：
 
-- 检查 Docker、uv、Node、Python、OpenSSL
+- 自动检查并安装缺失的 Docker、uv、Node、Python、OpenSSL 和编译依赖
 - 生成根目录 `.env` 和 `apps/web/.env.local`
+- 创建并授权本地存储目录 `/opt/lumendata`
 - 拉取 Docker 镜像、同步 Python/Node 依赖
 - 启动 PostgreSQL 和 Redis
 - 执行 Alembic 迁移
