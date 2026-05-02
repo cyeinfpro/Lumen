@@ -1266,9 +1266,9 @@ PY
 )
 
 # ---------------------------------------------------------------------------
-# 8. 可选 build（内测建议跳过，dev 模式即可，启动更快）
+# 8. 可选 build（生产发布建议构建；本地开发可跳过）
 # ---------------------------------------------------------------------------
-if confirm "构建前端生产包（npm run build）？内测留空回车即可"; then
+if confirm "构建前端生产包（npm run build）？生产发布建议输入 y，本地开发可回车跳过"; then
     log_step "构建前端（npm run build）"
     (
         cd "${ROOT}/apps/web"
@@ -1285,13 +1285,21 @@ else
     BUILD_DONE=0
 fi
 
+if [ "${BUILD_DONE}" -eq 1 ]; then
+    WEB_START_CMD="cd ${ROOT}/apps/web && npm run start"
+    WEB_MODE_LABEL="前端生产模式"
+else
+    WEB_START_CMD="cd ${ROOT}/apps/web && npm run dev"
+    WEB_MODE_LABEL="前端开发模式"
+fi
+
 # ---------------------------------------------------------------------------
 # 10. 总结
 # ---------------------------------------------------------------------------
 log_step "安装完成"
 cat <<EOF
 
-  访问地址 ......... http://localhost:3000  （前端 dev）
+  访问地址 ......... http://localhost:3000  （${WEB_MODE_LABEL}）
   API 服务 ......... http://localhost:8000
   管理员邮箱 ....... ${ADMIN_EMAIL}
 
@@ -1304,8 +1312,8 @@ cat <<EOF
        cd ${ROOT}/apps/api && uv run arq app.main.WorkerSettings
 
     3) 前端
-       cd ${ROOT}/apps/web && npm run dev
-       （生产模式：${BUILD_DONE:+已构建，可用 npm run start；}${BUILD_DONE:+}如未构建：npm run build && npm run start）
+       ${WEB_START_CMD}
+       （如需切换到生产模式：cd ${ROOT}/apps/web && npm run build && npm run start）
 
   日常运维：
 
