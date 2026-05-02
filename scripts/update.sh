@@ -135,7 +135,7 @@ cat <<EOF
   Update complete. 请重启 api / worker / web 三个进程：
 
     1) API:    cd ${ROOT}/apps/api && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
-    2) Worker: cd ${ROOT}/apps/api && uv run arq app.main.WorkerSettings
+    2) Worker: cd ${ROOT}/apps/worker && uv run python -m arq app.main.WorkerSettings
     3) Web:    cd ${ROOT}/apps/web && npm run dev    （或 npm run start 如已 build）
 
 EOF

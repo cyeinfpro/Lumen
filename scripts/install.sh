@@ -1357,7 +1357,7 @@ cat <<EOF
        cd ${ROOT}/apps/api && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 
     2) Worker（arq）
-       cd ${ROOT}/apps/api && uv run arq app.main.WorkerSettings
+       cd ${ROOT}/apps/worker && uv run python -m arq app.main.WorkerSettings
 
     3) 前端
        ${WEB_START_CMD}
