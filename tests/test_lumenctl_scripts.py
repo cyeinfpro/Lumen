@@ -17,6 +17,7 @@ SCRIPT_FILES = [
     ROOT / "scripts" / "backup.sh",
     ROOT / "scripts" / "restore.sh",
 ]
+INSTALL = ROOT / "scripts" / "install.sh"
 
 
 def run_bash(script: str, *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -48,6 +49,15 @@ def test_operations_scripts_parse_with_bash_n() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_install_script_defaults_to_starting_runtime_after_install() -> None:
+    text = INSTALL.read_text(encoding="utf-8")
+    assert "LUMEN_AUTO_START_RUNTIME:-1" in text
+    assert "START_RUNTIME_REPLY=\"$(read_or_default '现在启动 API / Worker / Web" in text
+    assert "start_runtime_processes \"${WEB_NPM_SCRIPT}\"" in text
+    assert "运行状态 ......... 已启动 API / Worker / Web" in text
+    assert "未启动前，浏览器访问 3000 不会有响应" in text
 
 
 def test_lumenctl_help_lists_every_documented_command() -> None:

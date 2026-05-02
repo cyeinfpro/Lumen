@@ -3,7 +3,7 @@
 # 用法：  bash scripts/install.sh            # 打开运维菜单
 #        bash scripts/install.sh --install  # 直接安装
 # 行为：检查/自动安装依赖 -> 写 .env -> 起 PG/Redis -> uv sync
-#       -> alembic upgrade -> 创建 admin -> npm ci -> 可选 build。
+#       -> alembic upgrade -> 创建 admin -> npm ci -> 可选 build -> 可选启动 API/Worker/Web。
 # 重复执行安全（幂等），中途任何失败都会立即停止。
 
 set -euo pipefail
@@ -147,6 +147,8 @@ OS="$(detect_os)"
 LOCK_DIR="${ROOT}/.lumen-script.lock"
 LOCK_HELD=0
 PARALLEL_PIDS=()
+RUNTIME_PIDS=()
+RUNTIME_LOG_DIR=""
 
 usage() {
     cat <<EOF
@@ -213,6 +215,19 @@ kill_parallel_jobs() {
     PARALLEL_PIDS=()
 }
 
+stop_runtime_jobs() {
+    local pid
+    for pid in "${RUNTIME_PIDS[@]:-}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+            kill "${pid}" 2>/dev/null || true
+        fi
+    done
+    for pid in "${RUNTIME_PIDS[@]:-}"; do
+        wait "${pid}" 2>/dev/null || true
+    done
+    RUNTIME_PIDS=()
+}
+
 release_script_lock() {
     if [ "${LOCK_HELD}" -eq 1 ]; then
         rm -rf "${LOCK_DIR}"
@@ -224,6 +239,9 @@ cleanup() {
     local rc=$?
     trap - EXIT INT TERM ERR
     kill_parallel_jobs
+    if [ "${rc}" -ne 0 ]; then
+        stop_runtime_jobs
+    fi
     release_script_lock
     return "${rc}"
 }
@@ -233,6 +251,7 @@ on_signal() {
     local rc="$2"
     log_error "安装被 ${signal_name} 中断，正在清理后台任务和脚本锁。"
     kill_parallel_jobs
+    stop_runtime_jobs
     exit "${rc}"
 }
 
@@ -338,6 +357,103 @@ read_dotenv_value() {
     printf '%s' "${raw}"
 }
 
+process_listening_on_port() {
+    local port="$1"
+    if have_cmd lsof; then
+        lsof -iTCP:"${port}" -sTCP:LISTEN -nP >/dev/null 2>&1
+        return $?
+    fi
+    if have_cmd ss; then
+        ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE "[:.]${port}\$"
+        return $?
+    fi
+    if have_cmd netstat; then
+        netstat -an 2>/dev/null | awk '/LISTEN/ {print $4}' | grep -qE "[:.]${port}\$"
+        return $?
+    fi
+    return 1
+}
+
+wait_for_http() {
+    local url="$1"
+    local attempts="${2:-60}"
+    local _attempt
+    for _attempt in $(seq 1 "${attempts}"); do
+        if have_cmd curl && curl -fsS "${url}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+wait_for_port() {
+    local port="$1"
+    local attempts="${2:-60}"
+    local _attempt
+    for _attempt in $(seq 1 "${attempts}"); do
+        if process_listening_on_port "${port}"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+start_runtime_processes() {
+    local web_npm_script="$1"
+    local api_log worker_log web_log
+
+    RUNTIME_LOG_DIR="${ROOT}/.install-logs/runtime.$(date '+%Y%m%d%H%M%S')"
+    mkdir -p "${RUNTIME_LOG_DIR}"
+    api_log="${RUNTIME_LOG_DIR}/api.log"
+    worker_log="${RUNTIME_LOG_DIR}/worker.log"
+    web_log="${RUNTIME_LOG_DIR}/web.log"
+
+    log_step "启动 Lumen 运行时进程"
+
+    if process_listening_on_port 8000; then
+        log_warn "端口 8000 已有进程监听，跳过启动 API。"
+    else
+        log_info "启动 API → ${api_log}"
+        (
+            cd "${ROOT}/apps/api"
+            exec uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+        ) >"${api_log}" 2>&1 &
+        RUNTIME_PIDS+=("$!")
+    fi
+
+    log_info "启动 Worker → ${worker_log}"
+    (
+        cd "${ROOT}/apps/worker"
+        exec uv run python -m arq app.main.WorkerSettings
+    ) >"${worker_log}" 2>&1 &
+    RUNTIME_PIDS+=("$!")
+
+    if process_listening_on_port 3000; then
+        log_warn "端口 3000 已有进程监听，跳过启动 Web。"
+    else
+        log_info "启动 Web → ${web_log}"
+        (
+            cd "${ROOT}/apps/web"
+            exec npm run "${web_npm_script}"
+        ) >"${web_log}" 2>&1 &
+        RUNTIME_PIDS+=("$!")
+    fi
+
+    if wait_for_http "http://127.0.0.1:8000/healthz" 45; then
+        log_info "API 已就绪：http://127.0.0.1:8000/healthz"
+    else
+        log_warn "API 45 秒内未通过健康检查，请查看：${api_log}"
+    fi
+
+    if wait_for_port 3000 60; then
+        log_info "Web 已监听 3000。"
+    else
+        log_warn "Web 60 秒内未监听 3000，请查看：${web_log}"
+    fi
+}
+
 ensure_compose_db_env_vars() {
     local file="$1"
     if grep -qE '^DB_USER=' "${file}" \
@@ -409,6 +525,13 @@ DOCKER_USE_SUDO=0
 
 auto_install_enabled() {
     case "${AUTO_INSTALL_DEPS}" in
+        0|false|FALSE|False|no|NO|No|off|OFF|Off) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+auto_start_runtime_enabled() {
+    case "${LUMEN_AUTO_START_RUNTIME:-1}" in
         0|false|FALSE|False|no|NO|No|off|OFF|Off) return 1 ;;
         *) return 0 ;;
     esac
@@ -1338,24 +1461,55 @@ else
 fi
 
 if [ "${BUILD_DONE}" -eq 1 ]; then
-    WEB_START_CMD="cd ${ROOT}/apps/web && npm run start"
+    WEB_NPM_SCRIPT="start"
     WEB_MODE_LABEL="前端生产模式"
 else
-    WEB_START_CMD="cd ${ROOT}/apps/web && npm run dev"
+    WEB_NPM_SCRIPT="dev"
     WEB_MODE_LABEL="前端开发模式"
 fi
+
+RUNTIME_STARTED=0
+if auto_start_runtime_enabled; then
+    START_RUNTIME_REPLY="$(read_or_default '现在启动 API / Worker / Web，让 http://<服务器IP>:3000 立即可访问？(Y/n)' 'y')"
+else
+    START_RUNTIME_REPLY="$(read_or_default '现在启动 API / Worker / Web，让 http://<服务器IP>:3000 立即可访问？(y/N)' 'n')"
+fi
+case "${START_RUNTIME_REPLY}" in
+    y|Y|yes|YES|Yes)
+        start_runtime_processes "${WEB_NPM_SCRIPT}"
+        RUNTIME_STARTED=1
+        ;;
+    *)
+        log_warn "已跳过启动运行时进程。未启动前，浏览器访问 3000 不会有响应。"
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 10. 总结
 # ---------------------------------------------------------------------------
 log_step "安装完成"
-cat <<EOF
+if [ "${RUNTIME_STARTED}" -eq 1 ]; then
+    cat <<EOF
 
+  运行状态 ......... 已启动 API / Worker / Web（后台进程）
   访问地址 ......... http://<服务器IP>:3000  （${WEB_MODE_LABEL}；本机也可用 http://localhost:3000）
-  API 服务 ......... http://127.0.0.1:8000  （由 Web 的 /api 转发）
+  API 健康检查 ..... http://127.0.0.1:8000/healthz  （API 默认只监听本机）
+  管理员邮箱 ....... ${ADMIN_EMAIL}
+  运行日志目录 ..... ${RUNTIME_LOG_DIR}
+
+  如果服务器外部仍打不开 3000，请检查云安全组/防火墙是否放行 TCP 3000：
+    ss -ltnp | grep -E ':3000|:8000'
+
+EOF
+else
+    cat <<EOF
+
+  运行状态 ......... 未启动 API / Worker / Web
+  访问地址 ......... 运行 Web 后访问 http://<服务器IP>:3000
+  API 服务 ......... http://127.0.0.1:8000  （由 Web 的 /api 转发，默认不暴露公网）
   管理员邮箱 ....... ${ADMIN_EMAIL}
 
-  启动 3 个进程（建议各开一个终端）：
+  手动启动 3 个进程（建议各开一个终端）：
 
     1) API（FastAPI）
        cd ${ROOT}/apps/api && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
@@ -1364,8 +1518,7 @@ cat <<EOF
        cd ${ROOT}/apps/worker && uv run python -m arq app.main.WorkerSettings
 
     3) 前端
-       ${WEB_START_CMD}
-       （如需切换到生产模式：cd ${ROOT}/apps/web && npm run build && npm run start）
+       cd ${ROOT}/apps/web && npm run ${WEB_NPM_SCRIPT}
 
   日常运维：
 
@@ -1375,6 +1528,7 @@ cat <<EOF
   管理面板：登录后右上角 "管理"，可调整上游 API、像素预算、邀请链接。
 
 EOF
+fi
 
 trap - ERR
 exit 0
