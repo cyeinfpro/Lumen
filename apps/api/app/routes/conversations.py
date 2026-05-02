@@ -32,10 +32,13 @@ from lumen_core.context_window import (
     CONTEXT_RESPONSE_TOKEN_RESERVE,
     CONTEXT_TOTAL_TOKEN_TARGET,
     HISTORY_FETCH_BATCH,
+    MESSAGE_OVERHEAD_TOKENS,
+    compose_summary_guardrail,
     estimate_message_tokens,
     estimate_summary_tokens,
     estimate_system_prompt_tokens,
     estimate_text_tokens,
+    format_sticky_input_text,
     is_summary_usable,
     messages_token_count,
     would_exceed_budget,
@@ -617,6 +620,126 @@ def _summary_str(summary: dict[str, Any] | None, key: str) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _parse_summary_datetime(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return _coerce_aware(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _compare_message_position(
+    left_created_at: datetime,
+    left_id: str | None,
+    right_created_at: datetime,
+    right_id: str | None,
+) -> int:
+    left_created_at = _coerce_aware(left_created_at)
+    right_created_at = _coerce_aware(right_created_at)
+    if left_created_at > right_created_at:
+        return 1
+    if left_created_at < right_created_at:
+        return -1
+    if not left_id or not right_id:
+        return 0 if left_id == right_id else -1
+    if left_id > right_id:
+        return 1
+    if left_id < right_id:
+        return -1
+    return 0
+
+
+def _summary_boundary(summary: dict[str, Any] | None) -> tuple[datetime, str | None] | None:
+    if not is_summary_usable(summary):
+        return None
+    created_at = _parse_summary_datetime(summary.get("up_to_created_at"))
+    if created_at is None:
+        return None
+    return created_at, _summary_str(summary, "up_to_message_id")
+
+
+def _message_after_summary(msg: Message, summary: dict[str, Any] | None) -> bool:
+    boundary = _summary_boundary(summary)
+    if boundary is None:
+        return True
+    boundary_created_at, boundary_id = boundary
+    return _compare_message_position(
+        msg.created_at,
+        msg.id,
+        boundary_created_at,
+        boundary_id,
+    ) > 0
+
+
+def _with_summary_guardrail(system_prompt: str | None, *, enabled: bool) -> str | None:
+    if not enabled:
+        return system_prompt
+    guardrail = compose_summary_guardrail()
+    if system_prompt:
+        if guardrail in system_prompt:
+            return system_prompt
+        return f"{system_prompt.rstrip()}\n\n{guardrail}"
+    return None
+
+
+def _truncate_sticky_text(text: str, limit: int = 4000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[... truncated original task ...]"
+
+
+def _sticky_text_from_message(message: Message) -> str:
+    content = message.content if isinstance(message.content, dict) else {}
+    text = _truncate_sticky_text(str(content.get("text") or ""))
+    refs: list[str] = []
+    for att in content.get("attachments") or []:
+        if not isinstance(att, dict):
+            continue
+        image_id = att.get("image_id")
+        if image_id:
+            refs.append(f"[user_image image_id={image_id}]")
+        elif att.get("kind"):
+            refs.append(f"[attachment kind={att.get('kind')!r}]")
+    if refs:
+        return "\n".join([text, *refs]).strip()
+    return text
+
+
+def _estimate_sticky_tokens(message: Message | None) -> int:
+    if message is None:
+        return 0
+    sticky = _sticky_text_from_message(message)
+    if not sticky:
+        return 0
+    return MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens(format_sticky_input_text(sticky))
+
+
+async def _load_message_by_id(
+    db: AsyncSession,
+    message_id: str | None,
+) -> Message | None:
+    if not message_id:
+        return None
+    try:
+        getter = getattr(db, "get", None)
+        if getter is not None:
+            msg = await getter(Message, message_id)
+            if msg is not None:
+                return msg
+    except Exception:
+        logger.debug("message lookup by id failed", exc_info=True)
+    try:
+        return (
+            await db.execute(
+                select(Message).where(Message.id == message_id, *_message_alive_filters()).limit(1)
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        logger.debug("message lookup query failed", exc_info=True)
+        return None
+
+
 def _manual_compact_cooldown_key(*, user_id: str, conv_id: str) -> str:
     return f"context:manual_compact:{user_id}:{conv_id}:cooldown"
 
@@ -1132,10 +1255,33 @@ async def _estimate_context_window(
         legacy_conversation_prompt=conv.default_system,
     )
 
-    system_tokens = estimate_system_prompt_tokens(system_prompt)
+    raw_summary = getattr(conv, "summary_jsonb", None)
+    summary = raw_summary if isinstance(raw_summary, dict) else None
+    summary_available = is_summary_usable(summary)
+    sticky_message = None
+    if summary_available:
+        first_user_id = _summary_str(summary, "first_user_message_id")
+        candidate = await _load_message_by_id(db, first_user_id)
+        if candidate is not None and not _message_after_summary(candidate, summary):
+            sticky_message = candidate
+
+    effective_system_prompt = _with_summary_guardrail(
+        system_prompt,
+        enabled=summary_available,
+    )
+    system_tokens = estimate_system_prompt_tokens(effective_system_prompt)
     used_tokens = system_tokens
     history_tokens = 0
     included_messages_count = 0
+    summary_tokens = estimate_summary_tokens(summary)
+    sticky_tokens = 0
+    summary_block_tokens = 0
+    if summary_available:
+        sticky_tokens = _estimate_sticky_tokens(sticky_message)
+        summary_block_tokens = MESSAGE_OVERHEAD_TOKENS + summary_tokens
+        used_tokens += sticky_tokens + summary_block_tokens
+        history_tokens += sticky_tokens + summary_block_tokens
+        included_messages_count += 1 if sticky_tokens > 0 else 0
     truncated = False
     cursor_created_at: datetime | None = None
     cursor_id: str | None = None
@@ -1166,10 +1312,13 @@ async def _estimate_context_window(
 
         stop = False
         for msg in batch:
-            if len(scanned_messages_desc) < COMPACTION_MESSAGE_LOAD_LIMIT:
-                scanned_messages_desc.append(msg)
             cursor_created_at = msg.created_at
             cursor_id = msg.id
+            if summary_available and not _message_after_summary(msg, summary):
+                stop = True
+                break
+            if len(scanned_messages_desc) < COMPACTION_MESSAGE_LOAD_LIMIT:
+                scanned_messages_desc.append(msg)
             est_tokens = estimate_message_tokens(msg.role, msg.content)
             if est_tokens <= 0:
                 continue
@@ -1188,10 +1337,6 @@ async def _estimate_context_window(
     compression_enabled = bool(
         await _setting_int(db, "context.compression_enabled", 0)
     )
-    raw_summary = getattr(conv, "summary_jsonb", None)
-    summary = raw_summary if isinstance(raw_summary, dict) else None
-    summary_available = is_summary_usable(summary)
-    summary_tokens = estimate_summary_tokens(summary)
     latest_context_meta: dict[str, Any] = {}
     try:
         upstream_request = (
@@ -1231,7 +1376,12 @@ async def _estimate_context_window(
         compressible_tokens = _estimate_messages_tokens(source_messages)
     except Exception:
         logger.debug("context compressible estimate failed", exc_info=True)
-    estimated_tokens_freed = max(0, compressible_tokens - summary_target_tokens)
+    effective_summary_cost = (
+        summary_block_tokens + sticky_tokens
+        if summary_available
+        else summary_target_tokens
+    )
+    estimated_tokens_freed = max(0, compressible_tokens - effective_summary_cost)
     manual_min_input_tokens = await _setting_int(
         db,
         "context.manual_compact_min_input_tokens",

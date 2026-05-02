@@ -1175,6 +1175,10 @@ def _summary_covers_boundary(
     return bool(summary_id and summary_id >= boundary_message.id)
 
 
+def _message_after_summary(summary: dict[str, Any] | None, message: Message) -> bool:
+    return not _summary_covers_boundary(summary, message)
+
+
 def _summary_age_seconds(summary: dict[str, Any] | None) -> int | None:
     compressed_at = _summary_compressed_at(summary)
     if compressed_at is None:
@@ -1376,6 +1380,86 @@ def _estimated_summary_source(rows: list[Message], *, skip_message_id: str | Non
     return total
 
 
+def _pack_with_existing_summary(
+    *,
+    system_prompt: str | None,
+    all_rows_desc: list[Message],
+    summary: dict[str, Any],
+    summary_model: str,
+    input_budget: int,
+    current_user: Message | None,
+    first_user: Message | None,
+) -> PackedContext:
+    summary_token_count = estimate_summary_tokens(summary)
+    sticky_message = (
+        first_user
+        if first_user is not None and not _message_after_summary(summary, first_user)
+        else None
+    )
+    sticky_tokens = 0
+    if sticky_message is not None:
+        sticky_input_text = format_sticky_input_text(
+            _sticky_text_from_message(sticky_message)
+        )
+        sticky_tokens = MESSAGE_OVERHEAD_TOKENS + count_tokens(sticky_input_text)
+
+    used_tokens = (
+        estimate_system_prompt_tokens(_with_summary_guardrail(system_prompt, enabled=True))
+        + sticky_tokens
+        + MESSAGE_OVERHEAD_TOKENS
+        + summary_token_count
+    )
+    after_summary_desc = [
+        m
+        for m in all_rows_desc
+        if _count_message_tokens(m.role, m.content) > 0
+        and _message_after_summary(summary, m)
+    ]
+    recent_desc: list[Message] = []
+    recent_ids: set[str] = set()
+
+    if current_user is not None and _message_after_summary(summary, current_user):
+        current_tokens = _count_message_tokens(current_user.role, current_user.content)
+        if current_tokens > 0:
+            recent_desc.append(current_user)
+            recent_ids.add(current_user.id)
+            used_tokens += current_tokens
+
+    for m in after_summary_desc:
+        if m.id in recent_ids:
+            continue
+        est = _count_message_tokens(m.role, m.content)
+        if used_tokens + est > input_budget:
+            break
+        recent_desc.append(m)
+        recent_ids.add(m.id)
+        used_tokens += est
+
+    summary_text = str(summary.get("text") or "")
+    recent_rows = tuple(reversed(recent_desc))
+    return PackedContext(
+        input_list=[],
+        estimated_tokens=used_tokens,
+        summary_used=True,
+        summary_created=False,
+        summary_up_to_message_id=str(summary.get("up_to_message_id") or ""),
+        sticky_used=sticky_message is not None,
+        included_messages_count=len(recent_rows) + (1 if sticky_message is not None else 0),
+        truncated_without_summary=False,
+        fallback_reason=None,
+        compression_enabled=True,
+        recent_messages_count=len(recent_rows),
+        summary_tokens=summary_token_count,
+        summary_age_seconds=_summary_age_seconds(summary),
+        compressor_model=summary_model,
+        image_caption_count=int(summary.get("image_caption_count") or 0),
+        _system_prompt=system_prompt,
+        _sticky_message=sticky_message,
+        _summary_text=summary_text,
+        _recent_rows=recent_rows,
+    )
+
+
 def _fallback_pack(
     *,
     system_prompt: str | None,
@@ -1475,6 +1559,101 @@ async def _load_rows_desc(
         cursor_inclusive = False
 
     return rows_desc, used_tokens, truncated
+
+
+async def _load_rows_desc_after_summary(
+    session: Any,
+    *,
+    conversation_id: str,
+    target: Message,
+    summary: dict[str, Any],
+) -> list[Message]:
+    rows_desc: list[Message] = []
+    cursor_created_at = target.created_at
+    cursor_id = target.id
+    cursor_inclusive = True
+
+    while True:
+        same_timestamp_filter = (
+            Message.id <= cursor_id if cursor_inclusive else Message.id < cursor_id
+        )
+        q = (
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.deleted_at.is_(None),
+                or_(
+                    Message.created_at < cursor_created_at,
+                    and_(
+                        Message.created_at == cursor_created_at,
+                        same_timestamp_filter,
+                    ),
+                ),
+            )
+            .order_by(desc(Message.created_at), desc(Message.id))
+            .limit(HISTORY_FETCH_BATCH)
+        )
+        batch = list((await session.execute(q)).scalars())
+        if not batch:
+            break
+
+        stop = False
+        for m in batch:
+            cursor_created_at = m.created_at
+            cursor_id = m.id
+            if not _message_after_summary(summary, m):
+                stop = True
+                break
+            rows_desc.append(m)
+
+        if stop or len(batch) < HISTORY_FETCH_BATCH:
+            break
+        cursor_inclusive = False
+
+    return rows_desc
+
+
+async def _get_message(session: Any, message_id: str | None) -> Message | None:
+    if not message_id:
+        return None
+    try:
+        return await session.get(Message, message_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("completion.message_lookup_failed id=%s err=%r", message_id, exc)
+        return None
+
+
+async def _pick_first_user_from_summary(
+    session: Any,
+    summary: dict[str, Any],
+) -> Message | None:
+    first_id = summary.get("first_user_message_id")
+    if not isinstance(first_id, str) or not first_id:
+        return None
+    msg = await _get_message(session, first_id)
+    if msg is not None and _role_eq(msg.role, Role.USER):
+        return msg
+    return None
+
+
+async def _pick_current_user_with_lookup(
+    session: Any,
+    rows_desc: list[Message],
+    target: Message,
+    summary: dict[str, Any] | None = None,
+) -> Message | None:
+    current = _pick_current_user(rows_desc, target)
+    if current is not None:
+        return current
+    parent_id = getattr(target, "parent_message_id", None)
+    if not parent_id:
+        return None
+    candidate = await _get_message(session, parent_id)
+    if candidate is None or not _role_eq(candidate.role, Role.USER):
+        return None
+    if is_summary_usable(summary) and not _message_after_summary(summary, candidate):
+        return None
+    return candidate
 
 
 def _pick_first_user(rows_desc: list[Message]) -> Message | None:
@@ -1603,20 +1782,84 @@ async def _pack_recent_history(
             _system_prompt=system_prompt,
         )
 
+    summary_model = await _resolve_summary_model()
+    conv = await session.get(Conversation, conversation_id)
+    summary = getattr(conv, "summary_jsonb", None) if conv is not None else None
+    all_rows_desc: list[Message] | None = None
+    total_used_tokens = 0
+    total_truncated = False
+
     compression_enabled = bool(
         await _resolve_int_setting(
             "context.compression_enabled",
             _CONTEXT_COMPRESSION_ENABLED_DEFAULT,
         )
     )
-    if not compression_enabled:
-        rows_desc, used_tokens, truncated = await _load_rows_desc(
+    trigger_percent = await _resolve_int_setting(
+        "context.compression_trigger_percent",
+        _CONTEXT_COMPRESSION_TRIGGER_PERCENT_DEFAULT,
+    )
+    trigger_tokens = input_budget * trigger_percent // 100
+    existing_summary_packed: PackedContext | None = None
+    if is_summary_usable(summary):
+        rows_after_summary = await _load_rows_desc_after_summary(
             session,
             conversation_id=conversation_id,
             target=target,
-            budget_tokens=input_budget,
-            system_prompt=system_prompt,
+            summary=summary,  # type: ignore[arg-type]
         )
+        first_user = await _pick_first_user_from_summary(session, summary)  # type: ignore[arg-type]
+        current_user = await _pick_current_user_with_lookup(
+            session,
+            rows_after_summary,
+            target,
+            summary,  # type: ignore[arg-type]
+        )
+        existing_summary_packed = _pack_with_existing_summary(
+            system_prompt=system_prompt,
+            all_rows_desc=rows_after_summary,
+            summary=summary,  # type: ignore[arg-type]
+            summary_model=summary_model,
+            input_budget=input_budget,
+            current_user=current_user,
+            first_user=first_user,
+        )
+        # A persisted manual summary is authoritative even when auto compression
+        # is disabled. Only roll it forward when auto compression is enabled and
+        # new post-summary history has grown back toward the trigger threshold.
+        if not compression_enabled or existing_summary_packed.estimated_tokens < trigger_tokens:
+            return _packed_with_input(
+                await _build_input_from_packed_context(session, existing_summary_packed),
+                existing_summary_packed,
+            )
+
+    all_rows_desc, total_used_tokens, total_truncated = await _load_rows_desc(
+        session,
+        conversation_id=conversation_id,
+        target=target,
+        budget_tokens=None,
+        system_prompt=system_prompt,
+    )
+    first_user = _pick_first_user(all_rows_desc)
+    current_user = await _pick_current_user_with_lookup(
+        session,
+        all_rows_desc,
+        target,
+    )
+
+    if not compression_enabled:
+        rows_desc = []
+        used_tokens = estimate_system_prompt_tokens(system_prompt)
+        truncated = False
+        for m in all_rows_desc:
+            est = _count_message_tokens(m.role, m.content)
+            if est <= 0:
+                continue
+            if used_tokens + est > input_budget:
+                truncated = True
+                break
+            rows_desc.append(m)
+            used_tokens += est
         packed = _fallback_pack(
             system_prompt=system_prompt,
             rows_desc=rows_desc,
@@ -1628,7 +1871,6 @@ async def _pack_recent_history(
             packed,
         )
 
-    summary_model = await _resolve_summary_model()
     if await _context_circuit_open(redis):
         rows_desc, used_tokens, truncated = await _load_rows_desc(
             session,
@@ -1652,10 +1894,6 @@ async def _pack_recent_history(
             packed,
         )
 
-    trigger_percent = await _resolve_int_setting(
-        "context.compression_trigger_percent",
-        _CONTEXT_COMPRESSION_TRIGGER_PERCENT_DEFAULT,
-    )
     target_tokens = await _resolve_int_setting(
         "context.summary_target_tokens",
         _CONTEXT_SUMMARY_TARGET_TOKENS_DEFAULT,
@@ -1672,15 +1910,11 @@ async def _pack_recent_history(
         _CONTEXT_SUMMARY_MIN_INTERVAL_SECONDS_DEFAULT,
     )
 
-    all_rows_desc, total_used_tokens, total_truncated = await _load_rows_desc(
-        session,
-        conversation_id=conversation_id,
-        target=target,
-        budget_tokens=None,
-        system_prompt=system_prompt,
-    )
-    trigger_tokens = input_budget * trigger_percent // 100
-    if total_used_tokens < trigger_tokens and not total_truncated:
+    if (
+        not is_summary_usable(summary)
+        and total_used_tokens < trigger_tokens
+        and not total_truncated
+    ):
         packed = _fallback_pack(
             system_prompt=system_prompt,
             rows_desc=all_rows_desc,
@@ -1693,9 +1927,6 @@ async def _pack_recent_history(
             await _build_input_from_packed_context(session, packed),
             packed,
         )
-
-    first_user = _pick_first_user(all_rows_desc)
-    current_user = _pick_current_user(all_rows_desc, target)
 
     forced_recent_desc: list[Message] = []
     for m in all_rows_desc:
@@ -1754,6 +1985,11 @@ async def _pack_recent_history(
         and (sticky_message is None or m.id != sticky_message.id)
     ]
     if not summary_rows:
+        if existing_summary_packed is not None:
+            return _packed_with_input(
+                await _build_input_from_packed_context(session, existing_summary_packed),
+                existing_summary_packed,
+            )
         packed = _fallback_pack(
             system_prompt=system_prompt,
             rows_desc=all_rows_desc,
@@ -1768,8 +2004,6 @@ async def _pack_recent_history(
         )
 
     boundary_message = max(summary_rows, key=lambda m: (_message_created_at(m), m.id))
-    conv = await session.get(Conversation, conversation_id)
-    summary = getattr(conv, "summary_jsonb", None) if conv is not None else None
     summary_created = False
 
     summary_recently_refreshed = False
