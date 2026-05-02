@@ -89,6 +89,57 @@ Next.js Web ---------------> FastAPI API
 bash scripts/install.sh
 ```
 
+也可以使用统一运维脚本，把 Lumen、image-job 和 nginx 相关操作放在同一个入口：
+
+```bash
+bash scripts/lumenctl.sh
+```
+
+运行后会出现交互菜单：
+
+```text
+1) 安装 Lumen
+2) 更新 Lumen
+3) 卸载 Lumen
+4) 安装 image-job
+5) 卸载 image-job
+6) 扫描 nginx 配置
+7) nginx 反代优化向导
+0) 退出
+```
+
+也可以不进菜单，直接执行单个动作：
+
+```bash
+# Lumen
+bash scripts/lumenctl.sh install-lumen
+bash scripts/lumenctl.sh update-lumen
+bash scripts/lumenctl.sh uninstall-lumen
+
+# image-job sidecar
+bash scripts/lumenctl.sh install-image-job
+bash scripts/lumenctl.sh uninstall-image-job
+
+# nginx
+bash scripts/lumenctl.sh nginx-scan
+bash scripts/lumenctl.sh nginx-optimize
+bash scripts/lumenctl.sh nginx-lumen
+bash scripts/lumenctl.sh nginx-sub2api
+bash scripts/lumenctl.sh nginx-sub2api-inner
+bash scripts/lumenctl.sh nginx-sub2api-outer
+bash scripts/lumenctl.sh nginx-image-job
+```
+
+`nginx-optimize` 是一个反代向导，进入后按部署拓扑选择：
+
+- `Lumen 反代`：生成/更新 Lumen Web 反代，包含 `/api/`、`/events` SSE、上传大小和超时配置。
+- `sub2api 单机公网反代`：公网域名所在 nginx 直接代理到本机 sub2api，例如 `http://127.0.0.1:8081`。
+- `sub2api 内层反代`：sub2api 所在机器也有 nginx，先把本机 `127.0.0.1:8081` 暴露成内网地址/端口。
+- `sub2api 外层公网反代`：公网域名在另一台机器上，该机器再代理到上面的内层 nginx。
+- `image-job 路由注入`：扫描已有 nginx 站点，备份后注入 `/v1/image-jobs`、`/v1/refs`、`/images/temp/`、`/refs/`。
+
+nginx 写入逻辑会先备份目标配置，写入后执行 `nginx -t`；如果校验失败会回滚。校验通过后会询问是否 reload nginx。涉及 systemd、`/etc/nginx`、`/opt/image-job` 的操作需要在 Linux 服务器上用有 sudo 权限的用户运行。
+
 安装脚本会执行：
 
 - 检查 Docker、uv、Node、Python、OpenSSL
@@ -415,6 +466,15 @@ IMAGE_JOB_PUBLIC_BASE_URL=https://img.example.com \
 - `deploy/image-job/image-job.service`
 - `deploy/image-job/image-job.example.com.conf`
 - `deploy/image-job/nginx-image-job.locations.conf`
+
+也可以用统一菜单自动执行：
+
+```bash
+bash scripts/lumenctl.sh install-image-job
+bash scripts/lumenctl.sh nginx-optimize
+```
+
+`nginx-optimize` 的各类反代拓扑见上文“快速安装”里的统一运维脚本说明。
 
 ## 测试
 

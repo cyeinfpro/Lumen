@@ -25,7 +25,9 @@
 ```text
 POST https://example.com/v1/image-jobs
 GET  https://example.com/v1/image-jobs/{job_id}
+POST https://example.com/v1/refs
 GET  https://example.com/images/temp/...
+GET  https://example.com/refs/...
 ```
 
 推荐路径和端口：
@@ -48,7 +50,7 @@ SQLite:   /var/lib/image-job/state/image_jobs.sqlite3
 Python 3.11+
 可运行 uvicorn / fastapi / httpx / pillow
 本机上游图片 API 已启动，例如 http://127.0.0.1:8081
-nginx 可代理 /v1/image-jobs 并静态暴露 /images/temp/
+nginx 可代理 /v1/image-jobs 与 /v1/refs，并静态暴露 /images/temp/ 与 /refs/
 systemd 可管理 image-job 服务
 ```
 
@@ -182,8 +184,28 @@ location ^~ /v1/image-jobs {
   proxy_read_timeout 60s;
 }
 
+location ^~ /v1/refs {
+  client_max_body_size 100M;
+  proxy_pass http://127.0.0.1:8091;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_connect_timeout 30s;
+  proxy_send_timeout 600s;
+  proxy_read_timeout 600s;
+}
+
   location ^~ /images/temp/ {
     alias /opt/image-job/data/images/temp/;
+    try_files $uri =404;
+    expires 1d;
+    add_header Cache-Control "public, max-age=86400" always;
+  }
+
+  location ^~ /refs/ {
+    alias /opt/image-job/data/refs/;
     try_files $uri =404;
     expires 1d;
     add_header Cache-Control "public, max-age=86400" always;
