@@ -270,7 +270,10 @@ lumen_http_status() {
     if ! command -v curl >/dev/null 2>&1; then
         return 1
     fi
-    curl -sS -o /dev/null -w '%{http_code}' \
+    # 健康检查走本地 loopback。admin 面板触发 update 时会注入 HTTP_PROXY=socks5h://...
+    # 给 git/uv/npm 用，但本地 healthz 千万不能走代理——curl 会把 "connect 127.0.0.1" 投递
+    # 到代理服务器，落到那台机器自己的 loopback，永远拿不到 lumen-api 的响应。
+    curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' \
         --connect-timeout "${LUMEN_HEALTH_CONNECT_TIMEOUT:-2}" \
         --max-time "${LUMEN_HEALTH_MAX_TIME:-8}" \
         "${url}" 2>/dev/null

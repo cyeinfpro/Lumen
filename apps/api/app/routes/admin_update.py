@@ -104,6 +104,8 @@ def _runner_env_lines(env: dict[str, str]) -> list[str]:
         "http_proxy",
         "https_proxy",
         "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
     )
     lines: list[str] = []
     for key in keys:
@@ -629,6 +631,10 @@ async def trigger_update(
         _clean_proxy_env(env)
         if proxy_url:
             _apply_proxy_env(env, proxy_url)
+        # Local-loopback exemptions so update.sh's healthz curl doesn't route
+        # 127.0.0.1 through the upstream socks5 proxy and timeout forever.
+        env.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
+        env.setdefault("no_proxy", "127.0.0.1,localhost,::1")
         env["LUMEN_UPDATE_NONINTERACTIVE"] = "1"
         env.setdefault("LUMEN_UPDATE_GIT_PULL", "1")
         env.setdefault("LUMEN_UPDATE_BUILD", "1")
