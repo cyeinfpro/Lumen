@@ -38,9 +38,13 @@ class _Db:
 
 
 class _ContextDb:
-    def __init__(self, rows: list[Any]) -> None:
+    def __init__(self, rows: list[Any], by_id: dict[str, Any] | None = None) -> None:
         self.rows = rows
+        self.by_id = by_id or {getattr(row, "id", ""): row for row in rows}
         self.message_selects = 0
+
+    async def get(self, _model: Any, object_id: str) -> Any:
+        return self.by_id.get(object_id)
 
     async def execute(self, statement: Any) -> _Result:
         rendered = str(statement)
@@ -196,10 +200,12 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
             "version": 2,
             "kind": "rolling_conversation_summary",
             "up_to_message_id": "msg-4",
-            "up_to_created_at": now.isoformat(),
+            "up_to_created_at": (now + timedelta(seconds=4)).isoformat(),
             "first_user_message_id": "msg-1",
             "text": "Earlier summary",
             "tokens": 12,
+            "source_message_count": 3,
+            "source_token_estimate": 3000,
             "compressed_at": now.isoformat(),
             "compression_runs": 2,
         },
@@ -215,7 +221,7 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
     assert out.input_budget_tokens == 200_000
     assert out.total_target_tokens == 256_000
     assert out.response_reserve_tokens == 56_000
-    assert out.included_messages_count == 25
+    assert out.included_messages_count == 22
     assert out.truncated is False
     assert out.compression_enabled is False
     assert out.summary_available is True
@@ -223,10 +229,66 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
     assert out.summary_up_to_message_id == "msg-4"
     assert out.summary_first_user_message_id == "msg-1"
     assert out.summary_compression_runs == 2
-    assert out.compressible_messages_count == 8
+    assert out.compressible_messages_count == 4
     assert out.compressible_tokens > 0
     assert out.summary_target_tokens == 1200
-    assert out.estimated_tokens_freed == max(0, out.compressible_tokens - 1200)
+    assert out.estimated_tokens_freed < out.compressible_tokens
     assert out.manual_compact_available is False
     assert out.manual_compact_min_input_tokens == 4000
     assert out.manual_compact_unavailable_reason == "below_min_tokens"
+
+
+@pytest.mark.asyncio
+async def test_context_window_estimate_uses_summary_instead_of_counting_compacted_history() -> None:
+    now = datetime.now(timezone.utc)
+    old_blob = "old context " + ("x" * 35_000)
+    recent_blob = "recent context " + ("y" * 350)
+    messages = [
+        _message("msg-5", now + timedelta(seconds=5)),
+        _message("msg-4", now + timedelta(seconds=4)),
+        _message("msg-3", now + timedelta(seconds=3)),
+        _message("msg-2", now + timedelta(seconds=2)),
+        _message("msg-1", now + timedelta(seconds=1)),
+    ]
+    messages[0].content = {"text": "latest question"}
+    messages[1].content = {"text": recent_blob}
+    messages[2].content = {"text": old_blob}
+    messages[3].content = {"text": old_blob}
+    messages[4].content = {"text": "original task"}
+    by_id = {msg.id: msg for msg in messages}
+    raw_history_tokens = sum(
+        conversations.estimate_message_tokens(msg.role, msg.content)
+        for msg in messages
+    )
+    summary = {
+        "version": 2,
+        "kind": "rolling_conversation_summary",
+        "up_to_message_id": "msg-3",
+        "up_to_created_at": (now + timedelta(seconds=3)).isoformat(),
+        "first_user_message_id": "msg-1",
+        "text": "compressed old facts",
+        "tokens": 100,
+        "source_message_count": 3,
+        "source_token_estimate": raw_history_tokens,
+        "compressed_at": now.isoformat(),
+        "compression_runs": 1,
+    }
+    conv = SimpleNamespace(
+        id="conv-1",
+        default_system=None,
+        default_system_prompt_id=None,
+        summary_jsonb=summary,
+    )
+
+    out = await conversations._estimate_context_window(
+        _ContextDb(messages, by_id=by_id),  # type: ignore[arg-type]
+        conv=conv,  # type: ignore[arg-type]
+        user_id="user-1",
+        user_default_prompt_id=None,
+    )
+
+    assert out.summary_available is True
+    assert out.estimated_input_tokens < raw_history_tokens // 4
+    assert out.summary_tokens == 100
+    assert out.compressible_tokens == 0
+    assert out.estimated_tokens_freed == 0

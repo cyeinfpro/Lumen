@@ -240,6 +240,60 @@ async def test_compression_injects_sticky_and_existing_summary(
 
 
 @pytest.mark.asyncio
+async def test_manual_summary_is_used_even_below_auto_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_resolve_int(key: str, default: int) -> int:
+        values = {
+            "context.compression_enabled": 1,
+            "context.compression_trigger_percent": 98,
+            "context.summary_target_tokens": 20,
+            "context.summary_min_recent_messages": 16,
+            "context.summary_min_interval_seconds": 30,
+        }
+        return values.get(key, default)
+
+    async def fake_resolve(key: str) -> str | None:
+        if key == "context.summary_model":
+            return "summary-model"
+        return None
+
+    monkeypatch.setattr(completion.runtime_settings, "resolve_int", fake_resolve_int)
+    monkeypatch.setattr(completion.runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(completion, "CONTEXT_INPUT_TOKEN_BUDGET", 20_000)
+    first = _message(1, "original task")
+    old_a = _message(2, "old answer " + ("a" * 600), Role.ASSISTANT.value)
+    old_u = _message(3, "old detail " + ("b" * 600))
+    recent = _message(4, "recent question")
+    target = _message(5, "", Role.ASSISTANT.value)
+    target.parent_message_id = recent.id
+    messages = [first, old_a, old_u, recent, target]
+    conv = _conversation(_summary(up_to=old_u, first_user=first))
+    session = _CompressionSession(
+        conversation=conv,
+        messages=messages,
+        batches=[list(reversed(messages))],
+    )
+
+    packed = await completion._pack_recent_history(
+        session,
+        conversation_id="conv-1",
+        up_to_message_id=target.id,
+        system_prompt=None,
+    )
+
+    assert packed.summary_used is True
+    assert packed.summary_up_to_message_id == old_u.id
+    texts = _texts(
+        await completion._build_input_from_packed_context(session, packed)
+    )
+    joined = "\n".join(texts)
+    assert "compressed old facts" in joined
+    assert "recent question" in joined
+    assert "old detail " not in joined
+
+
+@pytest.mark.asyncio
 async def test_compression_calls_summary_service_when_missing(
     enable_compression: None,
     monkeypatch: pytest.MonkeyPatch,
