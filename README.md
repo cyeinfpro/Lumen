@@ -85,15 +85,26 @@ Next.js Web ---------------> FastAPI API
 
 ## 快速安装
 
+可以直接从 GitHub raw 调用安装脚本：
+
 ```bash
-bash scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/cyeinfpro/Lumen/refs/heads/main/scripts/install.sh | bash
 ```
 
-也可以使用统一运维脚本，把 Lumen、image-job 和 nginx 相关操作放在同一个入口：
+这条命令会先把仓库拉到 `~/Lumen`，再执行仓库内的 `scripts/install.sh`。如果要指定安装目录或分支：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cyeinfpro/Lumen/refs/heads/main/scripts/install.sh \
+  | LUMEN_INSTALL_DIR=/opt/Lumen LUMEN_BRANCH=main bash
+```
+
+如果已经在项目目录内，可以直接运行统一运维菜单：
 
 ```bash
 bash scripts/lumenctl.sh
 ```
+
+`lumenctl.sh` 会把 Lumen、image-job 和 nginx 相关操作放在同一个入口。
 
 运行后会出现交互菜单：
 

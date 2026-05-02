@@ -7,7 +7,44 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+
+bootstrap_from_raw_script() {
+    local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
+    local branch="${LUMEN_BRANCH:-main}"
+    local install_dir="${LUMEN_INSTALL_DIR:-${HOME:-$PWD}/Lumen}"
+
+    printf '[INFO] 当前脚本不是在完整 Lumen 仓库内运行，将进入远程 bootstrap 模式。\n'
+    printf '[INFO] 仓库：%s\n' "${repo_url}"
+    printf '[INFO] 分支：%s\n' "${branch}"
+    printf '[INFO] 目录：%s\n' "${install_dir}"
+
+    if ! command -v git >/dev/null 2>&1; then
+        printf '[ERROR] 缺少 git，无法从 GitHub 拉取 Lumen。\n' >&2
+        printf '        请先安装 git，或手动执行：git clone %s\n' "${repo_url}" >&2
+        exit 1
+    fi
+
+    if [ -d "${install_dir}/.git" ]; then
+        printf '[INFO] 目录已存在，尝试拉取最新代码。\n'
+        git -C "${install_dir}" fetch origin "${branch}"
+        git -C "${install_dir}" checkout "${branch}"
+        git -C "${install_dir}" pull --ff-only origin "${branch}"
+    elif [ -e "${install_dir}" ]; then
+        printf '[ERROR] 目标目录已存在但不是 git 仓库：%s\n' "${install_dir}" >&2
+        printf '        请移走该目录，或设置 LUMEN_INSTALL_DIR 指向一个新目录。\n' >&2
+        exit 1
+    else
+        git clone --branch "${branch}" "${repo_url}" "${install_dir}"
+    fi
+
+    exec bash "${install_dir}/scripts/install.sh" "$@"
+}
+
+if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
+    bootstrap_from_raw_script "$@"
+fi
+
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
