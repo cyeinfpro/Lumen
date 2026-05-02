@@ -525,8 +525,59 @@ install_linux_docker() {
     get_docker_script="$(mktemp)"
     log_info "缺少 Docker 或 docker compose v2，尝试通过 Docker 官方脚本安装。"
     curl -fsSL https://get.docker.com -o "${get_docker_script}"
-    run_as_root sh "${get_docker_script}"
+    if ! run_as_root sh "${get_docker_script}"; then
+        log_warn "Docker 官方安装脚本失败，尝试改用当前软件源中的 Docker 核心包安装。"
+        install_linux_docker_packages
+    fi
     rm -f "${get_docker_script}"
+}
+
+install_linux_docker_packages() {
+    local pm packages package available_packages
+    pm="$(linux_package_manager)"
+    case "${pm}" in
+        apt)
+            run_as_root env DEBIAN_FRONTEND=noninteractive apt-get update
+            packages=(
+                docker-ce
+                docker-ce-cli
+                containerd.io
+                docker-compose-plugin
+                docker-buildx-plugin
+                docker-ce-rootless-extras
+            )
+            available_packages=()
+            for package in "${packages[@]}"; do
+                if apt-cache show "${package}" >/dev/null 2>&1; then
+                    available_packages+=("${package}")
+                else
+                    log_warn "apt 源中不存在 ${package}，跳过该可选 Docker 包。"
+                fi
+            done
+            if [ "${#available_packages[@]}" -eq 0 ]; then
+                log_warn "Docker 官方源无可安装包，尝试安装发行版 docker.io/docker-compose-v2。"
+                install_linux_packages docker.io docker-compose-v2 || install_linux_packages docker.io docker-compose
+            else
+                run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "${available_packages[@]}"
+            fi
+            ;;
+        dnf|yum)
+            install_linux_packages docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin \
+                || install_linux_packages docker docker-compose
+            ;;
+        pacman)
+            install_linux_packages docker docker-compose
+            ;;
+        zypper)
+            install_linux_packages docker docker-compose
+            ;;
+        apk)
+            install_linux_packages docker docker-cli-compose
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 install_linux_compose_plugin() {
