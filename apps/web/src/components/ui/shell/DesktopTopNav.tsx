@@ -2,7 +2,7 @@
 
 // 桌面端顶部主导航：复用在 DesktopStudio / DesktopStream / DesktopMe。
 // 三 Tab 横向导航 + 左侧 Logo + 可配置右侧 slot。
-// 与 MobileTabBar 的路由契约保持一致：/ → 创作；/stream → 灵感流；/me、/settings → 我的。
+// 与 MobileTabBar 的路由契约保持一致：/ → 创作；/stream → 图库；/me、/settings → 我的。
 
 import { motion } from "framer-motion";
 import { Menu } from "lucide-react";
@@ -22,7 +22,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { key: "studio", label: "创作", route: "/" },
-  { key: "stream", label: "灵感流", route: "/stream" },
+  { key: "stream", label: "图库", route: "/stream" },
   { key: "me", label: "我的", route: "/me" },
 ];
 

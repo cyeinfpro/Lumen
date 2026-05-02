@@ -55,8 +55,8 @@ export async function generateMetadata({
     ? `Lumen 图片分享 · ${images.length} 张`
     : "Lumen 分享";
   const description = first
-    ? `查看 ${first.width} x ${first.height} 的 Lumen 生成图片。`
-    : "查看 Lumen Studio 生成的分享图片。";
+    ? `查看一张 ${first.width} x ${first.height} 的 Lumen 图片。`
+    : "查看 Lumen 分享图片。";
   const imageUrl = first ? absoluteUrl(first.url, base) : undefined;
 
   return {
@@ -223,8 +223,8 @@ function ShareShell({ children }: { children: React.ReactNode }) {
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300 hover:text-neutral-100 transition-colors"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">用 Lumen 生成</span>
-            <span className="sm:hidden">生成</span>
+            <span className="hidden sm:inline">打开 Lumen</span>
+            <span className="sm:hidden">打开</span>
           </Link>
         </div>
       </header>
@@ -235,14 +235,13 @@ function ShareShell({ children }: { children: React.ReactNode }) {
 
       <footer className="border-t border-white/8 px-4 py-6 text-center text-xs text-neutral-500 safe-bottom safe-x">
         <p>
-          由{" "}
           <Link
             href="/"
             className="text-neutral-300 hover:text-[var(--color-lumen-amber)] transition-colors"
           >
             Lumen Studio
-          </Link>{" "}
-          生成
+          </Link>
+          {" "}分享
         </p>
       </footer>
     </div>
@@ -294,7 +293,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
           href="/"
           className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-lg bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium transition-all"
         >
-          <Sparkles className="w-3.5 h-3.5" /> 用 Lumen 生成自己的
+          <Sparkles className="w-3.5 h-3.5" /> 打开 Lumen
         </Link>
       </div>
     </div>

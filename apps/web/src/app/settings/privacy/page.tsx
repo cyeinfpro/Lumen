@@ -70,7 +70,7 @@ export default function PrivacyPage() {
               隐私 & 数据
             </h1>
             <p className="text-sm text-[var(--fg-1)] mt-1.5">
-              管理你的个人数据、活跃会话与账号删除。
+              查看数据、登录会话和账号删除选项。
             </p>
           </div>
           <Link

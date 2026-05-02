@@ -60,7 +60,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   // 粘贴图 toast：本地最简实现，避免依赖 Agent A 的 Toast 原语
   const [toast, setToast] = useState<string | null>(null);
-  // AI 增强提示词
+  // 提示词润色
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [originalText, setOriginalText] = useState<string | null>(null);
   const enhanceAbortRef = useRef<AbortController | null>(null);
@@ -222,7 +222,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
       logError(err, { scope: "composer", code: "enhance_failed" });
       setText(current);
       setOriginalText(null);
-      setToast("提示词优化失败");
+      setToast("润色失败");
     } finally {
       setIsEnhancing(false);
       enhanceAbortRef.current = null;
@@ -422,7 +422,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           </div>
         )}
 
-        {/* AI 已优化提示 */}
+        {/* 提示词已润色 */}
         <AnimatePresence>
           {originalText !== null && !isEnhancing && (
             <motion.div
@@ -434,7 +434,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
             >
               <div className="mx-4 mt-2 flex items-center gap-2 px-2.5 py-1 text-[11px] rounded-lg bg-[var(--color-lumen-amber)]/10 border border-[var(--color-lumen-amber)]/25 text-[var(--color-lumen-amber)]">
                 <Sparkles className="w-3 h-3 shrink-0" />
-                <span className="flex-1">AI 已优化提示词</span>
+                <span className="flex-1">提示词已润色</span>
                 <button
                   type="button"
                   onClick={handleUndoEnhance}
@@ -463,7 +463,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               onCompositionEnd={() => {
                 isComposingRef.current = false;
               }}
-              placeholder="描述你想生成的画面，或和 Lumen 对话…"
+              placeholder="描述画面，或直接提问..."
               aria-label="输入提示词"
               className={cn(
                 "w-full bg-transparent resize-none outline-none",
@@ -511,7 +511,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           />
 
           <IconButton
-            label={isEnhancing ? "正在优化…" : "AI 优化提示词"}
+            label={isEnhancing ? "润色中..." : "润色提示词"}
             onClick={() => void handleEnhance()}
             disabled={isEnhancing || !text.trim()}
           >

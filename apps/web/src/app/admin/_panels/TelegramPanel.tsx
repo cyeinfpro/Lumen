@@ -50,13 +50,13 @@ const STRATEGIES: {
   {
     value: "random",
     label: "随机",
-    hint: "每次发请求都从池子里随机挑一个，最稳，推荐。",
+    hint: "每次请求随机选一个，分摊压力。",
     icon: Shuffle,
   },
   {
     value: "latency",
     label: "选最快",
-    hint: "在测过的最快 1/3 代理里随机挑，追求速度。",
+    hint: "从延迟最低的一组里随机选。",
     icon: Zap,
   },
   {
@@ -68,7 +68,7 @@ const STRATEGIES: {
   {
     value: "round_robin",
     label: "轮流",
-    hint: "按顺序一个一个轮着用，分布最均匀。",
+    hint: "按顺序轮换使用。",
     icon: Shuffle,
   },
 ];
@@ -184,8 +184,7 @@ export function TelegramPanel() {
           </div>
           <div className="min-w-0 text-xs text-neutral-400 leading-relaxed">
             <p className="text-sm font-medium text-neutral-100 mb-1">Telegram 机器人</p>
-            改完保存后会询问是否立即重启机器人；点确认就直接通过控制通道让 bot 重启。
-            代理切换不需要重启 —— 机器人发送出错会自动从池里换一个。
+            保存后可直接重启机器人。代理切换不需要重启；发送失败时会自动换下一个。
           </div>
         </div>
       </div>
@@ -196,7 +195,7 @@ export function TelegramPanel() {
 
         <ToggleField
           label="启用机器人"
-          hint="关掉后机器人启动会立刻退出。临时停服不用 ssh，把这里关上就行。"
+          hint="关闭后机器人会在启动时退出。临时停服可直接关掉这里。"
           on={form.bot_enabled === "1"}
           onChange={(v) =>
             setForm((f) => ({ ...f, bot_enabled: v ? "1" : "0" }))
@@ -237,7 +236,7 @@ export function TelegramPanel() {
 
         <Field
           label="允许使用的 TG 账号 ID"
-          hint="只允许这些 Telegram 账号 ID（一串数字）使用，多个用英文逗号分开。留空表示不限制。建议至少填上自己的 ID 当双重保险。"
+          hint="只允许这些 Telegram 账号 ID 使用，多个用英文逗号分开。留空表示不限制。"
           value={form.allowed_user_ids}
           onChange={(v) => setForm((f) => ({ ...f, allowed_user_ids: v }))}
           mono
@@ -249,7 +248,7 @@ export function TelegramPanel() {
         <div>
           <h3 className="text-sm font-medium text-neutral-100">代理设置</h3>
           <p className="text-xs text-neutral-500 mt-0.5">
-            机器人发消息给 Telegram 走哪些代理，怎么挑。代理本身在
+            设置机器人发消息时使用哪些代理，以及选择顺序。代理本身在
             「代理池」标签页查看。
           </p>
         </div>
@@ -415,8 +414,7 @@ function RestartConfirmModal({
           <div className="min-w-0 flex-1">
             <h3 className="text-base font-medium text-neutral-100">设置已保存，是否立即重启机器人？</h3>
             <p className="text-sm text-neutral-400 mt-1.5 leading-relaxed">
-              重启大约需要 3 秒。期间发给机器人的消息会暂时无响应；进行中的任务图片仍会
-              在重启后通过任务列表查看。
+              重启大约需要 3 秒。期间机器人会暂时无响应；进行中的任务可在重启后通过任务列表查看。
             </p>
           </div>
         </div>

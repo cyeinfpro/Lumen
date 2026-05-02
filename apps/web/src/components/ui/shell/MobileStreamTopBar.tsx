@@ -25,7 +25,7 @@ export function MobileStreamTopBar({
         compact ? (
           <div className="min-w-0 flex items-baseline gap-2">
             <span className="font-display italic text-[17px] leading-[1.2] text-[var(--fg-0)] shrink-0">
-              灵感流
+              图库
             </span>
             {countLabel && (
               <span className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono truncate">
@@ -36,7 +36,7 @@ export function MobileStreamTopBar({
         ) : (
           <div className="min-w-0">
             <div className="font-display italic text-[28px] leading-[1.1] text-[var(--fg-0)]">
-              灵感流
+              图库
             </div>
             {countLabel && (
               <div className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono mt-0.5">

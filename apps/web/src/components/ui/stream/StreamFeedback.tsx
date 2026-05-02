@@ -20,7 +20,7 @@ export function StreamLoadingState({ columns = 2 }: { columns?: number }) {
   });
 
   return (
-    <div className="px-3 py-4 md:px-0" aria-label="正在加载灵感流">
+    <div className="px-3 py-4 md:px-0" aria-label="正在加载图库">
       <div
         className="grid"
         style={{
@@ -74,7 +74,7 @@ export function StreamErrorState({
         <AlertTriangle className="h-5 w-5" />
       </div>
       <div className="mt-4 text-[15px] font-medium text-[var(--fg-0)]">
-        灵感流暂时没有载入
+        图库暂时没有载入
       </div>
       <div className="mt-2 max-w-[30rem] text-[13px] leading-relaxed text-[var(--fg-2)]">
         {message || "可能是网络或登录状态过期，刷新后会保留当前筛选。"}
@@ -111,7 +111,7 @@ export function StreamNoResultsState({
         {label}
       </div>
       <div className="mt-2 max-w-[28rem] text-[13px] leading-relaxed text-[var(--fg-2)]">
-        清除条件回到完整灵感流，或继续下滑加载更多历史作品。
+        清除条件查看全部作品，或继续下滑加载更早内容。
       </div>
       <button
         type="button"
@@ -135,10 +135,10 @@ export function StreamNeverState() {
         className="mt-6 font-display italic text-[var(--fg-0)]"
         style={{ fontSize: 36, lineHeight: 1.05 }}
       >
-        还没有显影
+        还没有作品
       </div>
       <div className="mt-3 max-w-[26rem] text-[15px] leading-7 text-[var(--fg-2)]">
-        先生成一张图，作品会自动进入这里。
+        生成后的图片会放在这里。
       </div>
       <button
         type="button"
@@ -146,7 +146,7 @@ export function StreamNeverState() {
         className="mt-8 inline-flex h-11 cursor-pointer items-center gap-2 rounded-full bg-[var(--amber-400)] px-5 text-[14px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none"
       >
         <WandSparkles className="h-4 w-4" />
-        开始创作
+        去工作台
       </button>
     </div>
   );

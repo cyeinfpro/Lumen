@@ -33,7 +33,7 @@ export function LandscapeBanner() {
       className="sticky top-0 left-0 right-0 flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-1)]/92 border-b border-[var(--border-subtle)] text-xs text-[var(--fg-1)] backdrop-blur-xl safe-x"
       style={{ zIndex: "var(--z-header, 10)" as unknown as number }}
     >
-      <span className="flex-1 truncate">竖屏体验更佳</span>
+      <span className="flex-1 truncate">竖屏更好用</span>
       <button
         type="button"
         aria-label="关闭提示"

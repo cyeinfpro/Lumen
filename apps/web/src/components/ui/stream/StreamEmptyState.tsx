@@ -37,20 +37,20 @@ export function StreamEmptyState({ kind, onClearFilters }: StreamEmptyStateProps
         className="font-display italic text-[var(--fg-0)]"
         style={{ fontSize: 36, lineHeight: 1.05 }}
       >
-        还没有显影
+        还没有作品
       </div>
       <div
         className="mt-2 text-[15px] text-[var(--fg-1)]"
         style={{ fontFamily: "var(--font-zh-body)" }}
       >
-        试着对 Lumen 说一句话
+        生成后的图片会放在这里
       </div>
       <button
         type="button"
         onClick={() => router.push("/")}
         className="mt-6 h-11 px-5 rounded-full bg-[var(--amber-400)] text-[var(--bg-0)] text-[14px] font-medium shadow-amber active:scale-[0.98] transition-transform"
       >
-        开始创作 →
+        去工作台
       </button>
     </div>
   );

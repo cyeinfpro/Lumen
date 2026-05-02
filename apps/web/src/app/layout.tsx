@@ -38,7 +38,7 @@ const ibmPlexMono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: "Lumen Studio",
-  description: "A premium multimodal AI studio.",
+  description: "Lumen image and chat workspace.",
   applicationName: "Lumen",
   // appleWebApp 不会自动 imply manifest，要单独声明。manifest 走 app/manifest.ts。
   appleWebApp: {

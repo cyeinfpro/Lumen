@@ -1,7 +1,7 @@
 "use client";
 
 // 桌面端创作外壳（V1.0 重设计版）——对齐移动 Darkroom 逻辑：
-//   · 顶部主导航三 Tab (创作 / 灵感流 / 我的) 替代原 Header
+//   · 顶部主导航三 Tab (创作 / 图库 / 我的) 替代原 Header
 //   · Sidebar 从固定侧栏改为按需抽屉，由 ⌘K 或顶部 ≡ 触发
 //   · 底部 Composer 改为居中 Pill（max-w 720，由 Agent 1 提供）
 //   · 会话画布改用 Scene 无气泡（由 Agent 2 提供）

@@ -71,11 +71,11 @@ const ASPECT_OPTIONS: { value: AspectRatio; label: string; hint: string }[] = [
 ];
 
 const REASONING_OPTIONS: { value: ReasoningEffort; label: string; hint: string }[] = [
-  { value: "none", label: "极速", hint: "不思考，最快回复" },
+  { value: "none", label: "最快", hint: "直接回复" },
   { value: "low", label: "低", hint: "轻量思考" },
   { value: "medium", label: "中", hint: "平衡" },
-  { value: "high", label: "高", hint: "深入思考" },
-  { value: "xhigh", label: "极限", hint: "最深入但最慢" },
+  { value: "high", label: "高", hint: "多想一步" },
+  { value: "xhigh", label: "很高", hint: "更慢，适合复杂问题" },
 ];
 
 const COUNT_OPTIONS = [1, 2, 4] as const;
@@ -379,7 +379,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
         setOriginalText(null);
       }
       haptic("light");
-      pushMobileToast("已取消优化", "success");
+      pushMobileToast("已取消润色", "success");
       return;
     }
     const current = text.trim();
@@ -401,13 +401,13 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
         ctl.signal,
       );
       haptic("medium");
-      pushMobileToast("提示词已优化", "success");
+      pushMobileToast("提示词已润色", "success");
     } catch (err) {
       if (ctl.signal.aborted) return;
       logError(err, { scope: "mobile-composer", code: "enhance_failed" });
       setText(current);
       setOriginalText(null);
-      pushMobileToast("提示词优化失败", "danger");
+      pushMobileToast("润色失败", "danger");
     } finally {
       setIsEnhancing(false);
       enhanceAbortRef.current = null;
@@ -536,7 +536,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
                   isComposingRef.current = false;
                 }}
                 readOnly={isEnhancing}
-                placeholder={isImageMode ? "描述你想要的画面…" : "给 Lumen 一句话…"}
+                placeholder={isImageMode ? "描述画面..." : "直接提问..."}
                 aria-label="输入提示词"
                 maxLength={MAX_PROMPT_CHARS}
                 rows={1}
@@ -651,7 +651,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
               )}
             </AnimatePresence>
 
-            {/* AI 优化状态条 */}
+            {/* 提示词润色状态条 */}
             <AnimatePresence>
               {(isEnhancing || (originalText !== null && !isEnhancing)) && (
                 <motion.div
@@ -674,7 +674,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
                       <Sparkles className="w-3.5 h-3.5 shrink-0 text-[var(--amber-400)]" aria-hidden />
                     )}
                     <span className="flex-1 text-[var(--fg-1)]">
-                      {isEnhancing ? "AI 正在优化提示词…" : "AI 已优化提示词"}
+                      {isEnhancing ? "正在润色..." : "提示词已润色"}
                     </span>
                     {!isEnhancing && (
                       <>
@@ -728,7 +728,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
                   isComposingRef.current = false;
                 }}
                 readOnly={isEnhancing}
-                placeholder={isImageMode ? "描述你想要的画面…" : "输入你的问题…"}
+                placeholder={isImageMode ? "描述画面..." : "直接提问..."}
                 aria-label="输入提示词"
                 maxLength={MAX_PROMPT_CHARS}
                 rows={2}
@@ -769,7 +769,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
                   </IconBtn>
 
                   <IconBtn
-                    label={isEnhancing ? "取消优化" : "AI 优化提示词"}
+                    label={isEnhancing ? "取消润色" : "润色提示词"}
                     onClick={() => void handleEnhance()}
                     disabled={!isEnhancing && !text.trim()}
                   >

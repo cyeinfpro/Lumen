@@ -161,12 +161,12 @@ const IMAGE_OUTPUT_FORMAT_OPTIONS: readonly SettingChoice[] = [
   {
     value: "jpeg",
     label: "JPEG",
-    description: "默认选项。体积更小，适合日常生成和分享。",
+    description: "默认选项。文件小，适合分享。",
   },
   {
     value: "png",
     label: "PNG",
-    description: "更接近无损画质，文件更大，适合保真保存和后期编辑。",
+    description: "文件更大，适合保存透明背景或继续编辑。",
   },
 ];
 
@@ -200,11 +200,11 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "image",
     title: "生图引擎",
     summary: "决定图片生成使用 Codex 原生、image2 直连还是双路竞速。",
-    detail: "不确定时选“Codex 原生”。双并发会同时消耗两条路径的配额，默认折叠在高级路径里。",
+    detail: "不确定时选“Codex 原生”。双并发会同时消耗两条路径的配额，默认收起。",
     kind: "enum",
     icon: ImageIcon,
     defaultValue: "responses",
-    recommended: "推荐：Codex 原生",
+    recommended: "默认：Codex 原生",
     choices: IMAGE_ENGINE_OPTIONS,
     keywords: ["image", "engine", "responses", "image2", "dual"],
   },
@@ -216,7 +216,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     kind: "enum",
     icon: Activity,
     defaultValue: "auto",
-    recommended: "推荐：自动混合",
+    recommended: "默认：自动混合",
     choices: IMAGE_CHANNEL_OPTIONS,
     keywords: ["image", "channel", "image_jobs", "stream", "auto", "异步"],
   },
@@ -229,7 +229,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     kind: "enum",
     icon: ImageIcon,
     defaultValue: "jpeg",
-    recommended: "追求画质选 PNG；追求速度和体积选 JPEG。",
+    recommended: "体积优先选 JPEG；需要透明或后期编辑选 PNG。",
     choices: IMAGE_OUTPUT_FORMAT_OPTIONS,
     keywords: ["image", "format", "output", "jpeg", "png", "格式", "画质"],
   },
@@ -293,7 +293,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     max: 60,
     step: 0.5,
     defaultValue: "10",
-    recommended: "推荐：10 秒",
+    recommended: "默认：10 秒",
     keywords: ["connect", "timeout", "连接"],
   },
   "upstream.read_timeout_s": {
@@ -308,7 +308,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     max: 1800,
     step: 1,
     defaultValue: "660",
-    recommended: "推荐：660 秒；4K 任务多时保持这个值。",
+    recommended: "默认：660 秒；4K 任务多时保持这个值。",
     keywords: ["read", "timeout", "生成", "等待"],
   },
   "upstream.write_timeout_s": {
@@ -322,7 +322,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     max: 120,
     step: 1,
     defaultValue: "30",
-    recommended: "推荐：30 秒",
+    recommended: "默认：30 秒",
     keywords: ["write", "timeout", "上传"],
   },
   "providers.auto_probe_interval": {
@@ -336,7 +336,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 0,
     max: 3600,
     defaultValue: "120",
-    recommended: "推荐：120 秒；账号少时可以更低。",
+    recommended: "默认：120 秒；账号少时可以更短。",
     keywords: ["provider", "probe", "探活"],
   },
   "providers.auto_image_probe_interval": {
@@ -350,19 +350,19 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 0,
     max: 86400,
     defaultValue: "0",
-    recommended: "推荐：0，先关闭。",
-    warning: "开启后会消耗上游图片配额。",
+    recommended: "默认：0，先关闭。",
+    warning: "会消耗上游图片配额。",
     keywords: ["provider", "image", "probe", "图片探活"],
   },
   "context.compression_enabled": {
     group: "context_auto",
     title: "自动压缩长对话",
     summary: "对话快超过上下文时，自动把较早内容整理成摘要。",
-    detail: "开启后更适合长对话，但摘要质量依赖所选模型。",
+    detail: "长对话会更稳，但摘要质量取决于所选模型。",
     kind: "toggle",
     icon: BrainCircuit,
     defaultValue: "0",
-    recommended: "长对话用户多时建议开启。",
+    recommended: "长对话较多时打开。",
     keywords: ["context", "compression", "上下文", "压缩"],
   },
   "context.compression_trigger_percent": {
@@ -376,7 +376,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 50,
     max: 98,
     defaultValue: "80",
-    recommended: "推荐：80%",
+    recommended: "默认：80%",
     keywords: ["trigger", "percent", "阈值"],
   },
   "context.summary_target_tokens": {
@@ -390,7 +390,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 300,
     max: 8000,
     defaultValue: "1200",
-    recommended: "推荐：1200",
+    recommended: "默认：1200",
     keywords: ["summary", "tokens", "摘要"],
   },
   "context.summary_model": {
@@ -400,7 +400,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     kind: "text",
     icon: Bot,
     defaultValue: "gpt-5.4",
-    recommended: "建议使用稳定、理解长上下文能力好的模型。",
+    recommended: "选稳定、长上下文表现好的模型。",
     keywords: ["summary", "model", "摘要模型"],
   },
   "context.summary_min_recent_messages": {
@@ -414,7 +414,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 4,
     max: 64,
     defaultValue: "16",
-    recommended: "推荐：16 条",
+    recommended: "默认：16 条",
     keywords: ["recent", "messages", "保留"],
   },
   "context.summary_min_interval_seconds": {
@@ -428,7 +428,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 0,
     max: 3600,
     defaultValue: "30",
-    recommended: "推荐：30 秒",
+    recommended: "默认：30 秒",
     keywords: ["interval", "cooldown", "冷却"],
   },
   "context.summary_input_budget": {
@@ -442,7 +442,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 8000,
     max: 200000,
     defaultValue: "80000",
-    recommended: "推荐：80000",
+    recommended: "默认：80000",
     keywords: ["input", "budget", "摘要输入"],
   },
   "context.image_caption_enabled": {
@@ -452,7 +452,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     kind: "toggle",
     icon: ImageIcon,
     defaultValue: "1",
-    recommended: "推荐开启，尤其是多图长对话。",
+    recommended: "多图长对话建议打开。",
     keywords: ["image", "caption", "图片描述"],
   },
   "context.image_caption_model": {
@@ -462,7 +462,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     kind: "text",
     icon: Bot,
     defaultValue: "gpt-5.4-mini-vision",
-    recommended: "建议使用便宜、稳定的视觉模型。",
+    recommended: "选成本低、稳定的视觉模型。",
     keywords: ["caption", "vision", "图片模型"],
   },
   "context.compression_circuit_breaker_threshold": {
@@ -476,7 +476,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 10,
     max: 100,
     defaultValue: "60",
-    recommended: "推荐：60%",
+    recommended: "默认：60%",
     keywords: ["circuit", "breaker", "失败保护"],
   },
   "context.manual_compact_min_input_tokens": {
@@ -489,7 +489,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 0,
     max: 200000,
     defaultValue: "4000",
-    recommended: "推荐：4000",
+    recommended: "默认：4000",
     keywords: ["manual", "compact", "手动压缩"],
   },
   "context.manual_compact_cooldown_seconds": {
@@ -502,7 +502,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     min: 0,
     max: 86400,
     defaultValue: "600",
-    recommended: "推荐：600 秒，也就是 10 分钟。",
+    recommended: "默认：600 秒，也就是 10 分钟。",
     keywords: ["manual", "cooldown", "手动压缩"],
   },
 };
@@ -564,7 +564,7 @@ const GROUPS: {
   {
     id: "advanced",
     label: "其他",
-    description: "尚未归类的高级项",
+    description: "未归类设置",
     icon: Database,
   },
 ];
@@ -847,7 +847,7 @@ export function SettingsPanel() {
                 系统设置
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-                这些开关会影响图片生成、上游请求和长对话处理。多数设置保持推荐值即可，保存后通常几秒内对 API 和 Worker 生效。
+                这些设置会影响图片生成、上游请求和长对话处理。保存后通常几秒内对 API 和 Worker 生效。
               </p>
             </div>
           </div>
@@ -1121,8 +1121,8 @@ function SettingsGroup({
         {group.id === "context_auto" && !dependencyState.compressionEnabled && (
           <DependencyNotice
             icon={BrainCircuit}
-            title="开启自动压缩后可调整摘要参数"
-            body="摘要触发阈值、目标 token、模型和熔断参数会在开关开启后显示。"
+            title="先打开自动压缩"
+            body="打开后再调整触发阈值、目标 token、模型和熔断参数。"
           />
         )}
         {group.items.map((item) => (
@@ -1380,7 +1380,7 @@ function SettingControl({
             className="inline-flex min-h-[32px] cursor-pointer items-center gap-1 rounded-lg border border-red-500/25 bg-red-500/5 px-2 text-xs text-red-200 transition-colors hover:bg-red-500/10"
           >
             <ChevronRight className="h-3.5 w-3.5" />
-            显示高级路径
+            显示进阶路径
           </button>
         )}
         {item.key === IMAGE_CHANNEL_KEY && (
@@ -1725,7 +1725,7 @@ function ResetEditButton({
       className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 md:h-11"
     >
       <Check className="h-3.5 w-3.5" />
-      填入推荐值
+      填入默认值
     </button>
   );
 }
@@ -2024,7 +2024,7 @@ function getSettingMeta(key: string, fallbackDescription?: string): SettingMeta 
               ? "context_auto"
               : "advanced",
     title: humanizeKey(key),
-    summary: fallbackDescription || "高级设置。修改前建议先确认它影响的功能范围。",
+    summary: fallbackDescription || "未归类设置。修改前先确认影响范围。",
     kind: "text",
     icon: Database,
     keywords: [prefix],

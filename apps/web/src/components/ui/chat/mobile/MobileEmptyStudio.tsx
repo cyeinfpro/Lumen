@@ -33,12 +33,12 @@ interface HistoryStoreExtras {
 }
 
 const SUGGESTIONS: Suggestion[] = [
-  { text: "傍晚的海边，镜头略俯，电影感暖调", mode: "image" },
-  { text: "一只戴眼镜的橘猫，水彩画风格", mode: "image" },
-  { text: "赛博朋克风格的东京街头，霓虹灯倒映雨地", mode: "image" },
+  { text: "傍晚海边，镜头略俯，暖色调", mode: "image" },
+  { text: "戴眼镜的橘猫，水彩质感", mode: "image" },
+  { text: "雨夜东京街头，霓虹倒映在地面", mode: "image" },
   { text: "帮我把这张照片调成胶片感", mode: "chat" },
   { text: "分析这张图的构图和光影", mode: "chat" },
-  { text: "用文艺的语言描述这张照片", mode: "chat" },
+  { text: "用克制一点的语言描述这张照片", mode: "chat" },
 ];
 
 export function MobileEmptyStudio({
@@ -122,7 +122,7 @@ export function MobileEmptyStudio({
           className="text-body-lg leading-[1.5] text-[var(--fg-1)] max-w-[280px]"
           style={{ fontFamily: "var(--font-zh-display)" }}
         >
-          说一句话，让它显影。
+          先写一句话。
         </p>
       </div>
 
@@ -161,7 +161,7 @@ export function MobileEmptyStudio({
       <div className="mb-5">
         <div className="mb-2.5 text-caption tracking-[0.08em] uppercase text-[var(--fg-2)] font-semibold flex items-center gap-1.5">
           <span className="w-1.5 h-1.5 rounded-full bg-[var(--amber-400)]" aria-hidden />
-          生成图片
+          图片
         </div>
         <div className="grid grid-cols-2 gap-2.5">
           {imageSuggestions.map((s) => (
@@ -203,7 +203,7 @@ export function MobileEmptyStudio({
       <div>
         <div className="mb-2.5 text-caption tracking-[0.08em] uppercase text-[var(--fg-2)] font-semibold flex items-center gap-1.5">
           <span className="w-1.5 h-1.5 rounded-full bg-[var(--info)]" aria-hidden />
-          智能对话
+          对话
         </div>
         <ul className="flex flex-col gap-2">
           {chatSuggestions.map((s) => (
