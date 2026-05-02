@@ -33,6 +33,14 @@ export type {
   CompactUnavailableReason,
 } from "@/lib/apiClient";
 
+type ErrorPayload = {
+  error?: {
+    reason?: unknown;
+    details?: Record<string, unknown>;
+    rate_limit_reset_seconds?: unknown;
+  };
+};
+
 export interface CompactConversationVars {
   conversationId: string;
   extra_instruction?: string | null;
@@ -40,25 +48,33 @@ export interface CompactConversationVars {
   force?: boolean;
 }
 
-// 后端 503 payload 形如 { detail, reason }；其它错误码可能没有 reason。
+// 后端统一错误 payload 形如 { error: { code, message, ... } }。
 function readUnavailableReason(err: unknown): CompactUnavailableReason | null {
   if (!(err instanceof ApiError)) return null;
   if (err.status !== 503) return null;
-  const payload = err.payload;
-  if (!payload || typeof payload !== "object") return null;
-  const directReason = (payload as { reason?: unknown }).reason;
-  const nestedError = (payload as { error?: unknown }).error;
-  const nestedReason =
-    nestedError && typeof nestedError === "object"
-      ? (nestedError as { reason?: unknown }).reason
-      : null;
-  const reason = directReason ?? nestedReason;
+  const reason = readErrorField(err.payload, "reason");
   if (
     reason === "lock_busy" ||
     reason === "circuit_open" ||
     reason === "upstream_error"
   ) {
     return reason;
+  }
+  return null;
+}
+
+function readErrorField(payload: unknown, field: "reason" | "rate_limit_reset_seconds"): unknown {
+  if (!payload || typeof payload !== "object") return null;
+  const direct = (payload as Record<string, unknown>)[field];
+  const error = (payload as ErrorPayload).error;
+  if (direct != null) return direct;
+  if (error && typeof error === "object") {
+    const fromError = (error as Record<string, unknown>)[field];
+    if (fromError != null) return fromError;
+    const details = (error as ErrorPayload["error"])?.details;
+    if (details && typeof details === "object") {
+      return details[field];
+    }
   }
   return null;
 }
@@ -76,6 +92,13 @@ export function describeCompactError(err: unknown): string {
     if (reason === "circuit_open") return "压缩服务暂不可用";
     if (reason === "upstream_error") return "上游服务异常，稍后重试";
     return "压缩服务暂不可用";
+  }
+  if (err.status === 429 && err.code === "manual_compact_cooldown") {
+    const reset = readErrorField(err.payload, "rate_limit_reset_seconds");
+    if (typeof reset === "number" && Number.isFinite(reset) && reset > 0) {
+      return `冷却中，${Math.ceil(reset)} 秒后可重试`;
+    }
+    return "冷却中，请稍后重试";
   }
   if (err.status === 401) return "请重新登录";
   return err.message || `压缩失败 (HTTP ${err.status})`;

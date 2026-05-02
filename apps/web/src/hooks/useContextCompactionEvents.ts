@@ -359,9 +359,9 @@ export function useContextCompactionEvents(
                 ? {
                     summaryTokens: status.summary.tokens,
                     sourceMessageCount: status.summary.source_message_count,
-                    sourceTokenEstimate: 0,
-                    imageCaptionCount: 0,
-                    tokensFreed: 0,
+                    sourceTokenEstimate: status.summary.source_token_estimate ?? 0,
+                    imageCaptionCount: status.summary.image_caption_count ?? 0,
+                    tokensFreed: status.summary.tokens_freed ?? 0,
                     summaryUpToMessageId: status.summary.summary_up_to_message_id,
                   }
                 : undefined,
