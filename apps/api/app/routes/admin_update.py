@@ -238,6 +238,7 @@ def _systemd_run_command(
     log_path: Path,
     env_file: Path,
     marker_path: Path,
+    user_mode: bool = False,
 ) -> list[str]:
     wrapper = r"""
 set -euo pipefail
@@ -256,14 +257,21 @@ set +a
 printf '=== update unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "$LUMEN_UPDATE_SYSTEMD_UNIT"
 /usr/bin/env bash "$script"
 """
-    return [
-        "systemd-run",
+    cmd: list[str] = ["systemd-run"]
+    if user_mode:
+        cmd.append("--user")
+    cmd += [
         "--unit",
         unit,
         "--collect",
         "--property",
         f"WorkingDirectory={root}",
-        *_current_service_identity_properties(),
+    ]
+    if not user_mode:
+        # User= and Group= are only valid in system mode; --user implicitly runs
+        # under the invoking user's manager.
+        cmd += _current_service_identity_properties()
+    cmd += [
         "/usr/bin/env",
         "bash",
         "-lc",
@@ -274,6 +282,7 @@ printf '=== update unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "$LUME
         str(marker_path),
         str(script),
     ]
+    return cmd
 
 
 def _systemd_run_available() -> bool:
@@ -285,7 +294,7 @@ def _run_systemd_command(
     env: dict[str, str],
     cwd: Path,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
+    return subprocess.run(
         command,
         cwd=str(cwd),
         stdin=subprocess.DEVNULL,
@@ -295,19 +304,62 @@ def _run_systemd_command(
         env=env,
         check=False,
     )
-    if result.returncode == 0 or shutil.which("sudo") is None:
-        return result
-    sudo_command = ["sudo", "-n", *command]
-    return subprocess.run(
-        sudo_command,
-        cwd=str(cwd),
-        stdin=subprocess.DEVNULL,
-        text=True,
-        capture_output=True,
-        close_fds=True,
-        env=env,
-        check=False,
+
+
+def _systemd_run_attempts(
+    *,
+    unit: str,
+    root: Path,
+    script: Path,
+    log_path: Path,
+    env_file: Path,
+    marker_path: Path,
+) -> list[tuple[str, list[str]]]:
+    """Build the ordered list of systemd-run attempts.
+
+    Cheapest first (system bus as current uid), then sudo (works with NOPASSWD
+    or cached creds), then the user manager (works without root if linger is
+    enabled for the runtime user).
+    """
+    system_cmd = _systemd_run_command(
+        unit=unit,
+        root=root,
+        script=script,
+        log_path=log_path,
+        env_file=env_file,
+        marker_path=marker_path,
     )
+    user_cmd = _systemd_run_command(
+        unit=unit,
+        root=root,
+        script=script,
+        log_path=log_path,
+        env_file=env_file,
+        marker_path=marker_path,
+        user_mode=True,
+    )
+    attempts: list[tuple[str, list[str]]] = [("systemd-run", system_cmd)]
+    if shutil.which("sudo") is not None:
+        attempts.append(("sudo -n systemd-run", ["sudo", "-n", *system_cmd]))
+    attempts.append(("systemd-run --user", user_cmd))
+    return attempts
+
+
+def _log_attempt_failure(
+    log_fh: TextIO,
+    label: str,
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    log_fh.write(f"\n[{label}] failed (rc={result.returncode})\n")
+    if result.stdout:
+        log_fh.write(result.stdout)
+        if not result.stdout.endswith("\n"):
+            log_fh.write("\n")
+    if result.stderr:
+        log_fh.write(result.stderr)
+        if not result.stderr.endswith("\n"):
+            log_fh.write("\n")
+    log_fh.flush()
 
 
 def _start_update_systemd_unit(
@@ -316,44 +368,55 @@ def _start_update_systemd_unit(
     env: dict[str, str],
     log_fh: TextIO,
     started_at: datetime,
-) -> tuple[int, str | None]:
+) -> tuple[int, str] | None:
+    """Try to launch update.sh in a transient systemd unit.
+
+    Returns ``(0, unit_name)`` on the first successful attempt; returns ``None``
+    when every attempt fails so the caller can fall back to a detached
+    subprocess. Each attempt's stdout/stderr is appended to ``log_fh`` so the
+    operator can see the real reason via the admin UI.
+    """
     root = script.parent.parent
     unit = _systemd_unit_name(started_at)
     log_path = _update_log_path()
     marker_path = _update_marker_path()
     env = dict(env)
     env["LUMEN_UPDATE_SYSTEMD_UNIT"] = unit
+    # `systemd-run --user` needs XDG_RUNTIME_DIR (and the dbus session it implies)
+    # to reach the runtime user's manager. lumen-api inherits a system-service
+    # environment without these vars, so inject them explicitly. Harmless for the
+    # other attempts: system-mode systemd-run ignores XDG_RUNTIME_DIR, and `sudo`
+    # strips it from the child env unless told otherwise.
+    runtime_dir = f"/run/user/{os.getuid()}"
+    env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
     env_file = _write_update_env_file(env, unit)
     _write_marker(0, started_at.isoformat(), unit=unit)
-    command = _systemd_run_command(
+
+    for label, command in _systemd_run_attempts(
         unit=unit,
         root=root,
         script=script,
         log_path=log_path,
         env_file=env_file,
         marker_path=marker_path,
-    )
-    result = _run_systemd_command(command, env, root)
-    if result.returncode != 0:
-        try:
-            marker_path.unlink()
-        except OSError:
-            pass
-        try:
-            env_file.unlink()
-        except OSError:
-            pass
-        log_fh.write("systemd-run failed\n")
-        if result.stdout:
-            log_fh.write(result.stdout)
-        if result.stderr:
-            log_fh.write(result.stderr)
-        raise _http(
-            "systemd_run_failed",
-            "failed to start update in a separate systemd unit; run scripts/update.sh on the server or grant sudo systemd-run",
-            500,
-        )
-    return 0, unit
+    ):
+        result = _run_systemd_command(command, env, root)
+        if result.returncode == 0:
+            return 0, unit
+        _log_attempt_failure(log_fh, label, result)
+
+    # Every attempt failed — clean up the staged files so the caller's fallback
+    # path can rewrite the marker for its own pid.
+    try:
+        marker_path.unlink()
+    except OSError:
+        pass
+    try:
+        env_file.unlink()
+    except OSError:
+        pass
+    return None
 
 
 async def _resolve_update_proxy(
@@ -453,14 +516,28 @@ async def trigger_update(
 
         proc: subprocess.Popen[bytes] | None = None
         unit: str | None = None
+        pid: int = 0
         if _systemd_run_available():
-            pid, unit = _start_update_systemd_unit(
+            outcome = _start_update_systemd_unit(
                 script=script,
                 env=env,
                 log_fh=log_fh,
                 started_at=started_at,
             )
-        else:
+            if outcome is not None:
+                pid, unit = outcome
+        if unit is None:
+            # systemd-run is missing or every attempt failed (often because the
+            # runtime user lacks NOPASSWD sudo and linger). Fall back to a
+            # detached subprocess so the update can still proceed; update.sh
+            # restarts lumen-api last to minimise the chance of self-killing.
+            log_fh.write(
+                "\n[fallback] launching update.sh as a detached subprocess; "
+                "restart of lumen-api will be the last step. To use a transient "
+                "systemd unit instead, grant 'sudo -n systemd-run' or run "
+                "'loginctl enable-linger <runtime-user>'.\n"
+            )
+            log_fh.flush()
             proc = subprocess.Popen(
                 ["/usr/bin/env", "bash", str(script)],
                 cwd=str(script.parent.parent),
