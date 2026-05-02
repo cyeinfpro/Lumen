@@ -9,6 +9,7 @@ import pwd
 import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,9 @@ router = APIRouter(prefix="/admin/update", tags=["admin"])
 
 _UPDATE_LOG_NAME = ".update.log"
 _UPDATE_RUNNING_MARKER = ".update.running"
+_UPDATE_TRIGGER_NAME = ".update.trigger"
+_UPDATE_RUNNER_ENV_NAME = ".update.env"
+_UPDATE_RUNNER_UNIT = "lumen-update-runner.service"
 _LOG_TAIL_CHARS = 6000
 
 
@@ -58,6 +62,60 @@ def _update_log_path() -> Path:
 
 def _update_marker_path() -> Path:
     return Path(settings.backup_root).expanduser() / _UPDATE_RUNNING_MARKER
+
+
+def _update_trigger_path() -> Path:
+    return Path(settings.backup_root).expanduser() / _UPDATE_TRIGGER_NAME
+
+
+def _update_runner_env_path() -> Path:
+    return Path(settings.backup_root).expanduser() / _UPDATE_RUNNER_ENV_NAME
+
+
+def _runner_unit_available() -> bool:
+    """True iff the system has lumen-update-runner.service installed.
+
+    When present we let PID 1 start the update via a path-watched trigger
+    file. This sidesteps lumen-api's NoNewPrivileges/ProtectSystem sandbox
+    entirely — no dbus, no sudo, no polkit needed.
+    """
+    if shutil.which("systemctl") is None:
+        return False
+    result = subprocess.run(
+        ["systemctl", "list-unit-files", _UPDATE_RUNNER_UNIT, "--no-legend"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return _UPDATE_RUNNER_UNIT in result.stdout
+
+
+def _runner_env_lines(env: dict[str, str]) -> list[str]:
+    """Subset of env vars worth forwarding to the runner via EnvironmentFile."""
+    keys = (
+        "LUMEN_UPDATE_NONINTERACTIVE",
+        "LUMEN_UPDATE_GIT_PULL",
+        "LUMEN_UPDATE_BUILD",
+        "LUMEN_UPDATE_SYSTEMD_UNIT",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    )
+    lines: list[str] = []
+    for key in keys:
+        value = env.get(key)
+        if value is None:
+            continue
+        # systemd EnvironmentFile uses simple KEY=VALUE; values must not be
+        # quoted (systemd parses them literally including any quotes).
+        if "\n" in value or "\r" in value:
+            continue
+        lines.append(f"{key}={value}")
+    return lines
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -362,6 +420,67 @@ def _log_attempt_failure(
     log_fh.flush()
 
 
+def _start_update_via_path_unit(
+    *,
+    env: dict[str, str],
+    log_fh: TextIO,
+    started_at: datetime,
+) -> tuple[int, str] | None:
+    """Trigger lumen-update-runner.service via the path-watched trigger file.
+
+    Writes ``.update.env`` (runner reads via EnvironmentFile) and ``.update.trigger``.
+    PID 1 — not lumen-api — launches the runner, so all of lumen-api's sandbox
+    constraints (NoNewPrivileges, ProtectSystem=strict) and the polkit/sudo
+    plumbing become irrelevant. Synchronously waits up to ~10s for the runner
+    to become active so callers get a deterministic success/fail signal.
+    """
+    backup_root = Path(settings.backup_root).expanduser()
+    backup_root.mkdir(parents=True, exist_ok=True)
+    env_path = _update_runner_env_path()
+    trigger_path = _update_trigger_path()
+    unit = _UPDATE_RUNNER_UNIT
+
+    # 1) Marker first so concurrent triggers see the lock immediately.
+    _write_marker(0, started_at.isoformat(), unit=unit)
+
+    # 2) Env file for the runner. Tmp+rename keeps systemd from racing with
+    #    a half-written file when PathChanged fires.
+    env_text = "\n".join(_runner_env_lines(env)) + "\n"
+    env_tmp = env_path.with_suffix(f"{env_path.suffix}.tmp")
+    env_tmp.write_text(env_text, encoding="utf-8")
+    os.chmod(env_tmp, 0o600)
+    env_tmp.replace(env_path)
+
+    # 3) Trigger file. Content is the ISO timestamp; PathChanged on the path
+    #    unit fires on close-after-write and starts the runner unit.
+    trigger_tmp = trigger_path.with_suffix(f"{trigger_path.suffix}.tmp")
+    trigger_tmp.write_text(started_at.isoformat() + "\n", encoding="utf-8")
+    os.chmod(trigger_tmp, 0o600)
+    trigger_tmp.replace(trigger_path)
+
+    # 4) Wait for the runner to come up. The path-watcher latency is normally
+    #    < 1s; allow generous slack so a busy host doesn't return a misleading
+    #    failure. Exit early as soon as we observe the unit active.
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if _unit_is_running(unit):
+            return 0, unit
+        time.sleep(0.3)
+
+    # Runner did not pick up the trigger. Clean staged files so the caller can
+    # try the next attempt and we don't leave a stale lock.
+    log_fh.write(
+        f"\n[{unit}] path-unit trigger did not activate within 15s; falling through.\n"
+    )
+    log_fh.flush()
+    for path in (trigger_path, env_path, _update_marker_path()):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return None
+
+
 def _start_update_systemd_unit(
     *,
     script: Path,
@@ -517,7 +636,18 @@ async def trigger_update(
         proc: subprocess.Popen[bytes] | None = None
         unit: str | None = None
         pid: int = 0
-        if _systemd_run_available():
+        # Preferred path: a system-installed lumen-update-runner.service watched
+        # by lumen-update.path. Trigger via a file write — PID 1 starts the
+        # runner, so we sidestep lumen-api's sandbox completely.
+        if _runner_unit_available():
+            outcome = _start_update_via_path_unit(
+                env=env,
+                log_fh=log_fh,
+                started_at=started_at,
+            )
+            if outcome is not None:
+                pid, unit = outcome
+        if unit is None and _systemd_run_available():
             outcome = _start_update_systemd_unit(
                 script=script,
                 env=env,

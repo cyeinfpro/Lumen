@@ -1,0 +1,13 @@
+[Unit]
+Description=Lumen one-click update trigger watcher
+After=multi-user.target
+
+[Path]
+# lumen-api (running as user=lumen with NoNewPrivileges + ProtectSystem=strict)
+# writes this file via /admin/update; PID 1 starts the runner so we sidestep the
+# whole sandbox/sudo/polkit chain.
+PathChanged=/opt/lumendata/backup/.update.trigger
+Unit=lumen-update-runner.service
+
+[Install]
+WantedBy=multi-user.target

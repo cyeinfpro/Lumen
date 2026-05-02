@@ -124,6 +124,83 @@ def test_start_update_systemd_unit_writes_marker_and_env(
     assert "export LUMEN_UPDATE_SYSTEMD_UNIT=lumen-update-test.service" in env_text
 
 
+def test_start_update_via_path_unit_writes_trigger_and_waits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+
+    # Pretend the runner unit goes active immediately.
+    monkeypatch.setattr(admin_update, "_unit_is_running", lambda unit: True)
+
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        outcome = admin_update._start_update_via_path_unit(
+            env={
+                "LUMEN_UPDATE_NONINTERACTIVE": "1",
+                "LUMEN_UPDATE_GIT_PULL": "1",
+                "LUMEN_UPDATE_BUILD": "1",
+                "HTTP_PROXY": "http://proxy.example:3128",
+                "PATH": "/should/not/leak",
+            },
+            log_fh=log_fh,
+            started_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+
+    assert outcome == (0, admin_update._UPDATE_RUNNER_UNIT)
+
+    marker = (backup_root / ".update.running").read_text(encoding="utf-8")
+    assert f"unit={admin_update._UPDATE_RUNNER_UNIT}" in marker
+
+    env_text = (backup_root / ".update.env").read_text(encoding="utf-8")
+    assert "LUMEN_UPDATE_NONINTERACTIVE=1" in env_text
+    assert "HTTP_PROXY=http://proxy.example:3128" in env_text
+    # Non-allowlisted vars must not leak into the runner env file.
+    assert "PATH=" not in env_text
+
+    trigger_text = (backup_root / ".update.trigger").read_text(encoding="utf-8")
+    assert trigger_text.startswith("2026-05-02T00:00:00")
+
+
+def test_start_update_via_path_unit_cleans_up_when_runner_does_not_activate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+
+    # Runner never goes active; shrink the wait so the test stays fast.
+    monkeypatch.setattr(admin_update, "_unit_is_running", lambda unit: False)
+    counter = {"n": 0}
+
+    def fake_monotonic() -> float:
+        counter["n"] += 1
+        return float(counter["n"])
+
+    def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(admin_update.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(admin_update.time, "sleep", fake_sleep)
+
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        outcome = admin_update._start_update_via_path_unit(
+            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            log_fh=log_fh,
+            started_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+
+    assert outcome is None
+    # Staged files cleaned so the next attempt isn't blocked by stale state.
+    assert not (backup_root / ".update.running").exists()
+    assert not (backup_root / ".update.trigger").exists()
+    assert not (backup_root / ".update.env").exists()
+
+
 @pytest.mark.asyncio
 async def test_cleanup_marker_when_done_uses_marker_dataclass(
     monkeypatch: pytest.MonkeyPatch,

@@ -1,0 +1,20 @@
+[Unit]
+Description=Lumen one-click update runner
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/lumen
+EnvironmentFile=-/opt/lumendata/backup/.update.env
+Environment=LUMEN_UPDATE_NONINTERACTIVE=1
+Environment=LUMEN_UPDATE_GIT_PULL=1
+Environment=LUMEN_UPDATE_BUILD=1
+StandardOutput=append:/opt/lumendata/backup/.update.log
+StandardError=append:/opt/lumendata/backup/.update.log
+ExecStart=/usr/bin/env bash /opt/lumen/scripts/update.sh
+# Clean trigger / marker / env regardless of update result so the next click works.
+ExecStopPost=/bin/sh -c "rm -f /opt/lumendata/backup/.update.trigger /opt/lumendata/backup/.update.running /opt/lumendata/backup/.update.env"
+TimeoutStartSec=infinity
+KillSignal=SIGTERM
+KillMode=mixed
