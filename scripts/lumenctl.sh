@@ -171,7 +171,10 @@ PY
 run_lumen_script() {
     local script_name="$1"
     log_step "执行 ${script_name}"
-    bash "${SCRIPT_DIR}/${script_name}"
+    case "${script_name}" in
+        install.sh) bash "${SCRIPT_DIR}/${script_name}" --install ;;
+        *) bash "${SCRIPT_DIR}/${script_name}" ;;
+    esac
 }
 
 detect_nologin_shell() {

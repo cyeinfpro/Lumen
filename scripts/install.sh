@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Lumen 一键安装脚本
-# 用法：  bash scripts/install.sh
+# 用法：  bash scripts/install.sh            # 打开运维菜单
+#        bash scripts/install.sh --install  # 直接安装
 # 行为：检查/自动安装依赖 -> 写 .env -> 起 PG/Redis -> uv sync
 #       -> alembic upgrade -> 创建 admin -> npm ci -> 可选 build。
 # 重复执行安全（幂等），中途任何失败都会立即停止。
@@ -142,6 +143,53 @@ OS="$(detect_os)"
 LOCK_DIR="${ROOT}/.lumen-script.lock"
 LOCK_HELD=0
 PARALLEL_PIDS=()
+
+usage() {
+    cat <<EOF
+Lumen 安装入口
+
+用法：
+  bash scripts/install.sh              打开运维菜单
+  bash scripts/install.sh --install    直接安装 Lumen
+  bash scripts/install.sh --update     更新 Lumen
+  bash scripts/install.sh --uninstall  卸载 Lumen
+
+EOF
+}
+
+dispatch_entrypoint() {
+    local command="${1:-menu}"
+    case "${command}" in
+        menu|--menu)
+            exec bash "${SCRIPT_DIR}/lumenctl.sh" menu
+            ;;
+        install|--install)
+            shift || true
+            if [ "$#" -gt 0 ]; then
+                usage
+                log_error "安装命令不接受额外参数：$*"
+                exit 1
+            fi
+            ;;
+        update|--update)
+            exec bash "${SCRIPT_DIR}/update.sh"
+            ;;
+        uninstall|--uninstall)
+            exec bash "${SCRIPT_DIR}/uninstall.sh"
+            ;;
+        help|-h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage
+            log_error "未知命令：${command}"
+            exit 1
+            ;;
+    esac
+}
+
+dispatch_entrypoint "$@"
 
 on_error() {
     local line="$1"
@@ -999,7 +1047,7 @@ else
         validate_dotenv_value "PROVIDER_BASE_URL" "${PROVIDER_BASE_URL}" && break
     done
     while :; do
-        PUBLIC_BASE_URL="$(read_or_default 'PUBLIC_BASE_URL（API 对外可访问地址）' 'http://localhost:8000')"
+        PUBLIC_BASE_URL="$(read_or_default 'PUBLIC_BASE_URL（站点对外访问地址）' 'http://localhost:3000')"
         validate_dotenv_value "PUBLIC_BASE_URL" "${PUBLIC_BASE_URL}" && break
     done
     while :; do
@@ -1073,12 +1121,11 @@ fi
 # 前端 .env.local（非敏感；即使 .env 已存在也按需补写，便于用户单独删除后恢复）
 WEB_ENV="${ROOT}/apps/web/.env.local"
 if [ ! -f "${WEB_ENV}" ]; then
-    WEB_PUBLIC_BASE_URL="$(read_dotenv_value "PUBLIC_BASE_URL" "${ENV_FILE}")"
-    WEB_PUBLIC_BASE_URL="${WEB_PUBLIC_BASE_URL:-http://localhost:8000}"
-    WEB_PUBLIC_BASE_URL_ENV="$(dotenv_quote "NEXT_PUBLIC_API_BASE" "${WEB_PUBLIC_BASE_URL}")"
+    WEB_BACKEND_URL_ENV="$(dotenv_quote "LUMEN_BACKEND_URL" "http://127.0.0.1:8000")"
     cat > "${WEB_ENV}" <<EOF
-# 前端运行时配置：浏览器侧通过 NEXT_PUBLIC_* 读取。
-NEXT_PUBLIC_API_BASE=${WEB_PUBLIC_BASE_URL_ENV}
+# 前端运行时配置。
+# 浏览器默认使用同源 /api，由 Next.js 服务端转发到 LUMEN_BACKEND_URL。
+LUMEN_BACKEND_URL=${WEB_BACKEND_URL_ENV}
 EOF
     log_info "已写入 ${WEB_ENV}"
 fi
@@ -1274,10 +1321,11 @@ if confirm "构建前端生产包（npm run build）？生产发布建议输入 
         cd "${ROOT}/apps/web"
         # Next.js 只需要公开的 NEXT_PUBLIC_* 编译期变量，避免把 .env 密钥整体导出给构建进程。
         NEXT_PUBLIC_API_BASE="$(read_dotenv_value "NEXT_PUBLIC_API_BASE" "${WEB_ENV}")"
-        if [ -z "${NEXT_PUBLIC_API_BASE}" ]; then
-            NEXT_PUBLIC_API_BASE="$(read_dotenv_value "PUBLIC_BASE_URL" "${ENV_FILE}")"
+        if [ -n "${NEXT_PUBLIC_API_BASE}" ]; then
+            export NEXT_PUBLIC_API_BASE
+        else
+            unset NEXT_PUBLIC_API_BASE
         fi
-        export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE:-http://localhost:8000}"
         npm run build
     )
     BUILD_DONE=1
@@ -1299,14 +1347,14 @@ fi
 log_step "安装完成"
 cat <<EOF
 
-  访问地址 ......... http://localhost:3000  （${WEB_MODE_LABEL}）
-  API 服务 ......... http://localhost:8000
+  访问地址 ......... http://<服务器IP>:3000  （${WEB_MODE_LABEL}；本机也可用 http://localhost:3000）
+  API 服务 ......... http://127.0.0.1:8000  （由 Web 的 /api 转发）
   管理员邮箱 ....... ${ADMIN_EMAIL}
 
   启动 3 个进程（建议各开一个终端）：
 
     1) API（FastAPI）
-       cd ${ROOT}/apps/api && uv run uvicorn app.main:app --reload --port 8000
+       cd ${ROOT}/apps/api && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 
     2) Worker（arq）
        cd ${ROOT}/apps/api && uv run arq app.main.WorkerSettings

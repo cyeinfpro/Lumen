@@ -110,19 +110,17 @@ if confirm "是否重新构建前端生产包（npm run build）？"; then
     log_step "重建前端（npm run build）"
     WEB_ENV="${ROOT}/apps/web/.env.local"
     NEXT_PUBLIC_API_BASE_VALUE=""
-    if [ ! -f "${WEB_ENV}" ]; then
-        log_warn "未找到 ${WEB_ENV}；前端默认会把 API_BASE 编译成 http://localhost:8000，浏览器访问时会失败"
-    elif ! grep -qE "^NEXT_PUBLIC_API_BASE=.+" "${WEB_ENV}"; then
-        log_warn "${WEB_ENV} 缺 NEXT_PUBLIC_API_BASE；前端将退回到 http://localhost:8000，外网访问会出现 'Load failed' / network_error"
-        log_warn "请在 ${WEB_ENV} 增加：NEXT_PUBLIC_API_BASE=<浏览器能访问到的 API 地址>"
-    else
+    if [ -f "${WEB_ENV}" ] && grep -qE "^NEXT_PUBLIC_API_BASE=.+" "${WEB_ENV}"; then
         NEXT_PUBLIC_API_BASE_VALUE="$(sed -n 's/^NEXT_PUBLIC_API_BASE=//p' "${WEB_ENV}" | head -n1)"
     fi
     (
         cd "${ROOT}/apps/web"
-        # NEXT_PUBLIC_* 是 Next.js 编译期变量；这里只导出前端公开变量，避免泄露根 .env 密钥。
+        # 默认不导出 NEXT_PUBLIC_API_BASE：浏览器使用同源 /api，由 Next.js rewrite 到后端。
+        # 只有跨域部署显式配置了 NEXT_PUBLIC_API_BASE 时才注入前端 bundle。
         if [ -n "${NEXT_PUBLIC_API_BASE_VALUE}" ]; then
             export NEXT_PUBLIC_API_BASE="${NEXT_PUBLIC_API_BASE_VALUE}"
+        else
+            unset NEXT_PUBLIC_API_BASE
         fi
         npm run build
     )
@@ -136,7 +134,7 @@ cat <<EOF
 
   Update complete. 请重启 api / worker / web 三个进程：
 
-    1) API:    cd ${ROOT}/apps/api && uv run uvicorn app.main:app --reload --port 8000
+    1) API:    cd ${ROOT}/apps/api && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
     2) Worker: cd ${ROOT}/apps/api && uv run arq app.main.WorkerSettings
     3) Web:    cd ${ROOT}/apps/web && npm run dev    （或 npm run start 如已 build）
 
