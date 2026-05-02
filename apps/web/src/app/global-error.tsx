@@ -81,7 +81,7 @@ export default function GlobalError({
               color: "#fafafa",
             }}
           >
-            页面崩溃
+            页面出错
           </h1>
           <p
             style={{
@@ -91,7 +91,7 @@ export default function GlobalError({
               lineHeight: 1.6,
             }}
           >
-            应用遇到了一个致命错误。请尝试刷新页面，或返回首页。
+            请刷新页面，或先返回首页。
           </p>
           {detail && (
             <pre

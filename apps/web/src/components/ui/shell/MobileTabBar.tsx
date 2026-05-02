@@ -21,7 +21,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { key: "studio", label: "创作", route: "/", Icon: Camera },
-  { key: "stream", label: "灵感流", route: "/stream", Icon: Compass },
+  { key: "stream", label: "图库", route: "/stream", Icon: Compass },
   { key: "me", label: "我的", route: "/me", Icon: User },
 ];
 

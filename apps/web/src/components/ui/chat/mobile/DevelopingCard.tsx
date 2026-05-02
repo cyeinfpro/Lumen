@@ -50,7 +50,7 @@ const STAGE_COPY: Record<Generation["stage"], string> = {
   queued: "排队中",
   understanding: "正在打光…",
   rendering: "细化中…",
-  finalizing: "显影完成",
+  finalizing: "收尾中",
 };
 
 function getReducedMotionSnapshot() {
@@ -101,7 +101,7 @@ export function DevelopingCard({
   const isQueued = gen.status === "queued";
   const ratioCss = aspectRatioToCss(gen.aspect_ratio);
   const size = sizeLabel(gen.aspect_ratio, gen.size_requested);
-  const stageText = STAGE_COPY[gen.stage] ?? "显影中…";
+  const stageText = STAGE_COPY[gen.stage] ?? "生成中...";
 
   const prefersReduced = useSyncExternalStore(
     subscribeReducedMotion,
@@ -110,7 +110,7 @@ export function DevelopingCard({
   );
 
   // 粗略"已 Ns"：后端 started_at 是权威时间，后续用 performance.now delta 推进。
-  const [elapsedLabel, setElapsedLabel] = useState<string>("显影中…");
+  const [elapsedLabel, setElapsedLabel] = useState<string>("生成中...");
   useEffect(() => {
     if (isQueued || !isDeveloping || !startedAt) return;
     let raf = 0;
@@ -119,7 +119,7 @@ export function DevelopingCard({
     let lastCommit = Number.NEGATIVE_INFINITY;
     const commit = (elapsedMs: number) => {
       const s = Math.floor(elapsedMs / 1000);
-      setElapsedLabel(s > 0 ? `已 ${s}s` : "显影中…");
+      setElapsedLabel(s > 0 ? `已 ${s}s` : "生成中...");
     };
     const tick = (t: number) => {
       if (t - lastCommit >= 250) {
@@ -223,7 +223,7 @@ export function DevelopingCard({
         style={{ fontFamily: "var(--font-mono)" }}
       >
         {gen.aspect_ratio} · {size} ·{" "}
-        {isQueued ? "排队中" : startedAt ? elapsedLabel : "显影中…"}
+        {isQueued ? "排队中" : startedAt ? elapsedLabel : "生成中..."}
       </p>
     </div>
   );

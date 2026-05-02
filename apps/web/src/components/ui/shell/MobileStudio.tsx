@@ -68,7 +68,7 @@ export function MobileStudio() {
     void loadHistoricalMessages(first.id).catch(() => {});
   }, [currentConvId, convsQuery.data, setCurrentConv, loadHistoricalMessages]);
 
-  // 若来自灵感流 "在对话中定位"，滚到目标 message
+  // 若来自图库 "在对话中定位"，滚到目标 message
   useEffect(() => {
     if (!scrollTo) return;
     const el = document.getElementById(`msg-${scrollTo}`);

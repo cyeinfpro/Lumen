@@ -1104,7 +1104,7 @@ function ImageContextMenuInner({
     },
     {
       key: "locate",
-      label: "在灵感流定位",
+      label: "在图库定位",
       icon: <ExternalLink className="w-4 h-4" />,
       onSelect: () => onLocate(info.imageId),
     },

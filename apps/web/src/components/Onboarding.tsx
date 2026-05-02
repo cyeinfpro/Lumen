@@ -28,16 +28,16 @@ const PRESETS: Preset[] = [
   {
     icon: <Aperture className="w-4 h-4" />,
     title: "电影感雨夜东京街角",
-    hint: "文生图 · 16:9 · 光影大片",
-    text: "电影感雨夜东京街角，霓虹倒影，35mm 胶片质感，浅景深，暖橙与青蓝色调，高级摄影构图",
+    hint: "文生图 · 16:9 · 夜景",
+    text: "雨夜东京街角，霓虹倒影，35mm 胶片质感，浅景深，暖橙与青蓝色调，画面留出呼吸感",
     mode: "image",
     accent: "from-cyan-300/20 to-[var(--accent)]/20",
   },
   {
     icon: <Layers3 className="w-4 h-4" />,
-    title: "生成 4 张产品海报方向",
-    hint: "多图并发 · 选择 4/6/8 张",
-    text: "为一款极简黑色咖啡杯生成高级产品海报，暗色背景，柔和边缘光，留白充足，适合社交媒体展示",
+    title: "做 4 张产品海报",
+    hint: "多图 · 可选 4/6/8 张",
+    text: "黑色极简咖啡杯，暗色背景，柔和边缘光，留白充足，做成一组安静的产品海报",
     mode: "image",
     accent: "from-white/10 to-[var(--accent)]/20",
   },
@@ -45,15 +45,15 @@ const PRESETS: Preset[] = [
     icon: <ImageDown className="w-4 h-4" />,
     title: "分析一张图片的构图",
     hint: "视觉理解 · 上传图片后发送",
-    text: "请分析这张图片的构图、光线、色彩层次和情绪，并给出 3 个可执行的改进建议",
+    text: "看一下这张图的构图、光线和色彩，指出最值得调整的地方",
     mode: "chat",
     accent: "from-emerald-300/15 to-white/10",
   },
   {
     icon: <Wand2 className="w-4 h-4" />,
-    title: "把草图变成精修设定图",
+    title: "把草图整理成设定图",
     hint: "图生图 · 拖入参考图后使用",
-    text: "保留主体轮廓和姿态，把它精修成干净的角色设定图，细节丰富，材质清晰，专业概念设计风格",
+    text: "保留主体轮廓和姿态，整理成干净的角色设定图，材质清楚，细节不过度堆满",
     mode: "image",
     accent: "from-purple-300/15 to-[var(--accent)]/20",
   },
@@ -105,9 +105,9 @@ export function Onboarding({
         transition={{ duration: 0.4, delay: 0.12 }}
         className="max-w-[20rem] break-words text-balance text-xl font-semibold leading-[1.12] tracking-tight text-[var(--fg-0)] sm:max-w-2xl sm:text-2xl md:text-[clamp(2rem,5vw,2.75rem)]"
       >
-        像在暗房里创作，
+        从一句话开始，
         <span className="text-[var(--accent)]">
-          每一次出图都可继续迭代。
+          慢慢把画面定下来。
         </span>
       </motion.h1>
 
@@ -117,7 +117,7 @@ export function Onboarding({
         transition={{ duration: 0.4, delay: 0.16 }}
         className="mt-3 max-w-lg text-pretty px-1 text-[13px] leading-6 text-[var(--fg-1)] md:text-sm md:leading-7"
       >
-        选择一个起点，或直接在下方输入框描述你想要的画面。
+        选一个起点，或直接写下你想要的画面。
       </motion.p>
 
       <div className="mt-5 sm:mt-7 grid w-full max-w-4xl grid-cols-1 gap-2.5 sm:gap-3 sm:grid-cols-2 lg:grid-cols-4">

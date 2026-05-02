@@ -313,7 +313,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
           href="/"
           className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 active:scale-[0.97] md:w-auto"
         >
-          开始生成
+          打开 Lumen
           <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       </div>

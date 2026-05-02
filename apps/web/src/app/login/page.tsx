@@ -112,10 +112,10 @@ function LoginInner() {
             <div className="space-y-6">
               <div>
                 <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
-                  欢迎回来
+                  登录 Lumen
                 </h1>
                 <p className="text-sm text-[var(--fg-1)] mt-1.5">
-                  使用你的 Lumen 账号继续创作。
+                  继续你的对话和图片。
                 </p>
               </div>
 
@@ -213,13 +213,13 @@ function LoginInner() {
                 </div>
                 <div className="relative flex justify-center">
                   <span className="px-3 bg-[var(--bg-0)] text-[11px] uppercase tracking-wider text-neutral-500">
-                    没有账号?
+                    还没有账号?
                   </span>
                 </div>
               </div>
 
               <p className="text-xs text-neutral-500 text-center leading-relaxed">
-                请联系管理员获取邀请链接，或从你收到的{" "}
+                需要邀请链接才能注册。也可以打开收到的{" "}
                 <span className="text-neutral-400">/invite/*</span>{" "}
                 链接完成注册。
               </p>
@@ -320,28 +320,28 @@ function BrandPanel() {
             transition={{ duration: 0.35, delay: 0.05 }}
             className="text-3xl lg:text-4xl font-semibold tracking-tight leading-tight"
           >
-            让你的灵感
+            把想法
             <br />
-            成为画面。
+            落到画面里。
           </motion.h2>
 
           <ul className="space-y-4">
             <Feature
               icon={<Sparkles className="w-4 h-4" />}
-              title="直觉的 prompt 体验"
-              desc="自然语言、参考图、风格开关，一气呵成。"
+              title="直接写需求"
+              desc="文字、参考图和参数放在同一个输入框里。"
               delay={0.1}
             />
             <Feature
               icon={<Wand2 className="w-4 h-4" />}
-              title="对话式迭代"
-              desc="边聊边改图，每一次都留在同一会话里。"
+              title="按会话整理"
+              desc="每次修改都留在原来的上下文里。"
               delay={0.15}
             />
             <Feature
               icon={<Zap className="w-4 h-4" />}
-              title="实时反馈"
-              desc="生成进度、任务状态都在眼前。"
+              title="状态清楚"
+              desc="排队、生成、完成和失败都直接显示。"
               delay={0.2}
             />
           </ul>

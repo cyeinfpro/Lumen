@@ -56,8 +56,8 @@ export default function GlobalError({
     <div className="min-h-[100dvh] w-full flex-1 flex items-center justify-center bg-[var(--bg-0)] px-4 sm:px-6 safe-area">
       <div className="w-full max-w-md">
         <ErrorState
-          title="页面出了点问题"
-          description="这次请求出错了。可以试着重试，或返回首页。"
+          title="页面出错"
+          description="可以重试，或先返回首页。"
           detail={detail}
           onRetry={handleRetry}
           retryLabel="重试"

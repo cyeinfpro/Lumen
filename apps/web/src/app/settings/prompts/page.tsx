@@ -17,7 +17,7 @@ export default function PromptsPage() {
               系统提示词
             </h1>
             <p className="mt-1.5 text-sm text-[var(--fg-1)]">
-              管理可复用的系统提示词方案。
+              管理可复用的系统提示词。
             </p>
           </div>
           <Link

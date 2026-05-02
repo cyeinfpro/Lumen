@@ -663,9 +663,9 @@ export function ProvidersPanel() {
               <CloudOff className="w-6 h-6 text-neutral-500" />
             </div>
             <div>
-              <p className="text-sm text-neutral-200">暂无额外 Provider</p>
+              <p className="text-sm text-neutral-200">还没有 Provider</p>
               <p className="text-xs text-neutral-500 mt-1">
-                请添加至少一个 Provider，系统所有上游请求都会从 Pool 选择
+                添加至少一个 Provider 后，请求会从池里选择可用账号。
               </p>
             </div>
             <button

@@ -263,8 +263,8 @@ export function ProxiesPanel() {
           <div className="min-w-0">
             <h2 className="text-sm font-medium text-neutral-100">代理池</h2>
             <p className="text-xs text-neutral-500 mt-0.5">
-              提供商和 Telegram 机器人共用这套代理。下面可以增加 / 修改 / 删除代理；
-              失败几次后会自动停用一段时间。
+              Provider 和 Telegram 机器人共用这套代理。可以在这里增加、修改或删除代理；
+              连续失败后会暂停一段时间。
             </p>
           </div>
         </div>
@@ -272,7 +272,7 @@ export function ProxiesPanel() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <Field
             label="测试目标网址"
-            hint="点「测试」按钮时会 ping 这个网址来量延迟。Telegram 用户填官方 API 即可。"
+            hint="点击「测试」时会访问这个地址来估算延迟。"
             value={draftTarget}
             onChange={setDraftTarget}
           />
@@ -389,7 +389,7 @@ export function ProxiesPanel() {
           drafts!.length === 0 ? (
             <EmptyBlock
               title="还没有代理"
-              description="点上面「加一个代理」开始添加。"
+              description="点「加一个代理」添加第一条。"
             />
           ) : (
             <ul className="divide-y divide-white/5">
@@ -408,7 +408,7 @@ export function ProxiesPanel() {
         ) : (q.data?.items ?? []).length === 0 ? (
           <EmptyBlock
             title="代理池为空"
-            description="点「编辑代理列表」添加第一个代理。"
+            description="点「编辑代理列表」添加第一条。"
           />
         ) : (
           <ul className="divide-y divide-white/5">

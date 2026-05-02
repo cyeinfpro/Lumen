@@ -7,7 +7,7 @@ export default function manifest(): MetadataRoute.Manifest {
     id: "/",
     name: "Lumen Studio",
     short_name: "Lumen",
-    description: "A premium multimodal AI studio.",
+    description: "Lumen image and chat workspace.",
     start_url: "/",
     scope: "/",
     display: "standalone",

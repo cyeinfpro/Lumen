@@ -74,11 +74,11 @@ const ASPECT_OPTIONS: { value: AspectRatio; label: string; hint: string }[] = [
 ];
 
 const REASONING_OPTIONS: { value: ReasoningEffort; label: string; hint: string }[] = [
-  { value: "none", label: "极速", hint: "不思考，最快回复" },
+  { value: "none", label: "最快", hint: "直接回复" },
   { value: "low", label: "低", hint: "轻量思考" },
   { value: "medium", label: "中", hint: "平衡" },
-  { value: "high", label: "高", hint: "深入思考" },
-  { value: "xhigh", label: "极限", hint: "最深入但最慢" },
+  { value: "high", label: "高", hint: "多想一步" },
+  { value: "xhigh", label: "很高", hint: "更慢，适合复杂问题" },
 ];
 
 const COUNT_OPTIONS = [1, 2, 4] as const;
@@ -412,7 +412,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
         setOriginalText(null);
       }
       haptic("light");
-      pushMobileToast("已取消优化", "success");
+      pushMobileToast("已取消润色", "success");
       return;
     }
     const current = text.trim();
@@ -434,13 +434,13 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
         ctl.signal,
       );
       haptic("medium");
-      pushMobileToast("提示词已优化", "success");
+      pushMobileToast("提示词已润色", "success");
     } catch (err) {
       if (ctl.signal.aborted) return;
       logError(err, { scope: "desktop-composer", code: "enhance_failed" });
       setText(current);
       setOriginalText(null);
-      pushMobileToast("提示词优化失败", "danger");
+      pushMobileToast("润色失败", "danger");
     } finally {
       setIsEnhancing(false);
       enhanceAbortRef.current = null;
@@ -621,7 +621,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
             )}
           </AnimatePresence>
 
-          {/* AI 已优化提示 */}
+          {/* 提示词已润色 */}
           <AnimatePresence>
             {originalText !== null && !isEnhancing && (
               <motion.div
@@ -639,7 +639,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                   )}
                 >
                   <Sparkles className="w-3 h-3 shrink-0" />
-                  <span className="flex-1">AI 已优化提示词</span>
+                  <span className="flex-1">提示词已润色</span>
                   <button
                     type="button"
                     onClick={handleUndoEnhance}
@@ -670,7 +670,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               onBlur={() => {
                 isComposingRef.current = false;
               }}
-              placeholder="描述你想要的画面…（⌘↵ 发送）"
+              placeholder="描述画面，或直接提问...（⌘↵ 发送）"
               aria-label="输入提示词"
               maxLength={MAX_PROMPT_CHARS}
               rows={1}
@@ -702,7 +702,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
             </IconBtn>
 
             <IconBtn
-              label={isEnhancing ? "正在优化…" : "AI 优化提示词"}
+              label={isEnhancing ? "润色中..." : "润色提示词"}
               onClick={() => void handleEnhance()}
               disabled={isEnhancing || !text.trim()}
             >

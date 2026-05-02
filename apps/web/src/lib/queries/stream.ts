@@ -1,4 +1,4 @@
-// Phase 4 · 灵感流 Tab 数据层
+// Phase 4 · 图库 Tab 数据层
 // 对接后端 GET /api/generations/feed（apps/api/app/routes/generations.py）。
 //
 // 为什么用 useInfiniteQuery 而不是手写分页：

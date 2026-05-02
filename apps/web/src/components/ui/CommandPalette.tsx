@@ -72,11 +72,11 @@ const COMMANDS: Command[] = [
   }),
   command({
     id: "stream",
-    label: "Stream",
-    detail: "浏览灵感流",
+    label: "图库",
+    detail: "浏览已生成的图片",
     href: "/stream",
     group: "导航",
-    keywords: ["stream", "feed", "灵感流", "图片流"],
+    keywords: ["stream", "feed", "图库", "图片", "作品"],
     icon: ImageIcon,
   }),
   command({

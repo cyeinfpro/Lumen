@@ -64,7 +64,7 @@ export function StreamOverview({
 
   return (
     <section
-      aria-label="灵感流概览"
+      aria-label="图库概览"
       className="border-b border-[var(--border-subtle)] px-3 py-3 md:px-0 md:py-4"
     >
       <div className="flex items-center justify-between gap-3">
