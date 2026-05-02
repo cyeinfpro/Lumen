@@ -370,6 +370,31 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         max_value=3600,
     ),
 
+    # ----- Lumen 更新 -----
+    SettingSpec(
+        key="update.use_proxy_pool",
+        description=(
+            "在管理后台点「一键更新」时是否使用代理池。0=直连，1=使用代理池中选中的代理。"
+            "只影响后台触发更新脚本时的 git、uv、npm 等出站请求。"
+        ),
+        sensitive=False,
+        parser=int,
+        env_fallback="LUMEN_UPDATE_USE_PROXY_POOL",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="update.proxy_name",
+        description=(
+            "一键更新使用的代理名称。需要和代理池里的名称一致；"
+            "留空时使用代理池中第一个启用代理。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_UPDATE_PROXY_NAME",
+    ),
+
     # ----- Telegram 机器人 -----
     SettingSpec(
         key="telegram.bot_enabled",

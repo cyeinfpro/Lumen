@@ -135,6 +135,24 @@ def test_share_expiration_days_setting_is_registered_and_bounded():
         parse_value(spec, "3651")
 
 
+def test_update_settings_are_registered_and_validated():
+    use_proxy = get_spec("update.use_proxy_pool")
+    proxy_name = get_spec("update.proxy_name")
+    assert use_proxy is not None
+    assert proxy_name is not None
+
+    assert use_proxy.parser is int
+    assert use_proxy.env_fallback == "LUMEN_UPDATE_USE_PROXY_POOL"
+    assert parse_value(use_proxy, "0") == 0
+    assert parse_value(use_proxy, "1") == 1
+    with pytest.raises(ValueError):
+        parse_value(use_proxy, "2")
+
+    assert proxy_name.parser is str
+    assert proxy_name.env_fallback == "LUMEN_UPDATE_PROXY_NAME"
+    assert parse_value(proxy_name, "s5-us") == "s5-us"
+
+
 def test_legacy_text_to_image_route_key_still_registered_for_fallback():
     """旧键保留在 SUPPORTED_SETTINGS，让现有 DB 行仍能被 worker resolve 拿到。"""
     spec = get_spec("image.text_to_image_primary_route")

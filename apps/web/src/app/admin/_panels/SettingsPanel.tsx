@@ -20,6 +20,7 @@ import {
   ImageIcon,
   Info,
   Loader2,
+  Rocket,
   RotateCcw,
   Save,
   Search,
@@ -33,11 +34,18 @@ import {
 
 import {
   useAdminModelsQuery,
+  useAdminProxiesQuery,
+  useAdminUpdateStatusQuery,
   useProvidersQuery,
   useSystemSettingsQuery,
+  useTriggerAdminUpdateMutation,
   useUpdateSystemSettingsMutation,
 } from "@/lib/queries";
-import { ApiError, getAdminContextHealth } from "@/lib/apiClient";
+import {
+  ApiError,
+  getAdminContextHealth,
+  getAdminUpdateStatus,
+} from "@/lib/apiClient";
 import type { SystemSettingItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ErrorBlock } from "../page";
@@ -48,6 +56,7 @@ type SettingGroupId =
   | "image"
   | "upstream"
   | "providers"
+  | "update"
   | "context_auto"
   | "context_caption"
   | "context_manual"
@@ -107,6 +116,15 @@ type ProviderStatus = {
   compact: string;
 };
 
+type UpdateProxyOption = {
+  name: string;
+  enabled: boolean;
+  in_cooldown: boolean;
+  last_latency_ms: number | null;
+};
+
+const UPDATE_USE_PROXY_POOL_KEY = "update.use_proxy_pool";
+const UPDATE_PROXY_NAME_KEY = "update.proxy_name";
 const IMAGE_ENGINE_KEY = "image.engine";
 const IMAGE_CHANNEL_KEY = "image.channel";
 const IMAGE_OUTPUT_FORMAT_KEY = "image.output_format";
@@ -354,6 +372,27 @@ const SETTING_META: Record<string, SettingMeta> = {
     warning: "会消耗上游图片配额。",
     keywords: ["provider", "image", "probe", "图片探活"],
   },
+  [UPDATE_USE_PROXY_POOL_KEY]: {
+    group: "update",
+    title: "更新时使用代理池",
+    summary: "一键更新 Lumen 时，让 git、uv 和 npm 的出站请求走代理池。",
+    detail: "关闭时直接更新；开启后会使用下面选中的代理。这个设置只影响管理后台触发的一键更新。",
+    kind: "toggle",
+    icon: Rocket,
+    defaultValue: "0",
+    recommended: "国内服务器拉取依赖慢或失败时开启。",
+    keywords: ["update", "proxy", "更新", "代理池"],
+  },
+  [UPDATE_PROXY_NAME_KEY]: {
+    group: "update",
+    title: "更新代理",
+    summary: "选择一键更新时使用代理池里的哪一个代理。",
+    detail: "留空时后端会使用代理池中第一个启用代理。代理列表在“代理池”标签页维护。",
+    kind: "text",
+    icon: Rocket,
+    recommended: "优先选择已测试成功、延迟稳定的代理。",
+    keywords: ["update", "proxy", "name", "更新代理"],
+  },
   "context.compression_enabled": {
     group: "context_auto",
     title: "自动压缩长对话",
@@ -556,6 +595,12 @@ const GROUPS: {
     icon: Activity,
   },
   {
+    id: "update",
+    label: "Lumen 更新",
+    description: "一键更新和代理选择",
+    icon: Rocket,
+  },
+  {
     id: "site",
     label: "站点",
     description: "域名和对外链接",
@@ -580,6 +625,8 @@ export function SettingsPanel() {
   const updateMut = useUpdateSystemSettingsMutation();
   const adminModelsQ = useAdminModelsQuery({ retry: false });
   const providersQ = useProvidersQuery({ retry: false });
+  const proxiesQ = useAdminProxiesQuery({ retry: false });
+  const updateStatusQ = useAdminUpdateStatusQuery({ retry: false });
   const contextHealthQ = useQuery({
     queryKey: ["admin", "context", "health"],
     queryFn: getAdminContextHealth,
@@ -592,6 +639,22 @@ export function SettingsPanel() {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [activeGroup, setActiveGroup] = useState<FilterId>("all");
   const [search, setSearch] = useState("");
+  const [updateBanner, setUpdateBanner] = useState<{
+    kind: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
+  const triggerUpdateMut = useTriggerAdminUpdateMutation({
+    onSuccess: (result) => {
+      setUpdateBanner({
+        kind: "success",
+        text: `更新已启动，进程 ${result.pid}${result.proxy_name ? `，代理 ${result.proxy_name}` : ""}`,
+      });
+    },
+    onError: (err) => {
+      const msg = err instanceof ApiError ? err.message : err.message || "触发更新失败";
+      setUpdateBanner({ kind: "error", text: `触发更新失败：${msg}` });
+    },
+  });
 
   useEffect(() => {
     if (savedAt == null) return;
@@ -928,6 +991,19 @@ export function SettingsPanel() {
         data={contextHealthQ.data}
       />
 
+      <LumenUpdateBlock
+        status={updateStatusQ.data}
+        loading={updateStatusQ.isLoading}
+        error={updateStatusQ.error}
+        triggering={triggerUpdateMut.isPending}
+        banner={updateBanner}
+        onTrigger={() => {
+          setUpdateBanner(null);
+          triggerUpdateMut.mutate();
+        }}
+        onRefresh={() => void updateStatusQ.refetch()}
+      />
+
       <div className="space-y-3">
         <div className="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
           <div className="inline-flex min-w-max items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] p-1">
@@ -1022,6 +1098,7 @@ export function SettingsPanel() {
                 models: adminModelsQ.data?.models.map((model) => model.id) ?? [],
               }}
               providerStatus={providerStatus}
+              updateProxyOptions={proxiesQ.data?.items ?? []}
               onChange={setOp}
             />
           ))}
@@ -1083,6 +1160,7 @@ function SettingsGroup({
   dependencyState,
   modelsQuery,
   providerStatus,
+  updateProxyOptions,
   onChange,
 }: {
   group: { id: SettingGroupId; label: string; description: string; items: SystemSettingItem[] };
@@ -1091,6 +1169,7 @@ function SettingsGroup({
   dependencyState: DependencyState;
   modelsQuery: ModelsQueryState;
   providerStatus: ProviderStatus;
+  updateProxyOptions: UpdateProxyOption[];
   onChange: (key: string, op: Op | undefined) => void;
 }) {
   const groupMeta = GROUPS.find((g) => g.id === group.id);
@@ -1133,6 +1212,7 @@ function SettingsGroup({
             fieldError={fieldErrors[item.key]}
             modelsQuery={modelsQuery}
             providerStatus={providerStatus}
+            updateProxyOptions={updateProxyOptions}
             onChange={(op) => onChange(item.key, op)}
           />
         ))}
@@ -1147,6 +1227,7 @@ function SettingCard({
   fieldError,
   modelsQuery,
   providerStatus,
+  updateProxyOptions,
   onChange,
 }: {
   item: SystemSettingItem;
@@ -1154,6 +1235,7 @@ function SettingCard({
   fieldError: string | undefined;
   modelsQuery: ModelsQueryState;
   providerStatus: ProviderStatus;
+  updateProxyOptions: UpdateProxyOption[];
   onChange: (op: Op | undefined) => void;
 }) {
   const meta = getSettingMeta(item.key, item.description);
@@ -1225,6 +1307,7 @@ function SettingCard({
           op={op}
           modelsQuery={modelsQuery}
           providerStatus={providerStatus}
+          updateProxyOptions={updateProxyOptions}
           onChange={onChange}
         />
       </div>
@@ -1278,6 +1361,11 @@ function SettingCard({
           保存后改为：{formatValue(op.value, meta)}
         </p>
       )}
+      {op?.kind === "clear" && (
+        <p className="mt-3 text-xs text-[var(--color-lumen-amber)]/90">
+          保存后清除该项
+        </p>
+      )}
     </motion.article>
   );
 }
@@ -1288,6 +1376,7 @@ function SettingControl({
   op,
   modelsQuery,
   providerStatus,
+  updateProxyOptions,
   onChange,
 }: {
   item: SystemSettingItem;
@@ -1295,6 +1384,7 @@ function SettingControl({
   op: Op | undefined;
   modelsQuery: ModelsQueryState;
   providerStatus: ProviderStatus;
+  updateProxyOptions: UpdateProxyOption[];
   onChange: (op: Op | undefined) => void;
 }) {
   const browserOrigin = useSyncExternalStore(
@@ -1304,8 +1394,13 @@ function SettingControl({
   );
 
   const controlValue =
-    op?.kind === "set" ? op.value : item.value ?? meta.defaultValue ?? "";
-  const inputValue = op?.kind === "set" ? op.value : item.value ?? "";
+    op?.kind === "clear"
+      ? ""
+      : op?.kind === "set"
+        ? op.value
+        : item.value ?? meta.defaultValue ?? "";
+  const inputValue =
+    op?.kind === "clear" ? "" : op?.kind === "set" ? op.value : item.value ?? "";
   const showDefaultAction =
     item.value != null &&
     item.value !== "" &&
@@ -1405,6 +1500,17 @@ function SettingControl({
         op={op}
         modelsQuery={modelsQuery}
         showDefaultAction={showDefaultAction}
+        onChange={onChange}
+      />
+    );
+  }
+
+  if (item.key === UPDATE_PROXY_NAME_KEY) {
+    return (
+      <UpdateProxySelectControl
+        item={item}
+        op={op}
+        proxies={updateProxyOptions}
         onChange={onChange}
       />
     );
@@ -1563,12 +1669,14 @@ function ModelSelectControl({
     for (const model of modelsQuery.models) ids.add(model);
     return Array.from(ids).sort();
   }, [meta.defaultValue, modelsQuery.models]);
-  const value = op?.kind === "set" ? op.value : item.value ?? "";
+  const value =
+    op?.kind === "clear" ? "" : op?.kind === "set" ? op.value : item.value ?? "";
   const effective = value || meta.defaultValue || "";
   const [customMode, setCustomMode] = useState(
     Boolean(effective && !modelIds.includes(effective)),
   );
-  const inputValue = op?.kind === "set" ? op.value : item.value ?? "";
+  const inputValue =
+    op?.kind === "clear" ? "" : op?.kind === "set" ? op.value : item.value ?? "";
 
   if (modelsQuery.isError || modelIds.length === 0) {
     return (
@@ -1654,6 +1762,70 @@ function ModelSelectControl({
   );
 }
 
+function UpdateProxySelectControl({
+  item,
+  op,
+  proxies,
+  onChange,
+}: {
+  item: SystemSettingItem;
+  op: Op | undefined;
+  proxies: UpdateProxyOption[];
+  onChange: (op: Op | undefined) => void;
+}) {
+  const value =
+    op?.kind === "clear" ? "" : op?.kind === "set" ? op.value : item.value ?? "";
+  const enabledProxies = proxies.filter((proxy) => proxy.enabled);
+  const selectedExists = !value || enabledProxies.some((proxy) => proxy.name === value);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-col gap-2 md:flex-row md:items-center">
+        <select
+          value={selectedExists ? value : "__custom__"}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (next === "") {
+              onChange(item.value ? { kind: "clear" } : undefined);
+            } else {
+              onChange({ kind: "set", value: next });
+            }
+          }}
+          className="h-11 flex-1 rounded-xl border border-white/10 bg-black/30 px-3 text-sm text-neutral-100 outline-none transition-colors focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
+        >
+          <option value="">自动选择第一个启用代理</option>
+          {enabledProxies.map((proxy) => (
+            <option key={proxy.name} value={proxy.name}>
+              {proxy.name}
+              {proxy.last_latency_ms != null
+                ? ` · ${Math.round(proxy.last_latency_ms)}ms`
+                : ""}
+              {proxy.in_cooldown ? " · 冷却中" : ""}
+            </option>
+          ))}
+          {!selectedExists && <option value="__custom__">{value}</option>}
+        </select>
+        <ResetEditButton
+          dirty={!!op}
+          defaultValue={undefined}
+          showDefaultAction={false}
+          onReset={() => onChange(undefined)}
+          onUseDefault={() => {}}
+        />
+      </div>
+      {enabledProxies.length === 0 ? (
+        <p className="text-xs text-amber-200">
+          代理池没有启用代理；开启“更新时使用代理池”后，一键更新会被后端拒绝。
+        </p>
+      ) : (
+        <p className="text-xs text-neutral-500">
+          可用代理 {enabledProxies.length} 个，选择后记得保存设置。
+        </p>
+      )}
+    </div>
+  );
+}
+
 function TextSettingInput({
   item,
   meta,
@@ -1727,6 +1899,122 @@ function ResetEditButton({
       <Check className="h-3.5 w-3.5" />
       填入默认值
     </button>
+  );
+}
+
+function LumenUpdateBlock({
+  status,
+  loading,
+  error,
+  triggering,
+  banner,
+  onTrigger,
+  onRefresh,
+}: {
+  status: Awaited<ReturnType<typeof getAdminUpdateStatus>> | undefined;
+  loading: boolean;
+  error: Error | null;
+  triggering: boolean;
+  banner: { kind: "success" | "error" | "info"; text: string } | null;
+  onTrigger: () => void;
+  onRefresh: () => void;
+}) {
+  const running = Boolean(status?.running);
+  const disabled = triggering || running;
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="flex min-w-0 gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
+            <Rocket className="h-4 w-4 text-[var(--color-lumen-amber)]" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium text-neutral-100">
+              一键更新 Lumen
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-neutral-500">
+              后台执行更新脚本，代理设置在“Lumen 更新”分组里保存后生效。
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 md:h-10"
+          >
+            {loading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3.5 w-3.5" />
+            )}
+            刷新状态
+          </button>
+          <button
+            type="button"
+            onClick={onTrigger}
+            disabled={disabled}
+            className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-xs font-medium text-black transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 md:h-10"
+          >
+            {triggering || running ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> 更新中
+              </>
+            ) : (
+              <>
+                <Rocket className="h-3.5 w-3.5" /> 一键更新
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2 text-xs">
+        <span
+          className={cn(
+            "rounded-md border px-2 py-1",
+            running
+              ? "border-sky-500/25 bg-sky-500/10 text-sky-200"
+              : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300",
+          )}
+        >
+          {running ? `运行中 · pid ${status?.pid ?? "-"}` : "当前没有更新任务"}
+        </span>
+        {status?.started_at && (
+          <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-neutral-400">
+            启动时间 {formatDateTime(status.started_at)}
+          </span>
+        )}
+      </div>
+
+      {error && (
+        <p className="mt-3 text-xs text-red-300">
+          更新状态读取失败：{error.message}
+        </p>
+      )}
+      {banner && (
+        <div
+          className={cn(
+            "mt-3 rounded-xl border px-3 py-2 text-sm",
+            banner.kind === "success"
+              ? "border-emerald-500/30 bg-emerald-500/8 text-emerald-200"
+              : banner.kind === "error"
+                ? "border-red-500/30 bg-red-500/8 text-red-200"
+                : "border-sky-500/30 bg-sky-500/8 text-sky-200",
+          )}
+        >
+          {banner.text}
+        </div>
+      )}
+
+      {status?.log_tail && (
+        <pre className="mt-4 max-h-64 overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs leading-5 text-neutral-300">
+          {status.log_tail}
+        </pre>
+      )}
+    </div>
   );
 }
 
@@ -1975,6 +2263,7 @@ function countByGroup(items: SystemSettingItem[]): Record<SettingGroupId, number
     image: 0,
     upstream: 0,
     providers: 0,
+    update: 0,
     context_auto: 0,
     context_caption: 0,
     context_manual: 0,
@@ -2020,6 +2309,8 @@ function getSettingMeta(key: string, fallbackDescription?: string): SettingMeta 
           ? "upstream"
           : prefix === "providers"
             ? "providers"
+            : prefix === "update"
+              ? "update"
             : prefix === "context"
               ? "context_auto"
               : "advanced",
@@ -2037,6 +2328,7 @@ function currentDisplayValue(
   meta: SettingMeta,
 ) {
   if (op?.kind === "set") return formatValue(op.value, meta);
+  if (op?.kind === "clear") return "未设置";
   if (item.value != null && item.value !== "") return formatValue(item.value, meta);
   if (item.has_value) return "来自环境变量";
   if (meta.defaultValue != null) return `默认 ${formatValue(meta.defaultValue, meta)}`;
@@ -2049,6 +2341,7 @@ function effectiveValue(
   defaultValue: string,
 ) {
   if (op?.kind === "set") return op.value;
+  if (op?.kind === "clear") return "";
   return item?.value ?? defaultValue;
 }
 
@@ -2140,6 +2433,21 @@ function formatPlainNumber(value: number) {
   return new Intl.NumberFormat("zh-CN", {
     maximumFractionDigits: 3,
   }).format(value);
+}
+
+function formatDateTime(value: string) {
+  try {
+    return new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
 }
 
 function formatCircuitState(state: string | undefined): {
