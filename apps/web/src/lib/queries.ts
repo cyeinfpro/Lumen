@@ -49,11 +49,13 @@ import {
   getAdminModels,
   getProviders,
   getProviderStats,
+  getAdminUpdateStatus,
   getConversationContext,
   listAdminProxies,
   restartTelegramBot,
   testAdminProxy,
   testAllAdminProxies,
+  triggerAdminUpdate,
   updateAdminProxies,
   updateProviders,
   probeProviders,
@@ -112,6 +114,7 @@ export const qk = {
   providers: () => ["admin", "providers"] as const,
   providerStats: () => ["admin", "providers", "stats"] as const,
   adminProxies: () => ["admin", "proxies"] as const,
+  adminUpdateStatus: () => ["admin", "update", "status"] as const,
   systemPrompts: () => ["system_prompts"] as const,
   mySessions: () => ["me", "sessions"] as const,
   conversations: (opts?: ListConversationsOpts) =>
@@ -666,6 +669,37 @@ export function useRestartTelegramBotMutation(
   return useMutation<{ ok: boolean; receivers: number }, Error, void>({
     mutationFn: () => restartTelegramBot(),
     ...options,
+  });
+}
+
+export function useAdminUpdateStatusQuery(
+  options?: Omit<
+    UseQueryOptions<import("./apiClient").AdminUpdateStatusOut>,
+    "queryKey" | "queryFn"
+  >,
+) {
+  return useQuery<import("./apiClient").AdminUpdateStatusOut>({
+    queryKey: qk.adminUpdateStatus(),
+    queryFn: getAdminUpdateStatus,
+    refetchInterval: (query) => (query.state.data?.running ? 5000 : false),
+    ...options,
+  });
+}
+
+export function useTriggerAdminUpdateMutation(
+  options?: Omit<
+    UseMutationOptions<import("./apiClient").AdminUpdateTriggerOut, Error, void>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<import("./apiClient").AdminUpdateTriggerOut, Error, void>({
+    mutationFn: () => triggerAdminUpdate(),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.adminUpdateStatus() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
   });
 }
 

@@ -18,6 +18,27 @@ lumen_acquire_lock "${ROOT}" "update.sh"
 cd "${ROOT}"
 log_info "项目根目录：${ROOT}"
 
+lumen_update_decision() {
+    local env_name="$1"
+    local prompt="$2"
+    local raw="${!env_name:-}"
+    case "${raw}" in
+        1|true|TRUE|yes|YES|y|Y|on|ON)
+            log_info "${env_name}=1，自动确认：${prompt}"
+            return 0
+            ;;
+        0|false|FALSE|no|NO|n|N|off|OFF)
+            log_info "${env_name}=0，自动跳过：${prompt}"
+            return 1
+            ;;
+    esac
+    if [ "${LUMEN_UPDATE_NONINTERACTIVE:-0}" = "1" ]; then
+        log_info "非交互更新未设置 ${env_name}，默认跳过：${prompt}"
+        return 1
+    fi
+    confirm "${prompt}"
+}
+
 # ---------------------------------------------------------------------------
 # 1. 依赖快查（更新阶段假设 install 已经做过完整检查，这里只确认必备工具仍在）
 # ---------------------------------------------------------------------------
@@ -34,7 +55,7 @@ if [ -d "${ROOT}/.git" ] && command -v git >/dev/null 2>&1; then
     BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
     log_info "当前分支：${BRANCH}    commit：${CURRENT_COMMIT}"
 
-    if confirm "是否执行 git pull 拉取最新代码？"; then
+    if lumen_update_decision LUMEN_UPDATE_GIT_PULL "是否执行 git pull 拉取最新代码？"; then
         log_info "执行 git pull（rebase=merges + autostash）..."
         # 使用 --rebase=merges 保留 merge 拓扑；--autostash 自动 stash/pop 本地未提交改动，
         # 比 --ff-only 友好：只要无冲突就能继续，否则给出清晰提示让用户处理。
@@ -98,7 +119,7 @@ log_step "同步前端依赖（npm ci）"
 # ---------------------------------------------------------------------------
 # 7. 可选 rebuild
 # ---------------------------------------------------------------------------
-if confirm "是否重新构建前端生产包（npm run build）？"; then
+if lumen_update_decision LUMEN_UPDATE_BUILD "是否重新构建前端生产包（npm run build）？"; then
     log_step "重建前端（npm run build）"
     WEB_ENV="${ROOT}/apps/web/.env.local"
     NEXT_PUBLIC_API_BASE_VALUE=""

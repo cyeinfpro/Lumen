@@ -947,6 +947,35 @@ export function restoreBackup(
   );
 }
 
+// ——— Admin: one-click Lumen update ———
+
+export interface AdminUpdateStatusOut {
+  running: boolean;
+  pid?: number | null;
+  started_at?: string | null;
+  log_tail: string;
+}
+
+export interface AdminUpdateTriggerOut {
+  accepted: boolean;
+  pid: number;
+  started_at: string;
+  proxy_name?: string | null;
+  log_path: string;
+  note: string;
+}
+
+export function getAdminUpdateStatus(): Promise<AdminUpdateStatusOut> {
+  return apiFetch<AdminUpdateStatusOut>("/admin/update/status");
+}
+
+export function triggerAdminUpdate(): Promise<AdminUpdateTriggerOut> {
+  return apiFetch<AdminUpdateTriggerOut>("/admin/update", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 // ——— Me: usage ———
 
 export function getMyUsage(): Promise<UsageOut> {

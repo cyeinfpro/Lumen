@@ -60,6 +60,15 @@ def test_install_script_defaults_to_starting_runtime_after_install() -> None:
     assert "未启动前，浏览器访问 3000 不会有响应" in text
 
 
+def test_update_script_supports_noninteractive_env_decisions() -> None:
+    text = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+    assert "LUMEN_UPDATE_NONINTERACTIVE" in text
+    assert "LUMEN_UPDATE_GIT_PULL" in text
+    assert "LUMEN_UPDATE_BUILD" in text
+    assert 'lumen_update_decision LUMEN_UPDATE_GIT_PULL "是否执行 git pull 拉取最新代码？"' in text
+    assert 'lumen_update_decision LUMEN_UPDATE_BUILD "是否重新构建前端生产包（npm run build）？"' in text
+
+
 def test_lumenctl_help_lists_every_documented_command() -> None:
     result = subprocess.run(
         ["bash", str(LUMENCTL), "help"],
