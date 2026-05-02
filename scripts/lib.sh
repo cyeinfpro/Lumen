@@ -210,7 +210,11 @@ read_or_default() {
     else
         printf '%s%s%s: ' "${LUMEN_C_CYAN}" "${prompt}" "${LUMEN_C_RESET}" >&2
     fi
-    if ! IFS= read -r reply; then
+    if [ -r /dev/tty ]; then
+        if ! IFS= read -r reply </dev/tty; then
+            reply=""
+        fi
+    elif ! IFS= read -r reply; then
         reply=""
     fi
     if [ -z "${reply}" ]; then
@@ -226,8 +230,12 @@ read_secret() {
     local reply=""
     printf '%s%s%s: ' "${LUMEN_C_CYAN}" "${prompt}" "${LUMEN_C_RESET}" >&2
     # -s 静默读取；某些终端不支持 -s，则降级
-    if IFS= read -rs reply 2>/dev/null; then
+    if [ -r /dev/tty ] && IFS= read -rs reply </dev/tty 2>/dev/null; then
         printf '\n' >&2
+    elif [ -r /dev/tty ]; then
+        if ! IFS= read -r reply </dev/tty; then
+            reply=""
+        fi
     else
         if ! IFS= read -r reply; then
             reply=""

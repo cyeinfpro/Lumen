@@ -122,7 +122,12 @@ bootstrap_from_raw_script() {
         git clone --branch "${branch}" "${repo_url}" "${install_dir}"
     fi
 
-    exec bash "${install_dir}/scripts/install.sh" "$@"
+    if [ -r /dev/tty ]; then
+        exec bash "${install_dir}/scripts/install.sh" "$@" </dev/tty
+    fi
+    printf '[ERROR] 无法打开 /dev/tty 读取安装参数。\n' >&2
+    printf '        请改用：bash %s/scripts/install.sh\n' "${install_dir}" >&2
+    exit 1
 }
 
 if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
