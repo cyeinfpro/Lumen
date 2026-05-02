@@ -18,6 +18,7 @@ SCRIPT_FILES = [
     ROOT / "scripts" / "restore.sh",
 ]
 INSTALL = ROOT / "scripts" / "install.sh"
+UPDATE = ROOT / "scripts" / "update.sh"
 
 
 def run_bash(script: str, *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -71,7 +72,7 @@ def test_update_script_supports_noninteractive_env_decisions() -> None:
 
 
 def test_update_script_restarts_services_and_health_checks_after_update() -> None:
-    text = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+    text = UPDATE.read_text(encoding="utf-8")
     assert 'log_step "更新后运行时检查"' in text
     assert 'lumen_ensure_runtime_dirs "${ROOT}/.env"' in text
     assert "lumen_restart_systemd_units lumen-api.service lumen-worker.service lumen-web.service" in text
@@ -79,6 +80,16 @@ def test_update_script_restarts_services_and_health_checks_after_update() -> Non
     assert "无法安全重启并确认新版本" in text
     assert 'lumen_start_local_runtime "${ROOT}" "${WEB_NPM_SCRIPT}"' in text
     assert "已重启 systemd 服务并通过健康检查" in text
+
+
+def test_update_script_runs_dependency_steps_as_systemd_runtime_user() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+    assert "LUMEN_UPDATE_SYSTEMD_RUNTIME=1" in text
+    assert 'LUMEN_UPDATE_RUN_USER="$(lumen_runtime_service_user)"' in text
+    assert 'lumen_update_as_runtime_user "${UV_BIN}" sync --frozen --all-packages' in text
+    assert 'lumen_update_as_runtime_user "${UV_BIN}" run alembic upgrade head' in text
+    assert 'lumen_update_as_runtime_user "${NPM_BIN}" ci' in text
+    assert 'lumen_update_as_runtime_user "${NPM_BIN}" run build' in text
 
 
 def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
