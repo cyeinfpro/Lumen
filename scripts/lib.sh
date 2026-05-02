@@ -621,6 +621,25 @@ lumen_pid_cmdline() {
     fi
 }
 
+# 抓 PID 的工作目录。next-server 子进程把 process.title 改成 "next-server (v...)"，
+# cmdline 已不含项目路径，必须用 cwd 才能确认是不是 lumen 起的。
+lumen_pid_cwd() {
+    local pid="$1"
+    [ -n "${pid}" ] || return 0
+    if [ -L "/proc/${pid}/cwd" ]; then
+        readlink -f "/proc/${pid}/cwd" 2>/dev/null
+        return 0
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        # macOS 的 lsof 即便加 -p PID 仍可能输出全表，必须先匹配 p<pid> 再取它后面的 n 行。
+        lsof -p "${pid}" -d cwd -Fpn 2>/dev/null \
+            | awk -v pid="${pid}" '
+                /^p/ { current = substr($0, 2); next }
+                /^n/ && current == pid { sub(/^n/, ""); print; exit }
+            '
+    fi
+}
+
 # 判断给定 PID 是否 lumen 后台运行时（uvicorn app.main:app / arq app.main / next-server / npm run dev|start）。
 # 防止误杀同机其它 nodejs / python 服务。
 lumen_is_lumen_runtime_process() {
@@ -628,24 +647,31 @@ lumen_is_lumen_runtime_process() {
     [ -n "${pid}" ] || return 1
     local cmd
     cmd="$(lumen_pid_cmdline "${pid}")"
-    [ -n "${cmd}" ] || return 1
     case "${cmd}" in
         *"uvicorn app.main:app"*) return 0 ;;
         *"arq app.main.WorkerSettings"*) return 0 ;;
         *"app.main.WorkerSettings"*) return 0 ;;
-        *"next-server"*"apps/web"*) return 0 ;;
-        *"node"*"apps/web/node_modules/next/dist"*) return 0 ;;
+        # next-server (v...)  —— next 子进程改 process.title 后 cmdline 通常就这么短，
+        # 不含 apps/web。cwd 兜底（见下）会再校验一次是不是真在 lumen 项目内。
+        *"next-server"*) return 0 ;;
+        *"node"*"node_modules/next/dist"*) return 0 ;;
+        *"node"*"node_modules/.bin/next"*) return 0 ;;
         *"npm run dev"*|*"npm run start"*|*"npm exec next"*) return 0 ;;
-        *"apps/web"*"next dev"*) return 0 ;;
-        *"apps/web"*"next start"*) return 0 ;;
+        *"next dev"*|*"next start"*) return 0 ;;
     esac
-    # 兜底：cmdline 出现项目根目录路径，再校验 apps/api|apps/worker|apps/web 子串。
-    if [[ "${cmd}" == *"apps/api"* && "${cmd}" == *"uvicorn"* ]]; then
-        return 0
-    fi
-    if [[ "${cmd}" == *"apps/worker"* && "${cmd}" == *"arq"* ]]; then
-        return 0
-    fi
+    # cmdline 包含 apps/* 路径的兜底（uvicorn 走 uv run 可能少 uvicorn 字面量）
+    case "${cmd}" in
+        *"apps/api"*"uvicorn"*|*"apps/api"*"app.main"*) return 0 ;;
+        *"apps/worker"*"arq"*|*"apps/worker"*"app.main"*) return 0 ;;
+    esac
+    # 进程 cwd 在 apps/api|worker|web 下：next-server 等改了 process.title 的进程靠这个识别
+    local cwd
+    cwd="$(lumen_pid_cwd "${pid}")"
+    case "${cwd}" in
+        */apps/api|*/apps/api/*) return 0 ;;
+        */apps/worker|*/apps/worker/*) return 0 ;;
+        */apps/web|*/apps/web/*) return 0 ;;
+    esac
     return 1
 }
 
@@ -757,10 +783,28 @@ lumen_tail_runtime_log() {
     fi
 }
 
+# 启动新进程前先把端口腾出来：lumen 自己的旧进程主动 kill；外部进程则报错。
+# 返回 0 表示端口现在空闲，可以启动；返回 1 表示外部占用，调用方应放弃启动。
+lumen_prepare_port_for_runtime() {
+    local port="$1"
+    local label="$2"
+    if ! lumen_process_listening_on_port "${port}"; then
+        return 0
+    fi
+    log_info "${label} 启动前发现 ${port} 已被占用，尝试释放（仅限 Lumen 自家进程）。"
+    if lumen_release_port_if_lumen "${port}" "${label}"; then
+        return 0
+    fi
+    log_error "${label}：端口 ${port} 被外部进程占用，无法启动。"
+    log_error "排查命令：lsof -iTCP:${port} -sTCP:LISTEN -nP   或   ss -ltnp \"sport = :${port}\""
+    return 1
+}
+
 lumen_start_local_runtime() {
     local root="$1"
     local web_npm_script="${2:-dev}"
-    local api_log worker_log web_log worker_pid=""
+    local api_log worker_log web_log
+    local api_pid="" worker_pid="" web_pid=""
     local failed=0
 
     LUMEN_LOCAL_RUNTIME_LOG_DIR="${root}/.install-logs/runtime.$(date '+%Y%m%d%H%M%S')"
@@ -771,15 +815,18 @@ lumen_start_local_runtime() {
 
     log_step "启动 Lumen 运行时进程"
 
-    if lumen_process_listening_on_port 8000; then
-        log_warn "端口 8000 已有进程监听，跳过启动 API。"
+    # 先把 8000/3000 上的旧 Lumen 进程清掉。否则这次启动的新 API/Web 会因 EADDRINUSE
+    # 立刻退出，而旧进程仍在响应 healthz，健康检查会假阳性通过。
+    if ! lumen_prepare_port_for_runtime 8000 "API"; then
+        failed=1
     else
         log_info "启动 API → ${api_log}"
         (
             cd "${root}/apps/api"
             exec uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
         ) >"${api_log}" 2>&1 &
-        LUMEN_LOCAL_RUNTIME_PIDS+=("$!")
+        api_pid="$!"
+        LUMEN_LOCAL_RUNTIME_PIDS+=("${api_pid}")
     fi
 
     log_info "启动 Worker → ${worker_log}"
@@ -790,25 +837,38 @@ lumen_start_local_runtime() {
     worker_pid="$!"
     LUMEN_LOCAL_RUNTIME_PIDS+=("${worker_pid}")
 
-    if lumen_process_listening_on_port 3000; then
-        log_warn "端口 3000 已有进程监听，跳过启动 Web。"
+    if ! lumen_prepare_port_for_runtime 3000 "Web"; then
+        failed=1
     else
         log_info "启动 Web → ${web_log}"
         (
             cd "${root}/apps/web"
             exec npm run "${web_npm_script}"
         ) >"${web_log}" 2>&1 &
-        LUMEN_LOCAL_RUNTIME_PIDS+=("$!")
+        web_pid="$!"
+        LUMEN_LOCAL_RUNTIME_PIDS+=("${web_pid}")
     fi
 
     sleep "${LUMEN_WORKER_START_GRACE_SECONDS:-3}"
+    # 校验三个 PID 仍然存活：旧进程会让 healthz 假阳性，
+    # 只有「我们刚启动的进程还活着」才算真启动成功。
+    if [ -n "${api_pid}" ] && ! kill -0 "${api_pid}" 2>/dev/null; then
+        log_error "API 启动后立即退出（常见原因：端口 8000 冲突 / DATABASE_URL 错误 / .env 不完整）。"
+        lumen_tail_runtime_log "API" "${api_log}"
+        failed=1
+    fi
     if [ -n "${worker_pid}" ] && ! kill -0 "${worker_pid}" 2>/dev/null; then
         log_error "Worker 启动后立即退出。"
         lumen_tail_runtime_log "Worker" "${worker_log}"
         failed=1
     fi
+    if [ -n "${web_pid}" ] && ! kill -0 "${web_pid}" 2>/dev/null; then
+        log_error "Web 启动后立即退出（常见原因：端口 3000 被旧进程占用 / npm build 残缺）。"
+        lumen_tail_runtime_log "Web" "${web_log}"
+        failed=1
+    fi
 
-    if ! LUMEN_CHECK_WORKER=0 lumen_check_runtime_health; then
+    if [ "${failed}" -eq 0 ] && ! LUMEN_CHECK_WORKER=0 lumen_check_runtime_health; then
         failed=1
     fi
 
