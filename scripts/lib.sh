@@ -210,10 +210,8 @@ read_or_default() {
     else
         printf '%s%s%s: ' "${LUMEN_C_CYAN}" "${prompt}" "${LUMEN_C_RESET}" >&2
     fi
-    if [ -r /dev/tty ]; then
-        if ! IFS= read -r reply </dev/tty; then
-            reply=""
-        fi
+    if [ -r /dev/tty ] && IFS= read -r reply 2>/dev/null </dev/tty; then
+        :
     elif ! IFS= read -r reply; then
         reply=""
     fi
