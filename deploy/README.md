@@ -9,6 +9,8 @@
 
 `image-job` 是异步图像任务的 sidecar 进程，独立部署，监听 `127.0.0.1:8091`。
 worker 通过 sidecar 把参考图转成短 URL，避免 base64 内联到上游请求。
+它必须绑定一个已运行的 sub2api/OpenAI 兼容上游；`scripts/lumenctl.sh install-image-job`
+会让你填写实际上游 base URL，例如本机常见默认值 `http://127.0.0.1:8081`，也可以是其他端口、内网地址或公网反代地址；脚本会探测你填写的地址，不可达时会中止安装。
 
 **源码唯一真相**：仓库根 `image-job/app.py`。`deploy/image-job/` 只放部署模板。
 

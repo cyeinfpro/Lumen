@@ -463,6 +463,8 @@ GET  /refs/...
 - 定期清理过期图片和 job 行
 - requeue stuck queued/running job
 
+`image-job` 必须绑定一个已经运行的 sub2api/OpenAI 兼容上游。统一安装菜单会让你填写实际的 `IMAGE_JOB_UPSTREAM_BASE_URL`，例如本机常见默认值 `http://127.0.0.1:8081`，也可以是其他端口、内网地址或公网反代地址。脚本会探测你填写的地址；如果当前机器连不上该上游，会中止安装。
+
 最小启动：
 
 ```bash
