@@ -1224,16 +1224,17 @@ function ProviderCard({
         />
         <MetaSep />
         <MetaItem label="代理" value={p.proxy ?? "直连"} mono />
-        {p.image_jobs_enabled && (
+        {((p.image_jobs_endpoint ?? "auto") !== "auto" ||
+          p.image_jobs_enabled) && (
           <>
             <MetaSep />
             <MetaItem
-              label="异步"
+              label="Endpoint"
               value={
                 p.image_jobs_endpoint_lock &&
                 p.image_jobs_endpoint !== "auto"
-                  ? `image-jobs · ${p.image_jobs_endpoint} · locked`
-                  : `image-jobs · ${p.image_jobs_endpoint ?? "auto"}`
+                  ? `${p.image_jobs_endpoint} · locked`
+                  : (p.image_jobs_endpoint ?? "auto")
               }
               mono
               color={
@@ -1736,56 +1737,56 @@ const DraftCard = forwardRef<
                 </div>
               </div>
 
-              {draft.image_jobs_enabled && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-xl bg-white/[0.02] border border-white/5">
-                  <div className="flex flex-col">
-                    <label className="text-xs text-neutral-300 font-medium mb-1.5">
-                      Sidecar Endpoint 偏好
-                    </label>
-                    <select
-                      value={draft.image_jobs_endpoint ?? "auto"}
-                      onChange={(e) =>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-xl bg-white/[0.02] border border-white/5">
+                <div className="flex flex-col">
+                  <label className="text-xs text-neutral-300 font-medium mb-1.5">
+                    Endpoint 偏好
+                  </label>
+                  <select
+                    value={draft.image_jobs_endpoint ?? "auto"}
+                    onChange={(e) =>
+                      onUpdate({
+                        image_jobs_endpoint:
+                          (e.target.value as "auto" | "generations" | "responses") || "auto",
+                      })
+                    }
+                    className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-sky-500/50"
+                  >
+                    <option value="auto">auto（按健康度自适应）</option>
+                    <option value="generations">generations（/v1/images/generations · /v1/images/edits）</option>
+                    <option value="responses">responses（/v1/responses + image_generation）</option>
+                  </select>
+                  <span className="mt-1 text-[11px] leading-4 text-neutral-600">
+                    适用于异步与同步生图：auto 时按健康度在两种 endpoint 间切换；锁定后该号只服务对应 endpoint，由其他号兜底对端。
+                  </span>
+                  {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
+                    <button
+                      type="button"
+                      onClick={() =>
                         onUpdate({
-                          image_jobs_endpoint:
-                            (e.target.value as "auto" | "generations" | "responses") || "auto",
+                          image_jobs_endpoint_lock:
+                            !draft.image_jobs_endpoint_lock,
                         })
                       }
-                      className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-sky-500/50"
+                      className={
+                        "mt-2 inline-flex items-center gap-1.5 min-h-[36px] sm:h-8 px-3 rounded-xl border text-xs transition-colors justify-center " +
+                        (draft.image_jobs_endpoint_lock
+                          ? "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20"
+                          : "bg-white/[0.03] border-white/10 text-neutral-400 hover:bg-white/[0.06]")
+                      }
                     >
-                      <option value="auto">auto（按健康度自适应）</option>
-                      <option value="generations">generations（/v1/images/generations · /v1/images/edits）</option>
-                      <option value="responses">responses（/v1/responses + image_generation）</option>
-                    </select>
+                      {draft.image_jobs_endpoint_lock
+                        ? `已锁定 · 仅服务 ${draft.image_jobs_endpoint}`
+                        : "锁定到该 endpoint"}
+                    </button>
+                  )}
+                  {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
                     <span className="mt-1 text-[11px] leading-4 text-neutral-600">
-                      auto 时 Lumen 会按历史成功率与延迟在两种 endpoint 间切换并自动 failover。
+                      锁定后该号不再服务对端 endpoint：选号阶段直接被过滤、失败也不再回退到对端，由其它号兜底。
                     </span>
-                    {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onUpdate({
-                            image_jobs_endpoint_lock:
-                              !draft.image_jobs_endpoint_lock,
-                          })
-                        }
-                        className={
-                          "mt-2 inline-flex items-center gap-1.5 min-h-[36px] sm:h-8 px-3 rounded-xl border text-xs transition-colors justify-center " +
-                          (draft.image_jobs_endpoint_lock
-                            ? "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20"
-                            : "bg-white/[0.03] border-white/10 text-neutral-400 hover:bg-white/[0.06]")
-                        }
-                      >
-                        {draft.image_jobs_endpoint_lock
-                          ? `已锁定 · 仅服务 ${draft.image_jobs_endpoint}`
-                          : "锁定到该 endpoint"}
-                      </button>
-                    )}
-                    {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
-                      <span className="mt-1 text-[11px] leading-4 text-neutral-600">
-                        锁定后该号不再服务对端 endpoint：选号阶段直接被过滤、失败也不再回退到对端，由其它号兜底。
-                      </span>
-                    )}
-                  </div>
+                  )}
+                </div>
+                {draft.image_jobs_enabled && (
                   <div className="flex flex-col">
                     <label className="text-xs text-neutral-300 font-medium mb-1.5">
                       Sidecar Base URL（可选）
@@ -1803,8 +1804,8 @@ const DraftCard = forwardRef<
                       支持给不同 Provider 指定独立的 image-job sidecar，例如多区域部署时按 Provider 路由。
                     </span>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
 
               {/* 操作栏 */}
               <div className="flex items-center gap-2 pt-3 border-t border-white/5">
