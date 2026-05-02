@@ -270,6 +270,48 @@ PY
     fi
 }
 
+probe_sub2api_upstream() {
+    local upstream_base="$1"
+    local probe_path probe_url status
+
+    ensure_cmd curl "请安装 curl，用于安装 image-job 前探测 sub2api 上游"
+    log_step "检查 sub2api/OpenAI 兼容上游是否可访问"
+    log_info "上游地址（按实际部署填写，不固定端口）：${upstream_base}"
+
+    for probe_path in /v1/models /v1/images/generations /v1/responses; do
+        probe_url="${upstream_base}${probe_path}"
+        status="$(curl -k -sS -o /dev/null -w '%{http_code}' \
+            --connect-timeout 3 \
+            --max-time 8 \
+            "${probe_url}" 2>/dev/null || true)"
+        case "${status}" in
+            2??|3??|400|401|403|404|405|422)
+                log_info "sub2api/OpenAI 兼容端点探测通过：${probe_url} -> HTTP ${status}"
+                return 0
+                ;;
+        esac
+    done
+
+    for probe_path in /health /healthz /; do
+        probe_url="${upstream_base}${probe_path}"
+        status="$(curl -k -sS -o /dev/null -w '%{http_code}' \
+            --connect-timeout 3 \
+            --max-time 8 \
+            "${probe_url}" 2>/dev/null || true)"
+        case "${status}" in
+            2??|3??|401|403)
+                log_warn "上游地址可达：${probe_url} -> HTTP ${status}；请确认它是 sub2api/OpenAI 兼容服务。"
+                return 0
+                ;;
+        esac
+    done
+
+    log_error "无法连接 sub2api/OpenAI 兼容上游：${upstream_base}"
+    log_error "image-job 必须绑定一个已运行的 sub2api/OpenAI 兼容上游。"
+    log_error "请先启动 sub2api，并确认当前机器可访问你填写的地址，例如：curl -i ${upstream_base}/v1/models"
+    exit 1
+}
+
 run_lumen_script() {
     local script_name="$1"
     log_step "执行 ${script_name}"
@@ -321,7 +363,7 @@ install_image_job() {
     app_dir="$(read_or_default '应用目录' '/opt/image-job')"
     data_dir="$(read_or_default '数据目录' "${app_dir}/data")"
     state_dir="$(read_or_default '状态目录' '/var/lib/image-job/state')"
-    upstream_base="$(strip_trailing_slash "$(read_or_default '上游同步图片 API' 'http://127.0.0.1:8081')")"
+    upstream_base="$(strip_trailing_slash "$(read_or_default 'sub2api/OpenAI 兼容上游 base URL（按实际地址填写）' 'http://127.0.0.1:8081')")"
     public_base="$(strip_trailing_slash "$(read_or_default 'image-job 公网 base URL' 'https://example.com')")"
     listen_host="$(read_or_default '监听地址' '127.0.0.1')"
     listen_port="$(read_or_default '监听端口' '8091')"
@@ -332,7 +374,7 @@ install_image_job() {
     validate_absolute_path "应用目录" "${app_dir}" || exit 1
     validate_absolute_path "数据目录" "${data_dir}" || exit 1
     validate_absolute_path "状态目录" "${state_dir}" || exit 1
-    validate_url_like "上游同步图片 API" "${upstream_base}" || exit 1
+    validate_url_like "sub2api/OpenAI 兼容上游 base URL" "${upstream_base}" || exit 1
     validate_url_like "image-job 公网 base URL" "${public_base}" || exit 1
     validate_host_port_target "监听地址" "${listen_host}" || exit 1
     validate_tcp_port "监听端口" "${listen_port}" || exit 1
@@ -340,6 +382,7 @@ install_image_job() {
     validate_python_command "Python 命令" "${python_bin}" || exit 1
     validate_service_user_name "systemd 运行用户" "${service_user}" || exit 1
     ensure_python_min_version "${python_bin}" 3 11
+    probe_sub2api_upstream "${upstream_base}"
 
     ensure_service_user "${service_user}" "${app_dir}"
     service_group="$(id -gn "${service_user}" 2>/dev/null || printf '%s' "${service_user}")"

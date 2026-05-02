@@ -211,6 +211,54 @@ def test_lumenctl_validators_reject_unsafe_values() -> None:
     )
 
 
+def test_probe_sub2api_upstream_accepts_openai_compatible_http_status() -> None:
+    result = assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        ensure_cmd() {{ :; }}
+        curl() {{
+          printf '401'
+        }}
+        probe_sub2api_upstream http://10.0.0.8:18080
+        """
+    )
+    assert "http://10.0.0.8:18080/v1/models" in result.stdout
+    assert "sub2api/OpenAI 兼容端点探测通过" in result.stdout
+
+
+def test_probe_sub2api_upstream_uses_health_as_reachability_fallback() -> None:
+    result = assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        ensure_cmd() {{ :; }}
+        curl() {{
+          case "$*" in
+            *'/health'*) printf '200' ;;
+            *) printf '000' ;;
+          esac
+        }}
+        probe_sub2api_upstream https://sub2api.example.com
+        """
+    )
+    assert "https://sub2api.example.com/health" in result.stderr
+    assert "请确认它是 sub2api/OpenAI 兼容服务" in result.stderr
+
+
+def test_probe_sub2api_upstream_fails_when_unreachable() -> None:
+    result = run_bash(
+        f"""
+        . {LUMENCTL}
+        ensure_cmd() {{ :; }}
+        curl() {{
+          printf '000'
+        }}
+        probe_sub2api_upstream http://127.0.0.1:19091
+        """
+    )
+    assert result.returncode == 1
+    assert "无法连接 sub2api/OpenAI 兼容上游" in result.stderr
+
+
 def test_lumen_nginx_config_contains_sse_api_and_security_defaults(tmp_path: Path) -> None:
     out = tmp_path / "lumen.conf"
     assert_bash_ok(
