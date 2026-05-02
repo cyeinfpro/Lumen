@@ -25,13 +25,14 @@ log_step "Lumen 卸载向导"
 cat <<EOF
 
   本向导将分步进行：
-    1) 停止 PostgreSQL / Redis 容器
-    2) 询问是否删除数据卷（不可恢复）
-    3) 询问是否删除 .env 配置
-    4) 询问是否删除本地图片存储
-    5) 询问是否删除 /opt/lumendata/backup 备份
-    6) 询问是否删除前端 node_modules / .next
-    7) 询问是否删除 .venv（uv 虚拟环境）
+    1) 停止 install.sh 拉起的 API / Worker / Web 后台进程（释放 8000/3000）
+    2) 停止 PostgreSQL / Redis 容器（释放 5432/6379）
+    3) 询问是否删除数据卷（不可恢复）
+    4) 询问是否删除 .env 配置
+    5) 询问是否删除本地图片存储
+    6) 询问是否删除 /opt/lumendata/backup 备份
+    7) 询问是否删除前端 node_modules / .next
+    8) 询问是否删除 .venv（uv 虚拟环境）
 
   源代码与 docker-compose.yml 不会被删除；删除项目目录请手动 rm。
   每个删除步骤默认 "N"（保留），需明确输入 y/yes 才会执行。
@@ -55,15 +56,58 @@ if lumen_detect_docker_access; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. docker compose down（仅停容器）
+# 2. 停 install.sh 拉起的本地运行时（uvicorn / arq / next-server）
+#    install.sh 把 API/Worker/Web 后台 & 起来，PID 仅在 install.sh 进程内；
+#    如果不在这里清掉，下次 install 检测到 8000/3000 已被占用就会卡死。
+# ---------------------------------------------------------------------------
+log_step "停止 Lumen 本地运行时（API / Worker / Web）"
+RUNTIME_FREED=0
+RUNTIME_BUSY=0
+lumen_stop_persisted_runtime "${ROOT}" 15 || true
+for PORT in 8000 3000; do
+    if ! lumen_process_listening_on_port "${PORT}"; then
+        continue
+    fi
+    if lumen_release_port_if_lumen "${PORT}" "端口 ${PORT}"; then
+        RUNTIME_FREED=1
+    else
+        log_warn "端口 ${PORT} 仍被外部进程占用，跳过强杀。请在确认无误后手动停掉。"
+        RUNTIME_BUSY=1
+    fi
+done
+if [ "${RUNTIME_FREED}" -eq 1 ]; then
+    DONE+=("已停止本地运行时进程并释放 8000/3000")
+elif [ "${RUNTIME_BUSY}" -eq 1 ]; then
+    KEPT+=("8000/3000 仍被非 Lumen 进程占用（请自行确认）")
+else
+    KEPT+=("本地运行时本来就没在跑")
+fi
+
+# ---------------------------------------------------------------------------
+# 3. docker compose down（停容器）；失败兜底用 docker rm -f 强删 lumen-pg/lumen-redis。
 # ---------------------------------------------------------------------------
 log_step "停止容器（docker compose down）"
 if [ "${DOCKER_AVAILABLE}" -eq 1 ]; then
     if lumen_docker compose down; then
         DONE+=("已停止 lumen-pg / lumen-redis 容器")
     else
-        log_warn "docker compose down 返回非零；容器可能仍在运行。继续后续可选清理。"
-        KEPT+=("容器状态未确认（docker compose down 失败）")
+        log_warn "docker compose down 返回非零，尝试强删残留容器以释放 5432/6379。"
+        STRAY=0
+        for CNAME in lumen-pg lumen-redis; do
+            if lumen_docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CNAME}"; then
+                if lumen_docker rm -f "${CNAME}" >/dev/null 2>&1; then
+                    log_info "已强删容器 ${CNAME}"
+                    STRAY=1
+                else
+                    log_error "无法删除 ${CNAME}，请手动 'docker rm -f ${CNAME}'。"
+                fi
+            fi
+        done
+        if [ "${STRAY}" -eq 1 ]; then
+            DONE+=("已强删残留 lumen-pg / lumen-redis 容器")
+        else
+            KEPT+=("容器状态未确认（docker compose down 失败）")
+        fi
     fi
 else
     log_warn "未检测到 docker / docker compose v2，跳过停容器步骤。"
