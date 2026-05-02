@@ -34,7 +34,9 @@ Public API:
 ```text
 POST /v1/image-jobs
 GET  /v1/image-jobs/{job_id}
+POST /v1/refs
 GET  /images/temp/...
+GET  /refs/...
 ```
 
 The caller must send the same `Authorization: Bearer <UPSTREAM_API_KEY>` when creating and polling a job.
