@@ -1016,19 +1016,38 @@ elif [ "${AVAILABLE_KB}" -lt "${MIN_KB}" ] 2>/dev/null; then
     fi
 fi
 
-# 同名容器存在但不属于 docker compose -- 直接冲突，要求用户手清
+# 残留容器：只要不属于本 compose project 就主动清掉，避免反复装时被卡死。
 for CNAME in lumen-pg lumen-redis; do
     if docker_cli ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CNAME}"; then
         OWNER="$(docker_cli inspect "${CNAME}" --format '{{ index .Config.Labels "com.docker.compose.project" }}' 2>/dev/null || true)"
         if [ -z "${OWNER}" ]; then
-            log_error "已存在同名容器 ${CNAME}，但不属于 docker compose 项目。"
-            log_error "请手动清理后重跑：docker rm -f ${CNAME}"
-            exit 1
+            log_warn "发现残留容器 ${CNAME}（不属于任何 docker compose 项目），自动清理。"
+            docker_cli rm -f "${CNAME}" >/dev/null 2>&1 || {
+                log_error "无法删除残留容器 ${CNAME}，请手动 'docker rm -f ${CNAME}' 后重跑。"
+                exit 1
+            }
         fi
     fi
 done
 
-# 宿主端口占用（仅检查 PG/Redis；如果端口被自家 compose 容器持有则放行）
+# 后台残留的 lumen 运行时（uvicorn / arq / next）会一直占着 8000/3000，
+# 否则下次 install 起的 API/Web 会因端口冲突静默跳过启动。这里识别到 lumen 自己的进程就清。
+for PORT in 8000 3000; do
+    if lumen_release_port_if_lumen "${PORT}" "端口 ${PORT}"; then
+        :
+    else
+        log_error "端口 ${PORT} 被非 Lumen 进程占用，install 已停止。"
+        if [ "${OS}" = "macos" ]; then
+            log_error "排查命令：lsof -iTCP:${PORT} -sTCP:LISTEN -nP"
+        else
+            log_error "排查命令：ss -ltnp \"sport = :${PORT}\""
+        fi
+        log_error "请停止该进程或释放端口后重跑本脚本（可先 'bash scripts/uninstall.sh' 清理 Lumen 残留）。"
+        exit 1
+    fi
+done
+
+# 宿主端口占用（PG/Redis；如果端口被自家 compose 容器持有则放行）
 for PORT in 5432 6379; do
     case "${PORT}" in
         5432) OWN_CNAME=lumen-pg ;;
@@ -1067,36 +1086,16 @@ if [ -f "${ENV_FILE}" ]; then
     ensure_compose_db_env_vars "${ENV_FILE}"
     log_info ".env 已存在，跳过生成。如需重置请手动删除后重跑。"
 else
-    log_step "首次配置 .env（按提示填写，括号内为默认值）"
+    log_step "生成 .env（敏感字段自动随机；上游 Provider 留待登录后在管理面板配置）"
 
-    PROVIDER_API_KEY=""
-    while [ -z "${PROVIDER_API_KEY}" ]; do
-        PROVIDER_API_KEY="$(read_secret 'PROVIDER_API_KEY（必填，上游图像 API 密钥；输入不回显）')"
-        if [ -z "${PROVIDER_API_KEY}" ]; then
-            log_warn "PROVIDER_API_KEY 不能为空。"
-        elif ! validate_dotenv_value "PROVIDER_API_KEY" "${PROVIDER_API_KEY}"; then
-            PROVIDER_API_KEY=""
-        fi
-    done
-
-    while :; do
-        PROVIDER_BASE_URL="$(read_or_default 'PROVIDER_BASE_URL' 'https://api.example.com')"
-        validate_dotenv_value "PROVIDER_BASE_URL" "${PROVIDER_BASE_URL}" && break
-    done
-    while :; do
-        PUBLIC_BASE_URL="$(read_or_default 'PUBLIC_BASE_URL（站点对外访问地址）' 'http://localhost:3000')"
-        validate_dotenv_value "PUBLIC_BASE_URL" "${PUBLIC_BASE_URL}" && break
-    done
-    while :; do
-        CORS_ALLOW_ORIGINS="$(read_or_default 'CORS_ALLOW_ORIGINS（允许访问 API 的前端来源，逗号分隔）' 'http://localhost:3000')"
-        validate_dotenv_value "CORS_ALLOW_ORIGINS" "${CORS_ALLOW_ORIGINS}" && break
-    done
-
-    DEFAULT_SECRET="$(openssl rand -hex 32)"
-    while :; do
-        SESSION_SECRET="$(read_or_default 'SESSION_SECRET（直接回车使用随机生成）' "${DEFAULT_SECRET}")"
-        validate_dotenv_value "SESSION_SECRET" "${SESSION_SECRET}" && break
-    done
+    # 上游 Provider 留空：登录后到「管理 → 上游 Provider」添加真实 API key。
+    # 站点访问/CORS/Session 用安全默认；要自定义可提前 export LUMEN_* 环境变量。
+    PUBLIC_BASE_URL="${LUMEN_PUBLIC_BASE_URL:-http://localhost:3000}"
+    CORS_ALLOW_ORIGINS="${LUMEN_CORS_ALLOW_ORIGINS:-http://localhost:3000}"
+    SESSION_SECRET="${LUMEN_SESSION_SECRET:-$(openssl rand -hex 32)}"
+    validate_dotenv_value "PUBLIC_BASE_URL" "${PUBLIC_BASE_URL}" || exit 1
+    validate_dotenv_value "CORS_ALLOW_ORIGINS" "${CORS_ALLOW_ORIGINS}" || exit 1
+    validate_dotenv_value "SESSION_SECRET" "${SESSION_SECRET}" || exit 1
 
     # Redis 密码：默认自动生成，避免安装过程被密码交互卡住。
     # 如需自定义，安装前设置 LUMEN_REDIS_PASSWORD。
@@ -1112,9 +1111,8 @@ else
     DB_USER="lumen_app"
     DB_NAME="lumen_app"
     DB_PASSWORD="$(openssl rand -hex 24)"
-    PROVIDER_BASE_URL_JSON="$(json_escape_string "${PROVIDER_BASE_URL}")"
-    PROVIDER_API_KEY_JSON="$(json_escape_string "${PROVIDER_API_KEY}")"
-    PROVIDERS_JSON="[{\"name\":\"default\",\"base_url\":\"${PROVIDER_BASE_URL_JSON}\",\"api_key\":\"${PROVIDER_API_KEY_JSON}\",\"priority\":0,\"weight\":1,\"enabled\":true}]"
+    # PROVIDERS 写空数组；启动后 UI 仍可登录，调用上游 API 前需到管理面板补一条 provider。
+    PROVIDERS_JSON="[]"
     DB_PASSWORD_ENV="$(dotenv_quote "DB_PASSWORD" "${DB_PASSWORD}")"
     DATABASE_URL_ENV="$(dotenv_quote "DATABASE_URL" "postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@localhost:5432/${DB_NAME}")"
     REDIS_PASSWORD_ENV="$(dotenv_quote "REDIS_PASSWORD" "${REDIS_PASSWORD}")"
@@ -1350,25 +1348,29 @@ PY
 )
 
 # ---------------------------------------------------------------------------
-# 8. 可选 build（生产发布建议构建；本地开发可跳过）
+# 8. 构建前端（默认构建，符合朋友内测/生产部署主流场景；输入 n 跳过走 dev 模式）
 # ---------------------------------------------------------------------------
-if confirm "构建前端生产包（npm run build）？生产发布建议输入 y，本地开发可回车跳过"; then
-    log_step "构建前端（npm run build）"
-    (
-        cd "${ROOT}/apps/web"
-        # Next.js 只需要公开的 NEXT_PUBLIC_* 编译期变量，避免把 .env 密钥整体导出给构建进程。
-        NEXT_PUBLIC_API_BASE="$(read_dotenv_value "NEXT_PUBLIC_API_BASE" "${WEB_ENV}")"
-        if [ -n "${NEXT_PUBLIC_API_BASE}" ]; then
-            export NEXT_PUBLIC_API_BASE
-        else
-            unset NEXT_PUBLIC_API_BASE
-        fi
-        npm run build
-    )
-    BUILD_DONE=1
-else
-    BUILD_DONE=0
-fi
+BUILD_REPLY="$(read_or_default '构建前端生产包（npm run build）？(Y/n)' 'y')"
+case "${BUILD_REPLY}" in
+    n|N|no|NO|No)
+        BUILD_DONE=0
+        ;;
+    *)
+        log_step "构建前端（npm run build）"
+        (
+            cd "${ROOT}/apps/web"
+            # Next.js 只需要公开的 NEXT_PUBLIC_* 编译期变量，避免把 .env 密钥整体导出给构建进程。
+            NEXT_PUBLIC_API_BASE="$(read_dotenv_value "NEXT_PUBLIC_API_BASE" "${WEB_ENV}")"
+            if [ -n "${NEXT_PUBLIC_API_BASE}" ]; then
+                export NEXT_PUBLIC_API_BASE
+            else
+                unset NEXT_PUBLIC_API_BASE
+            fi
+            npm run build
+        )
+        BUILD_DONE=1
+        ;;
+esac
 
 if [ "${BUILD_DONE}" -eq 1 ]; then
     WEB_NPM_SCRIPT="start"
@@ -1385,12 +1387,12 @@ else
     START_RUNTIME_REPLY="$(read_or_default '现在启动 API / Worker / Web，让 http://<服务器IP>:3000 立即可访问？(y/N)' 'n')"
 fi
 case "${START_RUNTIME_REPLY}" in
-    y|Y|yes|YES|Yes)
-        start_runtime_processes "${WEB_NPM_SCRIPT}"
-        RUNTIME_STARTED=1
+    n|N|no|NO|No)
+        log_warn "已跳过启动运行时进程。未启动前，浏览器访问 3000 不会有响应。"
         ;;
     *)
-        log_warn "已跳过启动运行时进程。未启动前，浏览器访问 3000 不会有响应。"
+        start_runtime_processes "${WEB_NPM_SCRIPT}"
+        RUNTIME_STARTED=1
         ;;
 esac
 
@@ -1406,6 +1408,9 @@ if [ "${RUNTIME_STARTED}" -eq 1 ]; then
   API 健康检查 ..... http://127.0.0.1:8000/healthz  （API 默认只监听本机）
   管理员邮箱 ....... ${ADMIN_EMAIL}
   运行日志目录 ..... ${RUNTIME_LOG_DIR}
+
+  下一步：登录后到右上角「管理 → 上游 Provider」添加真实的图像 API key，
+  否则前端可以登录但生图会报 no_providers / all_providers_failed。
 
   如果服务器外部仍打不开 3000，请检查云安全组/防火墙是否放行 TCP 3000：
     ss -ltnp | grep -E ':3000|:8000'
@@ -1435,7 +1440,8 @@ else
     更新（拉新代码、依赖、迁移）  bash scripts/update.sh
     卸载（停容器、可选清数据）    bash scripts/uninstall.sh
 
-  管理面板：登录后右上角 "管理"，可调整上游 API、像素预算、邀请链接。
+  管理面板：登录后右上角「管理」，可添加上游 API key、调整像素预算、生成邀请链接。
+  上游 Provider 默认为空，需先在管理面板添加一条才能调用图像生成。
 
 EOF
 fi

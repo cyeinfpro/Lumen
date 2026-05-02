@@ -547,6 +547,27 @@ lumen_check_runtime_health() {
 LUMEN_LOCAL_RUNTIME_PIDS=()
 LUMEN_LOCAL_RUNTIME_LOG_DIR=""
 
+# 后台拉起的 API/Worker/Web PID 持久化文件。install.sh 退出后子进程不会主动结束，
+# 写入这里方便 uninstall.sh 准确停掉，避免 8000/3000 端口悬空。
+lumen_runtime_pid_file() {
+    local root="$1"
+    printf '%s/var/run/lumen-runtime.pids' "${root}"
+}
+
+lumen_persist_runtime_pids() {
+    local root="$1"
+    local pid_file
+    pid_file="$(lumen_runtime_pid_file "${root}")"
+    mkdir -p "$(dirname "${pid_file}")" 2>/dev/null || true
+    : > "${pid_file}" 2>/dev/null || return 0
+    local pid
+    for pid in "${LUMEN_LOCAL_RUNTIME_PIDS[@]:-}"; do
+        [ -n "${pid}" ] || continue
+        printf '%s\n' "${pid}" >> "${pid_file}"
+    done
+    chmod 600 "${pid_file}" 2>/dev/null || true
+}
+
 lumen_stop_local_runtime_jobs() {
     local pid
     for pid in "${LUMEN_LOCAL_RUNTIME_PIDS[@]:-}"; do
@@ -558,6 +579,173 @@ lumen_stop_local_runtime_jobs() {
         wait "${pid}" 2>/dev/null || true
     done
     LUMEN_LOCAL_RUNTIME_PIDS=()
+}
+
+# 列出占用某端口的 PID（每行一个）。优先 lsof，其次 ss，最后 netstat。
+lumen_pids_listening_on_port() {
+    local port="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -tiTCP:"${port}" -sTCP:LISTEN -nP 2>/dev/null | sort -u
+        return 0
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        # ss -ltnpH 输出含 users:(("name",pid=NNN,fd=...)) 的字段
+        ss -ltnpH 2>/dev/null \
+            | awk -v port="${port}" '$4 ~ ":"port"$" {print $0}' \
+            | grep -oE 'pid=[0-9]+' \
+            | awk -F= '{print $2}' \
+            | sort -u
+        return 0
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltnp 2>/dev/null \
+            | awk -v port="${port}" '$4 ~ ":"port"$" {print $7}' \
+            | awk -F'/' '{print $1}' \
+            | grep -E '^[0-9]+$' \
+            | sort -u
+        return 0
+    fi
+    return 0
+}
+
+# 抓 PID 的命令行文本（用于识别是不是 lumen 自己起的进程）。
+lumen_pid_cmdline() {
+    local pid="$1"
+    if [ -r "/proc/${pid}/cmdline" ]; then
+        tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null
+        return 0
+    fi
+    if command -v ps >/dev/null 2>&1; then
+        # macOS ps 没有 /proc，用 -o command= 拿全命令行
+        ps -o command= -p "${pid}" 2>/dev/null || ps -o args= -p "${pid}" 2>/dev/null || true
+    fi
+}
+
+# 判断给定 PID 是否 lumen 后台运行时（uvicorn app.main:app / arq app.main / next-server / npm run dev|start）。
+# 防止误杀同机其它 nodejs / python 服务。
+lumen_is_lumen_runtime_process() {
+    local pid="$1"
+    [ -n "${pid}" ] || return 1
+    local cmd
+    cmd="$(lumen_pid_cmdline "${pid}")"
+    [ -n "${cmd}" ] || return 1
+    case "${cmd}" in
+        *"uvicorn app.main:app"*) return 0 ;;
+        *"arq app.main.WorkerSettings"*) return 0 ;;
+        *"app.main.WorkerSettings"*) return 0 ;;
+        *"next-server"*"apps/web"*) return 0 ;;
+        *"node"*"apps/web/node_modules/next/dist"*) return 0 ;;
+        *"npm run dev"*|*"npm run start"*|*"npm exec next"*) return 0 ;;
+        *"apps/web"*"next dev"*) return 0 ;;
+        *"apps/web"*"next start"*) return 0 ;;
+    esac
+    # 兜底：cmdline 出现项目根目录路径，再校验 apps/api|apps/worker|apps/web 子串。
+    if [[ "${cmd}" == *"apps/api"* && "${cmd}" == *"uvicorn"* ]]; then
+        return 0
+    fi
+    if [[ "${cmd}" == *"apps/worker"* && "${cmd}" == *"arq"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# 关掉 PID 文件中记录的 lumen 进程（先 SIGTERM，最多等 wait_seconds 秒，必要时 SIGKILL）。
+# 返回值非零表示有部分进程仍在；调用方按需要再处理。
+lumen_stop_persisted_runtime() {
+    local root="$1"
+    local wait_seconds="${2:-15}"
+    local pid_file
+    pid_file="$(lumen_runtime_pid_file "${root}")"
+    [ -f "${pid_file}" ] || return 0
+    local -a pids=()
+    local line
+    while IFS= read -r line; do
+        line="${line//[[:space:]]/}"
+        [[ "${line}" =~ ^[0-9]+$ ]] || continue
+        pids+=("${line}")
+    done < "${pid_file}"
+    if [ "${#pids[@]}" -eq 0 ]; then
+        rm -f "${pid_file}" 2>/dev/null || true
+        return 0
+    fi
+    local pid sent=0
+    for pid in "${pids[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
+            kill "${pid}" 2>/dev/null || true
+            sent=1
+        fi
+    done
+    if [ "${sent}" -eq 1 ]; then
+        local _i
+        for _i in $(seq 1 "${wait_seconds}"); do
+            local alive=0
+            for pid in "${pids[@]}"; do
+                if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
+                    alive=1
+                    break
+                fi
+            done
+            [ "${alive}" -eq 0 ] && break
+            sleep 1
+        done
+        for pid in "${pids[@]}"; do
+            if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
+                kill -9 "${pid}" 2>/dev/null || true
+            fi
+        done
+    fi
+    rm -f "${pid_file}" 2>/dev/null || true
+}
+
+# 扫描端口 → 找 lumen 自己的进程 → kill。返回 0 表示端口已腾出（或本来就空闲）。
+# 输入：端口号 + 用途描述（仅日志）。
+lumen_release_port_if_lumen() {
+    local port="$1"
+    local label="${2:-port ${port}}"
+    if ! lumen_process_listening_on_port "${port}"; then
+        return 0
+    fi
+    local -a pids=()
+    local pid
+    while IFS= read -r pid; do
+        [ -n "${pid}" ] || continue
+        pids+=("${pid}")
+    done < <(lumen_pids_listening_on_port "${port}")
+    if [ "${#pids[@]}" -eq 0 ]; then
+        # 拿不到 PID（无 root / 无 lsof / docker-proxy 占的端口都可能落到这里）。
+        # 让调用方按 docker 或外部进程去处理，这里返回非 0。
+        return 1
+    fi
+    local matched=0
+    for pid in "${pids[@]}"; do
+        if lumen_is_lumen_runtime_process "${pid}"; then
+            log_warn "${label}：发现 Lumen 残留进程 pid=${pid}，发送 SIGTERM。"
+            kill "${pid}" 2>/dev/null || true
+            matched=1
+        fi
+    done
+    if [ "${matched}" -eq 0 ]; then
+        log_warn "${label}：被非 Lumen 进程占用，PID=${pids[*]}。"
+        return 1
+    fi
+    local _i
+    for _i in $(seq 1 10); do
+        if ! lumen_process_listening_on_port "${port}"; then
+            return 0
+        fi
+        sleep 1
+    done
+    for pid in "${pids[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
+            log_warn "${label}：pid=${pid} 未在 SIGTERM 后退出，发送 SIGKILL。"
+            kill -9 "${pid}" 2>/dev/null || true
+        fi
+    done
+    sleep 1
+    if lumen_process_listening_on_port "${port}"; then
+        return 1
+    fi
+    return 0
 }
 
 lumen_tail_runtime_log() {
@@ -632,6 +820,9 @@ lumen_start_local_runtime() {
         return 1
     fi
 
+    # 把后台 PID 写到 var/run/lumen-runtime.pids，方便 uninstall.sh 在不同 shell
+    # 进程里也能停掉这些后台运行时；否则 8000/3000 会被悬空进程一直占住。
+    lumen_persist_runtime_pids "${root}"
     log_info "运行时日志目录：${LUMEN_LOCAL_RUNTIME_LOG_DIR}"
 }
 
