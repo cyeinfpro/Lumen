@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { cookies, headers } from "next/headers";
-import { Instrument_Serif, Geist, IBM_Plex_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 import { Lightbox } from "@/components/ui/Lightbox";
 import { GlobalTaskTray } from "@/components/ui/GlobalTaskTray";
@@ -14,25 +14,31 @@ import { PageTransitions } from "@/components/ui/shell/PageTransitions";
 import { CommandPalette } from "@/components/ui/CommandPalette";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 
-const instrumentSerif = Instrument_Serif({
+// Self-hosted to keep `next build` offline. Google Fonts fetch fails behind
+// region-blocked / proxied production networks; switching to next/font/local
+// removes the network dependency entirely.
+const instrumentSerif = localFont({
+  src: "./fonts/InstrumentSerif-Regular.woff2",
   variable: "--font-display",
-  subsets: ["latin"],
   weight: "400",
   display: "swap",
   preload: true,
 });
 
-const geist = Geist({
+const geist = localFont({
+  src: "./fonts/Geist-Variable.woff2",
   variable: "--font-body",
-  subsets: ["latin"],
+  weight: "100 900",
   display: "swap",
   preload: true,
 });
 
-const ibmPlexMono = IBM_Plex_Mono({
+const ibmPlexMono = localFont({
+  src: [
+    { path: "./fonts/IBMPlexMono-Regular.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/IBMPlexMono-Medium.woff2", weight: "500", style: "normal" },
+  ],
   variable: "--font-mono",
-  subsets: ["latin"],
-  weight: ["400", "500"],
   display: "swap",
 });
 
