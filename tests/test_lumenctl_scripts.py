@@ -56,6 +56,7 @@ def test_install_script_defaults_to_starting_runtime_after_install() -> None:
     assert "LUMEN_AUTO_START_RUNTIME:-1" in text
     assert "START_RUNTIME_REPLY=\"$(read_or_default '现在启动 API / Worker / Web" in text
     assert "start_runtime_processes \"${WEB_NPM_SCRIPT}\"" in text
+    assert "lumen_start_local_runtime \"${ROOT}\" \"${web_npm_script}\"" in text
     assert "运行状态 ......... 已启动 API / Worker / Web" in text
     assert "未启动前，浏览器访问 3000 不会有响应" in text
 
@@ -67,6 +68,118 @@ def test_update_script_supports_noninteractive_env_decisions() -> None:
     assert "LUMEN_UPDATE_BUILD" in text
     assert 'lumen_update_decision LUMEN_UPDATE_GIT_PULL "是否执行 git pull 拉取最新代码？"' in text
     assert 'lumen_update_decision LUMEN_UPDATE_BUILD "是否重新构建前端生产包（npm run build）？"' in text
+
+
+def test_update_script_restarts_services_and_health_checks_after_update() -> None:
+    text = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+    assert 'log_step "更新后运行时检查"' in text
+    assert 'lumen_ensure_runtime_dirs "${ROOT}/.env"' in text
+    assert "lumen_restart_systemd_units lumen-api.service lumen-worker.service lumen-web.service" in text
+    assert "lumen_check_runtime_health" in text
+    assert "无法安全重启并确认新版本" in text
+    assert 'lumen_start_local_runtime "${ROOT}" "${WEB_NPM_SCRIPT}"' in text
+    assert "已重启 systemd 服务并通过健康检查" in text
+
+
+def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    assert "lumen_check_runtime_health()" in text
+    assert "http://127.0.0.1:8000/healthz" in text
+    assert "http://127.0.0.1:3000/" in text
+    assert "lumen_systemd_unit_active lumen-worker.service" in text
+    assert "lumen_start_local_runtime()" in text
+    assert "lumen_tail_runtime_log \"Worker\"" in text
+
+
+def test_runtime_health_check_fails_when_api_unhealthy() -> None:
+    result = run_bash(
+        f"""
+        . {LIB}
+        log_step() {{ :; }}
+        sleep() {{ :; }}
+        curl() {{
+          case "$*" in
+            *'127.0.0.1:8000/healthz'*) printf '500' ;;
+            *'127.0.0.1:3000/'*) printf '200' ;;
+            *) printf '000' ;;
+          esac
+        }}
+        systemctl() {{
+          case "$1 $2" in
+            "list-unit-files lumen-worker.service") printf 'lumen-worker.service enabled\\n' ;;
+            "is-active --quiet") return 0 ;;
+            *) return 0 ;;
+          esac
+        }}
+        LUMEN_API_HEALTH_ATTEMPTS=1 LUMEN_WEB_HEALTH_ATTEMPTS=1 lumen_check_runtime_health
+        """
+    )
+    assert result.returncode == 1
+    assert "API 健康检查失败" in result.stderr
+
+
+def test_runtime_health_check_passes_for_api_web_and_worker() -> None:
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        log_step() {{ :; }}
+        sleep() {{ :; }}
+        curl() {{
+          case "$*" in
+            *'127.0.0.1:8000/healthz'*) printf '200' ;;
+            *'127.0.0.1:3000/'*) printf '200' ;;
+            *) printf '000' ;;
+          esac
+        }}
+        systemctl() {{
+          case "$1 $2" in
+            "list-unit-files lumen-worker.service") printf 'lumen-worker.service enabled\\n' ;;
+            "is-active --quiet") return 0 ;;
+            *) return 0 ;;
+          esac
+        }}
+        LUMEN_API_HEALTH_ATTEMPTS=1 LUMEN_WEB_HEALTH_ATTEMPTS=1 lumen_check_runtime_health
+        """
+    )
+    assert "API 健康检查通过" in result.stdout
+    assert "Web 健康检查通过" in result.stdout
+
+
+def test_runtime_dir_check_uses_systemd_service_user(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    storage = tmp_path / "storage"
+    backup = tmp_path / "backup"
+    env_file.write_text(
+        f"STORAGE_ROOT={storage}\nBACKUP_ROOT={backup}\n",
+        encoding="utf-8",
+    )
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        systemctl() {{
+          case "$1 $2" in
+            "list-unit-files lumen-api.service") printf 'lumen-api.service enabled\\n' ;;
+            "show -p") printf 'lumen\\n' ;;
+            *) return 1 ;;
+          esac
+        }}
+        id() {{
+          case "$1 $2" in
+            "-gn lumen") printf 'lumen\\n' ;;
+            "-un ") printf 'tester\\n' ;;
+            *) command id "$@" ;;
+          esac
+        }}
+        lumen_run_as_user() {{ shift; "$@"; }}
+        lumen_run_as_root() {{ "$@"; }}
+        lumen_ensure_runtime_dirs {env_file}
+        test -d {storage}
+        test -d {backup / "pg"}
+        test -d {backup / "redis"}
+        """
+    )
+    assert "运行用户：lumen:lumen" in result.stdout
 
 
 def test_lumenctl_help_lists_every_documented_command() -> None:

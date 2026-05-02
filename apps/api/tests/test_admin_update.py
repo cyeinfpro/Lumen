@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -46,6 +48,101 @@ def test_proxy_env_is_replaced_for_update_process() -> None:
         "all_proxy",
     ):
         assert env[key] == "socks5h://127.0.0.1:1080"
+
+
+def test_update_trigger_note_mentions_restart_and_health_check() -> None:
+    # The response currently passes the note inline from trigger_update; keep the
+    # user-facing contract visible even if that implementation is later refactored.
+    source = Path(admin_update.__file__).read_text(encoding="utf-8")
+    assert "重启运行进程并执行健康检查" in source
+
+
+def test_systemd_run_command_uses_separate_unit_and_marker_cleanup(tmp_path: Path) -> None:
+    command = admin_update._systemd_run_command(
+        unit="lumen-update-test.service",
+        root=tmp_path / "lumen",
+        script=tmp_path / "lumen" / "scripts" / "update.sh",
+        log_path=tmp_path / ".update.log",
+        env_file=tmp_path / ".update.env",
+        marker_path=tmp_path / ".update.running",
+    )
+
+    assert command[:4] == ["systemd-run", "--unit", "lumen-update-test.service", "--collect"]
+    assert f"WorkingDirectory={tmp_path / 'lumen'}" in command
+    assert any(part.startswith("User=") for part in command)
+    assert any(part.startswith("Group=") for part in command)
+    joined = "\n".join(command)
+    assert "trap cleanup EXIT" in joined
+    assert '/usr/bin/env bash "$script"' in joined
+
+
+def test_start_update_systemd_unit_writes_marker_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    scripts_dir = tmp_path / "lumen" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    script = scripts_dir / "update.sh"
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_update, "_systemd_unit_name", lambda _started_at: "lumen-update-test.service")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, env, cwd):
+        captured["command"] = command
+        captured["env"] = env
+        captured["cwd"] = cwd
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(admin_update, "_run_systemd_command", fake_run)
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        pid, unit = admin_update._start_update_systemd_unit(
+            script=script,
+            env={"PATH": "/bin", "LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            log_fh=log_fh,
+            started_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+
+    marker = (backup_root / ".update.running").read_text(encoding="utf-8")
+    assert pid == 0
+    assert unit == "lumen-update-test.service"
+    assert "unit=lumen-update-test.service" in marker
+    assert captured["cwd"] == tmp_path / "lumen"
+    env_file = backup_root / ".update.lumen-update-test.service.env"
+    env_text = env_file.read_text(encoding="utf-8")
+    assert "export LUMEN_UPDATE_NONINTERACTIVE=1" in env_text
+    assert "export LUMEN_UPDATE_SYSTEMD_UNIT=lumen-update-test.service" in env_text
+
+
+@pytest.mark.asyncio
+async def test_cleanup_marker_when_done_uses_marker_dataclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unlinked = Mock()
+    proc = Mock()
+    proc.pid = 1234
+    proc.wait.return_value = 0
+
+    monkeypatch.setattr(
+        admin_update,
+        "_read_marker",
+        lambda: admin_update.UpdateMarker(pid=1234, started_at="2026-05-02T00:00:00Z"),
+    )
+    monkeypatch.setattr(admin_update, "_update_marker_path", lambda: Mock(unlink=unlinked))
+
+    await admin_update._cleanup_marker_when_done(proc)
+
+    unlinked.assert_called_once()
 
 
 @pytest.mark.asyncio

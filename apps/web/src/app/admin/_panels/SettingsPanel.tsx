@@ -645,9 +645,10 @@ export function SettingsPanel() {
   } | null>(null);
   const triggerUpdateMut = useTriggerAdminUpdateMutation({
     onSuccess: (result) => {
+      const target = result.unit ? `任务 ${result.unit}` : `进程 ${result.pid ?? "-"}`;
       setUpdateBanner({
         kind: "success",
-        text: `更新已启动，进程 ${result.pid}${result.proxy_name ? `，代理 ${result.proxy_name}` : ""}`,
+        text: `更新已启动，${target}${result.proxy_name ? `，代理 ${result.proxy_name}` : ""}`,
       });
     },
     onError: (err) => {
@@ -1921,6 +1922,7 @@ function LumenUpdateBlock({
 }) {
   const running = Boolean(status?.running);
   const disabled = triggering || running;
+  const runningTarget = status?.unit ? `unit ${status.unit}` : `pid ${status?.pid ?? "-"}`;
 
   return (
     <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm">
@@ -1980,7 +1982,7 @@ function LumenUpdateBlock({
               : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300",
           )}
         >
-          {running ? `运行中 · pid ${status?.pid ?? "-"}` : "当前没有更新任务"}
+          {running ? `运行中 · ${runningTarget}` : "当前没有更新任务"}
         </span>
         {status?.started_at && (
           <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-neutral-400">

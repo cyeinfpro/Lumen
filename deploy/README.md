@@ -78,7 +78,7 @@ sudo apt-get install -y build-essential libpq-dev
 
 1. rsync 代码到目标机（**必须排除 `apps/worker/var/` 整目录**，否则会覆盖用户数据）
 2. **`sudo deploy/scripts/sync_env_version.sh`**（刷新 LUMEN_VERSION 为当次 commit hash）
-3. `systemctl restart lumen-api lumen-worker lumen-web lumen-tgbot`
+3. `bash scripts/update.sh`（同步依赖、迁移、可选 build、重启服务并执行 API/Web/Worker 健康检查）
 4. 如果改了 `image-job/app.py`：`cp image-job/app.py /opt/image-job/ && systemctl restart image-job`
 5. 首次安装或 watchdog 变更后：`systemctl enable --now lumen-health-watchdog.timer`
 6. 验证：`grep '^LUMEN_VERSION=' /opt/lumen/.env` 应为当次 commit 短 hash

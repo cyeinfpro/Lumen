@@ -548,12 +548,13 @@ cd apps/web && npm run lint && npm run type-check && npm run build
 ```bash
 # 同步代码后，在目标机执行
 cd /opt/lumen
-uv sync --frozen
-(cd apps/api && uv run alembic upgrade head)
-(cd apps/web && npm ci && npm run build)
 sudo /opt/lumen/deploy/scripts/sync_env_version.sh /opt/lumen/.env
-sudo systemctl restart lumen-api lumen-worker lumen-web lumen-tgbot
+bash scripts/update.sh
 ```
+
+`scripts/update.sh` 会同步依赖、执行迁移、可选构建前端，然后重启 Lumen systemd 服务并检查
+`http://127.0.0.1:8000/healthz`、`http://127.0.0.1:3000/` 和 `lumen-worker.service`。
+健康检查失败时脚本会返回非零并保留排查日志。
 
 Nginx 关键约束：
 

@@ -357,101 +357,11 @@ read_dotenv_value() {
     printf '%s' "${raw}"
 }
 
-process_listening_on_port() {
-    local port="$1"
-    if have_cmd lsof; then
-        lsof -iTCP:"${port}" -sTCP:LISTEN -nP >/dev/null 2>&1
-        return $?
-    fi
-    if have_cmd ss; then
-        ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE "[:.]${port}\$"
-        return $?
-    fi
-    if have_cmd netstat; then
-        netstat -an 2>/dev/null | awk '/LISTEN/ {print $4}' | grep -qE "[:.]${port}\$"
-        return $?
-    fi
-    return 1
-}
-
-wait_for_http() {
-    local url="$1"
-    local attempts="${2:-60}"
-    local _attempt
-    for _attempt in $(seq 1 "${attempts}"); do
-        if have_cmd curl && curl -fsS "${url}" >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
-wait_for_port() {
-    local port="$1"
-    local attempts="${2:-60}"
-    local _attempt
-    for _attempt in $(seq 1 "${attempts}"); do
-        if process_listening_on_port "${port}"; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
 start_runtime_processes() {
     local web_npm_script="$1"
-    local api_log worker_log web_log
-
-    RUNTIME_LOG_DIR="${ROOT}/.install-logs/runtime.$(date '+%Y%m%d%H%M%S')"
-    mkdir -p "${RUNTIME_LOG_DIR}"
-    api_log="${RUNTIME_LOG_DIR}/api.log"
-    worker_log="${RUNTIME_LOG_DIR}/worker.log"
-    web_log="${RUNTIME_LOG_DIR}/web.log"
-
-    log_step "启动 Lumen 运行时进程"
-
-    if process_listening_on_port 8000; then
-        log_warn "端口 8000 已有进程监听，跳过启动 API。"
-    else
-        log_info "启动 API → ${api_log}"
-        (
-            cd "${ROOT}/apps/api"
-            exec uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
-        ) >"${api_log}" 2>&1 &
-        RUNTIME_PIDS+=("$!")
-    fi
-
-    log_info "启动 Worker → ${worker_log}"
-    (
-        cd "${ROOT}/apps/worker"
-        exec uv run python -m arq app.main.WorkerSettings
-    ) >"${worker_log}" 2>&1 &
-    RUNTIME_PIDS+=("$!")
-
-    if process_listening_on_port 3000; then
-        log_warn "端口 3000 已有进程监听，跳过启动 Web。"
-    else
-        log_info "启动 Web → ${web_log}"
-        (
-            cd "${ROOT}/apps/web"
-            exec npm run "${web_npm_script}"
-        ) >"${web_log}" 2>&1 &
-        RUNTIME_PIDS+=("$!")
-    fi
-
-    if wait_for_http "http://127.0.0.1:8000/healthz" 45; then
-        log_info "API 已就绪：http://127.0.0.1:8000/healthz"
-    else
-        log_warn "API 45 秒内未通过健康检查，请查看：${api_log}"
-    fi
-
-    if wait_for_port 3000 60; then
-        log_info "Web 已监听 3000。"
-    else
-        log_warn "Web 60 秒内未监听 3000，请查看：${web_log}"
-    fi
+    lumen_start_local_runtime "${ROOT}" "${web_npm_script}"
+    RUNTIME_LOG_DIR="${LUMEN_LOCAL_RUNTIME_LOG_DIR}"
+    RUNTIME_PIDS=("${LUMEN_LOCAL_RUNTIME_PIDS[@]:-}")
 }
 
 ensure_compose_db_env_vars() {
@@ -1297,7 +1207,7 @@ if [ ! -w "${DATA_ROOT}/storage" ] || [ ! -w "${DATA_ROOT}/backup/pg" ] || [ ! -
     log_error "本地存储目录创建后仍不可写：${DATA_ROOT}"
     exit 1
 fi
-log_info "存储目录就绪：${DATA_ROOT}/{storage,backup}"
+lumen_ensure_runtime_dirs "${ENV_FILE}"
 
 # ---------------------------------------------------------------------------
 # 4. 并行下载/同步依赖（docker 镜像 / Python / Node 三者无依赖，同时跑）

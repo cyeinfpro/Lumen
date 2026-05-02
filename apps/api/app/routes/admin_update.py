@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import grp
 import os
+import pwd
+import shlex
+import shutil
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, TextIO
@@ -30,6 +35,13 @@ router = APIRouter(prefix="/admin/update", tags=["admin"])
 _UPDATE_LOG_NAME = ".update.log"
 _UPDATE_RUNNING_MARKER = ".update.running"
 _LOG_TAIL_CHARS = 6000
+
+
+@dataclass(frozen=True)
+class UpdateMarker:
+    pid: int
+    started_at: str | None
+    unit: str | None = None
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -60,7 +72,20 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
-def _read_marker() -> tuple[int, str | None] | None:
+def _unit_is_running(unit: str) -> bool:
+    if not unit or shutil.which("systemctl") is None:
+        return False
+    result = subprocess.run(
+        ["systemctl", "is-active", "--quiet", unit],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _read_marker() -> UpdateMarker | None:
     marker = _update_marker_path()
     try:
         raw = marker.read_text(encoding="utf-8")
@@ -70,6 +95,7 @@ def _read_marker() -> tuple[int, str | None] | None:
         return None
     pid = 0
     started_at: str | None = None
+    unit: str | None = None
     for line in raw.splitlines():
         key, sep, value = line.partition("=")
         if not sep:
@@ -81,8 +107,12 @@ def _read_marker() -> tuple[int, str | None] | None:
                 pid = 0
         elif key == "started_at":
             started_at = value.strip() or None
+        elif key == "unit":
+            unit = value.strip() or None
+    if unit and _unit_is_running(unit):
+        return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
     if pid and _pid_is_running(pid):
-        return pid, started_at
+        return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
     try:
         marker.unlink()
     except OSError:
@@ -90,11 +120,14 @@ def _read_marker() -> tuple[int, str | None] | None:
     return None
 
 
-def _write_marker(pid: int, started_at: str) -> None:
+def _write_marker(pid: int, started_at: str, unit: str | None = None) -> None:
     marker = _update_marker_path()
     marker.parent.mkdir(parents=True, exist_ok=True)
     tmp = marker.with_suffix(f"{marker.suffix}.tmp")
-    tmp.write_text(f"pid={pid}\nstarted_at={started_at}\n", encoding="utf-8")
+    lines = [f"pid={pid}", f"started_at={started_at}"]
+    if unit:
+        lines.append(f"unit={unit}")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
     tmp.replace(marker)
 
@@ -145,6 +178,184 @@ def _mask_proxy_url(proxy_url: str) -> str:
     return f"{scheme}://***@{host}" if scheme else f"***@{host}"
 
 
+def _systemd_unit_name(started_at: datetime) -> str:
+    stamp = started_at.strftime("%Y%m%d%H%M%S")
+    return f"lumen-update-{stamp}-{os.getpid()}.service"
+
+
+def _current_service_identity_properties() -> list[str]:
+    user = pwd.getpwuid(os.getuid()).pw_name
+    group = grp.getgrgid(os.getgid()).gr_name
+    return ["--property", f"User={user}", "--property", f"Group={group}"]
+
+
+def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
+    path = _update_marker_path().with_name(f".update.{unit}.env")
+    prefixes = (
+        "LUMEN_UPDATE_",
+        "LUMEN_API_HEALTH_",
+        "LUMEN_WEB_HEALTH_",
+        "LUMEN_HEALTH_",
+    )
+    keys = {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    }
+    for key in env:
+        if key.startswith(prefixes):
+            keys.add(key)
+
+    lines = []
+    for key in sorted(keys):
+        value = env.get(key)
+        if value is None:
+            continue
+        lines.append(f"export {key}={shlex.quote(value)}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+    return path
+
+
+def _systemd_run_command(
+    *,
+    unit: str,
+    root: Path,
+    script: Path,
+    log_path: Path,
+    env_file: Path,
+    marker_path: Path,
+) -> list[str]:
+    wrapper = r"""
+set -euo pipefail
+log_path="$1"
+env_file="$2"
+marker_path="$3"
+script="$4"
+cleanup() {
+  rm -f "$env_file" "$marker_path"
+}
+trap cleanup EXIT
+exec >>"$log_path" 2>&1
+set -a
+. "$env_file"
+set +a
+printf '=== update unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "$LUMEN_UPDATE_SYSTEMD_UNIT"
+/usr/bin/env bash "$script"
+"""
+    return [
+        "systemd-run",
+        "--unit",
+        unit,
+        "--collect",
+        "--property",
+        f"WorkingDirectory={root}",
+        *_current_service_identity_properties(),
+        "/usr/bin/env",
+        "bash",
+        "-lc",
+        wrapper,
+        "bash",
+        str(log_path),
+        str(env_file),
+        str(marker_path),
+        str(script),
+    ]
+
+
+def _systemd_run_available() -> bool:
+    return shutil.which("systemd-run") is not None and shutil.which("systemctl") is not None
+
+
+def _run_systemd_command(
+    command: list[str],
+    env: dict[str, str],
+    cwd: Path,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command,
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        close_fds=True,
+        env=env,
+        check=False,
+    )
+    if result.returncode == 0 or shutil.which("sudo") is None:
+        return result
+    sudo_command = ["sudo", "-n", *command]
+    return subprocess.run(
+        sudo_command,
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        close_fds=True,
+        env=env,
+        check=False,
+    )
+
+
+def _start_update_systemd_unit(
+    *,
+    script: Path,
+    env: dict[str, str],
+    log_fh: TextIO,
+    started_at: datetime,
+) -> tuple[int, str | None]:
+    root = script.parent.parent
+    unit = _systemd_unit_name(started_at)
+    log_path = _update_log_path()
+    marker_path = _update_marker_path()
+    env = dict(env)
+    env["LUMEN_UPDATE_SYSTEMD_UNIT"] = unit
+    env_file = _write_update_env_file(env, unit)
+    _write_marker(0, started_at.isoformat(), unit=unit)
+    command = _systemd_run_command(
+        unit=unit,
+        root=root,
+        script=script,
+        log_path=log_path,
+        env_file=env_file,
+        marker_path=marker_path,
+    )
+    result = _run_systemd_command(command, env, root)
+    if result.returncode != 0:
+        try:
+            marker_path.unlink()
+        except OSError:
+            pass
+        try:
+            env_file.unlink()
+        except OSError:
+            pass
+        log_fh.write("systemd-run failed\n")
+        if result.stdout:
+            log_fh.write(result.stdout)
+        if result.stderr:
+            log_fh.write(result.stderr)
+        raise _http(
+            "systemd_run_failed",
+            "failed to start update in a separate systemd unit; run scripts/update.sh on the server or grant sudo systemd-run",
+            500,
+        )
+    return 0, unit
+
+
 async def _resolve_update_proxy(
     db: AsyncSession,
 ) -> tuple[ProviderProxyDefinition | None, str | None]:
@@ -175,7 +386,8 @@ async def _resolve_update_proxy(
 
 class UpdateTriggerOut(BaseModel):
     accepted: bool
-    pid: int
+    pid: int | None = None
+    unit: str | None = None
     started_at: datetime
     proxy_name: str | None = None
     log_path: str
@@ -185,6 +397,7 @@ class UpdateTriggerOut(BaseModel):
 class UpdateStatusOut(BaseModel):
     running: bool
     pid: int | None = None
+    unit: str | None = None
     started_at: str | None = None
     log_tail: str
 
@@ -194,11 +407,11 @@ async def update_status(_admin: AdminUser) -> UpdateStatusOut:
     marker = _read_marker()
     if marker is None:
         return UpdateStatusOut(running=False, log_tail=_read_log_tail())
-    pid, started_at = marker
     return UpdateStatusOut(
         running=True,
-        pid=pid,
-        started_at=started_at,
+        pid=marker.pid or None,
+        unit=marker.unit,
+        started_at=marker.started_at,
         log_tail=_read_log_tail(),
     )
 
@@ -214,8 +427,9 @@ async def trigger_update(
         raise _http("script_missing", f"missing {script}", 500)
     marker = _read_marker()
     if marker is not None:
-        pid, _started_at = marker
-        raise _http("update_running", f"Lumen update is already running (pid {pid})", 409)
+        if marker.unit:
+            raise _http("update_running", f"Lumen update is already running ({marker.unit})", 409)
+        raise _http("update_running", f"Lumen update is already running (pid {marker.pid})", 409)
 
     proxy, proxy_url = await _resolve_update_proxy(db)
     started_at = datetime.now(timezone.utc)
@@ -237,17 +451,28 @@ async def trigger_update(
         env.setdefault("LUMEN_UPDATE_GIT_PULL", "1")
         env.setdefault("LUMEN_UPDATE_BUILD", "1")
 
-        proc = subprocess.Popen(
-            ["/usr/bin/env", "bash", str(script)],
-            cwd=str(script.parent.parent),
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-            env=env,
-        )
-        _write_marker(proc.pid, started_at.isoformat())
+        proc: subprocess.Popen[bytes] | None = None
+        unit: str | None = None
+        if _systemd_run_available():
+            pid, unit = _start_update_systemd_unit(
+                script=script,
+                env=env,
+                log_fh=log_fh,
+                started_at=started_at,
+            )
+        else:
+            proc = subprocess.Popen(
+                ["/usr/bin/env", "bash", str(script)],
+                cwd=str(script.parent.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+                env=env,
+            )
+            pid = proc.pid
+            _write_marker(pid, started_at.isoformat())
     finally:
         log_fh.close()
 
@@ -256,17 +481,19 @@ async def trigger_update(
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
         actor_ip_hash=request_ip_hash(request),
-        details={"pid": proc.pid, "proxy_name": proxy.name if proxy else None},
+        details={"pid": pid or None, "unit": unit, "proxy_name": proxy.name if proxy else None},
     )
 
-    asyncio.create_task(_cleanup_marker_when_done(proc))
+    if proc is not None:
+        asyncio.create_task(_cleanup_marker_when_done(proc))
     return UpdateTriggerOut(
         accepted=True,
-        pid=proc.pid,
+        pid=pid or None,
+        unit=unit,
         started_at=started_at,
         proxy_name=proxy.name if proxy else None,
         log_path=str(_update_log_path()),
-        note="更新已在后台启动；期间服务可能短暂不可用，完成后按日志提示重启运行进程。",
+        note="更新已在后台启动；期间服务可能短暂不可用，脚本会在完成后重启运行进程并执行健康检查。",
     )
 
 
@@ -274,7 +501,7 @@ async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
     await asyncio.to_thread(proc.wait)
     pid = int(proc.pid)
     marker = _read_marker()
-    if marker and marker[0] == pid:
+    if marker and marker.pid == pid:
         try:
             _update_marker_path().unlink()
         except OSError:
@@ -288,5 +515,7 @@ __all__ = [
     "_pid_is_running",
     "_read_marker",
     "_resolve_update_proxy",
+    "_systemd_run_command",
+    "_systemd_unit_name",
     "_update_script",
 ]

@@ -952,13 +952,15 @@ export function restoreBackup(
 export interface AdminUpdateStatusOut {
   running: boolean;
   pid?: number | null;
+  unit?: string | null;
   started_at?: string | null;
   log_tail: string;
 }
 
 export interface AdminUpdateTriggerOut {
   accepted: boolean;
-  pid: number;
+  pid?: number | null;
+  unit?: string | null;
   started_at: string;
   proxy_name?: string | null;
   log_path: string;
