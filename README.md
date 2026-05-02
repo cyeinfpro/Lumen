@@ -159,17 +159,20 @@ nginx 写入逻辑会先备份目标配置，写入后执行 `nginx -t`；如果
 - 执行 Alembic 迁移
 - 创建或提升首个管理员账号
 - 可选构建前端生产包
+- 默认询问并启动 API / Worker / Web 后台进程；直接回车会启动，如需跳过可输入 `n` 或设置 `LUMEN_AUTO_START_RUNTIME=0`
 
 安装完成后访问：
 
 ```text
-Web: http://localhost:3000
-API: http://localhost:8000
+Web: http://<服务器IP>:3000
+API health: http://127.0.0.1:8000/healthz
 ```
+
+如果服务器本机 `curl http://127.0.0.1:3000` 正常，但外部浏览器打不开 `http://<服务器IP>:3000`，请检查云安全组或防火墙是否放行 TCP 3000。
 
 ## 手动启动
 
-建议开发时开 3 个终端：
+如果安装时选择不启动运行时，建议开发时开 3 个终端：
 
 ```bash
 # 1. 基础设施
