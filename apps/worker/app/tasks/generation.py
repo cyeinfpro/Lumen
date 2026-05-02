@@ -737,11 +737,26 @@ async def _reserve_image_queue_slot(
         pool = await get_pool()
         # P1-8: 把 task_id 透传给 pool；pool 内部会从 Redis avoid set 跳过
         # 上次失败的 provider，与下方 generation.py 的二次过滤是双保险。
-        providers = await pool.select(
-            route="image",
-            task_id=task_id,
-            endpoint_kind=endpoint_kind,
-        )
+        # acquire_inflight=False：reserve 只是为了挑号占 zset，不真正发请求；
+        # inflight 由真正发请求的 _dispatch_image / lane 持有。如果这里 acquire
+        # 了，_dispatch_image 之后又 acquire 一次，且 reserve 占的那一份没人
+        # release 会一直泄漏。老版 mock pool 不接受这个 kwarg，TypeError 时退化
+        # 调用——reserve 拿到的候选不消费 inflight，老 mock 也不维护 inflight，结果一致。
+        try:
+            providers = await pool.select(
+                route="image",
+                task_id=task_id,
+                endpoint_kind=endpoint_kind,
+                acquire_inflight=False,
+            )
+        except TypeError as exc:
+            if "acquire_inflight" not in str(exc):
+                raise
+            providers = await pool.select(
+                route="image",
+                task_id=task_id,
+                endpoint_kind=endpoint_kind,
+            )
         if not providers:
             return None
 

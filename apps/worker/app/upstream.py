@@ -3253,6 +3253,39 @@ def _provider_pool_redis(pool: Any) -> Any:
     return None
 
 
+def _pool_acquire_inflight(pool: Any, name: str, endpoint_kind: str | None) -> None:
+    """防御性 acquire——老的 mock pool 没实现这两个方法，noop 放过；inflight 是
+    选号排序优化而非正确性约束，缺失不影响生图主路径。"""
+    fn = getattr(pool, "acquire_image_inflight", None)
+    if callable(fn):
+        fn(name, endpoint_kind)
+
+
+def _pool_release_inflight(pool: Any, name: str, endpoint_kind: str | None) -> None:
+    fn = getattr(pool, "release_image_inflight", None)
+    if callable(fn):
+        fn(name, endpoint_kind)
+
+
+def _pool_report_image_success(
+    pool: Any, name: str, *, endpoint_kind: str | None = None
+) -> None:
+    """兼容老 mock pool（不接 endpoint_kind kwarg）的 report_image_success 包装。
+
+    新代码 lane 调用统一走这里，避免一个旧测试桩让上线代码崩。endpoint_kind 仅
+    用于 inflight 排序维度更新，缺失退回到全局 last_used_at 的旧行为。
+    """
+    fn = getattr(pool, "report_image_success", None)
+    if not callable(fn):
+        return
+    try:
+        fn(name, endpoint_kind=endpoint_kind)
+    except TypeError as exc:
+        if "endpoint_kind" not in str(exc):
+            raise
+        fn(name)
+
+
 def _provider_endpoint_locked_error(provider: Any, endpoint_kind: str) -> UpstreamError | None:
     if endpoint_kind_allowed(provider, endpoint_kind):
         return None
@@ -3399,11 +3432,13 @@ async def _pool_select_compat(
     ignore_cooldown: bool = False,
     task_id: str | None = None,
     endpoint_kind: str | None = None,
+    acquire_inflight: bool = True,
 ) -> list[Any]:
     selector = getattr(pool, "select")
     kwargs: dict[str, Any] = {
         "route": route,
         "ignore_cooldown": ignore_cooldown,
+        "acquire_inflight": acquire_inflight,
     }
     if task_id is not None:
         kwargs["task_id"] = task_id
@@ -3412,7 +3447,25 @@ async def _pool_select_compat(
     try:
         return await selector(**kwargs)
     except TypeError as exc:
-        if endpoint_kind is None or "endpoint_kind" not in str(exc):
+        msg = str(exc)
+        # 兼容老版本 select 签名（旧 mock / 测试桩）：去掉 acquire_inflight、
+        # endpoint_kind 后重试，filter 留给本函数兜底。
+        if "acquire_inflight" in msg:
+            kwargs.pop("acquire_inflight", None)
+            try:
+                return await selector(**kwargs)
+            except TypeError as exc2:
+                msg = str(exc2)
+                if endpoint_kind is None or "endpoint_kind" not in msg:
+                    raise
+                kwargs.pop("endpoint_kind", None)
+                providers = await selector(**kwargs)
+                return [
+                    provider
+                    for provider in providers
+                    if endpoint_kind_allowed(provider, endpoint_kind)
+                ]
+        if endpoint_kind is None or "endpoint_kind" not in msg:
             raise
         kwargs.pop("endpoint_kind", None)
         providers = await selector(**kwargs)
@@ -3468,6 +3521,10 @@ async def _direct_generate_image_with_failover(
     from .retry import is_retriable as classify_retriable
 
     pool = await provider_pool.get_pool()
+    # provider_override 给定时表示外层 (_dispatch_image) 已 acquire 过 inflight,
+    # 本函数不再动 inflight；override 为空时由本函数管 acquire/release——i=0 由
+    # _pool_select_compat 软占座，i>0 由 finally 段前显式 acquire。
+    lane_owns_inflight = provider_override is None
     providers = (
         [provider_override]
         if provider_override is not None
@@ -3481,96 +3538,102 @@ async def _direct_generate_image_with_failover(
     errors: list[BaseException] = []
 
     for i, provider in enumerate(providers):
-        lock_error = _provider_endpoint_locked_error(provider, "generations")
-        if lock_error is not None:
-            errors.append(lock_error)
-            continue
+        if lane_owns_inflight and i > 0:
+            _pool_acquire_inflight(pool, provider.name, "generations")
         try:
-            kwargs: dict[str, Any] = {
-                "prompt": prompt,
-                "size": size,
-                "n": n,
-                "quality": quality,
-                "output_format": output_format,
-                "output_compression": output_compression,
-                "background": background,
-                "moderation": moderation,
-                "base_url_override": provider.base_url,
-                "api_key_override": provider.api_key,
-            }
-            proxy = _provider_proxy(provider)
-            if proxy is not None:
-                kwargs["proxy_override"] = proxy
-            result = await _direct_generate_image_once(**kwargs)
-            pool.report_image_success(provider.name)
-            await account_limiter.record_image_call(
-                _provider_pool_redis(pool), provider.name
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "provider_used",
-                provider=provider.name,
-                route="image2",
-                source="image2_direct",
-                endpoint="images/generations",
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "final_image",
-                source="image2_direct",
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "completed",
-                source="image2_direct",
-            )
-            return result
-        except (asyncio.CancelledError, UpstreamCancelled):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-            decision = classify_retriable(
-                getattr(exc, "error_code", None),
-                getattr(exc, "status_code", None),
-                error_message=str(exc),
-            )
-            should_continue = _should_continue_image_provider_failover(
-                exc,
-                retriable=decision.retriable,
-            )
-            if not should_continue:
-                logger.warning(
-                    "direct image provider %s terminal error: %s",
-                    provider.name,
-                    decision.reason,
+            lock_error = _provider_endpoint_locked_error(provider, "generations")
+            if lock_error is not None:
+                errors.append(lock_error)
+                continue
+            try:
+                kwargs: dict[str, Any] = {
+                    "prompt": prompt,
+                    "size": size,
+                    "n": n,
+                    "quality": quality,
+                    "output_format": output_format,
+                    "output_compression": output_compression,
+                    "background": background,
+                    "moderation": moderation,
+                    "base_url_override": provider.base_url,
+                    "api_key_override": provider.api_key,
+                }
+                proxy = _provider_proxy(provider)
+                if proxy is not None:
+                    kwargs["proxy_override"] = proxy
+                result = await _direct_generate_image_once(**kwargs)
+                _pool_report_image_success(pool, provider.name, endpoint_kind="generations")
+                await account_limiter.record_image_call(
+                    _provider_pool_redis(pool), provider.name
                 )
-                raise
-            is_rl, retry_after = _is_image_rate_limit_error(exc)
-            if is_rl:
-                pool.report_image_rate_limited(
-                    provider.name, retry_after_s=retry_after
-                )
-            else:
-                pool.report_image_failure(provider.name)
-            remaining = len(providers) - i - 1
-            if remaining > 0:
-                logger.warning(
-                    "direct image provider_failover: from=%s remaining=%d reason=%s",
-                    provider.name,
-                    remaining,
-                    decision.reason,
-                )
-                # P2: 把"换号"通知给前端，避免用户在 retriable 错误时看到长时间无响应。
-                # 调用方（generation.publish_image_progress）会把它转成 SSE
-                # generation.progress(substage=provider_selected, provider_failover=true)。
                 await _emit_image_progress(
                     progress_callback,
-                    "provider_failover",
-                    from_provider=provider.name,
-                    remaining=remaining,
-                    reason=decision.reason,
-                    route="image2_direct",
+                    "provider_used",
+                    provider=provider.name,
+                    route="image2",
+                    source="image2_direct",
+                    endpoint="images/generations",
                 )
+                await _emit_image_progress(
+                    progress_callback,
+                    "final_image",
+                    source="image2_direct",
+                )
+                await _emit_image_progress(
+                    progress_callback,
+                    "completed",
+                    source="image2_direct",
+                )
+                return result
+            except (asyncio.CancelledError, UpstreamCancelled):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                decision = classify_retriable(
+                    getattr(exc, "error_code", None),
+                    getattr(exc, "status_code", None),
+                    error_message=str(exc),
+                )
+                should_continue = _should_continue_image_provider_failover(
+                    exc,
+                    retriable=decision.retriable,
+                )
+                if not should_continue:
+                    logger.warning(
+                        "direct image provider %s terminal error: %s",
+                        provider.name,
+                        decision.reason,
+                    )
+                    raise
+                is_rl, retry_after = _is_image_rate_limit_error(exc)
+                if is_rl:
+                    pool.report_image_rate_limited(
+                        provider.name, retry_after_s=retry_after
+                    )
+                else:
+                    pool.report_image_failure(provider.name)
+                remaining = len(providers) - i - 1
+                if remaining > 0:
+                    logger.warning(
+                        "direct image provider_failover: from=%s remaining=%d reason=%s",
+                        provider.name,
+                        remaining,
+                        decision.reason,
+                    )
+                    # P2: 把"换号"通知给前端，避免用户在 retriable 错误时看到长时间无响应。
+                    # 调用方（generation.publish_image_progress）会把它转成 SSE
+                    # generation.progress(substage=provider_selected, provider_failover=true)。
+                    await _emit_image_progress(
+                        progress_callback,
+                        "provider_failover",
+                        from_provider=provider.name,
+                        remaining=remaining,
+                        reason=decision.reason,
+                        route="image2_direct",
+                    )
+        finally:
+            if lane_owns_inflight:
+                _pool_release_inflight(pool, provider.name, "generations")
 
     merged = _merge_fallback_errors(
         errors,
@@ -3746,6 +3809,12 @@ async def _image_job_with_failover(
         forced_kind = endpoint_override
     elif endpoint_preference in ("generations", "responses"):
         forced_kind = endpoint_preference
+    # provider_override 给定时表示外层（_dispatch_image）已 acquire 过 inflight,
+    # 本函数不再动 inflight；override 为空时由本函数管 acquire/release——i=0 由
+    # _pool_select_compat 软占座，i>0 由 finally 段前显式 acquire。inflight 维度
+    # 和 select 排序维度对齐用 forced_kind（None 时聚合到 "" key）。
+    lane_owns_inflight = provider_override is None
+    inflight_ek = forced_kind
     providers = (
         [provider_override]
         if provider_override is not None
@@ -3762,178 +3831,184 @@ async def _image_job_with_failover(
     fallback_base_url = await _resolve_image_job_base_url()
 
     for i, provider in enumerate(providers):
-        configured_endpoint = getattr(provider, "image_jobs_endpoint", "auto")
-        endpoint_locked = bool(
-            getattr(provider, "image_jobs_endpoint_lock", False)
-        ) and configured_endpoint in ("generations", "responses")
+        if lane_owns_inflight and i > 0:
+            _pool_acquire_inflight(pool, provider.name, inflight_ek)
+        try:
+            configured_endpoint = getattr(provider, "image_jobs_endpoint", "auto")
+            endpoint_locked = bool(
+                getattr(provider, "image_jobs_endpoint_lock", False)
+            ) and configured_endpoint in ("generations", "responses")
 
-        # lock 防御层：override / preference 任一与本号 lock 冲突都视为本号
-        # 不可用——dual_race lane 由对端 lane 兜底，单路场景由下一个号兜底。
-        # 不再有"override 强制跑对端 endpoint"或"preference 被 lock 静默改写"
-        # 的隐式路径；所有锁定不一致都通过 _provider_endpoint_locked_error
-        # 统一报到 errors 列表，便于上层 merge 后生成可观测的失败聚合。
-        conflict_kind: str | None = None
-        if endpoint_override in ("generations", "responses"):
-            conflict_kind = endpoint_override
-        elif endpoint_preference in ("generations", "responses"):
-            conflict_kind = endpoint_preference
-        if conflict_kind is not None:
-            locked_err = _provider_endpoint_locked_error(provider, conflict_kind)
-            if locked_err is not None:
-                logger.info(
-                    "image_jobs skip locked provider=%s configured=%s requested_kind=%s",
-                    getattr(provider, "name", "unknown"),
-                    configured_endpoint,
-                    conflict_kind,
+            # lock 防御层：override / preference 任一与本号 lock 冲突都视为本号
+            # 不可用——dual_race lane 由对端 lane 兜底，单路场景由下一个号兜底。
+            # 不再有"override 强制跑对端 endpoint"或"preference 被 lock 静默改写"
+            # 的隐式路径；所有锁定不一致都通过 _provider_endpoint_locked_error
+            # 统一报到 errors 列表，便于上层 merge 后生成可观测的失败聚合。
+            conflict_kind: str | None = None
+            if endpoint_override in ("generations", "responses"):
+                conflict_kind = endpoint_override
+            elif endpoint_preference in ("generations", "responses"):
+                conflict_kind = endpoint_preference
+            if conflict_kind is not None:
+                locked_err = _provider_endpoint_locked_error(provider, conflict_kind)
+                if locked_err is not None:
+                    logger.info(
+                        "image_jobs skip locked provider=%s configured=%s requested_kind=%s",
+                        getattr(provider, "name", "unknown"),
+                        configured_endpoint,
+                        conflict_kind,
+                    )
+                    errors.append(locked_err)
+                    continue
+
+            if endpoint_override is not None:
+                endpoint_chain = [endpoint_override]
+            elif endpoint_locked:
+                # lock 已通过上面的 conflict_kind 校验保证与 preference 一致（或
+                # preference=None 时由本号自决），这里直接锁单 endpoint。
+                endpoint_chain = [configured_endpoint]
+            elif endpoint_preference is not None:
+                endpoint_chain = _image_jobs_endpoint_fallback_chain(endpoint_preference)
+            else:
+                endpoint_chain = pool.endpoint_chain(
+                    provider.name, action, configured_endpoint
                 )
-                errors.append(locked_err)
-                continue
-
-        if endpoint_override is not None:
-            endpoint_chain = [endpoint_override]
-        elif endpoint_locked:
-            # lock 已通过上面的 conflict_kind 校验保证与 preference 一致（或
-            # preference=None 时由本号自决），这里直接锁单 endpoint。
-            endpoint_chain = [configured_endpoint]
-        elif endpoint_preference is not None:
-            endpoint_chain = _image_jobs_endpoint_fallback_chain(endpoint_preference)
-        else:
-            endpoint_chain = pool.endpoint_chain(
-                provider.name, action, configured_endpoint
+            provider_base_url = (
+                getattr(provider, "image_jobs_base_url", "") or fallback_base_url
             )
-        provider_base_url = (
-            getattr(provider, "image_jobs_base_url", "") or fallback_base_url
-        )
 
-        provider_done = False
-        last_exc: BaseException | None = None
-        for ep_idx, endpoint in enumerate(endpoint_chain):
-            ep_remaining = len(endpoint_chain) - ep_idx - 1
-            started = time.monotonic()
-            try:
-                result = await _image_job_run_once(
-                    action=action,
-                    endpoint=endpoint,
-                    prompt=prompt,
-                    size=size,
-                    images=images,
-                    n=n,
-                    quality=quality,
-                    output_format=output_format,
-                    output_compression=output_compression,
-                    background=background,
-                    moderation=moderation,
-                    model=model,
-                    api_key=provider.api_key,
-                    base_url=provider_base_url,
-                    proxy=_provider_proxy(provider),
-                    progress_callback=progress_callback,
-                )
-            except (asyncio.CancelledError, UpstreamCancelled):
-                raise
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                pool.record_endpoint_failure(provider.name, endpoint)
-                decision = classify_retriable(
-                    getattr(exc, "error_code", None),
-                    getattr(exc, "status_code", None),
-                    error_message=str(exc),
-                )
-                error_class = _image_job_error_class(exc)
-                logger.warning(
-                    "image job %s/%s endpoint=%s error_class=%s decision=%s: %r",
-                    action,
-                    provider.name,
-                    endpoint,
-                    error_class,
-                    decision.reason,
-                    exc,
-                )
-                if ep_remaining > 0:
+            provider_done = False
+            last_exc: BaseException | None = None
+            for ep_idx, endpoint in enumerate(endpoint_chain):
+                ep_remaining = len(endpoint_chain) - ep_idx - 1
+                started = time.monotonic()
+                try:
+                    result = await _image_job_run_once(
+                        action=action,
+                        endpoint=endpoint,
+                        prompt=prompt,
+                        size=size,
+                        images=images,
+                        n=n,
+                        quality=quality,
+                        output_format=output_format,
+                        output_compression=output_compression,
+                        background=background,
+                        moderation=moderation,
+                        model=model,
+                        api_key=provider.api_key,
+                        base_url=provider_base_url,
+                        proxy=_provider_proxy(provider),
+                        progress_callback=progress_callback,
+                    )
+                except (asyncio.CancelledError, UpstreamCancelled):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    pool.record_endpoint_failure(provider.name, endpoint)
+                    decision = classify_retriable(
+                        getattr(exc, "error_code", None),
+                        getattr(exc, "status_code", None),
+                        error_message=str(exc),
+                    )
+                    error_class = _image_job_error_class(exc)
+                    logger.warning(
+                        "image job %s/%s endpoint=%s error_class=%s decision=%s: %r",
+                        action,
+                        provider.name,
+                        endpoint,
+                        error_class,
+                        decision.reason,
+                        exc,
+                    )
+                    if ep_remaining > 0:
+                        await _emit_image_progress(
+                            progress_callback,
+                            "endpoint_failover",
+                            provider=provider.name,
+                            from_endpoint=endpoint,
+                            remaining=ep_remaining,
+                            reason=error_class or decision.reason,
+                            route="image_jobs",
+                        )
+                        continue
+                    should_continue = _should_continue_image_job_failover(
+                        exc,
+                        retriable=_should_continue_image_provider_failover(
+                            exc,
+                            retriable=decision.retriable,
+                        ),
+                    )
+                    if not should_continue:
+                        raise
+                    # Bubble up to the provider-level failover branch.
+                    break
+                else:
+                    # Success path.
+                    latency_ms = (time.monotonic() - started) * 1000.0
+                    pool.record_endpoint_success(
+                        provider.name, endpoint, latency_ms=latency_ms
+                    )
+                    _pool_report_image_success(pool, provider.name, endpoint_kind=inflight_ek)
+                    await account_limiter.record_image_call(
+                        _provider_pool_redis(pool), provider.name
+                    )
                     await _emit_image_progress(
                         progress_callback,
-                        "endpoint_failover",
+                        "provider_used",
                         provider=provider.name,
-                        from_endpoint=endpoint,
-                        remaining=ep_remaining,
-                        reason=error_class or decision.reason,
                         route="image_jobs",
+                        source=source_label,
+                        endpoint=f"image-jobs:{endpoint}",
                     )
-                    continue
-                should_continue = _should_continue_image_job_failover(
-                    exc,
-                    retriable=_should_continue_image_provider_failover(
-                        exc,
-                        retriable=decision.retriable,
-                    ),
+                    await _emit_image_progress(
+                        progress_callback,
+                        "final_image",
+                        source=source_label,
+                        endpoint_used=endpoint,
+                    )
+                    await _emit_image_progress(
+                        progress_callback,
+                        "completed",
+                        source=source_label,
+                        endpoint_used=endpoint,
+                    )
+                    provider_done = True
+                    return result
+
+            if provider_done:
+                return  # unreachable — return inside the loop already happened.
+
+            # Provider failover (mirrors the original semantics).
+            if last_exc is None:
+                continue
+            errors.append(last_exc)
+            is_rl, retry_after = _is_image_rate_limit_error(last_exc)
+            if is_rl:
+                pool.report_image_rate_limited(
+                    provider.name, retry_after_s=retry_after
                 )
-                if not should_continue:
-                    raise
-                # Bubble up to the provider-level failover branch.
-                break
             else:
-                # Success path.
-                latency_ms = (time.monotonic() - started) * 1000.0
-                pool.record_endpoint_success(
-                    provider.name, endpoint, latency_ms=latency_ms
-                )
-                pool.report_image_success(provider.name)
-                await account_limiter.record_image_call(
-                    _provider_pool_redis(pool), provider.name
+                pool.report_image_failure(provider.name)
+            remaining = len(providers) - i - 1
+            if remaining > 0:
+                logger.warning(
+                    "image job provider_failover: from=%s remaining=%d action=%s",
+                    provider.name,
+                    remaining,
+                    action,
                 )
                 await _emit_image_progress(
                     progress_callback,
-                    "provider_used",
-                    provider=provider.name,
+                    "provider_failover",
+                    from_provider=provider.name,
+                    remaining=remaining,
+                    reason="image_job_failed",
                     route="image_jobs",
-                    source=source_label,
-                    endpoint=f"image-jobs:{endpoint}",
                 )
-                await _emit_image_progress(
-                    progress_callback,
-                    "final_image",
-                    source=source_label,
-                    endpoint_used=endpoint,
-                )
-                await _emit_image_progress(
-                    progress_callback,
-                    "completed",
-                    source=source_label,
-                    endpoint_used=endpoint,
-                )
-                provider_done = True
-                return result
-
-        if provider_done:
-            return  # unreachable — return inside the loop already happened.
-
-        # Provider failover (mirrors the original semantics).
-        if last_exc is None:
-            continue
-        errors.append(last_exc)
-        is_rl, retry_after = _is_image_rate_limit_error(last_exc)
-        if is_rl:
-            pool.report_image_rate_limited(
-                provider.name, retry_after_s=retry_after
-            )
-        else:
-            pool.report_image_failure(provider.name)
-        remaining = len(providers) - i - 1
-        if remaining > 0:
-            logger.warning(
-                "image job provider_failover: from=%s remaining=%d action=%s",
-                provider.name,
-                remaining,
-                action,
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "provider_failover",
-                from_provider=provider.name,
-                remaining=remaining,
-                reason="image_job_failed",
-                route="image_jobs",
-            )
+        finally:
+            if lane_owns_inflight:
+                _pool_release_inflight(pool, provider.name, inflight_ek)
 
     merged = _merge_fallback_errors(
         errors,
@@ -4038,6 +4113,10 @@ async def _direct_edit_image_with_failover(
     from .retry import is_retriable as classify_retriable
 
     pool = await provider_pool.get_pool()
+    # provider_override 给定时表示外层 (_dispatch_image) 已 acquire 过 inflight,
+    # 本函数不再动 inflight；override 为空时由本函数管 acquire/release——i=0 由
+    # _pool_select_compat 软占座，i>0 由 finally 段前显式 acquire。
+    lane_owns_inflight = provider_override is None
     providers = (
         [provider_override]
         if provider_override is not None
@@ -4051,94 +4130,100 @@ async def _direct_edit_image_with_failover(
     errors: list[BaseException] = []
 
     for i, provider in enumerate(providers):
-        lock_error = _provider_endpoint_locked_error(provider, "generations")
-        if lock_error is not None:
-            errors.append(lock_error)
-            continue
+        if lane_owns_inflight and i > 0:
+            _pool_acquire_inflight(pool, provider.name, "generations")
         try:
-            kwargs: dict[str, Any] = {
-                "prompt": prompt,
-                "size": size,
-                "images": images,
-                "n": n,
-                "quality": quality,
-                "output_format": output_format,
-                "output_compression": output_compression,
-                "background": background,
-                "moderation": moderation,
-                "base_url_override": provider.base_url,
-                "api_key_override": provider.api_key,
-            }
-            proxy = _provider_proxy(provider)
-            if proxy is not None:
-                kwargs["proxy_override"] = proxy
-            result = await _direct_edit_image_once(**kwargs)
-            pool.report_image_success(provider.name)
-            await account_limiter.record_image_call(
-                _provider_pool_redis(pool), provider.name
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "provider_used",
-                provider=provider.name,
-                route="image2",
-                source="image2_edit_direct",
-                endpoint="images/edits",
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "final_image",
-                source="image2_edit_direct",
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "completed",
-                source="image2_edit_direct",
-            )
-            return result
-        except (asyncio.CancelledError, UpstreamCancelled):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-            decision = classify_retriable(
-                getattr(exc, "error_code", None),
-                getattr(exc, "status_code", None),
-                error_message=str(exc),
-            )
-            should_continue = _should_continue_image_provider_failover(
-                exc,
-                retriable=decision.retriable,
-            )
-            if not should_continue:
-                logger.warning(
-                    "direct edit provider %s terminal error: %s",
-                    provider.name,
-                    decision.reason,
-                )
-                raise
-            is_rl, retry_after = _is_image_rate_limit_error(exc)
-            if is_rl:
-                pool.report_image_rate_limited(
-                    provider.name, retry_after_s=retry_after
-                )
-            else:
-                pool.report_image_failure(provider.name)
-            remaining = len(providers) - i - 1
-            if remaining > 0:
-                logger.warning(
-                    "direct edit provider_failover: from=%s remaining=%d reason=%s",
-                    provider.name,
-                    remaining,
-                    decision.reason,
+            lock_error = _provider_endpoint_locked_error(provider, "generations")
+            if lock_error is not None:
+                errors.append(lock_error)
+                continue
+            try:
+                kwargs: dict[str, Any] = {
+                    "prompt": prompt,
+                    "size": size,
+                    "images": images,
+                    "n": n,
+                    "quality": quality,
+                    "output_format": output_format,
+                    "output_compression": output_compression,
+                    "background": background,
+                    "moderation": moderation,
+                    "base_url_override": provider.base_url,
+                    "api_key_override": provider.api_key,
+                }
+                proxy = _provider_proxy(provider)
+                if proxy is not None:
+                    kwargs["proxy_override"] = proxy
+                result = await _direct_edit_image_once(**kwargs)
+                _pool_report_image_success(pool, provider.name, endpoint_kind="generations")
+                await account_limiter.record_image_call(
+                    _provider_pool_redis(pool), provider.name
                 )
                 await _emit_image_progress(
                     progress_callback,
-                    "provider_failover",
-                    from_provider=provider.name,
-                    remaining=remaining,
-                    reason=decision.reason,
-                    route="image2_edit_direct",
+                    "provider_used",
+                    provider=provider.name,
+                    route="image2",
+                    source="image2_edit_direct",
+                    endpoint="images/edits",
                 )
+                await _emit_image_progress(
+                    progress_callback,
+                    "final_image",
+                    source="image2_edit_direct",
+                )
+                await _emit_image_progress(
+                    progress_callback,
+                    "completed",
+                    source="image2_edit_direct",
+                )
+                return result
+            except (asyncio.CancelledError, UpstreamCancelled):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                decision = classify_retriable(
+                    getattr(exc, "error_code", None),
+                    getattr(exc, "status_code", None),
+                    error_message=str(exc),
+                )
+                should_continue = _should_continue_image_provider_failover(
+                    exc,
+                    retriable=decision.retriable,
+                )
+                if not should_continue:
+                    logger.warning(
+                        "direct edit provider %s terminal error: %s",
+                        provider.name,
+                        decision.reason,
+                    )
+                    raise
+                is_rl, retry_after = _is_image_rate_limit_error(exc)
+                if is_rl:
+                    pool.report_image_rate_limited(
+                        provider.name, retry_after_s=retry_after
+                    )
+                else:
+                    pool.report_image_failure(provider.name)
+                remaining = len(providers) - i - 1
+                if remaining > 0:
+                    logger.warning(
+                        "direct edit provider_failover: from=%s remaining=%d reason=%s",
+                        provider.name,
+                        remaining,
+                        decision.reason,
+                    )
+                    await _emit_image_progress(
+                        progress_callback,
+                        "provider_failover",
+                        from_provider=provider.name,
+                        remaining=remaining,
+                        reason=decision.reason,
+                        route="image2_edit_direct",
+                    )
+        finally:
+            if lane_owns_inflight:
+                _pool_release_inflight(pool, provider.name, "generations")
 
     merged = _merge_fallback_errors(
         errors,
@@ -4177,6 +4262,10 @@ async def _responses_image_stream_with_failover(
     from .retry import is_retriable as classify_retriable
 
     pool = await provider_pool.get_pool()
+    # provider_override 给定时表示外层 (_dispatch_image) 已 acquire 过 inflight,
+    # 本函数不再动 inflight；override 为空时由本函数管 acquire/release——i=0 由
+    # _pool_select_compat 软占座，i>0 由 finally 段前显式 acquire。
+    lane_owns_inflight = provider_override is None
     providers = (
         [provider_override]
         if provider_override is not None
@@ -4190,92 +4279,98 @@ async def _responses_image_stream_with_failover(
     errors: list[BaseException] = []
 
     for i, provider in enumerate(providers):
-        lock_error = _provider_endpoint_locked_error(provider, "responses")
-        if lock_error is not None:
-            errors.append(lock_error)
-            continue
+        if lane_owns_inflight and i > 0:
+            _pool_acquire_inflight(pool, provider.name, "responses")
         try:
-            kwargs: dict[str, Any] = {
-                "prompt": prompt,
-                "size": size,
-                "action": action,
-                "images": images,
-                "quality": quality,
-                "output_format": output_format,
-                "output_compression": output_compression,
-                "background": background,
-                "moderation": moderation,
-                "model": model,
-                "progress_callback": progress_callback,
-                "use_httpx": use_httpx,
-                "base_url_override": provider.base_url,
-                "api_key_override": provider.api_key,
-            }
-            proxy = _provider_proxy(provider)
-            if proxy is not None:
-                kwargs["proxy_override"] = proxy
-            result = await _responses_image_stream_with_retry(**kwargs)
-            pool.report_image_success(provider.name)
-            # 入账：滑动窗口 + 当日计数（rate_limit/daily_quota 都为空时短路不查 Redis）
-            await account_limiter.record_image_call(
-                _provider_pool_redis(pool), provider.name, task_id=task_id
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "provider_used",
-                provider=provider.name,
-                route="responses",
-                source="responses",
-                endpoint="responses:image_generation",
-            )
-            return result
-        except (asyncio.CancelledError, UpstreamCancelled):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-            decision = classify_retriable(
-                getattr(exc, "error_code", None),
-                getattr(exc, "status_code", None),
-                error_message=str(exc),
-            )
-            should_continue = _should_continue_image_provider_failover(
-                exc,
-                retriable=decision.retriable,
-            )
-            if not should_continue:
-                # terminal（invalid_request/auth）：输入或配置问题，换号也一样，不动 image health 计数。
-                logger.warning(
-                    "provider %s terminal error, not failing over: %s",
-                    provider.name,
-                    decision.reason,
+            lock_error = _provider_endpoint_locked_error(provider, "responses")
+            if lock_error is not None:
+                errors.append(lock_error)
+                continue
+            try:
+                kwargs: dict[str, Any] = {
+                    "prompt": prompt,
+                    "size": size,
+                    "action": action,
+                    "images": images,
+                    "quality": quality,
+                    "output_format": output_format,
+                    "output_compression": output_compression,
+                    "background": background,
+                    "moderation": moderation,
+                    "model": model,
+                    "progress_callback": progress_callback,
+                    "use_httpx": use_httpx,
+                    "base_url_override": provider.base_url,
+                    "api_key_override": provider.api_key,
+                }
+                proxy = _provider_proxy(provider)
+                if proxy is not None:
+                    kwargs["proxy_override"] = proxy
+                result = await _responses_image_stream_with_retry(**kwargs)
+                _pool_report_image_success(pool, provider.name, endpoint_kind="responses")
+                # 入账：滑动窗口 + 当日计数（rate_limit/daily_quota 都为空时短路不查 Redis）
+                await account_limiter.record_image_call(
+                    _provider_pool_redis(pool), provider.name, task_id=task_id
                 )
-                raise
-            # 以下都是 retriable：分流到 image_rate_limited（号没额度，定时冷却）
-            # 或 image_failure（号在抖动，3 次累计触发 image cooldown）。
-            is_rl, retry_after = _is_image_rate_limit_error(exc)
-            if is_rl:
-                pool.report_image_rate_limited(
-                    provider.name, retry_after_s=retry_after
-                )
-            else:
-                pool.report_image_failure(provider.name)
-            remaining = len(providers) - i - 1
-            if remaining > 0:
-                logger.warning(
-                    "provider_failover: from=%s remaining=%d reason=%s",
-                    provider.name,
-                    remaining,
-                    decision.reason,
-                )
-                # P2: 同 _direct_generate_image_with_failover——把切号通知给前端。
                 await _emit_image_progress(
                     progress_callback,
-                    "provider_failover",
-                    from_provider=provider.name,
-                    remaining=remaining,
-                    reason=decision.reason,
+                    "provider_used",
+                    provider=provider.name,
                     route="responses",
+                    source="responses",
+                    endpoint="responses:image_generation",
                 )
+                return result
+            except (asyncio.CancelledError, UpstreamCancelled):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                decision = classify_retriable(
+                    getattr(exc, "error_code", None),
+                    getattr(exc, "status_code", None),
+                    error_message=str(exc),
+                )
+                should_continue = _should_continue_image_provider_failover(
+                    exc,
+                    retriable=decision.retriable,
+                )
+                if not should_continue:
+                    # terminal（invalid_request/auth）：输入或配置问题，换号也一样，不动 image health 计数。
+                    logger.warning(
+                        "provider %s terminal error, not failing over: %s",
+                        provider.name,
+                        decision.reason,
+                    )
+                    raise
+                # 以下都是 retriable：分流到 image_rate_limited（号没额度，定时冷却）
+                # 或 image_failure（号在抖动，3 次累计触发 image cooldown）。
+                is_rl, retry_after = _is_image_rate_limit_error(exc)
+                if is_rl:
+                    pool.report_image_rate_limited(
+                        provider.name, retry_after_s=retry_after
+                    )
+                else:
+                    pool.report_image_failure(provider.name)
+                remaining = len(providers) - i - 1
+                if remaining > 0:
+                    logger.warning(
+                        "provider_failover: from=%s remaining=%d reason=%s",
+                        provider.name,
+                        remaining,
+                        decision.reason,
+                    )
+                    # P2: 同 _direct_generate_image_with_failover——把切号通知给前端。
+                    await _emit_image_progress(
+                        progress_callback,
+                        "provider_failover",
+                        from_provider=provider.name,
+                        remaining=remaining,
+                        reason=decision.reason,
+                        route="responses",
+                    )
+        finally:
+            if lane_owns_inflight:
+                _pool_release_inflight(pool, provider.name, "responses")
 
     merged = _merge_fallback_errors(
         errors,
@@ -5206,6 +5301,7 @@ async def _dispatch_image(
 
     channel = await _resolve_image_channel()
     engine = await _resolve_image_engine()
+    dispatch_ek = _image_endpoint_kind_for_engine(engine)
     try:
         providers = await _image_dispatch_candidates(provider_override, engine=engine)
     except TypeError as exc:
@@ -5220,71 +5316,82 @@ async def _dispatch_image(
                 if endpoint_kind_allowed(provider, endpoint_kind)
             ]
     errors: list[BaseException] = []
+    # provider_override 给定时 caller 已 acquire 过 inflight；这里不再持。否则
+    # _image_dispatch_candidates 走 _pool_select_compat 已对第 0 个候选软占座，
+    # 本 for loop 负责所有 idx 的 release（含 i=0 释放 select 占的）+ i>0 acquire。
+    dispatch_owns_inflight = provider_override is None
+    pool = await provider_pool.get_pool() if dispatch_owns_inflight else None
 
     for idx, provider in enumerate(providers):
-        any_yielded = False
+        if dispatch_owns_inflight and idx > 0 and pool is not None:
+            _pool_acquire_inflight(pool, provider.name, dispatch_ek)
         try:
-            async for item in _run_image_once_for_provider(
-                action=action,
-                provider=provider,
-                channel=channel,
-                engine=engine,
-                prompt=prompt,
-                size=size,
-                images=images,
-                n=n,
-                quality=quality,
-                output_format=output_format,
-                output_compression=output_compression,
-                background=background,
-                moderation=moderation,
-                model=model,
-                progress_callback=progress_callback,
-            ):
-                any_yielded = True
-                yield item
-            return
-        except (asyncio.CancelledError, UpstreamCancelled):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            if any_yielded:
+            any_yielded = False
+            try:
+                async for item in _run_image_once_for_provider(
+                    action=action,
+                    provider=provider,
+                    channel=channel,
+                    engine=engine,
+                    prompt=prompt,
+                    size=size,
+                    images=images,
+                    n=n,
+                    quality=quality,
+                    output_format=output_format,
+                    output_compression=output_compression,
+                    background=background,
+                    moderation=moderation,
+                    model=model,
+                    progress_callback=progress_callback,
+                ):
+                    any_yielded = True
+                    yield item
+                return
+            except (asyncio.CancelledError, UpstreamCancelled):
                 raise
-            errors.append(exc)
-            decision = classify_retriable(
-                getattr(exc, "error_code", None),
-                getattr(exc, "status_code", None),
-                error_message=str(exc),
-            )
-            should_continue = _should_continue_image_provider_failover(
-                exc,
-                retriable=decision.retriable,
-            )
-            if channel == _IMAGE_CHANNEL_IMAGE_JOBS_ONLY and not _provider_supports_image_jobs(provider):
-                raise
-            if not should_continue:
-                raise
-            remaining = len(providers) - idx - 1
-            if remaining <= 0:
-                continue
-            provider_name = getattr(provider, "name", "unknown")
-            logger.warning(
-                "%s image dispatch provider_failover: from=%s remaining=%d "
-                "channel=%s engine=%s reason=%s",
-                action,
-                provider_name,
-                remaining,
-                channel,
-                engine,
-                decision.reason,
-            )
-            await _emit_image_progress(
-                progress_callback,
-                "provider_failover",
-                from_provider=provider_name,
-                remaining=remaining,
-                reason=decision.reason,
-                route=f"{channel}:{engine}",
-            )
+            except Exception as exc:  # noqa: BLE001
+                if any_yielded:
+                    raise
+                errors.append(exc)
+                decision = classify_retriable(
+                    getattr(exc, "error_code", None),
+                    getattr(exc, "status_code", None),
+                    error_message=str(exc),
+                )
+                should_continue = _should_continue_image_provider_failover(
+                    exc,
+                    retriable=decision.retriable,
+                )
+                if channel == _IMAGE_CHANNEL_IMAGE_JOBS_ONLY and not _provider_supports_image_jobs(provider):
+                    raise
+                if not should_continue:
+                    raise
+                remaining = len(providers) - idx - 1
+                if remaining <= 0:
+                    continue
+                provider_name = getattr(provider, "name", "unknown")
+                logger.warning(
+                    "%s image dispatch provider_failover: from=%s remaining=%d "
+                    "channel=%s engine=%s reason=%s",
+                    action,
+                    provider_name,
+                    remaining,
+                    channel,
+                    engine,
+                    decision.reason,
+                )
+                await _emit_image_progress(
+                    progress_callback,
+                    "provider_failover",
+                    from_provider=provider_name,
+                    remaining=remaining,
+                    reason=decision.reason,
+                    route=f"{channel}:{engine}",
+                )
+        finally:
+            if dispatch_owns_inflight and pool is not None:
+                _pool_release_inflight(pool, provider.name, dispatch_ek)
 
     merged = _merge_fallback_errors(
         errors,

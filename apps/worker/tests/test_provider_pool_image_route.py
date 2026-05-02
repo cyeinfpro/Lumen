@@ -93,11 +93,13 @@ async def test_select_image_jobs_keeps_plain_providers_for_dispatch_layer() -> N
 async def test_select_image_orders_by_image_last_used_at_ascending() -> None:
     pool = _make_pool(_cfg("acc1"), _cfg("acc2"), _cfg("acc3"))
     now = time.monotonic()
-    pool._health["acc1"].image_last_used_at = now - 10.0  # 最近用过
-    pool._health["acc2"].image_last_used_at = now - 100.0  # 较早
-    pool._health["acc3"].image_last_used_at = None  # 从未用过 → 最早
+    # 排序按 endpoint_kind 维度查 image_last_used_at_per_ek；下面 select 不传
+    # endpoint_kind，dict key 用 ""（聚合）。
+    pool._health["acc1"].image_last_used_at_per_ek[""] = now - 10.0  # 最近用过
+    pool._health["acc2"].image_last_used_at_per_ek[""] = now - 100.0  # 较早
+    # acc3 从未用过 → key 不存在 → -inf 排最前
 
-    providers = await pool.select(route="image")
+    providers = await pool.select(route="image", acquire_inflight=False)
     # 顺序：从未用过 → 较早 → 最近
     assert [p.name for p in providers] == ["acc3", "acc2", "acc1"]
 
@@ -601,6 +603,123 @@ async def test_flush_image_metrics_no_redis_only_sets_state() -> None:
     pool._redis = None
     # 不应抛
     await pool.flush_image_metrics()
+
+
+# --- inflight 软占座 + 按 endpoint_kind 分散 ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_select_distributes_across_providers() -> None:
+    """并发 select 不应全压在同一个号上——这是 dual_race 雪崩的修复回归测试。
+
+    场景：6 个并发请求几乎同时进 select。修复前所有请求看到相同的 last_used_at 排序
+    都会拿到候选 #1（A）；修复后 select 在 return 前 incr inflight 软占座，紧接着
+    发起 select 的请求看到 A 的 inflight=1 自然落到 B。
+    """
+    pool = _make_pool(_cfg("A"), _cfg("B"), _cfg("C"))
+
+    chosen: list[str] = []
+
+    async def use_one() -> None:
+        providers = await pool.select(route="image", endpoint_kind="responses")
+        first = providers[0]
+        chosen.append(first.name)
+        # 模拟"实际发请求"——给一段持有时间，让其他并发 select 看到 inflight 状态
+        await asyncio.sleep(0.005)
+        pool.release_image_inflight(first.name, "responses")
+
+    await asyncio.gather(*(use_one() for _ in range(6)))
+
+    counts: dict[str, int] = {}
+    for name in chosen:
+        counts[name] = counts.get(name, 0) + 1
+    # 所有 3 个 provider 都被使用过
+    assert set(counts.keys()) == {"A", "B", "C"}
+    # 且分布合理（最多 3 次落在同一个号；6 个请求理想分布是 2/2/2）
+    assert max(counts.values()) <= 3
+
+
+@pytest.mark.asyncio
+async def test_select_acquire_inflight_false_does_not_increment() -> None:
+    """reserve 路径走 acquire_inflight=False，不应留下软占座状态。"""
+    pool = _make_pool(_cfg("A"), _cfg("B"))
+
+    providers = await pool.select(
+        route="image", endpoint_kind="responses", acquire_inflight=False
+    )
+    first = providers[0]
+    # 没 acquire 过，第二次 select 看到的 inflight 仍然 0，排序应该一致
+    again = await pool.select(
+        route="image", endpoint_kind="responses", acquire_inflight=False
+    )
+    assert again[0].name == first.name
+
+
+@pytest.mark.asyncio
+async def test_inflight_dimension_is_per_endpoint_kind() -> None:
+    """一个号在 responses lane 被 acquire 不应污染 generations lane 排序。"""
+    pool = _make_pool(_cfg("A"), _cfg("B"))
+
+    # responses lane 占住 A
+    pool.acquire_image_inflight("A", "responses")
+    try:
+        # generations lane 不受 A 在 responses 维度的占用影响
+        providers = await pool.select(
+            route="image", endpoint_kind="generations", acquire_inflight=False
+        )
+        # A 在 generations 维度 inflight=0，priority/last_used 都和 B 一样 → A 仍排前
+        assert providers[0].name == "A"
+
+        # 但 responses lane 看 A 已被占，应该拿到 B
+        responses_view = await pool.select(
+            route="image", endpoint_kind="responses", acquire_inflight=False
+        )
+        assert responses_view[0].name == "B"
+    finally:
+        pool.release_image_inflight("A", "responses")
+
+
+@pytest.mark.asyncio
+async def test_release_image_inflight_floor_at_zero() -> None:
+    """release 多于 acquire 不应让计数变负数（保护下界）。"""
+    pool = _make_pool(_cfg("A"))
+    pool.acquire_image_inflight("A", "responses")
+    pool.release_image_inflight("A", "responses")
+    pool.release_image_inflight("A", "responses")  # 多余的 release
+    pool.release_image_inflight("A", "responses")  # 还有
+    # 不应抛；下次 acquire 行为正常
+    pool.acquire_image_inflight("A", "responses")
+    h = pool._health["A"]
+    assert h.image_inflight.get("responses", 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_report_image_success_updates_per_endpoint_last_used_at() -> None:
+    """report_image_success(endpoint_kind=...) 只更新对应维度，不污染其他 lane 排序。"""
+    pool = _make_pool(_cfg("A"), _cfg("B"))
+
+    # A 在 responses lane 成功一次
+    pool.report_image_success("A", endpoint_kind="responses")
+
+    # generations lane 上 A 的 last_used 应该仍然 None（A 在 generations 上从没成功过）
+    h_a = pool._health["A"]
+    assert h_a.image_last_used_at_per_ek.get("responses") is not None
+    assert h_a.image_last_used_at_per_ek.get("generations") is None
+
+    # 因此 generations lane 的排序里 A 仍然是"从未用过"，sort key = -inf 排前面
+    providers = await pool.select(
+        route="image", endpoint_kind="generations", acquire_inflight=False
+    )
+    # A 和 B 在 generations 维度 sort key 都是 (0, -inf, ...)，但既然 last_used 相同
+    # 应该至少能保证 A 没被推到 B 后面（不被 responses 成功污染）
+    # 如果污染了，A 的 sort_key 会是 (0, success_time, ...) > B 的 (0, -inf, ...)
+    # 此时 B 会排前——这种情况是修复前的 bug。
+    a_idx = next(i for i, p in enumerate(providers) if p.name == "A")
+    b_idx = next(i for i, p in enumerate(providers) if p.name == "B")
+    # A 不应被 responses lane 的成功推后
+    assert a_idx <= b_idx, (
+        "A 在 generations lane 不应被它在 responses lane 的成功污染排序"
+    )
 
 
 # --- pytest-asyncio event_loop ----------------------------------------------
