@@ -152,7 +152,7 @@ nginx 写入逻辑会先备份目标配置，写入后执行 `nginx -t`；如果
 安装脚本会执行：
 
 - 自动检查并安装缺失的 Docker、uv、Node、Python、OpenSSL 和编译依赖
-- 生成根目录 `.env` 和 `apps/web/.env.local`
+- 生成根目录 `.env` 和 `apps/web/.env.local`；Redis 密码默认自动生成，如需指定可设置 `LUMEN_REDIS_PASSWORD`
 - 创建并授权本地存储目录 `/opt/lumendata`
 - 拉取 Docker 镜像、同步 Python/Node 依赖
 - 启动 PostgreSQL 和 Redis

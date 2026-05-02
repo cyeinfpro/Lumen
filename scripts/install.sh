@@ -1008,13 +1008,15 @@ else
         validate_dotenv_value "SESSION_SECRET" "${SESSION_SECRET}" && break
     done
 
-    # Redis 密码：docker-compose 的 redis service 启动时会 --requirepass，
-    # 这里生成随机强密码并同时写入 REDIS_PASSWORD / REDIS_URL，避免本地 redis 裸奔。
-    DEFAULT_REDIS_PWD="$(openssl rand -hex 24)"
-    while :; do
-        REDIS_PASSWORD="$(read_or_default 'REDIS_PASSWORD（直接回车使用随机生成）' "${DEFAULT_REDIS_PWD}")"
-        validate_redis_password "${REDIS_PASSWORD}" && break
-    done
+    # Redis 密码：默认自动生成，避免安装过程被密码交互卡住。
+    # 如需自定义，安装前设置 LUMEN_REDIS_PASSWORD。
+    REDIS_PASSWORD="${LUMEN_REDIS_PASSWORD:-$(openssl rand -hex 24)}"
+    validate_redis_password "${REDIS_PASSWORD}" || exit 1
+    if [ -n "${LUMEN_REDIS_PASSWORD:-}" ]; then
+        log_info "使用 LUMEN_REDIS_PASSWORD 写入 Redis 配置。"
+    else
+        log_info "已自动生成 Redis 密码。"
+    fi
 
     log_info "写入 ${ENV_FILE}"
     DB_USER="lumen_app"
