@@ -57,7 +57,6 @@ from lumen_core.providers import parse_proxy_item, resolve_provider_proxy_url
 from lumen_core.runtime_settings import get_spec
 from ..proxy_pool import (
     DEFAULT_STRATEGY,
-    DEFAULT_TEST_TARGET,
     pick_proxy,
     report_failure as pool_report_failure,
     report_success as pool_report_success,

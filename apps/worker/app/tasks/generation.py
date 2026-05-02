@@ -1798,7 +1798,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     """arq entry for generation task."""
     redis = ctx["redis"]
     worker_id = str(ctx.get("worker_id") or ctx.get("job_id") or "worker")
-    job_try = int(ctx.get("job_try") or 1)
     _task_start = asyncio.get_event_loop().time()
     _task_deadline = _task_start + _RUN_GENERATION_TIMEOUT_S
     _task_outcome = "unknown"

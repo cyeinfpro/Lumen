@@ -40,7 +40,7 @@ class ProviderProxyDefinition:
         object.__setattr__(self, "_password", password)
 
     @property
-    def password(self) -> str | None:
+    def password(self) -> str | None:  # noqa: F811 - expose InitVar through a read-only property
         return self._password
 
 

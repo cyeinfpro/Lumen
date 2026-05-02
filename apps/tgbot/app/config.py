@@ -12,7 +12,7 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,16 +74,6 @@ class Settings(BaseSettings):
     # 与 telegram_bindings 形成双因子：拿到 X-Bot-Token 又知道 chat_id 也没用，因为
     # 进 bot 这层会先按 from_user.id 拒掉。
     telegram_allowed_user_ids: str = ""
-
-    @model_validator(mode="after")
-    def _validate(self) -> "Settings":
-        if not self.telegram_bot_token.strip():
-            raise ValueError("TELEGRAM_BOT_TOKEN is required")
-        if not self.telegram_bot_shared_secret.strip():
-            raise ValueError("TELEGRAM_BOT_SHARED_SECRET is required")
-        if self.bot_mode == "webhook" and not self.webhook_url:
-            raise ValueError("WEBHOOK_URL is required when BOT_MODE=webhook")
-        return self
 
 
 settings = Settings()

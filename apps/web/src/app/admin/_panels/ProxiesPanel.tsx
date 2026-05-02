@@ -8,7 +8,6 @@ import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertCircle,
-  Check,
   CheckCircle2,
   Clock,
   Edit3,
@@ -298,7 +297,7 @@ export function ProxiesPanel() {
             type="button"
             onClick={onSaveSettings}
             disabled={!settingsDirty || updateSettingsMut.isPending}
-            className="inline-flex items-center justify-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
           >
             {updateSettingsMut.isPending ? "保存中…" : "保存这三项"}
           </button>
@@ -317,7 +316,7 @@ export function ProxiesPanel() {
             <button
               type="button"
               onClick={startEdit}
-              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium transition-all"
+              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium transition-all"
             >
               <Edit3 className="w-3.5 h-3.5" /> 编辑代理列表
             </button>
@@ -325,7 +324,7 @@ export function ProxiesPanel() {
               type="button"
               onClick={onTestAll}
               disabled={testAll.isPending || (q.data?.items ?? []).length === 0}
-              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
+              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
             >
               <Zap className="w-3.5 h-3.5" />
               {testAll.isPending ? "全部测试中…" : "全部测一遍"}
@@ -333,7 +332,7 @@ export function ProxiesPanel() {
             <button
               type="button"
               onClick={() => void q.refetch()}
-              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-sm transition-colors"
+              className="inline-flex min-h-11 items-center gap-1.5 px-3 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-sm transition-colors"
             >
               <RefreshCw className="w-3.5 h-3.5" /> 刷新
             </button>
@@ -344,7 +343,7 @@ export function ProxiesPanel() {
               type="button"
               onClick={onSaveProxies}
               disabled={updateProxiesMut.isPending}
-              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium disabled:opacity-50 transition-all"
+              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium disabled:opacity-50 transition-all"
             >
               <Save className="w-3.5 h-3.5" />
               {updateProxiesMut.isPending ? "保存中…" : "保存代理列表"}
@@ -353,14 +352,14 @@ export function ProxiesPanel() {
               type="button"
               onClick={cancelEdit}
               disabled={updateProxiesMut.isPending}
-              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
+              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
             >
               <RotateCcw className="w-3.5 h-3.5" /> 取消
             </button>
             <button
               type="button"
               onClick={addProxy}
-              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm transition-colors"
+              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm transition-colors"
             >
               <Plus className="w-3.5 h-3.5" /> 加一个代理
             </button>
@@ -498,7 +497,7 @@ function ProxyViewRow({
             type="button"
             onClick={onTest}
             disabled={testing}
-            className="inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-xs disabled:opacity-50 transition-colors"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 px-3 sm:h-8 sm:min-h-0 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-xs disabled:opacity-50 transition-colors"
           >
             <Zap className="w-3 h-3" />
             {testing ? "测试中…" : "测试"}
@@ -607,7 +606,7 @@ function ProxyEditRow({
             type="button"
             onClick={() => onChange({ enabled: !draft.enabled })}
             className={
-              "inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs border transition-colors " +
+              "inline-flex min-h-11 items-center gap-1.5 px-3 sm:h-8 sm:min-h-0 rounded-lg text-xs border transition-colors " +
               (draft.enabled
                 ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
                 : "bg-white/5 text-neutral-400 border-white/10")
@@ -635,14 +634,14 @@ function ProxyEditRow({
                 <button
                   type="button"
                   onClick={onDelete}
-                  className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg text-xs bg-red-500/80 hover:bg-red-500 text-white transition-colors"
+                  className="inline-flex min-h-11 items-center gap-1 px-2.5 sm:h-8 sm:min-h-0 rounded-lg text-xs bg-red-500/80 hover:bg-red-500 text-white transition-colors"
                 >
                   <Trash2 className="w-3 h-3" /> 确认删除
                 </button>
                 <button
                   type="button"
                   onClick={() => onConfirmDelete(false)}
-                  className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 text-neutral-300 transition-colors"
+                  className="inline-flex min-h-11 min-w-11 items-center justify-center sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 rounded-lg bg-white/5 hover:bg-white/10 text-neutral-300 transition-colors"
                   aria-label="取消"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -656,7 +655,7 @@ function ProxyEditRow({
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 onClick={() => onConfirmDelete(true)}
-                className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg text-xs text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors"
+                className="inline-flex min-h-11 items-center gap-1 px-2.5 sm:h-8 sm:min-h-0 rounded-lg text-xs text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors"
               >
                 <Trash2 className="w-3 h-3" /> 删除
               </motion.button>

@@ -548,7 +548,7 @@ function ShareLightbox({
               href={image.image_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="hidden h-10 items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 text-xs text-white backdrop-blur transition-colors hover:bg-white/15 sm:inline-flex"
+              className="hidden min-h-11 items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 text-xs text-white backdrop-blur transition-colors hover:bg-white/15 sm:inline-flex"
             >
               <ExternalLink className="h-4 w-4" />
               原图
@@ -570,7 +570,7 @@ function ShareLightbox({
               type="button"
               aria-label="关闭"
               onClick={onClose}
-              className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white backdrop-blur transition-colors hover:bg-white/15"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white backdrop-blur transition-colors hover:bg-white/15"
             >
               <X className="h-5 w-5" />
             </button>

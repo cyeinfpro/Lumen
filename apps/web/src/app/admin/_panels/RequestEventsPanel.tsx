@@ -603,7 +603,7 @@ export function RequestEventsPanel() {
               onClick={() => setAutoRefresh((value) => !value)}
               aria-pressed={autoRefresh}
               className={cn(
-                "inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border px-3 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25",
+                "inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border px-3 sm:h-10 sm:min-h-0 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25",
                 autoRefresh
                   ? "border-[var(--color-lumen-amber)]/30 bg-[var(--color-lumen-amber)]/12 text-[var(--color-lumen-amber)]"
                   : "border-white/10 bg-white/[0.04] text-neutral-300 hover:bg-white/[0.08] hover:text-neutral-100",
@@ -616,7 +616,7 @@ export function RequestEventsPanel() {
               <button
                 type="button"
                 onClick={resetFilters}
-                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-xs text-neutral-300 transition-colors hover:bg-white/[0.08] hover:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 sm:h-10 sm:min-h-0 text-xs text-neutral-300 transition-colors hover:bg-white/[0.08] hover:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
               >
                 <X className="h-3.5 w-3.5" />
                 重置
@@ -626,7 +626,7 @@ export function RequestEventsPanel() {
               type="button"
               onClick={() => void q.refetch()}
               disabled={q.isFetching}
-              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-xs text-neutral-300 transition-colors hover:bg-white/[0.08] hover:text-neutral-100 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+              className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 sm:h-10 sm:min-h-0 text-xs text-neutral-300 transition-colors hover:bg-white/[0.08] hover:text-neutral-100 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
             >
               {q.isFetching ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -716,7 +716,7 @@ export function RequestEventsPanel() {
                               onClick={() =>
                                 setExpandedId(expanded ? null : event.id)
                               }
-                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100 sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
                               aria-label={expanded ? "收起详情" : "展开详情"}
                               aria-expanded={expanded}
                               aria-controls={detailId}

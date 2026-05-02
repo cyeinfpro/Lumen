@@ -15,7 +15,7 @@ import time
 from sqlalchemy import select
 
 from lumen_core.models import SystemSetting
-from lumen_core.runtime_settings import SUPPORTED_SETTINGS, SettingSpec, get_spec
+from lumen_core.runtime_settings import SettingSpec, get_spec
 
 from .config import settings as _config_settings
 from .db import SessionLocal

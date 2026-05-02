@@ -82,7 +82,7 @@ export function StreamErrorState({
       <button
         type="button"
         onClick={onRetry}
-        className="mt-6 inline-flex h-10 cursor-pointer items-center gap-2 rounded-full bg-[var(--amber-400)] px-4 text-[13px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none"
+        className="mt-6 inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full bg-[var(--amber-400)] px-4 text-[13px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none"
       >
         <RefreshCw className="h-4 w-4" />
         重新加载
@@ -116,7 +116,7 @@ export function StreamNoResultsState({
       <button
         type="button"
         onClick={onClear}
-        className="mt-6 inline-flex h-10 cursor-pointer items-center rounded-full border border-[var(--border-amber)] bg-[rgba(242,169,58,0.08)] px-4 text-[13px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none"
+        className="mt-6 inline-flex min-h-11 cursor-pointer items-center rounded-full border border-[var(--border-amber)] bg-[rgba(242,169,58,0.08)] px-4 text-[13px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none"
       >
         清除条件
       </button>

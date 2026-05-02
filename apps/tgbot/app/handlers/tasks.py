@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
