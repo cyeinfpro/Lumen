@@ -129,7 +129,7 @@ async def update_settings(
         if spec is None:
             raise ValueError(f"unknown setting key: {key}")
         if value != "":
-            parsed = parse_value(spec, value)  # 会抛 ValueError
+            parse_value(spec, value)  # 会抛 ValueError
         validated_items.append((key, value))
 
     for key, value in validated_items:

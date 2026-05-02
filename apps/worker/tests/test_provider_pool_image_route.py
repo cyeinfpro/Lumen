@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from app import provider_pool
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
 
 

@@ -19,7 +19,6 @@ healthy = enabled 且 不在 cooldown 且 不在 caller 的 avoid set。
 
 from __future__ import annotations
 
-import json
 import logging
 import random
 from datetime import datetime, timezone
@@ -200,7 +199,7 @@ async def measure_latency(
             timeout=httpx.Timeout(timeout_s, connect=min(timeout_s, 5.0)),
             follow_redirects=False,
         ) as client:
-            resp = await client.head(target)
+            await client.head(target)
             # 任何 HTTP 响应（含 4xx/5xx）都说明 SOCKS 通路完整建立，记为成功
             return ((time.monotonic() - start) * 1000.0, None)
     except Exception as exc:  # noqa: BLE001

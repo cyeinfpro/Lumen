@@ -91,7 +91,7 @@ export function StreamOverview({
                 type="button"
                 onClick={onShareSelected}
                 disabled={sharingSelected}
-                className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.16)] px-2.5 text-[11px] font-medium text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.22)] disabled:opacity-60 focus-visible:outline-none"
+                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.16)] px-2.5 sm:h-8 sm:min-h-0 text-[11px] font-medium text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.22)] disabled:opacity-60 focus-visible:outline-none"
               >
                 <Share2 className="h-3 w-3" />
                 {sharingSelected ? "分享中" : `分享 ${selectedCount} 张`}
@@ -100,7 +100,7 @@ export function StreamOverview({
                 type="button"
                 onClick={onClearSelection}
                 aria-label="取消选择"
-                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none"
+                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus-visible:outline-none"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -111,7 +111,7 @@ export function StreamOverview({
               onClick={onToggleSelectionMode}
               aria-pressed={selectionMode}
               className={cn(
-                "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors focus-visible:outline-none",
+                "inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 sm:h-8 sm:min-h-0 text-[11px] transition-colors focus-visible:outline-none",
                 selectionMode
                   ? "border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.14)] text-[var(--amber-300)]"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -125,7 +125,7 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onClearFilters}
-              className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none"
+              className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 sm:h-8 sm:min-h-0 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none"
             >
               <Eraser className="h-3 w-3" />
               清除
@@ -136,7 +136,7 @@ export function StreamOverview({
             onClick={onRefresh}
             disabled={refreshing}
             aria-label="刷新"
-            className="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] disabled:opacity-50 focus-visible:outline-none"
+            className="inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] disabled:opacity-50 sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus-visible:outline-none"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
           </button>

@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -97,6 +96,13 @@ def _setup_logging() -> None:
 async def _amain() -> None:
     _setup_logging()
     logger = logging.getLogger("lumen-tgbot")
+
+    if not settings.telegram_bot_shared_secret.strip():
+        logger.error("no TELEGRAM_BOT_SHARED_SECRET, refusing to start")
+        return
+    if settings.bot_mode == "webhook" and not settings.webhook_url.strip():
+        logger.error("WEBHOOK_URL is required when BOT_MODE=webhook")
+        return
 
     api = LumenApi()
     proxy_mgr = ProxyManager(api)

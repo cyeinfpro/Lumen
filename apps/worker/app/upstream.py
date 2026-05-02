@@ -55,7 +55,6 @@ from PIL import Image as PILImage, UnidentifiedImageError
 from lumen_core.constants import (
     DEFAULT_IMAGE_INSTRUCTIONS,
     DEFAULT_IMAGE_RESPONSES_MODEL,
-    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     GenerationErrorCode as EC,
     UPSTREAM_MODEL,
 )

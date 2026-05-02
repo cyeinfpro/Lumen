@@ -69,7 +69,7 @@ export function StreamSearchBar({
                 type="button"
                 onClick={() => onChange("")}
                 aria-label="清空"
-                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none"
+                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] hover:text-[var(--fg-0)] sm:h-7 sm:w-7 sm:min-h-0 sm:min-w-0 focus-visible:outline-none"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -77,7 +77,7 @@ export function StreamSearchBar({
             <button
               type="button"
               onClick={onClose}
-              className="ml-1 h-8 cursor-pointer rounded-full px-2.5 text-[13px] text-[var(--fg-1)] hover:text-[var(--fg-0)] focus-visible:outline-none"
+              className="ml-1 min-h-11 cursor-pointer rounded-full px-2.5 sm:h-8 sm:min-h-0 text-[13px] text-[var(--fg-1)] hover:text-[var(--fg-0)] focus-visible:outline-none"
               aria-label="关闭搜索"
             >
               取消

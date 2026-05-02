@@ -21,7 +21,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, exists, or_, select, update
 
 from lumen_core.constants import EV_CONV_RENAMED, GenerationErrorCode as EC, conv_channel
 from lumen_core.models import Conversation, Message

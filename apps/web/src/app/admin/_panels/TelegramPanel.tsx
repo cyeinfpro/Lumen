@@ -332,7 +332,7 @@ export function TelegramPanel() {
           type="button"
           onClick={onSave}
           disabled={!dirty || updateMut.isPending}
-          className="inline-flex items-center justify-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
+          className="inline-flex min-h-11 items-center justify-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
         >
           <Save className="w-3.5 h-3.5" />
           {updateMut.isPending ? "保存中…" : dirty ? "保存修改" : "无修改"}
@@ -425,7 +425,7 @@ function RestartConfirmModal({
             type="button"
             onClick={onCancel}
             disabled={pending}
-            className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
+            className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
           >
             <X className="w-3.5 h-3.5" /> 暂不重启
           </button>
@@ -433,7 +433,7 @@ function RestartConfirmModal({
             type="button"
             onClick={onConfirm}
             disabled={pending}
-            className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium disabled:opacity-50 transition-all"
+            className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium disabled:opacity-50 transition-all"
           >
             {pending ? (
               <>

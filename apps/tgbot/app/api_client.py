@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import tempfile
 import uuid
 from pathlib import Path

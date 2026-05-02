@@ -19,7 +19,6 @@ import {
   GripVertical,
   ImageIcon,
   Loader2,
-  Network,
   Pencil,
   Plus,
   Power,
@@ -45,7 +44,6 @@ import type {
   ProviderProbeResult,
   ProviderProxyIn,
   ProviderProxyOut,
-  ProviderProxyType,
   ProviderStatsItem,
 } from "@/lib/types";
 import { EmptyBlock, ErrorBlock } from "../page";
@@ -131,20 +129,6 @@ function toProxyDraft(p: ProviderProxyOut): ProxyDraft {
     password: "",
     private_key_path: p.private_key_path ?? "",
     enabled: p.enabled,
-  };
-}
-
-function emptyProxyDraft(): ProxyDraft {
-  return {
-    _key: nextKey(),
-    name: "",
-    type: "socks5",
-    host: "",
-    port: 1080,
-    username: "",
-    password: "",
-    private_key_path: "",
-    enabled: true,
   };
 }
 
@@ -291,40 +275,9 @@ export function ProvidersPanel() {
     setDeleteConfirmIdx(null);
   }, []);
 
-  const addProxy = useCallback(() => {
-    const d = emptyProxyDraft();
-    setProxyDrafts((prev) => [...(prev ?? []), d]);
-    setDeleteConfirmIdx(null);
-  }, []);
-
-  const removeProxy = useCallback((idx: number) => {
-    const removedName = proxyDrafts?.[idx]?.name.trim() ?? "";
-    setProxyDrafts((prev) => {
-      if (!prev) return prev;
-      return prev.filter((_, i) => i !== idx);
-    });
-    if (removedName) {
-      setDrafts((prev) =>
-        prev?.map((d) => (d.proxy === removedName ? { ...d, proxy: null } : d)) ?? prev,
-      );
-    }
-  }, [proxyDrafts]);
-
   const updateDraft = useCallback(
     (idx: number, patch: Partial<Draft>) => {
       setDrafts((prev) => {
-        if (!prev) return prev;
-        const next = [...prev];
-        next[idx] = { ...next[idx], ...patch };
-        return next;
-      });
-    },
-    [],
-  );
-
-  const updateProxyDraft = useCallback(
-    (idx: number, patch: Partial<ProxyDraft>) => {
-      setProxyDrafts((prev) => {
         if (!prev) return prev;
         const next = [...prev];
         next[idx] = { ...next[idx], ...patch };
@@ -989,200 +942,6 @@ function WeightBar({ items }: { items: ProviderItemOut[] }) {
           );
         })}
       </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 代理池
-// ---------------------------------------------------------------------------
-
-function ProxyOverview({ proxies }: { proxies: ProviderProxyOut[] }) {
-  return (
-    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-xl p-4">
-      <div className="flex items-center justify-between gap-3 mb-3">
-        <div className="flex items-center gap-2">
-          <Network className="w-4 h-4 text-neutral-400" />
-          <div className="text-xs font-medium text-neutral-200">代理池</div>
-        </div>
-        <span className="text-[11px] text-neutral-500 tabular-nums">
-          {proxies.length} 个代理
-        </span>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        {proxies.map((p) => (
-          <div
-            key={p.name}
-            className="rounded-lg border border-white/8 bg-black/20 px-3 py-2.5"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-xs font-medium text-neutral-200 truncate">
-                {p.name}
-              </span>
-              <span className="shrink-0 rounded-md border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] uppercase text-neutral-400">
-                {p.type === "ssh" ? "SSH" : "S5"}
-              </span>
-              {!p.enabled && (
-                <span className="shrink-0 rounded-md border border-neutral-500/30 bg-neutral-500/10 px-1.5 py-0.5 text-[10px] text-neutral-500">
-                  禁用
-                </span>
-              )}
-            </div>
-            <code className="mt-1 block truncate text-[11px] text-neutral-500">
-              {p.username ? `${p.username}@` : ""}
-              {p.host}:{p.port}
-            </code>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ProxyDraftList({
-  drafts,
-  onAdd,
-  onUpdate,
-  onRemove,
-}: {
-  drafts: ProxyDraft[];
-  onAdd: () => void;
-  onUpdate: (idx: number, patch: Partial<ProxyDraft>) => void;
-  onRemove: (idx: number) => void;
-}) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-4">
-      <div className="flex items-center justify-between gap-3 mb-4">
-        <div className="flex items-center gap-2.5">
-          <Network className="w-4 h-4 text-neutral-400" />
-          <div>
-            <div className="text-xs font-medium text-neutral-200">代理池</div>
-            <div className="text-[11px] text-neutral-500 mt-0.5">
-              Provider 可选择其中一个代理，也可以直连
-            </div>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onAdd}
-          className="inline-flex items-center gap-1.5 min-h-[36px] px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300 transition-colors"
-        >
-          <Plus className="w-3 h-3" /> 添加代理
-        </button>
-      </div>
-      {drafts.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-white/10 px-4 py-6 text-center text-xs text-neutral-500">
-          未配置代理
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {drafts.map((p, idx) => (
-            <div
-              key={p._key}
-              className="rounded-xl border border-white/8 bg-black/20 p-3 space-y-3"
-            >
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-                <Field label="名称" required>
-                  <input
-                    type="text"
-                    value={p.name}
-                    onChange={(e) => onUpdate(idx, { name: e.target.value })}
-                    placeholder="proxy-us-1"
-                    className={fieldCls(false)}
-                  />
-                </Field>
-                <Field label="类型">
-                  <select
-                    value={p.type}
-                    onChange={(e) => {
-                      const type = e.target.value as ProviderProxyType;
-                      onUpdate(idx, {
-                        type,
-                        port: type === "ssh" && p.port === 1080 ? 22 : p.port,
-                      });
-                    }}
-                    className={fieldCls(false)}
-                  >
-                    <option value="socks5">S5</option>
-                    <option value="ssh">SSH</option>
-                  </select>
-                </Field>
-                <Field label="Host" required>
-                  <input
-                    type="text"
-                    value={p.host}
-                    onChange={(e) => onUpdate(idx, { host: e.target.value })}
-                    placeholder={p.type === "ssh" ? "ssh.example.com" : "127.0.0.1"}
-                    className={fieldCls(false)}
-                  />
-                </Field>
-                <Field label="Port" required>
-                  <input
-                    type="number"
-                    min={1}
-                    max={65535}
-                    value={p.port}
-                    onChange={(e) =>
-                      onUpdate(idx, { port: parseInt(e.target.value, 10) || 1 })
-                    }
-                    inputMode="numeric"
-                    className={fieldCls(false)}
-                  />
-                </Field>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <Field label={p.type === "ssh" ? "SSH 用户" : "用户名"}>
-                  <input
-                    type="text"
-                    value={p.username ?? ""}
-                    onChange={(e) => onUpdate(idx, { username: e.target.value })}
-                    placeholder={p.type === "ssh" ? "root / ubuntu" : "可选"}
-                    className={fieldCls(false)}
-                  />
-                </Field>
-                <Field
-                  label={p.type === "ssh" ? "SSH 密码" : "密码"}
-                  hint={
-                    p.type === "ssh" ? "留空保持原值；新建必填" : "留空保持原值"
-                  }
-                >
-                  <input
-                    type="password"
-                    value={p.password}
-                    onChange={(e) => onUpdate(idx, { password: e.target.value })}
-                    placeholder={p.type === "ssh" ? "服务器登录密码" : "可选"}
-                    autoComplete="new-password"
-                    className={fieldCls(false)}
-                  />
-                </Field>
-                <div className="flex items-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onUpdate(idx, { enabled: !p.enabled })}
-                    className={
-                      "flex-1 inline-flex items-center justify-center gap-1.5 min-h-[44px] sm:h-9 px-3 rounded-xl border text-xs transition-colors " +
-                      (p.enabled
-                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
-                        : "bg-neutral-500/10 border-neutral-500/30 text-neutral-400 hover:bg-neutral-500/20")
-                    }
-                  >
-                    {p.enabled ? <Power className="w-3 h-3" /> : <PowerOff className="w-3 h-3" />}
-                    {p.enabled ? "已启用" : "已禁用"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onRemove(idx)}
-                    className="inline-flex items-center justify-center min-h-[44px] sm:h-9 w-11 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-300 transition-colors"
-                    title="移除代理"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

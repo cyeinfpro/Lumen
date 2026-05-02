@@ -9,7 +9,6 @@ import {
   describeCompactError,
   useCompactConversation,
   type CompactConversationApiResponse,
-  type CompactConversationResponse,
 } from "@/app/(chat)/_hooks/useCompactConversation";
 import { CompactionToast } from "@/components/ui/chat/CompactionToast";
 import { RollingTokenCounter } from "@/components/ui/chat/RollingTokenCounter";
