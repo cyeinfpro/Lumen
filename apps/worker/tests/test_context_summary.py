@@ -213,6 +213,34 @@ def test_summary_boundary_uses_message_id_when_timestamps_equal() -> None:
     )
 
 
+def test_worker_compact_summary_payload_preserves_public_stats() -> None:
+    conv = Conversation(
+        id="conv-1",
+        user_id="user-1",
+        summary_jsonb={"compressed_at": "2026-04-26T12:00:00+00:00"},
+    )
+
+    payload = context_summary._worker_compact_summary_payload(
+        result={
+            "status": "created",
+            "summary_created": True,
+            "summary_used": True,
+            "summary_up_to_message_id": "msg-3",
+            "summary_up_to_created_at": "2026-04-26T00:00:03+00:00",
+            "summary_tokens": 200,
+            "source_message_count": 4,
+            "source_token_estimate": 1200,
+            "image_caption_count": 1,
+            "fallback_reason": None,
+        },
+        conv=conv,
+    )
+
+    assert payload["tokens_freed"] == 1000
+    assert payload["source_token_estimate"] == 1200
+    assert payload["image_caption_count"] == 1
+
+
 @pytest.mark.asyncio
 async def test_record_summary_metrics_writes_admin_compatible_fields() -> None:
     redis = _MetricsRedis()

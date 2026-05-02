@@ -299,7 +299,7 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
     ),
     SettingSpec(
         key="context.image_caption_model",
-        description="出窗图片 caption 模型。默认 gpt-5.4-mini-vision。",
+        description="出窗图片 caption 模型。默认 gpt-5.4-mini。",
         sensitive=False,
         parser=str,
         env_fallback="CONTEXT_IMAGE_CAPTION_MODEL",

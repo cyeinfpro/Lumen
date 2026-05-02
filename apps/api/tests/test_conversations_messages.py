@@ -223,6 +223,10 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
     assert out.summary_up_to_message_id == "msg-4"
     assert out.summary_first_user_message_id == "msg-1"
     assert out.summary_compression_runs == 2
+    assert out.compressible_messages_count == 8
+    assert out.compressible_tokens > 0
+    assert out.summary_target_tokens == 1200
+    assert out.estimated_tokens_freed == max(0, out.compressible_tokens - 1200)
     assert out.manual_compact_available is False
     assert out.manual_compact_min_input_tokens == 4000
     assert out.manual_compact_unavailable_reason == "below_min_tokens"

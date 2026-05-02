@@ -11,6 +11,7 @@ pattern in ``test_conversations_messages.py``.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -94,6 +95,57 @@ class _Db:
 
     async def flush(self) -> None:
         return None
+
+
+class _Redis:
+    def __init__(
+        self,
+        *,
+        cooldown_allowed: bool = True,
+        cooldown_reset_seconds: int = 600,
+        circuit_open: bool = False,
+    ) -> None:
+        self.cooldown_allowed = cooldown_allowed
+        self.cooldown_reset_seconds = cooldown_reset_seconds
+        self.circuit_open = circuit_open
+        self.kv: dict[str, str] = {}
+        self.deleted: list[str] = []
+        self.eval_calls: list[tuple[Any, ...]] = []
+
+    async def get(self, key: str) -> str | None:
+        if key == conversations.CIRCUIT_BREAKER_KEY and self.circuit_open:
+            return "open"
+        return self.kv.get(key)
+
+    async def ttl(self, key: str) -> int:
+        if key == conversations.CIRCUIT_BREAKER_KEY and self.circuit_open:
+            return 120
+        return -2
+
+    async def eval(self, *args: Any) -> list[int]:
+        self.eval_calls.append(args)
+        return [
+            1 if self.cooldown_allowed else 0,
+            self.cooldown_reset_seconds,
+        ]
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool:
+        if nx and key in self.kv:
+            return False
+        self.kv[key] = value
+        return True
+
+    async def delete(self, *keys: str) -> None:
+        self.deleted.extend(keys)
+        for key in keys:
+            self.kv.pop(key, None)
 
 
 def _request() -> Request:
@@ -182,7 +234,7 @@ async def test_compact_returns_summary_for_owner(
         }
 
     monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
-    monkeypatch.setattr(conversations, "get_redis", lambda: object())
+    monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     out = await conversations.compact_conversation(
         "conv-1",
@@ -203,6 +255,10 @@ async def test_compact_returns_summary_for_owner(
     assert summary["summary_up_to_created_at"] == "2026-04-26T00:00:01+00:00"
     assert summary["tokens"] == 1234
     assert summary["source_message_count"] == 45
+    assert summary["source_token_estimate"] == 99000
+    assert summary["tokens_freed"] == 8000
+    assert summary["image_caption_count"] == 0
+    assert summary["fallback_reason"] is None
     assert summary["compressed_at"] == "2026-04-26T12:00:00+00:00"
     assert summary["status"] == "created"
     # ensure_context_summary must be called with force=True and trigger="manual"
@@ -228,7 +284,7 @@ async def test_compact_404_for_other_user(
         raise AssertionError("ensure_context_summary must not run for non-owners")
 
     monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
-    monkeypatch.setattr(conversations, "get_redis", lambda: object())
+    monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     with pytest.raises(HTTPException) as excinfo:
         await conversations.compact_conversation(
@@ -261,7 +317,7 @@ async def test_compact_409_when_no_messages(
         raise AssertionError("ensure_context_summary must not run without messages")
 
     monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
-    monkeypatch.setattr(conversations, "get_redis", lambda: object())
+    monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     with pytest.raises(HTTPException) as excinfo:
         await conversations.compact_conversation(
@@ -291,7 +347,7 @@ async def test_compact_503_on_lock_busy(
         return None
 
     monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
-    monkeypatch.setattr(conversations, "get_redis", lambda: object())
+    monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     with pytest.raises(HTTPException) as excinfo:
         await conversations.compact_conversation(
@@ -308,6 +364,7 @@ async def test_compact_503_on_lock_busy(
             "code": "compression_unavailable",
             "message": "compression unavailable",
             "reason": "lock_busy",
+            "details": {"reason": "lock_busy"},
         }
     }
 
@@ -326,7 +383,7 @@ async def test_compact_returns_false_when_below_budget(
         raise AssertionError("budget gate must short-circuit before ensure")
 
     monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
-    monkeypatch.setattr(conversations, "get_redis", lambda: object())
+    monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     out = await conversations.compact_conversation(
         "conv-1",
@@ -383,7 +440,7 @@ async def test_compact_force_false_with_huge_safety_margin_invokes_upstream(
         }
 
     monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
-    monkeypatch.setattr(conversations, "get_redis", lambda: object())
+    monkeypatch.setattr(conversations, "get_redis", lambda: _Redis())
 
     out = await conversations.compact_conversation(
         "conv-1",
@@ -401,6 +458,144 @@ async def test_compact_force_false_with_huge_safety_margin_invokes_upstream(
     assert invoked.get("called") is True
     # ensure 入参恒为 force=True：用户已显式触发 compact，应当强制重新生成摘要。
     assert invoked.get("force") is True
+
+
+def test_build_compact_summary_payload_estimates_tokens_freed_when_missing() -> None:
+    conv = _conv()
+
+    summary = conversations._build_compact_summary_payload(
+        result={
+            "status": "created",
+            "summary_created": True,
+            "summary_used": True,
+            "summary_up_to_message_id": "msg-latest",
+            "summary_up_to_created_at": "2026-04-26T00:00:01+00:00",
+            "summary_tokens": 300,
+            "source_message_count": 6,
+            "source_token_estimate": 1800,
+            "image_caption_count": 2,
+        },
+        conv=conv,  # type: ignore[arg-type]
+    )
+
+    assert summary["tokens_freed"] == 1500
+    assert summary["source_token_estimate"] == 1800
+    assert summary["image_caption_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_compact_enforces_cooldown_before_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _Db(conv=_conv(), latest_message=_message())
+    redis = _Redis(cooldown_allowed=False, cooldown_reset_seconds=321)
+
+    async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("cooldown must stop before upstream")
+
+    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(conversations, "get_redis", lambda: redis)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await conversations.compact_conversation(
+            "conv-1",
+            _request(),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+            conversations.ManualCompactIn(force=True),
+        )
+
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.detail["error"]["code"] == "manual_compact_cooldown"
+    assert excinfo.value.detail["error"]["rate_limit_reset_seconds"] == 321
+    assert excinfo.value.headers == {"Retry-After": "321"}
+
+
+@pytest.mark.asyncio
+async def test_compact_enforces_circuit_before_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _Db(conv=_conv(), latest_message=_message())
+
+    async def fake_ensure(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("circuit breaker must stop before upstream")
+
+    monkeypatch.setattr(conversations, "_import_ensure_context_summary", lambda: fake_ensure)
+    monkeypatch.setattr(conversations, "get_redis", lambda: _Redis(circuit_open=True))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await conversations.compact_conversation(
+            "conv-1",
+            _request(),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+            conversations.ManualCompactIn(force=True),
+        )
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error"]["reason"] == "circuit_open"
+
+
+@pytest.mark.asyncio
+async def test_background_compact_reuses_active_job_before_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _Db(conv=_conv(), latest_message=_message())
+    redis = _Redis(cooldown_allowed=False, cooldown_reset_seconds=321)
+    active_key = conversations._manual_compact_active_key(
+        user_id="user-1",
+        conv_id="conv-1",
+    )
+    redis.kv[active_key] = json.dumps({"job_id": "job-already-running"})
+
+    async def fake_pool() -> None:
+        raise AssertionError("active job reuse must not enqueue another job")
+
+    monkeypatch.setattr(conversations, "get_arq_pool", fake_pool)
+    monkeypatch.setattr(conversations, "get_redis", lambda: redis)
+
+    out = await conversations.compact_conversation(
+        "conv-1",
+        _request(),
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+        conversations.ManualCompactIn(force=True, background=True),
+    )
+
+    assert out["status"] == "pending"
+    assert out["job_id"] == "job-already-running"
+    assert redis.eval_calls == []
+
+
+@pytest.mark.asyncio
+async def test_background_compact_releases_active_lock_when_cooldown_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _Db(conv=_conv(), latest_message=_message())
+    redis = _Redis(cooldown_allowed=False, cooldown_reset_seconds=321)
+    active_key = conversations._manual_compact_active_key(
+        user_id="user-1",
+        conv_id="conv-1",
+    )
+
+    async def fake_pool() -> None:
+        raise AssertionError("cooldown must stop before enqueue")
+
+    monkeypatch.setattr(conversations, "get_arq_pool", fake_pool)
+    monkeypatch.setattr(conversations, "get_redis", lambda: redis)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await conversations.compact_conversation(
+            "conv-1",
+            _request(),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+            conversations.ManualCompactIn(force=True, background=True),
+        )
+
+    assert excinfo.value.status_code == 429
+    assert active_key in redis.deleted
+    assert active_key not in redis.kv
 
 
 @pytest.mark.asyncio

@@ -500,7 +500,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     summary: "用于给即将离开上下文的图片生成文字描述。",
     kind: "text",
     icon: Bot,
-    defaultValue: "gpt-5.4-mini-vision",
+    defaultValue: "gpt-5.4-mini",
     recommended: "选成本低、稳定的视觉模型。",
     keywords: ["caption", "vision", "图片模型"],
   },

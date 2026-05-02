@@ -33,6 +33,10 @@ type ExtendedContextStats = ConversationContextStats &
     summary_updated_at: string | null;
     summary_first_user_message_id: string | null;
     summary_compression_runs: number;
+    compressible_messages_count: number;
+    compressible_tokens: number;
+    estimated_tokens_freed: number;
+    summary_target_tokens: number;
     compressed: boolean;
     last_fallback_reason: string | null;
     manual_compact_available: boolean;
@@ -106,6 +110,28 @@ function stateDescription(state: ContextState): string {
     default:
       return "未截断";
   }
+}
+
+function compactBenefit(stats: ExtendedContextStats): {
+  sourceMessages: number;
+  sourceTokens: number;
+  targetTokens: number;
+  tokensFreed: number;
+} {
+  const sourceMessages = Math.max(0, Math.round(stats.compressible_messages_count ?? 0));
+  const sourceTokens = Math.max(0, Math.round(stats.compressible_tokens ?? 0));
+  const targetTokens = Math.max(
+    0,
+    Math.round(stats.summary_target_tokens ?? stats.summary_tokens ?? 0),
+  );
+  const explicitFreed = stats.estimated_tokens_freed;
+  const tokensFreed = Math.max(
+    0,
+    Math.round(
+      explicitFreed != null ? explicitFreed : Math.max(0, sourceTokens - targetTokens),
+    ),
+  );
+  return { sourceMessages, sourceTokens, targetTokens, tokensFreed };
 }
 
 function MeterBar({
@@ -219,7 +245,17 @@ function resultToast(result: CompactConversationApiResponse) {
       ? `已用兜底摘要压缩 ${s.source_message_count} 条消息`
     : `已压缩 ${s.source_message_count} 条早期消息`;
   const description =
-    s.tokens > 0 ? `摘要 ${formatTokens(s.tokens)} token` : undefined;
+    [
+      s.tokens_freed != null && s.tokens_freed > 0
+        ? `释放约 ${formatTokens(s.tokens_freed)} token`
+        : null,
+      s.tokens > 0 ? `摘要 ${formatTokens(s.tokens)} token` : null,
+      s.image_caption_count != null && s.image_caption_count > 0
+        ? `图片描述 ${s.image_caption_count} 个`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || undefined;
   toast.success(title, { description });
 }
 
@@ -271,11 +307,20 @@ export function ContextWindowMeter({
     const percent = Math.max(0, Math.min(stats.percent ?? 0, 100));
     const rounded = Math.round(percent);
     const state = stateOf(stats);
+    const benefit = compactBenefit(stats);
     const parts = [
       `上下文 ${formatTokens(stats.estimated_input_tokens)} / ${formatTokens(stats.input_budget_tokens)}`,
       `回复预留 ${formatTokens(stats.response_reserve_tokens)}`,
       stateDescription(state),
     ];
+    if (benefit.sourceMessages > 0 || benefit.tokensFreed > 0) {
+      parts.push(
+        `可压缩 ${benefit.sourceMessages} 条 / ${formatTokens(benefit.sourceTokens)} token`,
+      );
+      if (benefit.tokensFreed > 0) {
+        parts.push(`预计释放 ${formatTokens(benefit.tokensFreed)} token`);
+      }
+    }
     if (stats.summary_available || stats.compressed) {
       parts.push(`摘要 ${formatTokens(stats.summary_tokens)}`);
       if (stats.summary_compression_runs != null) {
@@ -292,6 +337,7 @@ export function ContextWindowMeter({
       percent,
       rounded,
       state,
+      benefit,
       title: parts.join(" · "),
       disabled: disabledReason(stats, convId, false, isCompacting),
     };
@@ -299,8 +345,21 @@ export function ContextWindowMeter({
 
   if (!stats || !meta) return null;
 
+  const benefitLabel =
+    meta.benefit.tokensFreed > 0 ? `预计释放 ${formatTokens(meta.benefit.tokensFreed)}` : null;
   const buttonTitle =
-    meta.disabled ?? "压缩历史上下文 — 将早期对话压缩为摘要以节省上下文窗口";
+    meta.disabled ??
+    [
+      "压缩历史上下文",
+      meta.benefit.sourceMessages > 0
+        ? `将 ${meta.benefit.sourceMessages} 条早期消息压成约 ${formatTokens(
+            meta.benefit.targetTokens,
+          )} token`
+        : "将早期对话压缩为摘要以节省上下文窗口",
+      benefitLabel,
+    ]
+      .filter(Boolean)
+      .join(" — ");
   const buttonDisabled = meta.disabled != null;
 
   const startBackgroundCompact = () => {
@@ -436,7 +495,7 @@ export function ContextWindowMeter({
           ) : (
             <Archive className="h-3.5 w-3.5" aria-hidden="true" />
           )}
-          <span>{isCompacting ? "压缩中" : "压缩历史"}</span>
+          <span>{isCompacting ? "压缩中" : benefitLabel ?? "压缩历史"}</span>
         </button>
       <CompactionToast
         event={latestCompaction}

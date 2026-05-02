@@ -141,6 +141,7 @@ def _service_unavailable(reason: str) -> HTTPException:
                 "code": "compression_unavailable",
                 "message": "compression unavailable",
                 "reason": reason,
+                "details": {"reason": reason},
             }
         },
     )
@@ -499,6 +500,10 @@ class ConversationContextOut(BaseModel):
     summary_updated_at: datetime | None
     summary_first_user_message_id: str | None
     summary_compression_runs: int
+    compressible_messages_count: int
+    compressible_tokens: int
+    estimated_tokens_freed: int
+    summary_target_tokens: int
     compressed: bool
     last_fallback_reason: str | None
     manual_compact_available: bool
@@ -699,6 +704,10 @@ async def _check_manual_compact_cooldown(
                     "message": f"同一会话 {cooldown_minutes} 分钟内只能手动压缩一次",
                     "rate_limit_remaining": 0,
                     "rate_limit_reset_seconds": reset_seconds,
+                    "details": {
+                        "rate_limit_remaining": 0,
+                        "rate_limit_reset_seconds": reset_seconds,
+                    },
                 }
             },
             headers={"Retry-After": str(max(1, reset_seconds))},
@@ -1131,6 +1140,7 @@ async def _estimate_context_window(
     cursor_created_at: datetime | None = None
     cursor_id: str | None = None
     alive_filters = _message_alive_filters()
+    scanned_messages_desc: list[Message] = []
 
     while True:
         filters: list[Any] = [Message.conversation_id == conv.id, *alive_filters]
@@ -1156,6 +1166,8 @@ async def _estimate_context_window(
 
         stop = False
         for msg in batch:
+            if len(scanned_messages_desc) < COMPACTION_MESSAGE_LOAD_LIMIT:
+                scanned_messages_desc.append(msg)
             cursor_created_at = msg.created_at
             cursor_id = msg.id
             est_tokens = estimate_message_tokens(msg.role, msg.content)
@@ -1200,6 +1212,26 @@ async def _estimate_context_window(
     latest_fallback = latest_context_meta.get("fallback_reason")
     if not isinstance(latest_fallback, str):
         latest_fallback = _summary_str(summary, "last_fallback_reason")
+    summary_target_tokens = await _setting_int(
+        db, "context.summary_target_tokens", SUMMARY_TARGET_DEFAULT_TOKENS
+    )
+    compressible_messages_count = 0
+    compressible_tokens = 0
+    try:
+        min_recent_messages = await _setting_int(
+            db,
+            "context.summary_min_recent_messages",
+            SUMMARY_MIN_RECENT_DEFAULT_MESSAGES,
+        )
+        source_messages, _first_user = _compaction_source_messages(
+            list(reversed(scanned_messages_desc)),
+            min_recent_messages=min_recent_messages,
+        )
+        compressible_messages_count = len(source_messages)
+        compressible_tokens = _estimate_messages_tokens(source_messages)
+    except Exception:
+        logger.debug("context compressible estimate failed", exc_info=True)
+    estimated_tokens_freed = max(0, compressible_tokens - summary_target_tokens)
     manual_min_input_tokens = await _setting_int(
         db,
         "context.manual_compact_min_input_tokens",
@@ -1251,6 +1283,10 @@ async def _estimate_context_window(
         summary_updated_at=_summary_updated_at(summary),
         summary_first_user_message_id=_summary_str(summary, "first_user_message_id"),
         summary_compression_runs=_summary_int(summary, "compression_runs"),
+        compressible_messages_count=compressible_messages_count,
+        compressible_tokens=compressible_tokens,
+        estimated_tokens_freed=estimated_tokens_freed,
+        summary_target_tokens=summary_target_tokens,
         compressed=bool(latest_context_meta.get("summary_used")),
         last_fallback_reason=latest_fallback,
         manual_compact_available=manual_compact_available,
@@ -1693,13 +1729,24 @@ def _build_compact_summary_payload(
         conv.summary_jsonb if isinstance(getattr(conv, "summary_jsonb", None), dict) else {}
     )
     compressed_at = summary_jsonb.get("compressed_at") if isinstance(summary_jsonb, dict) else None
+    summary_tokens = int(result.get("summary_tokens") or 0)
+    source_token_estimate = int(result.get("source_token_estimate") or 0)
+    tokens_freed = int(
+        result.get("tokens_freed")
+        if result.get("tokens_freed") is not None
+        else max(0, source_token_estimate - summary_tokens)
+    )
     return {
         "summary_created": bool(result.get("summary_created")),
         "summary_used": bool(result.get("summary_used", True)),
         "summary_up_to_message_id": result.get("summary_up_to_message_id"),
         "summary_up_to_created_at": result.get("summary_up_to_created_at"),
-        "tokens": int(result.get("summary_tokens") or 0),
+        "tokens": summary_tokens,
         "source_message_count": int(result.get("source_message_count") or 0),
+        "source_token_estimate": source_token_estimate,
+        "image_caption_count": int(result.get("image_caption_count") or 0),
+        "tokens_freed": tokens_freed,
+        "fallback_reason": result.get("fallback_reason"),
         "compressed_at": compressed_at,
         "status": result.get("status"),
     }
@@ -1716,6 +1763,7 @@ async def _enqueue_manual_compact_job(
     summary_timeout_s: float,
     model: str,
     redis: Any,
+    cooldown_seconds: int,
 ) -> dict[str, Any]:
     job_id = _manual_compact_job_id(
         user_id=user_id,
@@ -1733,6 +1781,7 @@ async def _enqueue_manual_compact_job(
         job_id=job_id,
     )
     active_key = _manual_compact_active_key(user_id=user_id, conv_id=conv_id)
+    cooldown_key = _manual_compact_cooldown_key(user_id=user_id, conv_id=conv_id)
 
     try:
         existing = await _redis_get_json(redis, job_key)
@@ -1742,6 +1791,14 @@ async def _enqueue_manual_compact_job(
     payload = _compact_payload_from_job(existing, job_id=job_id)
     if payload is not None:
         return payload
+
+    try:
+        active = await _redis_get_json(redis, active_key)
+    except Exception:
+        active = None
+    active_job_id = active.get("job_id") if isinstance(active, dict) else None
+    if isinstance(active_job_id, str) and active_job_id:
+        return _compact_pending_payload(job_id=active_job_id, status="pending")
 
     active_payload = {
         "job_id": job_id,
@@ -1769,6 +1826,20 @@ async def _enqueue_manual_compact_job(
         if isinstance(active_job_id, str) and active_job_id:
             return _compact_pending_payload(job_id=active_job_id, status="pending")
         return _compact_pending_payload(job_id=job_id, status="pending")
+
+    try:
+        await _check_manual_compact_cooldown(
+            redis,
+            user_id=user_id,
+            conv_id=conv_id,
+            cooldown_seconds=cooldown_seconds,
+        )
+    except HTTPException:
+        try:
+            await redis.delete(active_key)
+        except Exception:
+            logger.debug("manual compact active cleanup after cooldown failed", exc_info=True)
+        raise
 
     now = datetime.now(timezone.utc).isoformat()
     job_payload = {
@@ -1800,6 +1871,7 @@ async def _enqueue_manual_compact_job(
         try:
             await redis.delete(active_key)
             await redis.delete(job_key)
+            await redis.delete(cooldown_key)
         except Exception:
             logger.debug("manual compact enqueue cleanup failed", exc_info=True)
         raise _service_unavailable("upstream_error") from exc
@@ -1902,6 +1974,26 @@ async def compact_conversation(
     input_budget = await _setting_int(db, "context.summary_input_budget", 80_000)
     summary_timeout_s = await _setting_float(db, "context.summary_http_timeout_s", 120.0)
     model = await _setting_str(db, "context.summary_model", SUMMARY_MODEL_DEFAULT)
+    manual_cooldown_seconds = await _setting_int(
+        db,
+        "context.manual_compact_cooldown_seconds",
+        MANUAL_COMPACT_DEFAULT_COOLDOWN_SECONDS,
+    )
+
+    circuit_retry_after = await _circuit_breaker_retry_after(redis)
+    if circuit_retry_after is not None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "code": "compression_unavailable",
+                    "message": "compression unavailable",
+                    "reason": "circuit_open",
+                    "details": {"reason": "circuit_open"},
+                }
+            },
+            headers={"Retry-After": str(max(1, circuit_retry_after))},
+        )
 
     if body.background:
         return await _enqueue_manual_compact_job(
@@ -1914,7 +2006,15 @@ async def compact_conversation(
             summary_timeout_s=summary_timeout_s,
             model=model,
             redis=redis,
+            cooldown_seconds=manual_cooldown_seconds,
         )
+
+    await _check_manual_compact_cooldown(
+        redis,
+        user_id=user.id,
+        conv_id=conv.id,
+        cooldown_seconds=manual_cooldown_seconds,
+    )
 
     ensure = _import_ensure_context_summary()
     if ensure is None:

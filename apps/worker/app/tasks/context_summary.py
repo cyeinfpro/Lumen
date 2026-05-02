@@ -587,7 +587,7 @@ async def _caption_images_for_summary(
         model = _settings_str(
             settings,
             "context.image_caption_model",
-            "gpt-5.4-mini-vision",
+            "gpt-5.4-mini",
         )
         return await context_image_caption.batch_caption_images(
             session,
@@ -1666,13 +1666,24 @@ def _worker_compact_summary_payload(
     conv: Conversation,
 ) -> dict[str, Any]:
     summary = conv.summary_jsonb if isinstance(conv.summary_jsonb, dict) else {}
+    summary_tokens = int(result.get("summary_tokens") or 0)
+    source_token_estimate = int(result.get("source_token_estimate") or 0)
+    tokens_freed = int(
+        result.get("tokens_freed")
+        if result.get("tokens_freed") is not None
+        else max(0, source_token_estimate - summary_tokens)
+    )
     return {
         "summary_created": bool(result.get("summary_created")),
         "summary_used": bool(result.get("summary_used", True)),
         "summary_up_to_message_id": result.get("summary_up_to_message_id"),
         "summary_up_to_created_at": result.get("summary_up_to_created_at"),
-        "tokens": int(result.get("summary_tokens") or 0),
+        "tokens": summary_tokens,
         "source_message_count": int(result.get("source_message_count") or 0),
+        "source_token_estimate": source_token_estimate,
+        "image_caption_count": int(result.get("image_caption_count") or 0),
+        "tokens_freed": tokens_freed,
+        "fallback_reason": result.get("fallback_reason"),
         "compressed_at": summary.get("compressed_at"),
         "status": result.get("status"),
     }

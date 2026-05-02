@@ -288,6 +288,10 @@ export interface ConversationContextStats {
   summary_updated_at?: string | null;
   summary_first_user_message_id?: string | null;
   summary_compression_runs?: number;
+  compressible_messages_count?: number;
+  compressible_tokens?: number;
+  estimated_tokens_freed?: number;
+  summary_target_tokens?: number;
   compressed?: boolean;
   last_fallback_reason?: string | null;
   manual_compact_available?: boolean;
@@ -331,6 +335,10 @@ export interface CompactSummary {
   summary_up_to_created_at: string; // ISO8601
   tokens: number;
   source_message_count: number;
+  source_token_estimate?: number;
+  image_caption_count?: number;
+  tokens_freed?: number;
+  fallback_reason?: string | null;
   compressed_at: string; // ISO8601
   status: CompactSummaryStatus;
 }
