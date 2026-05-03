@@ -689,6 +689,11 @@ else
 fi
 emit_info fetch_release repo_dir "${REPO_DIR}"
 emit_info fetch_release git_pull_env "${LUMEN_UPDATE_GIT_PULL:-<unset>}"
+if [ -d "${REPO_DIR}/.git" ]; then
+    emit_info fetch_release repo_dir_has_git "yes"
+else
+    emit_info fetch_release repo_dir_has_git "no"
+fi
 
 if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
     if ! command -v git >/dev/null 2>&1; then
