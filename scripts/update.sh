@@ -293,25 +293,92 @@ check_data_owners() {
 rsync_repo_to_release() {
     local src="$1"
     local dst="$2"
+    local err_file rc
     if ! command -v rsync >/dev/null 2>&1; then
         log_error "缺少 rsync，请先安装。"
         return 1
     fi
+    err_file="$(mktemp "${UPDATE_LOG_DIR:-/tmp}/lumen-rsync.XXXXXX.err" 2>/dev/null || mktemp)"
+    rc=0
     rsync -a \
         --exclude='/.git/' \
+        --exclude='/.env' \
+        --exclude='/.env.local' \
         --exclude='/shared/' \
         --exclude='/releases/' \
         --exclude='/current' \
         --exclude='/previous' \
         --exclude='/node_modules/' \
         --exclude='/.venv/' \
+        --exclude='/.pytest_cache/' \
+        --exclude='/.mypy_cache/' \
+        --exclude='/.ruff_cache/' \
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/node_modules/' \
         --exclude='/apps/worker/var/' \
         --exclude='/var/' \
         --exclude='/.lumen-script.lock/' \
         --exclude='/.update.log' \
-        "${src}/" "${dst}/"
+        --exclude='/.install-logs/' \
+        --exclude='__pycache__/' \
+        --exclude='*.pyc' \
+        --exclude='.DS_Store' \
+        "${src}/" "${dst}/" 2>"${err_file}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        log_error "rsync 失败（rc=${rc}）：${src} -> ${dst}"
+        sed -n '1,30p' "${err_file}" 2>/dev/null | while IFS= read -r line; do
+            [ -n "${line}" ] && log_error "rsync stderr: ${line}"
+        done
+        rm -f "${err_file}"
+        return "${rc}"
+    fi
+    rm -f "${err_file}"
+    return 0
+}
+
+sync_repo_to_release() {
+    local src="$1"
+    local dst="$2"
+    local err_file rc
+    if [ -d "${src}/.git" ] && command -v git >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        err_file="$(mktemp "${UPDATE_LOG_DIR:-/tmp}/lumen-git-archive.XXXXXX.err" 2>/dev/null || mktemp)"
+        log_info "[fetch_release] git archive ${src} -> ${dst}"
+        rc=0
+        ( cd "${src}" && git archive --format=tar HEAD ) 2>"${err_file}" \
+            | tar -xf - -C "${dst}" 2>>"${err_file}" || rc=$?
+        if [ "${rc}" -eq 0 ]; then
+            rm -f "${err_file}"
+            return 0
+        fi
+        log_warn "[fetch_release] git archive 失败（rc=${rc}），回退 rsync。"
+        sed -n '1,20p' "${err_file}" 2>/dev/null | while IFS= read -r line; do
+            [ -n "${line}" ] && log_warn "git archive stderr: ${line}"
+        done
+        rm -f "${err_file}"
+    fi
+    rsync_repo_to_release "${src}" "${dst}"
+}
+
+detect_repo_source_dir() {
+    local candidate
+    for candidate in \
+        "${LUMEN_REPO_DIR:-}" \
+        "${LUMEN_SOURCE_ROOT:-}" \
+        "${SCRIPT_ROOT}" \
+        "/root/Lumen" \
+        "/opt/Lumen"; do
+        [ -n "${candidate}" ] || continue
+        [ -f "${candidate}/docker-compose.yml" ] || continue
+        if [ -n "${LUMEN_REPO_DIR:-}" ] && [ "${candidate}" = "${LUMEN_REPO_DIR}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+        if [ -d "${candidate}/.git" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # 探测 GHCR 上 tag 是否存在。在没有 token 的情况下只能尽力 HEAD：
@@ -562,14 +629,12 @@ fi
 emit_start fetch_release
 
 # 发布物来源目录：
-#   - LUMEN_REPO_DIR 显式指定时优先采用；
-#   - 当前脚本来自完整 git 仓库时，优先从该仓库复制（让脚本/compose 修复进入新 release）；
+#   - LUMEN_REPO_DIR / LUMEN_SOURCE_ROOT 显式指定时优先采用；
+#   - 当前脚本或 /root/Lumen 来自完整 git 仓库时，优先从该仓库复制（让脚本/compose 修复进入新 release）；
 #   - 标准 release 布局下从 current release 复制，确保新 release 根部有 docker-compose.yml；
 #   - 旧 in-place / 开发仓库下才从 ROOT 复制。
-if [ -n "${LUMEN_REPO_DIR:-}" ]; then
-    REPO_DIR="${LUMEN_REPO_DIR}"
-elif [ -f "${SCRIPT_ROOT}/docker-compose.yml" ] && [ -d "${SCRIPT_ROOT}/.git" ]; then
-    REPO_DIR="${SCRIPT_ROOT}"
+if REPO_SOURCE="$(detect_repo_source_dir 2>/dev/null || true)" && [ -n "${REPO_SOURCE}" ]; then
+    REPO_DIR="${REPO_SOURCE}"
 elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then
     REPO_DIR="${CURRENT_RELEASE}"
 else
@@ -624,9 +689,9 @@ mkdir -p "${NEW_RELEASE}"
 emit_info fetch_release release_id   "${NEW_ID}"
 emit_info fetch_release release_path "${NEW_RELEASE}"
 
-log_info "[fetch_release] rsync ${REPO_DIR} -> ${NEW_RELEASE}"
-if ! rsync_repo_to_release "${REPO_DIR}" "${NEW_RELEASE}"; then
-    log_error "[fetch_release] rsync 仓库到 release 失败。"
+log_info "[fetch_release] 同步发布物 ${REPO_DIR} -> ${NEW_RELEASE}"
+if ! sync_repo_to_release "${REPO_DIR}" "${NEW_RELEASE}"; then
+    log_error "[fetch_release] 同步仓库到 release 失败。"
     emit_fail fetch_release 1
     exit 1
 fi
@@ -643,9 +708,21 @@ ln -sfn "${SHARED_ENV}" "${NEW_RELEASE}/.env"
 LUMEN_IMAGE_REGISTRY="$(lumen_env_value LUMEN_IMAGE_REGISTRY "${SHARED_ENV}" 2>/dev/null || echo "")"
 [ -n "${LUMEN_IMAGE_REGISTRY}" ] || LUMEN_IMAGE_REGISTRY="ghcr.io/cyeinfpro"
 if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
-    log_error "[fetch_release] 目标镜像不存在：${LUMEN_IMAGE_REGISTRY}/lumen-api:${TARGET_TAG}"
-    emit_fail fetch_release 1
-    exit 1
+    if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-1}" = "1" ]; then
+        log_warn "[fetch_release] 目标镜像 tag=${TARGET_TAG} 不存在，自动回退到 main。"
+        emit_info fetch_release target_tag_fallback "main"
+        TARGET_TAG="main"
+        if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
+            log_error "[fetch_release] fallback main 镜像也不存在：${LUMEN_IMAGE_REGISTRY}/lumen-api:${TARGET_TAG}"
+            emit_fail fetch_release 1
+            exit 1
+        fi
+    else
+        log_error "[fetch_release] 目标镜像不存在：${LUMEN_IMAGE_REGISTRY}/lumen-api:${TARGET_TAG}"
+        log_error "[fetch_release] 可临时执行：LUMEN_UPDATE_CHANNEL=main bash ${SCRIPT_DIR}/update.sh"
+        emit_fail fetch_release 1
+        exit 1
+    fi
 fi
 
 emit_done fetch_release 0
@@ -709,11 +786,30 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     fi
 
     if ! lumen_compose_in "${NEW_RELEASE}" pull; then
-        log_error "[pull_images] docker compose pull 失败。"
-        log_error "  请检查 GHCR 可达性或代理配置（参考 docs/.. §10.5）。"
-        log_error "  当前服务保持不变。"
-        emit_fail pull_images 1
-        exit 1
+        if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-1}" = "1" ]; then
+            log_warn "[pull_images] docker compose pull tag=${TARGET_TAG} 失败，自动回退到 main 后重试。"
+            emit_info pull_images target_tag_fallback "main"
+            TARGET_TAG="main"
+            if ! lumen_set_image_tag_in_env "${SHARED_ENV}" "${TARGET_TAG}"; then
+                log_error "[pull_images] 回退 main 时写入 shared/.env 失败。"
+                emit_fail pull_images 1
+                exit 1
+            fi
+            printf '%s\n' "${TARGET_TAG}" > "${NEW_RELEASE}/.image-tag" 2>/dev/null || true
+            if ! lumen_compose_in "${NEW_RELEASE}" pull; then
+                log_error "[pull_images] fallback main 后 docker compose pull 仍失败。"
+                log_error "  请检查 GHCR 可达性或代理配置。"
+                log_error "  当前服务保持不变。"
+                emit_fail pull_images 1
+                exit 1
+            fi
+        else
+            log_error "[pull_images] docker compose pull 失败。"
+            log_error "  请检查 GHCR 可达性或代理配置。"
+            log_error "  当前服务保持不变。"
+            emit_fail pull_images 1
+            exit 1
+        fi
     fi
     emit_info pull_images tag "${TARGET_TAG}"
     emit_done pull_images 0

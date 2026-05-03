@@ -117,7 +117,13 @@ def test_update_migrates_old_web_bind_and_proxy_env() -> None:
     assert "SCRIPT_ROOT=" in update
     assert 'ROOT="${LUMEN_DEPLOY_ROOT}"' in update
     assert 'LUMEN_REPO_DIR="${SCRIPT_ROOT}"' in update
-    assert '[ -d "${SCRIPT_ROOT}/.git" ]' in update
+    assert '[ -d "${candidate}/.git" ]' in update
+    assert "detect_repo_source_dir()" in update
+    assert '"/root/Lumen"' in update
+    assert "sync_repo_to_release" in update
+    assert "git archive" in update
+    assert "target_tag_fallback" in update
+    assert "fallback main 后 docker compose pull 仍失败" in update
     assert 'if lumen_configure_proxy_env "${SHARED_ENV}"' in update
     assert "config_changed_redeploy" in update
     assert 'emit_info check reason "missing_shared_env"' in update
@@ -166,8 +172,10 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     # 仍然要求 release 布局 + shared/.env 复用
     assert 'NEW_RELEASE="${ROOT}/releases/${NEW_ID}"' in text
     assert 'lumen_release_ensure_shared_env "${ROOT}"' in text
-    # docker cutover：fetch_release 阶段改 rsync REPO_DIR -> NEW_RELEASE
+    # docker cutover：fetch_release 阶段同步 REPO_DIR -> NEW_RELEASE
     assert "rsync_repo_to_release" in text
+    assert "sync_repo_to_release" in text
+    assert "git archive" in text
     assert 'elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then' in text
     assert 'REPO_DIR="${CURRENT_RELEASE}"' in text
     assert 'LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续' in text
