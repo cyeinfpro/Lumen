@@ -98,6 +98,14 @@ LUMEN_LEGACY_UPDATE_UNITS=(
     lumen-backup.service
 )
 
+LUMEN_NGINX_ACTIVE_DIRS=(
+    /etc/nginx/sites-enabled
+    /etc/nginx/conf.d
+    /www/server/panel/vhost/nginx
+    /usr/local/etc/nginx/servers
+    /usr/local/etc/nginx/conf.d
+)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -147,6 +155,116 @@ lumen_uninstall_join() {
         fi
     done
     printf '%s' "${out}"
+}
+
+lumen_uninstall_safe_name() {
+    local value="$1"
+    value="${value//\//_}"
+    value="$(printf '%s' "${value}" | tr '[:space:]' '_' | tr -c 'A-Za-z0-9_.-' '-')"
+    printf '%s' "${value:-nginx.conf}"
+}
+
+lumen_uninstall_collect_nginx_candidates() {
+    local dir file seen=" "
+    for dir in "${LUMEN_NGINX_ACTIVE_DIRS[@]}"; do
+        [ -d "${dir}" ] || continue
+        while IFS= read -r file; do
+            [ -n "${file}" ] || continue
+            case "${seen}" in
+                *" ${file} "*) continue ;;
+            esac
+            seen="${seen}${file} "
+            if grep -Iq . "${file}" 2>/dev/null \
+                && grep -Eq 'Managed by scripts/lumenctl\.sh|Lumen reverse proxy|upstream[[:space:]]+lumen_web|lumen_web_|Lumen 反代|proxy_pass[[:space:]]+http://(127\.0\.0\.1|localhost):3000|server[[:space:]]+(127\.0\.0\.1|localhost):3000' "${file}" 2>/dev/null; then
+                printf '%s\n' "${file}"
+            fi
+        done < <(find "${dir}" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null | sort)
+    done
+}
+
+lumen_uninstall_disable_nginx_configs() {
+    if ! command -v nginx >/dev/null 2>&1; then
+        KEPT+=("nginx 未检测到，未处理反代配置")
+        return 0
+    fi
+
+    local candidates=()
+    local file
+    while IFS= read -r file; do
+        [ -n "${file}" ] && candidates+=("${file}")
+    done < <(lumen_uninstall_collect_nginx_candidates)
+
+    if [ "${#candidates[@]}" -eq 0 ]; then
+        KEPT+=("未发现启用中的 Lumen nginx 配置")
+        return 0
+    fi
+
+    log_step "nginx 反代配置"
+    log_warn "发现疑似仍在生效的 Lumen nginx 配置："
+    for file in "${candidates[@]}"; do
+        printf '         %s\n' "${file}"
+    done
+    log_warn "卸载会自动禁用这些配置；原文件会先移入备份目录，避免域名继续指向 Lumen。"
+
+    if ! lumen_run_as_root nginx -t >/dev/null 2>&1; then
+        log_error "当前 nginx -t 未通过。为避免扩大故障，跳过自动禁用 nginx 配置。"
+        log_error "请先修复 nginx 配置，或手动移除上方 Lumen 配置后 reload nginx。"
+        KEPT+=("nginx 反代配置未改动（nginx -t 当前不通过）")
+        return 0
+    fi
+
+    local timestamp backup_dir dest
+    timestamp="$(date -u +%Y%m%d%H%M%S 2>/dev/null || date +%s)"
+    backup_dir="${LUMEN_NGINX_DISABLED_DIR:-/var/backups/lumenctl/nginx-disabled}/${timestamp}"
+    if ! lumen_run_as_root mkdir -p "${backup_dir}"; then
+        log_error "无法创建 nginx 禁用备份目录：${backup_dir}"
+        KEPT+=("nginx 反代配置未改动（无法创建备份目录）")
+        return 0
+    fi
+
+    local moved_src=()
+    local moved_dst=()
+    for file in "${candidates[@]}"; do
+        [ -e "${file}" ] || [ -L "${file}" ] || continue
+        dest="${backup_dir}/$(lumen_uninstall_safe_name "${file}")"
+        if lumen_run_as_root mv -f "${file}" "${dest}"; then
+            log_info "已移出 nginx 配置 ${file} -> ${dest}"
+            moved_src+=("${file}")
+            moved_dst+=("${dest}")
+        else
+            log_warn "无法移动 ${file}，已跳过。"
+        fi
+    done
+
+    if [ "${#moved_dst[@]}" -eq 0 ]; then
+        KEPT+=("nginx 反代配置未改动（没有文件被移动）")
+        return 0
+    fi
+
+    if ! lumen_run_as_root nginx -t >/dev/null 2>&1; then
+        log_error "禁用后 nginx -t 未通过，正在回滚 nginx 配置。"
+        local i
+        for i in "${!moved_dst[@]}"; do
+            lumen_run_as_root mv -f "${moved_dst[$i]}" "${moved_src[$i]}" || true
+        done
+        lumen_run_as_root nginx -t >/dev/null 2>&1 || true
+        KEPT+=("nginx 反代配置已回滚（禁用后 nginx -t 未通过）")
+        return 0
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if lumen_systemctl reload nginx; then
+            DONE+=("已禁用 Lumen nginx 配置并 reload nginx（备份：${backup_dir}）")
+        else
+            log_warn "nginx 配置已禁用且 nginx -t 通过，但 reload 失败。请手动执行：sudo systemctl reload nginx"
+            DONE+=("已禁用 Lumen nginx 配置（备份：${backup_dir}，reload 需手动确认）")
+        fi
+    elif lumen_run_as_root nginx -s reload; then
+        DONE+=("已禁用 Lumen nginx 配置并 reload nginx（备份：${backup_dir}）")
+    else
+        log_warn "nginx 配置已禁用且 nginx -t 通过，但 reload 失败。请手动执行：sudo nginx -s reload"
+        DONE+=("已禁用 Lumen nginx 配置（备份：${backup_dir}，reload 需手动确认）")
+    fi
 }
 
 lumen_uninstall_compose_down() {
@@ -356,6 +474,7 @@ lumen_uninstall_force_remove_containers
 #   - --disable-systemd / LUMEN_UNINSTALL_DISABLE_SYSTEMD=1 才会执行 disable --now
 # ---------------------------------------------------------------------------
 lumen_uninstall_systemd_compat
+lumen_uninstall_disable_nginx_configs
 
 # ---------------------------------------------------------------------------
 # Phase C：是否删数据（purge）
