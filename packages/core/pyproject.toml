@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-core"
-version = "1.0.0"
+version = "1.0.1"
 description = "Lumen shared core: SQLAlchemy models, Pydantic schemas, sizing resolver, constants"
 requires-python = ">=3.12"
 dependencies = [
