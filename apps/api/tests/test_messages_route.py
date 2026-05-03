@@ -10,7 +10,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.routes import messages
-from lumen_core.constants import MAX_PROMPT_CHARS
+from lumen_core.constants import (
+    DEFAULT_IMAGE_RESPONSES_MODEL,
+    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
+    MAX_PROMPT_CHARS,
+)
 from lumen_core.schemas import ChatParamsIn, ImageParamsIn, PostMessageIn
 
 
@@ -125,6 +129,7 @@ def test_image_upstream_request_uses_explicit_render_quality_for_4k() -> None:
         prompt="make a 4k landscape",
     )
     assert medium["render_quality"] == "medium"
+    assert medium["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
     assert medium["output_compression"] == 0
 
     fast = messages._image_upstream_request(  # noqa: SLF001
@@ -140,6 +145,7 @@ def test_image_upstream_request_uses_explicit_render_quality_for_4k() -> None:
         prompt="make a 4k landscape fast",
     )
     assert fast["render_quality"] == "high"
+    assert fast["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
     assert fast["output_compression"] == 95
 
 
@@ -394,6 +400,7 @@ async def test_post_message_persists_image_render_options(
     gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
     assert gen.upstream_request == {
         "fast": False,
+        "responses_model": DEFAULT_IMAGE_RESPONSES_MODEL,
         "render_quality": "medium",
         "output_format": "webp",
         "output_format_source": "request",

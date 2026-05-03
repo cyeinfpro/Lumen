@@ -428,6 +428,13 @@ def _short_model(name: str) -> str:
     return _MODEL_SHORT_LABELS.get(name, name)
 
 
+def _responses_model_from_request(req: dict[str, Any], *, fast: bool) -> str:
+    value = _json_str(req, "responses_model")
+    if value:
+        return value
+    return DEFAULT_IMAGE_RESPONSES_MODEL_FAST if fast else DEFAULT_IMAGE_RESPONSES_MODEL
+
+
 def _generation_model_label_from_request(
     upstream_request: dict[str, Any] | None,
     *,
@@ -441,16 +448,14 @@ def _generation_model_label_from_request(
     route = _request_route(req) or "responses"
     actual_route = _request_actual_route(req)
     actual_endpoint = _json_str(req, "actual_endpoint") or ""
-    fast = bool(req.get("fast")) and action == "generate"
+    fast = bool(req.get("fast"))
 
     # image-jobs sidecar can ride either /v1/images/generations or /v1/responses;
     # the endpoint string is the source of truth, not the route name.
     if actual_endpoint.startswith("image-jobs:responses") or actual_endpoint.startswith(
         "responses:"
     ):
-        return _short_model(
-            DEFAULT_IMAGE_RESPONSES_MODEL_FAST if fast else DEFAULT_IMAGE_RESPONSES_MODEL
-        )
+        return _short_model(_responses_model_from_request(req, fast=fast))
     if actual_endpoint.startswith("image-jobs:") or actual_endpoint.startswith("images/"):
         return _short_model(UPSTREAM_MODEL)
     if actual_route and actual_route.startswith("image2"):
@@ -458,27 +463,24 @@ def _generation_model_label_from_request(
     if actual_route and actual_route.startswith("image_jobs"):
         return _short_model(UPSTREAM_MODEL)
     if actual_route and actual_route.startswith("responses"):
-        return _short_model(
-            DEFAULT_IMAGE_RESPONSES_MODEL_FAST if fast else DEFAULT_IMAGE_RESPONSES_MODEL
-        )
+        return _short_model(_responses_model_from_request(req, fast=fast))
     if route == "image2":
         return _short_model(UPSTREAM_MODEL)
     if route == "image_jobs":
         # No actual_endpoint yet (still queued/running) — guess by action +
-        # fast flag. generate without fast / edit go via gpt-image-2 directly;
-        # generate+fast goes through responses with the mini brain.
+        # fast flag. generate without fast / edit usually go via gpt-image-2
+        # directly; fast generate goes through responses with the mini brain.
         if action == "generate" and not fast:
             return _short_model(UPSTREAM_MODEL)
         if action == "edit":
             return _short_model(UPSTREAM_MODEL)
-        return _short_model(DEFAULT_IMAGE_RESPONSES_MODEL_FAST)
+        return _short_model(_responses_model_from_request(req, fast=fast))
     if route == "dual_race":
         if status in {"queued", "running"}:
-            return f"竞速中: {_short_model(DEFAULT_IMAGE_RESPONSES_MODEL)} / {_short_model(UPSTREAM_MODEL)}"
+            responses_label = _short_model(_responses_model_from_request(req, fast=fast))
+            return f"竞速中: {responses_label} / {_short_model(UPSTREAM_MODEL)}"
         return "历史未记录"
-    return _short_model(
-        DEFAULT_IMAGE_RESPONSES_MODEL_FAST if fast else DEFAULT_IMAGE_RESPONSES_MODEL
-    )
+    return _short_model(_responses_model_from_request(req, fast=fast))
 
 
 def _generation_model_label(gen: Generation) -> str:
@@ -550,6 +552,7 @@ def _safe_upstream_details(upstream_request: dict[str, Any] | None) -> dict[str,
         "output_compression",
         "output_format",
         "render_quality",
+        "responses_model",
         "revised_prompt",
         "route",
         "size_actual",

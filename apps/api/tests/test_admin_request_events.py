@@ -303,3 +303,23 @@ def test_generation_model_label_uses_actual_dual_race_winner() -> None:
     assert admin._generation_model_label(image2) == "image2"
     assert admin._generation_model_label(responses) == "5.4"
     assert admin._generation_model_label(historical) == "历史未记录"
+
+
+def test_generation_model_label_uses_fast_responses_model() -> None:
+    fast_responses = SimpleNamespace(
+        upstream_request={
+            "upstream_route": "dual_race",
+            "actual_route": "responses",
+            "fast": True,
+        },
+        action="generate",
+        status="succeeded",
+    )
+    queued_fast_race = SimpleNamespace(
+        upstream_request={"upstream_route": "dual_race", "fast": True},
+        action="generate",
+        status="running",
+    )
+
+    assert admin._generation_model_label(fast_responses) == "5.4 mini"
+    assert admin._generation_model_label(queued_fast_race) == "竞速中: 5.4 mini / image2"
