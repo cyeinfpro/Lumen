@@ -26,6 +26,7 @@ import {
   deleteConversation,
   deleteMyAccount,
   deleteSystemPrompt,
+  deleteWorkflow,
   getMyUsage,
   getPublicInvite,
   getPublicShare,
@@ -43,6 +44,7 @@ import {
   listSystemPrompts,
   patchConversation,
   patchSystemPrompt,
+  patchWorkflow,
   approveModelCandidate,
   approveProductAnalysis,
   completeWorkflowDelivery,
@@ -88,6 +90,7 @@ import {
   type ListMessagesOpts,
   type MessageListResponse,
   type PatchConversationIn,
+  type PatchWorkflowIn,
   type CreateSystemPromptIn,
   type PatchSystemPromptIn,
   type ModelCandidatesIn,
@@ -999,6 +1002,40 @@ export function useCreateApparelWorkflowMutation(
     mutationFn: createApparelWorkflow,
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export interface PatchWorkflowVars extends PatchWorkflowIn {
+  id: string;
+}
+
+export function usePatchWorkflowMutation(
+  options?: Omit<UseMutationOptions<WorkflowRun, Error, PatchWorkflowVars>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, PatchWorkflowVars>({
+    mutationFn: ({ id, ...body }) => patchWorkflow(id, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(data.id), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useDeleteWorkflowMutation(
+  options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: (id) => deleteWorkflow(id),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.removeQueries({ queryKey: qk.workflow(vars) });
       qc.invalidateQueries({ queryKey: ["workflows"] });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },

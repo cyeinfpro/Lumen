@@ -381,6 +381,10 @@ class WorkflowRunListOut(BaseModel):
     next_cursor: str | None = None
 
 
+class WorkflowRunPatchIn(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+
+
 class ApparelWorkflowCreateIn(BaseModel):
     conversation_id: str | None = None
     product_image_ids: list[str] = Field(min_length=1, max_length=3)
