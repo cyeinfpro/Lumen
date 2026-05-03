@@ -206,6 +206,65 @@ lumen_update_ensure_runtime_can_access_path() {
     fi
 }
 
+lumen_update_render_systemd_unit() {
+    local src="$1"
+    local dst="$2"
+    local service_user="$3"
+    local service_group="$4"
+    python3 - "$src" "$dst" "$ROOT" "$service_user" "$service_group" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst, root, user, group = sys.argv[1:6]
+text = Path(src).read_text(encoding="utf-8")
+text = text.replace("/opt/lumen", root)
+text = text.replace("User=lumen", f"User={user}")
+text = text.replace("Group=lumen", f"Group={group}")
+text = text.replace("id -u lumen", f"id -u {user}")
+text = text.replace("id -g lumen", f"id -g {group}")
+Path(dst).write_text(text, encoding="utf-8")
+PY
+}
+
+lumen_update_sync_systemd_units() {
+    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" != "1" ]; then
+        return 0
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        log_warn "非 root 运行，跳过 systemd unit 同步。"
+        return 0
+    fi
+    local src_dir="${NEW_RELEASE}/deploy/systemd"
+    if [ ! -d "${src_dir}" ]; then
+        log_warn "找不到 ${src_dir}，跳过 systemd unit 同步。"
+        return 0
+    fi
+    local service_user="${LUMEN_UPDATE_RUN_USER}"
+    local service_group="${LUMEN_UPDATE_RUN_GROUP}"
+    case "${ROOT}" in
+        /root|/root/*)
+            service_user="root"
+            service_group="root"
+            ;;
+    esac
+    log_info "同步 systemd unit（root=${ROOT}, user=${service_user}:${service_group}）"
+    local f tmp
+    for f in lumen-api.service lumen-web.service lumen-worker.service \
+             lumen-tgbot.service lumen-update-runner.service \
+             lumen-update.path lumen-backup.service lumen-backup.timer \
+             lumen-health-watchdog.service lumen-health-watchdog.timer; do
+        [ -f "${src_dir}/${f}" ] || continue
+        tmp="$(mktemp)"
+        lumen_update_render_systemd_unit "${src_dir}/${f}" "${tmp}" "${service_user}" "${service_group}"
+        install -m 0644 "${tmp}" "/etc/systemd/system/${f}"
+        rm -f "${tmp}"
+    done
+    systemctl daemon-reload
+}
+
 lumen_update_require_runtime_cmd() {
     local cmd="$1"
     local hint="$2"
@@ -668,6 +727,7 @@ lumen_step_end build_web 0
 if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
     chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${NEW_RELEASE}" 2>/dev/null || true
 fi
+lumen_update_sync_systemd_units
 
 # ---------------------------------------------------------------------------
 # Phase 9: switch
