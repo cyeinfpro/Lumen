@@ -115,15 +115,9 @@ def invalidate_cache() -> None:
     _DB_ONLY_CACHE.clear()
 
 
-def warmup_supported() -> list[str]:
-    """返回当前缓存里所有命中的 keys（调试用）。"""
-    return list(_CACHE.keys())
-
-
 __all__ = [
     "resolve",
     "resolve_db",
     "resolve_int",
     "invalidate_cache",
-    "warmup_supported",
 ]
