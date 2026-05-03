@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery
 
 from ..api_client import ApiError, LumenApi
 from ..tracker import TaskTrack, tracker
+from ._helpers import require_message
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -37,9 +38,12 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
     if not gen_id:
         await cb.answer()
         return
+    msg = await require_message(cb)
+    if msg is None:
+        return
 
     try:
-        gen = await api.get_generation(cb.message.chat.id, gen_id)
+        gen = await api.get_generation(msg.chat.id, gen_id)
     except ApiError as exc:
         await cb.answer(f"读取原任务失败：{exc.message}", show_alert=True)
         return
@@ -60,7 +64,7 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
     }
 
     try:
-        result = await api.create_generation(cb.message.chat.id, payload)
+        result = await api.create_generation(msg.chat.id, payload)
     except ApiError as exc:
         await cb.answer(f"重试提交失败：{exc.message}", show_alert=True)
         return
@@ -72,21 +76,21 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
 
     # 提交成功后直接删原失败提示，避免会话里堆一堆 ❌；删失败（>48h 等）回退去按钮
     try:
-        await cb.message.delete()
+        await msg.delete()
     except Exception:  # noqa: BLE001
         try:
-            await cb.message.edit_reply_markup(reply_markup=None)
+            await msg.edit_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001
             pass
 
     new_gen = new_ids[0]
-    status = await cb.message.answer(
+    status = await msg.answer(
         f"⏳ 重试已排队 #{new_gen[:8]}\n\n📝 {prompt[:200]}",
     )
     await tracker.add(
         new_gen,
         TaskTrack(
-            chat_id=cb.message.chat.id,
+            chat_id=msg.chat.id,
             status_message_id=status.message_id,
             prompt=prompt,
             params={},

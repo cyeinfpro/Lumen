@@ -23,6 +23,7 @@ from aiogram.types import (
 )
 
 from ..api_client import ApiError, LumenApi
+from ._helpers import require_message
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -101,18 +102,21 @@ async def cmd_unbind(message: Message) -> None:
 @router.callback_query(F.data.startswith("unbind:"))
 async def on_unbind_choice(cb: CallbackQuery, api: LumenApi) -> None:
     choice = (cb.data or "").split(":", 1)[1] if cb.data else ""
+    msg = await require_message(cb)
+    if msg is None:
+        return
     try:
-        await cb.message.edit_reply_markup(reply_markup=None)
+        await msg.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
         pass
     if choice != "confirm":
         await cb.answer("已取消")
         return
     try:
-        await api.unbind(cb.message.chat.id)
+        await api.unbind(msg.chat.id)
     except ApiError as exc:
-        await cb.message.answer(f"解绑失败：{exc.message}")
+        await msg.answer(f"解绑失败：{exc.message}")
         await cb.answer()
         return
-    await cb.message.answer("✅ 已解绑。再次绑定请用 /start <code>")
+    await msg.answer("✅ 已解绑。再次绑定请用 /start <code>")
     await cb.answer()

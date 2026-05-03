@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, Message
 from ..api_client import ApiError, LumenApi
 from ..states import GenFlow
 from ..tracker import TaskTrack, tracker
+from ._helpers import require_message
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -56,8 +57,11 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
     if not gen_id:
         await cb.answer()
         return
+    msg = await require_message(cb)
+    if msg is None:
+        return
     try:
-        gen = await api.get_generation(cb.message.chat.id, gen_id)
+        gen = await api.get_generation(msg.chat.id, gen_id)
     except ApiError as exc:
         await cb.answer(f"读取原任务失败：{exc.message}", show_alert=True)
         return
@@ -68,7 +72,7 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
 
     payload = _payload_from_gen(gen, prompt)
     try:
-        result = await api.create_generation(cb.message.chat.id, payload)
+        result = await api.create_generation(msg.chat.id, payload)
     except ApiError as exc:
         await cb.answer(f"重画提交失败：{exc.message}", show_alert=True)
         return
@@ -78,13 +82,13 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
         return
 
     new_gen = new_ids[0]
-    status = await cb.message.answer(
+    status = await msg.answer(
         f"⏳ 重画已排队 #{new_gen[:8]}\n\n📝 {prompt[:200]}"
     )
     await tracker.add(
         new_gen,
         TaskTrack(
-            chat_id=cb.message.chat.id,
+            chat_id=msg.chat.id,
             status_message_id=status.message_id,
             prompt=prompt,
             params={},
@@ -102,8 +106,11 @@ async def on_iter_start(cb: CallbackQuery, state: FSMContext, api: LumenApi) -> 
     if not gen_id:
         await cb.answer()
         return
+    msg = await require_message(cb)
+    if msg is None:
+        return
     try:
-        gen = await api.get_generation(cb.message.chat.id, gen_id)
+        gen = await api.get_generation(msg.chat.id, gen_id)
     except ApiError as exc:
         await cb.answer(f"读取原任务失败：{exc.message}", show_alert=True)
         return
@@ -124,7 +131,7 @@ async def on_iter_start(cb: CallbackQuery, state: FSMContext, api: LumenApi) -> 
         source_output_format=gen.get("output_format") or "jpeg",
         source_fast=bool(gen.get("fast", False)),
     )
-    await cb.message.answer(
+    await msg.answer(
         "✏️ 迭代模式：发送你的修改指令（例如「换成蓝色背景」「让头发更长」）。\n"
         "新图会以上面这张图为基础重绘。\n/cancel 放弃。"
     )
