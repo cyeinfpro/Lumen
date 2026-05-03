@@ -180,10 +180,12 @@ async def test_context_window_truncates_by_token_budget_from_oldest_side(
         return default
 
     monkeypatch.setattr(completion.runtime_settings, "resolve_int", _disable_compression)
-    # Default system instructions are now budgeted with the same doubled
-    # overhead as production requests, so keep this high enough for the two
-    # newest messages while still forcing older history to be truncated.
-    monkeypatch.setattr(completion, "CONTEXT_INPUT_TOKEN_BUDGET", 140)
+    # Keep token counting deterministic across tiktoken cold/warm CI runs.
+    monkeypatch.setattr(completion, "count_tokens", lambda text: len(text or "") // 2)
+    monkeypatch.setattr(completion, "estimate_system_prompt_tokens", lambda _prompt: 0)
+    # High enough for the two newest messages while still forcing older history
+    # to be truncated.
+    monkeypatch.setattr(completion, "CONTEXT_INPUT_TOKEN_BUDGET", 250)
     messages = [_message(i, f"message {i} " + ("x" * 200)) for i in range(1, 6)]
     session = _HistorySession(target=messages[-1], batches=[list(reversed(messages))])
 
