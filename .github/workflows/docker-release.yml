@@ -130,11 +130,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # platforms：默认 amd64+arm64；lumen-web 单独 amd64-only —— Next.js 16
+        # Turbopack 在 QEMU emulated arm64 上做 page collection 时会 SIGILL
+        # （uncaught target signal 4 / Illegal instruction），需要 native arm64
+        # runner 才能稳。生产服务器都是 amd64，不阻塞发布。
         image:
-          - { name: lumen-api,    file: ./Dockerfile.python,    context: . }
-          - { name: lumen-worker, file: ./Dockerfile.python,    context: . }
-          - { name: lumen-tgbot,  file: ./Dockerfile.python,    context: . }
-          - { name: lumen-web,    file: ./apps/web/Dockerfile,  context: ./apps/web }
+          - { name: lumen-api,    file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-worker, file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-tgbot,  file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
+          - { name: lumen-web,    file: ./apps/web/Dockerfile,  context: ./apps/web,  platforms: "linux/amd64" }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -190,7 +194,7 @@ jobs:
           context: ${{ matrix.image.context }}
           file: ${{ matrix.image.file }}
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.image.platforms }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image.name }}
