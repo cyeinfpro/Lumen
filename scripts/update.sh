@@ -162,6 +162,44 @@ lumen_update_runtime_command_path() {
     printf '%s' "${path}"
 }
 
+lumen_update_have_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+lumen_update_install_linux_packages() {
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        return 1
+    fi
+    if lumen_update_have_cmd apt-get; then
+        env DEBIAN_FRONTEND=noninteractive apt-get update
+        env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+    elif lumen_update_have_cmd dnf; then
+        dnf install -y "$@"
+    elif lumen_update_have_cmd yum; then
+        yum install -y "$@"
+    elif lumen_update_have_cmd pacman; then
+        pacman -Sy --noconfirm "$@"
+    elif lumen_update_have_cmd zypper; then
+        zypper --non-interactive install "$@"
+    elif lumen_update_have_cmd apk; then
+        apk add --no-cache "$@"
+    else
+        return 1
+    fi
+}
+
+lumen_update_ensure_rsync() {
+    if lumen_update_have_cmd rsync; then
+        return 0
+    fi
+    log_warn "缺少 rsync，尝试自动安装。"
+    if lumen_update_install_linux_packages rsync && lumen_update_have_cmd rsync; then
+        return 0
+    fi
+    log_error "缺少 rsync，且自动安装失败；请手动安装 rsync 后重跑。"
+    return 1
+}
+
 lumen_update_ensure_runtime_can_access_path() {
     local path="$1"
     local label="${2:-路径}"
@@ -564,6 +602,10 @@ if [ "${FETCH_OK}" -eq 1 ] && [ -n "${GIT_REMOTE_URL}" ]; then
 else
     # 离线 fallback：rsync from current（保留 .git）然后 git pull autostash。
     log_info "[fetch] 从 current 复制代码（离线 fallback）"
+    if ! lumen_update_ensure_rsync; then
+        lumen_step_end fetch 1
+        exit 1
+    fi
     if ! rsync -a --delete \
             --exclude='/.venv/' \
             --exclude='/node_modules/' \
@@ -624,7 +666,8 @@ lumen_step_end link_shared 0
 if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
     chown -R "${LUMEN_UPDATE_EXEC_USER}:${LUMEN_UPDATE_EXEC_GROUP}" "${NEW_RELEASE}" 2>/dev/null || true
 fi
-if ! lumen_update_ensure_runtime_can_access_path "${NEW_RELEASE}/uv.toml" "uv 配置文件"; then
+if [ -e "${NEW_RELEASE}/uv.toml" ] \
+        && ! lumen_update_ensure_runtime_can_access_path "${NEW_RELEASE}/uv.toml" "uv 配置文件"; then
     lumen_step_end link_shared 1
     exit 1
 fi
