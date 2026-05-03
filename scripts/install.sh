@@ -946,6 +946,13 @@ prepare_env_file() {
     env_file_set "${shared_env}" LUMEN_IMAGE_TAG      "${image_tag}"
     env_file_set "${shared_env}" LUMEN_VERSION        "${lumen_version}"
     env_file_set "${shared_env}" LUMEN_DATA_ROOT      "${LUMEN_DATA_ROOT}"
+    if [ "${LUMEN_WEB_BIND_HOST:-}" = "" ] \
+        && [ "$(env_file_get WEB_BIND_HOST "${shared_env}")" = "127.0.0.1" ]; then
+        log_info "WEB_BIND_HOST 仍是旧默认 127.0.0.1，自动改为 0.0.0.0 暴露宿主机 3000。"
+        env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"
+    elif [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
+        env_file_set "${shared_env}" WEB_BIND_HOST "${LUMEN_WEB_BIND_HOST}"
+    fi
 
     # 创建 release/.env -> ../../shared/.env 的相对 symlink
     # docker compose 默认从 -f 所在目录加载 .env；让它读到 shared/.env
