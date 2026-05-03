@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -38,6 +39,38 @@ _COOLDOWN_PREFIX = "lumen:proxy:cooldown:"
 _RR_KEY = "lumen:proxy:rr:idx"
 _FAIL_TTL_SECONDS = 300
 
+# In-process cooldown fallback: if Redis SET/DEL/EXISTS fail (transient outage,
+# timeout) we still want this worker not to immediately re-pick the proxy that
+# just failed. Entries are best-effort and never replace the Redis cooldown —
+# they only add to it. TTL kept short on purpose: each process makes its own
+# local decision and the canonical cooldown lives in Redis.
+_LOCAL_COOLDOWN_TTL_SECONDS = 30
+_local_cooldown: dict[str, float] = {}
+
+
+def _local_cooldown_mark(name: str, ttl_seconds: float | None = None) -> None:
+    if not name:
+        return
+    ttl = ttl_seconds if ttl_seconds and ttl_seconds > 0 else _LOCAL_COOLDOWN_TTL_SECONDS
+    # Cap to local TTL: longer Redis cooldowns are still authoritative; the
+    # local set is just a same-process safety net for the next few picks.
+    ttl = min(float(ttl), float(_LOCAL_COOLDOWN_TTL_SECONDS))
+    _local_cooldown[name] = time.monotonic() + ttl
+
+
+def _local_cooldown_active(name: str) -> bool:
+    expiry = _local_cooldown.get(name)
+    if expiry is None:
+        return False
+    if expiry <= time.monotonic():
+        _local_cooldown.pop(name, None)
+        return False
+    return True
+
+
+def _local_cooldown_clear(name: str) -> None:
+    _local_cooldown.pop(name, None)
+
 
 def health_key(name: str) -> str:
     return f"{_HEALTH_PREFIX}{name}"
@@ -52,9 +85,19 @@ def fail_key(name: str) -> str:
 
 
 async def _is_in_cooldown(redis: Any, name: str) -> bool:
+    # Local fallback first: even if Redis read succeeds, an in-process record
+    # from a recent local cooldown mark (set when Redis write previously failed)
+    # is honoured — Redis being healthy now doesn't undo a known-bad proxy.
+    if _local_cooldown_active(name):
+        return True
     try:
         return bool(await redis.exists(cooldown_key(name)))
     except Exception as exc:  # noqa: BLE001
+        # Redis read failed: fall back to whatever local state we have. We do
+        # NOT mark the proxy bad here — only known-failed proxies (recorded
+        # via report_failure when SET also failed) live in _local_cooldown.
+        # Marking everything on read-failure would knock out the whole pool
+        # the moment Redis blips.
         logger.warning("proxy cooldown check failed name=%s err=%s", name, exc)
         return False
 
@@ -100,28 +143,49 @@ async def report_failure(
     failure_threshold: int,
     cooldown_seconds: int,
 ) -> bool:
-    """记录一次失败；返回 True 代表本次触发了冷却（达到阈值）。"""
+    """记录一次失败；返回 True 代表本次触发了冷却（达到阈值）。
+
+    Redis 写失败时落到 in-process cooldown 兜底，避免本进程立即重选刚失败的 proxy。
+    阈值/计数仍以 Redis 为准；纯本地无法跨进程，所以这只是单 worker 的安全网。
+    """
     if not name:
         return False
+    triggered = False
     try:
         n = int(await redis.incr(fail_key(name)))
         await redis.expire(fail_key(name), _FAIL_TTL_SECONDS)
         if n >= failure_threshold:
-            await redis.set(cooldown_key(name), b"1", ex=cooldown_seconds)
-            await redis.delete(fail_key(name))
+            try:
+                await redis.set(cooldown_key(name), b"1", ex=cooldown_seconds)
+                await redis.delete(fail_key(name))
+                triggered = True
+            except Exception as exc:  # noqa: BLE001
+                # Redis SET failed mid-flight: enter local cooldown so this
+                # process doesn't keep re-picking the bad proxy.
+                _local_cooldown_mark(name, ttl_seconds=cooldown_seconds)
+                logger.warning(
+                    "proxy %s cooldown SET failed (local fallback): %s",
+                    name, exc,
+                )
+                return True
             logger.warning(
                 "proxy %s into cooldown after %d failures (cooldown=%ds)",
                 name, n, cooldown_seconds,
             )
-            return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("report_failure failed name=%s err=%s", name, exc)
-    return False
+        # INCR/EXPIRE failed entirely: we can't tell how many recent failures
+        # exist, but we know this call failed. Apply a single short local
+        # cooldown so the same proxy isn't immediately retried in-process.
+        _local_cooldown_mark(name)
+        logger.warning("report_failure failed name=%s err=%s (local fallback)", name, exc)
+    return triggered
 
 
 async def report_success(redis: Any, name: str) -> None:
     if not name:
         return
+    # Successful use clears the local fallback regardless of Redis state.
+    _local_cooldown_clear(name)
     try:
         await redis.delete(fail_key(name))
     except Exception:  # noqa: BLE001
