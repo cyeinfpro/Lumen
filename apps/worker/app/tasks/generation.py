@@ -3440,16 +3440,43 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 await renewer
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-        await _release_image_queue_slot(
-            redis, task_id=task_id, provider_name=reserved_provider_name
-        )
-        # in-flight 快照只在"任务还在跑"时有意义；终态/retry 之间任何状态都直接清掉，
-        # 下次 attempt 进来会在 EV_GEN_STARTED 之后重新写。
-        await _inflight_clear(redis, task_id)
-        # task 已到终态时清 avoid set；retry 路径会在下一次 attempt 之前重新写入。
-        if _task_outcome != "retry":
-            await _clear_avoided_providers(redis, task_id)
-        await _release_lease(redis, task_id)
+
+        # cancel-safe 关键清理：arq 1800s timeout 触发外层 cancel 时，finally 第一个
+        # 普通 await 会立刻重抛 CancelledError，导致后续 release 全被跳过，只能靠
+        # zset/lease/inflight 各自的 TTL 60~240s 自然过期兜底（漂浮窗：分布式槽位
+        # 长达一分钟看起来还在占用）。把"释放外部 redis 资源 / 防状态泄漏"这些
+        # 关键 await 打包进一个协程，用 ensure_future + shield 让外层 cancel 时
+        # 仍能跑完；shield 抛 CancelledError 时把 cleanup 挂成 done_callback，
+        # 最后再重抛 CancelledError 让 arq 知道任务真的被 cancel。
+        # task_duration_seconds 是纯 best-effort 指标，无需 shield。
+        async def _critical_release_cleanup() -> None:
+            with suppress(Exception):
+                await _release_image_queue_slot(
+                    redis, task_id=task_id, provider_name=reserved_provider_name
+                )
+            # in-flight 快照只在"任务还在跑"时有意义；终态/retry 之间任何状态都直接清掉，
+            # 下次 attempt 进来会在 EV_GEN_STARTED 之后重新写。
+            with suppress(Exception):
+                await _inflight_clear(redis, task_id)
+            # task 已到终态时清 avoid set；retry 路径会在下一次 attempt 之前重新写入。
+            if _task_outcome != "retry":
+                with suppress(Exception):
+                    await _clear_avoided_providers(redis, task_id)
+            with suppress(Exception):
+                await _release_lease(redis, task_id)
+
+        cleanup_future = asyncio.ensure_future(_critical_release_cleanup())
+        cancel_during_cleanup = False
+        try:
+            await asyncio.shield(cleanup_future)
+        except asyncio.CancelledError:
+            cancel_during_cleanup = True
+            cleanup_future.add_done_callback(
+                lambda _t: logger.debug(
+                    "generation late critical cleanup finished task=%s", task_id
+                )
+            )
+
         try:
             _duration = asyncio.get_event_loop().time() - _task_start
             task_duration_seconds.labels(
@@ -3457,6 +3484,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             ).observe(_duration)
         except Exception:  # noqa: BLE001
             pass
+
+        if cancel_during_cleanup:
+            raise asyncio.CancelledError()
 
 
 __all__ = ["run_generation"]
