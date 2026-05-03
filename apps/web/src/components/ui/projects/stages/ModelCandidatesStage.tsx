@@ -255,7 +255,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             </Button>
           </div>
           {accessoryPreviewRunning ? (
-            <SelectableImageGridLoading label="配饰图生成中" />
+            <SelectableImageGridLoading count={1} label="配饰图生成中" />
           ) : accessoryImages.length > 0 ? (
             <SelectableImageGrid
               images={accessoryImages}
