@@ -48,13 +48,17 @@ _SUMMARY_TARGET_TOKENS = 1200
 _SUMMARY_INPUT_BUDGET = 80_000
 _SUMMARY_MAX_SEGMENTS = 8
 _SUMMARY_LOCK_TTL_S = 15 * 60
-# Worst-case run = _SUMMARY_MAX_SEGMENTS (8) × _SUMMARY_HTTP_TIMEOUT_S (120s) = 960s,
-# already pushing past the 900s lock TTL. A renewer task pumps EXPIRE every TTL/3 so
-# a slow LLM cannot let the lock silently expire and admit a second concurrent worker
-# that would re-pay the upstream cost.
+# Worst-case run = _SUMMARY_MAX_SEGMENTS (8) × _SUMMARY_HTTP_TIMEOUT_S (90s) = 720s,
+# comfortably under the 900s lock TTL and well below the task 1500s envelope. A renewer
+# task still pumps EXPIRE every TTL/3 so a slow LLM cannot let the lock silently expire
+# and admit a second concurrent worker that would re-pay the upstream cost. We keep
+# the 8 segment ceiling (rather than dropping to 6) because chunk_size = input_budget/2
+# means 8 segments cover ~320k input tokens; capping at 6 would reject the longest
+# legitimate conversations, and the existing too_many_segments warning already gives us
+# the observability hook to revisit if this turns out too tight in practice.
 _SUMMARY_LOCK_RENEW_INTERVAL_S = max(30.0, _SUMMARY_LOCK_TTL_S / 3)
 _SUMMARY_LOCK_WAIT_S = 1.5
-_SUMMARY_HTTP_TIMEOUT_S = 120.0
+_SUMMARY_HTTP_TIMEOUT_S = 90.0
 _PER_PROVIDER_RETRY_ATTEMPTS = 1
 _PER_PROVIDER_RETRY_BACKOFF_S = 1.0
 _PARTIAL_TTL_S = 30 * 60
@@ -1271,10 +1275,11 @@ async def _renew_summary_lock_loop(
 ) -> None:
     """Keep the redis lock alive while the summary keeps running.
 
-    Why: 8 segments × 120s upstream timeout = 960s easily overruns the 900s static TTL.
-    Without renewal a slow run lets the lock silently expire and a second worker can
-    grab it, re-paying the upstream cost. CAS write later refuses to overwrite, but
-    that does not refund the wasted tokens.
+    Why: 8 segments × 90s upstream timeout = 720s — still uncomfortably close to the
+    900s static TTL once we add chunking / DB write overhead. Without renewal a slow
+    run lets the lock silently expire and a second worker can grab it, re-paying the
+    upstream cost. CAS write later refuses to overwrite, but that does not refund the
+    wasted tokens.
     """
     if redis is None or lock.kind != "redis" or lock.token is None:
         return
