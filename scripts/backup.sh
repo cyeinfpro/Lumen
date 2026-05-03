@@ -6,8 +6,62 @@
 # 同一 timestamp 两个文件配对，被视为一个"备份点"。
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+
+backup_dotenv_value() {
+    local key="$1"
+    local file="$2"
+    local raw=""
+    raw="$(sed -n "s/^${key}=//p" "${file}" 2>/dev/null | head -n1 || true)"
+    raw="${raw%$'\r'}"
+    if [[ "${raw}" == \'*\' && "${raw}" == *\' ]]; then
+        raw="${raw:1:${#raw}-2}"
+    elif [[ "${raw}" == \"*\" && "${raw}" == *\" ]]; then
+        raw="${raw:1:${#raw}-2}"
+    fi
+    printf '%s' "${raw}"
+}
+
+backup_find_env_file() {
+    local candidate
+    for candidate in \
+        "${LUMEN_ENV_FILE:-}" \
+        "${SCRIPT_ROOT}/.env" \
+        "${SCRIPT_ROOT}/shared/.env" \
+        "/opt/lumen/shared/.env"; do
+        [ -n "${candidate}" ] || continue
+        if [ -f "${candidate}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+backup_export_dotenv_key() {
+    local key="$1"
+    local file="$2"
+    local value=""
+    if [ -n "${!key:-}" ]; then
+        return 0
+    fi
+    value="$(backup_dotenv_value "${key}" "${file}")"
+    if [ -n "${value}" ]; then
+        export "${key}=${value}"
+    fi
+}
+
+ENV_FILE="$(backup_find_env_file 2>/dev/null || true)"
+if [ -n "${ENV_FILE}" ]; then
+    export LUMEN_ENV_FILE="${ENV_FILE}"
+    for key in DB_USER DB_NAME DB_PASSWORD REDIS_PASSWORD BACKUP_ROOT LUMEN_BACKUP_ROOT PG_CONTAINER REDIS_CONTAINER; do
+        backup_export_dotenv_key "${key}" "${ENV_FILE}"
+    done
+fi
+
 TS="$(date -u +%Y%m%d-%H%M%S)"
-BACKUP_ROOT="${BACKUP_ROOT:-/opt/lumendata/backup}"
+BACKUP_ROOT="${BACKUP_ROOT:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
 PG_DIR="$BACKUP_ROOT/pg"
 REDIS_DIR="$BACKUP_ROOT/redis"
 MAX_KEEP="${MAX_KEEP:-40}"
@@ -149,7 +203,28 @@ mkdir -p "$PG_DIR" "$REDIS_DIR"
 # ---- Postgres ----
 PG_OUT="$PG_DIR/$TS.pg.dump.gz"
 log "dumping postgres → $PG_OUT"
-docker exec -i "$PG_CONTAINER" pg_dump -U "$PG_USER" -Fc "$PG_DB" | gzip -c > "$PG_OUT"
+PG_ERR="$(mktemp "${BACKUP_ROOT}/.pg-dump.XXXXXX.err")" || {
+    log "ERROR: failed to create pg_dump error log"
+    exit 5
+}
+set +e
+docker exec -i "$PG_CONTAINER" pg_dump -U "$PG_USER" -Fc "$PG_DB" 2>"$PG_ERR" | gzip -c > "$PG_OUT"
+PIPE_RC=("${PIPESTATUS[@]}")
+PG_RC="${PIPE_RC[0]:-1}"
+GZIP_RC="${PIPE_RC[1]:-1}"
+set -e
+if [ "${PG_RC}" -ne 0 ] || [ "${GZIP_RC}" -ne 0 ]; then
+    log "ERROR: pg_dump failed (pg_rc=${PG_RC}, gzip_rc=${GZIP_RC}, container=${PG_CONTAINER}, db=${PG_DB}, user=${PG_USER})"
+    docker ps -a --filter "name=^/${PG_CONTAINER}$" --format 'container={{.Names}} status={{.Status}}' 2>/dev/null | while IFS= read -r line; do
+        [ -n "$line" ] && log "$line"
+    done
+    sed -n '1,20p' "$PG_ERR" 2>/dev/null | while IFS= read -r line; do
+        [ -n "$line" ] && log "pg_dump stderr: $line"
+    done
+    rm -f "$PG_ERR" "$PG_OUT"
+    exit 2
+fi
+rm -f "$PG_ERR"
 # 基本合理性：gzip 有效 + 非空
 if ! gzip -t "$PG_OUT" 2>/dev/null || [ ! -s "$PG_OUT" ]; then
     log "ERROR: pg dump invalid, removing"
