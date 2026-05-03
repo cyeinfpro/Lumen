@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lumen 卸载脚本
 # 用法：  bash scripts/uninstall.sh
-# 行为：分步交互，仅停止容器（默认）；用户明确同意才删数据 / 配置 / 缓存。
+# 行为：分步交互，停止 systemd / 本地进程 / 容器；用户明确同意才删数据 / 配置 / 缓存。
 # 源代码本身不会被删除，可随时重新安装。
 
 set -euo pipefail
@@ -12,11 +12,250 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 trap 'log_error "卸载脚本失败：第 ${LINENO} 行返回非零状态。手动检查后再重试。"' ERR
 
-ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
 lumen_install_signal_handlers
 lumen_acquire_lock "${ROOT}" "uninstall.sh"
 cd "${ROOT}"
 log_info "项目根目录：${ROOT}"
+
+LUMEN_SYSTEMD_UNITS=(
+    lumen-health-watchdog.timer
+    lumen-backup.timer
+    lumen-update.path
+    lumen-health-watchdog.service
+    lumen-update-runner.service
+    lumen-backup.service
+    lumen-tgbot.service
+    lumen-worker.service
+    lumen-web.service
+    lumen-api.service
+)
+
+LUMEN_SYSTEMD_UNIT_FILES=(
+    "${LUMEN_SYSTEMD_UNITS[@]}"
+)
+
+LUMEN_NGINX_ACTIVE_DIRS=(
+    /etc/nginx/sites-enabled
+    /etc/nginx/conf.d
+    /www/server/panel/vhost/nginx
+    /usr/local/etc/nginx/servers
+    /usr/local/etc/nginx/conf.d
+)
+
+lumen_uninstall_join() {
+    local sep="${1:- }"
+    shift || true
+    local out="" item
+    for item in "$@"; do
+        if [ -z "${out}" ]; then
+            out="${item}"
+        else
+            out="${out}${sep}${item}"
+        fi
+    done
+    printf '%s' "${out}"
+}
+
+lumen_uninstall_safe_name() {
+    local value="$1"
+    value="${value//\//_}"
+    value="$(printf '%s' "${value}" | tr '[:space:]' '_' | tr -c 'A-Za-z0-9_.-' '-')"
+    printf '%s' "${value:-nginx.conf}"
+}
+
+lumen_uninstall_collect_nginx_candidates() {
+    local dir file seen=" "
+    for dir in "${LUMEN_NGINX_ACTIVE_DIRS[@]}"; do
+        [ -d "${dir}" ] || continue
+        while IFS= read -r file; do
+            [ -n "${file}" ] || continue
+            case "${seen}" in
+                *" ${file} "*) continue ;;
+            esac
+            seen="${seen}${file} "
+            if grep -Iq . "${file}" 2>/dev/null \
+                && grep -Eq 'Managed by scripts/lumenctl\.sh|Lumen reverse proxy|upstream[[:space:]]+lumen_web|lumen_web_|Lumen 反代' "${file}" 2>/dev/null; then
+                printf '%s\n' "${file}"
+            fi
+        done < <(find "${dir}" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null | sort)
+    done
+}
+
+lumen_uninstall_disable_nginx_configs() {
+    if ! command -v nginx >/dev/null 2>&1; then
+        KEPT+=("nginx 未检测到，未处理反代配置")
+        return 0
+    fi
+
+    local candidates=()
+    local file
+    while IFS= read -r file; do
+        [ -n "${file}" ] && candidates+=("${file}")
+    done < <(lumen_uninstall_collect_nginx_candidates)
+
+    if [ "${#candidates[@]}" -eq 0 ]; then
+        KEPT+=("未发现启用中的 Lumen nginx 配置")
+        return 0
+    fi
+
+    log_step "nginx 反代配置"
+    log_warn "发现疑似仍在生效的 Lumen nginx 配置："
+    for file in "${candidates[@]}"; do
+        printf '         %s\n' "${file}"
+    done
+    log_warn "如果不禁用它，域名仍会指向 Lumen；Web 停掉后通常表现为 502，或被其它进程继续接管。"
+
+    if ! confirm "禁用上述 nginx 配置并 reload nginx？"; then
+        KEPT+=("nginx 反代配置保留")
+        return 0
+    fi
+
+    if ! lumen_run_as_root nginx -t >/dev/null 2>&1; then
+        log_error "当前 nginx -t 未通过。为避免扩大故障，跳过自动禁用 nginx 配置。"
+        log_error "请先修复 nginx 配置，或手动移除上方 Lumen 配置后 reload nginx。"
+        KEPT+=("nginx 反代配置未改动（nginx -t 当前不通过）")
+        return 0
+    fi
+
+    local timestamp backup_dir dest
+    timestamp="$(date -u +%Y%m%d%H%M%S 2>/dev/null || date +%s)"
+    backup_dir="${LUMEN_NGINX_DISABLED_DIR:-/var/backups/lumenctl/nginx-disabled}/${timestamp}"
+    if ! lumen_run_as_root mkdir -p "${backup_dir}"; then
+        log_error "无法创建 nginx 禁用备份目录：${backup_dir}"
+        KEPT+=("nginx 反代配置未改动（无法创建备份目录）")
+        return 0
+    fi
+
+    local moved_src=()
+    local moved_dst=()
+    for file in "${candidates[@]}"; do
+        [ -e "${file}" ] || [ -L "${file}" ] || continue
+        dest="${backup_dir}/$(lumen_uninstall_safe_name "${file}")"
+        if lumen_run_as_root mv -f "${file}" "${dest}"; then
+            log_info "已移出 nginx 配置 ${file} -> ${dest}"
+            moved_src+=("${file}")
+            moved_dst+=("${dest}")
+        else
+            log_warn "无法移动 ${file}，已跳过。"
+        fi
+    done
+
+    if [ "${#moved_dst[@]}" -eq 0 ]; then
+        KEPT+=("nginx 反代配置未改动（没有文件被移动）")
+        return 0
+    fi
+
+    if ! lumen_run_as_root nginx -t >/dev/null 2>&1; then
+        log_error "禁用后 nginx -t 未通过，正在回滚 nginx 配置。"
+        local i
+        for i in "${!moved_dst[@]}"; do
+            lumen_run_as_root mv -f "${moved_dst[$i]}" "${moved_src[$i]}" || true
+        done
+        lumen_run_as_root nginx -t >/dev/null 2>&1 || true
+        KEPT+=("nginx 反代配置已回滚（禁用后 nginx -t 未通过）")
+        return 0
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if lumen_systemctl reload nginx; then
+            DONE+=("已禁用 Lumen nginx 配置并 reload nginx（备份：${backup_dir}）")
+        else
+            log_warn "nginx 配置已禁用且 nginx -t 通过，但 reload 失败。请手动执行：sudo systemctl reload nginx"
+            DONE+=("已禁用 Lumen nginx 配置（备份：${backup_dir}，reload 需手动确认）")
+        fi
+    elif lumen_run_as_root nginx -s reload; then
+        DONE+=("已禁用 Lumen nginx 配置并 reload nginx（备份：${backup_dir}）")
+    else
+        log_warn "nginx 配置已禁用且 nginx -t 通过，但 reload 失败。请手动执行：sudo nginx -s reload"
+        DONE+=("已禁用 Lumen nginx 配置（备份：${backup_dir}，reload 需手动确认）")
+    fi
+}
+
+lumen_uninstall_stop_systemd() {
+    log_step "停止 systemd 部署（如存在）"
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_info "未检测到 systemctl，跳过 systemd 停用。"
+        KEPT+=("systemd 未检测到")
+        return 0
+    fi
+
+    local existing=()
+    local unit
+    for unit in "${LUMEN_SYSTEMD_UNITS[@]}"; do
+        if lumen_systemd_has_unit "${unit}"; then
+            existing+=("${unit}")
+        fi
+    done
+
+    if [ "${#existing[@]}" -eq 0 ]; then
+        log_info "未发现 Lumen systemd unit。"
+        KEPT+=("未发现 Lumen systemd 服务")
+        return 0
+    fi
+
+    log_info "发现 Lumen systemd unit：$(lumen_uninstall_join ', ' "${existing[@]}")"
+
+    local stopped=()
+    local failed=()
+    local disable_failed=()
+    for unit in "${existing[@]}"; do
+        if lumen_systemctl stop "${unit}" >/dev/null 2>&1; then
+            :
+        else
+            log_warn "stop ${unit} 失败，稍后检查 active 状态。"
+        fi
+
+        if lumen_systemctl disable "${unit}" >/dev/null 2>&1; then
+            :
+        else
+            disable_failed+=("${unit}")
+        fi
+
+        if lumen_systemctl is-active --quiet "${unit}" >/dev/null 2>&1; then
+            failed+=("${unit}")
+        else
+            stopped+=("${unit}")
+        fi
+    done
+
+    if [ "${#stopped[@]}" -gt 0 ]; then
+        DONE+=("已停止 Lumen systemd unit：$(lumen_uninstall_join ', ' "${stopped[@]}")")
+    fi
+    if [ "${#disable_failed[@]}" -gt 0 ]; then
+        log_warn "以下 unit 停止了，但 disable 返回非零（常见于 static/transient unit）：$(lumen_uninstall_join ', ' "${disable_failed[@]}")"
+    fi
+    if [ "${#failed[@]}" -gt 0 ]; then
+        log_error "以下 systemd unit 仍处于 active：$(lumen_uninstall_join ', ' "${failed[@]}")"
+        log_error "请手动排查：systemctl status $(lumen_uninstall_join ' ' "${failed[@]}")"
+        KEPT+=("部分 systemd 服务仍在运行：$(lumen_uninstall_join ', ' "${failed[@]}")")
+    fi
+
+    if confirm "删除 /etc/systemd/system 下的 Lumen unit 文件？"; then
+        local removed=()
+        local path
+        for unit in "${LUMEN_SYSTEMD_UNIT_FILES[@]}"; do
+            path="/etc/systemd/system/${unit}"
+            if [ -e "${path}" ] || [ -L "${path}" ]; then
+                if lumen_run_as_root rm -f "${path}"; then
+                    removed+=("${unit}")
+                    log_info "已删除 ${path}"
+                else
+                    log_warn "无法删除 ${path}"
+                fi
+            fi
+        done
+        lumen_systemctl daemon-reload >/dev/null 2>&1 || true
+        lumen_systemctl reset-failed "${LUMEN_SYSTEMD_UNITS[@]}" >/dev/null 2>&1 || true
+        if [ "${#removed[@]}" -gt 0 ]; then
+            DONE+=("已删除 systemd unit 文件：$(lumen_uninstall_join ', ' "${removed[@]}")")
+        else
+            KEPT+=("未发现可删除的 systemd unit 文件")
+        fi
+    else
+        KEPT+=("systemd unit 文件保留（已尝试停止/禁用）")
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # 1. 二次确认
@@ -25,14 +264,16 @@ log_step "Lumen 卸载向导"
 cat <<EOF
 
   本向导将分步进行：
-    1) 停止 install.sh 拉起的 API / Worker / Web 后台进程（释放 8000/3000）
-    2) 停止 PostgreSQL / Redis 容器（释放 5432/6379）
-    3) 询问是否删除数据卷（不可恢复）
-    4) 询问是否删除 .env 配置
-    5) 询问是否删除本地图片存储
-    6) 询问是否删除 /opt/lumendata/backup 备份
-    7) 询问是否删除前端 node_modules / .next
-    8) 询问是否删除 .venv（uv 虚拟环境）
+    1) 停止 systemd 部署的 Lumen 服务（lumen-api / worker / web / tgbot / timers）
+    2) 停止 install.sh 拉起的 API / Worker / Web 后台进程（释放 8000/3000）
+    3) 停止 PostgreSQL / Redis 容器（释放 5432/6379）
+    4) 询问是否禁用 Lumen nginx 反代配置
+    5) 询问是否删除数据卷（不可恢复）
+    6) 询问是否删除 .env 配置
+    7) 询问是否删除本地图片存储
+    8) 询问是否删除 /opt/lumendata/backup 备份
+    9) 询问是否删除前端 node_modules / .next
+    10) 询问是否删除 .venv（uv 虚拟环境）
 
   源代码与 docker-compose.yml 不会被删除；删除项目目录请手动 rm。
   每个删除步骤默认 "N"（保留），需明确输入 y/yes 才会执行。
@@ -56,7 +297,14 @@ if lumen_detect_docker_access; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. 停 install.sh 拉起的本地运行时（uvicorn / arq / next-server）
+# 2. 停 systemd 部署运行时。
+#    release/systemd 部署不会由 PID 文件管理；如果不处理，卸载后 lumen-web
+#    仍会监听 3000，nginx 域名自然还能打开网站。
+# ---------------------------------------------------------------------------
+lumen_uninstall_stop_systemd
+
+# ---------------------------------------------------------------------------
+# 3. 停 install.sh 拉起的本地运行时（uvicorn / arq / next-server）
 #    install.sh 把 API/Worker/Web 后台 & 起来，PID 仅在 install.sh 进程内；
 #    如果不在这里清掉，下次 install 检测到 8000/3000 已被占用就会卡死。
 # ---------------------------------------------------------------------------
@@ -84,7 +332,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. docker compose down（停容器）；失败兜底用 docker rm -f 强删 lumen-pg/lumen-redis。
+# 4. docker compose down（停容器）；失败兜底用 docker rm -f 强删 lumen-pg/lumen-redis。
 # ---------------------------------------------------------------------------
 log_step "停止容器（docker compose down）"
 if [ "${DOCKER_AVAILABLE}" -eq 1 ]; then
@@ -115,7 +363,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. 删数据卷
+# 5. nginx 反代配置（默认保留，用户确认才禁用）。
+# ---------------------------------------------------------------------------
+lumen_uninstall_disable_nginx_configs
+
+# ---------------------------------------------------------------------------
+# 6. 删数据卷
 # ---------------------------------------------------------------------------
 log_step "数据卷"
 log_warn "数据卷包含所有用户、对话、生成图记录。删除后无法恢复。"
@@ -140,7 +393,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. 删 .env
+# 7. 删 .env
 # ---------------------------------------------------------------------------
 log_step ".env 配置文件"
 ENV_TARGETS=(
@@ -174,7 +427,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. 本地图片存储
+# 8. 本地图片存储
 # ---------------------------------------------------------------------------
 log_step "本地图片存储"
 STORAGE_TARGETS=(
@@ -207,7 +460,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. 本地备份
+# 9. 本地备份
 # ---------------------------------------------------------------------------
 log_step "本地备份 /opt/lumendata/backup"
 BACKUP_TARGETS=(
@@ -239,7 +492,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. 前端 node_modules / .next
+# 10. 前端 node_modules / .next
 # ---------------------------------------------------------------------------
 log_step "前端缓存（node_modules / .next）"
 WEB_NODE="${ROOT}/apps/web/node_modules"
@@ -268,7 +521,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. .venv（uv 虚拟环境）
+# 11. .venv（uv 虚拟环境）
 # ---------------------------------------------------------------------------
 log_step "Python 虚拟环境 .venv"
 VENV="${ROOT}/.venv"

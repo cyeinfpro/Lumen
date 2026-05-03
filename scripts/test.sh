@@ -17,6 +17,10 @@ cd "$(dirname "$0")/.."
 : "${STORAGE_ROOT:=/tmp/lumen-test-storage}"
 export STORAGE_ROOT
 
+echo "==> scripts/uninstall"
+bash -n scripts/uninstall.sh scripts/test_uninstall.sh scripts/lib.sh
+bash scripts/test_uninstall.sh
+
 ensure_web_deps() {
     if [ -x "apps/web/node_modules/.bin/eslint" ] &&
        [ -x "apps/web/node_modules/.bin/tsc" ] &&
