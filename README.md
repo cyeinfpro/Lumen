@@ -186,7 +186,7 @@ Web: http://<服务器IP>:3000
 API health: http://127.0.0.1:8000/healthz
 ```
 
-如果服务器本机 `curl http://127.0.0.1:3000` 正常，但外部浏览器打不开 `http://<服务器IP>:3000`，请检查云安全组或防火墙是否放行 TCP 3000。
+Web 默认绑定 `0.0.0.0:3000`。如果服务器本机 `curl http://127.0.0.1:3000` 正常，但外部浏览器打不开 `http://<服务器IP>:3000`，请检查云安全组或防火墙是否放行 TCP 3000。
 
 ## 更新
 
@@ -257,7 +257,7 @@ sudo chmod 755 /opt/lumendata
 
 ## nginx 反代
 
-生产推荐让 nginx 只反代 `Web:3000`，由 Next.js rewrites 转发 `/api/*` 与 `/events`，避免 nginx 维护两条上游。Web 容器映射到宿主机 `127.0.0.1:3000`：
+生产推荐让 nginx 只反代 `Web:3000`，由 Next.js rewrites 转发 `/api/*` 与 `/events`，避免 nginx 维护两条上游。Web 默认同时可通过宿主机公网 `:3000` 直连；如只允许 nginx 本机反代，可在 `shared/.env` 设置 `WEB_BIND_HOST=127.0.0.1`。nginx 反代仍可指向本机回环：
 
 ```nginx
 proxy_pass http://127.0.0.1:3000;

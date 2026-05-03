@@ -100,6 +100,16 @@ def test_install_pull_failure_falls_back_to_main_for_default_tag() -> None:
     assert "main 镜像也未发布 → 使用 --build 本地构建" in text
 
 
+def test_web_port_defaults_to_public_bind_and_install_migrates_old_env() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    install = INSTALL.read_text(encoding="utf-8")
+    assert '"${WEB_BIND_HOST:-0.0.0.0}:3000:3000"' in compose
+    assert "WEB_BIND_HOST=0.0.0.0" in env_example
+    assert "WEB_BIND_HOST 仍是旧默认 127.0.0.1，自动改为 0.0.0.0" in install
+    assert 'env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"' in install
+
+
 def test_update_script_requires_release_layout_and_prepares_new_release() -> None:
     """
     docker cutover: release 布局保留，但 prepare 流程从 git clone 改为 rsync 仓库快照
