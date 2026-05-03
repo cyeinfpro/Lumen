@@ -205,18 +205,35 @@ def _showcase_prompt_brief(
 ) -> str:
     direction_parts = [part for part in (user_direction.strip(), template_direction.strip()) if part]
     direction = "，".join(direction_parts) or "高级自然电商场景，动作自然"
-    return (
-        "请根据白底产品图和已确认模特参考图，生成真实自然的真人模特穿搭电商图。"
-        "核心要求："
-        "1. 模特必须穿着产品图中的同一件衣服，严格还原商品服饰，不要改款、不要改变颜色、"
-        f"不要添加不存在的服装细节。必须保留：{product_preserve}。"
-        f"2. {model_consistency}"
-        f"3. {accessory_direction}"
-        f"4. 场景选择与衣服风格和用户方向匹配的干净商业摄影背景。参考方向：{direction}。"
-        "背景简洁高级，不杂乱，不抢主体，整体适合亚马逊/电商主图。"
-        f"5. {shot_direction}"
-        f"6. 画质：{quality_direction}，超写实，自然商业摄影风格，细节清晰，光线真实，干净高级。"
-        "7. 画面中不要出现文字、水印、logo 水印、畸形手脚、多余人物、衣架、假人或不自然背景物体。"
+    return "\n".join(
+        [
+            "生成一张真实自然的真人模特穿搭电商图。请根据白底产品图和已确认模特参考图完成。",
+            "",
+            "REFERENCE USE:",
+            "- 商品白底图是服装唯一来源；模特必须穿着同一件衣服，严格还原商品服饰，"
+            f"不要改款、不要改变颜色、不要添加不存在的服装细节。必须保留：{product_preserve}。",
+            f"- 模特参考图是人物身份来源；{model_consistency}",
+            f"- {accessory_direction}",
+            "",
+            "SCENE:",
+            f"- 场景选择与衣服风格和用户方向匹配的干净商业摄影背景。参考方向：{direction}。",
+            "- 人物必须真实站在同一环境里，透视、地面接触、脚下阴影、反射、环境光和色温一致，"
+            "不要像抠图贴到背景上。",
+            "- 背景简洁高级，不杂乱，不抢主体，整体适合亚马逊/电商主图；不能纯靠强虚化制造高级感。",
+            "",
+            "CAMERA / PHOTO STYLE:",
+            f"- 画质：{quality_direction}，超写实，真实 Canon 相机商业摄影风格，自然商业摄影风格。",
+            "- Real Canon full-frame commercial fashion photography, realistic lens rendering, clean color, "
+            "true-to-life skin texture, no over-retouching.",
+            "- 使用中等景深，衣服、脸、手脚和近处环境都清晰；不要大光圈虚化、强 bokeh 或背景过度模糊。",
+            "",
+            "SHOT:",
+            f"- {shot_direction}",
+            "",
+            "OUTPUT:",
+            "- 细节清晰，光线真实，干净高级。",
+            "- 画面中不要出现文字、水印、logo 水印、畸形手脚、多余人物、衣架、假人或不自然背景物体。",
+        ]
     )
 
 
@@ -2259,7 +2276,7 @@ async def create_showcase_images(
                 count=1,
                 render_quality="high" if body.final_quality != "standard" else "medium",
                 final_quality=body.final_quality,
-                fast=True,
+                fast=False,
             ),
             workflow_meta={
                 "workflow_action": "showcase_image",
