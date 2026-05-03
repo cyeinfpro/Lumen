@@ -90,6 +90,82 @@ raw_install_git() {
     esac
 }
 
+# 检测 install_dir 当前状态，返回字符串：
+#   empty   不存在或确实是空目录
+#   git     已经是 git checkout（有 .git/）
+#   release release 布局已就位（current 是 symlink，或 releases/ + shared/）
+#   inplace 旧 in-place 部署 / rsync 部署（看到 scripts/lib.sh 或 apps/api 但无 .git）
+#   mixed   既不像 Lumen 部署也不是空（杂乱目录，需要保留备份后重建）
+detect_install_state() {
+    local d="$1"
+    if [ ! -e "${d}" ]; then
+        printf 'empty'
+        return 0
+    fi
+    if [ -d "${d}/.git" ]; then
+        printf 'git'
+        return 0
+    fi
+    if [ -L "${d}/current" ] || { [ -d "${d}/releases" ] && [ -d "${d}/shared" ]; }; then
+        printf 'release'
+        return 0
+    fi
+    if [ -f "${d}/scripts/lib.sh" ] || [ -d "${d}/apps/api" ] || [ -d "${d}/packages/core" ]; then
+        printf 'inplace'
+        return 0
+    fi
+    # 真正的空目录也归 empty
+    if [ -z "$(ls -A "${d}" 2>/dev/null)" ]; then
+        printf 'empty'
+        return 0
+    fi
+    printf 'mixed'
+}
+
+# 把最新 main 的代码合并到已有部署目录，保留运行时数据（.env / shared / releases /
+# current / var / .venv / node_modules / .next / .env.local 等）。
+overlay_repo_into_existing() {
+    local repo_url="$1"
+    local branch="$2"
+    local install_dir="$3"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)" || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '${tmp_dir}'" RETURN
+    printf '[INFO] 在临时目录 clone 最新 %s\n' "${branch}"
+    if ! git clone --quiet --depth 1 --branch "${branch}" "${repo_url}" "${tmp_dir}/repo"; then
+        printf '[ERROR] git clone 失败。\n' >&2
+        return 1
+    fi
+    if ! raw_have_cmd rsync; then
+        printf '[INFO] 缺少 rsync，尝试自动安装。\n'
+        raw_install_packages rsync || true
+    fi
+    if ! raw_have_cmd rsync; then
+        printf '[ERROR] 没有 rsync，无法非破坏性合并代码到 %s。\n' "${install_dir}" >&2
+        return 1
+    fi
+    printf '[INFO] 把最新代码合并到 %s（保留 .env / shared / releases / var 等运行时数据）\n' "${install_dir}"
+    rsync -a --delete-after \
+        --exclude='/.git/' \
+        --exclude='/.env' \
+        --exclude='/.env.*' \
+        --exclude='/shared/' \
+        --exclude='/releases/' \
+        --exclude='/current' \
+        --exclude='/previous' \
+        --exclude='/var/' \
+        --exclude='/.venv/' \
+        --exclude='/node_modules/' \
+        --exclude='/apps/worker/var/' \
+        --exclude='/apps/web/.next/' \
+        --exclude='/apps/web/.env.local' \
+        --exclude='/apps/web/node_modules/' \
+        --exclude='/.lumen-script.lock/' \
+        --exclude='/.update.log' \
+        "${tmp_dir}/repo/" "${install_dir}/"
+}
+
 bootstrap_from_raw_script() {
     local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
     local branch="${LUMEN_BRANCH:-main}"
@@ -110,31 +186,75 @@ bootstrap_from_raw_script() {
         printf '[INFO] git 已安装。\n'
     fi
 
-    if ! raw_have_cmd git; then
-        printf '[ERROR] 缺少 git，无法从 GitHub 拉取 Lumen。\n' >&2
-        printf '        请先安装 git，或手动执行：git clone %s\n' "${repo_url}" >&2
-        exit 1
+    local state
+    state="$(detect_install_state "${install_dir}")"
+    printf '[INFO] 检测到目标目录状态：%s\n' "${state}"
+
+    case "${state}" in
+        git)
+            # 标准 git checkout：fetch + reset，确保 worktree 干净指向 origin/branch。
+            printf '[INFO] 已是 git checkout，拉取最新 %s 并 reset。\n' "${branch}"
+            git -C "${install_dir}" fetch --quiet origin "${branch}"
+            git -C "${install_dir}" checkout --quiet "${branch}"
+            git -C "${install_dir}" reset --hard "origin/${branch}"
+            export LUMEN_BOOTSTRAP_MODE="auto"
+            ;;
+        release)
+            # release 布局：current 软链 + shared/releases。代码升级走 update.sh，
+            # 这里只把 update.sh / lib.sh 等 scripts 同步到最新，让 update.sh 有新逻辑。
+            printf '[INFO] 已是 release 布局，先同步 scripts/ 到最新再交给 update.sh。\n'
+            local current_release="${install_dir}/current"
+            if [ -L "${current_release}" ]; then
+                # 把 scripts/ 覆盖到 current 指向的 release 内
+                overlay_repo_into_existing "${repo_url}" "${branch}" "${install_dir}/current"
+            else
+                printf '[WARN] %s 不是 symlink，跳过 scripts 同步，直接交给 update.sh。\n' "${current_release}" >&2
+            fi
+            export LUMEN_BOOTSTRAP_MODE="update"
+            ;;
+        inplace)
+            # 老 in-place 部署 / rsync 落地。把代码合并进去（保护运行时数据）。
+            # 之后让 update.sh 的 auto-migrate 把 in-place 切到 release 布局。
+            printf '[INFO] 检测到旧 in-place 部署，合并最新代码并交给 update.sh 自动迁移。\n'
+            if ! overlay_repo_into_existing "${repo_url}" "${branch}" "${install_dir}"; then
+                printf '[ERROR] 合并代码失败。\n' >&2
+                exit 1
+            fi
+            export LUMEN_BOOTSTRAP_MODE="update"
+            ;;
+        mixed)
+            # 杂乱目录：备份后重新 clone，避免误删用户数据。
+            local backup="${install_dir}.bak.$(date -u +%Y%m%d%H%M%S 2>/dev/null || date +%s)"
+            printf '[WARN] %s 已存在但不像 Lumen 部署，备份到 %s 后重新 clone。\n' "${install_dir}" "${backup}"
+            mv "${install_dir}" "${backup}"
+            git clone --branch "${branch}" "${repo_url}" "${install_dir}"
+            export LUMEN_BOOTSTRAP_MODE="install"
+            ;;
+        empty|*)
+            git clone --branch "${branch}" "${repo_url}" "${install_dir}"
+            export LUMEN_BOOTSTRAP_MODE="install"
+            ;;
+    esac
+
+    # 决定 exec 时传给 install.sh 的参数。如果调用方没传，按 BOOTSTRAP_MODE 走：
+    #   update  -> --update（直接交给 update.sh，不进交互菜单）
+    #   install -> --auto（自动判定：有 systemd active 走 update，否则走 install）
+    #   auto    -> --auto
+    local args=("$@")
+    if [ "${#args[@]}" -eq 0 ]; then
+        if [ "${LUMEN_BOOTSTRAP_MODE}" = "update" ]; then
+            args=("--update")
+        else
+            args=("--auto")
+        fi
     fi
 
-    if [ -d "${install_dir}/.git" ]; then
-        printf '[INFO] 目录已存在，尝试拉取最新代码。\n'
-        git -C "${install_dir}" fetch origin "${branch}"
-        git -C "${install_dir}" checkout "${branch}"
-        git -C "${install_dir}" pull --ff-only origin "${branch}"
-    elif [ -e "${install_dir}" ]; then
-        printf '[ERROR] 目标目录已存在但不是 git 仓库：%s\n' "${install_dir}" >&2
-        printf '        请移走该目录，或设置 LUMEN_INSTALL_DIR 指向一个新目录。\n' >&2
-        exit 1
-    else
-        git clone --branch "${branch}" "${repo_url}" "${install_dir}"
-    fi
-
+    # 优先用 /dev/tty 接管 stdin（让交互菜单能读键），没 tty 就直接 exec。
+    # --auto / --update 都是非交互的，没 tty 也能跑通。
     if [ -r /dev/tty ]; then
-        exec bash "${install_dir}/scripts/install.sh" "$@" </dev/tty
+        exec bash "${install_dir}/scripts/install.sh" "${args[@]}" </dev/tty
     fi
-    printf '[ERROR] 无法打开 /dev/tty 读取安装参数。\n' >&2
-    printf '        请改用：bash %s/scripts/install.sh\n' "${install_dir}" >&2
-    exit 1
+    exec bash "${install_dir}/scripts/install.sh" "${args[@]}"
 }
 
 if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
@@ -158,6 +278,7 @@ Lumen 安装入口
 
 用法：
   bash scripts/install.sh              打开运维菜单
+  bash scripts/install.sh --auto       自动：有部署走 update，新机器走 install
   bash scripts/install.sh --install    直接安装 Lumen
   bash scripts/install.sh --update     更新 Lumen
   bash scripts/install.sh --uninstall  卸载 Lumen
@@ -165,11 +286,45 @@ Lumen 安装入口
 EOF
 }
 
+# --auto：根据当前机器状态自动选 update / install。
+#   release 布局或 in-place 部署或已有 systemd active → update（无人值守）
+#   否则                                              → fresh install（如有 tty 进交互菜单）
+dispatch_auto() {
+    local has_release=0 has_inplace=0 has_systemd=0
+    [ -L "${ROOT}/current" ] && has_release=1
+    [ -d "${ROOT}/apps/api" ] && has_inplace=1
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet lumen-api.service 2>/dev/null \
+           || systemctl is-active --quiet lumen-worker.service 2>/dev/null \
+           || systemctl is-active --quiet lumen-web.service 2>/dev/null; then
+            has_systemd=1
+        fi
+    fi
+    if [ "${has_release}" = "1" ] || [ "${has_inplace}" = "1" ] || [ "${has_systemd}" = "1" ]; then
+        log_info "[auto] 检测到已有 Lumen 部署 (release=${has_release} inplace=${has_inplace} systemd=${has_systemd})，转入 update 流程。"
+        exec bash "${SCRIPT_DIR}/update.sh"
+    fi
+    log_info "[auto] 未检测到已有部署，进入全新安装流程。"
+    if [ ! -r /dev/tty ] && [ -t 0 ]; then
+        : # 有交互输入
+    elif [ ! -r /dev/tty ]; then
+        log_warn "[auto] 当前没有 tty，全新安装会卡在交互输入。"
+        log_warn "[auto] 请改用：bash ${SCRIPT_DIR}/install.sh --install   或在 SSH 终端里重跑。"
+        exit 2
+    fi
+    # fall through 到 install path
+}
+
 dispatch_entrypoint() {
     local command="${1:-menu}"
     case "${command}" in
         menu|--menu)
             exec bash "${SCRIPT_DIR}/lumenctl.sh" menu
+            ;;
+        auto|--auto)
+            shift || true
+            dispatch_auto
+            # dispatch_auto 没退出说明要走 install path
             ;;
         install|--install)
             shift || true
