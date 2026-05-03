@@ -105,16 +105,15 @@ def test_workflow_image_params_use_high_quality_jpeg() -> None:
     assert params.fast is False
 
 
-def test_workflow_image_params_can_use_fast_high_quality_for_showcase() -> None:
+def test_workflow_image_params_default_to_non_fast_high_quality_for_showcase() -> None:
     params = workflows._image_params(  # noqa: SLF001
         aspect_ratio="4:5",
         count=1,
         render_quality="high",
         final_quality="high",
-        fast=True,
     )
 
-    assert params.fast is True
+    assert params.fast is False
     assert params.render_quality == "high"
     assert params.fixed_size == "1600x2000"
 
@@ -232,6 +231,11 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
 
     assert "请根据白底产品图和已确认模特参考图" in prompt
     assert "真实自然的真人模特穿搭电商图" in prompt
+    assert "REFERENCE USE:" in prompt
+    assert "SCENE:" in prompt
+    assert "CAMERA / PHOTO STYLE:" in prompt
+    assert "SHOT:" in prompt
+    assert "OUTPUT:" in prompt
     assert "咖啡馆窗边，自然走动回头" in prompt
     assert "模板强约束：高级灰棚拍" in prompt
     assert "必须保留：lapel shape、button position、pocket placement" in prompt
@@ -239,13 +243,21 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "不要额外新增、替换或强化配饰" in prompt
     assert "不要让配饰遮挡衣服主体" in prompt
     assert "超写实" in prompt
+    assert "真实 Canon 相机商业摄影风格" in prompt
+    assert "Real Canon full-frame commercial fashion photography" in prompt
+    assert "realistic lens rendering" in prompt
+    assert "true-to-life skin texture" in prompt
     assert "自然商业摄影风格" in prompt
     assert "细节清晰" in prompt
     assert "适合亚马逊/电商主图" in prompt
+    assert "透视、地面接触、脚下阴影、反射、环境光和色温一致" in prompt
+    assert "不要像抠图贴到背景上" in prompt
+    assert "中等景深" in prompt
+    assert "不要大光圈虚化、强 bokeh 或背景过度模糊" in prompt
     assert "主图" in prompt
     assert "standing front-facing" in prompt
     assert "文字、水印" in prompt
-    assert len(prompt) < 1300
+    assert len(prompt) < 1800
 
 
 def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() -> None:
