@@ -249,12 +249,29 @@ bootstrap_from_raw_script() {
         fi
     fi
 
+    # 选 install.sh 路径：release 布局下 scripts/ 在 current 内（${ROOT}/current/scripts），
+    # 而不是 ${ROOT}/scripts；其它布局都在 ${ROOT}/scripts。fallback 到 inplace 路径
+    # 兼容奇怪情况（current symlink 失效）。
+    local script_path=""
+    if [ "${state}" = "release" ] && [ -L "${install_dir}/current" ] \
+            && [ -f "${install_dir}/current/scripts/install.sh" ]; then
+        script_path="${install_dir}/current/scripts/install.sh"
+    elif [ -f "${install_dir}/scripts/install.sh" ]; then
+        script_path="${install_dir}/scripts/install.sh"
+    elif [ -f "${install_dir}/current/scripts/install.sh" ]; then
+        script_path="${install_dir}/current/scripts/install.sh"
+    else
+        printf '[ERROR] 找不到 install.sh：既不在 %s/scripts/ 也不在 %s/current/scripts/\n' \
+            "${install_dir}" "${install_dir}" >&2
+        exit 1
+    fi
+
     # 优先用 /dev/tty 接管 stdin（让交互菜单能读键），没 tty 就直接 exec。
     # --auto / --update 都是非交互的，没 tty 也能跑通。
     if [ -r /dev/tty ]; then
-        exec bash "${install_dir}/scripts/install.sh" "${args[@]}" </dev/tty
+        exec bash "${script_path}" "${args[@]}" </dev/tty
     fi
-    exec bash "${install_dir}/scripts/install.sh" "${args[@]}"
+    exec bash "${script_path}" "${args[@]}"
 }
 
 if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
