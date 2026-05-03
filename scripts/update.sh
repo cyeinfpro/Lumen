@@ -468,6 +468,10 @@ lumen_step_end fetch 0
 lumen_step_begin link_shared
 log_step "[link_shared] 把 shared 目录软链到 release 内"
 
+if ! lumen_release_ensure_shared_env "${ROOT}"; then
+    lumen_step_end link_shared 1
+    exit 1
+fi
 if ! lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"; then
     lumen_step_end link_shared 1
     exit 1

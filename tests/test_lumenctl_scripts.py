@@ -73,6 +73,7 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     assert 'GIT_BIN}" clone --quiet' in text
     assert '"${GIT_REMOTE_URL}" "${NEW_RELEASE}"' in text
     assert 'cat > "${NEW_RELEASE}/.lumen_release.json" <<JSON' in text
+    assert 'lumen_release_ensure_shared_env "${ROOT}"' in text
     assert 'lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"' in text
     assert 'lumen_ensure_compose_db_env_vars "${NEW_RELEASE}/.env"' in text
 
@@ -112,6 +113,43 @@ def test_compose_db_env_vars_fail_without_database_url(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "缺少 DB_USER/DB_PASSWORD/DB_NAME" in result.stderr
     assert "无法从 DATABASE_URL 推导" in result.stderr
+
+
+def test_release_shared_env_recovers_from_root_env(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "lumen"
+    (deploy_root / "shared").mkdir(parents=True)
+    root_env = deploy_root / ".env"
+    root_env.write_text("DB_USER=lumen_app\nDB_PASSWORD='secret'\nDB_NAME=lumen\n", encoding="utf-8")
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        lumen_release_ensure_shared_env {deploy_root}
+        test -f {deploy_root / "shared" / ".env"}
+        test -L {root_env}
+        """
+    )
+
+    assert "shared/.env 缺失，检测到 ROOT/.env" in result.stderr
+    assert (deploy_root / "shared" / ".env").read_text(encoding="utf-8") == (
+        "DB_USER=lumen_app\nDB_PASSWORD='secret'\nDB_NAME=lumen\n"
+    )
+
+
+def test_release_shared_env_fails_when_no_env_source(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "lumen"
+    (deploy_root / "shared").mkdir(parents=True)
+
+    result = run_bash(
+        f"""
+        . {LIB}
+        lumen_release_ensure_shared_env {deploy_root}
+        """
+    )
+
+    assert result.returncode == 1
+    assert "shared/.env 缺失" in result.stderr
+    assert "未找到可恢复的 ROOT/.env 或 current/.env" in result.stderr
 
 
 def test_rollback_script_validates_compose_env_before_compose_up() -> None:
