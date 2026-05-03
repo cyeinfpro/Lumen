@@ -139,12 +139,39 @@ lumen_update_require_runtime_cmd() {
     local cmd="$1"
     local hint="$2"
     local path=""
-    if ! path="$(lumen_update_runtime_command_path "${cmd}")"; then
-        log_error "缺少 ${cmd}，或运行用户 ${LUMEN_UPDATE_RUN_USER} 无法访问。"
-        log_error "${hint}"
-        return 1
+    if path="$(lumen_update_runtime_command_path "${cmd}")"; then
+        printf '%s' "${path}"
+        return 0
     fi
-    printf '%s' "${path}"
+
+    # uv 缺失时自动以 runtime 用户安装到 ~/.local/bin（官方 install 脚本默认路径）。
+    # 这覆盖了首次 update / 历史 in-place 布局自动迁移后 runtime 用户没装过 uv 的场景。
+    # 装完后再次 probe 路径；仍找不到才让上面的硬错误暴露。
+    if [ "${cmd}" = "uv" ] && [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
+        log_warn "uv 不在 ${LUMEN_UPDATE_RUN_USER} 的 PATH，尝试通过官方脚本自动安装……"
+        if lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc \
+                'curl -LsSf https://astral.sh/uv/install.sh | sh' >&2; then
+            if path="$(lumen_update_runtime_command_path "${cmd}")"; then
+                log_info "uv 自动安装完成：${path}"
+                printf '%s' "${path}"
+                return 0
+            fi
+            # uv installer 默认装到 ~/.local/bin，但有些环境 .profile 还没更新；
+            # 直接尝试常见路径作为兜底。
+            local home_dir
+            home_dir="$(lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc 'printf %s "${HOME}"' 2>/dev/null || true)"
+            if [ -n "${home_dir}" ] && [ -x "${home_dir}/.local/bin/uv" ]; then
+                log_info "uv 自动安装完成：${home_dir}/.local/bin/uv"
+                printf '%s' "${home_dir}/.local/bin/uv"
+                return 0
+            fi
+        fi
+        log_error "uv 自动安装失败或安装后仍不可达。"
+    fi
+
+    log_error "缺少 ${cmd}，或运行用户 ${LUMEN_UPDATE_RUN_USER} 无法访问。"
+    log_error "${hint}"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
