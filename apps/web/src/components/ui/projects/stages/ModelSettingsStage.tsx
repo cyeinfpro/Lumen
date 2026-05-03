@@ -1,6 +1,6 @@
 "use client";
 
-// 模特设定：把 user_prompt 作为风格初值；avoid 用顿号/逗号分隔。
+// 模特设定：把 user_prompt 作为风格初值；同时确认饰品方案，和模特候选并行生成。
 // 失败 toast；按钮 loading 时禁用。
 
 import { Sparkles } from "lucide-react";
@@ -11,6 +11,7 @@ import { toast } from "@/components/ui/primitives/Toast";
 import { useCreateModelCandidatesMutation } from "@/lib/queries";
 import type { WorkflowRun } from "@/lib/apiClient";
 import { StageFrame } from "../components/StageFrame";
+import { accessorySuggestionText } from "../utils";
 
 export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
   const create = useCreateModelCandidatesMutation(workflow.id, {
@@ -23,6 +24,11 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
   });
   const [stylePrompt, setStylePrompt] = useState(workflow.user_prompt);
   const [avoid, setAvoid] = useState("过度网红感、夸张姿势、强烈妆容");
+  const [accessoryEnabled, setAccessoryEnabled] = useState(true);
+  const suggestedAccessories = accessorySuggestionText(workflow);
+  const [accessories, setAccessories] = useState(
+    suggestedAccessories || "简洁鞋子、小巧发饰、轻量包袋",
+  );
 
   const submit = () => {
     if (!stylePrompt.trim()) {
@@ -36,6 +42,16 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
         .split(/[、,]/)
         .map((item) => item.trim())
         .filter(Boolean),
+      accessory_plan: {
+        enabled: accessoryEnabled,
+        items: accessoryEnabled
+          ? accessories
+              .split(/[,，、]/)
+              .map((item) => item.trim())
+              .filter(Boolean)
+          : [],
+        strength: "subtle",
+      },
     });
   };
 
@@ -63,8 +79,32 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
           placeholder="顿号或逗号分隔，例如 网红感、夸张姿势"
         />
       </label>
+      <label className="mt-4 block">
+        <span className="text-sm text-[var(--fg-1)]">推荐饰品</span>
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => setAccessoryEnabled((value) => !value)}
+            className={[
+              "h-10 rounded-md border px-3 text-sm transition-colors",
+              accessoryEnabled
+                ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
+                : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
+            ].join(" ")}
+          >
+            {accessoryEnabled ? "开启" : "关闭"}
+          </button>
+          <input
+            value={accessories}
+            onChange={(event) => setAccessories(event.target.value)}
+            disabled={!accessoryEnabled}
+            className="h-10 min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)] disabled:opacity-50"
+            placeholder="逗号或顿号分隔，例如 白色运动鞋、小发夹"
+          />
+        </div>
+      </label>
       <div className="mt-4 rounded-md border border-[var(--border-amber)]/40 bg-[var(--accent-soft)] p-3 text-sm leading-6 text-[var(--fg-1)]">
-        模特方案图未试穿商品，仅用于确认模特形象。可在下一阶段勾选具体方案。
+        模特方案图未试穿商品，仅用于确认模特形象。饰品会同时生成白底平面搭配图，下一阶段直接选择。
       </div>
       <Button
         className="mt-4"
@@ -73,7 +113,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
         onClick={submit}
         leftIcon={<Sparkles className="h-4 w-4" />}
       >
-        生成 3 套模特候选
+        生成模特候选和饰品图
       </Button>
     </StageFrame>
   );

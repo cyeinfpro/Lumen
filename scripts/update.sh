@@ -19,32 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
-# ROOT 解析：可能从三种位置启动：
-#   1) /opt/lumen/scripts/update.sh                 — 旧 in-place 布局或者用户从根目录手动跑
-#   2) /opt/lumen/current/scripts/update.sh         — systemd lumen-update-runner.service 启动
-#                                                       （current 是软链；pwd 默认走 logical 路径）
-#   3) /opt/lumen/releases/<id>/scripts/update.sh   — 用户直接进 release 目录跑
-#
-# 目标：把 ROOT 解析为 /opt/lumen（包含 releases/、shared/、current 软链的根）。
-# 处理：用 pwd -P 做物理路径解析，统一把 case 2 当 case 3 看待，再往上找。
-lumen_resolve_root() {
-    local script_phys probe
-    # SCRIPT_DIR 是 logical 的；这里用 -P 拿物理路径，避开 current 软链导致的歧义。
-    script_phys="$(cd "${SCRIPT_DIR}" && pwd -P)"
-    probe="$(cd "${script_phys}/.." && pwd -P)"
-    # 如果 probe 本身就是 release 目录（其上级是 releases/），则 ROOT = probe/../..
-    local probe_parent
-    probe_parent="$(cd "${probe}/.." && pwd -P)"
-    if [ "$(basename "${probe_parent}")" = "releases" ]; then
-        # probe = /opt/lumen/releases/<id>；ROOT = /opt/lumen
-        (cd "${probe_parent}/.." && pwd -P)
-        return 0
-    fi
-    # 否则 probe 即 ROOT（in-place / 已经位于 /opt/lumen 这一级）。
-    printf '%s' "${probe}"
-}
-
-ROOT="$(lumen_resolve_root)"
+ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
 
 lumen_install_signal_handlers
 # Lock 必须落在 ROOT（而不是 release 内）：跨 release 共享同一把锁。
