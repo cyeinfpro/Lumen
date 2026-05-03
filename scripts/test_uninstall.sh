@@ -52,6 +52,13 @@ server {
   location / { return 200 "ok"; }
 }
 EOF
+    cat > "${tmp}/sites-enabled/manual-lumen.conf" <<'EOF'
+server {
+  listen 80;
+  server_name manual-lumen.example.com;
+  location / { proxy_pass http://127.0.0.1:3000; }
+}
+EOF
 
     match_count="$(
         # shellcheck source=scripts/uninstall.sh
@@ -66,8 +73,8 @@ EOF
         lumen_uninstall_collect_nginx_candidates | wc -l | tr -d ' '
     )"
 
-    if [ "${match_count}" != "1" ]; then
-        printf 'expected one nginx candidate, got %s\n' "${match_count}" >&2
+    if [ "${match_count}" != "2" ]; then
+        printf 'expected two nginx candidates, got %s\n' "${match_count}" >&2
         rm -rf "${tmp}"
         return 1
     fi

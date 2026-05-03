@@ -43,6 +43,11 @@ LUMEN_NGINX_ACTIVE_DIRS=(
     /usr/local/etc/nginx/conf.d
 )
 
+LUMEN_CONTAINER_NAME_PATTERNS=(
+    '^lumen-'
+    '^lumen_'
+)
+
 lumen_uninstall_join() {
     local sep="${1:- }"
     shift || true
@@ -75,11 +80,65 @@ lumen_uninstall_collect_nginx_candidates() {
             esac
             seen="${seen}${file} "
             if grep -Iq . "${file}" 2>/dev/null \
-                && grep -Eq 'Managed by scripts/lumenctl\.sh|Lumen reverse proxy|upstream[[:space:]]+lumen_web|lumen_web_|Lumen 反代' "${file}" 2>/dev/null; then
+                && grep -Eq 'Managed by scripts/lumenctl\.sh|Lumen reverse proxy|upstream[[:space:]]+lumen_web|lumen_web_|Lumen 反代|proxy_pass[[:space:]]+http://(127\.0\.0\.1|localhost):3000|server[[:space:]]+(127\.0\.0\.1|localhost):3000' "${file}" 2>/dev/null; then
                 printf '%s\n' "${file}"
             fi
         done < <(find "${dir}" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null | sort)
     done
+}
+
+lumen_uninstall_remove_lumen_containers() {
+    [ "${DOCKER_AVAILABLE:-0}" -eq 1 ] || return 0
+
+    local containers=()
+    local name pattern
+    while IFS= read -r name; do
+        [ -n "${name}" ] || continue
+        for pattern in "${LUMEN_CONTAINER_NAME_PATTERNS[@]}"; do
+            if [[ "${name}" =~ ${pattern} ]]; then
+                containers+=("${name}")
+                break
+            fi
+        done
+    done < <(lumen_docker ps -a --format '{{.Names}}' 2>/dev/null | sort -u)
+
+    if [ "${#containers[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    log_warn "发现残留 Lumen 容器：$(lumen_uninstall_join ', ' "${containers[@]}")"
+    for name in "${containers[@]}"; do
+        if lumen_docker rm -f "${name}" >/dev/null 2>&1; then
+            log_info "已删除残留容器 ${name}"
+        else
+            log_warn "无法删除残留容器 ${name}，请手动执行：$(lumen_docker_command_label) rm -f ${name}"
+        fi
+    done
+}
+
+lumen_uninstall_verify_ports_released() {
+    local still_busy=()
+    local port
+    for port in 3000 8000; do
+        if lumen_process_listening_on_port "${port}"; then
+            still_busy+=("${port}")
+        fi
+    done
+    if [ "${#still_busy[@]}" -eq 0 ]; then
+        DONE+=("已确认 3000/8000 未监听")
+        return 0
+    fi
+
+    local pids
+    for port in "${still_busy[@]}"; do
+        pids="$(lumen_pids_listening_on_port "${port}" | paste -sd ',' - 2>/dev/null || true)"
+        if [ -n "${pids}" ]; then
+            log_warn "端口 ${port} 仍在监听，PID=${pids}。"
+        else
+            log_warn "端口 ${port} 仍在监听，但当前用户无法读取 PID。请用 sudo lsof -iTCP:${port} -sTCP:LISTEN -nP 排查。"
+        fi
+    done
+    KEPT+=("3000/8000 仍有监听：$(lumen_uninstall_join ', ' "${still_busy[@]}")")
 }
 
 lumen_uninstall_disable_nginx_configs() {
@@ -104,12 +163,7 @@ lumen_uninstall_disable_nginx_configs() {
     for file in "${candidates[@]}"; do
         printf '         %s\n' "${file}"
     done
-    log_warn "如果不禁用它，域名仍会指向 Lumen；Web 停掉后通常表现为 502，或被其它进程继续接管。"
-
-    if ! confirm "禁用上述 nginx 配置并 reload nginx？"; then
-        KEPT+=("nginx 反代配置保留")
-        return 0
-    fi
+    log_warn "卸载会自动禁用这些配置；原文件会先移入备份目录，避免域名继续指向 Lumen。"
 
     if ! lumen_run_as_root nginx -t >/dev/null 2>&1; then
         log_error "当前 nginx -t 未通过。为避免扩大故障，跳过自动禁用 nginx 配置。"
@@ -267,7 +321,7 @@ cat <<EOF
     1) 停止 systemd 部署的 Lumen 服务（lumen-api / worker / web / tgbot / timers）
     2) 停止 install.sh 拉起的 API / Worker / Web 后台进程（释放 8000/3000）
     3) 停止 PostgreSQL / Redis 容器（释放 5432/6379）
-    4) 询问是否禁用 Lumen nginx 反代配置
+    4) 自动禁用 Lumen nginx 反代配置（移入备份后 reload）
     5) 询问是否删除数据卷（不可恢复）
     6) 询问是否删除 .env 配置
     7) 询问是否删除本地图片存储
@@ -361,6 +415,7 @@ else
     log_warn "未检测到 docker / docker compose v2，跳过停容器步骤。"
     KEPT+=("容器状态未变（无 docker 命令）")
 fi
+lumen_uninstall_remove_lumen_containers
 
 # ---------------------------------------------------------------------------
 # 5. nginx 反代配置（默认保留，用户确认才禁用）。
@@ -540,7 +595,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. 总结
+# 12. 最终确认核心端口已经释放。
+# ---------------------------------------------------------------------------
+log_step "最终端口确认"
+lumen_uninstall_verify_ports_released
+
+# ---------------------------------------------------------------------------
+# 13. 总结
 # ---------------------------------------------------------------------------
 log_step "卸载总结"
 printf '\n  已执行：\n'
