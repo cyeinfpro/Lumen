@@ -158,13 +158,32 @@ lumen_update_require_runtime_cmd() {
         return 0
     fi
 
-    # uv 缺失时自动以 runtime 用户安装到 ~/.local/bin（官方 install 脚本默认路径）。
-    # 这覆盖了首次 update / 历史 in-place 布局自动迁移后 runtime 用户没装过 uv 的场景。
-    # 装完后再次 probe 路径；仍找不到才让上面的硬错误暴露。
+    # uv 缺失时自动安装。systemd 部署经常是 root 触发更新、服务以 lumen
+    # 用户运行；如果部署目录在 /root/Lumen，直接以 lumen 跑官方安装脚本会尝试写
+    # /root/Lumen/.local/bin 并因 /root 权限失败。root 触发时优先安装到
+    # /usr/local/bin 这类系统级 PATH，再让 runtime 用户重新 probe。
     if [ "${cmd}" = "uv" ] && [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
         log_warn "uv 不在 ${LUMEN_UPDATE_RUN_USER} 的 PATH，尝试通过官方脚本自动安装……"
-        if lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc \
-                'curl -LsSf https://astral.sh/uv/install.sh | sh' >&2; then
+        local installed_uv=0
+        if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+            for uv_install_dir in /usr/local/bin /usr/bin; do
+                if [ -d "${uv_install_dir}" ] && [ -w "${uv_install_dir}" ]; then
+                    if env UV_INSTALL_DIR="${uv_install_dir}" sh -lc \
+                            'curl -LsSf https://astral.sh/uv/install.sh | sh' >&2; then
+                        installed_uv=1
+                        break
+                    fi
+                fi
+            done
+        fi
+        if [ "${installed_uv}" -ne 1 ]; then
+            if lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc \
+                    'curl -LsSf https://astral.sh/uv/install.sh | sh' >&2; then
+                installed_uv=1
+            fi
+        fi
+
+        if [ "${installed_uv}" -eq 1 ]; then
             if path="$(lumen_update_runtime_command_path "${cmd}")"; then
                 log_info "uv 自动安装完成：${path}"
                 printf '%s' "${path}"
