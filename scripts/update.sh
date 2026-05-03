@@ -53,22 +53,43 @@ lumen_acquire_lock "${ROOT}" "update.sh"
 log_info "项目根目录：${ROOT}"
 
 # ---------------------------------------------------------------------------
-# 检测 release 布局：current 必须是 symlink
+# 检测 release 布局：current 必须是 symlink。
+# 兼容首次部署 / 旧 in-place 布局：自动调用 migrate_to_releases.sh 完成
+# 迁移，再继续后续 update。migrate 脚本本身是幂等的，重复跑只会快速 noop。
+# 只在 root 执行时尝试自动迁移（迁移涉及 systemctl + chown，需要 root）。
 # ---------------------------------------------------------------------------
+need_migration=0
+if [ ! -L "${ROOT}/current" ] || [ ! -d "${ROOT}/releases" ] || [ ! -d "${ROOT}/shared" ]; then
+    need_migration=1
+fi
+
+if [ "${need_migration}" = "1" ]; then
+    log_warn "检测到旧版 in-place 布局或首次部署 (current/releases/shared 不全)。"
+    if [ "$(id -u)" -ne 0 ]; then
+        log_error "迁移到 release 布局需要 root 权限；请改用 sudo 重跑或先手动执行："
+        log_error "  sudo LUMEN_ROOT='${ROOT}' bash ${SCRIPT_DIR}/migrate_to_releases.sh"
+        exit 1
+    fi
+    if [ ! -x "${SCRIPT_DIR}/migrate_to_releases.sh" ] && [ ! -f "${SCRIPT_DIR}/migrate_to_releases.sh" ]; then
+        log_error "找不到 ${SCRIPT_DIR}/migrate_to_releases.sh，无法自动迁移。"
+        exit 1
+    fi
+    log_info "自动调用 migrate_to_releases.sh 完成布局迁移……"
+    if ! LUMEN_ROOT="${ROOT}" bash "${SCRIPT_DIR}/migrate_to_releases.sh"; then
+        log_error "migrate_to_releases.sh 失败，停止 update。请手动排查后重跑。"
+        exit 1
+    fi
+    # migrate 之后 SCRIPT_DIR 可能被搬移到 ${ROOT}/releases/initial/scripts/，
+    # 但当前进程已经把 lib.sh source 进 shell；ROOT 变量值不变，下面继续走。
+    log_info "迁移完成，继续 update。"
+fi
+
 if [ ! -L "${ROOT}/current" ]; then
-    log_error "${ROOT}/current 不是 symlink，当前还是旧版 in-place 布局。"
-    log_error "请先执行：sudo bash ${SCRIPT_DIR}/migrate_to_releases.sh"
-    log_error "迁移完成后再重跑 update.sh。"
+    log_error "${ROOT}/current 仍不是 symlink；迁移可能未完成，请人工检查。"
     exit 1
 fi
-
-if [ ! -d "${ROOT}/releases" ]; then
-    log_error "${ROOT}/releases 目录不存在；请先跑 migrate_to_releases.sh。"
-    exit 1
-fi
-
-if [ ! -d "${ROOT}/shared" ]; then
-    log_error "${ROOT}/shared 目录不存在；请先跑 migrate_to_releases.sh。"
+if [ ! -d "${ROOT}/releases" ] || [ ! -d "${ROOT}/shared" ]; then
+    log_error "迁移后 ${ROOT}/releases 或 ${ROOT}/shared 仍不存在；请人工检查。"
     exit 1
 fi
 
@@ -377,6 +398,14 @@ if ! lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"; then
 fi
 lumen_step_end link_shared 0
 
+# link_shared 的 mkdir -p 是以 root 身份创建父目录（如 apps/web/.next）。
+# 后续 build_web / deps_python 是以 runtime 用户跑的，会因为这些目录的
+# ownership 写不进 .next/trace 等中间文件。把整个 release 强制 chown 给
+# runtime 用户，幂等。
+if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
+    chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${NEW_RELEASE}" 2>/dev/null || true
+fi
+
 # ---------------------------------------------------------------------------
 # Phase 4: containers
 # 在 release 目录里跑 docker compose up -d --wait。
@@ -388,6 +417,10 @@ log_step "[containers] 确保 PostgreSQL / Redis 容器在运行（docker compos
 
 (
     cd "${NEW_RELEASE}"
+    # release 目录每次 update 都换名字，但容器 / volume 必须固定在 "lumen"
+    # project，否则 compose up 会以为现有容器属于别的 project 而尝试重建，
+    # 引发 container_name conflict + volume 错位丢数据。
+    export COMPOSE_PROJECT_NAME=lumen
     if ! lumen_docker compose up -d --wait; then
         log_error "[containers] 容器启动或健康检查失败"
         exit 1

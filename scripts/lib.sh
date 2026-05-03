@@ -1218,12 +1218,16 @@ lumen_release_link_shared() {
         return 1
     fi
 
-    # 三条软链。第二个字段为 shared 下的物理路径，第三个字段为 release 内目标路径。
+    # 四条软链。第二个字段为 shared 下的物理路径，第三个字段为 release 内目标路径。
     # 用换行分隔，避开复杂关联数组（兼容 bash 3.2 / macOS）。
+    # .env 是 docker compose 启动 PostgreSQL / Redis 时读取的，release 是
+    # git clone 出来的纯净树没有 .env，必须从 shared 链入；否则 containers
+    # phase 会因为 "required variable DB_USER is missing a value" 失败。
     local mapping="
 web-env/.env.local|apps/web/.env.local
 worker-var|apps/worker/var
 web-next-cache|apps/web/.next/cache
+.env|.env
 "
     local line src_rel dst_rel src dst dst_parent
     while IFS= read -r line; do
