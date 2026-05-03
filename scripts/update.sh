@@ -149,6 +149,50 @@ lumen_update_runtime_command_path() {
     printf '%s' "${path}"
 }
 
+lumen_update_ensure_runtime_can_access_path() {
+    local path="$1"
+    local label="${2:-路径}"
+    local dir
+    dir="$(dirname "${path}")"
+
+    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" != "1" ]; then
+        return 0
+    fi
+    if lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" test -r "${path}" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        log_error "${label} 对运行用户 ${LUMEN_UPDATE_RUN_USER} 不可读：${path}"
+        log_error "请用 root 运行 update，或修复部署目录祖先权限。"
+        return 1
+    fi
+
+    log_warn "${label} 对运行用户 ${LUMEN_UPDATE_RUN_USER} 不可读，尝试修复部署目录遍历权限：${path}"
+    chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${dir}" 2>/dev/null || true
+
+    if command -v setfacl >/dev/null 2>&1; then
+        local walk="${dir}"
+        while [ -n "${walk}" ] && [ "${walk}" != "/" ]; do
+            setfacl -m "u:${LUMEN_UPDATE_RUN_USER}:x" "${walk}" 2>/dev/null || true
+            walk="$(dirname "${walk}")"
+        done
+    fi
+
+    if ! lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" test -r "${path}" >/dev/null 2>&1; then
+        local walk="${dir}"
+        while [ -n "${walk}" ] && [ "${walk}" != "/" ]; do
+            chmod o+x "${walk}" 2>/dev/null || true
+            walk="$(dirname "${walk}")"
+        done
+    fi
+
+    if ! lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" test -r "${path}" >/dev/null 2>&1; then
+        log_error "${label} 对运行用户 ${LUMEN_UPDATE_RUN_USER} 仍不可读：${path}"
+        log_error "建议把 Lumen 部署到 /opt/lumen，或手动允许 ${LUMEN_UPDATE_RUN_USER} 遍历部署目录。"
+        return 1
+    fi
+}
+
 lumen_update_require_runtime_cmd() {
     local cmd="$1"
     local hint="$2"
@@ -488,6 +532,10 @@ lumen_step_end link_shared 0
 # runtime 用户，幂等。
 if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
     chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${NEW_RELEASE}" 2>/dev/null || true
+fi
+if ! lumen_update_ensure_runtime_can_access_path "${NEW_RELEASE}/uv.toml" "uv 配置文件"; then
+    lumen_step_end link_shared 1
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
