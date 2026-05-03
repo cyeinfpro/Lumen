@@ -688,6 +688,7 @@ else
     REPO_DIR="${ROOT}"
 fi
 emit_info fetch_release repo_dir "${REPO_DIR}"
+emit_info fetch_release git_pull_env "${LUMEN_UPDATE_GIT_PULL:-<unset>}"
 
 if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
     if ! command -v git >/dev/null 2>&1; then
