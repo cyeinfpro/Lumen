@@ -749,10 +749,10 @@ networks:
 services:
   postgres:
     volumes:
-      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data
+      - ${LUMEN_DB_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data
   redis:
     volumes:
-      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/redis:/data
+      - ${LUMEN_DB_ROOT:-/opt/lumendata}/redis:/data
   api:
     volumes:
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
