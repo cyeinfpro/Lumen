@@ -29,11 +29,13 @@ import {
   getMyUsage,
   getPublicInvite,
   getPublicShare,
+  getWorkflow,
   getSystemSettings,
   listAdminRequestEvents,
   listAdminUsers,
   listAllowedEmails,
   listConversations,
+  listWorkflows,
   listInviteLinks,
   listMessages,
   listMySessions,
@@ -41,6 +43,16 @@ import {
   listSystemPrompts,
   patchConversation,
   patchSystemPrompt,
+  approveModelCandidate,
+  approveProductAnalysis,
+  completeWorkflowDelivery,
+  createAccessoryPreviews,
+  createApparelWorkflow,
+  createModelCandidates,
+  createShowcaseImages,
+  saveAccessorySelection,
+  reopenModelSelection,
+  reviseWorkflowImage,
   removeAllowedEmail,
   revokeInviteLink,
   revokeMySession,
@@ -66,14 +78,24 @@ import {
   type ConversationSummary,
   type ConversationContextStats,
   type CreateConversationIn,
+  type ApproveModelCandidateIn,
+  type AccessoryPreviewIn,
+  type AccessorySelectionIn,
+  type CreateApparelWorkflowIn,
+  type CreateApparelWorkflowOut,
+  type CreateShowcaseImagesIn,
   type ListConversationsOpts,
   type ListMessagesOpts,
   type MessageListResponse,
   type PatchConversationIn,
   type CreateSystemPromptIn,
   type PatchSystemPromptIn,
+  type ModelCandidatesIn,
+  type ReviseWorkflowImageIn,
   type SystemPrompt,
   type SystemPromptListResponse,
+  type WorkflowRun,
+  type WorkflowRunListResponse,
 } from "./apiClient";
 import type {
   AdminUserOut,
@@ -128,6 +150,9 @@ export const qk = {
     ["messages", convId, opts ?? {}] as const,
   conversationContext: (convId: string) =>
     ["conversations", convId, "context"] as const,
+  workflows: (params?: { type?: string; limit?: number }) =>
+    ["workflows", params ?? {}] as const,
+  workflow: (id: string) => ["workflows", id] as const,
 };
 
 // ——— Queries ———
@@ -916,5 +941,243 @@ export function useConversationContextQuery(
     enabled: typeof convId === "string" && convId.length > 0,
     staleTime: 10_000,
     ...options,
+  });
+}
+
+// ——————————————————————————————————————————————————————————————
+// 结构化项目 / 工作流
+// ——————————————————————————————————————————————————————————————
+
+export function useWorkflowsQuery(
+  params: { type?: string; limit?: number } = {},
+  options?: Omit<UseQueryOptions<WorkflowRunListResponse>, "queryKey" | "queryFn">,
+) {
+  return useQuery<WorkflowRunListResponse>({
+    queryKey: qk.workflows(params),
+    queryFn: () => listWorkflows(params),
+    staleTime: 10_000,
+    // 列表里有运行中项目时 30s 兜底刷新；否则不轮询（focus 时仍会刷）
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? [];
+      return items.some((item) => item.status === "running") ? 30_000 : false;
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    ...options,
+  });
+}
+
+export function useWorkflowQuery(
+  id: string | null | undefined,
+  options?: Omit<UseQueryOptions<WorkflowRun>, "queryKey" | "queryFn">,
+) {
+  return useQuery<WorkflowRun>({
+    queryKey: qk.workflow(id ?? ""),
+    queryFn: () => getWorkflow(id as string),
+    enabled: typeof id === "string" && id.length > 0,
+    // running 5s、needs_review 30s 兜底（避免外部状态翻面后用户感知延迟）；其余不轮询
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status === "running") return 5_000;
+      if (status === "needs_review") return 30_000;
+      return false;
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    ...options,
+  });
+}
+
+export function useCreateApparelWorkflowMutation(
+  options?: Omit<
+    UseMutationOptions<CreateApparelWorkflowOut, Error, CreateApparelWorkflowIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<CreateApparelWorkflowOut, Error, CreateApparelWorkflowIn>({
+    mutationFn: createApparelWorkflow,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useApproveProductAnalysisMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<WorkflowRun, Error, Record<string, unknown>>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, Record<string, unknown>>({
+    mutationFn: (corrections) => approveProductAnalysis(workflowId, corrections),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCreateModelCandidatesMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<WorkflowRun, Error, ModelCandidatesIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, ModelCandidatesIn>({
+    mutationFn: (body) => createModelCandidates(workflowId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useApproveModelCandidateMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<
+      WorkflowRun,
+      Error,
+      ApproveModelCandidateIn & { candidate_id: string }
+    >,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<
+    WorkflowRun,
+    Error,
+    ApproveModelCandidateIn & { candidate_id: string }
+  >({
+    mutationFn: ({ candidate_id, ...body }) =>
+      approveModelCandidate(workflowId, candidate_id, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useReopenModelSelectionMutation(
+  workflowId: string,
+  options?: Omit<UseMutationOptions<WorkflowRun, Error, void>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, void>({
+    mutationFn: () => reopenModelSelection(workflowId),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCreateAccessoryPreviewsMutation(
+  workflowId: string,
+  options?: Omit<UseMutationOptions<WorkflowRun, Error, AccessoryPreviewIn>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, AccessoryPreviewIn>({
+    mutationFn: (body) => createAccessoryPreviews(workflowId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useSaveAccessorySelectionMutation(
+  workflowId: string,
+  options?: Omit<UseMutationOptions<WorkflowRun, Error, AccessorySelectionIn>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, AccessorySelectionIn>({
+    mutationFn: (body) => saveAccessorySelection(workflowId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCreateShowcaseImagesMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<WorkflowRun, Error, CreateShowcaseImagesIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, CreateShowcaseImagesIn>({
+    mutationFn: (body) => createShowcaseImages(workflowId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useReviseWorkflowImageMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<
+      WorkflowRun,
+      Error,
+      ReviseWorkflowImageIn & { image_id: string }
+    >,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<
+    WorkflowRun,
+    Error,
+    ReviseWorkflowImageIn & { image_id: string }
+  >({
+    mutationFn: ({ image_id, ...body }) =>
+      reviseWorkflowImage(workflowId, image_id, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCompleteWorkflowDeliveryMutation(
+  workflowId: string,
+  options?: Omit<UseMutationOptions<WorkflowRun, Error, void>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, void>({
+    mutationFn: () => completeWorkflowDelivery(workflowId),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
   });
 }

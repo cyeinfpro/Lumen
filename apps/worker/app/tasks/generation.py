@@ -43,7 +43,10 @@ from ..background_removal import (
 )
 
 from lumen_core.constants import (
+    DEFAULT_CHAT_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
+    CompletionStage,
+    CompletionStatus,
     EV_GEN_ATTACHED,
     EV_GEN_FAILED,
     EV_GEN_PARTIAL_IMAGE,
@@ -59,14 +62,19 @@ from lumen_core.constants import (
     ImageSource,
     MessageStatus,
     RETRY_BACKOFF_SECONDS,
+    Role,
     task_channel,
 )
 from lumen_core.models import (
+    Completion,
     Conversation,
     Generation,
     Image,
     ImageVariant,
     Message,
+    OutboxEvent,
+    WorkflowRun,
+    WorkflowStep,
     new_uuid7,
 )
 from lumen_core.sizing import resolve_size
@@ -1028,6 +1036,186 @@ def _generation_attempt_update(task_id: str, attempt_epoch: int):
         Generation.id == task_id,
         Generation.attempt == attempt_epoch,
     )
+
+
+def _workflow_qc_prompt(
+    *,
+    product_analysis: dict[str, Any],
+    selected_model_brief: dict[str, Any],
+    shot_type: str | None,
+) -> str:
+    must_preserve = product_analysis.get("must_preserve")
+    preserve = (
+        ", ".join(str(x) for x in must_preserve)
+        if isinstance(must_preserve, list)
+        else "garment color, silhouette, neckline, sleeve shape, length, logo, pattern, buttons, pockets, zippers, seams"
+    )
+    return (
+        "Perform automatic visual quality control for one generated ecommerce "
+        "apparel model showcase image. Compare the attached product reference, "
+        "confirmed synthetic model reference, and generated showcase image. "
+        "Check whether the product is still the same garment, whether color and "
+        "structural details are preserved, whether the model identity is close "
+        "to the confirmed candidate, whether there are visible hand, leg, face, "
+        "garment edge, or background artifacts, and whether the image is usable "
+        "as a premium ecommerce asset. Return strict JSON only with keys: "
+        "overall_score, product_fidelity_score, model_consistency_score, "
+        "aesthetic_score, artifact_score, issues, recommendation. Scores are "
+        "0-100. recommendation must be approve or revise. "
+        f"Must preserve: {preserve}. Shot type: {shot_type or 'unknown'}. "
+        f"Confirmed model brief: {selected_model_brief.get('summary') or 'synthetic ecommerce model'}."
+    )
+
+
+async def _maybe_enqueue_workflow_quality_review(
+    *,
+    session: Any,
+    redis: Any,
+    user_id: str,
+    conversation_id: str,
+    generation: Generation,
+    image_id: str,
+) -> None:
+    req = generation.upstream_request if isinstance(generation.upstream_request, dict) else {}
+    if req.get("workflow_type") != "apparel_model_showcase":
+        return
+    if req.get("workflow_step_key") != "showcase_generation":
+        return
+    if req.get("workflow_action") not in {"showcase_image", "revision"}:
+        return
+    run_id = req.get("workflow_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+
+    run = (
+        await session.execute(
+            select(WorkflowRun).where(
+                WorkflowRun.id == run_id,
+                WorkflowRun.user_id == user_id,
+                WorkflowRun.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        return
+    quality_step = (
+        await session.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run.id,
+                WorkflowStep.step_key == "quality_review",
+            )
+        )
+    ).scalar_one_or_none()
+    showcase_step = (
+        await session.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run.id,
+                WorkflowStep.step_key == "showcase_generation",
+            )
+        )
+    ).scalar_one_or_none()
+    product_step = (
+        await session.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run.id,
+                WorkflowStep.step_key == "product_analysis",
+            )
+        )
+    ).scalar_one_or_none()
+    if quality_step is None or showcase_step is None or product_step is None:
+        return
+
+    output_json = dict(quality_step.output_json or {})
+    review_tasks = output_json.get("review_tasks")
+    if not isinstance(review_tasks, dict):
+        review_tasks = {}
+    if image_id in review_tasks:
+        return
+
+    candidate_id = req.get("workflow_candidate_id")
+    candidate_ref_id: str | None = None
+    selected_model_brief: dict[str, Any] = {}
+    if isinstance(candidate_id, str):
+        from lumen_core.models import ModelCandidate
+
+        candidate = await session.get(ModelCandidate, candidate_id)
+        if candidate is not None:
+            candidate_ref_id = candidate.contact_sheet_image_id
+            selected_model_brief = dict(candidate.model_brief_json or {})
+
+    attachment_ids = [
+        image_id for image_id in (run.product_image_ids or []) if isinstance(image_id, str)
+    ]
+    if candidate_ref_id:
+        attachment_ids.append(candidate_ref_id)
+    attachment_ids.append(image_id)
+    attachment_ids = list(dict.fromkeys(attachment_ids))
+
+    user_msg = Message(
+        conversation_id=conversation_id,
+        role=Role.USER.value,
+        content={
+            "text": _workflow_qc_prompt(
+                product_analysis=product_step.output_json or {},
+                selected_model_brief=selected_model_brief,
+                shot_type=str(req.get("workflow_shot_type") or req.get("workflow_revision_scope") or ""),
+            ),
+            "attachments": [{"image_id": iid} for iid in attachment_ids],
+            "workflow_run_id": run.id,
+            "workflow_step_key": "quality_review",
+            "workflow_review_image_id": image_id,
+        },
+    )
+    session.add(user_msg)
+    await session.flush()
+    assistant_msg = Message(
+        conversation_id=conversation_id,
+        role=Role.ASSISTANT.value,
+        content={},
+        parent_message_id=user_msg.id,
+        intent="vision_qa",
+        status=MessageStatus.PENDING.value,
+    )
+    session.add(assistant_msg)
+    await session.flush()
+    completion = Completion(
+        message_id=assistant_msg.id,
+        user_id=user_id,
+        model=DEFAULT_CHAT_MODEL,
+        input_image_ids=attachment_ids,
+        text="",
+        status=CompletionStatus.QUEUED.value,
+        progress_stage=CompletionStage.QUEUED.value,
+        attempt=0,
+        idempotency_key=f"wf:{run.id[:21]}:qc:{image_id[:8]}",
+        upstream_request={
+            "workflow_run_id": run.id,
+            "workflow_type": "apparel_model_showcase",
+            "workflow_step_key": "quality_review",
+            "workflow_action": "quality_review",
+            "workflow_review_image_id": image_id,
+        },
+    )
+    session.add(completion)
+    await session.flush()
+    payload = {"task_id": completion.id, "user_id": user_id, "kind": "completion"}
+    session.add(OutboxEvent(kind="completion", payload=payload, published_at=None))
+
+    review_tasks[image_id] = completion.id
+    output_json["review_tasks"] = review_tasks
+    output_json["review_task_count"] = len(review_tasks)
+    quality_step.output_json = output_json
+    quality_step.task_ids = list(dict.fromkeys([*(quality_step.task_ids or []), completion.id]))
+    quality_step.image_ids = list(dict.fromkeys([*(quality_step.image_ids or []), image_id]))
+    quality_step.status = "running"
+    run.current_step = "quality_review"
+    run.status = "running"
+
+    # Do not enqueue directly here: this function runs inside the image success
+    # DB transaction, so a fast worker could observe the completion before commit.
+    # The outbox row above is committed atomically with the workflow state and
+    # the publisher will enqueue it shortly after.
+    _ = redis
 
 
 def _primary_input_image_id_valid(
@@ -2821,6 +3009,15 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     content["images"] = images_list
                     msg.content = content
                     msg.status = MessageStatus.SUCCEEDED
+
+                await _maybe_enqueue_workflow_quality_review(
+                    session=session,
+                    redis=redis,
+                    user_id=user_id,
+                    conversation_id=conversation_id_for_title,
+                    generation=gen,
+                    image_id=image_id,
+                )
 
                 await session.commit()
 

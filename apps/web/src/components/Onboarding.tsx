@@ -1,11 +1,13 @@
 "use client";
 
 import { motion } from "framer-motion";
+import Link from "next/link";
 import {
   Aperture,
   ImageDown,
   Keyboard,
   Layers3,
+  Shirt,
   Sparkles,
   Upload,
   Wand2,
@@ -119,6 +121,38 @@ export function Onboarding({
       >
         选一个起点，或直接写下你想要的画面。
       </motion.p>
+
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: 0.18 }}
+        className="mt-5 w-full max-w-4xl"
+      >
+        <Link
+          href="/projects/apparel-model-showcase/new"
+          className={cn(
+            "group flex min-h-14 items-center justify-between gap-3 rounded-lg border border-[var(--border-amber)]/45",
+            "bg-[var(--accent-soft)] px-4 text-left transition-colors hover:bg-[var(--accent-soft)]/80",
+          )}
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--accent)] text-black">
+              <Shirt className="h-4 w-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-[var(--fg-0)]">
+                服饰模特展示图
+              </span>
+              <span className="mt-0.5 block text-xs text-[var(--fg-2)]">
+                上传商品图，先确认模特，再生成电商展示图
+              </span>
+            </span>
+          </span>
+          <span className="text-xs font-medium text-[var(--amber-300)]">
+            创建项目
+          </span>
+        </Link>
+      </motion.div>
 
       <div className="mt-5 sm:mt-7 grid w-full max-w-4xl grid-cols-1 gap-2.5 sm:gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {PRESETS.map((preset, index) => (

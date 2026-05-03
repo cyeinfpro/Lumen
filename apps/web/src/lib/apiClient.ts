@@ -263,6 +263,159 @@ export interface BackendImageMeta {
   metadata_jsonb?: Record<string, unknown> | null;
 }
 
+export interface WorkflowStep {
+  id: string;
+  workflow_run_id: string;
+  step_key: string;
+  status: string;
+  input_json: Record<string, unknown>;
+  output_json: Record<string, unknown>;
+  task_ids: string[];
+  image_ids: string[];
+  approved_at: string | null;
+  approved_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelCandidate {
+  id: string;
+  workflow_run_id: string;
+  candidate_index: number;
+  portrait_image_id: string | null;
+  front_image_id: string | null;
+  side_image_id: string | null;
+  back_image_id: string | null;
+  contact_sheet_image_id: string | null;
+  model_brief_json: Record<string, unknown>;
+  task_ids: string[];
+  status: string;
+  selected_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QualityReport {
+  id: string;
+  workflow_run_id: string;
+  image_id: string;
+  overall_score: number;
+  product_fidelity_score: number;
+  model_consistency_score: number;
+  aesthetic_score: number;
+  artifact_score: number;
+  issues_json: Array<Record<string, unknown>>;
+  recommendation: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowRun {
+  id: string;
+  conversation_id: string | null;
+  user_id: string;
+  type: string;
+  status: string;
+  title: string;
+  user_prompt: string;
+  product_image_ids: string[];
+  current_step: string;
+  quality_mode: string;
+  metadata_jsonb: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  steps: WorkflowStep[];
+  model_candidates: ModelCandidate[];
+  quality_reports: QualityReport[];
+  product_images: BackendImageMeta[];
+  generated_images: BackendImageMeta[];
+  generations: BackendGeneration[];
+}
+
+export interface WorkflowRunListItem {
+  id: string;
+  conversation_id: string | null;
+  type: string;
+  status: string;
+  title: string;
+  user_prompt: string;
+  product_image_ids: string[];
+  current_step: string;
+  quality_mode: string;
+  metadata_jsonb: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  output_count: number;
+  next_action: string;
+}
+
+export interface WorkflowRunListResponse {
+  items: WorkflowRunListItem[];
+  next_cursor?: string | null;
+}
+
+export interface CreateApparelWorkflowIn {
+  conversation_id?: string | null;
+  product_image_ids: string[];
+  user_prompt: string;
+  quality_mode?: "standard" | "premium";
+  title?: string | null;
+}
+
+export interface CreateApparelWorkflowOut {
+  workflow_run_id: string;
+  status: string;
+  current_step: string;
+}
+
+export interface ModelCandidatesIn {
+  candidate_count?: 3;
+  style_prompt: string;
+  avoid?: string[];
+}
+
+export interface AccessoryPlan {
+  enabled: boolean;
+  items: string[];
+  strength: "subtle" | "medium" | "strong";
+}
+
+export interface ApproveModelCandidateIn {
+  adjustments?: string;
+  accessory_plan: AccessoryPlan;
+  selected_accessory_image_id?: string | null;
+}
+
+export interface AccessoryPreviewIn {
+  candidate_id: string;
+  accessory_plan: AccessoryPlan;
+  style_prompt?: string;
+}
+
+export interface AccessorySelectionIn {
+  selected_accessory_image_id: string | null;
+}
+
+export interface CreateShowcaseImagesIn {
+  template:
+    | "white_ecommerce"
+    | "premium_studio"
+    | "urban_commute"
+    | "lifestyle"
+    | "social_seed";
+  shot_plan: Array<
+    "front_full_body" | "natural_pose" | "detail_half_body" | "side_or_back"
+  >;
+  aspect_ratio: "4:5" | "3:4" | "1:1" | "16:9" | "9:16";
+  final_quality: "standard" | "high" | "4k";
+  output_count: number;
+}
+
+export interface ReviseWorkflowImageIn {
+  instruction: string;
+  scope: "full_image" | "local_repair";
+}
+
 export interface MessageListResponse {
   items: BackendMessage[];
   next_cursor?: string | null;
@@ -305,6 +458,137 @@ export function getConversationContext(
   convId: string,
 ): Promise<ConversationContextStats> {
   return apiFetch<ConversationContextStats>(`/conversations/${convId}/context`);
+}
+
+// —— 结构化项目 / 工作流 ——
+
+export function listWorkflows(
+  opts: { type?: string; limit?: number } = {},
+): Promise<WorkflowRunListResponse> {
+  const qs = new URLSearchParams();
+  if (opts.type) qs.set("type", opts.type);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<WorkflowRunListResponse>(`/workflows${suffix}`);
+}
+
+export function getWorkflow(id: string): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${id}`);
+}
+
+export function createApparelWorkflow(
+  body: CreateApparelWorkflowIn,
+): Promise<CreateApparelWorkflowOut> {
+  return apiFetch<CreateApparelWorkflowOut>("/workflows/apparel-model-showcase", {
+    method: "POST",
+    body: JSON.stringify({
+      quality_mode: "premium",
+      ...body,
+    }),
+  });
+}
+
+export function approveProductAnalysis(
+  workflowId: string,
+  corrections: Record<string, unknown> = {},
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/steps/product-analysis/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ corrections }),
+    },
+  );
+}
+
+export function createModelCandidates(
+  workflowId: string,
+  body: ModelCandidatesIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/model-candidates`, {
+    method: "POST",
+    body: JSON.stringify({
+      candidate_count: 3,
+      avoid: [],
+      ...body,
+    }),
+  });
+}
+
+export function approveModelCandidate(
+  workflowId: string,
+  candidateId: string,
+  body: ApproveModelCandidateIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/model-candidates/${candidateId}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        adjustments: "",
+        ...body,
+      }),
+    },
+  );
+}
+
+export function reopenModelSelection(workflowId: string): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/model-candidates/reopen`, {
+    method: "POST",
+  });
+}
+
+export function createAccessoryPreviews(
+  workflowId: string,
+  body: AccessoryPreviewIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/model-candidates/accessory-previews`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function saveAccessorySelection(
+  workflowId: string,
+  body: AccessorySelectionIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/model-candidates/accessory-selection`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function createShowcaseImages(
+  workflowId: string,
+  body: CreateShowcaseImagesIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/showcase-images`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function reviseWorkflowImage(
+  workflowId: string,
+  imageId: string,
+  body: ReviseWorkflowImageIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/images/${imageId}/revise`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function completeWorkflowDelivery(workflowId: string): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/delivery/complete`, {
+    method: "POST",
+  });
 }
 
 // 手动压缩会话上下文（P0-3）
@@ -987,8 +1271,8 @@ export interface UpdateStepRecord {
 export interface ReleaseInfo {
   id: string;
   created_at: string;
-  sha: string;
-  branch?: string;
+  sha?: string | null;
+  branch?: string | null;
   alembic_head_expected?: string | null;
   alembic_head_applied?: string | null;
   is_current: boolean;
