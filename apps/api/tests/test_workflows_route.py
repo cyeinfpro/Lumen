@@ -119,6 +119,28 @@ def test_workflow_image_params_can_use_fast_high_quality_for_showcase() -> None:
     assert params.fixed_size == "1600x2000"
 
 
+def test_showcase_refs_use_product_images_when_no_accessory_preview() -> None:
+    refs = workflows._showcase_reference_image_ids(  # noqa: SLF001
+        product_image_ids=["product-1", "product-2"],
+        model_image_id="model-1",
+        selected_accessory_image_id=None,
+    )
+
+    assert refs == ["product-1", "product-2", "model-1"]
+
+
+def test_showcase_refs_use_accessory_preview_instead_of_product_images() -> None:
+    refs = workflows._showcase_reference_image_ids(  # noqa: SLF001
+        product_image_ids=["product-1", "product-2"],
+        model_image_id="model-1",
+        selected_accessory_image_id="accessory-preview-1",
+    )
+
+    assert refs == ["accessory-preview-1", "model-1"]
+    assert "product-1" not in refs
+    assert "product-2" not in refs
+
+
 def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -> None:
     prompt = workflows._candidate_prompt(  # noqa: SLF001
         style_prompt="premium natural model",
@@ -164,6 +186,9 @@ def test_age_direction_adapts_child_model_pose_and_expression() -> None:
     assert "non-adultized" in candidate_prompt
     assert "已确认模特参考图" in showcase_prompt
     assert "自然生活场景" in showcase_prompt
+    assert "同一张脸" in showcase_prompt
+    assert "身材比例" in showcase_prompt
+    assert "肢体长度" in showcase_prompt
 
 
 def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
@@ -191,12 +216,64 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "请根据商品图和已确认模特参考图" in prompt
     assert "真实自然的真人服饰电商穿搭图" in prompt
     assert "参考方向：咖啡馆窗边，自然走动回头，高级灰棚拍" in prompt
-    assert "正面" in prompt
-    assert "侧面" in prompt
+    assert "超写实" in prompt
+    assert "自然商业摄影风格" in prompt
+    assert "细节清晰" in prompt
+    assert "适合电商主图" in prompt
+    assert "主图" in prompt
+    assert "standing front-facing" in prompt
     assert "无文字、无水印" in prompt
     assert "lapel shape" not in prompt
     assert "small earrings" not in prompt
-    assert len(prompt) < 160
+    assert len(prompt) < 700
+
+
+def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "8岁儿童，活泼自然", "height_cm": 128},
+    )
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": ["颜色", "版型"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="lifestyle",
+        shot_type="natural_pose",
+        final_quality="high",
+    )
+
+    assert "同一张脸" in prompt
+    assert "发型" in prompt
+    assert "身高约 128cm" in prompt
+    assert "身材比例" in prompt
+    assert "肢体长度" in prompt
+    assert "腿长" in prompt
+    assert "不要换人" in prompt
+
+
+def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "clean commute model", "height_cm": 168},
+    )
+    prompts = {
+        shot: workflows._showcase_prompt(  # noqa: SLF001
+            product_analysis={},
+            selected_candidate=candidate,  # type: ignore[arg-type]
+            accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+            template="premium_studio",
+            shot_type=shot,
+            final_quality="high",
+        )
+        for shot in workflows.DEFAULT_SHOT_PLAN
+    }
+
+    assert "standing front-facing" in prompts["front_full_body"]
+    assert "natural walking or turning" in prompts["natural_pose"]
+    assert "half-body detail pose" in prompts["detail_half_body"]
+    assert "side or back three-quarter pose" in prompts["side_or_back"]
+    assert len(set(prompts.values())) == len(workflows.DEFAULT_SHOT_PLAN)
 
 
 def test_accessory_preview_prompt_is_flat_lay_product_and_accessories_only() -> None:
