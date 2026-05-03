@@ -523,11 +523,14 @@ lumen_try_acquire_lock() {
     fi
 
     if command -v flock >/dev/null 2>&1; then
-        if ! exec 9>"${lock_file}" 2>/dev/null; then
+        # 注意：`exec FD>file 2>/dev/null` 会把当前 shell 的 stderr 永久重定向到
+        # /dev/null（exec 无命令时所有 redirect 都作用于当前 shell）。改为不带
+        # 2>/dev/null，让 exec 失败时错误正常显示，且不污染主 shell 的 fd 2。
+        if ! exec 9>"${lock_file}"; then
             return 1
         fi
         if ! flock -n 9 2>/dev/null; then
-            exec 9>&- 2>/dev/null || true
+            exec 9>&- || true
             return 1
         fi
         LUMEN_LOCK_KIND="flock"
@@ -2183,19 +2186,22 @@ lumen_with_lock() {
     mkdir -p "${lock_dir}" 2>/dev/null || true
 
     if command -v flock >/dev/null 2>&1; then
-        if ! exec 8>"${lock_file}" 2>/dev/null; then
+        # 历史 bug：`exec 8>file 2>/dev/null` 会把整个 shell 的 stderr 永久指向
+        # /dev/null（exec 无命令时所有 redirect 作用于当前 shell），后续 do_update
+        # 的 log_warn / log_error 全部丢失。已修复为不重定向 fd 2。
+        if ! exec 8>"${lock_file}"; then
             log_error "无法打开更新锁文件：${lock_file}"
             exit 1
         fi
         if ! flock -n 8; then
             printf '{"error":{"code":"system_operation_busy","operation_id":"%s","retry_after":%s}}\n' \
                 "${op_id}" "${ttl}"
-            exec 8>&- 2>/dev/null || true
+            exec 8>&- || true
             exit 75
         fi
         "$@" || rc=$?
         flock -u 8 2>/dev/null || true
-        exec 8>&- 2>/dev/null || true
+        exec 8>&- || true
         return "${rc}"
     fi
 
