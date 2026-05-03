@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +31,6 @@ from lumen_core.providers import (
 from lumen_core.runtime_settings import get_spec, validate_providers
 from lumen_core.schemas import ProviderProxyIn
 
-from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..proxy_pool import (
@@ -42,6 +41,7 @@ from ..proxy_pool import (
 )
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ._admin_common import admin_http as _http, write_admin_audit
 from .providers import _parse_config, _read_providers
 
 logger = logging.getLogger(__name__)
@@ -75,10 +75,6 @@ class ProxyTestOut(BaseModel):
     latency_ms: float
     ok: bool
     error: str | None = None
-
-
-def _http(code: str, msg: str, http: int = 400) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
 
 
 async def _resolve_test_target(db: AsyncSession) -> str:
@@ -246,12 +242,11 @@ async def update_proxies(
     else:
         existing.value = validated
 
-    await write_audit(
+    await write_admin_audit(
         db,
+        request,
+        admin,
         event_type="admin.proxies.update",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={"count": len(new_proxies), "names": sorted(seen_names)},
     )
     await db.commit()

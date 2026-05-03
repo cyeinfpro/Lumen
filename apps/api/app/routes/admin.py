@@ -12,7 +12,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import and_, desc, func, or_, select
@@ -39,10 +39,11 @@ from lumen_core.schemas import AdminUserOut, AllowedEmailOut
 from lumen_core.utils import ensure_utc
 
 from ..arq_pool import get_arq_pool
-from ..audit import hash_email, request_ip_hash, write_audit
+from ..audit import hash_email
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..redis_client import get_redis
+from ._admin_common import admin_http as _http, write_admin_audit
 from .images import (
     ALLOWED_VARIANTS,
     DISPLAY_VARIANT,
@@ -55,10 +56,6 @@ from .images import (
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger(__name__)
-
-
-def _http(code: str, msg: str, http: int) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
 
 
 _CONTEXT_METRIC_FIELDS = (
@@ -773,12 +770,11 @@ async def add_allowed_email(
     ae = AllowedEmail(email=email, invited_by=admin.id)
     db.add(ae)
     await db.flush()
-    await write_audit(
+    await write_admin_audit(
         db,
+        request,
+        admin,
         event_type="admin.allowed_email.add",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={"email_hash": hash_email(email), "id": ae.id},
     )
     await db.commit()
@@ -807,12 +803,11 @@ async def delete_allowed_email(
     ).scalar_one_or_none()
     if not ae:
         raise _http("not_found", "allowed email not found", 404)
-    await write_audit(
+    await write_admin_audit(
         db,
+        request,
+        admin,
         event_type="admin.allowed_email.delete",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={"email_hash": hash_email(ae.email), "id": ae.id},
     )
     await db.delete(ae)
@@ -1553,12 +1548,11 @@ async def retry_dlq(
         except Exception as exc:  # noqa: BLE001
             row.retry_count = (row.retry_count or 0) + 1
             row.error_message = f"retry failed: {exc!r}"
-            await write_audit(
+            await write_admin_audit(
                 db,
+                request,
+                admin,
                 event_type="admin.dlq.retry.fail",
-                user_id=admin.id,
-                actor_email_hash=hash_email(admin.email),
-                actor_ip_hash=request_ip_hash(request),
                 details={"dlq_id": dlq_id, "task_id": task_id, "error": str(exc)},
             )
             await db.commit()
@@ -1566,12 +1560,11 @@ async def retry_dlq(
 
     row.retry_count = (row.retry_count or 0) + 1
     row.resolved_at = datetime.now(timezone.utc)
-    await write_audit(
+    await write_admin_audit(
         db,
+        request,
+        admin,
         event_type="admin.dlq.retry",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={
             "dlq_id": dlq_id,
             "event_type": row.event_type,

@@ -26,14 +26,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..audit import hash_email, request_ip_hash, write_audit_isolated
-from ..db import engine, get_db
+from ..db import get_db
 from ..deps import AdminUser, verify_csrf
+from ._admin_common import (
+    admin_http as _http,
+    cleanup_marker_when_done,
+    write_admin_audit_isolated,
+)
 from .admin_update import (
     ReleaseInfo,
     _list_releases,
@@ -45,7 +49,6 @@ from .admin_update import (
     _run_systemd_command,
     _systemd_run_available,
     _systemd_run_inline_attempts,
-    _unit_is_running,
     _update_log_path,
     _update_marker_path,
     _write_marker,
@@ -53,13 +56,6 @@ from .admin_update import (
 
 
 router = APIRouter(prefix="/admin/release", tags=["admin"])
-
-
-def _http(code: str, msg: str, http: int = 400, details: dict | None = None) -> HTTPException:
-    err: dict = {"code": code, "message": msg}
-    if details:
-        err["details"] = details
-    return HTTPException(status_code=http, detail={"error": err})
 
 
 # ---------------------------------------------------------------------------
@@ -328,14 +324,11 @@ def _start_rollback_subprocess(
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
-    await asyncio.to_thread(proc.wait)
-    pid = int(proc.pid)
-    marker = _read_marker()
-    if marker and marker.pid == pid:
-        try:
-            _update_marker_path().unlink()
-        except OSError:
-            pass
+    await cleanup_marker_when_done(
+        proc,
+        read_marker_fn=_read_marker,
+        marker_path_fn=_update_marker_path,
+    )
 
 
 @router.post(
@@ -435,11 +428,10 @@ async def rollback_release(
         (r.id for r in releases if r.is_current),
         None,
     )
-    await write_audit_isolated(
+    await write_admin_audit_isolated(
+        request,
+        admin,
         event_type="admin.release.rollback",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={
             "release_id": target_id,
             "previous_id": previous_id,
@@ -474,11 +466,3 @@ __all__ = [
     "_build_rollback_script",
     "_read_db_alembic_head",
 ]
-
-
-# Reference (silences unused-import warnings when only some helpers are needed
-# at call time). These come from admin_update and are deliberately re-exported
-# for tests / future routes that want to share the same swap mechanics.
-_ = (
-    _unit_is_running,
-)
