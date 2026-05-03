@@ -1975,34 +1975,37 @@ function ResetEditButton({
 }
 
 // ——— Lumen 一键更新：phase 中文映射 + 默认顺序 ———
-// 后端契约里 phase 是开放枚举；前端列出"标准 12 phase + rollback"做骨架。
+// 后端契约里 phase 是开放枚举；前端列出标准 Docker 更新 phase 做骨架。
 // 顺序对齐 update.sh 实际执行顺序；rollback 默认隐藏，只在 status.phases 出现时显示。
 const PHASE_ORDER: readonly string[] = [
-  "prepare",
-  "fetch",
-  "link_shared",
-  "containers",
-  "deps_python",
+  "lock",
+  "check",
+  "preflight",
+  "backup_preflight",
+  "fetch_release",
+  "set_image_tag",
+  "pull_images",
+  "start_infra",
   "migrate_db",
-  "deps_node",
-  "build_web",
   "switch",
-  "restart",
-  "health_post",
+  "restart_services",
+  "health_check",
   "cleanup",
 ];
 
 const PHASE_LABEL: Record<string, string> = {
-  prepare: "准备",
-  fetch: "拉代码",
-  link_shared: "链接共享",
-  containers: "容器",
-  deps_python: "Python 依赖",
+  lock: "获取锁",
+  check: "检查版本",
+  preflight: "预检查",
+  backup_preflight: "更新前备份",
+  fetch_release: "准备发布目录",
+  set_image_tag: "写入镜像标签",
+  pull_images: "拉取镜像",
+  start_infra: "启动基础设施",
   migrate_db: "数据库迁移",
-  deps_node: "Node 依赖",
-  build_web: "前端构建",
   switch: "原子切换",
-  restart: "重启服务",
+  restart_services: "重启服务",
+  health_check: "健康检查",
   health_post: "健康检查",
   cleanup: "清理旧版本",
   rollback: "回滚",

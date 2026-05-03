@@ -45,6 +45,14 @@ log_step() {
         "${LUMEN_C_BOLD}" "$*" "${LUMEN_C_RESET}"
 }
 
+# 默认运维路径与 Compose project name（§11.4 死规则：project name 必须固定）。
+# 调用方可通过环境变量覆盖；fallback 全部走 /opt/lumendata 与 /opt/lumen 约定。
+: "${LUMEN_DATA_ROOT:=/opt/lumendata}"
+: "${LUMEN_BACKUP_ROOT:=$LUMEN_DATA_ROOT/backup}"
+: "${LUMEN_DEPLOY_ROOT:=/opt/lumen}"
+: "${LUMEN_COMPOSE_PROJECT:=lumen}"
+export LUMEN_DATA_ROOT LUMEN_BACKUP_ROOT LUMEN_DEPLOY_ROOT LUMEN_COMPOSE_PROJECT
+
 lumen_read_dotenv_value() {
     local key="$1"
     local file="$2"
@@ -126,6 +134,142 @@ PY
     log_warn "${file} 缺少 DB_USER/DB_PASSWORD/DB_NAME，已从 DATABASE_URL 补全供 docker compose 使用。"
 }
 
+lumen_migrate_container_urls() {
+    local file="$1"
+    local mode="${2:---dry-run}"
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "lumen_migrate_container_urls 需要 python3 来安全解析 URL。"
+        return 1
+    fi
+    if [ ! -f "${file}" ]; then
+        log_error "${file} 不存在，无法迁移容器内 URL。"
+        return 1
+    fi
+    if [ "${mode}" != "--dry-run" ] && [ "${mode}" != "--apply" ]; then
+        log_error "lumen_migrate_container_urls: mode 必须是 --dry-run 或 --apply。"
+        return 1
+    fi
+    python3 - "${file}" "${mode}" <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+import difflib
+import sys
+import time
+
+path = Path(sys.argv[1])
+mode = sys.argv[2]
+apply = mode == "--apply"
+allowed = {"DATABASE_URL", "REDIS_URL", "LUMEN_BACKEND_URL", "LUMEN_API_BASE"}
+local_keep_keys = {
+    "PUBLIC_BASE_URL",
+    "CORS_ALLOW_ORIGINS",
+    "NEXT_PUBLIC_API_BASE",
+    "POSTGRES_BIND_HOST",
+    "REDIS_BIND_HOST",
+    "API_BIND_HOST",
+    "WEB_BIND_HOST",
+    "NO_PROXY",
+    "no_proxy",
+}
+
+original = path.read_text(encoding="utf-8").splitlines()
+changed = []
+diff_before_after: list[tuple[str, str, str]] = []
+
+def split_assignment(line: str) -> tuple[str, str, str, str] | None:
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        return None
+    key, value = line.split("=", 1)
+    key = key.strip()
+    leading = ""
+    quote = ""
+    trailing = ""
+    raw = value.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        quote = raw[0]
+        raw = raw[1:-1]
+    return key, raw, quote, leading + key
+
+def replace_netloc(value: str, host: str, port: int) -> str:
+    parts = urlsplit(value)
+    if not parts.scheme or not parts.netloc:
+        return value
+    if parts.hostname not in {"localhost", "127.0.0.1"}:
+        return value
+    auth = parts.netloc.rsplit("@", 1)[0] + "@" if "@" in parts.netloc else ""
+    netloc = f"{auth}{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+def quote_value(value: str, quote: str) -> str:
+    return f"{quote}{value}{quote}" if quote else value
+
+for line in original:
+    parsed = split_assignment(line)
+    if parsed is None:
+        changed.append(line)
+        continue
+    key, value, quote, prefix = parsed
+    new_value = value
+    if key == "DATABASE_URL":
+        new_value = replace_netloc(value, "postgres", 5432)
+    elif key == "REDIS_URL":
+        new_value = replace_netloc(value, "redis", 6379)
+    elif key in {"LUMEN_BACKEND_URL", "LUMEN_API_BASE"} and value in {
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    }:
+        new_value = "http://api:8000"
+    if new_value != value:
+        if key not in allowed:
+            raise SystemExit(f"refusing to modify non-allowlisted key: {key}")
+        diff_before_after.append((key, value, new_value))
+        changed.append(f"{prefix}={quote_value(new_value, quote)}")
+    else:
+        changed.append(line)
+
+residual_errors: list[str] = []
+for line in changed:
+    parsed = split_assignment(line)
+    if parsed is None:
+        continue
+    key, value, _quote, _prefix = parsed
+    if "localhost" not in value and "127.0.0.1" not in value:
+        continue
+    if key in allowed:
+        raise SystemExit(f"{key} still points at localhost after migration")
+    if key not in local_keep_keys:
+        residual_errors.append(
+            f"{key} still contains localhost/127.0.0.1; review manually or add it to the explicit keep list"
+        )
+if residual_errors:
+    raise SystemExit("\n".join(residual_errors))
+
+if not diff_before_after:
+    print("no container URL changes needed")
+    raise SystemExit(0)
+
+for key, before, after in diff_before_after:
+    print(f"{key}: {before} -> {after}")
+diff = difflib.unified_diff(
+    [line + "\n" for line in original],
+    [line + "\n" for line in changed],
+    fromfile=str(path),
+    tofile=f"{path} (container-url-migrated)",
+)
+print("".join(diff), end="")
+
+if apply:
+    backup = path.with_name(path.name + f".bak.{time.strftime('%Y%m%d%H%M%S', time.gmtime())}")
+    backup.write_text("\n".join(original) + "\n", encoding="utf-8")
+    path.write_text("\n".join(changed) + "\n", encoding="utf-8")
+    print(f"applied; backup={backup}")
+else:
+    print("dry-run only; rerun with --apply to write changes")
+PY
+}
+
 lumen_release_ensure_shared_env() {
     local root="$1"
     local shared_env="${root}/shared/.env"
@@ -182,7 +326,7 @@ LUMEN_CURRENT_PHASE_START_MS=""
 
 # 所有合法的 phase 枚举（与 update.sh 严格对齐）。
 # rollback 是异常分支，不计入正常流程，但允许在 begin/end 中使用。
-LUMEN_VALID_PHASES="prepare fetch link_shared containers deps_python migrate_db deps_node build_web switch restart health_post cleanup rollback"
+LUMEN_VALID_PHASES="lock check preflight backup_preflight fetch_release set_image_tag pull_images start_infra migrate_db switch restart_services health_check cleanup rollback prepare fetch link_shared containers deps_python deps_node build_web health_post"
 
 lumen_iso_now() {
     # GNU date / BSD date 都支持 -u +%FT%TZ
@@ -1528,4 +1672,245 @@ lumen_release_cleanup_old() {
         log_info "release cleanup：删除 ${removed} 个旧 release，保留 ${keep} 个。"
     fi
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# Docker Compose 包装与容器化健康检查
+# 详见 docs/docker-full-stack-cutover-plan.md §11.4 / §13 / §17.5-§17.7。
+# ---------------------------------------------------------------------------
+
+# 返回固定的 Compose project name 常量（§11.4 死规则）。
+lumen_compose_project_name() {
+    printf '%s' "${LUMEN_COMPOSE_PROJECT:-lumen}"
+}
+
+# 包装 docker compose；自动注入 COMPOSE_PROJECT_NAME，并探测 v2 可用性。
+lumen_compose() {
+    if ! docker compose version >/dev/null 2>&1; then
+        log_error "未检测到 docker compose v2，请安装/升级到 Docker Compose v2 后重试。"
+        return 1
+    fi
+    COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT:-lumen}" \
+        lumen_docker compose --ansi=never "$@"
+}
+
+# 在指定目录执行 lumen_compose（release 切换时用）。
+lumen_compose_in() {
+    local dir="$1"
+    shift
+    ( cd "${dir}" && lumen_compose "$@" )
+}
+
+# 轮询 HTTP 健康端点；用法：lumen_health_http <url> <max_seconds> <interval_seconds>。
+lumen_health_http() {
+    local url="$1"
+    local max_seconds="${2:-30}"
+    local interval="${3:-2}"
+    [ "${interval}" -gt 0 ] || interval=1
+    local attempts=$(( max_seconds / interval ))
+    [ "${attempts}" -gt 0 ] || attempts=1
+    local _i
+    for _i in $(seq 1 "${attempts}"); do
+        if curl --noproxy '*' -fsS --max-time 5 -o /dev/null "${url}" 2>/dev/null; then
+            return 0
+        fi
+        sleep "${interval}"
+    done
+    return 1
+}
+
+# 检查 compose 服务是否 running 且（如有 healthcheck）healthy；变长服务名。
+lumen_health_compose() {
+    local attempts="${LUMEN_HEALTH_COMPOSE_ATTEMPTS:-60}"
+    local interval="${LUMEN_HEALTH_COMPOSE_INTERVAL:-2}"
+    local proj="${LUMEN_COMPOSE_PROJECT:-lumen}"
+    local svc cid status _i ok
+    for svc in "$@"; do
+        cid=""
+        ok=0
+        for _i in $(seq 1 "${attempts}"); do
+            cid="$(lumen_compose ps --status running --quiet "${svc}" 2>/dev/null | head -n1)"
+            if [ -z "${cid}" ]; then
+                sleep "${interval}"
+                continue
+            fi
+            status="$(lumen_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${proj}-${svc}" 2>/dev/null || true)"
+            if [ -z "${status}" ]; then
+                # 容器可能用其它命名（service-1 等）；按容器 id 再查一次。
+                status="$(lumen_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${cid}" 2>/dev/null || true)"
+            fi
+            case "${status}" in
+                ""|healthy)
+                    ok=1
+                    break
+                    ;;
+                unhealthy)
+                    log_error "compose 服务 ${svc} 进入 unhealthy 状态。"
+                    return 1
+                    ;;
+                starting|*)
+                    sleep "${interval}"
+                    continue
+                ;;
+            esac
+        done
+        if [ -z "${cid}" ]; then
+            log_error "compose 服务 ${svc} 未在 ${attempts}×${interval}s 内 running。"
+            return 1
+        fi
+        if [ "${ok}" -ne 1 ]; then
+            log_error "compose 服务 ${svc} 未在 ${attempts}×${interval}s 内 healthy。"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# 根据 LUMEN_UPDATE_CHANNEL 解析目标镜像 tag；输出到 stdout，失败回退已有 tag 或 main。
+# 用法：
+#   lumen_image_tag_resolve [channel] [env_file]
+# 兼容旧调用：如果第一个参数是存在的文件路径，则视为 env_file，channel 从环境读取。
+lumen_image_tag_resolve() {
+    local channel="${1:-${LUMEN_UPDATE_CHANNEL:-stable}}"
+    local env_file="${2:-${LUMEN_DEPLOY_ROOT}/shared/.env}"
+    if [ -n "${1:-}" ] && [ -f "${1}" ] && [ -z "${2:-}" ]; then
+        env_file="$1"
+        channel="${LUMEN_UPDATE_CHANNEL:-stable}"
+    fi
+    local current_tag=""
+    if [ -f "${env_file}" ]; then
+        current_tag="$(lumen_env_value LUMEN_IMAGE_TAG "${env_file}")"
+    fi
+    case "${channel}" in
+        main)
+            printf 'main\n'
+            return 0
+            ;;
+        pinned)
+            if [ -n "${current_tag}" ]; then
+                printf '%s\n' "${current_tag}"
+                return 0
+            fi
+            log_warn "channel=pinned 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
+            printf 'main\n'
+            return 0
+            ;;
+    esac
+    # stable / latest：查 GitHub Releases API 取 latest tag_name
+    local api_url="https://api.github.com/repos/cyeinfpro/Lumen/releases/latest"
+    local proxy_args=()
+    if [ -n "${LUMEN_UPDATE_PROXY_URL:-}" ]; then
+        proxy_args=(-x "${LUMEN_UPDATE_PROXY_URL}")
+    fi
+    local body=""
+    if command -v curl >/dev/null 2>&1; then
+        body="$(curl -fsSL --max-time 8 "${proxy_args[@]}" \
+            -H 'Accept: application/vnd.github+json' \
+            "${api_url}" 2>/dev/null || true)"
+    fi
+    local tag=""
+    if [ -n "${body}" ]; then
+        tag="$(printf '%s' "${body}" \
+            | grep -m1 '"tag_name"' \
+            | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+    fi
+    if [ -n "${tag}" ]; then
+        printf '%s\n' "${tag}"
+        return 0
+    fi
+    if [ -n "${current_tag}" ]; then
+        log_warn "GitHub Releases API 不可达，沿用 ${env_file} 中现有 LUMEN_IMAGE_TAG=${current_tag}。"
+        printf '%s\n' "${current_tag}"
+        return 0
+    fi
+    log_warn "GitHub Releases API 不可达且 .env 无 LUMEN_IMAGE_TAG，回退 main（§6.4 首发兜底）。"
+    printf 'main\n'
+    return 0
+}
+
+# 把 LUMEN_IMAGE_TAG=<tag> 唯一写入指定 .env，禁止动其他字段（§6.4.1）。
+lumen_set_image_tag_in_env() {
+    local file="$1"
+    local tag="$2"
+    if [ -z "${file}" ] || [ -z "${tag}" ]; then
+        log_error "lumen_set_image_tag_in_env：参数不完整 (file=${file} tag=${tag})。"
+        return 1
+    fi
+    if [ ! -f "${file}" ]; then
+        log_error "lumen_set_image_tag_in_env：${file} 不存在。"
+        return 1
+    fi
+    if grep -qE '^LUMEN_IMAGE_TAG=' "${file}"; then
+        if ! sed -i.bak "s|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${tag}|" "${file}"; then
+            log_error "sed 替换 LUMEN_IMAGE_TAG 失败：${file}"
+            return 1
+        fi
+        rm -f "${file}.bak" 2>/dev/null || true
+    else
+        printf '\nLUMEN_IMAGE_TAG=%s\n' "${tag}" >> "${file}"
+    fi
+    local count
+    count="$(grep -cE '^LUMEN_IMAGE_TAG=' "${file}" || true)"
+    if [ "${count}" != "1" ]; then
+        log_error "${file} 中 LUMEN_IMAGE_TAG 出现 ${count} 次，期望唯一存在。"
+        return 1
+    fi
+    return 0
+}
+
+# 输出 ::lumen-step:: 结构化阶段日志；接受 key=val 透传，自动追加 ts。
+# 同时写 stdout + stderr，方便 SSE 与 tee 日志双路捕获。
+lumen_emit_step() {
+    local line
+    line="$(printf '::lumen-step::')"
+    local arg
+    for arg in "$@"; do
+        line="${line} ${arg}"
+    done
+    line="${line} ts=$(lumen_iso_now)"
+    printf '%s\n' "${line}"
+    printf '%s\n' "${line}" >&2
+}
+
+# 输出 ::lumen-info:: 结构化信息行；语义同 lumen_emit_step。
+lumen_emit_info() {
+    local line
+    line="$(printf '::lumen-info::')"
+    local arg
+    for arg in "$@"; do
+        line="${line} ${arg}"
+    done
+    line="${line} ts=$(lumen_iso_now)"
+    printf '%s\n' "${line}"
+    printf '%s\n' "${line}" >&2
+}
+
+# 全局更新锁（§12.5）：基于 flock + ${LUMEN_BACKUP_ROOT}/.lumen-update.lock。
+# 用法：lumen_with_lock <operation_id> <ttl_seconds> <cmd...>；占用时输出 system_operation_busy 并退出 75。
+lumen_with_lock() {
+    local op_id="$1"
+    local ttl="$2"
+    shift 2 || true
+    if ! command -v flock >/dev/null 2>&1; then
+        log_error "lumen_with_lock 需要 flock；请安装 util-linux 后重试。"
+        exit 1
+    fi
+    local lock_dir="${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}"
+    local lock_file="${lock_dir}/.lumen-update.lock"
+    mkdir -p "${lock_dir}" 2>/dev/null || true
+    if ! exec 8>"${lock_file}" 2>/dev/null; then
+        log_error "无法打开更新锁文件：${lock_file}"
+        exit 1
+    fi
+    if ! flock -n 8; then
+        printf '{"error":{"code":"system_operation_busy","operation_id":"%s","retry_after":%s}}\n' \
+            "${op_id}" "${ttl}"
+        exec 8>&- 2>/dev/null || true
+        exit 75
+    fi
+    local rc=0
+    "$@" || rc=$?
+    flock -u 8 2>/dev/null || true
+    exec 8>&- 2>/dev/null || true
+    return "${rc}"
 }

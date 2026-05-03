@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
-# Lumen 卸载脚本
-# 用法：  bash scripts/uninstall.sh
-# 行为：分步交互，停止 systemd / 本地进程 / 容器；用户明确同意才删数据 / 配置 / 缓存。
+# Lumen 卸载脚本（Docker compose 版）
+# 用法：
+#   bash scripts/uninstall.sh                  # 交互式：停容器、保留数据
+#   bash scripts/uninstall.sh --purge          # 同时删除 /opt/lumendata 等数据
+#   bash scripts/uninstall.sh --disable-systemd  # 自动 disable 旧 lumen-* systemd 服务
+#   LUMEN_UNINSTALL_NONINTERACTIVE=1 bash scripts/uninstall.sh  # 跳过所有确认
+#   LUMEN_UNINSTALL_PURGE=1 bash scripts/uninstall.sh           # 同 --purge
+#
+# 行为（与 docker-full-stack-cutover-plan.md §17.9 / §24 对齐）：
+#   1. 安全确认（NONINTERACTIVE=1 跳过）
+#   2. docker compose down --remove-orphans（含 tgbot profile）
+#   3. 询问/通过 flag 决定是否 down -v + 删 /opt/lumendata（purge）
+#   4. 检测到旧 lumen-* systemd unit 仍 enabled 时给出提示；可选 --disable-systemd 自动禁用
+#   5. purge 时清理 .update.path / .update-runner 单元（仅当显式 purge）
+#   6. 输出汇总
+#
 # 源代码本身不会被删除，可随时重新安装。
 
 set -euo pipefail
@@ -18,35 +31,109 @@ lumen_acquire_lock "${ROOT}" "uninstall.sh"
 cd "${ROOT}"
 log_info "项目根目录：${ROOT}"
 
-LUMEN_SYSTEMD_UNITS=(
-    lumen-health-watchdog.timer
-    lumen-backup.timer
-    lumen-update.path
-    lumen-health-watchdog.service
-    lumen-update-runner.service
-    lumen-backup.service
-    lumen-tgbot.service
+# ---------------------------------------------------------------------------
+# Args / env
+# ---------------------------------------------------------------------------
+LUMEN_UNINSTALL_PURGE="${LUMEN_UNINSTALL_PURGE:-0}"
+LUMEN_UNINSTALL_NONINTERACTIVE="${LUMEN_UNINSTALL_NONINTERACTIVE:-0}"
+LUMEN_UNINSTALL_DISABLE_SYSTEMD="${LUMEN_UNINSTALL_DISABLE_SYSTEMD:-0}"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --purge)
+            LUMEN_UNINSTALL_PURGE=1
+            ;;
+        --disable-systemd)
+            LUMEN_UNINSTALL_DISABLE_SYSTEMD=1
+            ;;
+        --noninteractive|--non-interactive|--yes|-y)
+            LUMEN_UNINSTALL_NONINTERACTIVE=1
+            ;;
+        -h|--help)
+            cat <<USAGE
+Lumen 卸载脚本
+
+  bash scripts/uninstall.sh [选项]
+
+选项：
+  --purge                同时删除数据卷与 /opt/lumendata 等持久化数据
+  --disable-systemd      自动 disable 旧 lumen-* systemd unit
+  --yes / --noninteractive  跳过所有交互确认
+  -h / --help            显示本帮助
+
+环境变量：
+  LUMEN_UNINSTALL_NONINTERACTIVE=1  同 --yes
+  LUMEN_UNINSTALL_PURGE=1           同 --purge
+  LUMEN_DEPLOY_ROOT=/opt/lumen      compose 工作目录的备选路径
+  LUMEN_DATA_ROOT=/opt/lumendata    数据/备份/存储父目录
+USAGE
+            exit 0
+            ;;
+        *)
+            log_warn "未知参数：$1（已忽略）"
+            ;;
+    esac
+    shift
+done
+
+LUMEN_DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
+LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-/opt/lumendata}"
+LUMEN_COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-lumen}"
+export COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT}"
+
+# 旧 systemd unit 列表：仅用于检测/提示（除非 --disable-systemd），不再自动删除单元文件。
+LUMEN_LEGACY_SYSTEMD_UNITS=(
+    lumen-api.service
     lumen-worker.service
     lumen-web.service
-    lumen-api.service
+    lumen-tgbot.service
+)
+# 与一键更新相关的 path/runner unit；仅在 --purge 时清理。
+LUMEN_LEGACY_UPDATE_UNITS=(
+    lumen-update.path
+    lumen-update-runner.service
+    lumen-health-watchdog.timer
+    lumen-health-watchdog.service
+    lumen-backup.timer
+    lumen-backup.service
 )
 
-LUMEN_SYSTEMD_UNIT_FILES=(
-    "${LUMEN_SYSTEMD_UNITS[@]}"
-)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-LUMEN_NGINX_ACTIVE_DIRS=(
-    /etc/nginx/sites-enabled
-    /etc/nginx/conf.d
-    /www/server/panel/vhost/nginx
-    /usr/local/etc/nginx/servers
-    /usr/local/etc/nginx/conf.d
-)
+# lumen_uninstall_compose_workdir：定位 docker-compose.yml 所在目录。
+# 优先 ${ROOT}/current（release 布局），否则 ${LUMEN_DEPLOY_ROOT}/current，否则 ROOT。
+# lib.sh 已提供 lumen_compose / lumen_compose_in（同 wave 加入）；这里只负责挑目录。
+lumen_uninstall_compose_workdir() {
+    if [ -d "${ROOT}/current" ]; then
+        printf '%s' "${ROOT}/current"
+        return 0
+    fi
+    if [ -d "${LUMEN_DEPLOY_ROOT}/current" ]; then
+        printf '%s' "${LUMEN_DEPLOY_ROOT}/current"
+        return 0
+    fi
+    if [ -f "${ROOT}/docker-compose.yml" ]; then
+        printf '%s' "${ROOT}"
+        return 0
+    fi
+    if [ -f "${LUMEN_DEPLOY_ROOT}/docker-compose.yml" ]; then
+        printf '%s' "${LUMEN_DEPLOY_ROOT}"
+        return 0
+    fi
+    return 1
+}
 
-LUMEN_CONTAINER_NAME_PATTERNS=(
-    '^lumen-'
-    '^lumen_'
-)
+# 给本脚本的本地包装：找到 workdir 后调 lib.sh 的 lumen_compose_in。
+lumen_uninstall_compose() {
+    local workdir
+    if ! workdir="$(lumen_uninstall_compose_workdir)"; then
+        log_error "找不到 docker-compose.yml；预期位置：${ROOT}/current 或 ${LUMEN_DEPLOY_ROOT}/current"
+        return 1
+    fi
+    lumen_compose_in "${workdir}" "$@"
+}
 
 lumen_uninstall_join() {
     local sep="${1:- }"
@@ -62,284 +149,191 @@ lumen_uninstall_join() {
     printf '%s' "${out}"
 }
 
-lumen_uninstall_safe_name() {
-    local value="$1"
-    value="${value//\//_}"
-    value="$(printf '%s' "${value}" | tr '[:space:]' '_' | tr -c 'A-Za-z0-9_.-' '-')"
-    printf '%s' "${value:-nginx.conf}"
-}
-
-lumen_uninstall_collect_nginx_candidates() {
-    local dir file seen=" "
-    for dir in "${LUMEN_NGINX_ACTIVE_DIRS[@]}"; do
-        [ -d "${dir}" ] || continue
-        while IFS= read -r file; do
-            [ -n "${file}" ] || continue
-            case "${seen}" in
-                *" ${file} "*) continue ;;
-            esac
-            seen="${seen}${file} "
-            if grep -Iq . "${file}" 2>/dev/null \
-                && grep -Eq 'Managed by scripts/lumenctl\.sh|Lumen reverse proxy|upstream[[:space:]]+lumen_web|lumen_web_|Lumen 反代|proxy_pass[[:space:]]+http://(127\.0\.0\.1|localhost):3000|server[[:space:]]+(127\.0\.0\.1|localhost):3000' "${file}" 2>/dev/null; then
-                printf '%s\n' "${file}"
-            fi
-        done < <(find "${dir}" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null | sort)
-    done
-}
-
-lumen_uninstall_remove_lumen_containers() {
-    [ "${DOCKER_AVAILABLE:-0}" -eq 1 ] || return 0
-
-    local containers=()
-    local name pattern
-    while IFS= read -r name; do
-        [ -n "${name}" ] || continue
-        for pattern in "${LUMEN_CONTAINER_NAME_PATTERNS[@]}"; do
-            if [[ "${name}" =~ ${pattern} ]]; then
-                containers+=("${name}")
-                break
-            fi
-        done
-    done < <(lumen_docker ps -a --format '{{.Names}}' 2>/dev/null | sort -u)
-
-    if [ "${#containers[@]}" -eq 0 ]; then
+lumen_uninstall_compose_down() {
+    if [ "${DOCKER_AVAILABLE}" -ne 1 ]; then
+        log_warn "未检测到 docker / docker compose v2，跳过 compose down。"
+        KEPT+=("容器状态未变（无 docker 命令）")
         return 0
     fi
 
-    log_warn "发现残留 Lumen 容器：$(lumen_uninstall_join ', ' "${containers[@]}")"
-    for name in "${containers[@]}"; do
-        if lumen_docker rm -f "${name}" >/dev/null 2>&1; then
-            log_info "已删除残留容器 ${name}"
-        else
-            log_warn "无法删除残留容器 ${name}，请手动执行：$(lumen_docker_command_label) rm -f ${name}"
-        fi
-    done
-}
-
-lumen_uninstall_verify_ports_released() {
-    local still_busy=()
-    local port
-    for port in 3000 8000; do
-        if lumen_process_listening_on_port "${port}"; then
-            still_busy+=("${port}")
-        fi
-    done
-    if [ "${#still_busy[@]}" -eq 0 ]; then
-        DONE+=("已确认 3000/8000 未监听")
-        return 0
-    fi
-
-    local pids
-    for port in "${still_busy[@]}"; do
-        pids="$(lumen_pids_listening_on_port "${port}" | paste -sd ',' - 2>/dev/null || true)"
-        if [ -n "${pids}" ]; then
-            log_warn "端口 ${port} 仍在监听，PID=${pids}。"
-        else
-            log_warn "端口 ${port} 仍在监听，但当前用户无法读取 PID。请用 sudo lsof -iTCP:${port} -sTCP:LISTEN -nP 排查。"
-        fi
-    done
-    KEPT+=("3000/8000 仍有监听：$(lumen_uninstall_join ', ' "${still_busy[@]}")")
-}
-
-lumen_uninstall_disable_nginx_configs() {
-    if ! command -v nginx >/dev/null 2>&1; then
-        KEPT+=("nginx 未检测到，未处理反代配置")
-        return 0
-    fi
-
-    local candidates=()
-    local file
-    while IFS= read -r file; do
-        [ -n "${file}" ] && candidates+=("${file}")
-    done < <(lumen_uninstall_collect_nginx_candidates)
-
-    if [ "${#candidates[@]}" -eq 0 ]; then
-        KEPT+=("未发现启用中的 Lumen nginx 配置")
-        return 0
-    fi
-
-    log_step "nginx 反代配置"
-    log_warn "发现疑似仍在生效的 Lumen nginx 配置："
-    for file in "${candidates[@]}"; do
-        printf '         %s\n' "${file}"
-    done
-    log_warn "卸载会自动禁用这些配置；原文件会先移入备份目录，避免域名继续指向 Lumen。"
-
-    if ! lumen_run_as_root nginx -t >/dev/null 2>&1; then
-        log_error "当前 nginx -t 未通过。为避免扩大故障，跳过自动禁用 nginx 配置。"
-        log_error "请先修复 nginx 配置，或手动移除上方 Lumen 配置后 reload nginx。"
-        KEPT+=("nginx 反代配置未改动（nginx -t 当前不通过）")
-        return 0
-    fi
-
-    local timestamp backup_dir dest
-    timestamp="$(date -u +%Y%m%d%H%M%S 2>/dev/null || date +%s)"
-    backup_dir="${LUMEN_NGINX_DISABLED_DIR:-/var/backups/lumenctl/nginx-disabled}/${timestamp}"
-    if ! lumen_run_as_root mkdir -p "${backup_dir}"; then
-        log_error "无法创建 nginx 禁用备份目录：${backup_dir}"
-        KEPT+=("nginx 反代配置未改动（无法创建备份目录）")
-        return 0
-    fi
-
-    local moved_src=()
-    local moved_dst=()
-    for file in "${candidates[@]}"; do
-        [ -e "${file}" ] || [ -L "${file}" ] || continue
-        dest="${backup_dir}/$(lumen_uninstall_safe_name "${file}")"
-        if lumen_run_as_root mv -f "${file}" "${dest}"; then
-            log_info "已移出 nginx 配置 ${file} -> ${dest}"
-            moved_src+=("${file}")
-            moved_dst+=("${dest}")
-        else
-            log_warn "无法移动 ${file}，已跳过。"
-        fi
-    done
-
-    if [ "${#moved_dst[@]}" -eq 0 ]; then
-        KEPT+=("nginx 反代配置未改动（没有文件被移动）")
-        return 0
-    fi
-
-    if ! lumen_run_as_root nginx -t >/dev/null 2>&1; then
-        log_error "禁用后 nginx -t 未通过，正在回滚 nginx 配置。"
-        local i
-        for i in "${!moved_dst[@]}"; do
-            lumen_run_as_root mv -f "${moved_dst[$i]}" "${moved_src[$i]}" || true
-        done
-        lumen_run_as_root nginx -t >/dev/null 2>&1 || true
-        KEPT+=("nginx 反代配置已回滚（禁用后 nginx -t 未通过）")
-        return 0
-    fi
-
-    if command -v systemctl >/dev/null 2>&1; then
-        if lumen_systemctl reload nginx; then
-            DONE+=("已禁用 Lumen nginx 配置并 reload nginx（备份：${backup_dir}）")
-        else
-            log_warn "nginx 配置已禁用且 nginx -t 通过，但 reload 失败。请手动执行：sudo systemctl reload nginx"
-            DONE+=("已禁用 Lumen nginx 配置（备份：${backup_dir}，reload 需手动确认）")
-        fi
-    elif lumen_run_as_root nginx -s reload; then
-        DONE+=("已禁用 Lumen nginx 配置并 reload nginx（备份：${backup_dir}）")
+    log_step "停止 Docker 栈（docker compose down --remove-orphans）"
+    log_info "compose project：${LUMEN_COMPOSE_PROJECT}"
+    if lumen_uninstall_compose down --remove-orphans; then
+        DONE+=("已 docker compose down 主栈（含 --remove-orphans）")
     else
-        log_warn "nginx 配置已禁用且 nginx -t 通过，但 reload 失败。请手动执行：sudo nginx -s reload"
-        DONE+=("已禁用 Lumen nginx 配置（备份：${backup_dir}，reload 需手动确认）")
+        log_warn "docker compose down 失败，稍后会强删残留容器。"
+        KEPT+=("docker compose down 失败（详见上方日志）")
+    fi
+
+    # tgbot 走 profile，单独 down 一次确保即便没启动也不会留下编排状态。
+    if lumen_uninstall_compose --profile tgbot down --remove-orphans >/dev/null 2>&1; then
+        DONE+=("已 docker compose --profile tgbot down")
     fi
 }
 
-lumen_uninstall_stop_systemd() {
-    log_step "停止 systemd 部署（如存在）"
+lumen_uninstall_force_remove_containers() {
+    [ "${DOCKER_AVAILABLE}" -eq 1 ] || return 0
+    local cnames=(lumen-api lumen-worker lumen-web lumen-tgbot lumen-pg lumen-redis)
+    local removed=()
+    local cn
+    for cn in "${cnames[@]}"; do
+        if lumen_docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${cn}"; then
+            if lumen_docker rm -f "${cn}" >/dev/null 2>&1; then
+                removed+=("${cn}")
+                log_info "已强删残留容器 ${cn}"
+            else
+                log_warn "无法删除残留容器 ${cn}，请手动 'docker rm -f ${cn}'"
+            fi
+        fi
+    done
+    if [ "${#removed[@]}" -gt 0 ]; then
+        DONE+=("已强删残留容器：$(lumen_uninstall_join ', ' "${removed[@]}")")
+    fi
+}
+
+lumen_uninstall_purge_data_volumes() {
+    if [ "${DOCKER_AVAILABLE}" -ne 1 ]; then
+        log_warn "未检测到 docker，跳过 down -v。"
+        KEPT+=("数据卷未删除（无可用 docker 命令）")
+        return 0
+    fi
+    log_step "删除 Docker 数据卷（docker compose down -v）"
+    if lumen_uninstall_compose down -v --remove-orphans; then
+        DONE+=("已执行 docker compose down -v")
+    else
+        log_warn "docker compose down -v 失败，请手动检查 'docker volume ls | grep lumen'"
+        KEPT+=("docker compose down -v 失败（请手动 docker volume rm <name>）")
+    fi
+}
+
+lumen_uninstall_purge_data_dirs() {
+    log_step "删除持久化数据目录"
+    local targets=("${LUMEN_DATA_ROOT}")
+    local d
+    for d in "${targets[@]}"; do
+        if [ -e "${d}" ] || [ -L "${d}" ]; then
+            log_warn "即将删除 ${d}（含 PG / Redis bind mount、storage、backup 等所有数据）"
+            if lumen_run_as_root rm -rf "${d}"; then
+                log_info "已删除 ${d}"
+                DONE+=("已删除 ${d}")
+            else
+                log_warn "无法删除 ${d}，请手动 sudo rm -rf ${d}"
+                KEPT+=("${d} 删除失败")
+            fi
+        fi
+    done
+}
+
+lumen_uninstall_purge_deploy_dirs() {
+    log_step "清理仓库 deploy 目录（release 布局：releases / current / shared）"
+    if [ -e "${ROOT}/current" ] && [ -L "${ROOT}/current" ]; then
+        rm -f "${ROOT}/current" 2>/dev/null || lumen_run_as_root rm -f "${ROOT}/current" || true
+        DONE+=("已删除 ${ROOT}/current symlink")
+    fi
+    local d
+    for d in "${ROOT}/releases" "${ROOT}/shared" "${ROOT}/.lumen-maintenance.lock.d"; do
+        if [ -e "${d}" ]; then
+            if lumen_run_as_root rm -rf "${d}"; then
+                log_info "已删除 ${d}"
+                DONE+=("已删除 ${d}")
+            else
+                log_warn "无法删除 ${d}，请手动检查"
+            fi
+        fi
+    done
+}
+
+lumen_uninstall_systemd_compat() {
     if ! command -v systemctl >/dev/null 2>&1; then
-        log_info "未检测到 systemctl，跳过 systemd 停用。"
-        KEPT+=("systemd 未检测到")
         return 0
     fi
 
-    local existing=()
-    local unit
-    for unit in "${LUMEN_SYSTEMD_UNITS[@]}"; do
-        if lumen_systemd_has_unit "${unit}"; then
-            existing+=("${unit}")
-        fi
+    local enabled=()
+    local unit state
+    for unit in "${LUMEN_LEGACY_SYSTEMD_UNITS[@]}"; do
+        # 不强求 has_unit；list-unit-files 直接看是否 enabled。
+        state="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
+        case "${state}" in
+            enabled|enabled-runtime|alias|static|linked|linked-runtime) enabled+=("${unit}") ;;
+        esac
     done
 
-    if [ "${#existing[@]}" -eq 0 ]; then
-        log_info "未发现 Lumen systemd unit。"
-        KEPT+=("未发现 Lumen systemd 服务")
+    if [ "${#enabled[@]}" -eq 0 ]; then
         return 0
     fi
 
-    log_info "发现 Lumen systemd unit：$(lumen_uninstall_join ', ' "${existing[@]}")"
+    log_step "检测到旧 lumen-* systemd 服务"
+    log_warn "以下 unit 仍处于启用状态：$(lumen_uninstall_join ', ' "${enabled[@]}")"
 
-    local stopped=()
-    local failed=()
-    local disable_failed=()
-    for unit in "${existing[@]}"; do
-        if lumen_systemctl stop "${unit}" >/dev/null 2>&1; then
-            :
+    if [ "${LUMEN_UNINSTALL_DISABLE_SYSTEMD}" = "1" ]; then
+        log_info "按 --disable-systemd 自动禁用上述 unit。"
+        if lumen_systemctl disable --now "${enabled[@]}" >/dev/null 2>&1; then
+            DONE+=("已 disable --now 旧 systemd unit：$(lumen_uninstall_join ', ' "${enabled[@]}")")
         else
-            log_warn "stop ${unit} 失败，稍后检查 active 状态。"
-        fi
-
-        if lumen_systemctl disable "${unit}" >/dev/null 2>&1; then
-            :
-        else
-            disable_failed+=("${unit}")
-        fi
-
-        if lumen_systemctl is-active --quiet "${unit}" >/dev/null 2>&1; then
-            failed+=("${unit}")
-        else
-            stopped+=("${unit}")
-        fi
-    done
-
-    if [ "${#stopped[@]}" -gt 0 ]; then
-        DONE+=("已停止 Lumen systemd unit：$(lumen_uninstall_join ', ' "${stopped[@]}")")
-    fi
-    if [ "${#disable_failed[@]}" -gt 0 ]; then
-        log_warn "以下 unit 停止了，但 disable 返回非零（常见于 static/transient unit）：$(lumen_uninstall_join ', ' "${disable_failed[@]}")"
-    fi
-    if [ "${#failed[@]}" -gt 0 ]; then
-        log_error "以下 systemd unit 仍处于 active：$(lumen_uninstall_join ', ' "${failed[@]}")"
-        log_error "请手动排查：systemctl status $(lumen_uninstall_join ' ' "${failed[@]}")"
-        KEPT+=("部分 systemd 服务仍在运行：$(lumen_uninstall_join ', ' "${failed[@]}")")
-    fi
-
-    if confirm "删除 /etc/systemd/system 下的 Lumen unit 文件？"; then
-        local removed=()
-        local path
-        for unit in "${LUMEN_SYSTEMD_UNIT_FILES[@]}"; do
-            path="/etc/systemd/system/${unit}"
-            if [ -e "${path}" ] || [ -L "${path}" ]; then
-                if lumen_run_as_root rm -f "${path}"; then
-                    removed+=("${unit}")
-                    log_info "已删除 ${path}"
-                else
-                    log_warn "无法删除 ${path}"
-                fi
-            fi
-        done
-        lumen_systemctl daemon-reload >/dev/null 2>&1 || true
-        lumen_systemctl reset-failed "${LUMEN_SYSTEMD_UNITS[@]}" >/dev/null 2>&1 || true
-        if [ "${#removed[@]}" -gt 0 ]; then
-            DONE+=("已删除 systemd unit 文件：$(lumen_uninstall_join ', ' "${removed[@]}")")
-        else
-            KEPT+=("未发现可删除的 systemd unit 文件")
+            log_warn "disable --now 返回非零，请手动确认。"
+            KEPT+=("旧 systemd unit disable 失败（请手动处理）")
         fi
     else
-        KEPT+=("systemd unit 文件保留（已尝试停止/禁用）")
+        cat <<TIP
+
+  检测到旧 systemd 服务仍 enabled。如确认不再回滚到 systemd 部署，可执行：
+    sudo systemctl disable --now $(lumen_uninstall_join ' ' "${enabled[@]}")
+
+  当前默认保留 systemd unit 文件以便回滚（参考 cutover plan §18.2）。
+  如要本脚本自动 disable，可加 --disable-systemd 后重跑。
+
+TIP
+        KEPT+=("旧 systemd unit 仍 enabled（提示用户手动处理）：$(lumen_uninstall_join ', ' "${enabled[@]}")")
+    fi
+}
+
+lumen_uninstall_purge_update_units() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+    local unit removed=()
+    for unit in "${LUMEN_LEGACY_UPDATE_UNITS[@]}"; do
+        if lumen_systemd_has_unit "${unit}"; then
+            lumen_systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+            removed+=("${unit}")
+        fi
+        local path="/etc/systemd/system/${unit}"
+        if [ -e "${path}" ] || [ -L "${path}" ]; then
+            lumen_run_as_root rm -f "${path}" || log_warn "无法删除 ${path}"
+        fi
+    done
+    if [ "${#removed[@]}" -gt 0 ]; then
+        lumen_systemctl daemon-reload >/dev/null 2>&1 || true
+        DONE+=("已 disable 并清理一键更新 unit：$(lumen_uninstall_join ', ' "${removed[@]}")")
     fi
 }
 
 # ---------------------------------------------------------------------------
-# 1. 二次确认
+# Phase A：安全确认
 # ---------------------------------------------------------------------------
 log_step "Lumen 卸载向导"
 cat <<EOF
 
   本向导将分步进行：
-    1) 停止 systemd 部署的 Lumen 服务（lumen-api / worker / web / tgbot / timers）
-    2) 停止 install.sh 拉起的 API / Worker / Web 后台进程（释放 8000/3000）
-    3) 停止 PostgreSQL / Redis 容器（释放 5432/6379）
-    4) 自动禁用 Lumen nginx 反代配置（移入备份后 reload）
-    5) 询问是否删除数据卷（不可恢复）
-    6) 询问是否删除 .env 配置
-    7) 询问是否删除本地图片存储
-    8) 询问是否删除 /opt/lumendata/backup 备份
-    9) 询问是否删除前端 node_modules / .next
-    10) 询问是否删除 .venv（uv 虚拟环境）
+    1) docker compose down --remove-orphans（同时停 tgbot profile）
+    2) 检测旧 systemd 部署并给出提示（--disable-systemd 时自动禁用）
+    3) 默认保留 ${LUMEN_DATA_ROOT} 下的持久化数据
+       （PG/Redis bind mount、storage、backup 等）；
+       传入 --purge 或 LUMEN_UNINSTALL_PURGE=1 时才会删除
+    4) --purge 时同步清理仓库 release 目录与一键更新 systemd unit
 
   源代码与 docker-compose.yml 不会被删除；删除项目目录请手动 rm。
-  每个删除步骤默认 "N"（保留），需明确输入 y/yes 才会执行。
 
 EOF
 
-if ! confirm "确认开始卸载？"; then
-    log_info "用户取消，未做任何修改。"
-    exit 0
+if [ "${LUMEN_UNINSTALL_NONINTERACTIVE}" != "1" ]; then
+    if ! confirm "确认开始卸载？"; then
+        log_info "用户取消，未做任何修改。"
+        exit 0
+    fi
 fi
 
-# 跟踪做了什么/没做什么，最后汇总
+# 跟踪做了什么/没做什么，最后汇总。
 declare -a DONE=()
 declare -a KEPT=()
 DOCKER_AVAILABLE=0
@@ -351,257 +345,55 @@ if lumen_detect_docker_access; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. 停 systemd 部署运行时。
-#    release/systemd 部署不会由 PID 文件管理；如果不处理，卸载后 lumen-web
-#    仍会监听 3000，nginx 域名自然还能打开网站。
+# Phase B：docker compose down
 # ---------------------------------------------------------------------------
-lumen_uninstall_stop_systemd
+lumen_uninstall_compose_down
+lumen_uninstall_force_remove_containers
 
 # ---------------------------------------------------------------------------
-# 3. 停 install.sh 拉起的本地运行时（uvicorn / arq / next-server）
-#    install.sh 把 API/Worker/Web 后台 & 起来，PID 仅在 install.sh 进程内；
-#    如果不在这里清掉，下次 install 检测到 8000/3000 已被占用就会卡死。
+# Phase D：旧 systemd 兼容提示（详见 §17.9 / §18.2）
+#   - 默认仅提示，不自动 disable，方便回滚 systemd 部署
+#   - --disable-systemd / LUMEN_UNINSTALL_DISABLE_SYSTEMD=1 才会执行 disable --now
 # ---------------------------------------------------------------------------
-log_step "停止 Lumen 本地运行时（API / Worker / Web）"
-RUNTIME_FREED=0
-RUNTIME_BUSY=0
-lumen_stop_persisted_runtime "${ROOT}" 15 || true
-for PORT in 8000 3000; do
-    if ! lumen_process_listening_on_port "${PORT}"; then
-        continue
-    fi
-    if lumen_release_port_if_lumen "${PORT}" "端口 ${PORT}"; then
-        RUNTIME_FREED=1
-    else
-        log_warn "端口 ${PORT} 仍被外部进程占用，跳过强杀。请在确认无误后手动停掉。"
-        RUNTIME_BUSY=1
-    fi
-done
-if [ "${RUNTIME_FREED}" -eq 1 ]; then
-    DONE+=("已停止本地运行时进程并释放 8000/3000")
-elif [ "${RUNTIME_BUSY}" -eq 1 ]; then
-    KEPT+=("8000/3000 仍被非 Lumen 进程占用（请自行确认）")
-else
-    KEPT+=("本地运行时本来就没在跑")
+lumen_uninstall_systemd_compat
+
+# ---------------------------------------------------------------------------
+# Phase C：是否删数据（purge）
+# ---------------------------------------------------------------------------
+PURGE_DECIDED=0
+if [ "${LUMEN_UNINSTALL_PURGE}" = "1" ]; then
+    PURGE_DECIDED=1
+elif [ "${LUMEN_UNINSTALL_NONINTERACTIVE}" = "1" ]; then
+    PURGE_DECIDED=0
+elif confirm "是否同时删除数据卷与 ${LUMEN_DATA_ROOT}（不可恢复）？"; then
+    PURGE_DECIDED=1
 fi
 
-# ---------------------------------------------------------------------------
-# 4. docker compose down（停容器）；失败兜底用 docker rm -f 强删 lumen-pg/lumen-redis。
-# ---------------------------------------------------------------------------
-log_step "停止容器（docker compose down）"
-if [ "${DOCKER_AVAILABLE}" -eq 1 ]; then
-    if lumen_docker compose down; then
-        DONE+=("已停止 lumen-pg / lumen-redis 容器")
-    else
-        log_warn "docker compose down 返回非零，尝试强删残留容器以释放 5432/6379。"
-        STRAY=0
-        for CNAME in lumen-pg lumen-redis; do
-            if lumen_docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CNAME}"; then
-                if lumen_docker rm -f "${CNAME}" >/dev/null 2>&1; then
-                    log_info "已强删容器 ${CNAME}"
-                    STRAY=1
-                else
-                    log_error "无法删除 ${CNAME}，请手动 'docker rm -f ${CNAME}'。"
-                fi
-            fi
-        done
-        if [ "${STRAY}" -eq 1 ]; then
-            DONE+=("已强删残留 lumen-pg / lumen-redis 容器")
-        else
-            KEPT+=("容器状态未确认（docker compose down 失败）")
+if [ "${PURGE_DECIDED}" = "1" ]; then
+    # purge 必须二次确认，除非 NONINTERACTIVE+PURGE 同时设置（CI / 自动化场景）
+    PURGE_OK=1
+    if [ "${LUMEN_UNINSTALL_NONINTERACTIVE}" != "1" ]; then
+        log_warn "purge 将删除：所有 docker 卷、${LUMEN_DATA_ROOT}（PG/Redis bind mount、storage、backup）"
+        if ! confirm "再次确认 purge？此操作不可恢复"; then
+            PURGE_OK=0
+            log_info "已取消 purge，仅停止容器、保留数据。"
+            KEPT+=("用户取消 purge：保留 ${LUMEN_DATA_ROOT} / 数据卷")
         fi
     fi
-else
-    log_warn "未检测到 docker / docker compose v2，跳过停容器步骤。"
-    KEPT+=("容器状态未变（无 docker 命令）")
-fi
-lumen_uninstall_remove_lumen_containers
 
-# ---------------------------------------------------------------------------
-# 5. nginx 反代配置（默认保留，用户确认才禁用）。
-# ---------------------------------------------------------------------------
-lumen_uninstall_disable_nginx_configs
-
-# ---------------------------------------------------------------------------
-# 6. 删数据卷
-# ---------------------------------------------------------------------------
-log_step "数据卷"
-log_warn "数据卷包含所有用户、对话、生成图记录。删除后无法恢复。"
-if confirm "删除 PG / Redis 数据卷（docker compose down -v）？"; then
-    if [ "${DOCKER_AVAILABLE}" -ne 1 ]; then
-        log_error "未检测到可用的 docker / docker compose v2，无法删除数据卷。"
-        KEPT+=("数据卷未删除（无可用 docker 命令）")
-    elif lumen_docker compose down -v; then
-        # compose 删卷时若 volume 仍被其它容器挂载会沉默跳过，主动 ls 一次校验。
-        if lumen_docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qE '(^|_)lumen_(pg|redis)_data$'; then
-            log_warn "卷未完全删除（可能仍被其它容器挂载，或 compose project 名不一致）。"
-            log_warn "请运行 '$(lumen_docker_command_label) volume ls | grep lumen' 排查，必要时手动 '$(lumen_docker_command_label) volume rm <name>'."
-            DONE+=("尝试删除数据卷（部分卷未清，详见上方提示）")
-        else
-            DONE+=("已删除数据卷 lumen_pg_data / lumen_redis_data")
-        fi
-    else
-        log_error "docker compose down -v 失败。请手动检查。"
+    if [ "${PURGE_OK}" = "1" ]; then
+        lumen_uninstall_purge_data_volumes
+        lumen_uninstall_purge_data_dirs
+        lumen_uninstall_purge_deploy_dirs
+        lumen_uninstall_purge_update_units
     fi
 else
-    KEPT+=("数据卷保留（可下次 install 直接复用）")
+    KEPT+=("数据卷与 ${LUMEN_DATA_ROOT} 保留（下次 install 直接复用）")
+    KEPT+=("一键更新 systemd unit 保留（仅 --purge 时清理）")
 fi
 
 # ---------------------------------------------------------------------------
-# 7. 删 .env
-# ---------------------------------------------------------------------------
-log_step ".env 配置文件"
-ENV_TARGETS=(
-    "${ROOT}/.env"
-    "${ROOT}/apps/api/.env"
-    "${ROOT}/apps/worker/.env"
-    "${ROOT}/apps/web/.env.local"
-)
-EXISTING_ENV=()
-for f in "${ENV_TARGETS[@]}"; do
-    [ -f "${f}" ] && EXISTING_ENV+=("${f}")
-done
-
-if [ "${#EXISTING_ENV[@]}" -eq 0 ]; then
-    log_info "未发现 .env 文件。"
-    KEPT+=(".env 文件本来就不存在")
-else
-    log_warn "将影响以下文件："
-    for f in "${EXISTING_ENV[@]}"; do
-        printf '         %s\n' "${f}"
-    done
-    if confirm "删除上述 .env 配置文件？"; then
-        for f in "${EXISTING_ENV[@]}"; do
-            rm -f "${f}"
-            log_info "已删除 ${f}"
-        done
-        DONE+=("已删除 ${#EXISTING_ENV[@]} 个 .env 配置文件")
-    else
-        KEPT+=(".env 配置文件保留")
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 8. 本地图片存储
-# ---------------------------------------------------------------------------
-log_step "本地图片存储"
-STORAGE_TARGETS=(
-    "/opt/lumendata/storage"
-    "${ROOT}/var/storage"
-    "${ROOT}/apps/api/var/storage"
-)
-EXISTING_STORAGE=()
-for d in "${STORAGE_TARGETS[@]}"; do
-    [ -d "${d}" ] && EXISTING_STORAGE+=("${d}")
-done
-
-if [ "${#EXISTING_STORAGE[@]}" -eq 0 ]; then
-    log_info "未发现 var/storage 目录。"
-    KEPT+=("var/storage 本来就不存在")
-else
-    log_warn "将影响以下目录（含所有生成图原文件）："
-    for d in "${EXISTING_STORAGE[@]}"; do
-        printf '         %s\n' "${d}"
-    done
-    if confirm "删除上述存储目录（不可恢复）？"; then
-        for d in "${EXISTING_STORAGE[@]}"; do
-            rm -rf "${d}"
-            log_info "已删除 ${d}"
-        done
-        DONE+=("已删除 ${#EXISTING_STORAGE[@]} 个本地图片存储目录")
-    else
-        KEPT+=("本地存储目录保留")
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 9. 本地备份
-# ---------------------------------------------------------------------------
-log_step "本地备份 /opt/lumendata/backup"
-BACKUP_TARGETS=(
-    "/opt/lumendata/backup"
-)
-EXISTING_BACKUP=()
-for d in "${BACKUP_TARGETS[@]}"; do
-    [ -d "${d}" ] && EXISTING_BACKUP+=("${d}")
-done
-
-if [ "${#EXISTING_BACKUP[@]}" -eq 0 ]; then
-    log_info "未发现本地备份目录。"
-    KEPT+=("本地备份本来就不存在")
-else
-    log_warn "备份目录包含 PostgreSQL / Redis 备份，删除后无法用于恢复。"
-    log_warn "将影响以下目录："
-    for d in "${EXISTING_BACKUP[@]}"; do
-        printf '         %s\n' "${d}"
-    done
-    if confirm "删除上述备份目录（不可恢复）？"; then
-        for d in "${EXISTING_BACKUP[@]}"; do
-            rm -rf "${d}"
-            log_info "已删除 ${d}"
-        done
-        DONE+=("已删除 ${#EXISTING_BACKUP[@]} 个本地备份目录")
-    else
-        KEPT+=("本地备份目录保留")
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 10. 前端 node_modules / .next
-# ---------------------------------------------------------------------------
-log_step "前端缓存（node_modules / .next）"
-WEB_NODE="${ROOT}/apps/web/node_modules"
-WEB_NEXT="${ROOT}/apps/web/.next"
-WEB_TARGETS=()
-[ -d "${WEB_NODE}" ] && WEB_TARGETS+=("${WEB_NODE}")
-[ -d "${WEB_NEXT}" ] && WEB_TARGETS+=("${WEB_NEXT}")
-
-if [ "${#WEB_TARGETS[@]}" -eq 0 ]; then
-    log_info "未发现前端缓存目录。"
-    KEPT+=("前端缓存本来就不存在")
-else
-    log_warn "将删除："
-    for d in "${WEB_TARGETS[@]}"; do
-        printf '         %s\n' "${d}"
-    done
-    if confirm "删除前端 node_modules 与 .next？"; then
-        for d in "${WEB_TARGETS[@]}"; do
-            rm -rf "${d}"
-            log_info "已删除 ${d}"
-        done
-        DONE+=("已清理前端 node_modules / .next")
-    else
-        KEPT+=("前端缓存保留")
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 11. .venv（uv 虚拟环境）
-# ---------------------------------------------------------------------------
-log_step "Python 虚拟环境 .venv"
-VENV="${ROOT}/.venv"
-if [ -d "${VENV}" ]; then
-    log_warn "将删除 ${VENV}"
-    if confirm "删除 .venv？"; then
-        rm -rf "${VENV}"
-        log_info "已删除 ${VENV}"
-        DONE+=("已删除 .venv")
-    else
-        KEPT+=(".venv 保留")
-    fi
-else
-    log_info "未发现 .venv。"
-    KEPT+=(".venv 本来就不存在")
-fi
-
-# ---------------------------------------------------------------------------
-# 12. 最终确认核心端口已经释放。
-# ---------------------------------------------------------------------------
-log_step "最终端口确认"
-lumen_uninstall_verify_ports_released
-
-# ---------------------------------------------------------------------------
-# 13. 总结
+# Phase F：汇总
 # ---------------------------------------------------------------------------
 log_step "卸载总结"
 printf '\n  已执行：\n'
@@ -626,7 +418,11 @@ cat <<EOF
 
   源代码仍在 ${ROOT}，docker-compose.yml / pyproject.toml 等配置未删。
   如需彻底移除：手动 'rm -rf ${ROOT}'（请先确认无未保存的数据）。
-  重新安装：bash scripts/install.sh
+
+  重新安装：
+    bash scripts/lumenctl.sh install-lumen
+    # 或
+    bash scripts/install.sh
 
 EOF
 

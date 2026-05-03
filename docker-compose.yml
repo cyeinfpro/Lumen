@@ -1,5 +1,6 @@
-# Lumen infrastructure stack.
-# API / Worker / Web are deployed by deploy/systemd/* on the target server.
+# Lumen full-stack runtime entrypoint (postgres + redis + api + worker + web + tgbot/migrate/bootstrap).
+# Image tags pulled from GHCR are pinned via LUMEN_IMAGE_TAG (see docs/docker-full-stack-cutover-plan.md §6.4.1).
+# tgbot / migrate / bootstrap live behind compose profiles so default `up -d` only starts the core stack.
 
 x-service-hardening: &service-hardening
   cap_drop:
@@ -12,6 +13,12 @@ x-service-hardening: &service-hardening
       max-size: "10m"
       max-file: "3"
 
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile.python
+  args:
+    LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
+
 services:
   postgres:
     <<: *service-hardening
@@ -20,6 +27,7 @@ services:
     user: "70:70"
     restart: unless-stopped
     shm_size: "256m"
+    stop_grace_period: 60s
     environment:
       POSTGRES_USER: "${DB_USER:?Set DB_USER in .env}"
       POSTGRES_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD in .env}"
@@ -29,7 +37,7 @@ services:
     ports:
       - "${POSTGRES_BIND_HOST:-127.0.0.1}:5432:5432"
     volumes:
-      - lumen_pg_data:/var/lib/postgresql/data
+      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data
     networks:
       - lumen_backend
     healthcheck:
@@ -44,6 +52,7 @@ services:
     container_name: lumen-redis
     user: "999:999"
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
     cpus: "0.5"
@@ -52,7 +61,7 @@ services:
       - "${REDIS_BIND_HOST:-127.0.0.1}:6379:6379"
     entrypoint: ["/bin/sh", "/usr/local/bin/lumen-redis-entrypoint"]
     volumes:
-      - lumen_redis_data:/data
+      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/redis:/data
       - ./deploy/redis/redis-entrypoint.sh:/usr/local/bin/lumen-redis-entrypoint:ro
     networks:
       - lumen_backend
@@ -62,9 +71,156 @@ services:
       timeout: 3s
       retries: 20
 
-volumes:
-  lumen_pg_data:
-  lumen_redis_data:
+  api:
+    <<: *service-hardening
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    container_name: lumen-api
+    build: *app-build
+    working_dir: /app/apps/api
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
+    restart: unless-stopped
+    stop_grace_period: 60s
+    cpus: "1.5"
+    mem_limit: 2g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_BIND_HOST:-127.0.0.1}:8000:8000"
+    volumes:
+      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
+      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup
+    networks:
+      - lumen_backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  worker:
+    <<: *service-hardening
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-worker:${LUMEN_IMAGE_TAG:-latest}
+    container_name: lumen-worker
+    build: *app-build
+    working_dir: /app/apps/worker
+    command: ["python", "-m", "arq", "app.main.WorkerSettings"]
+    env_file: .env
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    # 4K long task envelope: arq 1800s task timeout + 30s buffer; do not shorten (see §8.5).
+    stop_grace_period: 1830s
+    cpus: "2.0"
+    mem_limit: 3g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    volumes:
+      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
+    networks:
+      - lumen_backend
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c 'import os,redis; redis.from_url(os.environ[\"REDIS_URL\"]).ping()' || exit 1"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    <<: *service-hardening
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-web:${LUMEN_IMAGE_TAG:-latest}
+    container_name: lumen-web
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
+        LUMEN_BACKEND_URL: "http://api:8000"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: "1.0"
+    mem_limit: 1g
+    environment:
+      LUMEN_BACKEND_URL: "http://api:8000"
+      NEXT_PUBLIC_API_BASE: "/api"
+      NODE_ENV: "production"
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "${WEB_BIND_HOST:-127.0.0.1}:3000:3000"
+    networks:
+      - lumen_backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  tgbot:
+    <<: *service-hardening
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-tgbot:${LUMEN_IMAGE_TAG:-latest}
+    container_name: lumen-tgbot
+    build: *app-build
+    working_dir: /app/apps/tgbot
+    command: ["python", "-m", "app.main"]
+    env_file: .env
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: "0.5"
+    mem_limit: 512m
+    profiles: ["tgbot"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - lumen_backend
+
+  migrate:
+    <<: *service-hardening
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    build: *app-build
+    working_dir: /app/apps/api
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    restart: "no"
+    profiles: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lumen_backend
+
+  bootstrap:
+    <<: *service-hardening
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    build: *app-build
+    working_dir: /app/apps/api
+    command: ["python", "-m", "app.scripts.bootstrap"]
+    env_file: .env
+    environment:
+      LUMEN_ADMIN_EMAIL: "${LUMEN_ADMIN_EMAIL:-}"
+      LUMEN_ADMIN_PASSWORD: "${LUMEN_ADMIN_PASSWORD:-}"
+    restart: "no"
+    profiles: ["bootstrap"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lumen_backend
 
 networks:
   lumen_backend:

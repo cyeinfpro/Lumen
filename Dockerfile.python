@@ -1,0 +1,82 @@
+# 共用镜像：api / worker / tgbot / migrate / bootstrap 共用本镜像，
+# 具体启动命令与 working_dir 由 docker-compose 提供。
+
+ARG PYTHON_BASE=python:3.12-slim
+
+FROM ${PYTHON_BASE} AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+COPY packages/core/pyproject.toml packages/core/pyproject.toml
+COPY apps/api/pyproject.toml apps/api/pyproject.toml
+COPY apps/worker/pyproject.toml apps/worker/pyproject.toml
+COPY apps/tgbot/pyproject.toml apps/tgbot/pyproject.toml
+
+# hatchling editable 构建需要 wheel target 目录存在；先放占位 __init__.py
+# 让 uv sync --all-packages 能完成依赖解析与 .venv 物化，随后再拷完整源码。
+RUN mkdir -p packages/core/lumen_core apps/api/app apps/worker/app apps/tgbot/app \
+    && touch packages/core/lumen_core/__init__.py \
+             apps/api/app/__init__.py \
+             apps/worker/app/__init__.py \
+             apps/tgbot/app/__init__.py
+
+RUN uv sync --frozen --no-dev --all-packages
+
+COPY packages/ packages/
+COPY apps/api/ apps/api/
+COPY apps/worker/ apps/worker/
+COPY apps/tgbot/ apps/tgbot/
+
+
+FROM ${PYTHON_BASE} AS runtime
+
+ARG LUMEN_VERSION=0.0.0
+ARG LUMEN_GIT_SHA=unknown
+ARG LUMEN_BUILD_TIME=1970-01-01T00:00:00Z
+
+LABEL org.opencontainers.image.source="https://github.com/cyeinfpro/Lumen" \
+      org.opencontainers.image.version="${LUMEN_VERSION}" \
+      org.opencontainers.image.revision="${LUMEN_GIT_SHA}" \
+      org.opencontainers.image.created="${LUMEN_BUILD_TIME}"
+
+ENV PYTHONUNBUFFERED=1 \
+    PATH=/app/.venv/bin:$PATH \
+    LUMEN_VERSION=${LUMEN_VERSION}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        openssh-client \
+        sshpass \
+        libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 10001 lumen \
+    && useradd -m -u 10001 -g 10001 -s /bin/bash lumen
+
+WORKDIR /app
+
+COPY --from=builder --chown=lumen:lumen /app /app
+
+USER lumen
+
+CMD ["python"]

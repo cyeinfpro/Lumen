@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Lumen 统一运维入口。
+# Lumen 统一运维入口（Docker compose 全栈版）。
 # 用法：
-#   bash scripts/lumenctl.sh
-#   bash scripts/lumenctl.sh install-lumen
-#   bash scripts/lumenctl.sh install-image-job
-#   bash scripts/lumenctl.sh nginx-optimize
+#   bash scripts/lumenctl.sh                  # 交互菜单
+#   bash scripts/lumenctl.sh install-lumen    # 安装（透传给 install.sh）
+#   bash scripts/lumenctl.sh update-lumen     # 更新（透传给 update.sh）
+#   bash scripts/lumenctl.sh status           # docker compose ps + healthz
+#   bash scripts/lumenctl.sh logs api         # 跟随 api 日志
+#   bash scripts/lumenctl.sh nginx-optimize   # nginx 反代向导
 
 set -euo pipefail
 
@@ -15,6 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
 NGINX_FILES=()
 LUMEN_USE_SUDO="${LUMEN_USE_SUDO:-0}"
+LUMEN_DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
+LUMEN_COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-lumen}"
+export COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT}"
 
 trap 'log_error "lumenctl 失败：第 ${LINENO} 行返回非零状态。请查看上方输出修正后重试。"' ERR
 
@@ -23,13 +28,30 @@ usage() {
 Lumen 一键运维菜单
 
 用法：
-  bash scripts/lumenctl.sh [command]
+  bash scripts/lumenctl.sh [command] [args...]
 
-commands:
+Lifecycle commands:
   menu                 打开交互菜单（默认）
   install-lumen        安装 Lumen（调用 scripts/install.sh）
   update-lumen         更新 Lumen（调用 scripts/update.sh）
   uninstall-lumen      卸载 Lumen（调用 scripts/uninstall.sh）
+  rollback             回滚到 previous release（pull 旧 tag + compose up）
+  version              输出 VERSION + 镜像 tag + git sha
+
+Docker compose runtime:
+  status               docker compose ps + 健康检查
+  logs [service]       跟随 service 日志（默认 api，等价 docker compose logs -f）
+  start                up -d --wait api worker web
+  stop                 stop api worker web tgbot
+  restart              up -d --force-recreate api worker web
+  migrate              compose --profile migrate run --rm migrate
+  bootstrap            创建初始 admin（需 LUMEN_ADMIN_EMAIL / LUMEN_ADMIN_PASSWORD）
+  migrate-env          dry-run 检查旧 .env 的容器内 URL
+  migrate-env-apply    按白名单迁移旧 .env 的容器内 URL，并写 .bak
+  backup               调用 scripts/backup.sh
+  restore <ts>         调用 scripts/restore.sh <timestamp>
+
+Auxiliary:
   install-image-job    安装 image-job sidecar、systemd 服务
   uninstall-image-job  卸载 image-job sidecar
   nginx-scan           扫描 nginx 配置
@@ -327,33 +349,274 @@ lumenctl_resolve_script() {
 
 run_lumen_script() {
     local script_name="$1"
+    shift || true
     local script_path=""
     log_step "执行 ${script_name}"
     if ! script_path="$(lumenctl_resolve_script "${script_name}")"; then
         log_error "找不到脚本：${ROOT}/current/scripts/${script_name} 或 ${ROOT}/scripts/${script_name}"
         exit 1
     fi
+    # 全栈 docker 化后 install.sh / update.sh / uninstall.sh 都接受透传 flag。
+    # 不再强制塞 --install；让上游传什么就传什么。
     case "${script_name}" in
-        install.sh)
+        install.sh|update.sh|uninstall.sh|backup.sh|restore.sh)
             if [ "$(detect_os)" = "linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
                 ensure_cmd sudo "请安装 sudo，或切换到 root 后重试"
-                lumen_sudo bash "${script_path}" --install
+                lumen_sudo bash "${script_path}" "$@"
             else
-                bash "${script_path}" --install
-            fi
-            ;;
-        update.sh|uninstall.sh)
-            if [ "$(detect_os)" = "linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
-                ensure_cmd sudo "请安装 sudo，或切换到 root 后重试"
-                lumen_sudo bash "${script_path}"
-            else
-                bash "${script_path}"
+                bash "${script_path}" "$@"
             fi
             ;;
         *)
-            bash "${script_path}"
+            bash "${script_path}" "$@"
             ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# Docker compose helpers（cutover plan §17 / §24）
+# lib.sh 已提供 lumen_compose / lumen_compose_in（注入 COMPOSE_PROJECT_NAME=lumen，§11.4）。
+# 这里只负责定位 docker-compose.yml 所在工作目录：
+#   优先 ${ROOT}/current（release 布局），其次 ${LUMEN_DEPLOY_ROOT}/current，最后 ROOT 本身。
+# ---------------------------------------------------------------------------
+lumenctl_compose_workdir() {
+    if [ -d "${ROOT}/current" ]; then
+        printf '%s' "${ROOT}/current"
+        return 0
+    fi
+    if [ -d "${LUMEN_DEPLOY_ROOT}/current" ]; then
+        printf '%s' "${LUMEN_DEPLOY_ROOT}/current"
+        return 0
+    fi
+    if [ -f "${ROOT}/docker-compose.yml" ]; then
+        printf '%s' "${ROOT}"
+        return 0
+    fi
+    if [ -f "${LUMEN_DEPLOY_ROOT}/docker-compose.yml" ]; then
+        printf '%s' "${LUMEN_DEPLOY_ROOT}"
+        return 0
+    fi
+    return 1
+}
+
+lumenctl_compose() {
+    local workdir
+    if ! workdir="$(lumenctl_compose_workdir)"; then
+        log_error "找不到 docker-compose.yml；预期位置：${ROOT}/current 或 ${LUMEN_DEPLOY_ROOT}/current"
+        return 1
+    fi
+    lumen_compose_in "${workdir}" "$@"
+}
+
+lumen_compose_status() {
+    lumen_require_docker_access
+    log_step "docker compose ps（project=${LUMEN_COMPOSE_PROJECT}）"
+    lumenctl_compose ps || true
+    printf '\n---\n'
+    log_step "容器健康状态"
+    local cn state
+    for cn in lumen-api lumen-worker lumen-web lumen-pg lumen-redis lumen-tgbot; do
+        state="$(lumen_docker inspect --format '{{.Name}} {{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "${cn}" 2>/dev/null || true)"
+        if [ -n "${state}" ]; then
+            printf '  %s\n' "${state#/}"
+        fi
+    done
+    printf '\n---\n'
+    log_step "本地健康检查"
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS --noproxy '*' --max-time 8 http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+            log_info "API healthz: OK"
+        else
+            log_warn "API healthz: 失败 (http://127.0.0.1:8000/healthz)"
+        fi
+        if curl -fsS --noproxy '*' --max-time 8 -o /dev/null http://127.0.0.1:3000/ >/dev/null 2>&1; then
+            log_info "Web /: OK"
+        else
+            log_warn "Web /: 失败 (http://127.0.0.1:3000/)"
+        fi
+    else
+        log_warn "未安装 curl，跳过 HTTP 健康检查。"
+    fi
+}
+
+lumen_compose_logs() {
+    lumen_require_docker_access
+    local service="${1:-api}"
+    log_step "docker compose logs -f --tail=200 ${service}"
+    lumenctl_compose logs -f --tail=200 "${service}"
+}
+
+lumen_compose_restart() {
+    lumen_require_docker_access
+    log_step "docker compose up -d --force-recreate api worker web"
+    lumenctl_compose up -d --force-recreate api worker web
+}
+
+lumen_compose_stop() {
+    lumen_require_docker_access
+    log_step "docker compose stop api worker web tgbot"
+    # tgbot 走 profile，stop 时不在默认范围；显式指定即可，未运行也是 noop。
+    lumenctl_compose stop api worker web tgbot || true
+}
+
+lumen_compose_start() {
+    lumen_require_docker_access
+    log_step "docker compose up -d --wait api worker web"
+    lumenctl_compose up -d --wait api worker web
+}
+
+lumen_compose_migrate() {
+    lumen_require_docker_access
+    log_step "docker compose --profile migrate run --rm migrate"
+    lumenctl_compose --profile migrate run --rm migrate
+}
+
+lumen_compose_bootstrap() {
+    lumen_require_docker_access
+    if [ -z "${LUMEN_ADMIN_EMAIL:-}" ] || [ -z "${LUMEN_ADMIN_PASSWORD:-}" ]; then
+        log_error "bootstrap 需要 LUMEN_ADMIN_EMAIL 与 LUMEN_ADMIN_PASSWORD 环境变量。"
+        log_error "示例：LUMEN_ADMIN_EMAIL=admin@example.com LUMEN_ADMIN_PASSWORD='...' bash scripts/lumenctl.sh bootstrap"
+        exit 1
+    fi
+    log_step "docker compose --profile bootstrap run --rm bootstrap"
+    lumenctl_compose --profile bootstrap run --rm \
+        -e LUMEN_ADMIN_EMAIL="${LUMEN_ADMIN_EMAIL}" \
+        -e LUMEN_ADMIN_PASSWORD="${LUMEN_ADMIN_PASSWORD}" \
+        bootstrap python -m app.scripts.bootstrap "${LUMEN_ADMIN_EMAIL}" --role admin --password "${LUMEN_ADMIN_PASSWORD}"
+}
+
+lumen_env_migrate_file() {
+    local mode="$1"
+    local env_file="${2:-}"
+    if [ -z "${env_file}" ]; then
+        if [ -f "${ROOT}/shared/.env" ]; then
+            env_file="${ROOT}/shared/.env"
+        elif [ -f "${ROOT}/current/.env" ]; then
+            env_file="${ROOT}/current/.env"
+        elif [ -f "${LUMEN_DEPLOY_ROOT}/shared/.env" ]; then
+            env_file="${LUMEN_DEPLOY_ROOT}/shared/.env"
+        elif [ -f "${ROOT}/.env" ]; then
+            env_file="${ROOT}/.env"
+        else
+            log_error "找不到 .env；请显式传入路径：bash scripts/lumenctl.sh migrate-env /path/to/.env"
+            exit 1
+        fi
+    fi
+    log_step "迁移容器内 URL (${mode})"
+    lumen_migrate_container_urls "${env_file}" "${mode}"
+}
+
+lumen_compose_backup() {
+    run_lumen_script backup.sh "$@"
+}
+
+lumen_compose_restore() {
+    if [ "$#" -lt 1 ] || [ -z "${1:-}" ]; then
+        log_error "restore 需要一个 timestamp 参数（形如 20260424-123000）。"
+        log_error "用法：bash scripts/lumenctl.sh restore <timestamp>"
+        exit 1
+    fi
+    run_lumen_script restore.sh "$@"
+}
+
+# Rollback：切回 previous symlink + pull 旧 LUMEN_IMAGE_TAG + compose up
+# （cutover plan §18.1）。
+# previous symlink / .image-tag 由 update.sh 在切换时写入；缺失时报错让用户手动指定。
+lumen_compose_rollback() {
+    lumen_require_docker_access
+    local deploy_root
+    if [ -L "${ROOT}/current" ]; then
+        deploy_root="${ROOT}"
+    elif [ -L "${LUMEN_DEPLOY_ROOT}/current" ]; then
+        deploy_root="${LUMEN_DEPLOY_ROOT}"
+    else
+        log_error "找不到 release 布局的 current symlink；rollback 仅适用于 release 布局。"
+        exit 1
+    fi
+
+    if [ ! -L "${deploy_root}/previous" ]; then
+        log_error "${deploy_root}/previous 不存在，无法自动 rollback。"
+        log_error "请手动 ln -sfn releases/<old-id> ${deploy_root}/current 后重跑。"
+        exit 1
+    fi
+
+    local old_release old_id old_tag
+    old_release="$(readlink "${deploy_root}/previous" 2>/dev/null || true)"
+    old_id="$(basename "${old_release}")"
+    if [ -z "${old_id}" ]; then
+        log_error "无法解析 ${deploy_root}/previous 指向。"
+        exit 1
+    fi
+
+    log_step "rollback 到 release ${old_id}"
+    if [ -f "${deploy_root}/releases/${old_id}/.image-tag" ]; then
+        old_tag="$(head -n1 "${deploy_root}/releases/${old_id}/.image-tag" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [ -z "${old_tag}" ]; then
+        log_warn "未找到 ${deploy_root}/releases/${old_id}/.image-tag；rollback 将沿用当前 LUMEN_IMAGE_TAG。"
+    else
+        log_info "rollback 目标镜像 tag：${old_tag}"
+        if [ -f "${deploy_root}/shared/.env" ]; then
+            if grep -qE '^LUMEN_IMAGE_TAG=' "${deploy_root}/shared/.env"; then
+                lumen_run_as_root sed -i.bak -E "s|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${old_tag}|" "${deploy_root}/shared/.env"
+            else
+                printf 'LUMEN_IMAGE_TAG=%s\n' "${old_tag}" | lumen_run_as_root tee -a "${deploy_root}/shared/.env" >/dev/null
+            fi
+        else
+            log_warn "${deploy_root}/shared/.env 不存在，跳过 LUMEN_IMAGE_TAG 写入。"
+        fi
+    fi
+
+    lumen_run_as_root ln -sfn "releases/${old_id}" "${deploy_root}/current"
+    log_info "current 已切回 releases/${old_id}"
+
+    log_step "docker compose pull"
+    (cd "${deploy_root}/current" && lumen_docker compose pull) || log_warn "compose pull 返回非零，将继续 up 兜底"
+
+    log_step "docker compose up -d --wait api worker web"
+    (cd "${deploy_root}/current" && lumen_docker compose up -d --wait api worker web)
+}
+
+lumen_compose_version() {
+    log_step "Lumen 版本信息"
+    local version_file=""
+    if [ -f "${ROOT}/current/VERSION" ]; then
+        version_file="${ROOT}/current/VERSION"
+    elif [ -f "${ROOT}/VERSION" ]; then
+        version_file="${ROOT}/VERSION"
+    fi
+    if [ -n "${version_file}" ]; then
+        printf 'VERSION:        %s\n' "$(head -n1 "${version_file}" | tr -d '[:space:]')"
+    else
+        printf 'VERSION:        (unknown)\n'
+    fi
+
+    local env_file=""
+    if [ -f "${ROOT}/current/.env" ]; then
+        env_file="${ROOT}/current/.env"
+    elif [ -f "${ROOT}/.env" ]; then
+        env_file="${ROOT}/.env"
+    elif [ -f "${LUMEN_DEPLOY_ROOT}/shared/.env" ]; then
+        env_file="${LUMEN_DEPLOY_ROOT}/shared/.env"
+    fi
+    if [ -n "${env_file}" ]; then
+        local tag
+        tag="$(lumen_env_value LUMEN_IMAGE_TAG "${env_file}")"
+        printf 'IMAGE_TAG:      %s\n' "${tag:-(default)}"
+        local registry
+        registry="$(lumen_env_value LUMEN_IMAGE_REGISTRY "${env_file}")"
+        printf 'IMAGE_REGISTRY: %s\n' "${registry:-ghcr.io/cyeinfpro}"
+    fi
+
+    if command -v git >/dev/null 2>&1 && [ -d "${ROOT}/.git" ]; then
+        printf 'GIT_SHA:        %s\n' "$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    elif [ -f "${ROOT}/current/.lumen_release.json" ] && command -v python3 >/dev/null 2>&1; then
+        printf 'GIT_SHA:        %s\n' "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("git_sha","unknown"))' "${ROOT}/current/.lumen_release.json" 2>/dev/null || echo unknown)"
+    fi
+
+    if [ -L "${ROOT}/current" ]; then
+        printf 'CURRENT_LINK:   %s -> %s\n' "${ROOT}/current" "$(readlink "${ROOT}/current" 2>/dev/null || true)"
+    fi
 }
 
 detect_nologin_shell() {
@@ -1449,6 +1712,12 @@ Lumen 一键运维菜单
   5) 卸载 image-job
   6) 扫描 nginx 配置
   7) nginx 反代优化向导
+  8) 查看运行状态（compose ps + 健康检查）
+  9) 跟随 API 日志（compose logs -f api）
+  10) 重启 api/worker/web（compose up -d --force-recreate）
+  11) 启动 api/worker/web（compose up -d --wait）
+  12) 停止 api/worker/web/tgbot（compose stop）
+  13) 执行 DB migrate（compose --profile migrate run --rm migrate）
   0) 退出
 
 EOF
@@ -1462,6 +1731,12 @@ EOF
             5) uninstall_image_job ;;
             6) nginx_scan || true ;;
             7) nginx_optimize ;;
+            8) lumen_compose_status ;;
+            9) lumen_compose_logs api ;;
+            10) lumen_compose_restart ;;
+            11) lumen_compose_start ;;
+            12) lumen_compose_stop ;;
+            13) lumen_compose_migrate ;;
             0) exit 0 ;;
             *) log_warn "无效选项：${choice}" ;;
         esac
@@ -1470,11 +1745,28 @@ EOF
 
 main() {
     local command="${1:-menu}"
+    shift || true
     case "${command}" in
         menu) show_menu ;;
-        install-lumen) run_lumen_script install.sh ;;
-        update-lumen) run_lumen_script update.sh ;;
-        uninstall-lumen) run_lumen_script uninstall.sh ;;
+        # Lifecycle：透传额外 args 给底层脚本，install.sh / update.sh 可识别 --flag
+        install-lumen) run_lumen_script install.sh "$@" ;;
+        update-lumen) run_lumen_script update.sh "$@" ;;
+        uninstall-lumen) run_lumen_script uninstall.sh "$@" ;;
+        rollback) lumen_compose_rollback "$@" ;;
+        version) lumen_compose_version ;;
+        # Docker compose runtime
+        status) lumen_compose_status ;;
+        logs) lumen_compose_logs "${1:-api}" ;;
+        start) lumen_compose_start ;;
+        stop) lumen_compose_stop ;;
+        restart) lumen_compose_restart ;;
+        migrate) lumen_compose_migrate ;;
+        bootstrap) lumen_compose_bootstrap ;;
+        migrate-env) lumen_env_migrate_file --dry-run "$@" ;;
+        migrate-env-apply) lumen_env_migrate_file --apply "$@" ;;
+        backup) lumen_compose_backup "$@" ;;
+        restore) lumen_compose_restore "$@" ;;
+        # Auxiliary（保留，不再适用 docker 时由内部函数自行报错）
         install-image-job) install_image_job ;;
         uninstall-image-job) uninstall_image_job ;;
         nginx-scan) nginx_scan ;;

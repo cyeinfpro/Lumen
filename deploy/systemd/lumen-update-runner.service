@@ -11,7 +11,9 @@ WorkingDirectory=/opt/lumen/current
 EnvironmentFile=-/opt/lumendata/backup/.update.env
 Environment=LUMEN_UPDATE_NONINTERACTIVE=1
 Environment=LUMEN_UPDATE_GIT_PULL=1
-Environment=LUMEN_UPDATE_BUILD=1
+# 默认走 docker compose pull 拉预构建镜像；宿主机不再做 npm/uv 构建。
+# 需要本地 build 时由 API 写 .update.env 注入 LUMEN_UPDATE_BUILD=1 兜底。
+Environment=LUMEN_UPDATE_BUILD=0
 StandardOutput=append:/opt/lumendata/backup/.update.log
 StandardError=append:/opt/lumendata/backup/.update.log
 ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/update.sh

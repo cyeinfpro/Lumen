@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from lumen_core import __version__ as lumen_core_version
 from lumen_core.context_window import warm_tiktoken
 from lumen_core.constants import MAX_PROMPT_CHARS
 from sqlalchemy import text
@@ -312,8 +313,12 @@ def _cors_allow_origins() -> list[str]:
     return origins
 
 
+def _lumen_version() -> str:
+    return os.environ.get("LUMEN_VERSION", "").strip() or lumen_core_version
+
+
 def build_app() -> FastAPI:
-    app = FastAPI(title="Lumen API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Lumen API", version=_lumen_version(), lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -413,7 +418,11 @@ async def unhandled_exc_handler(_req: Request, exc: Exception) -> JSONResponse:
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
-    return {"status": "ok", "env": settings.app_env}
+    return {
+        "status": "ok",
+        "env": settings.app_env,
+        "version": _lumen_version(),
+    }
 
 
 @app.get("/readyz")
