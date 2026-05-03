@@ -1443,7 +1443,7 @@ export function publicShareItemImageUrl(token: string, imageId: string): string 
 }
 
 // ——————————————————————————————————————————————————————————————
-// V1.0 朋友内测：Invite Links / 系统设置 / 会话管理 / 隐私
+// Invite Links / 系统设置 / 会话管理 / 隐私
 // ——————————————————————————————————————————————————————————————
 
 // ——— Admin: invite links ———

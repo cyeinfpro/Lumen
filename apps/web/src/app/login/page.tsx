@@ -1,10 +1,6 @@
 "use client";
 
-// Lumen V1.0 登录页（朋友内测）。
-// - 左右分栏：左品牌介绍（桌面），右表单卡片（始终显示）
-// - 保留现有 401/404/422/429 细分文案
-// - 打开密码可见性（Eye / EyeOff）
-// - next 参数同源白名单保留
+// Lumen 登录页。
 
 import { Suspense, useState } from "react";
 import Link from "next/link";
@@ -347,14 +343,6 @@ function BrandPanel() {
           </ul>
         </div>
 
-        <motion.p
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.3, delay: 0.3 }}
-          className="text-xs text-neutral-500"
-        >
-          V1 内测版 · 朋友专用
-        </motion.p>
       </div>
     </aside>
   );

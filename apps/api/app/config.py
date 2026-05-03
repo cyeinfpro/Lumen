@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     # Prometheus /metrics 开关
     metrics_enabled: bool = True
 
-    # 登录用户的限流（发消息 / 上传图）开关。内测期默认关闭；
+    # 登录用户的限流（发消息 / 上传图）开关。默认关闭；
     # 公开端点的限流（invite / share 预览）恒开，不受此开关影响。
     user_rate_limit_enabled: bool = False
 
