@@ -347,13 +347,56 @@ lumenctl_resolve_script() {
     return 1
 }
 
+lumenctl_raw_script_url() {
+    local script_name="$1"
+    local branch="${LUMEN_BRANCH:-main}"
+    local raw_base="${LUMEN_RAW_BASE:-https://raw.githubusercontent.com/cyeinfpro/Lumen/${branch}}"
+    printf '%s/scripts/%s' "${raw_base%/}" "${script_name}"
+}
+
+lumenctl_bootstrap_install_from_github() {
+    local raw_url tmp_script install_dir
+    raw_url="$(lumenctl_raw_script_url install.sh)"
+    install_dir="${LUMEN_INSTALL_DIR:-${ROOT}}"
+
+    ensure_cmd curl "当前目录不是完整 Lumen 仓库，且缺少 curl，无法从 GitHub 拉取 install.sh"
+    tmp_script="$(mktemp)" || {
+        log_error "无法创建临时文件，不能从 GitHub bootstrap 安装。"
+        exit 1
+    }
+
+    log_warn "当前目录缺少 scripts/install.sh，将从 GitHub bootstrap 完整仓库。"
+    log_info "GitHub raw：${raw_url}"
+    log_info "目标目录：${install_dir}"
+    if ! curl -fsSL "${raw_url}" -o "${tmp_script}"; then
+        rm -f "${tmp_script}"
+        log_error "无法从 GitHub 下载 install.sh：${raw_url}"
+        log_error "可手动执行：git clone ${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git} ${install_dir}"
+        exit 1
+    fi
+
+    export LUMEN_INSTALL_DIR="${install_dir}"
+    export LUMEN_REPO_URL="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
+    export LUMEN_BRANCH="${LUMEN_BRANCH:-main}"
+
+    local rc=0
+    bash "${tmp_script}" --install "$@" || rc=$?
+    rm -f "${tmp_script}"
+    return "${rc}"
+}
+
 run_lumen_script() {
     local script_name="$1"
     shift || true
     local script_path=""
     log_step "执行 ${script_name}"
     if ! script_path="$(lumenctl_resolve_script "${script_name}")"; then
+        if [ "${script_name}" = "install.sh" ]; then
+            lumenctl_bootstrap_install_from_github "$@"
+            return $?
+        fi
         log_error "找不到脚本：${ROOT}/current/scripts/${script_name} 或 ${ROOT}/scripts/${script_name}"
+        log_error "如果这是新机器，请先从 GitHub 拉完整仓库：git clone ${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git} ${ROOT}"
         exit 1
     fi
     # 全栈 docker 化后 install.sh / update.sh / uninstall.sh 都接受透传 flag。
