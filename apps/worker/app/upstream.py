@@ -41,10 +41,12 @@ import math
 import os
 import re
 import shutil
+import signal
 import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import quote, urlsplit
@@ -2024,34 +2026,101 @@ def _write_bytes_file(fd: int, raw: bytes) -> None:
     os.write(fd, raw)
 
 
-async def _curl_post_multipart(
+async def _terminate_curl_proc_group(
+    proc: asyncio.subprocess.Process | None,
+) -> None:
+    """SIGTERM the curl process group, then SIGKILL after a short grace.
+
+    Why killpg instead of proc.terminate(): curl internally spawns helpers for
+    DNS resolution, TLS handshake, and proxy-connect. With start_new_session=True
+    they all share curl's pgid. proc.terminate() only signals the curl PID and
+    can leave those helpers as orphans owning sockets / fds. killpg(pgid, SIGTERM)
+    delivers the signal to the whole group; the wait_for(.., 2s) then escalates
+    to SIGKILL on whatever is still around.
+    """
+    if proc is None or proc.returncode is not None:
+        return
+    pgid: int | None = None
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+    try:
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                with suppress(Exception):
+                    proc.terminate()
+        else:
+            with suppress(Exception):
+                proc.terminate()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2)
+    except Exception:  # noqa: BLE001
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                with suppress(Exception):
+                    proc.kill()
+        else:
+            with suppress(Exception):
+                proc.kill()
+        with suppress(Exception):
+            await proc.wait()
+
+
+async def _stage_multipart_bytes_to_tmp(
+    files: list[tuple[str, tuple[str, bytes, str]]],
+) -> tuple[list[tuple[str, str, str, str]], list[str]]:
+    """Write each (field, (filename, bytes, mime)) to a tmp file once.
+
+    Returns (staged, tmpfiles) where:
+    - staged = list of (field_name, tmp_path, filename, mime) for `-F` building
+    - tmpfiles = same paths, separated for caller-side unlink in finally
+
+    Why split the staging: when the retry helper repeats the same upload it must
+    not hold a second copy of the bytes in Python. Pre-staging once + curl
+    --data-binary @path keeps memory at one body for the entire retry sequence,
+    which matters for 4K refs (tens of MB each, multiple per task, many tasks).
+    """
+    staged: list[tuple[str, str, str, str]] = []
+    tmpfiles: list[str] = []
+    for field_name, (filename, raw, mime) in files:
+        fd, tmp_path = tempfile.mkstemp(prefix="lumen_curl_", suffix=".bin")
+        tmpfiles.append(tmp_path)
+        try:
+            await asyncio.to_thread(_write_bytes_file, fd, raw)
+        finally:
+            os.close(fd)
+        staged.append((field_name, tmp_path, filename, mime))
+    return staged, tmpfiles
+
+
+async def _curl_post_multipart_using_paths(
     *,
     url: str,
     data: dict[str, str],
-    files: list[tuple[str, tuple[str, bytes, str]]],
+    staged_files: list[tuple[str, str, str, str]],
     headers: dict[str, str],
     timeout_s: float,
     proxy_url: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """用 curl 发 multipart POST，返回 (status_code, parsed_body)。
+    """Curl multipart POST against pre-staged tmp file paths.
 
-    - files 里的 bytes 写临时文件再用 `-F name=@path;filename=...;type=...` 送出
-    - 响应体读到 stdout，status 用 `-w \\n__HTTP_STATUS__:%{http_code}` 带出
-    - 子进程非 0 退出抛 httpx.HTTPError（与 httpx 调用方一致，便于外层 except）
+    staged_files = list of (field_name, tmp_path, filename, mime). The caller
+    owns the tmp files (created via _stage_multipart_bytes_to_tmp); this fn does
+    not unlink them so they can be reused across retries.
     """
-    tmpfiles: list[str] = []
     proc: asyncio.subprocess.Process | None = None
     try:
         form_args: list[str] = []
         for k, v in data.items():
             form_args += ["-F", f"{k}={v}"]
-        for field_name, (filename, raw, mime) in files:
-            fd, tmp_path = tempfile.mkstemp(prefix="lumen_curl_", suffix=".bin")
-            tmpfiles.append(tmp_path)
-            try:
-                await asyncio.to_thread(_write_bytes_file, fd, raw)
-            finally:
-                os.close(fd)
+        for field_name, tmp_path, filename, mime in staged_files:
             form_args += [
                 "-F",
                 f"{field_name}=@{tmp_path};filename={filename};type={mime}",
@@ -2072,10 +2141,14 @@ async def _curl_post_multipart(
             *form_args,
             url,
         ]
+        # start_new_session: 把 curl 放进自己的进程组，cleanup 时用 killpg 一并
+        # 收掉 curl 派生的 DNS / TLS / proxy connect 子进程，避免 terminate 只命中
+        # 主 PID 留下孤儿进程占住 fd / socket。
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         curl_timeout_s = float(_curl_timeout_arg(timeout_s))
         guard_timeout_s = curl_timeout_s + min(5.0, max(0.25, curl_timeout_s * 0.1))
@@ -2106,22 +2179,37 @@ async def _curl_post_multipart(
     except asyncio.CancelledError:
         raise
     finally:
-        if proc is not None and proc.returncode is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
+        await _terminate_curl_proc_group(proc)
+
+
+async def _curl_post_multipart(
+    *,
+    url: str,
+    data: dict[str, str],
+    files: list[tuple[str, tuple[str, bytes, str]]],
+    headers: dict[str, str],
+    timeout_s: float,
+    proxy_url: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """用 curl 发 multipart POST，返回 (status_code, parsed_body)。
+
+    - files 里的 bytes 写临时文件再用 `-F name=@path;filename=...;type=...` 送出
+    - 响应体读到 stdout，status 用 `-w \\n__HTTP_STATUS__:%{http_code}` 带出
+    - 子进程非 0 退出抛 httpx.HTTPError（与 httpx 调用方一致，便于外层 except）
+    """
+    staged: list[tuple[str, str, str, str]] = []
+    tmpfiles: list[str] = []
+    try:
+        staged, tmpfiles = await _stage_multipart_bytes_to_tmp(files)
+        return await _curl_post_multipart_using_paths(
+            url=url,
+            data=data,
+            staged_files=staged,
+            headers=headers,
+            timeout_s=timeout_s,
+            proxy_url=proxy_url,
+        )
+    finally:
         for p in tmpfiles:
             try:
                 os.unlink(p)
@@ -2142,42 +2230,57 @@ async def _curl_post_multipart_with_retry(
 ) -> tuple[int, dict[str, Any]]:
     """带重试的 curl POST。语义与 _post_with_retry 保持对称：
     httpx.HTTPError / 502 / 503 / 504 都重试，其他情况直接返回。
+
+    Memory: 把所有 multipart files 一次性 pre-stage 到 tmp 文件，retry 时直接复用
+    同一组路径（curl 自己读 disk 即可）。这样整个 retry 序列只在内存里持有一份 body
+    bytes 的时间窗 = _stage_multipart_bytes_to_tmp 的瞬间，之后调用方栈上的 files
+    引用可被 GC（前提：调用方不再持有）。对 4K 大图 + 多并发 task 的内存压力意义最大。
     """
     last_status: int | None = None
     last_payload: dict[str, Any] | None = None
     last_exc: BaseException | None = None
-    for attempt in range(max_attempts):
-        if attempt > 0:
-            await asyncio.sleep(backoff_base_s * (2 ** (attempt - 1)))
-        try:
-            status, payload = await _curl_post_multipart(
-                url=url,
-                data=data,
-                files=files,
-                headers=headers,
-                timeout_s=timeout_s,
-                proxy_url=proxy_url,
-            )
-        except httpx.HTTPError as exc:
-            last_exc = exc
-            logger.warning(
-                "curl upstream transient error attempt=%d/%d url=%s err=%r",
-                attempt + 1, max_attempts, url, exc,
-            )
-            continue
-        if status in _RETRY_STATUS:
-            last_status = status
-            last_payload = payload
-            logger.warning(
-                "curl upstream transient status attempt=%d/%d url=%s status=%d",
-                attempt + 1, max_attempts, url, status,
-            )
-            continue
-        return status, payload
-    if last_status is not None and last_payload is not None:
-        return last_status, last_payload
-    assert last_exc is not None
-    raise last_exc
+    staged: list[tuple[str, str, str, str]] = []
+    tmpfiles: list[str] = []
+    try:
+        staged, tmpfiles = await _stage_multipart_bytes_to_tmp(files)
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                await asyncio.sleep(backoff_base_s * (2 ** (attempt - 1)))
+            try:
+                status, payload = await _curl_post_multipart_using_paths(
+                    url=url,
+                    data=data,
+                    staged_files=staged,
+                    headers=headers,
+                    timeout_s=timeout_s,
+                    proxy_url=proxy_url,
+                )
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                logger.warning(
+                    "curl upstream transient error attempt=%d/%d url=%s err=%r",
+                    attempt + 1, max_attempts, url, exc,
+                )
+                continue
+            if status in _RETRY_STATUS:
+                last_status = status
+                last_payload = payload
+                logger.warning(
+                    "curl upstream transient status attempt=%d/%d url=%s status=%d",
+                    attempt + 1, max_attempts, url, status,
+                )
+                continue
+            return status, payload
+        if last_status is not None and last_payload is not None:
+            return last_status, last_payload
+        assert last_exc is not None
+        raise last_exc
+    finally:
+        for p in tmpfiles:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 async def _iter_sse_curl(
@@ -2330,10 +2433,14 @@ async def _iter_sse_curl(
             f"@{body_path}",
             url,
         ]
+        # start_new_session: 让 curl 自成进程组，cleanup 用 killpg 收掉它派生的
+        # DNS/TLS/proxy 子进程，避免 terminate 只命中主 PID 留下孤儿（详见
+        # _terminate_curl_proc_group 注释）。SSE 路径长 idle，更怕这种泄漏。
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         assert proc.stdout is not None
 
@@ -2452,22 +2559,7 @@ async def _iter_sse_curl(
         # cancellation safe: 终止 curl 子进程 + 删除 tmp body file（在 except / 正常退出
         # 都生效）。即使外层 cancel 也保证不留僵尸进程 / 临时文件。
         # proc 可能为 None：mkstemp 之后到 create_subprocess_exec 之前被 cancel 时。
-        if proc is not None and proc.returncode is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
+        await _terminate_curl_proc_group(proc)
         # fd 在主 try 段开头已经 close；但若 cancel 命中 _write_json_body_file 之前，
         # fd 仍是打开状态——容错关一下（重复 close 抛 OSError 也吞掉，主要为防 fd 泄漏）。
         try:
