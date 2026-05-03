@@ -428,7 +428,7 @@ cleanup_on_failure() {
     trap - EXIT INT TERM ERR
     if [ "${rc}" -ne 0 ]; then
         log_error "安装在阶段 [${INSTALL_PHASE:-unknown}] 失败，正在清理已启动的容器（保留数据卷）。"
-        if [ "${#INSTALL_STARTED_SERVICES[@]:-0}" -gt 0 ]; then
+        if [ "${#INSTALL_STARTED_SERVICES[@]}" -gt 0 ]; then
             local svc
             for svc in "${INSTALL_STARTED_SERVICES[@]}"; do
                 log_warn "  最近 40 行 ${svc} 日志："
@@ -1044,10 +1044,32 @@ pull_or_build_images() {
     else
         emit_step_start containers "拉取镜像（lumen_compose pull）"
         if ! _install_compose pull; then
-            log_error "docker compose pull 失败。"
-            log_error "  常见原因：1) 国内网络访问 ghcr 受阻 → 设置 LUMEN_HTTP_PROXY 或自托管 registry"
-            log_error "            2) 镜像 tag 不存在 → 用 --image-tag=vX.Y.Z 钉死 tag 或 --build 本地构建"
-            exit 1
+            local shared_env="${SHARED_DIR}/.env"
+            local registry current_tag
+            registry="$(env_file_get LUMEN_IMAGE_REGISTRY "${shared_env}")"
+            current_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
+            if [ -z "${INSTALL_IMAGE_TAG_OVERRIDE}" ] \
+                && [[ "${registry}" == ghcr.io/cyeinfpro* ]] \
+                && [ "${current_tag}" != "main" ]; then
+                log_warn "docker compose pull 失败，疑似默认镜像 tag=${current_tag} 尚未发布；回退到 main 后重试一次。"
+                env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"
+                if ! grep -q '^# install.sh: fallback to main after pull failure' "${shared_env}"; then
+                    printf '\n# install.sh: fallback to main after pull failure; publish stable/latest then switch back\n' >> "${shared_env}"
+                fi
+                if _install_compose pull; then
+                    log_info "已使用 LUMEN_IMAGE_TAG=main 拉取镜像。"
+                else
+                    log_error "docker compose pull 失败（fallback main 后仍失败）。"
+                    log_error "  常见原因：1) 国内网络访问 ghcr 受阻 → 设置 LUMEN_HTTP_PROXY 或自托管 registry"
+                    log_error "            2) main 镜像也未发布 → 使用 --build 本地构建"
+                    exit 1
+                fi
+            else
+                log_error "docker compose pull 失败。"
+                log_error "  常见原因：1) 国内网络访问 ghcr 受阻 → 设置 LUMEN_HTTP_PROXY 或自托管 registry"
+                log_error "            2) 镜像 tag 不存在 → 用 --image-tag=vX.Y.Z 钉死 tag 或 --build 本地构建"
+                exit 1
+            fi
         fi
     fi
     emit_step_done

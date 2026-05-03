@@ -86,6 +86,20 @@ def test_install_bootstrap_defaults_to_menu_not_auto_update() -> None:
     assert 'exec bash "${script_path}" "${args[@]}" </dev/tty' in text
 
 
+def test_install_failure_cleanup_array_length_is_bash_safe() -> None:
+    text = INSTALL.read_text(encoding="utf-8")
+    assert '${#INSTALL_STARTED_SERVICES[@]:-0}' not in text
+    assert '${#INSTALL_STARTED_SERVICES[@]}' in text
+
+
+def test_install_pull_failure_falls_back_to_main_for_default_tag() -> None:
+    text = INSTALL.read_text(encoding="utf-8")
+    assert "回退到 main 后重试一次" in text
+    assert 'env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"' in text
+    assert "fallback main 后仍失败" in text
+    assert "main 镜像也未发布 → 使用 --build 本地构建" in text
+
+
 def test_update_script_requires_release_layout_and_prepares_new_release() -> None:
     """
     docker cutover: release 布局保留，但 prepare 流程从 git clone 改为 rsync 仓库快照
