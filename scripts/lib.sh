@@ -1077,6 +1077,10 @@ lumen_start_local_runtime() {
 
     log_step "启动 Lumen 运行时进程"
 
+    # 上一次 install/start 写下的 PID 文件是最可靠的清理来源；先按 PID
+    # 停掉，再用端口扫描兜底处理未记录或旧版本残留的进程。
+    lumen_stop_persisted_runtime "${root}" "${LUMEN_RUNTIME_STOP_WAIT_SECONDS:-15}" || true
+
     # 先把 8000/3000 上的旧 Lumen 进程清掉。否则这次启动的新 API/Web 会因 EADDRINUSE
     # 立刻退出，而旧进程仍在响应 healthz，健康检查会假阳性通过。
     if ! lumen_prepare_port_for_runtime 8000 "API"; then

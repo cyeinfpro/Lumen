@@ -235,6 +235,15 @@ def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
     assert "lumen_tail_runtime_log \"Worker\"" in text
 
 
+def test_local_runtime_stops_persisted_pids_before_port_scan() -> None:
+    text = LIB.read_text(encoding="utf-8")
+    start = text.index("lumen_start_local_runtime()")
+    persisted = text.index('lumen_stop_persisted_runtime "${root}"', start)
+    api_port_scan = text.index('lumen_prepare_port_for_runtime 8000 "API"', start)
+    assert persisted < api_port_scan
+    assert 'LUMEN_RUNTIME_STOP_WAIT_SECONDS:-15' in text[persisted:api_port_scan]
+
+
 def test_shared_root_resolver_handles_release_current_symlink(tmp_path: Path) -> None:
     deploy_root = tmp_path / "lumen"
     release = deploy_root / "releases" / "20260503010101-abcdef0"
