@@ -4,6 +4,7 @@
 # Usage:
 #   COMPOSE_PROJECT_NAME=lumen-local \
 #   LUMEN_DATA_ROOT=/tmp/lumen-local \
+#   LUMEN_DB_ROOT=/tmp/lumen-local \
 #   docker compose -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait
 
 services:
