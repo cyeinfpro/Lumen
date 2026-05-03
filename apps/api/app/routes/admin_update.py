@@ -108,6 +108,41 @@ def _lumen_root() -> Path:
     return Path(os.environ.get("LUMEN_ROOT", _LUMEN_ROOT)).expanduser()
 
 
+def _read_dotenv_value(path: Path, key: str) -> str | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return None
+    prefix = f"{key}="
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or not line.startswith(prefix):
+            continue
+        value = line[len(prefix):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value or None
+    return None
+
+
+def _shared_env_path(script: Path | None = None) -> Path:
+    configured = os.environ.get("LUMEN_SHARED_ENV", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    root = _lumen_root()
+    candidate = root / "shared" / ".env"
+    if candidate.is_file():
+        return candidate
+    if script is not None:
+        release_env = script.parent.parent / ".env"
+        try:
+            if release_env.is_file():
+                return release_env.resolve()
+        except OSError:
+            pass
+    return candidate
+
+
 def _runner_unit_available() -> bool:
     """True iff the system has lumen-update-runner.service installed.
 
@@ -136,6 +171,8 @@ def _runner_env_lines(env: dict[str, str]) -> list[str]:
         "LUMEN_UPDATE_SYSTEMD_UNIT",
         "LUMEN_UPDATE_CHANNEL",
         "LUMEN_IMAGE_TAG",
+        "LUMEN_UPDATE_PROXY_URL",
+        "LUMEN_HTTP_PROXY",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -275,12 +312,46 @@ def _clean_proxy_env(env: dict[str, str]) -> None:
 
 
 def _apply_proxy_env(env: dict[str, str], proxy_url: str) -> None:
+    env["LUMEN_UPDATE_PROXY_URL"] = proxy_url
+    env["LUMEN_HTTP_PROXY"] = proxy_url
     env["HTTP_PROXY"] = proxy_url
     env["HTTPS_PROXY"] = proxy_url
     env["ALL_PROXY"] = proxy_url
     env["http_proxy"] = proxy_url
     env["https_proxy"] = proxy_url
     env["all_proxy"] = proxy_url
+
+
+def _proxy_url_from_env_file(path: Path) -> str | None:
+    for key in (
+        "LUMEN_UPDATE_PROXY_URL",
+        "LUMEN_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ):
+        value = _read_dotenv_value(path, key)
+        if value:
+            return value
+    return None
+
+
+def _apply_dotenv_proxy_env(env: dict[str, str], env_file: Path) -> str | None:
+    proxy_url = _proxy_url_from_env_file(env_file)
+    if not proxy_url:
+        return None
+    _apply_proxy_env(env, proxy_url)
+    no_proxy = (
+        _read_dotenv_value(env_file, "NO_PROXY")
+        or _read_dotenv_value(env_file, "no_proxy")
+        or "127.0.0.1,localhost,::1"
+    )
+    env.setdefault("NO_PROXY", no_proxy)
+    env.setdefault("no_proxy", no_proxy)
+    return proxy_url
 
 
 def _mask_proxy_url(proxy_url: str) -> str:
@@ -318,6 +389,7 @@ def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
         "LOGNAME",
         "LANG",
         "LC_ALL",
+        "LUMEN_HTTP_PROXY",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -1284,8 +1356,14 @@ async def trigger_update(
 
         env = os.environ.copy()
         _clean_proxy_env(env)
+        env_file_proxy_url = None
         if proxy_url:
             _apply_proxy_env(env, proxy_url)
+        else:
+            env_file_proxy_url = _apply_dotenv_proxy_env(env, _shared_env_path(script))
+            if env_file_proxy_url:
+                log_fh.write(f"proxy_url={_mask_proxy_url(env_file_proxy_url)}\n")
+                log_fh.flush()
         # Local-loopback exemptions so update.sh's healthz curl doesn't route
         # 127.0.0.1 through the upstream socks5 proxy and timeout forever.
         env.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")

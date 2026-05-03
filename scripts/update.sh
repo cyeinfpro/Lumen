@@ -391,6 +391,28 @@ PREVIOUS_TAG="${CURRENT_TAG}"
 LUMEN_UPDATE_CHANNEL="$(lumen_env_value LUMEN_UPDATE_CHANNEL "${SHARED_ENV}" 2>/dev/null || echo "")"
 [ -n "${LUMEN_UPDATE_CHANNEL}" ] || LUMEN_UPDATE_CHANNEL="stable"
 
+# 统一代理来源：支持 shared/.env 里的 LUMEN_UPDATE_PROXY_URL / LUMEN_HTTP_PROXY，
+# 也兼容面板触发时透传进来的 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY。
+LUMEN_PROXY_URL=""
+if lumen_configure_proxy_env "${SHARED_ENV}" >/dev/null 2>&1; then
+    LUMEN_PROXY_URL="${LUMEN_UPDATE_PROXY_URL:-${LUMEN_HTTP_PROXY:-}}"
+fi
+
+CONFIG_CHANGED=0
+CURRENT_WEB_BIND_HOST="$(lumen_env_value WEB_BIND_HOST "${SHARED_ENV}" 2>/dev/null || echo "")"
+if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
+    if [ "${CURRENT_WEB_BIND_HOST}" != "${LUMEN_WEB_BIND_HOST}" ]; then
+        lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "${LUMEN_WEB_BIND_HOST}"
+        CURRENT_WEB_BIND_HOST="${LUMEN_WEB_BIND_HOST}"
+        CONFIG_CHANGED=1
+    fi
+elif [ -z "${CURRENT_WEB_BIND_HOST}" ] || [ "${CURRENT_WEB_BIND_HOST}" = "127.0.0.1" ]; then
+    log_info "[check] WEB_BIND_HOST 仍是旧默认 ${CURRENT_WEB_BIND_HOST:-<unset>}，自动改为 0.0.0.0 暴露宿主机 3000。"
+    lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"
+    CURRENT_WEB_BIND_HOST="0.0.0.0"
+    CONFIG_CHANGED=1
+fi
+
 # 解析目标 tag
 TARGET_TAG="$(lumen_image_tag_resolve "${LUMEN_UPDATE_CHANNEL}" "${SHARED_ENV}" 2>/dev/null || echo "")"
 if [ -z "${TARGET_TAG}" ]; then
@@ -403,13 +425,21 @@ emit_info check channel       "${LUMEN_UPDATE_CHANNEL}"
 emit_info check current_tag   "${CURRENT_TAG:-<none>}"
 emit_info check target_tag    "${TARGET_TAG}"
 emit_info check current_id    "${CURRENT_ID:-<none>}"
+emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"
+if [ -n "${LUMEN_PROXY_URL}" ]; then
+    emit_info check proxy "configured"
+fi
 
-if [ -n "${CURRENT_TAG}" ] && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ]; then
+if [ -n "${CURRENT_TAG}" ] && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${CONFIG_CHANGED}" -eq 0 ]; then
     log_info "[check] 当前 tag ${CURRENT_TAG} 已是目标版本，跳过中间阶段，仅做 cleanup。"
     emit_info check action "noop_already_latest"
     emit_done  check 0
     SKIP_TO_CLEANUP=1
 else
+    if [ -n "${CURRENT_TAG}" ] && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${CONFIG_CHANGED}" -eq 1 ]; then
+        log_info "[check] 当前 tag ${CURRENT_TAG} 已是目标版本，但配置已变更，继续重建 release 并重启服务。"
+        emit_info check action "config_changed_redeploy"
+    fi
     SKIP_TO_CLEANUP=0
     emit_done check 0
 fi
@@ -639,12 +669,7 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     # -----------------------------------------------------------------------
     emit_start pull_images
 
-    # 应用 LUMEN_UPDATE_PROXY_URL 给 docker compose pull（HTTP_PROXY/HTTPS_PROXY）
-    if [ -n "${LUMEN_UPDATE_PROXY_URL:-}" ]; then
-        export HTTP_PROXY="${LUMEN_UPDATE_PROXY_URL}"
-        export HTTPS_PROXY="${LUMEN_UPDATE_PROXY_URL}"
-        export http_proxy="${LUMEN_UPDATE_PROXY_URL}"
-        export https_proxy="${LUMEN_UPDATE_PROXY_URL}"
+    if [ -n "${LUMEN_PROXY_URL}" ]; then
         emit_info pull_images proxy "configured"
     fi
 

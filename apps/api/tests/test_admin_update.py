@@ -40,6 +40,8 @@ def test_proxy_env_is_replaced_for_update_process() -> None:
 
     assert env["KEEP"] == "1"
     for key in (
+        "LUMEN_UPDATE_PROXY_URL",
+        "LUMEN_HTTP_PROXY",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -48,6 +50,33 @@ def test_proxy_env_is_replaced_for_update_process() -> None:
         "all_proxy",
     ):
         assert env[key] == "socks5h://127.0.0.1:1080"
+
+
+def test_update_proxy_can_be_loaded_from_shared_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    shared_env = tmp_path / "shared" / ".env"
+    shared_env.parent.mkdir()
+    shared_env.write_text(
+        "LUMEN_HTTP_PROXY='http://127.0.0.1:7890'\n"
+        "NO_PROXY=localhost,127.0.0.1,::1,10.0.0.0/8\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LUMEN_SHARED_ENV", str(shared_env))
+
+    env: dict[str, str] = {}
+    proxy_url = admin_update._apply_dotenv_proxy_env(
+        env,
+        admin_update._shared_env_path(tmp_path / "current" / "scripts" / "update.sh"),
+    )
+
+    assert proxy_url == "http://127.0.0.1:7890"
+    assert env["LUMEN_UPDATE_PROXY_URL"] == "http://127.0.0.1:7890"
+    assert env["LUMEN_HTTP_PROXY"] == "http://127.0.0.1:7890"
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert env["NO_PROXY"] == "localhost,127.0.0.1,::1,10.0.0.0/8"
 
 
 def test_update_trigger_note_mentions_restart_and_health_check() -> None:

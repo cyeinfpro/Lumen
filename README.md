@@ -196,6 +196,8 @@ Web 默认绑定 `0.0.0.0:3000`。如果服务器本机 `curl http://127.0.0.1:3
 bash scripts/lumenctl.sh update-lumen
 ```
 
+如果服务器访问 GitHub/GHCR 需要代理，在 `shared/.env` 写入 `LUMEN_HTTP_PROXY=http://127.0.0.1:7890` 或 `LUMEN_UPDATE_PROXY_URL=...`；命令行更新和管理面板「一键更新」都会自动读取。
+
 实际阶段：`check` -> `backup_preflight` -> `fetch_release` -> `set_image_tag` -> `pull_images` -> `start_infra` -> `migrate_db` -> `switch` -> `restart_services` -> `health_check` -> `cleanup`。
 
 如果需要在本机用 Dockerfile 重新构建（无 GHCR 访问，或本地有改动）：

@@ -110,6 +110,47 @@ def test_web_port_defaults_to_public_bind_and_install_migrates_old_env() -> None
     assert 'env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"' in install
 
 
+def test_update_migrates_old_web_bind_and_proxy_env() -> None:
+    update = UPDATE.read_text(encoding="utf-8")
+    lib = LIB.read_text(encoding="utf-8")
+
+    assert 'if lumen_configure_proxy_env "${SHARED_ENV}"' in update
+    assert "config_changed_redeploy" in update
+    assert 'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"' in update
+    assert 'emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"' in update
+    assert "LUMEN_HTTP_PROXY HTTPS_PROXY HTTP_PROXY" in lib
+    assert 'export HTTP_PROXY="${proxy_url}"' in lib
+    assert 'export HTTPS_PROXY="${proxy_url}"' in lib
+
+
+def test_lumen_configure_proxy_env_reads_shared_env(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LUMEN_HTTP_PROXY=http://127.0.0.1:7890\n"
+        "NO_PROXY=localhost,127.0.0.1,::1,10.0.0.0/8\n",
+        encoding="utf-8",
+    )
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        unset LUMEN_UPDATE_PROXY_URL LUMEN_HTTP_PROXY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
+        lumen_configure_proxy_env {shlex.quote(str(env_file))} >/tmp/lumen-proxy-test.out
+        printf 'proxy=%s\\n' "$(cat /tmp/lumen-proxy-test.out)"
+        printf 'http=%s\\n' "$HTTP_PROXY"
+        printf 'https=%s\\n' "$HTTPS_PROXY"
+        printf 'update=%s\\n' "$LUMEN_UPDATE_PROXY_URL"
+        printf 'no_proxy=%s\\n' "$NO_PROXY"
+        """
+    )
+
+    assert "proxy=http://127.0.0.1:7890" in result.stdout
+    assert "http=http://127.0.0.1:7890" in result.stdout
+    assert "https=http://127.0.0.1:7890" in result.stdout
+    assert "update=http://127.0.0.1:7890" in result.stdout
+    assert "no_proxy=localhost,127.0.0.1,::1,10.0.0.0/8" in result.stdout
+
+
 def test_update_script_requires_release_layout_and_prepares_new_release() -> None:
     """
     docker cutover: release 布局保留，但 prepare 流程从 git clone 改为 rsync 仓库快照
