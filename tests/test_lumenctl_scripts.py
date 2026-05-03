@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LUMENCTL = ROOT / "scripts" / "lumenctl.sh"
@@ -19,6 +21,7 @@ SCRIPT_FILES = [
 ]
 INSTALL = ROOT / "scripts" / "install.sh"
 UPDATE = ROOT / "scripts" / "update.sh"
+UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
 
 
@@ -53,14 +56,26 @@ def test_operations_scripts_parse_with_bash_n() -> None:
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_install_script_defaults_to_starting_runtime_after_install() -> None:
+def test_install_script_uses_docker_compose_full_stack() -> None:
+    """
+    docker cutover: install.sh 不再启动宿主机 uv/npm 运行时，而是 docker compose 全栈。
+    断言 docker compose 流程关键字 + 反断言旧的 systemctl restart / uv sync / npm ci。
+    """
     text = INSTALL.read_text(encoding="utf-8")
-    assert "LUMEN_AUTO_START_RUNTIME:-1" in text
-    assert "START_RUNTIME_REPLY=\"$(read_or_default '现在启动 API / Worker / Web" in text
-    assert "start_runtime_processes \"${WEB_NPM_SCRIPT}\"" in text
-    assert "lumen_start_local_runtime \"${ROOT}\" \"${web_npm_script}\"" in text
-    assert "运行状态 ......... 已启动 API / Worker / Web" in text
-    assert "未启动前，浏览器访问 3000 不会有响应" in text
+    # Docker compose 全栈关键字
+    assert "Docker Compose 全栈版" in text
+    assert "docker compose pull" in text
+    assert "docker compose v2" in text
+    # lib.sh 提供的 compose helper（直接引用或本地降级包装）
+    assert "lumen_compose" in text
+    # /opt/lumendata 数据根目录在脚本里有显式准备逻辑
+    assert "/opt/lumendata" in text
+    # 反断言：不再依赖宿主机 uv sync / npm ci / systemctl restart lumen-*
+    assert "uv sync" not in text
+    assert "npm ci" not in text
+    assert "systemctl restart lumen-api" not in text
+    assert "systemctl restart lumen-worker" not in text
+    assert "systemctl restart lumen-web" not in text
 
 
 def test_install_bootstrap_defaults_to_menu_not_auto_update() -> None:
@@ -71,21 +86,23 @@ def test_install_bootstrap_defaults_to_menu_not_auto_update() -> None:
 
 
 def test_update_script_requires_release_layout_and_prepares_new_release() -> None:
+    """
+    docker cutover: release 布局保留，但 prepare 流程从 git clone 改为 rsync 仓库快照
+    + shared/.env symlink，不再走 uv.toml 校验。
+    """
     text = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
-    assert "Capistrano 风格 release + symlink 原子切换版" in text
-    assert 'if [ ! -L "${ROOT}/current" ]; then' in text
-    assert "migrate_to_releases.sh" in text
+    # 仍然要求 release 布局 + shared/.env 复用
     assert 'NEW_RELEASE="${ROOT}/releases/${NEW_ID}"' in text
-    assert 'lumen_release_id "${PREP_SHA}"' in text
-    assert 'GIT_BIN}" clone --quiet' in text
-    assert '"${GIT_REMOTE_URL}" "${NEW_RELEASE}"' in text
-    assert 'cat > "${NEW_RELEASE}/.lumen_release.json" <<JSON' in text
     assert 'lumen_release_ensure_shared_env "${ROOT}"' in text
-    assert 'lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"' in text
-    assert 'lumen_ensure_compose_db_env_vars "${NEW_RELEASE}/.env"' in text
-    assert '[ -e "${NEW_RELEASE}/uv.toml" ]' in text
-    assert 'lumen_update_ensure_runtime_can_access_path "${NEW_RELEASE}/uv.toml" "uv 配置文件"' in text
-    assert "lumen_update_ensure_rsync" in text
+    # docker cutover：fetch_release 阶段改 rsync REPO_DIR -> NEW_RELEASE
+    assert "rsync_repo_to_release" in text
+    # release/.env 是 -> shared/.env 的 symlink，docker compose 自动识别
+    assert 'ln -sfn "${SHARED_ENV}" "${NEW_RELEASE}/.env"' in text
+    # 切换走 atomic switch helper
+    assert 'lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"' in text
+    # 不再依赖宿主机 uv 配置 / git clone 流程
+    assert "uv.toml" not in text
+    assert "lumen_update_ensure_runtime_can_access_path" not in text
 
 
 def test_compose_db_env_vars_backfilled_from_database_url(tmp_path: Path) -> None:
@@ -123,6 +140,81 @@ def test_compose_db_env_vars_fail_without_database_url(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "缺少 DB_USER/DB_PASSWORD/DB_NAME" in result.stderr
     assert "无法从 DATABASE_URL 推导" in result.stderr
+
+
+def test_container_url_migration_dry_run_and_apply_are_allowlisted(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql+asyncpg://alice:secret@localhost:5432/lumen",
+                "REDIS_URL=redis://:redis-secret@127.0.0.1:6379/0",
+                "LUMEN_BACKEND_URL=http://127.0.0.1:8000",
+                "LUMEN_API_BASE=http://localhost:8000",
+                "PUBLIC_BASE_URL=http://localhost:8000",
+                "CORS_ALLOW_ORIGINS=http://localhost:3000",
+                "NEXT_PUBLIC_API_BASE=/api",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dry_run = assert_bash_ok(
+        f"""
+        . {LIB}
+        lumen_migrate_container_urls {env_file} --dry-run
+        """
+    )
+    before = env_file.read_text(encoding="utf-8")
+    assert "DATABASE_URL:" in dry_run.stdout
+    assert "@postgres:5432/lumen" in dry_run.stdout
+    assert before.startswith("DATABASE_URL=postgresql+asyncpg://alice:secret@localhost")
+
+    applied = assert_bash_ok(
+        f"""
+        . {LIB}
+        lumen_migrate_container_urls {env_file} --apply
+        """
+    )
+    after = env_file.read_text(encoding="utf-8")
+    assert "backup=" in applied.stdout
+    assert "DATABASE_URL=postgresql+asyncpg://alice:secret@postgres:5432/lumen" in after
+    assert "REDIS_URL=redis://:redis-secret@redis:6379/0" in after
+    assert "LUMEN_BACKEND_URL=http://api:8000" in after
+    assert "LUMEN_API_BASE=http://api:8000" in after
+    # Browser/CORS fields are intentionally not touched by the migration helper.
+    assert "PUBLIC_BASE_URL=http://localhost:8000" in after
+    assert "CORS_ALLOW_ORIGINS=http://localhost:3000" in after
+    assert list(tmp_path.glob(".env.bak.*"))
+
+
+def test_container_url_migration_rejects_unclassified_localhost_keys(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DATABASE_URL=postgresql+asyncpg://alice:secret@localhost:5432/lumen\n"
+        "INTERNAL_CALLBACK_URL=http://127.0.0.1:9000\n",
+        encoding="utf-8",
+    )
+
+    result = run_bash(
+        f"""
+        . {LIB}
+        lumen_migrate_container_urls {env_file} --dry-run
+        """
+    )
+
+    assert result.returncode == 1
+    assert "INTERNAL_CALLBACK_URL still contains localhost/127.0.0.1" in result.stderr
+
+
+def test_install_existing_env_container_url_check_defaults_to_dry_run() -> None:
+    text = INSTALL.read_text(encoding="utf-8")
+    assert 'LUMEN_ENV_MIGRATE_CONTAINER_URLS:-dry-run' in text
+    assert 'apply|--apply)' in text
+    assert "migrate-env-apply" in text
+    assert "检测到旧 .env 仍需要容器地址迁移" in text
+    assert "LUMEN_ENV_MIGRATE_CONTAINER_URLS=apply" in text
 
 
 def test_release_shared_env_recovers_from_root_env(tmp_path: Path) -> None:
@@ -170,59 +262,85 @@ def test_rollback_script_validates_compose_env_before_compose_up() -> None:
     assert 'cd "$ROOT/current" && docker compose up -d --wait' in text
 
 
-def test_update_script_restarts_services_and_health_checks_after_update() -> None:
+def _strip_shell_comments(text: str) -> str:
+    """
+    去掉 bash 行内注释（# 开头或行末），用于反断言时只看实际可执行命令。
+    简化版：一行内首个未在引号里的 # 之后视为注释；不做 here-doc / 复杂引号解析，
+    对脚本顶部 banner 和 inline 注释足够。
+    """
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        in_single = False
+        in_double = False
+        i = 0
+        cut_at = len(line)
+        while i < len(line):
+            ch = line[i]
+            if ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
+            elif ch == "#" and not in_single and not in_double:
+                if i == 0 or line[i - 1] in (" ", "\t"):
+                    cut_at = i
+                    break
+            i += 1
+        out_lines.append(line[:cut_at].rstrip())
+    return "\n".join(out_lines)
+
+
+def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
+    """
+    docker cutover: update.sh 改为 docker compose pull -> start_infra -> migrate_db
+    -> switch -> restart_services。不再 systemctl restart lumen-* /
+    uv sync / npm ci / 写 systemd unit。
+    """
     text = UPDATE.read_text(encoding="utf-8")
-    assert "lumen_update_sync_systemd_units()" in text
-    assert 'lumen_update_sync_systemd_units' in text
-    assert 'text = text.replace("/opt/lumendata", data_token)' in text
-    assert 'text = text.replace(data_token, "/opt/lumendata")' in text
-    assert 'text = text.replace("/opt/lumen", root)' in text
-    assert 'text = text.replace("ProtectHome=true", "ProtectHome=false")' in text
-    assert 'service_user="root"' in text
-    assert 'systemctl daemon-reload' in text
-    assert "lumen_update_dump_failed_unit_logs" in text
-    assert 'lumen_step_begin switch' in text
+    # 关键阶段（::lumen-step:: phase=...）必须存在
+    assert "emit_start set_image_tag" in text
+    assert "emit_start pull_images" in text
+    assert "emit_start start_infra" in text
+    assert "emit_start migrate_db" in text
+    assert "emit_start switch" in text
+    assert "emit_start restart_services" in text
+    # 阶段输出协议（phase=set_image_tag / phase=migrate_db 出现在最终日志）
+    assert 'lumen_emit_step "phase=$1"' in text
+    # docker compose 关键命令
+    assert "lumen_compose_in" in text
+    assert "--profile migrate run --rm migrate" in text
+    assert "up -d --wait postgres redis" in text
+    assert "up -d --wait api worker web" in text
+    # release 切换走 atomic switch
     assert 'lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"' in text
-    assert 'lumen_step_begin restart' in text
-    assert 'log_step "[restart] 重启 systemd 服务"' in text
-    assert 'lumen_ensure_runtime_dirs "${ROOT}/.env"' in text
-    assert (
-        "for _LUMEN_UNIT in lumen-worker.service lumen-web.service "
-        "lumen-tgbot.service lumen-api.service; do"
-    ) in text
-    assert 'LUMEN_RESTART_UNITS+=("${_LUMEN_UNIT}")' in text
-    assert 'lumen_restart_systemd_units "${LUMEN_RESTART_UNITS[@]}"' in text
-    assert 'lumen_step_begin health_post' in text
-    assert "lumen_check_runtime_health" in text
-    assert 'lumen_step_begin cleanup' in text
-    assert 'lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-5}"' in text
-    assert 'log_info "release ${NEW_ID} 已上线（previous: ${CURRENT_ID}）"' in text
+    # 反断言：脚本注释里可以提"不再 uv sync / npm ci"，但实际可执行命令必须不包含。
+    code = _strip_shell_comments(text)
+    assert "systemctl restart lumen-api" not in code
+    assert "systemctl restart lumen-worker" not in code
+    assert "systemctl restart lumen-web" not in code
+    assert "lumen_restart_systemd_units" not in code
+    assert "uv sync" not in code
+    assert "npm ci" not in code
+    assert "npm run build" not in code
 
 
-def test_update_script_runs_dependency_steps_as_build_user() -> None:
+def test_update_script_supports_optional_local_build_when_env_set() -> None:
+    """
+    docker cutover §11.3.2: 默认 pull 优先；LUMEN_UPDATE_BUILD=1 才本地构建。
+    """
     text = UPDATE.read_text(encoding="utf-8")
-    assert "LUMEN_UPDATE_SYSTEMD_RUNTIME=1" in text
-    assert 'LUMEN_UPDATE_RUN_USER="$(lumen_runtime_service_user)"' in text
-    assert 'LUMEN_UPDATE_EXEC_USER="${LUMEN_UPDATE_RUN_USER}"' in text
-    assert 'LUMEN_UPDATE_EXEC_USER="root"' in text
-    assert "服务用户：" in text
-    assert "构建用户：" in text
-    assert "setfacl -m" in text
-    assert "chmod o+x" in text
-    assert 'lumen_update_as_runtime_user "${UV_BIN}" sync --frozen --all-packages' in text
-    assert 'lumen_update_as_runtime_user "${UV_BIN}" run alembic upgrade head' in text
-    assert 'lumen_update_as_runtime_user "${NPM_BIN}" ci' in text
-    assert 'lumen_update_as_runtime_user "${NPM_BIN}" run build' in text
+    # build 路径必须由 env 显式开启
+    assert 'LUMEN_UPDATE_BUILD:-0' in text
+    assert "build api worker web" in text
+    # build 路径仍走 lumen_compose_in（不直接 systemctl）
+    assert 'lumen_compose_in "${NEW_RELEASE}" build api worker web' in text
+    assert 'LUMEN_UPDATE_BUILD=1 已完成本地 build，跳过远程 pull' in text
 
 
+@pytest.mark.skip(
+    reason="docker cutover: 宿主机 uv 自动安装路径已删除（API/Worker 由 lumen-api / lumen-worker 镜像提供）"
+)
 def test_update_installs_missing_uv_to_system_path_before_runtime_home() -> None:
-    text = UPDATE.read_text(encoding="utf-8")
-    assert 'env UV_INSTALL_DIR="${uv_install_dir}" sh -lc' in text
-    assert "/usr/local/bin /usr/bin" in text
-    assert "installed_uv=1" in text
-    assert 'lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" sh -lc \\' in text
-    assert 'curl -LsSf https://astral.sh/uv/install.sh | sh' in text
-    assert "home_dir}/.local/bin/uv" in text
+    pass
 
 
 def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
@@ -403,6 +521,7 @@ def test_lumenctl_help_lists_every_documented_command() -> None:
     assert result.returncode == 0, result.stderr + result.stdout
     output = result.stdout
     for command in (
+        # 旧命令必须保留
         "menu",
         "install-lumen",
         "update-lumen",
@@ -417,8 +536,20 @@ def test_lumenctl_help_lists_every_documented_command() -> None:
         "nginx-sub2api-outer",
         "nginx-image-job",
         "help",
+        # docker cutover §24 新增的 lifecycle / compose runtime 命令
+        "rollback",
+        "version",
+        "status",
+        "logs",
+        "start",
+        "stop",
+        "restart",
+        "migrate",
+        "bootstrap",
+        "backup",
+        "restore",
     ):
-        assert f"  {command}" in output
+        assert f"  {command}" in output, f"lumenctl.sh help 缺少子命令：{command}"
 
 
 def test_lumenctl_menu_accepts_default_exit_without_error() -> None:
@@ -705,3 +836,176 @@ server {
     http_block, https_block = first.split("server {", 2)[1:]
     assert "/v1/image-jobs" not in http_block
     assert "/v1/image-jobs" in https_block
+
+
+# ---------------------------------------------------------------------------
+# Docker 全栈切换：脚本互相之间的契约（install / update / uninstall + lib helper）
+# ---------------------------------------------------------------------------
+
+
+def test_install_script_uses_lumen_compose_helpers_from_lib() -> None:
+    """
+    docker cutover §6.2 / §10.2: install.sh 走 lib.sh 提供的 lumen_compose helper
+    （或本地 _install_compose 包装），不再 systemctl restart lumen-*。
+    """
+    text = INSTALL.read_text(encoding="utf-8")
+    # 显式引用 lib.sh 的 compose helper（lumen_compose 或 lumen_compose_in）
+    assert "lumen_compose" in text
+    # 流程描述里出现 docker compose pull / migrate / api/worker/web
+    assert "docker compose pull" in text
+    assert "migrate" in text
+    # set -euo pipefail 必须保留
+    assert "set -euo pipefail" in text
+    # source lib.sh
+    assert ". \"${SCRIPT_DIR}/lib.sh\"" in text
+
+
+def test_update_script_emits_set_image_tag_and_migrate_db_phases() -> None:
+    """
+    docker cutover §11.3.1: update.sh 阶段日志里必须包含 set_image_tag 与 migrate_db，
+    后台一键更新解析这两个阶段决定 LUMEN_IMAGE_TAG 是否切换 / 数据库迁移是否成功。
+    """
+    text = UPDATE.read_text(encoding="utf-8")
+    assert "set_image_tag" in text
+    assert "migrate_db" in text
+    # phase=set_image_tag 与 phase=migrate_db 在最终输出里靠 emit_start 拼出，
+    # emit_start 的展开 = lumen_emit_step "phase=$1" "status=start"
+    assert 'lumen_emit_step "phase=$1"' in text
+    assert "emit_start set_image_tag" in text
+    assert "emit_start migrate_db" in text
+    # 必须 source lib.sh 并 set -euo pipefail
+    assert "set -euo pipefail" in text
+    assert "lib.sh" in text
+
+
+def test_update_script_runner_default_pull_not_build() -> None:
+    """
+    docker cutover §11.3.2 + §12.3.2: build 必须由 LUMEN_UPDATE_BUILD=1 显式开启，
+    runner systemd 默认 LUMEN_UPDATE_BUILD=0（pull 优先）。
+    """
+    text = UPDATE.read_text(encoding="utf-8")
+    # build 路径必须 gated by env
+    assert 'LUMEN_UPDATE_BUILD:-0' in text
+    runner_unit = (
+        ROOT / "deploy" / "systemd" / "lumen-update-runner.service"
+    ).read_text(encoding="utf-8")
+    assert "LUMEN_UPDATE_BUILD=0" in runner_unit
+
+
+def test_uninstall_script_uses_docker_compose_down() -> None:
+    """
+    docker cutover §17.4 / §17.9: uninstall.sh 走 docker compose down --remove-orphans，
+    不再依赖 systemctl stop lumen-* 作为停服主路径。
+    """
+    text = UNINSTALL.read_text(encoding="utf-8")
+    # 主路径必须有 docker compose down
+    assert "docker compose down" in text
+    # 优先走 lib.sh 的 lumen_compose_in（带 COMPOSE_PROJECT_NAME=lumen）
+    assert "lumen_compose_in" in text
+    # 含 --profile tgbot 的 down，确保 profile 服务也清理
+    assert "--profile tgbot" in text
+    # set -euo pipefail + source lib.sh 必须保留
+    assert "set -euo pipefail" in text
+    assert "lib.sh" in text
+
+
+def test_lib_provides_compose_helpers_required_by_cutover() -> None:
+    """
+    docker cutover: lib.sh 必须暴露 cutover plan §3.1 / §11 / §13 列出的全部 helper。
+    """
+    text = LIB.read_text(encoding="utf-8")
+    for fn in (
+        "lumen_compose()",
+        "lumen_compose_in()",
+        "lumen_health_http()",
+        "lumen_health_compose()",
+        "lumen_image_tag_resolve()",
+        "lumen_set_image_tag_in_env()",
+        "lumen_emit_step()",
+        "lumen_emit_info()",
+        "lumen_with_lock()",
+    ):
+        assert fn in text, f"lib.sh 缺少 helper：{fn}"
+
+
+def test_image_tag_resolve_uses_channel_and_env_file_for_pinned(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("LUMEN_IMAGE_TAG=v1.2.3\n", encoding="utf-8")
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        lumen_image_tag_resolve pinned {env_file}
+        """
+    )
+
+    assert result.stdout.strip() == "v1.2.3"
+
+
+def test_docker_release_workflow_builds_amd64_and_arm64() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "docker-release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "platforms: linux/amd64,linux/arm64" in workflow
+    assert "needs: quality-gate" in workflow
+    assert "type=semver,pattern=v{{version}}" in workflow
+    assert "type=semver,pattern=v{{major}}.{{minor}}" in workflow
+    assert "type=semver,pattern=v{{major}}" in workflow
+    assert "cp .env.example .env" in workflow
+    assert "Compose config" in workflow
+    assert "Image start smoke" in workflow
+
+
+def test_deploy_docker_helper_files_exist() -> None:
+    assert (ROOT / "deploy" / "docker" / "README.md").is_file()
+    override = (ROOT / "deploy" / "docker" / "docker-compose.local.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "lumen-local-api" in override
+    assert "18000:8000" in override
+    assert "13000:3000" in override
+
+
+def test_admin_update_checklist_uses_docker_phases() -> None:
+    panel = (
+        ROOT / "apps" / "web" / "src" / "app" / "admin" / "_panels" / "SettingsPanel.tsx"
+    ).read_text(encoding="utf-8")
+    for phase in (
+        "lock",
+        "check",
+        "preflight",
+        "backup_preflight",
+        "fetch_release",
+        "set_image_tag",
+        "pull_images",
+        "start_infra",
+        "migrate_db",
+        "switch",
+        "restart_services",
+        "health_check",
+        "cleanup",
+    ):
+        assert f'"{phase}"' in panel
+    for old_phase in ("deps_python", "deps_node", "build_web"):
+        assert f'"{old_phase}"' not in panel
+
+
+def test_lumenctl_help_documents_docker_compose_runtime_block() -> None:
+    """
+    docker cutover §24: lumenctl.sh help 输出里必须出现 status / logs / migrate / rollback / version
+    这些 docker compose 阶段命令的描述（菜单 + CLI 双入口）。
+    """
+    result = subprocess.run(
+        ["bash", str(LUMENCTL), "help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    output = result.stdout
+    # help 描述里出现 docker compose 关键字（确认 help 在描述中提到 compose 路径）
+    assert "docker compose" in output or "compose" in output
+    # 关键 lifecycle / runtime 命令名在描述行里
+    for keyword in ("rollback", "migrate", "version", "status", "logs"):
+        assert keyword in output, f"lumenctl.sh help 描述里缺少 {keyword}"

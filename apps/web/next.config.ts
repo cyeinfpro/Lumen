@@ -105,6 +105,7 @@ const hsts = unique([
 ]).join("; ");
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   // Next.js v16 experimental.proxyClientMaxBodySize：
   // rewrites/proxy 读 body 时默认只 buffer 10MB；图片上传最大约 50MB，
   // 这里给 60MB 留 multipart 开销。该实验 API 升级 Next 时需对照 changelog 复核。

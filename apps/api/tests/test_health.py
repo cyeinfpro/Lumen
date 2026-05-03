@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 import app.main as main
-from app.main import readyz
+from app.main import healthz, readyz
 
 
 class OkRedis:
@@ -46,6 +46,14 @@ class BadConn:
 class BadEngine:
     def connect(self):
         return BadConn()
+
+
+@pytest.mark.asyncio
+async def test_healthz_includes_runtime_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LUMEN_VERSION", "v9.8.7")
+    payload = await healthz()
+    assert payload["status"] == "ok"
+    assert payload["version"] == "v9.8.7"
 
 
 @pytest.mark.asyncio

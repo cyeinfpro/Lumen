@@ -1,0 +1,34 @@
+# Local-only override for running a second Lumen compose stack on a machine that
+# may already have the production `lumen-*` containers.
+#
+# Usage:
+#   COMPOSE_PROJECT_NAME=lumen-local \
+#   LUMEN_DATA_ROOT=/tmp/lumen-local \
+#   docker compose -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait
+
+services:
+  postgres:
+    container_name: lumen-local-pg
+    ports:
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:15432:5432"
+
+  redis:
+    container_name: lumen-local-redis
+    ports:
+      - "${REDIS_BIND_HOST:-127.0.0.1}:16379:6379"
+
+  api:
+    container_name: lumen-local-api
+    ports:
+      - "${API_BIND_HOST:-127.0.0.1}:18000:8000"
+
+  worker:
+    container_name: lumen-local-worker
+
+  web:
+    container_name: lumen-local-web
+    ports:
+      - "${WEB_BIND_HOST:-127.0.0.1}:13000:3000"
+
+  tgbot:
+    container_name: lumen-local-tgbot

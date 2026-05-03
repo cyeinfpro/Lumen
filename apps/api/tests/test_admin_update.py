@@ -141,7 +141,9 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
             env={
                 "LUMEN_UPDATE_NONINTERACTIVE": "1",
                 "LUMEN_UPDATE_GIT_PULL": "1",
-                "LUMEN_UPDATE_BUILD": "1",
+                "LUMEN_UPDATE_BUILD": "0",
+                "LUMEN_UPDATE_CHANNEL": "pinned",
+                "LUMEN_IMAGE_TAG": "v1.2.3",
                 "HTTP_PROXY": "http://proxy.example:3128",
                 "PATH": "/should/not/leak",
             },
@@ -156,6 +158,9 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
 
     env_text = (backup_root / ".update.env").read_text(encoding="utf-8")
     assert "LUMEN_UPDATE_NONINTERACTIVE=1" in env_text
+    assert "LUMEN_UPDATE_BUILD=0" in env_text
+    assert "LUMEN_UPDATE_CHANNEL=pinned" in env_text
+    assert "LUMEN_IMAGE_TAG=v1.2.3" in env_text
     assert "HTTP_PROXY=http://proxy.example:3128" in env_text
     # Non-allowlisted vars must not leak into the runner env file.
     assert "PATH=" not in env_text

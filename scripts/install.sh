@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
-# Lumen 一键安装脚本
-# 用法：  bash scripts/install.sh            # 打开运维菜单
-#        bash scripts/install.sh --install  # 直接安装
-# 行为：检查/自动安装依赖 -> 写 .env -> 起 PG/Redis -> uv sync
-#       -> alembic upgrade -> 创建 admin -> npm ci -> 可选 build -> 可选启动 API/Worker/Web。
-# 重复执行安全（幂等），中途任何失败都会立即停止。
+# Lumen 一键安装脚本（Docker Compose 全栈版）
+# 用法：  bash scripts/install.sh                  # 打开运维菜单
+#        bash scripts/install.sh --install         # 直接安装（docker compose 全栈）
+#        bash scripts/install.sh --install --build # 用本地 Dockerfile 构建而不是 pull 远程镜像
+#        bash scripts/install.sh --install --image-tag=vX.Y.Z   # 钉死镜像 tag
+#        bash scripts/install.sh --install --data-root=/data    # 自定义 LUMEN_DATA_ROOT
+#
+# 行为概述：
+#   A. 检查 docker / docker compose v2 / openssl / curl
+#   B. 准备 /opt/lumendata 子目录（按服务分别 chown 70/999/10001，§15.2）
+#   C. 准备 release 布局（${LUMEN_DEPLOY_ROOT:-/opt/lumen}/{releases,shared,current}）
+#   D. 生成或合并 shared/.env（强随机替换 placeholder；symlink release/.env -> shared/.env）
+#   E. 探测 GHCR 镜像可用性，未发布 latest 时回退到 main
+#   F. docker compose pull && 起 PG/Redis -> migrate -> 可选 bootstrap -> api/worker/web (+tgbot)
+#   G. 切 current symlink
+#   H. HTTP + compose 健康检查
+#   I. systemd 旧服务残留提示（不自动 disable）
+#   J. 打印汇总
+#
+# 重复执行安全（幂等）。失败时清理已起容器（不删数据卷），打印恢复命令。
+# 兼容 LUMEN_NONINTERACTIVE=1：所有 read 跳过，从 LUMEN_ADMIN_EMAIL/LUMEN_ADMIN_PASSWORD env 读。
 
 set -euo pipefail
 
@@ -123,7 +138,8 @@ detect_install_state() {
 }
 
 # 把最新 main 的代码合并到已有部署目录，保留运行时数据（.env / shared / releases /
-# current / var / .venv / node_modules / .next / .env.local 等）。
+# current / var 等）。Docker 全栈版本下 .venv / node_modules / .next 都在镜像里，
+# 但保留 exclude 是为了兼容残留的旧 in-place 部署目录。
 overlay_repo_into_existing() {
     local repo_url="$1"
     local branch="$2"
@@ -279,20 +295,32 @@ ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OS="$(detect_os)"
 LOCK_DIR="${ROOT}/.lumen-script.lock"
 LOCK_HELD=0
-PARALLEL_PIDS=()
-RUNTIME_PIDS=()
-RUNTIME_LOG_DIR=""
 
+# ---------------------------------------------------------------------------
+# 入口：菜单 / auto / install / update / uninstall 分发
+# 这一段保持向后兼容，逻辑没变。docker 化只影响 install 主流程。
+# ---------------------------------------------------------------------------
 usage() {
     cat <<EOF
-Lumen 安装入口
+Lumen 安装入口（Docker Compose 全栈版）
 
 用法：
-  bash scripts/install.sh              打开运维菜单
-  bash scripts/install.sh --auto       自动：有部署走 update，新机器走 install
-  bash scripts/install.sh --install    直接安装 Lumen
-  bash scripts/install.sh --update     更新 Lumen
-  bash scripts/install.sh --uninstall  卸载 Lumen
+  bash scripts/install.sh                    打开运维菜单
+  bash scripts/install.sh --auto             自动：有部署走 update，新机器走 install
+  bash scripts/install.sh --install [opts]   直接安装 Lumen（docker compose）
+  bash scripts/install.sh --update           更新 Lumen
+  bash scripts/install.sh --uninstall        卸载 Lumen
+
+--install 可选参数：
+  --image-tag=vX.Y.Z      钉死镜像 tag（默认探测 GHCR latest，找不到回退 main）
+  --data-root=/path       LUMEN_DATA_ROOT 数据根目录（默认 /opt/lumendata）
+  --build                 用本地 Dockerfile 构建而不是 pull GHCR（等价 LUMEN_INSTALL_BUILD=1）
+
+环境变量：
+  LUMEN_DEPLOY_ROOT       部署根目录（默认 /opt/lumen 或脚本所在父目录）
+  LUMEN_NONINTERACTIVE=1  非交互模式：从 LUMEN_ADMIN_EMAIL / LUMEN_ADMIN_PASSWORD 读管理员
+  LUMEN_IMAGE_REGISTRY    镜像 registry 前缀（默认 ghcr.io/cyeinfpro）
+  LUMEN_INSTALL_BUILD=1   等价 --build
 
 EOF
 }
@@ -318,12 +346,34 @@ dispatch_auto() {
     log_info "[auto] 未检测到已有部署，进入全新安装流程。"
     if [ ! -r /dev/tty ] && [ -t 0 ]; then
         : # 有交互输入
-    elif [ ! -r /dev/tty ]; then
+    elif [ ! -r /dev/tty ] && [ "${LUMEN_NONINTERACTIVE:-}" != "1" ]; then
         log_warn "[auto] 当前没有 tty，全新安装会卡在交互输入。"
-        log_warn "[auto] 请改用：bash ${SCRIPT_DIR}/install.sh --install   或在 SSH 终端里重跑。"
+        log_warn "[auto] 请改用：LUMEN_NONINTERACTIVE=1 bash ${SCRIPT_DIR}/install.sh --install   或在 SSH 终端里重跑。"
         exit 2
     fi
     # fall through 到 install path
+}
+
+# 解析 --image-tag / --data-root / --build；其它参数报错。
+# 调用方：dispatch_entrypoint 在收到 install/--install 后调用本函数。
+INSTALL_IMAGE_TAG_OVERRIDE=""
+INSTALL_DATA_ROOT_OVERRIDE=""
+INSTALL_BUILD_FLAG="${LUMEN_INSTALL_BUILD:-0}"
+
+parse_install_args() {
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in
+            --image-tag=*) INSTALL_IMAGE_TAG_OVERRIDE="${arg#*=}" ;;
+            --data-root=*) INSTALL_DATA_ROOT_OVERRIDE="${arg#*=}" ;;
+            --build)       INSTALL_BUILD_FLAG=1 ;;
+            *)
+                usage
+                log_error "未知 install 参数：${arg}"
+                exit 1
+                ;;
+        esac
+    done
 }
 
 dispatch_entrypoint() {
@@ -339,11 +389,7 @@ dispatch_entrypoint() {
             ;;
         install|--install)
             shift || true
-            if [ "$#" -gt 0 ]; then
-                usage
-                log_error "安装命令不接受额外参数：$*"
-                exit 1
-            fi
+            parse_install_args "$@"
             ;;
         update|--update)
             exec bash "${SCRIPT_DIR}/update.sh"
@@ -365,50 +411,42 @@ dispatch_entrypoint() {
 
 dispatch_entrypoint "$@"
 
+# ---------------------------------------------------------------------------
+# 失败处理 / 锁
+# ---------------------------------------------------------------------------
+INSTALL_PHASE=""               # 当前阶段名（用于错误时报告 + step protocol）
+INSTALL_STARTED_SERVICES=()    # 已启动的 compose service 列表（失败时 stop）
+
 on_error() {
     local line="$1"
-    log_error "安装失败：第 ${line} 行返回非零状态。请查看上方输出修正后重试。"
+    log_error "安装失败：第 ${line} 行返回非零状态（阶段=${INSTALL_PHASE:-unknown}）。"
 }
 
-kill_parallel_jobs() {
-    local pid
-    for pid in "${PARALLEL_PIDS[@]:-}"; do
-        if kill -0 "${pid}" 2>/dev/null; then
-            kill "${pid}" 2>/dev/null || true
-        fi
-    done
-    for pid in "${PARALLEL_PIDS[@]:-}"; do
-        wait "${pid}" 2>/dev/null || true
-    done
-    PARALLEL_PIDS=()
-}
-
-stop_runtime_jobs() {
-    local pid
-    for pid in "${RUNTIME_PIDS[@]:-}"; do
-        if kill -0 "${pid}" 2>/dev/null; then
-            kill "${pid}" 2>/dev/null || true
-        fi
-    done
-    for pid in "${RUNTIME_PIDS[@]:-}"; do
-        wait "${pid}" 2>/dev/null || true
-    done
-    RUNTIME_PIDS=()
-}
-
-release_script_lock() {
-    if [ "${LOCK_HELD}" -eq 1 ]; then
-        rm -rf "${LOCK_DIR}"
-        LOCK_HELD=0
-    fi
-}
-
-cleanup() {
+# 失败清理：停止已启动的容器但保留数据卷；打印 docker compose logs --tail=40
+cleanup_on_failure() {
     local rc=$?
     trap - EXIT INT TERM ERR
-    kill_parallel_jobs
     if [ "${rc}" -ne 0 ]; then
-        stop_runtime_jobs
+        log_error "安装在阶段 [${INSTALL_PHASE:-unknown}] 失败，正在清理已启动的容器（保留数据卷）。"
+        if [ "${#INSTALL_STARTED_SERVICES[@]:-0}" -gt 0 ]; then
+            local svc
+            for svc in "${INSTALL_STARTED_SERVICES[@]}"; do
+                log_warn "  最近 40 行 ${svc} 日志："
+                _install_compose logs --tail=40 "${svc}" 2>/dev/null || true
+            done
+            log_warn "停止已启动的服务（数据卷保留）：${INSTALL_STARTED_SERVICES[*]}"
+            _install_compose stop "${INSTALL_STARTED_SERVICES[@]}" 2>/dev/null || true
+        fi
+        # 只在新流程触发的 step protocol 上下文里写 fail；emit_step 函数在 lib.sh
+        if command -v lumen_emit_step >/dev/null 2>&1 && [ -n "${INSTALL_PHASE:-}" ]; then
+            lumen_emit_step "phase=${INSTALL_PHASE}" "status=fail" "rc=${rc}" "dur_ms=0" || true
+        fi
+        log_error ""
+        log_error "可恢复命令："
+        log_error "  cd ${RELEASE_DIR:-${ROOT}}"
+        log_error "  COMPOSE_PROJECT_NAME=lumen docker compose ps"
+        log_error "  COMPOSE_PROJECT_NAME=lumen docker compose logs --tail=200 api worker web"
+        log_error "  bash ${SCRIPT_DIR}/install.sh --install   # 修复后重跑（幂等）"
     fi
     release_script_lock
     return "${rc}"
@@ -417,10 +455,15 @@ cleanup() {
 on_signal() {
     local signal_name="$1"
     local rc="$2"
-    log_error "安装被 ${signal_name} 中断，正在清理后台任务和脚本锁。"
-    kill_parallel_jobs
-    stop_runtime_jobs
+    log_error "安装被 ${signal_name} 中断，正在清理脚本锁。"
     exit "${rc}"
+}
+
+release_script_lock() {
+    if [ "${LOCK_HELD}" -eq 1 ]; then
+        rm -rf "${LOCK_DIR}"
+        LOCK_HELD=0
+    fi
 }
 
 acquire_script_lock() {
@@ -444,7 +487,7 @@ acquire_script_lock() {
 
     if [[ "${lock_pid}" =~ ^[0-9]+$ ]] && kill -0 "${lock_pid}" 2>/dev/null; then
         log_error "另一个 Lumen 运维脚本正在运行（pid=${lock_pid}${started_at:+, started_at=${started_at}}）。"
-        log_error "为避免 .env、依赖安装和 docker compose 竞态，本次安装已停止。"
+        log_error "为避免 .env、docker compose 操作竞态，本次安装已停止。"
         exit 1
     fi
 
@@ -467,6 +510,9 @@ acquire_script_lock() {
     } > "${LOCK_DIR}/info"
 }
 
+# ---------------------------------------------------------------------------
+# .env 写入辅助（保留旧行为：拒绝控制字符 / 单引号）
+# ---------------------------------------------------------------------------
 contains_control_chars() {
     local value="$1"
     printf '%s' "${value}" | LC_ALL=C grep -q '[[:cntrl:]]'
@@ -497,1056 +543,780 @@ validate_redis_password() {
     return 0
 }
 
-dotenv_quote() {
-    local name="$1"
-    local value="$2"
-    validate_dotenv_value "${name}" "${value}" || return 1
-    printf "'%s'" "${value}"
+# 在 .env 文件里精确替换 KEY=value 行（避免全局 sed 误伤 §21.1）。
+# 用法：env_file_set <file> <key> <value>
+# 注意：value 不允许包含换行 / 单引号；用 dotenv_quote 校验。
+env_file_set() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    validate_dotenv_value "${key}" "${value}" || return 1
+    local tmp
+    tmp="$(mktemp)" || return 1
+    # awk 行级精确替换：只动 ^KEY= 开头的行；其它原样保留。
+    awk -v k="${key}" -v v="${value}" '
+        BEGIN { replaced=0 }
+        {
+            if ($0 ~ "^" k "=") {
+                printf "%s=%s\n", k, v
+                replaced=1
+            } else {
+                print
+            }
+        }
+        END {
+            if (!replaced) {
+                printf "%s=%s\n", k, v
+            }
+        }
+    ' "${file}" > "${tmp}" && mv "${tmp}" "${file}"
 }
 
-json_escape_string() {
-    local value="$1"
-    value="${value//\\/\\\\}"
-    value="${value//\"/\\\"}"
-    printf '%s' "${value}"
+# 读取 .env 中某 key 的当前值（沿用 lib.sh 实现）
+env_file_get() {
+    lumen_read_dotenv_value "$1" "$2"
 }
 
-read_dotenv_value() {
-    lumen_read_dotenv_value "$@"
-}
-
-start_runtime_processes() {
-    local web_npm_script="$1"
-    lumen_start_local_runtime "${ROOT}" "${web_npm_script}"
-    RUNTIME_LOG_DIR="${LUMEN_LOCAL_RUNTIME_LOG_DIR}"
-    RUNTIME_PIDS=("${LUMEN_LOCAL_RUNTIME_PIDS[@]:-}")
-}
-
-ensure_compose_db_env_vars() {
-    lumen_ensure_compose_db_env_vars "$@" || exit 1
-}
-
-available_kb_for_path() {
-    local path="$1"
-    python3 -c 'import shutil, sys; print(shutil.disk_usage(sys.argv[1]).free // 1024)' "${path}" 2>/dev/null
-}
-
-AUTO_INSTALL_DEPS="${LUMEN_AUTO_INSTALL_DEPS:-1}"
-APT_UPDATED=0
-DOCKER_USE_SUDO=0
-
-auto_install_enabled() {
-    case "${AUTO_INSTALL_DEPS}" in
-        0|false|FALSE|False|no|NO|No|off|OFF|Off) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
-auto_start_runtime_enabled() {
-    case "${LUMEN_AUTO_START_RUNTIME:-1}" in
-        0|false|FALSE|False|no|NO|No|off|OFF|Off) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
-have_cmd() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-prepend_path_if_dir() {
-    local dir="$1"
-    if [ -d "${dir}" ]; then
-        case ":${PATH}:" in
-            *":${dir}:"*) ;;
-            *) export PATH="${dir}:${PATH}" ;;
-        esac
+# ---------------------------------------------------------------------------
+# Compose 调用 wrapper
+# 优先使用 lib.sh 提供的 lumen_compose；缺失时降级到 docker compose 直调。
+# 同 wave 的 lib.sh agent 计划实现 lumen_compose / lumen_compose_in（自动 COMPOSE_PROJECT_NAME=lumen）；
+# TODO: 如果 lib.sh 实际签名与本处不一致（例如 lumen_compose_in <dir> ...），按 lib.sh 实现 align。
+# ---------------------------------------------------------------------------
+_install_compose() {
+    if command -v lumen_compose_in >/dev/null 2>&1 && [ -n "${RELEASE_DIR:-}" ]; then
+        lumen_compose_in "${RELEASE_DIR}" "$@"
+    elif command -v lumen_compose >/dev/null 2>&1; then
+        lumen_compose "$@"
+    else
+        # Fallback：手动设置 COMPOSE_PROJECT_NAME=lumen，cd 到 RELEASE_DIR
+        local cwd_dir="${RELEASE_DIR:-${ROOT}}"
+        ( cd "${cwd_dir}" && COMPOSE_PROJECT_NAME=lumen docker compose "$@" )
     fi
 }
 
-refresh_tool_paths() {
-    prepend_path_if_dir "${HOME:-}/.local/bin"
-    prepend_path_if_dir "${HOME:-}/.cargo/bin"
-    prepend_path_if_dir "/opt/homebrew/bin"
-    prepend_path_if_dir "/usr/local/bin"
+# 健康检查 wrapper
+_install_health_http() {
+    local url="$1"
+    local timeout_s="${2:-60}"
+    local interval_s="${3:-2}"
+    if command -v lumen_health_http >/dev/null 2>&1; then
+        lumen_health_http "${url}" "${timeout_s}" "${interval_s}"
+    else
+        # Fallback：用 lib.sh 已有的 lumen_wait_for_http_ok（attempts=timeout_s）
+        lumen_wait_for_http_ok "${url}" "${timeout_s}"
+    fi
+}
 
-    if have_cmd brew; then
-        local prefix
-        for formula in node@20 python@3.12 openssl@3 libpq; do
-            prefix="$(brew --prefix "${formula}" 2>/dev/null || true)"
-            if [ -n "${prefix}" ]; then
-                prepend_path_if_dir "${prefix}/bin"
-                prepend_path_if_dir "${prefix}/libexec/bin"
+_install_health_compose() {
+    if command -v lumen_health_compose >/dev/null 2>&1; then
+        lumen_health_compose "$@"
+        return $?
+    fi
+    # Fallback：自己 inspect Container.State.Health.Status
+    local svc cid status
+    for svc in "$@"; do
+        cid="$(_install_compose ps -q "${svc}" 2>/dev/null | head -n1 || true)"
+        if [ -z "${cid}" ]; then
+            log_error "compose service ${svc} 未运行，无法做健康检查。"
+            return 1
+        fi
+        status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${cid}" 2>/dev/null || true)"
+        case "${status}" in
+            healthy|running) ;;
+            *)
+                log_error "compose service ${svc} 状态异常：${status}"
+                return 1
+                ;;
+        esac
+    done
+}
+
+# 阶段记录 wrapper
+emit_step_start() {
+    INSTALL_PHASE="$1"
+    log_step "[${INSTALL_PHASE}] $2"
+    if command -v lumen_emit_step >/dev/null 2>&1; then
+        lumen_emit_step "phase=${INSTALL_PHASE}" "status=start" || true
+    fi
+}
+
+emit_step_done() {
+    if command -v lumen_emit_step >/dev/null 2>&1 && [ -n "${INSTALL_PHASE:-}" ]; then
+        lumen_emit_step "phase=${INSTALL_PHASE}" "status=done" "rc=0" || true
+    fi
+    INSTALL_PHASE=""
+}
+
+emit_info() {
+    if command -v lumen_emit_info >/dev/null 2>&1 && [ -n "${INSTALL_PHASE:-}" ]; then
+        lumen_emit_info "phase=${INSTALL_PHASE}" "$@" || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# A. 前置检查
+# 必装：docker / docker compose v2 / openssl / curl
+# 可选：python3（仅 backup 脚本用），systemd（仅 update-runner 路径用）
+# 磁盘：/opt 至少 10GB
+# ---------------------------------------------------------------------------
+check_prerequisites() {
+    emit_step_start prepare "前置检查（docker / compose v2 / openssl / curl）"
+    case "${OS}" in
+        macos|linux) ;;
+        *)
+            log_error "暂不支持当前操作系统（uname -s = $(uname -s)）。仅支持 macOS 与 Linux（含 WSL2）。"
+            exit 1
+            ;;
+    esac
+
+    local missing=()
+    command -v docker  >/dev/null 2>&1 || missing+=("docker")
+    command -v openssl >/dev/null 2>&1 || missing+=("openssl")
+    command -v curl    >/dev/null 2>&1 || missing+=("curl")
+    if [ "${#missing[@]}" -gt 0 ]; then
+        log_error "缺少必备命令：${missing[*]}"
+        log_error "  Docker：参考 https://docs.docker.com/engine/install/  或 macOS Docker Desktop"
+        log_error "  openssl / curl：通过系统包管理器安装（apt/dnf/brew）"
+        exit 1
+    fi
+
+    # docker compose v2 子命令检测
+    if ! docker compose version >/dev/null 2>&1; then
+        log_error "未检测到 docker compose v2 子命令。请安装 docker-compose-plugin（Linux）"
+        log_error "或升级 Docker Desktop（macOS）。"
+        exit 1
+    fi
+
+    # docker daemon 可达 + 是否需要 sudo
+    if command -v lumen_require_docker_access >/dev/null 2>&1; then
+        lumen_require_docker_access
+    elif ! docker info >/dev/null 2>&1; then
+        log_error "Docker daemon 未运行，或当前用户无权访问 Docker。"
+        log_error "  Linux：sudo systemctl start docker；将用户加入 docker 组后重新登录"
+        log_error "  macOS：启动 Docker Desktop 等待初始化"
+        exit 1
+    fi
+
+    # 可选：python3（备份脚本辅助）
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_warn "未检测到 python3；备份/恢复脚本会有部分辅助功能不可用，但安装可继续。"
+    fi
+
+    # 磁盘空间：/opt ≥ 10GB（10 * 1024 * 1024 KB）
+    local free_kb=""
+    local check_path="/opt"
+    [ -d "${check_path}" ] || check_path="/"
+    if command -v df >/dev/null 2>&1; then
+        free_kb="$(df -Pk "${check_path}" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+    fi
+    if [ -n "${free_kb}" ] && [ "${free_kb}" -lt $((10 * 1024 * 1024)) ] 2>/dev/null; then
+        log_warn "${check_path} 空闲空间约 $((free_kb / 1024)) MB，低于建议值 10 GB（postgres/redis 数据 + 镜像缓存）。"
+        if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] && ! confirm "仍要继续？"; then
+            exit 0
+        fi
+    fi
+
+    log_info "前置检查通过：docker $(docker --version 2>&1 | awk '{print $3}' | tr -d ',') / compose v2 / openssl / curl"
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# B. 准备数据目录与权限（§15.2 + §17.0）
+# 按服务分别 chown，禁止整体 chown -R 10001。
+# ---------------------------------------------------------------------------
+prepare_data_dirs() {
+    emit_step_start prepare "准备数据目录与权限（${LUMEN_DATA_ROOT}）"
+    local root="${LUMEN_DATA_ROOT}"
+
+    # /opt/lumendata 顶层归 root 755
+    if [ -e "${root}" ] && [ ! -d "${root}" ]; then
+        log_error "${root} 已存在但不是目录，请先移走或删除后重试。"
+        exit 1
+    fi
+    lumen_run_as_root mkdir -p "${root}" \
+        "${root}/postgres" \
+        "${root}/redis" \
+        "${root}/storage" \
+        "${root}/backup" \
+        "${root}/backup/pg" \
+        "${root}/backup/redis" || {
+        log_error "无法创建 ${root} 子目录。请确认当前用户有 sudo 权限。"
+        exit 1
+    }
+
+    # 顶层 root:root 755（不递归）
+    lumen_run_as_root chown root:root "${root}" || true
+    lumen_run_as_root chmod 755 "${root}" || true
+
+    # 按服务分别 chown（禁止整体 chown 10001 给所有目录 —— §15.2）
+    lumen_run_as_root chown -R 70:70   "${root}/postgres" || {
+        log_error "chown postgres 数据目录失败。"
+        exit 1
+    }
+    lumen_run_as_root chown -R 999:999 "${root}/redis" || {
+        log_error "chown redis 数据目录失败。"
+        exit 1
+    }
+    lumen_run_as_root chown -R 10001:10001 "${root}/storage" "${root}/backup" || {
+        log_error "chown storage/backup 数据目录失败。"
+        exit 1
+    }
+
+    lumen_run_as_root chmod 700 "${root}/postgres" "${root}/redis" || true
+    lumen_run_as_root chmod 750 "${root}/storage" "${root}/backup" || true
+
+    log_info "数据目录权限设置完成（postgres=70, redis=999, storage/backup=10001）。"
+    emit_info "key=data_root" "value=${root}"
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# C. 准备 release 布局
+#   ${LUMEN_DEPLOY_ROOT}/
+#     releases/<id>/      <- 当前 release，rsync 整个仓库进来
+#     shared/.env         <- 跨 release 持久化的密钥与配置
+#     current -> releases/<id>
+# ---------------------------------------------------------------------------
+prepare_release_layout() {
+    emit_step_start prepare "准备 release 布局（${DEPLOY_ROOT}）"
+
+    # 决定 release id：UTC 时间戳 + 可选 git short sha
+    local release_id sha=""
+    if [ -d "${ROOT}/.git" ] && command -v git >/dev/null 2>&1; then
+        sha="$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || true)"
+    fi
+    if command -v lumen_release_id >/dev/null 2>&1; then
+        release_id="$(lumen_release_id "${sha:-unknown}")"
+    else
+        release_id="$(date -u +%Y%m%dT%H%M%SZ)-${sha:-unknown}"
+    fi
+
+    RELEASE_ID="${release_id}"
+    RELEASE_DIR="${DEPLOY_ROOT}/releases/${release_id}"
+    SHARED_DIR="${DEPLOY_ROOT}/shared"
+
+    # 创建顶层 + releases + shared
+    lumen_run_as_root mkdir -p "${DEPLOY_ROOT}/releases" "${SHARED_DIR}" || {
+        log_error "无法创建部署目录 ${DEPLOY_ROOT}。请确认 sudo 权限。"
+        exit 1
+    }
+    # DEPLOY_ROOT 写权限给当前用户（compose 要从 RELEASE_DIR 读 docker-compose.yml）
+    if [ ! -w "${DEPLOY_ROOT}" ]; then
+        lumen_run_as_root chown "$(id -un):$(id -gn)" "${DEPLOY_ROOT}" "${DEPLOY_ROOT}/releases" "${SHARED_DIR}" 2>/dev/null || true
+    fi
+
+    if [ -e "${RELEASE_DIR}" ] && [ "$(ls -A "${RELEASE_DIR}" 2>/dev/null | head -1)" ]; then
+        log_warn "release 目录已存在且非空：${RELEASE_DIR}（同一秒重跑？覆盖式继续。）"
+    fi
+    mkdir -p "${RELEASE_DIR}" 2>/dev/null || lumen_run_as_root mkdir -p "${RELEASE_DIR}"
+    if [ ! -w "${RELEASE_DIR}" ]; then
+        lumen_run_as_root chown -R "$(id -un):$(id -gn)" "${RELEASE_DIR}" 2>/dev/null || true
+    fi
+
+    # 把当前仓库内容 rsync 到 release 目录（保留 release 布局，§11.1）
+    if ! command -v rsync >/dev/null 2>&1; then
+        log_error "缺少 rsync，无法把仓库内容复制到 release 目录。"
+        log_error "  Debian/Ubuntu：sudo apt install rsync"
+        log_error "  RHEL/Alma：sudo dnf install rsync"
+        log_error "  macOS：brew install rsync"
+        exit 1
+    fi
+    log_info "rsync 仓库 → ${RELEASE_DIR}"
+    rsync -a \
+        --exclude='/.git/' \
+        --exclude='/.env' \
+        --exclude='/.env.local' \
+        --exclude='/shared/' \
+        --exclude='/releases/' \
+        --exclude='/current' \
+        --exclude='/previous' \
+        --exclude='/var/' \
+        --exclude='/.venv/' \
+        --exclude='/node_modules/' \
+        --exclude='/apps/worker/var/' \
+        --exclude='/apps/web/.next/' \
+        --exclude='/apps/web/node_modules/' \
+        --exclude='/.lumen-script.lock/' \
+        --exclude='/.update.log' \
+        --exclude='/.install-logs/' \
+        "${ROOT}/" "${RELEASE_DIR}/"
+
+    emit_info "key=release_id" "value=${release_id}"
+    emit_info "key=release_dir" "value=${RELEASE_DIR}"
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# D. 生成或合并 shared/.env
+#   - 不存在：从 release 内的 .env.example 拷贝，然后 awk 替换 placeholder
+#   - 存在：原样保留
+#   - 写入 LUMEN_IMAGE_REGISTRY / LUMEN_IMAGE_TAG / LUMEN_VERSION / LUMEN_DATA_ROOT
+#   - 在 release dir 创建 .env -> shared/.env 的相对 symlink，让 docker compose 自动读
+# ---------------------------------------------------------------------------
+prepare_env_file() {
+    emit_step_start prepare "生成或合并 shared/.env"
+    local shared_env="${SHARED_DIR}/.env"
+    local example="${RELEASE_DIR}/.env.example"
+
+    if [ ! -f "${example}" ]; then
+        log_error "找不到 ${example}（仓库 .env.example 缺失？）"
+        exit 1
+    fi
+
+    if [ ! -f "${shared_env}" ]; then
+        log_info "shared/.env 不存在，从 .env.example 拷贝并生成强随机密钥。"
+        cp "${example}" "${shared_env}"
+        chmod 600 "${shared_env}"
+
+        # 强随机替换 3 个 placeholder（使用 URL-safe 字符避免破坏 REDIS_URL）
+        local db_password redis_password session_secret
+        db_password="$(openssl rand -hex 24)"
+        redis_password="$(openssl rand -hex 24)"
+        session_secret="$(openssl rand -hex 64)"
+        validate_dotenv_value DB_PASSWORD "${db_password}" || exit 1
+        validate_redis_password "${redis_password}" || exit 1
+        validate_dotenv_value SESSION_SECRET "${session_secret}" || exit 1
+
+        env_file_set "${shared_env}" DB_PASSWORD     "${db_password}"
+        env_file_set "${shared_env}" REDIS_PASSWORD  "${redis_password}"
+        env_file_set "${shared_env}" SESSION_SECRET  "${session_secret}"
+
+        # DATABASE_URL / REDIS_URL：基于新密码精确重写（不要全局 sed）
+        local db_user db_name
+        db_user="$(env_file_get DB_USER "${shared_env}")"
+        db_name="$(env_file_get DB_NAME "${shared_env}")"
+        db_user="${db_user:-lumen_app}"
+        db_name="${db_name:-lumen_app}"
+        env_file_set "${shared_env}" DATABASE_URL \
+            "postgresql+asyncpg://${db_user}:${db_password}@postgres:5432/${db_name}"
+        env_file_set "${shared_env}" REDIS_URL \
+            "redis://:${redis_password}@redis:6379/0"
+
+        log_info "已写入随机密钥（DB_PASSWORD/REDIS_PASSWORD/SESSION_SECRET）。"
+    else
+        log_info "shared/.env 已存在，跳过密钥生成。"
+        # 兜底：补齐 docker compose 必需的 DB_USER/DB_PASSWORD/DB_NAME
+        lumen_ensure_compose_db_env_vars "${shared_env}" || exit 1
+        case "${LUMEN_ENV_MIGRATE_CONTAINER_URLS:-dry-run}" in
+            0|false|FALSE|False|no|NO|No|off|OFF|Off)
+                log_info "跳过旧 .env 容器内 URL 检查（LUMEN_ENV_MIGRATE_CONTAINER_URLS=0）。"
+                ;;
+            apply|--apply)
+                log_info "检查并迁移旧 .env 容器内 URL（白名单 + backup）。"
+                lumen_migrate_container_urls "${shared_env}" --dry-run || exit 1
+                lumen_migrate_container_urls "${shared_env}" --apply || exit 1
+                ;;
+            *)
+                log_info "检查旧 .env 容器内 URL（白名单 dry-run，不落盘）。"
+                local dry_run_output
+                dry_run_output="$(lumen_migrate_container_urls "${shared_env}" --dry-run)" || {
+                    printf '%s\n' "${dry_run_output:-}" >&2
+                    exit 1
+                }
+                printf '%s\n' "${dry_run_output}"
+                case "${dry_run_output}" in
+                    *"dry-run only;"*)
+                        log_error "检测到旧 .env 仍需要容器地址迁移；默认 dry-run 不落盘，安装已停止。"
+                        log_error "请确认上方 diff 后执行："
+                        log_error "  bash ${RELEASE_DIR}/scripts/lumenctl.sh migrate-env-apply ${shared_env}"
+                        log_error "或显式：LUMEN_ENV_MIGRATE_CONTAINER_URLS=apply bash ${SCRIPT_DIR}/install.sh --install"
+                        exit 1
+                        ;;
+                esac
+                log_warn "如上方显示 DATABASE_URL/REDIS_URL 等变更，请确认后执行："
+                log_warn "  bash ${RELEASE_DIR}/scripts/lumenctl.sh migrate-env-apply ${shared_env}"
+                ;;
+        esac
+    fi
+
+    # 写入/覆盖镜像与版本变量（每次安装都更新，便于 update.sh 读到一致 tag）
+    local image_registry image_tag lumen_version
+    image_registry="${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}"
+    image_tag="${INSTALL_IMAGE_TAG_OVERRIDE:-${LUMEN_IMAGE_TAG:-latest}}"
+    if [ -f "${RELEASE_DIR}/VERSION" ]; then
+        lumen_version="$(head -n1 "${RELEASE_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [ -z "${lumen_version:-}" ] && [ -d "${ROOT}/.git" ] && command -v git >/dev/null 2>&1; then
+        lumen_version="$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || true)"
+    fi
+    lumen_version="${lumen_version:-unknown}"
+
+    env_file_set "${shared_env}" LUMEN_IMAGE_REGISTRY "${image_registry}"
+    env_file_set "${shared_env}" LUMEN_IMAGE_TAG      "${image_tag}"
+    env_file_set "${shared_env}" LUMEN_VERSION        "${lumen_version}"
+    env_file_set "${shared_env}" LUMEN_DATA_ROOT      "${LUMEN_DATA_ROOT}"
+
+    # 创建 release/.env -> ../../shared/.env 的相对 symlink
+    # docker compose 默认从 -f 所在目录加载 .env；让它读到 shared/.env
+    if [ -e "${RELEASE_DIR}/.env" ] || [ -L "${RELEASE_DIR}/.env" ]; then
+        rm -f "${RELEASE_DIR}/.env"
+    fi
+    ln -s "../../shared/.env" "${RELEASE_DIR}/.env"
+    log_info "已 symlink ${RELEASE_DIR}/.env -> ../../shared/.env"
+
+    # 友善提示：PUBLIC_BASE_URL / CORS_ALLOW_ORIGINS / NEXT_PUBLIC_API_BASE 保留默认
+    local pub_url cors_url
+    pub_url="$(env_file_get PUBLIC_BASE_URL "${shared_env}")"
+    cors_url="$(env_file_get CORS_ALLOW_ORIGINS "${shared_env}")"
+    if [[ "${pub_url}" == http://localhost* ]] || [[ "${cors_url}" == http://localhost* ]]; then
+        log_warn "PUBLIC_BASE_URL / CORS_ALLOW_ORIGINS 仍是 localhost 默认值。"
+        log_warn "  生产部署后请编辑 ${shared_env}，改成你的公网域名（例如 https://lumen.example.com）。"
+        log_warn "  并在 nginx 配置正确的 server_name + 反代到 127.0.0.1:3000。"
+    fi
+
+    emit_info "key=shared_env" "value=${shared_env}"
+    emit_info "key=image_registry" "value=${image_registry}"
+    emit_info "key=image_tag" "value=${image_tag}"
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# E. 探测 GHCR 镜像可用性
+# ---------------------------------------------------------------------------
+probe_ghcr_image_tag() {
+    emit_step_start prepare "探测 GHCR 镜像 tag 可用性"
+    local shared_env="${SHARED_DIR}/.env"
+    local registry tag api_url
+    registry="$(env_file_get LUMEN_IMAGE_REGISTRY "${shared_env}")"
+    tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
+
+    # 只在默认 ghcr.io/cyeinfpro 路径下做探测；自定义 registry 直接信任用户配置
+    if [[ "${registry}" != ghcr.io/cyeinfpro* ]]; then
+        log_info "自定义镜像 registry=${registry}，跳过 GHCR tag 探测。"
+        emit_step_done
+        return 0
+    fi
+
+    # 用户显式 --image-tag 覆盖时不做 fallback（信任用户）
+    if [ -n "${INSTALL_IMAGE_TAG_OVERRIDE}" ]; then
+        log_info "已用 --image-tag=${INSTALL_IMAGE_TAG_OVERRIDE}，跳过 GHCR 探测。"
+        emit_step_done
+        return 0
+    fi
+
+    # --build 模式不需要远程镜像
+    if [ "${INSTALL_BUILD_FLAG}" = "1" ]; then
+        log_info "--build 模式，跳过 GHCR 探测（将本地构建镜像）。"
+        emit_step_done
+        return 0
+    fi
+
+    # GHCR public packages tags API（对未 token 也返回 200/404）
+    api_url="https://ghcr.io/v2/cyeinfpro/lumen-api/tags/list"
+    log_info "探测 ${api_url}（tag=${tag}）..."
+    local resp http_code
+    http_code="$(curl -fsS -o /tmp/lumen-ghcr-probe.$$ -w '%{http_code}' --max-time 10 "${api_url}" 2>/dev/null || echo "000")"
+    resp="$(cat /tmp/lumen-ghcr-probe.$$ 2>/dev/null || true)"
+    rm -f /tmp/lumen-ghcr-probe.$$
+
+    if [ "${http_code}" = "200" ] && printf '%s' "${resp}" | grep -q "\"${tag}\""; then
+        log_info "GHCR 上存在 tag=${tag}，使用配置值。"
+    elif [ "${http_code}" = "200" ]; then
+        # 探测到 tags 列表但缺 ${tag}：尝试 fallback 到 main
+        if printf '%s' "${resp}" | grep -q '"main"'; then
+            log_warn "GHCR 上未找到 tag=${tag}，回退到 main。v1.0.0 发布后请改回 latest。"
+            env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"
+            # 在 .env 顶部追加一行注释（如果还没加过）
+            if ! grep -q '^# install.sh: fallback to main' "${shared_env}"; then
+                printf '\n# install.sh: fallback to main; v1.0.0 发布后改回 latest\n' >> "${shared_env}"
+            fi
+        else
+            log_warn "GHCR 上既无 ${tag} 也无 main。保留配置，pull 时可能失败。"
+        fi
+    else
+        # API 探测失败但 .env 已有 tag → 不动
+        log_warn "GHCR API 探测失败（HTTP ${http_code}），保留 .env 配置 LUMEN_IMAGE_TAG=${tag}。"
+    fi
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# F. 拉镜像 / 构建 -> 起 PG/Redis -> migrate -> bootstrap -> api/worker/web (+tgbot)
+# ---------------------------------------------------------------------------
+pull_or_build_images() {
+    if [ "${INSTALL_BUILD_FLAG}" = "1" ]; then
+        emit_step_start containers "本地构建镜像（lumen_compose build）"
+        if ! _install_compose build; then
+            log_error "本地 docker compose build 失败。"
+            exit 1
+        fi
+    else
+        emit_step_start containers "拉取镜像（lumen_compose pull）"
+        if ! _install_compose pull; then
+            log_error "docker compose pull 失败。"
+            log_error "  常见原因：1) 国内网络访问 ghcr 受阻 → 设置 LUMEN_HTTP_PROXY 或自托管 registry"
+            log_error "            2) 镜像 tag 不存在 → 用 --image-tag=vX.Y.Z 钉死 tag 或 --build 本地构建"
+            exit 1
+        fi
+    fi
+    emit_step_done
+}
+
+start_infrastructure() {
+    emit_step_start containers "启动 PostgreSQL / Redis 并等待健康"
+    if ! _install_compose up -d --wait postgres redis; then
+        log_error "postgres / redis 启动或健康检查失败。"
+        exit 1
+    fi
+    INSTALL_STARTED_SERVICES+=("postgres" "redis")
+    log_info "PG / Redis 已健康。"
+    emit_step_done
+}
+
+run_migration() {
+    emit_step_start migrate_db "执行数据库迁移（migrate profile，alembic upgrade head）"
+    if ! _install_compose --profile migrate run --rm migrate; then
+        log_error "alembic 迁移失败。检查 PG 容器健康状态与 DATABASE_URL。"
+        exit 1
+    fi
+    log_info "数据库迁移完成。"
+    emit_step_done
+}
+
+run_bootstrap_admin() {
+    local shared_env="${SHARED_DIR}/.env"
+    # 已 bootstrapped 过则跳过
+    if grep -q '^LUMEN_BOOTSTRAPPED=1' "${shared_env}" 2>/dev/null; then
+        log_info "shared/.env 中已记录 LUMEN_BOOTSTRAPPED=1，跳过管理员创建。"
+        return 0
+    fi
+
+    emit_step_start migrate_db "创建首个管理员账号（bootstrap profile）"
+
+    local admin_email admin_pwd
+    if [ "${LUMEN_NONINTERACTIVE:-}" = "1" ]; then
+        admin_email="${LUMEN_ADMIN_EMAIL:-}"
+        admin_pwd="${LUMEN_ADMIN_PASSWORD:-}"
+        if [ -z "${admin_email}" ] || [ -z "${admin_pwd}" ]; then
+            log_error "LUMEN_NONINTERACTIVE=1 但未提供 LUMEN_ADMIN_EMAIL / LUMEN_ADMIN_PASSWORD。"
+            exit 1
+        fi
+        if [ "${#admin_pwd}" -lt 12 ]; then
+            log_error "LUMEN_ADMIN_PASSWORD 长度不能少于 12 位。"
+            exit 1
+        fi
+    else
+        admin_email="$(read_or_default '管理员邮箱' 'admin@example.com')"
+        admin_pwd=""
+        while [ -z "${admin_pwd}" ]; do
+            admin_pwd="$(read_secret '管理员密码（≥12 chars）')"
+            if [ -z "${admin_pwd}" ]; then
+                log_warn "密码不能为空。"
+            elif [ "${#admin_pwd}" -lt 12 ]; then
+                log_warn "密码长度不能少于 12 位。"
+                admin_pwd=""
             fi
         done
     fi
+
+    # bootstrap 容器读 LUMEN_ADMIN_EMAIL / LUMEN_ADMIN_PASSWORD env（compose 已声明）
+    # 不写入 .env（§10.3：不要把管理员密码写入 .env）
+    if ! LUMEN_ADMIN_EMAIL="${admin_email}" LUMEN_ADMIN_PASSWORD="${admin_pwd}" \
+            _install_compose --profile bootstrap run --rm \
+            -e "LUMEN_ADMIN_EMAIL=${admin_email}" \
+            -e "LUMEN_ADMIN_PASSWORD=${admin_pwd}" \
+            bootstrap python -m app.scripts.bootstrap "${admin_email}" --role admin --password "${admin_pwd}"; then
+        log_warn "bootstrap 返回非零。常见原因：管理员账号已存在；继续后续步骤。"
+        log_warn "  如需重置密码，登录后到管理面板修改，或手动 DELETE 后重跑本脚本。"
+    fi
+
+    # 标记已 bootstrapped，避免重复运行
+    if ! grep -q '^LUMEN_BOOTSTRAPPED=1' "${shared_env}"; then
+        printf 'LUMEN_BOOTSTRAPPED=1\n' >> "${shared_env}"
+    fi
+
+    INSTALL_ADMIN_EMAIL="${admin_email}"
+    log_info "管理员账号：${admin_email}"
+    emit_info "key=admin_email" "value=${admin_email}"
+    emit_step_done
 }
 
-run_as_root() {
-    if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-        "$@"
-    elif have_cmd sudo; then
-        sudo "$@"
-    else
-        return 1
-    fi
-}
-
-require_auto_install() {
-    local name="$1"
-    local hint="$2"
-    if auto_install_enabled; then
-        return 0
-    fi
-    log_error "缺少或不满足依赖：${name}。已按 LUMEN_AUTO_INSTALL_DEPS=0 跳过自动安装。"
-    printf '       建议安装方式：%s\n' "${hint}" >&2
-    exit 1
-}
-
-linux_package_manager() {
-    if have_cmd apt-get; then
-        printf 'apt'
-    elif have_cmd dnf; then
-        printf 'dnf'
-    elif have_cmd yum; then
-        printf 'yum'
-    elif have_cmd pacman; then
-        printf 'pacman'
-    elif have_cmd zypper; then
-        printf 'zypper'
-    elif have_cmd apk; then
-        printf 'apk'
-    else
-        printf 'unknown'
-    fi
-}
-
-apt_update_once() {
-    if [ "${APT_UPDATED}" -eq 0 ]; then
-        run_as_root env DEBIAN_FRONTEND=noninteractive apt-get update
-        APT_UPDATED=1
-    fi
-}
-
-install_linux_packages() {
-    local pm
-    pm="$(linux_package_manager)"
-    case "${pm}" in
-        apt)
-            apt_update_once
-            run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
-            ;;
-        dnf)
-            run_as_root dnf install -y "$@"
-            ;;
-        yum)
-            run_as_root yum install -y "$@"
-            ;;
-        pacman)
-            run_as_root pacman -Sy --noconfirm "$@"
-            ;;
-        zypper)
-            run_as_root zypper --non-interactive install "$@"
-            ;;
-        apk)
-            run_as_root apk add --no-cache "$@"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-ensure_linux_base_tools() {
-    if [ "${OS}" != "linux" ]; then
-        return 0
-    fi
-    case "$(linux_package_manager)" in
-        apt) install_linux_packages ca-certificates curl gnupg ;;
-        dnf|yum) install_linux_packages ca-certificates curl gnupg2 ;;
-        pacman) install_linux_packages ca-certificates curl gnupg ;;
-        zypper) install_linux_packages ca-certificates curl gpg2 ;;
-        apk) install_linux_packages ca-certificates curl gnupg ;;
-        *) return 1 ;;
-    esac
-}
-
-ensure_homebrew() {
-    if [ "${OS}" != "macos" ]; then
-        return 1
-    fi
-    refresh_tool_paths
-    if have_cmd brew; then
-        return 0
-    fi
-    require_auto_install "Homebrew" "安装 Homebrew：https://brew.sh/"
-    if ! have_cmd curl; then
-        log_error "缺少 curl，无法自动安装 Homebrew。"
+start_application_services() {
+    emit_step_start containers "启动 API / Worker / Web（compose --wait）"
+    if ! _install_compose up -d --wait api worker web; then
+        log_error "api / worker / web 启动或健康检查失败。"
         exit 1
     fi
-    log_info "缺少 Homebrew，尝试自动安装。"
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    refresh_tool_paths
-    if ! have_cmd brew; then
-        log_error "Homebrew 自动安装后仍不可用。请按 https://brew.sh/ 完成安装后重试。"
-        exit 1
-    fi
-}
+    INSTALL_STARTED_SERVICES+=("api" "worker" "web")
 
-brew_install_formula() {
-    local formula="$1"
-    ensure_homebrew
-    if ! brew list --formula "${formula}" >/dev/null 2>&1; then
-        brew install "${formula}"
-    fi
-    refresh_tool_paths
-}
-
-brew_install_cask() {
-    local cask="$1"
-    ensure_homebrew
-    if ! brew list --cask "${cask}" >/dev/null 2>&1; then
-        brew install --cask "${cask}"
-    fi
-    refresh_tool_paths
-}
-
-install_linux_docker() {
-    require_auto_install "Docker" "${DOCKER_HINT}"
-    ensure_linux_base_tools
-    local get_docker_script
-    get_docker_script="$(mktemp)"
-    log_info "缺少 Docker 或 docker compose v2，尝试通过 Docker 官方脚本安装。"
-    curl -fsSL https://get.docker.com -o "${get_docker_script}"
-    if ! run_as_root sh "${get_docker_script}"; then
-        log_warn "Docker 官方安装脚本失败，尝试改用当前软件源中的 Docker 核心包安装。"
-        install_linux_docker_packages
-    fi
-    rm -f "${get_docker_script}"
-}
-
-install_linux_docker_packages() {
-    local pm packages package available_packages
-    pm="$(linux_package_manager)"
-    case "${pm}" in
-        apt)
-            run_as_root env DEBIAN_FRONTEND=noninteractive apt-get update
-            packages=(
-                docker-ce
-                docker-ce-cli
-                containerd.io
-                docker-compose-plugin
-                docker-buildx-plugin
-                docker-ce-rootless-extras
-            )
-            available_packages=()
-            for package in "${packages[@]}"; do
-                if apt-cache show "${package}" >/dev/null 2>&1; then
-                    available_packages+=("${package}")
-                else
-                    log_warn "apt 源中不存在 ${package}，跳过该可选 Docker 包。"
-                fi
-            done
-            if [ "${#available_packages[@]}" -eq 0 ]; then
-                log_warn "Docker 官方源无可安装包，尝试安装发行版 docker.io/docker-compose-v2。"
-                install_linux_packages docker.io docker-compose-v2 || install_linux_packages docker.io docker-compose
-            else
-                run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "${available_packages[@]}"
-            fi
-            ;;
-        dnf|yum)
-            install_linux_packages docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin \
-                || install_linux_packages docker docker-compose
-            ;;
-        pacman)
-            install_linux_packages docker docker-compose
-            ;;
-        zypper)
-            install_linux_packages docker docker-compose
-            ;;
-        apk)
-            install_linux_packages docker docker-cli-compose
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-install_linux_compose_plugin() {
-    local pm
-    pm="$(linux_package_manager)"
-    case "${pm}" in
-        apt) install_linux_packages docker-compose-plugin ;;
-        dnf|yum) install_linux_packages docker-compose-plugin ;;
-        pacman) install_linux_packages docker-compose ;;
-        zypper) install_linux_packages docker-compose-plugin ;;
-        apk) install_linux_packages docker-cli-compose ;;
-        *) return 1 ;;
-    esac
-}
-
-docker_cli() {
-    if [ "${DOCKER_USE_SUDO}" = "1" ]; then
-        sudo docker "$@"
-    else
-        docker "$@"
-    fi
-}
-
-start_linux_docker_service() {
-    if have_cmd systemctl; then
-        run_as_root systemctl enable --now docker || run_as_root systemctl start docker || true
-    elif have_cmd service; then
-        run_as_root service docker start || true
-    fi
-}
-
-wait_for_docker_daemon() {
-    local _attempt
-    for _attempt in $(seq 1 60); do
-        if docker_cli info >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
-ensure_docker_access_for_current_run() {
-    DOCKER_USE_SUDO=0
-    if docker info >/dev/null 2>&1; then
-        return 0
-    fi
-
-    if [ "${OS}" = "linux" ]; then
-        start_linux_docker_service
-        if docker info >/dev/null 2>&1; then
-            return 0
-        fi
-        if [ "${EUID:-$(id -u)}" -ne 0 ] && have_cmd sudo; then
-            DOCKER_USE_SUDO=1
-            if wait_for_docker_daemon; then
-                if ! id -nG | tr ' ' '\n' | grep -qx docker; then
-                    log_warn "当前用户不在 docker 组，本次安装将自动用 sudo 执行 docker 命令。"
-                    if getent group docker >/dev/null 2>&1; then
-                        run_as_root usermod -aG docker "$(id -un)" || true
-                        log_warn "已尝试把当前用户加入 docker 组；重新登录后可免 sudo 使用 docker。"
-                    fi
-                fi
-                return 0
-            fi
-        fi
-        DOCKER_USE_SUDO=0
-    elif [ "${OS}" = "macos" ]; then
-        if have_cmd open; then
-            log_info "Docker daemon 未运行，尝试启动 Docker Desktop。"
-            open -a Docker >/dev/null 2>&1 || true
-            wait_for_docker_daemon && return 0
-        fi
-    fi
-    return 1
-}
-
-ensure_docker_ready() {
-    if ! have_cmd docker; then
-        case "${OS}" in
-            macos)
-                require_auto_install "Docker Desktop" "${DOCKER_HINT}"
-                log_info "缺少 Docker，尝试安装 Docker Desktop。"
-                brew_install_cask docker
-                ;;
-            linux)
-                install_linux_docker
-                ;;
-        esac
-    fi
-    if ! have_cmd docker; then
-        log_error "Docker 自动安装后仍不可用。"
-        printf '       安装提示：%s\n' "${DOCKER_HINT}" >&2
-        exit 1
-    fi
-
-    if ! docker_cli compose version >/dev/null 2>&1; then
-        case "${OS}" in
-            macos)
-                require_auto_install "docker compose v2" "${DOCKER_HINT}"
-                brew_install_cask docker
-                ;;
-            linux)
-                require_auto_install "docker compose v2" "${DOCKER_HINT}"
-                install_linux_compose_plugin || install_linux_docker
-                ;;
-        esac
-    fi
-    if ! docker_cli compose version >/dev/null 2>&1; then
-        log_error "未检测到 docker compose v2 子命令，自动安装后仍不可用。"
-        printf '       安装提示：%s\n' "${DOCKER_HINT}" >&2
-        exit 1
-    fi
-
-    if ! ensure_docker_access_for_current_run; then
-        log_error "Docker daemon 未运行或当前用户无法访问 Docker。"
-        if [ "${OS}" = "macos" ]; then
-            printf '       请确认 Docker Desktop 已启动并完成首次初始化。\n' >&2
+    # tgbot 仅在 .env 提供了非空 TELEGRAM_BOT_TOKEN 时启动
+    local shared_env="${SHARED_DIR}/.env"
+    local bot_token
+    bot_token="$(env_file_get TELEGRAM_BOT_TOKEN "${shared_env}")"
+    if [ -n "${bot_token}" ]; then
+        log_info "检测到 TELEGRAM_BOT_TOKEN 非空，启动 tgbot service。"
+        if ! _install_compose --profile tgbot up -d tgbot; then
+            log_warn "tgbot 启动失败（可能是 token 无效或网络问题）。主栈不受影响。"
         else
-            printf '       请确认 systemd/service 可启动 docker，或当前用户有 sudo 权限。\n' >&2
+            INSTALL_STARTED_SERVICES+=("tgbot")
         fi
-        exit 1
+    else
+        log_info "未配置 TELEGRAM_BOT_TOKEN，跳过 tgbot。"
     fi
+    emit_step_done
 }
 
-ensure_uv_ready() {
-    refresh_tool_paths
-    if ! have_cmd uv; then
-        require_auto_install "uv" "${UV_HINT}"
-        if [ "${OS}" = "linux" ]; then
-            ensure_linux_base_tools
-        elif [ "${OS}" = "macos" ] && ! have_cmd curl; then
-            brew_install_formula curl
+# ---------------------------------------------------------------------------
+# G. 切换 current symlink
+# ---------------------------------------------------------------------------
+switch_current_symlink() {
+    emit_step_start switch "切换 current symlink → releases/${RELEASE_ID}"
+    local cur="${DEPLOY_ROOT}/current"
+    if [ -L "${cur}" ]; then
+        local prev_target
+        prev_target="$(readlink "${cur}" 2>/dev/null || true)"
+        if [ -n "${prev_target}" ]; then
+            ln -sfn "${prev_target}" "${DEPLOY_ROOT}/previous" 2>/dev/null || true
         fi
-        log_info "缺少 uv，尝试通过官方安装脚本安装。"
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-        refresh_tool_paths
     fi
-    if ! have_cmd uv; then
-        log_error "uv 自动安装后仍不可用。"
-        printf '       安装提示：%s\n' "${UV_HINT}" >&2
+    ln -sfn "releases/${RELEASE_ID}" "${cur}"
+    log_info "${cur} → releases/${RELEASE_ID}"
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# H. 健康检查（HTTP + Compose 状态）
+# ---------------------------------------------------------------------------
+run_health_checks() {
+    emit_step_start health_post "健康检查（HTTP + compose service 状态）"
+
+    if ! _install_health_http "http://127.0.0.1:8000/healthz" 60 2; then
+        log_error "API 健康检查失败：http://127.0.0.1:8000/healthz 在 60s 内未返回 2xx/3xx。"
+        log_error "  排查：${COMPOSE_LABEL} logs --tail=200 api"
         exit 1
     fi
-    log_info "确保 uv 可用 Python 3.12。"
-    uv python install 3.12 >/dev/null
-}
+    log_info "API /healthz 通过。"
 
-install_linux_node20() {
-    require_auto_install "Node.js >= 20 + npm" "${NODE_HINT}"
-    ensure_linux_base_tools
-    case "$(linux_package_manager)" in
-        apt)
-            run_as_root bash -c 'curl -fsSL https://deb.nodesource.com/setup_20.x | bash -'
-            install_linux_packages nodejs
-            ;;
-        dnf|yum)
-            run_as_root bash -c 'curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -'
-            install_linux_packages nodejs
-            ;;
-        pacman)
-            install_linux_packages nodejs npm
-            ;;
-        zypper)
-            install_linux_packages nodejs20 npm20 || install_linux_packages nodejs npm
-            ;;
-        apk)
-            if ! install_linux_packages nodejs-current npm; then
-                install_linux_packages nodejs npm
-            fi
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-node_major_version() {
-    node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
-}
-
-ensure_node_ready() {
-    refresh_tool_paths
-    local node_major
-    node_major="$(node_major_version)"
-    if ! have_cmd node || ! have_cmd npm || [ "${node_major}" -lt 20 ] 2>/dev/null; then
-        case "${OS}" in
-            macos)
-                require_auto_install "Node.js >= 20 + npm" "${NODE_HINT}"
-                log_info "缺少 Node.js >= 20/npm，尝试安装 node@20。"
-                brew_install_formula node@20
-                ;;
-            linux)
-                log_info "缺少 Node.js >= 20/npm，尝试自动安装 Node.js 20。"
-                install_linux_node20
-                ;;
-        esac
-        refresh_tool_paths
-        node_major="$(node_major_version)"
-    fi
-    if ! have_cmd node || ! have_cmd npm || [ "${node_major}" -lt 20 ] 2>/dev/null; then
-        log_error "Node.js/npm 自动安装后仍不满足要求：需要 Node.js >= 20。"
-        printf '       当前 node：%s\n' "$(node -v 2>/dev/null || echo missing)" >&2
-        printf '       当前 npm：%s\n' "$(npm -v 2>/dev/null || echo missing)" >&2
-        printf '       安装提示：%s\n' "${NODE_HINT}" >&2
+    if ! _install_health_http "http://127.0.0.1:3000/" 60 2; then
+        log_error "Web 健康检查失败：http://127.0.0.1:3000/ 在 60s 内未返回 2xx/3xx。"
+        log_error "  排查：${COMPOSE_LABEL} logs --tail=200 web"
         exit 1
     fi
-}
+    log_info "Web 首页通过。"
 
-ensure_python_helper_ready() {
-    refresh_tool_paths
-    if ! have_cmd python3; then
-        require_auto_install "python3" "${PYTHON_HINT}"
-        case "${OS}" in
-            macos)
-                log_info "缺少 python3，尝试安装 python@3.12。"
-                brew_install_formula python@3.12
-                ;;
-            linux)
-                log_info "缺少 python3，尝试安装 Python 运行时。"
-                case "$(linux_package_manager)" in
-                    apt) install_linux_packages python3 python3-venv python3-pip ;;
-                    dnf|yum) install_linux_packages python3 python3-pip ;;
-                    pacman) install_linux_packages python python-pip ;;
-                    zypper) install_linux_packages python3 python3-pip ;;
-                    apk) install_linux_packages python3 py3-pip ;;
-                    *) return 1 ;;
-                esac
-                ;;
-        esac
-        refresh_tool_paths
+    local health_services=("api" "worker" "web")
+    local shared_env="${SHARED_DIR}/.env"
+    if [ -n "$(env_file_get TELEGRAM_BOT_TOKEN "${shared_env}")" ]; then
+        # tgbot 没有 healthcheck（compose 里没声明），降级到 service started
+        :
     fi
-    if ! have_cmd python3; then
-        log_error "python3 自动安装后仍不可用。"
-        printf '       安装提示：%s\n' "${PYTHON_HINT}" >&2
+    if ! _install_health_compose "${health_services[@]}"; then
+        log_error "compose service 健康状态异常。"
         exit 1
     fi
+    log_info "所有 compose service 健康。"
+    emit_step_done
 }
 
-ensure_openssl_ready() {
-    refresh_tool_paths
-    if ! have_cmd openssl; then
-        require_auto_install "OpenSSL" "macOS: brew install openssl@3；Linux: 安装 openssl 包"
-        case "${OS}" in
-            macos)
-                log_info "缺少 openssl，尝试安装 openssl@3。"
-                brew_install_formula openssl@3
-                ;;
-            linux)
-                log_info "缺少 openssl，尝试安装 openssl 包。"
-                install_linux_packages openssl
-                ;;
-        esac
-        refresh_tool_paths
-    fi
-    if ! have_cmd openssl; then
-        log_error "openssl 自动安装后仍不可用。"
-        exit 1
-    fi
-}
-
-ensure_build_dependencies() {
-    if have_cmd gcc && have_cmd make && have_cmd pg_config; then
+# ---------------------------------------------------------------------------
+# I. systemd 处理（不自动 disable，仅提示）
+# ---------------------------------------------------------------------------
+warn_about_legacy_systemd() {
+    if ! command -v systemctl >/dev/null 2>&1; then
         return 0
     fi
-    require_auto_install "Python 编译依赖（gcc/make/pg_config）" \
-        "Debian/Ubuntu: apt install build-essential libpq-dev pkg-config；macOS: brew install libpq"
-    case "${OS}" in
-        macos)
-            brew_install_formula libpq
-            ;;
-        linux)
-            case "$(linux_package_manager)" in
-                apt) install_linux_packages build-essential libpq-dev pkg-config ;;
-                dnf|yum) install_linux_packages gcc gcc-c++ make postgresql-devel pkgconf-pkg-config ;;
-                pacman) install_linux_packages base-devel postgresql-libs pkgconf ;;
-                zypper) install_linux_packages gcc gcc-c++ make postgresql-devel pkg-config ;;
-                apk) install_linux_packages build-base postgresql-dev pkgconf ;;
-                *) log_warn "无法识别包管理器，跳过编译依赖自动安装。" ;;
-            esac
-            ;;
-    esac
-    refresh_tool_paths
+    local has_active=0 unit
+    for unit in lumen-api.service lumen-worker.service lumen-web.service lumen-tgbot.service; do
+        if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+            has_active=1
+            break
+        fi
+    done
+    if [ "${has_active}" -eq 1 ]; then
+        log_warn ""
+        log_warn "检测到旧版本的 systemd 服务仍在运行（可能与 docker 容器抢端口）："
+        log_warn "  Docker 栈已启动并健康。建议手动禁用旧 systemd 服务以避免冲突："
+        log_warn "    sudo systemctl disable --now lumen-api lumen-worker lumen-web lumen-tgbot"
+        log_warn "  确认后再访问 Web，避免请求被旧 systemd 进程截获。"
+    fi
 }
 
+# ---------------------------------------------------------------------------
+# J. 输出汇总
+# ---------------------------------------------------------------------------
+print_summary() {
+    emit_step_start cleanup "安装完成汇总"
+    local shared_env="${SHARED_DIR}/.env"
+    local image_tag
+    image_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
+    cat <<EOF
+
+  ${LUMEN_C_BOLD}Lumen 安装完成（Docker Compose 全栈）${LUMEN_C_RESET}
+
+  Web 地址 ......... http://127.0.0.1:3000/
+                     （生产建议通过 nginx 反代到公网，参考 deploy/nginx/）
+  API 健康检查 ..... http://127.0.0.1:8000/healthz
+  管理员邮箱 ....... ${INSTALL_ADMIN_EMAIL:-（已存在或非交互模式未设置）}
+  Provider 配置 .... 登录后 → 右上角「管理 → 上游 Provider」
+                     默认 PROVIDERS=[]，需添加 1 条才能调图像 API
+
+  部署目录 ......... ${DEPLOY_ROOT}/current → releases/${RELEASE_ID}
+  数据目录 ......... ${LUMEN_DATA_ROOT}/{postgres,redis,storage,backup}
+  共享 .env ........ ${SHARED_DIR}/.env
+  镜像 tag ......... ${image_tag}
+
+  ${LUMEN_C_BOLD}日常运维${LUMEN_C_RESET}
+
+    状态：    cd ${DEPLOY_ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose ps
+    日志：    cd ${DEPLOY_ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose logs -f api
+    更新：    bash ${DEPLOY_ROOT}/current/scripts/lumenctl.sh update-lumen
+    备份：    bash ${DEPLOY_ROOT}/current/scripts/backup.sh   （输出到 ${LUMEN_DATA_ROOT}/backup）
+    卸载：    bash ${DEPLOY_ROOT}/current/scripts/uninstall.sh
+
+EOF
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
 trap 'on_error ${LINENO}' ERR
-trap cleanup EXIT
+trap cleanup_on_failure EXIT
 trap 'on_signal SIGINT 130' INT
 trap 'on_signal SIGTERM 143' TERM
 
 acquire_script_lock
 
-log_step "Lumen 安装：检查环境（OS=${OS}）"
-
-# ---------------------------------------------------------------------------
-# 1. 依赖检查
-# ---------------------------------------------------------------------------
-case "${OS}" in
-    macos)
-        DOCKER_HINT="brew install --cask docker  （或 https://www.docker.com/products/docker-desktop）"
-        UV_HINT="brew install uv  或  curl -LsSf https://astral.sh/uv/install.sh | sh"
-        NODE_HINT="brew install node@20  并将其加入 PATH"
-        PYTHON_HINT="brew install python@3.12"
-        ;;
-    linux)
-        DOCKER_HINT="参考 https://docs.docker.com/engine/install/  （含 Docker Engine + Compose plugin）"
-        UV_HINT="curl -LsSf https://astral.sh/uv/install.sh | sh"
-        NODE_HINT="使用 nvm（curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash）后  nvm install 20"
-        PYTHON_HINT="apt install python3.12 python3.12-venv  （或对应发行版的包管理器）"
+# 解析最终的部署目录与数据目录（命令行 / 环境变量 / 默认值优先级）
+DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
+# 当前脚本若是从 /opt/lumen/* 内部运行，优先尊重它的根目录
+case "${ROOT}" in
+    "${DEPLOY_ROOT}"|"${DEPLOY_ROOT}"/*)
+        # ROOT 在 deploy_root 下：保留 deploy_root 不变
         ;;
     *)
-        log_error "暂不支持当前操作系统（uname -s = $(uname -s)）。仅支持 macOS 与 Linux（含 WSL2）。"
-        exit 1
+        # 否则：如果用户没显式设置 LUMEN_DEPLOY_ROOT，回退到 ROOT（开发模式 / 本地仓库）
+        if [ -z "${LUMEN_DEPLOY_ROOT:-}" ]; then
+            DEPLOY_ROOT="${ROOT}"
+        fi
         ;;
 esac
 
-refresh_tool_paths
-ensure_python_helper_ready
-ensure_openssl_ready
-ensure_node_ready
-ensure_uv_ready
-ensure_build_dependencies
-ensure_docker_ready
+LUMEN_DATA_ROOT="${INSTALL_DATA_ROOT_OVERRIDE:-${LUMEN_DATA_ROOT:-/opt/lumendata}}"
+RELEASE_DIR=""
+RELEASE_ID=""
+SHARED_DIR=""
+INSTALL_ADMIN_EMAIL=""
+COMPOSE_LABEL="COMPOSE_PROJECT_NAME=lumen docker compose"
 
-log_info "依赖就绪：docker / docker compose / uv / node $(node -v) / python3 $(python3 -V 2>&1 | awk '{print $2}') / uv python 3.12"
+log_step "Lumen Docker Compose 全栈安装（OS=${OS}, deploy=${DEPLOY_ROOT}, data=${LUMEN_DATA_ROOT}）"
 
-# ---------------------------------------------------------------------------
-# 2. 进入项目根
-# ---------------------------------------------------------------------------
-cd "${ROOT}"
-log_info "项目根目录：${ROOT}"
+check_prerequisites
+prepare_data_dirs
+prepare_release_layout
+prepare_env_file
+probe_ghcr_image_tag
+pull_or_build_images
+start_infrastructure
+run_migration
+run_bootstrap_admin
+start_application_services
+switch_current_symlink
+run_health_checks
+warn_about_legacy_systemd
+print_summary
 
-# ---------------------------------------------------------------------------
-# 2.5 环境就绪检查（磁盘 / 容器名 / 端口）
-# ---------------------------------------------------------------------------
-log_step "环境就绪检查"
-
-# 磁盘空间（建议 ≥ 2 GB；docker 镜像 + node_modules + .venv 通常 1.5 GB+）
-AVAILABLE_KB="$(available_kb_for_path "${ROOT}" || true)"
-MIN_KB=$((2 * 1024 * 1024))
-if [ -z "${AVAILABLE_KB}" ]; then
-    log_warn "无法检测 ${ROOT} 所在磁盘空闲空间，继续执行。"
-elif [ "${AVAILABLE_KB}" -lt "${MIN_KB}" ] 2>/dev/null; then
-    log_warn "磁盘空闲约 $((AVAILABLE_KB / 1024)) MB，低于建议值 2 GB。"
-    if ! confirm "仍要继续？"; then
-        exit 0
-    fi
-fi
-
-# 残留容器：只要不属于本 compose project 就主动清掉，避免反复装时被卡死。
-for CNAME in lumen-pg lumen-redis; do
-    if docker_cli ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CNAME}"; then
-        OWNER="$(docker_cli inspect "${CNAME}" --format '{{ index .Config.Labels "com.docker.compose.project" }}' 2>/dev/null || true)"
-        if [ -z "${OWNER}" ]; then
-            log_warn "发现残留容器 ${CNAME}（不属于任何 docker compose 项目），自动清理。"
-            docker_cli rm -f "${CNAME}" >/dev/null 2>&1 || {
-                log_error "无法删除残留容器 ${CNAME}，请手动 'docker rm -f ${CNAME}' 后重跑。"
-                exit 1
-            }
-        fi
-    fi
-done
-
-# 后台残留的 lumen 运行时（uvicorn / arq / next）会一直占着 8000/3000，
-# 否则下次 install 起的 API/Web 会因端口冲突静默跳过启动。这里识别到 lumen 自己的进程就清。
-for PORT in 8000 3000; do
-    if lumen_release_port_if_lumen "${PORT}" "端口 ${PORT}"; then
-        :
-    else
-        log_error "端口 ${PORT} 被非 Lumen 进程占用，install 已停止。"
-        if [ "${OS}" = "macos" ]; then
-            log_error "排查命令：lsof -iTCP:${PORT} -sTCP:LISTEN -nP"
-        else
-            log_error "排查命令：ss -ltnp \"sport = :${PORT}\""
-        fi
-        log_error "请停止该进程或释放端口后重跑本脚本（可先 'bash scripts/uninstall.sh' 清理 Lumen 残留）。"
-        exit 1
-    fi
-done
-
-# 宿主端口占用（PG/Redis；如果端口被自家 compose 容器持有则放行）
-for PORT in 5432 6379; do
-    case "${PORT}" in
-        5432) OWN_CNAME=lumen-pg ;;
-        6379) OWN_CNAME=lumen-redis ;;
-    esac
-    if docker_cli ps --format '{{.Names}}' 2>/dev/null | grep -qx "${OWN_CNAME}"; then
-        continue
-    fi
-    if port_in_use "${PORT}"; then
-        log_error "端口 ${PORT} 已被宿主进程占用（常见原因：本地已有 PostgreSQL / Redis 在跑）。"
-        if [ "${OS}" = "macos" ]; then
-            log_error "排查命令：lsof -iTCP:${PORT} -sTCP:LISTEN -nP"
-        else
-            log_error "排查命令：ss -ltnp \"sport = :${PORT}\""
-        fi
-        exit 1
-    fi
-done
-
-log_info "环境就绪检查通过。"
-
-# ---------------------------------------------------------------------------
-# 3. 写 .env（pydantic-settings 已配置从 ../../.env 加载，根一份即可）
-# ---------------------------------------------------------------------------
-ENV_FILE="${ROOT}/.env"
-if [ -f "${ENV_FILE}" ]; then
-    if ! grep -qE '^PROVIDERS=.+' "${ENV_FILE}"; then
-        if grep -qE '^UPSTREAM_API_KEY=.+' "${ENV_FILE}"; then
-            log_warn ".env 仍使用旧 UPSTREAM_* 配置；本版本会兼容读取，建议迁移为 PROVIDERS。"
-        else
-            log_error ".env 已存在，但 PROVIDERS 为空（可能是上次安装中断）。"
-            log_error "请编辑 ${ENV_FILE} 填入后重跑，或删除 .env 让脚本重新生成。"
-            exit 1
-        fi
-    fi
-    ensure_compose_db_env_vars "${ENV_FILE}"
-    log_info ".env 已存在，跳过生成。如需重置请手动删除后重跑。"
-else
-    log_step "生成 .env（敏感字段自动随机；上游 Provider 留待登录后在管理面板配置）"
-
-    # 上游 Provider 留空：登录后到「管理 → 上游 Provider」添加真实 API key。
-    # 站点访问/CORS/Session 用安全默认；要自定义可提前 export LUMEN_* 环境变量。
-    PUBLIC_BASE_URL="${LUMEN_PUBLIC_BASE_URL:-http://localhost:3000}"
-    CORS_ALLOW_ORIGINS="${LUMEN_CORS_ALLOW_ORIGINS:-http://localhost:3000}"
-    SESSION_SECRET="${LUMEN_SESSION_SECRET:-$(openssl rand -hex 32)}"
-    validate_dotenv_value "PUBLIC_BASE_URL" "${PUBLIC_BASE_URL}" || exit 1
-    validate_dotenv_value "CORS_ALLOW_ORIGINS" "${CORS_ALLOW_ORIGINS}" || exit 1
-    validate_dotenv_value "SESSION_SECRET" "${SESSION_SECRET}" || exit 1
-
-    # Redis 密码：默认自动生成，避免安装过程被密码交互卡住。
-    # 如需自定义，安装前设置 LUMEN_REDIS_PASSWORD。
-    REDIS_PASSWORD="${LUMEN_REDIS_PASSWORD:-$(openssl rand -hex 24)}"
-    validate_redis_password "${REDIS_PASSWORD}" || exit 1
-    if [ -n "${LUMEN_REDIS_PASSWORD:-}" ]; then
-        log_info "使用 LUMEN_REDIS_PASSWORD 写入 Redis 配置。"
-    else
-        log_info "已自动生成 Redis 密码。"
-    fi
-
-    log_info "写入 ${ENV_FILE}"
-    DB_USER="lumen_app"
-    DB_NAME="lumen_app"
-    DB_PASSWORD="$(openssl rand -hex 24)"
-    # PROVIDERS 写空数组；启动后 UI 仍可登录，调用上游 API 前需到管理面板补一条 provider。
-    PROVIDERS_JSON="[]"
-    DB_PASSWORD_ENV="$(dotenv_quote "DB_PASSWORD" "${DB_PASSWORD}")"
-    DATABASE_URL_ENV="$(dotenv_quote "DATABASE_URL" "postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@localhost:5432/${DB_NAME}")"
-    REDIS_PASSWORD_ENV="$(dotenv_quote "REDIS_PASSWORD" "${REDIS_PASSWORD}")"
-    REDIS_URL_ENV="$(dotenv_quote "REDIS_URL" "redis://:${REDIS_PASSWORD}@localhost:6379/0")"
-    PROVIDERS_ENV="$(dotenv_quote "PROVIDERS" "${PROVIDERS_JSON}")"
-    SESSION_SECRET_ENV="$(dotenv_quote "SESSION_SECRET" "${SESSION_SECRET}")"
-    PUBLIC_BASE_URL_ENV="$(dotenv_quote "PUBLIC_BASE_URL" "${PUBLIC_BASE_URL}")"
-    CORS_ALLOW_ORIGINS_ENV="$(dotenv_quote "CORS_ALLOW_ORIGINS" "${CORS_ALLOW_ORIGINS}")"
-    (
-    umask 077
-    cat > "${ENV_FILE}" <<EOF
-# 由 scripts/install.sh 自动生成，可手动编辑。
-# --- Database / Cache ---
-DB_USER=${DB_USER}
-DB_PASSWORD=${DB_PASSWORD_ENV}
-DB_NAME=${DB_NAME}
-DATABASE_URL=${DATABASE_URL_ENV}
-REDIS_PASSWORD=${REDIS_PASSWORD_ENV}
-REDIS_URL=${REDIS_URL_ENV}
-
-# --- Provider Pool（上游配置唯一入口）---
-PROVIDERS=${PROVIDERS_ENV}
-
-# --- Session / Auth ---
-SESSION_SECRET=${SESSION_SECRET_ENV}
-SESSION_TTL_MIN=10080
-
-# --- App ---
-APP_ENV=dev
-APP_PORT=8000
-STORAGE_ROOT=/opt/lumendata/storage
-PUBLIC_BASE_URL=${PUBLIC_BASE_URL_ENV}
-CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS_ENV}
-EOF
-    )
-    # 兜底：即便 umask 077 在某些 shell 配置下失效（如别名/陷阱），也强制 600。
-    chmod 600 "${ENV_FILE}"
-    log_info ".env 已写入（权限 600）。"
-fi
-
-# 前端 .env.local（非敏感；即使 .env 已存在也按需补写，便于用户单独删除后恢复）
-WEB_ENV="${ROOT}/apps/web/.env.local"
-if [ ! -f "${WEB_ENV}" ]; then
-    WEB_BACKEND_URL_ENV="$(dotenv_quote "LUMEN_BACKEND_URL" "http://127.0.0.1:8000")"
-    cat > "${WEB_ENV}" <<EOF
-# 前端运行时配置。
-# 浏览器默认使用同源 /api，由 Next.js 服务端转发到 LUMEN_BACKEND_URL。
-LUMEN_BACKEND_URL=${WEB_BACKEND_URL_ENV}
-EOF
-    log_info "已写入 ${WEB_ENV}"
-fi
-
-# ---------------------------------------------------------------------------
-# 3.5 本地存储目录（API 上传 / 生成图落盘位置；STORAGE_ROOT 默认指向此处）
-# ---------------------------------------------------------------------------
-DATA_ROOT="/opt/lumendata"
-if [ -e "${DATA_ROOT}" ] && [ ! -d "${DATA_ROOT}" ]; then
-    log_error "${DATA_ROOT} 已存在但不是目录，请先移走或删除后重试。"
-    exit 1
-fi
-if [ ! -d "${DATA_ROOT}" ]; then
-    if [ ! -d /opt ]; then
-        log_info "/opt 不存在，尝试自动创建。"
-        run_as_root mkdir -p /opt || {
-            log_error "无法创建 /opt。请确认当前用户有 sudo 权限后重试。"
-            exit 1
-        }
-    fi
-    log_info "创建本地存储目录：${DATA_ROOT}"
-    if ! mkdir -p "${DATA_ROOT}" 2>/dev/null; then
-        run_as_root mkdir -p "${DATA_ROOT}" || {
-            log_error "无法创建 ${DATA_ROOT}。请确认当前用户有 sudo 权限后重试。"
-            exit 1
-        }
-    fi
-fi
-if [ -d "${DATA_ROOT}" ] && [ ! -w "${DATA_ROOT}" ]; then
-    log_info "修正 ${DATA_ROOT} 所有权为当前用户。"
-    if ! run_as_root chown -R "$(id -un):$(id -gn)" "${DATA_ROOT}"; then
-        log_error "当前用户无权写入 ${DATA_ROOT}，且自动 chown 失败。"
-        log_error "请确认当前用户有 sudo 权限后重试。"
-        exit 1
-    fi
-fi
-mkdir -p "${DATA_ROOT}/storage" "${DATA_ROOT}/backup/pg" "${DATA_ROOT}/backup/redis" 2>/dev/null || {
-    run_as_root mkdir -p "${DATA_ROOT}/storage" "${DATA_ROOT}/backup/pg" "${DATA_ROOT}/backup/redis"
-    run_as_root chown -R "$(id -un):$(id -gn)" "${DATA_ROOT}"
-}
-if [ ! -w "${DATA_ROOT}/storage" ] || [ ! -w "${DATA_ROOT}/backup/pg" ] || [ ! -w "${DATA_ROOT}/backup/redis" ]; then
-    log_error "本地存储目录创建后仍不可写：${DATA_ROOT}"
-    exit 1
-fi
-lumen_ensure_runtime_dirs "${ENV_FILE}"
-
-# ---------------------------------------------------------------------------
-# 4. 并行下载/同步依赖（docker 镜像 / Python / Node 三者无依赖，同时跑）
-#    日志写入 .install-logs/，主进程只显示 [OK] / [FAIL] 摘要，避免输出交错。
-# ---------------------------------------------------------------------------
-log_step "并行下载/同步依赖（docker pull / uv sync / npm ci）"
-
-LOG_DIR="${ROOT}/.install-logs"
-mkdir -p "${LOG_DIR}"
-PARALLEL_LOG_DIR="$(mktemp -d "${LOG_DIR}/run.XXXXXX")"
-DOCKER_LOG="${PARALLEL_LOG_DIR}/docker-pull.log"
-UV_LOG="${PARALLEL_LOG_DIR}/uv-sync.log"
-NPM_LOG="${PARALLEL_LOG_DIR}/npm-ci.log"
-DOCKER_RC="${PARALLEL_LOG_DIR}/docker-pull.rc"
-UV_RC="${PARALLEL_LOG_DIR}/uv-sync.rc"
-NPM_RC="${PARALLEL_LOG_DIR}/npm-ci.rc"
-
-log_info "  docker compose pull   → ${DOCKER_LOG}"
-log_info "  uv sync --frozen      → ${UV_LOG}"
-log_info "  npm ci (apps/web)     → ${NPM_LOG}"
-log_info "  三者并行执行；主进程会等到全部完成后再继续。"
-
-(
-    set +e
-    docker_cli compose pull >"${DOCKER_LOG}" 2>&1
-    echo $? > "${DOCKER_RC}"
-) &
-PARALLEL_PIDS+=("$!")
-
-(
-    set +e
-    uv sync --frozen >"${UV_LOG}" 2>&1
-    echo $? > "${UV_RC}"
-) &
-PARALLEL_PIDS+=("$!")
-
-(
-    set +e
-    cd "${ROOT}/apps/web" && npm ci >"${NPM_LOG}" 2>&1
-    echo $? > "${NPM_RC}"
-) &
-PARALLEL_PIDS+=("$!")
-
-for pid in "${PARALLEL_PIDS[@]}"; do
-    wait "${pid}" || true
-done
-PARALLEL_PIDS=()
-
-PARALLEL_FAILED=0
-report_parallel() {
-    local name="$1"
-    local rc_file="$2"
-    local log_file="$3"
-    local rc
-    rc="$(cat "${rc_file}" 2>/dev/null || echo 99)"
-    if [ "${rc}" = "0" ]; then
-        log_info "  [OK]   ${name}"
-    else
-        log_error "  [FAIL] ${name} (exit ${rc}) — 详见 ${log_file}"
-        if [ -s "${log_file}" ]; then
-            log_error "  ${name} 最近日志："
-            tail -n 20 "${log_file}" >&2 || true
-        fi
-        PARALLEL_FAILED=1
-    fi
-}
-report_parallel "docker compose pull" "${DOCKER_RC}" "${DOCKER_LOG}"
-report_parallel "uv sync --frozen"    "${UV_RC}"     "${UV_LOG}"
-report_parallel "npm ci"              "${NPM_RC}"    "${NPM_LOG}"
-
-if [ "${PARALLEL_FAILED}" -ne 0 ]; then
-    log_error "并行阶段失败，请按上方 log 路径排查后重跑本脚本。"
-    exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# 5. 启动 PG / Redis 并等待健康（compose 自带 healthcheck，--wait 替代手写循环）
-# ---------------------------------------------------------------------------
-log_step "启动 PostgreSQL / Redis 并等待健康（docker compose up -d --wait）"
-if ! docker_cli compose up -d --wait; then
-    log_error "容器启动或健康检查失败。请运行 'docker compose logs' 排查。"
-    log_error "提示：如果你的 docker compose 版本过旧不识别 --wait，请升级 Docker Desktop / docker-compose-plugin。"
-    exit 1
-fi
-log_info "PG / Redis 已健康。"
-
-# ---------------------------------------------------------------------------
-# 6. alembic upgrade head
-# ---------------------------------------------------------------------------
-log_step "应用数据库迁移（alembic upgrade head）"
-(
-    cd "${ROOT}/apps/api"
-    if ! uv run alembic upgrade head; then
-        log_error "数据库迁移失败。请检查 PG 容器健康状态与 DATABASE_URL。"
-        exit 1
-    fi
-)
-
-# ---------------------------------------------------------------------------
-# 7. 创建 / 提升 admin
-# ---------------------------------------------------------------------------
-log_step "创建首个管理员账号（bootstrap，幂等可重复）"
-ADMIN_EMAIL="$(read_or_default '管理员邮箱' 'admin@example.com')"
-ADMIN_PWD=""
-while [ -z "${ADMIN_PWD}" ]; do
-    ADMIN_PWD="$(read_secret '管理员密码（不少于 8 位）')"
-    if [ -z "${ADMIN_PWD}" ]; then
-        log_warn "密码不能为空。"
-    elif [ "${#ADMIN_PWD}" -lt 8 ]; then
-        log_warn "密码长度不能少于 8 位。"
-        ADMIN_PWD=""
-    fi
-done
-
-(
-    cd "${ROOT}/apps/api"
-    # bootstrap 自身可能在用户/密码已存在时报非零（脚本在 apps/api 内，跨边界无法改）；
-    # 这里临时关闭 set -e 并把失败降级为 warn，避免重复运行 install.sh 时整体中断。
-    set +e
-    LUMEN_ADMIN_PASSWORD="${ADMIN_PWD}" uv run python - "${ADMIN_EMAIL}" <<'PY'
-import asyncio
-import os
-import sys
-
-from app.scripts import bootstrap
-
-password = os.environ.pop("LUMEN_ADMIN_PASSWORD", "")
-raise SystemExit(
-    asyncio.run(
-        bootstrap.main([sys.argv[1], "--role", "admin", "--password", password])
-    )
-)
-PY
-    BOOTSTRAP_RC=$?
-    set -e
-    if [ "${BOOTSTRAP_RC}" -ne 0 ]; then
-        log_warn "bootstrap 返回非零（${BOOTSTRAP_RC}）。常见原因：管理员账号已存在；继续后续步骤。"
-        log_warn "如需重置密码，登录后到管理面板修改，或手动 DELETE 后重跑本脚本。"
-    fi
-)
-
-# ---------------------------------------------------------------------------
-# 8. 构建前端（默认构建，符合生产部署主流场景；输入 n 跳过走 dev 模式）
-# ---------------------------------------------------------------------------
-BUILD_REPLY="$(read_or_default '构建前端生产包（npm run build）？(Y/n)' 'y')"
-case "${BUILD_REPLY}" in
-    n|N|no|NO|No)
-        BUILD_DONE=0
-        ;;
-    *)
-        log_step "构建前端（npm run build）"
-        (
-            cd "${ROOT}/apps/web"
-            # Next.js 只需要公开的 NEXT_PUBLIC_* 编译期变量，避免把 .env 密钥整体导出给构建进程。
-            NEXT_PUBLIC_API_BASE="$(read_dotenv_value "NEXT_PUBLIC_API_BASE" "${WEB_ENV}")"
-            if [ -n "${NEXT_PUBLIC_API_BASE}" ]; then
-                export NEXT_PUBLIC_API_BASE
-            else
-                unset NEXT_PUBLIC_API_BASE
-            fi
-            npm run build
-        )
-        BUILD_DONE=1
-        ;;
-esac
-
-if [ "${BUILD_DONE}" -eq 1 ]; then
-    WEB_NPM_SCRIPT="start"
-    WEB_MODE_LABEL="前端生产模式"
-else
-    WEB_NPM_SCRIPT="dev"
-    WEB_MODE_LABEL="前端开发模式"
-fi
-
-RUNTIME_STARTED=0
-if auto_start_runtime_enabled; then
-    START_RUNTIME_REPLY="$(read_or_default '现在启动 API / Worker / Web，让 http://<服务器IP>:3000 立即可访问？(Y/n)' 'y')"
-else
-    START_RUNTIME_REPLY="$(read_or_default '现在启动 API / Worker / Web，让 http://<服务器IP>:3000 立即可访问？(y/N)' 'n')"
-fi
-case "${START_RUNTIME_REPLY}" in
-    n|N|no|NO|No)
-        log_warn "已跳过启动运行时进程。未启动前，浏览器访问 3000 不会有响应。"
-        ;;
-    *)
-        start_runtime_processes "${WEB_NPM_SCRIPT}"
-        RUNTIME_STARTED=1
-        ;;
-esac
-
-# ---------------------------------------------------------------------------
-# 10. 总结
-# ---------------------------------------------------------------------------
-log_step "安装完成"
-if [ "${RUNTIME_STARTED}" -eq 1 ]; then
-    cat <<EOF
-
-  运行状态 ......... 已启动 API / Worker / Web（后台进程）
-  访问地址 ......... http://<服务器IP>:3000  （${WEB_MODE_LABEL}；本机也可用 http://localhost:3000）
-  API 健康检查 ..... http://127.0.0.1:8000/healthz  （API 默认只监听本机）
-  管理员邮箱 ....... ${ADMIN_EMAIL}
-  运行日志目录 ..... ${RUNTIME_LOG_DIR}
-
-  下一步：登录后到右上角「管理 → 上游 Provider」添加真实的图像 API key，
-  否则前端可以登录但生图会报 no_providers / all_providers_failed。
-
-  如果服务器外部仍打不开 3000，请检查云安全组/防火墙是否放行 TCP 3000：
-    ss -ltnp | grep -E ':3000|:8000'
-
-EOF
-else
-    cat <<EOF
-
-  运行状态 ......... 未启动 API / Worker / Web
-  访问地址 ......... 运行 Web 后访问 http://<服务器IP>:3000
-  API 服务 ......... http://127.0.0.1:8000  （由 Web 的 /api 转发，默认不暴露公网）
-  管理员邮箱 ....... ${ADMIN_EMAIL}
-
-  手动启动 3 个进程（建议各开一个终端）：
-
-    1) API（FastAPI）
-       cd ${ROOT}/apps/api && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
-
-    2) Worker（arq）
-       cd ${ROOT}/apps/worker && uv run python -m arq app.main.WorkerSettings
-
-    3) 前端
-       cd ${ROOT}/apps/web && npm run ${WEB_NPM_SCRIPT}
-
-  日常运维：
-
-    更新（拉新代码、依赖、迁移）  bash scripts/update.sh
-    卸载（停容器、可选清数据）    bash scripts/uninstall.sh
-
-  管理面板：登录后右上角「管理」，可添加上游 API key、调整像素预算、生成邀请链接。
-  上游 Provider 默认为空，需先在管理面板添加一条才能调用图像生成。
-
-EOF
-fi
-
-trap - ERR
+trap - ERR EXIT
+release_script_lock
 exit 0

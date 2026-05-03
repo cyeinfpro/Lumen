@@ -134,6 +134,8 @@ def _runner_env_lines(env: dict[str, str]) -> list[str]:
         "LUMEN_UPDATE_GIT_PULL",
         "LUMEN_UPDATE_BUILD",
         "LUMEN_UPDATE_SYSTEMD_UNIT",
+        "LUMEN_UPDATE_CHANNEL",
+        "LUMEN_IMAGE_TAG",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -1290,7 +1292,7 @@ async def trigger_update(
         env.setdefault("no_proxy", "127.0.0.1,localhost,::1")
         env["LUMEN_UPDATE_NONINTERACTIVE"] = "1"
         env.setdefault("LUMEN_UPDATE_GIT_PULL", "1")
-        env.setdefault("LUMEN_UPDATE_BUILD", "1")
+        env.setdefault("LUMEN_UPDATE_BUILD", "0")
 
         proc: subprocess.Popen[bytes] | None = None
         unit: str | None = None
