@@ -19,6 +19,7 @@ SCRIPT_FILES = [
 ]
 INSTALL = ROOT / "scripts" / "install.sh"
 UPDATE = ROOT / "scripts" / "update.sh"
+ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
 
 
 def run_bash(script: str, *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -73,6 +74,52 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     assert '"${GIT_REMOTE_URL}" "${NEW_RELEASE}"' in text
     assert 'cat > "${NEW_RELEASE}/.lumen_release.json" <<JSON' in text
     assert 'lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"' in text
+    assert 'lumen_ensure_compose_db_env_vars "${NEW_RELEASE}/.env"' in text
+
+
+def test_compose_db_env_vars_backfilled_from_database_url(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DATABASE_URL='postgresql+asyncpg://alice:pa%24%24@localhost:5432/lumen_prod'\n",
+        encoding="utf-8",
+    )
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        lumen_ensure_compose_db_env_vars {env_file}
+        """
+    )
+
+    assert "已从 DATABASE_URL 补全" in result.stderr
+    text = env_file.read_text(encoding="utf-8")
+    assert "DB_USER=alice" in text
+    assert "DB_PASSWORD='pa$$'" in text
+    assert "DB_NAME=lumen_prod" in text
+
+
+def test_compose_db_env_vars_fail_without_database_url(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("PUBLIC_BASE_URL=http://localhost:3000\n", encoding="utf-8")
+
+    result = run_bash(
+        f"""
+        . {LIB}
+        lumen_ensure_compose_db_env_vars {env_file}
+        """
+    )
+
+    assert result.returncode == 1
+    assert "缺少 DB_USER/DB_PASSWORD/DB_NAME" in result.stderr
+    assert "无法从 DATABASE_URL 推导" in result.stderr
+
+
+def test_rollback_script_validates_compose_env_before_compose_up() -> None:
+    text = ADMIN_RELEASE.read_text(encoding="utf-8")
+    assert '. "$ROOT/current/scripts/lib.sh"' in text
+    assert 'lumen_ensure_compose_db_env_vars "$ROOT/current/.env"' in text
+    assert "compose env validation failed; rollback continues but containers may be stale" in text
+    assert 'cd "$ROOT/current" && docker compose up -d --wait' in text
 
 
 def test_update_script_restarts_services_and_health_checks_after_update() -> None:
