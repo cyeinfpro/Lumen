@@ -9,6 +9,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
+# 复用 lib.sh 的 lumen_try_acquire_lock，让 backup 与 install/update/uninstall 互斥。
+# 在 backup 自己的 backup-restore 锁之前加一层维护锁；维护锁被占用时跳过本次（exit 0）。
+# shellcheck source=lib.sh
+if [ -f "${SCRIPT_DIR}/lib.sh" ]; then
+    . "${SCRIPT_DIR}/lib.sh"
+fi
+
 backup_dotenv_value() {
     local key="$1"
     local file="$2"
@@ -196,6 +203,24 @@ docker_cp_redis() {
 trap cleanup EXIT
 trap 'on_signal INT' INT
 trap 'on_signal TERM' TERM
+
+# 维护锁：与 install/update/uninstall 互斥；被占用时跳过本次 backup（exit 0，不让 systemd timer 报警）。
+# 受 LUMEN_BACKUP_FORCE=1 控制：强制运行（用于 update.sh 的 backup_preflight）；
+# 此时由调用方持有维护锁，本进程跳过 try-acquire。
+if command -v lumen_try_acquire_lock >/dev/null 2>&1 && [ "${LUMEN_BACKUP_FORCE:-0}" != "1" ]; then
+    LUMEN_MAINT_ROOT="${LUMEN_MAINT_ROOT:-}"
+    if [ -z "${LUMEN_MAINT_ROOT}" ]; then
+        if [ -d "/opt/lumen" ]; then
+            LUMEN_MAINT_ROOT="/opt/lumen"
+        else
+            LUMEN_MAINT_ROOT="${SCRIPT_ROOT}"
+        fi
+    fi
+    if ! lumen_try_acquire_lock "${LUMEN_MAINT_ROOT}" "backup.sh"; then
+        log "skipped: maintenance lock held (install/update/uninstall in progress); next timer cycle will retry"
+        exit 0
+    fi
+fi
 
 acquire_lock
 mkdir -p "$PG_DIR" "$REDIS_DIR"

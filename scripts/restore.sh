@@ -11,6 +11,14 @@
 # 失败时：API/Worker 仍会被重启起来（避免服务长时间卡停），但会 exit 非零。
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+
+# shellcheck source=lib.sh
+if [ -f "${SCRIPT_DIR}/lib.sh" ]; then
+    . "${SCRIPT_DIR}/lib.sh"
+fi
+
 TS="${1:-}"
 if [ -z "$TS" ]; then
     echo "usage: $0 <timestamp>" >&2
@@ -143,6 +151,20 @@ redis_host_dir() {
 trap cleanup EXIT
 trap 'on_signal INT' INT
 trap 'on_signal TERM' TERM
+
+# 维护锁：与 install/update/uninstall/backup 互斥；restore 是高风险操作，
+# 被占用时立即失败（不要等定时 backup 完成）。
+if command -v lumen_acquire_lock >/dev/null 2>&1; then
+    LUMEN_MAINT_ROOT="${LUMEN_MAINT_ROOT:-}"
+    if [ -z "${LUMEN_MAINT_ROOT}" ]; then
+        if [ -d "/opt/lumen" ]; then
+            LUMEN_MAINT_ROOT="/opt/lumen"
+        else
+            LUMEN_MAINT_ROOT="${SCRIPT_ROOT}"
+        fi
+    fi
+    lumen_acquire_lock "${LUMEN_MAINT_ROOT}" "restore.sh"
+fi
 
 acquire_lock
 

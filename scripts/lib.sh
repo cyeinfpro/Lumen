@@ -503,6 +503,46 @@ lumen_acquire_lock() {
     trap 'lumen_release_lock' EXIT
 }
 
+# lumen_try_acquire_lock <root> <script_name>
+# 非阻塞版本：占用时返回 1（不 exit）；成功时和 lumen_acquire_lock 一致。
+# 用途：定时 backup 等场景"被占用则跳过本次"。
+lumen_try_acquire_lock() {
+    local root="$1"
+    local script_name="${2:-maintenance}"
+    local lock_file="${root}/.lumen-maintenance.lock"
+    local lock_dir="${lock_file}.d"
+
+    if [ -n "${LUMEN_LOCK_KIND:-}" ]; then
+        return 0
+    fi
+
+    if command -v flock >/dev/null 2>&1; then
+        if ! exec 9>"${lock_file}" 2>/dev/null; then
+            return 1
+        fi
+        if ! flock -n 9 2>/dev/null; then
+            exec 9>&- 2>/dev/null || true
+            return 1
+        fi
+        LUMEN_LOCK_KIND="flock"
+        LUMEN_LOCK_PATH="${lock_file}"
+    else
+        if ! mkdir "${lock_dir}" 2>/dev/null; then
+            return 1
+        fi
+        LUMEN_LOCK_KIND="mkdir"
+        LUMEN_LOCK_PATH="${lock_dir}"
+        {
+            printf 'pid=%s\n' "$$"
+            printf 'script=%s\n' "${script_name}"
+            printf 'started_at=%s\n' "$(date -u +%FT%TZ 2>/dev/null || date)"
+        } > "${lock_dir}/owner" 2>/dev/null || true
+    fi
+
+    trap 'lumen_release_lock' EXIT
+    return 0
+}
+
 lumen_handle_signal() {
     local signal="$1"
     local line="${2:-unknown}"
@@ -1383,7 +1423,7 @@ lumen_start_local_runtime() {
     else
         log_info "启动 API → ${api_log}"
         (
-            cd "${root}/apps/api"
+            cd "${root}/apps/api" || exit 1
             exec uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
         ) >"${api_log}" 2>&1 &
         api_pid="$!"
@@ -1392,7 +1432,7 @@ lumen_start_local_runtime() {
 
     log_info "启动 Worker → ${worker_log}"
     (
-        cd "${root}/apps/worker"
+        cd "${root}/apps/worker" || exit 1
         exec uv run python -m arq app.main.WorkerSettings
     ) >"${worker_log}" 2>&1 &
     worker_pid="$!"
@@ -1403,7 +1443,7 @@ lumen_start_local_runtime() {
     else
         log_info "启动 Web → ${web_log}"
         (
-            cd "${root}/apps/web"
+            cd "${root}/apps/web" || exit 1
             exec npm run "${web_npm_script}"
         ) >"${web_log}" 2>&1 &
         web_pid="$!"
@@ -1519,7 +1559,8 @@ lumen_release_id() {
     local short
     short="$(printf '%s' "${sha}" | cut -c1-7)"
     [ -n "${short}" ] || short="unknown"
-    printf '%sZ-%s' "$(date -u +%Y%m%dT%H%M%S)" "${short}"
+    # 加 PID 后缀避免同一秒内重跑时 release_id collide（rsync 会污染同一目录）。
+    printf '%sZ-%s-%s' "$(date -u +%Y%m%dT%H%M%S)" "${short}" "$$"
 }
 
 # 读取 ${ROOT}/current 当前指向的 release 目录的绝对路径。
@@ -1682,7 +1723,8 @@ web-next-cache|apps/web/.next/cache
         if [ -e "${dst}" ] || [ -L "${dst}" ]; then
             local backup="${dst}.pre-link.$(date -u +%Y%m%d%H%M%S)"
             if ! mv "${dst}" "${backup}" 2>/dev/null; then
-                rm -rf "${dst}" 2>/dev/null || true
+                # 兜底删除：通过 lumen_safe_rm_rf 拦截 / /usr 等系统目录路径
+                lumen_safe_rm_rf "${dst}" 2>/dev/null || true
             fi
         fi
 
@@ -1973,6 +2015,153 @@ lumen_emit_info() {
     line="${line} ts=$(lumen_iso_now)"
     printf '%s\n' "${line}"
     printf '%s\n' "${line}" >&2
+}
+
+# ---------------------------------------------------------------------------
+# 路径安全 & 重试 & release 维护（install/update/uninstall 复用）
+# ---------------------------------------------------------------------------
+
+# lumen_path_safe_for_rm <path>
+# 校验 <path> 适合作为 rm -rf 的目标。返回 0=safe，1=unsafe（已 log_error）。
+# 拒绝：空 / 非绝对 / 长度 < 5 / 含 .. / 等于以下"系统目录"之一：
+#   /  /bin /boot /dev /etc /home /lib /lib32 /lib64 /opt /proc /root /run
+#   /sbin /srv /sys /tmp /usr /var /Applications /Library /System /Users /private
+# 注意：仅拦截"等于"系统目录；/opt/lumen, /opt/lumendata 等子路径不受影响。
+lumen_path_safe_for_rm() {
+    local p="$1"
+    if [ -z "${p}" ]; then
+        log_error "lumen_path_safe_for_rm: 路径为空，拒绝删除。"
+        return 1
+    fi
+    case "${p}" in
+        /*) ;;
+        *)
+            log_error "lumen_path_safe_for_rm: '${p}' 不是绝对路径，拒绝删除。"
+            return 1
+            ;;
+    esac
+    if [ "${#p}" -lt 5 ]; then
+        log_error "lumen_path_safe_for_rm: '${p}' 路径过短，拒绝删除。"
+        return 1
+    fi
+    case "${p}" in
+        *..*)
+            log_error "lumen_path_safe_for_rm: '${p}' 包含 '..'，拒绝删除。"
+            return 1
+            ;;
+    esac
+    case "${p}" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/Applications|/Library|/System|/Users|/private)
+            log_error "lumen_path_safe_for_rm: '${p}' 是系统目录，拒绝删除。"
+            return 1
+            ;;
+    esac
+    # 移除多余的尾部斜杠后再次校验（避免 "/opt/" 通过）
+    local trimmed="${p}"
+    while [[ "${trimmed}" == */ && "${trimmed}" != "/" ]]; do
+        trimmed="${trimmed%/}"
+    done
+    case "${trimmed}" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/Applications|/Library|/System|/Users|/private)
+            log_error "lumen_path_safe_for_rm: 规范化后 '${trimmed}' 仍是系统目录，拒绝删除。"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# lumen_safe_rm_rf <path>
+# 在 rm -rf 之前用 lumen_path_safe_for_rm 把关。返回 rm 的退出码（或校验失败时 1）。
+lumen_safe_rm_rf() {
+    local target="$1"
+    if ! lumen_path_safe_for_rm "${target}"; then
+        return 1
+    fi
+    rm -rf -- "${target}"
+}
+
+# lumen_safe_rm_rf_as_root <path>
+# 同 lumen_safe_rm_rf，但通过 lumen_run_as_root 执行（处理需要 root 权限的目录）。
+lumen_safe_rm_rf_as_root() {
+    local target="$1"
+    if ! lumen_path_safe_for_rm "${target}"; then
+        return 1
+    fi
+    lumen_run_as_root rm -rf -- "${target}"
+}
+
+# lumen_release_remove_unused <root> <release_id>
+# 删除一个 release 目录，但拒绝删除 current/previous 当前指向的 release。
+# 失败/被拒绝时 log_warn 并返回非零；不抛异常（让调用方决定如何处理）。
+lumen_release_remove_unused() {
+    local root="$1"
+    local release_id="$2"
+    if [ -z "${release_id}" ]; then
+        log_warn "lumen_release_remove_unused: release_id 为空，跳过。"
+        return 1
+    fi
+    local target="${root}/releases/${release_id}"
+    if [ ! -d "${target}" ]; then
+        return 0
+    fi
+    local cur_id prev_id=""
+    cur_id="$(lumen_release_current_id "${root}" || true)"
+    if [ -L "${root}/previous" ]; then
+        local prev_link
+        prev_link="$(readlink "${root}/previous" 2>/dev/null || true)"
+        [ -n "${prev_link}" ] && prev_id="$(basename "${prev_link}")"
+    fi
+    if [ "${release_id}" = "${cur_id}" ]; then
+        log_warn "lumen_release_remove_unused: ${release_id} 是当前 current，拒绝删除。"
+        return 1
+    fi
+    if [ "${release_id}" = "${prev_id}" ]; then
+        log_warn "lumen_release_remove_unused: ${release_id} 是 previous，拒绝删除。"
+        return 1
+    fi
+    if ! lumen_path_safe_for_rm "${target}"; then
+        return 1
+    fi
+    if rm -rf -- "${target}" 2>/dev/null; then
+        log_info "已删除未使用的 release：${target}"
+        return 0
+    fi
+    if lumen_run_as_root rm -rf -- "${target}" 2>/dev/null; then
+        log_info "已删除未使用的 release（root 权限）：${target}"
+        return 0
+    fi
+    log_warn "无法删除 release 目录：${target}"
+    return 1
+}
+
+# lumen_retry <max_attempts> <initial_delay_seconds> <label> <cmd...>
+# 指数退避重试。每次失败后 sleep delay，下次 delay 翻倍（最大 30s）。
+# label 仅用于日志（如 "docker compose pull"）。返回最后一次的退出码。
+lumen_retry() {
+    local max_attempts="$1"
+    local delay="$2"
+    local label="$3"
+    shift 3
+    local attempt=1
+    local rc=0
+    while :; do
+        rc=0
+        "$@" || rc=$?
+        if [ "${rc}" -eq 0 ]; then
+            return 0
+        fi
+        if [ "${attempt}" -ge "${max_attempts}" ]; then
+            log_error "${label}：连续 ${attempt} 次失败（rc=${rc}），不再重试。"
+            return "${rc}"
+        fi
+        log_warn "${label}：第 ${attempt} 次失败（rc=${rc}），${delay}s 后重试。"
+        sleep "${delay}"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+        if [ "${delay}" -gt 30 ]; then
+            delay=30
+        fi
+    done
 }
 
 # 全局更新锁（§12.5）：优先 flock，macOS / 精简环境无 flock 时用 mkdir 目录锁兜底。

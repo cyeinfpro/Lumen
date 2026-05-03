@@ -26,13 +26,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 trap 'log_error "卸载脚本失败：第 ${LINENO} 行返回非零状态。手动检查后再重试。"' ERR
 
 ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
-lumen_install_signal_handlers
-lumen_acquire_lock "${ROOT}" "uninstall.sh"
-cd "${ROOT}"
-log_info "项目根目录：${ROOT}"
 
 # ---------------------------------------------------------------------------
-# Args / env
+# Args / env（在 acquire_lock 之前解析，避免 --help 也要等锁）
 # ---------------------------------------------------------------------------
 LUMEN_UNINSTALL_PURGE="${LUMEN_UNINSTALL_PURGE:-0}"
 LUMEN_UNINSTALL_NONINTERACTIVE="${LUMEN_UNINSTALL_NONINTERACTIVE:-0}"
@@ -75,6 +71,11 @@ USAGE
     esac
     shift
 done
+
+lumen_install_signal_handlers
+lumen_acquire_lock "${ROOT}" "uninstall.sh"
+cd "${ROOT}"
+log_info "项目根目录：${ROOT}"
 
 LUMEN_DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
 LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-/opt/lumendata}"
@@ -331,33 +332,68 @@ lumen_uninstall_purge_data_dirs() {
     for d in "${targets[@]}"; do
         if [ -e "${d}" ] || [ -L "${d}" ]; then
             log_warn "即将删除 ${d}（含 PG / Redis bind mount、storage、backup 等所有数据）"
-            if lumen_run_as_root rm -rf "${d}"; then
+            # lumen_safe_rm_rf_as_root 内部用 lumen_path_safe_for_rm 拦截 / /usr /opt 等系统目录
+            if lumen_safe_rm_rf_as_root "${d}"; then
                 log_info "已删除 ${d}"
                 DONE+=("已删除 ${d}")
             else
-                log_warn "无法删除 ${d}，请手动 sudo rm -rf ${d}"
+                log_warn "无法删除 ${d}（路径校验失败或 rm 失败），请手动确认。"
                 KEPT+=("${d} 删除失败")
             fi
         fi
     done
 }
 
+# 清理 release 布局产物。union(ROOT, LUMEN_DEPLOY_ROOT) — 应对从源仓库或部署目录运行的差异。
+# 源仓库执行（ROOT=/home/x/Lumen 但 LUMEN_DEPLOY_ROOT=/opt/lumen）时，两边都要清理才彻底。
 lumen_uninstall_purge_deploy_dirs() {
     log_step "清理仓库 deploy 目录（release 布局：releases / current / shared）"
-    if [ -e "${ROOT}/current" ] && [ -L "${ROOT}/current" ]; then
-        rm -f "${ROOT}/current" 2>/dev/null || lumen_run_as_root rm -f "${ROOT}/current" || true
-        DONE+=("已删除 ${ROOT}/current symlink")
-    fi
-    local d
-    for d in "${ROOT}/releases" "${ROOT}/shared" "${ROOT}/.lumen-maintenance.lock.d"; do
-        if [ -e "${d}" ]; then
-            if lumen_run_as_root rm -rf "${d}"; then
-                log_info "已删除 ${d}"
-                DONE+=("已删除 ${d}")
-            else
-                log_warn "无法删除 ${d}，请手动检查"
-            fi
+    local roots=()
+    local seen=" "
+    local r
+    for r in "${ROOT}" "${LUMEN_DEPLOY_ROOT}"; do
+        [ -n "${r}" ] || continue
+        case "${seen}" in
+            *" ${r} "*) continue ;;
+        esac
+        seen="${seen}${r} "
+        # 只处理"看起来像 release 布局"的目录，避免误清理无关源仓库
+        if [ -L "${r}/current" ] || [ -d "${r}/releases" ] || [ -d "${r}/shared" ]; then
+            roots+=("${r}")
         fi
+    done
+
+    if [ "${#roots[@]}" -eq 0 ]; then
+        log_info "未检测到 release 布局，跳过清理。"
+        return 0
+    fi
+
+    local target d
+    for r in "${roots[@]}"; do
+        # current / previous symlink
+        for target in "${r}/current" "${r}/previous"; do
+            if [ -L "${target}" ]; then
+                if rm -f "${target}" 2>/dev/null \
+                        || lumen_run_as_root rm -f "${target}" 2>/dev/null; then
+                    DONE+=("已删除 ${target} symlink")
+                else
+                    log_warn "无法删除 symlink ${target}"
+                    KEPT+=("${target} 删除失败")
+                fi
+            fi
+        done
+        # 目录类（releases / shared / 锁目录）
+        for d in "${r}/releases" "${r}/shared" "${r}/.lumen-maintenance.lock.d" "${r}/.lumen-maintenance.lock"; do
+            if [ -e "${d}" ] || [ -L "${d}" ]; then
+                if lumen_safe_rm_rf_as_root "${d}"; then
+                    log_info "已删除 ${d}"
+                    DONE+=("已删除 ${d}")
+                else
+                    log_warn "无法删除 ${d}（路径校验失败或权限不足），请手动 sudo rm -rf '${d}'"
+                    KEPT+=("${d} 删除失败")
+                fi
+            fi
+        done
     done
 }
 
