@@ -45,6 +45,87 @@ log_step() {
         "${LUMEN_C_BOLD}" "$*" "${LUMEN_C_RESET}"
 }
 
+lumen_read_dotenv_value() {
+    local key="$1"
+    local file="$2"
+    local raw=""
+    raw="$(sed -n "s/^${key}=//p" "${file}" 2>/dev/null | head -n1 || true)"
+    raw="${raw%$'\r'}"
+    if [[ "${raw}" == \'*\' && "${raw}" == *\' ]]; then
+        raw="${raw:1:${#raw}-2}"
+    elif [[ "${raw}" == \"*\" && "${raw}" == *\" ]]; then
+        raw="${raw:1:${#raw}-2}"
+    fi
+    printf '%s' "${raw}"
+}
+
+lumen_ensure_compose_db_env_vars() {
+    local file="$1"
+    if [ ! -f "${file}" ]; then
+        log_error "${file} 不存在，无法为 docker compose 读取 DB_USER/DB_PASSWORD/DB_NAME。"
+        return 1
+    fi
+    if grep -qE '^DB_USER=.+' "${file}" \
+        && grep -qE '^DB_PASSWORD=.+' "${file}" \
+        && grep -qE '^DB_NAME=.+' "${file}"; then
+        return 0
+    fi
+    if ! grep -qE '^DATABASE_URL=.+' "${file}"; then
+        log_error "${file} 缺少 DB_USER/DB_PASSWORD/DB_NAME，且无法从 DATABASE_URL 推导。"
+        log_error "请补充 DB_USER、DB_PASSWORD、DB_NAME 后重跑。"
+        return 1
+    fi
+    if ! python3 - "${file}" <<'PY'
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+import sys
+
+path = Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+values = {}
+for line in lines:
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        continue
+    key, raw = line.split("=", 1)
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        raw = raw[1:-1]
+    values[key.strip()] = raw
+
+url = values.get("DATABASE_URL", "")
+parts = urlsplit(url)
+db_user = unquote(parts.username or "")
+db_password = unquote(parts.password or "")
+db_name = unquote(parts.path.lstrip("/"))
+missing = [name for name in ("DB_USER", "DB_PASSWORD", "DB_NAME") if not values.get(name)]
+if missing and (not db_user or not db_password or not db_name):
+    raise SystemExit(
+        "DATABASE_URL must include username, password, and database name "
+        "to backfill missing DB_USER/DB_PASSWORD/DB_NAME"
+    )
+for key, value in (("DB_USER", db_user), ("DB_PASSWORD", db_password), ("DB_NAME", db_name)):
+    if any(ord(ch) < 32 for ch in value) or "'" in value:
+        raise SystemExit("{} derived from DATABASE_URL contains unsupported characters".format(key))
+
+append = []
+if not values.get("DB_USER"):
+    append.append("DB_USER={}".format(db_user))
+if not values.get("DB_PASSWORD"):
+    append.append("DB_PASSWORD='{}'".format(db_password))
+if not values.get("DB_NAME"):
+    append.append("DB_NAME={}".format(db_name))
+if append:
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n# Backfilled for docker-compose variable interpolation.\n")
+        for line in append:
+            f.write(line + "\n")
+PY
+    then
+        return 1
+    fi
+    log_warn "${file} 缺少 DB_USER/DB_PASSWORD/DB_NAME，已从 DATABASE_URL 补全供 docker compose 使用。"
+}
+
 # ---------------------------------------------------------------------------
 # Step protocol（结构化阶段协议）
 # 由 admin_update.py 通过 .update.log 解析；格式必须严格保持。

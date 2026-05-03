@@ -179,7 +179,15 @@ COMPOSE_T0=$(date +%s%3N)
 echo "::lumen-step:: phase=containers status=start ts=$COMPOSE_START"
 compose_rc=0
 if [ -f "$ROOT/current/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then
-  if ! (cd "$ROOT/current" && docker compose up -d --wait); then
+  if [ -f "$ROOT/current/scripts/lib.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$ROOT/current/scripts/lib.sh"
+  fi
+  if declare -F lumen_ensure_compose_db_env_vars >/dev/null 2>&1 \
+    && ! lumen_ensure_compose_db_env_vars "$ROOT/current/.env"; then
+    compose_rc=1
+    echo "compose env validation failed; rollback continues but containers may be stale" >&2
+  elif ! (cd "$ROOT/current" && docker compose up -d --wait); then
     compose_rc=1
     echo "docker compose up failed; rollback continues but containers may be stale" >&2
   fi

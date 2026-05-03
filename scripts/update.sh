@@ -472,6 +472,10 @@ if ! lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"; then
     lumen_step_end link_shared 1
     exit 1
 fi
+if ! lumen_ensure_compose_db_env_vars "${NEW_RELEASE}/.env"; then
+    lumen_step_end link_shared 1
+    exit 1
+fi
 lumen_step_end link_shared 0
 
 # link_shared 的 mkdir -p 是以 root 身份创建父目录（如 apps/web/.next）。
