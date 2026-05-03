@@ -419,6 +419,33 @@ def test_lumenctl_resolves_scripts_from_current_release(tmp_path: Path) -> None:
     assert f"{deploy_root / 'scripts' / 'update.sh'}" not in result.stderr
 
 
+def test_lumenctl_install_bootstraps_from_github_when_install_script_missing(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "Lumen"
+    downloaded = tmp_path / "downloaded-install.sh"
+    deploy_root.mkdir()
+
+    result = assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        ROOT={deploy_root}
+        LUMEN_BRANCH=main
+        mktemp() {{ printf '%s\\n' {downloaded}; }}
+        ensure_cmd() {{ :; }}
+        curl() {{
+          printf 'curl:%s\\n' "$*"
+          printf '#!/usr/bin/env bash\\nexit 0\\n' > "$4"
+        }}
+        bash() {{ printf 'bash:%s\\n' "$*"; }}
+        run_lumen_script install.sh --image-tag=main
+        printf 'install_dir:%s\\n' "${{LUMEN_INSTALL_DIR}}"
+        """
+    )
+
+    assert "raw.githubusercontent.com/cyeinfpro/Lumen/main/scripts/install.sh" in result.stdout
+    assert f"bash:{downloaded} --install --image-tag=main" in result.stdout
+    assert f"install_dir:{deploy_root}" in result.stdout
+
+
 def test_runtime_health_check_fails_when_api_unhealthy() -> None:
     result = run_bash(
         f"""
