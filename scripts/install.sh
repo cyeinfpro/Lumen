@@ -971,6 +971,10 @@ prepare_env_file() {
         log_warn "  生产部署后请编辑 ${shared_env}，改成你的公网域名（例如 https://lumen.example.com）。"
         log_warn "  并在 nginx 配置正确的 server_name + 反代到 127.0.0.1:3000。"
     fi
+    if lumen_configure_proxy_env "${shared_env}" >/dev/null 2>&1; then
+        log_info "已配置更新/拉镜像代理（LUMEN_UPDATE_PROXY_URL / LUMEN_HTTP_PROXY / HTTP_PROXY）。"
+        emit_info "key=proxy" "value=configured"
+    fi
 
     emit_info "key=shared_env" "value=${shared_env}"
     emit_info "key=image_registry" "value=${image_registry}"
@@ -1273,8 +1277,8 @@ print_summary() {
 
   ${LUMEN_C_BOLD}Lumen 安装完成（Docker Compose 全栈）${LUMEN_C_RESET}
 
-  Web 地址 ......... http://127.0.0.1:3000/
-                     （生产建议通过 nginx 反代到公网，参考 deploy/nginx/）
+  Web 地址 ......... http://<服务器IP>:3000/
+                     （默认监听 0.0.0.0:3000；生产也可通过 nginx 反代）
   API 健康检查 ..... http://127.0.0.1:8000/healthz
   管理员邮箱 ....... ${INSTALL_ADMIN_EMAIL:-（已存在或非交互模式未设置）}
   Provider 配置 .... 登录后 → 右上角「管理 → 上游 Provider」

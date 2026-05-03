@@ -170,7 +170,15 @@ local_keep_keys = {
     "REDIS_BIND_HOST",
     "API_BIND_HOST",
     "WEB_BIND_HOST",
+    "LUMEN_UPDATE_PROXY_URL",
+    "LUMEN_HTTP_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
     "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
     "no_proxy",
 }
 
@@ -722,6 +730,88 @@ lumen_env_value() {
         raw="${raw:1:${#raw}-2}"
     fi
     printf '%s' "${raw}"
+}
+
+lumen_set_env_value_in_file() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    if [ -z "${file}" ] || [ -z "${key}" ]; then
+        log_error "lumen_set_env_value_in_file：参数不完整。"
+        return 1
+    fi
+    if [ ! -f "${file}" ]; then
+        log_error "lumen_set_env_value_in_file：${file} 不存在。"
+        return 1
+    fi
+    if [[ ! "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        log_error "lumen_set_env_value_in_file：非法 key=${key}。"
+        return 1
+    fi
+    if printf '%s' "${value}" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        log_error "lumen_set_env_value_in_file：${key} 不能包含控制字符。"
+        return 1
+    fi
+    local tmp
+    tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
+    awk -v k="${key}" -v v="${value}" '
+        BEGIN { done = 0 }
+        $0 ~ "^" k "=" {
+            if (done == 0) {
+                print k "=" v
+                done = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (done == 0) print k "=" v
+        }
+    ' "${file}" > "${tmp}" && mv "${tmp}" "${file}"
+}
+
+lumen_effective_proxy_url() {
+    local env_file="${1:-}"
+    local key value
+    for key in LUMEN_UPDATE_PROXY_URL LUMEN_HTTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY https_proxy http_proxy all_proxy; do
+        value="${!key:-}"
+        if [ -z "${value}" ] && [ -n "${env_file}" ] && [ -f "${env_file}" ]; then
+            value="$(lumen_env_value "${key}" "${env_file}")"
+        fi
+        if [ -n "${value}" ]; then
+            printf '%s' "${value}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+lumen_configure_proxy_env() {
+    local env_file="${1:-}"
+    local proxy_url no_proxy_value
+    proxy_url="$(lumen_effective_proxy_url "${env_file}" 2>/dev/null || true)"
+    if [ -z "${proxy_url}" ]; then
+        return 1
+    fi
+    export LUMEN_UPDATE_PROXY_URL="${proxy_url}"
+    export LUMEN_HTTP_PROXY="${proxy_url}"
+    export HTTP_PROXY="${proxy_url}"
+    export HTTPS_PROXY="${proxy_url}"
+    export ALL_PROXY="${proxy_url}"
+    export http_proxy="${proxy_url}"
+    export https_proxy="${proxy_url}"
+    export all_proxy="${proxy_url}"
+
+    no_proxy_value="${NO_PROXY:-${no_proxy:-}}"
+    if [ -z "${no_proxy_value}" ] && [ -n "${env_file}" ] && [ -f "${env_file}" ]; then
+        no_proxy_value="$(lumen_env_value NO_PROXY "${env_file}")"
+        [ -n "${no_proxy_value}" ] || no_proxy_value="$(lumen_env_value no_proxy "${env_file}")"
+    fi
+    no_proxy_value="${no_proxy_value:-127.0.0.1,localhost,::1}"
+    export NO_PROXY="${no_proxy_value}"
+    export no_proxy="${no_proxy_value}"
+
+    printf '%s' "${proxy_url}"
 }
 
 lumen_run_as_root() {
