@@ -48,6 +48,11 @@ _SUMMARY_TARGET_TOKENS = 1200
 _SUMMARY_INPUT_BUDGET = 80_000
 _SUMMARY_MAX_SEGMENTS = 8
 _SUMMARY_LOCK_TTL_S = 15 * 60
+# Worst-case run = _SUMMARY_MAX_SEGMENTS (8) × _SUMMARY_HTTP_TIMEOUT_S (120s) = 960s,
+# already pushing past the 900s lock TTL. A renewer task pumps EXPIRE every TTL/3 so
+# a slow LLM cannot let the lock silently expire and admit a second concurrent worker
+# that would re-pay the upstream cost.
+_SUMMARY_LOCK_RENEW_INTERVAL_S = max(30.0, _SUMMARY_LOCK_TTL_S / 3)
 _SUMMARY_LOCK_WAIT_S = 1.5
 _SUMMARY_HTTP_TIMEOUT_S = 120.0
 _PER_PROVIDER_RETRY_ATTEMPTS = 1
@@ -1257,6 +1262,47 @@ async def _release_summary_lock(redis: Any, conv_id: str, lock: _SummaryLock | N
         logger.debug("context_summary.redis_unlock_failed conv=%s err=%r", conv_id, exc)
 
 
+async def _renew_summary_lock_loop(
+    redis: Any,
+    conv_id: str,
+    lock: _SummaryLock,
+    *,
+    interval_s: float = _SUMMARY_LOCK_RENEW_INTERVAL_S,
+) -> None:
+    """Keep the redis lock alive while the summary keeps running.
+
+    Why: 8 segments × 120s upstream timeout = 960s easily overruns the 900s static TTL.
+    Without renewal a slow run lets the lock silently expire and a second worker can
+    grab it, re-paying the upstream cost. CAS write later refuses to overwrite, but
+    that does not refund the wasted tokens.
+    """
+    if redis is None or lock.kind != "redis" or lock.token is None:
+        return
+    key = f"context:summary:lock:{conv_id}"
+    try:
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                value = await redis.get(key)
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="replace")
+                if value != lock.token:
+                    # Lock已被其他持有者覆盖；退出，让主流程在 CAS 阶段自然失败。
+                    logger.warning(
+                        "context_summary.lock_renew_lost conv=%s holder=%s",
+                        conv_id, value,
+                    )
+                    return
+                await redis.expire(key, _SUMMARY_LOCK_TTL_S)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "context_summary.lock_renew_failed conv=%s err=%s",
+                    conv_id, exc,
+                )
+    except asyncio.CancelledError:
+        raise
+
+
 async def _read_current_summary(session: Any, conv_id: str) -> dict[str, Any] | None:
     try:
         row = await session.get(Conversation, conv_id)
@@ -1452,6 +1498,11 @@ async def ensure_context_summary(
         )
 
     await _publish_compaction_event(redis, conv_id, started_payload)
+    renew_task: asyncio.Task[None] | None = None
+    if redis is not None and lock.kind == "redis" and lock.token is not None:
+        renew_task = asyncio.create_task(
+            _renew_summary_lock_loop(redis, conv_id, lock)
+        )
     try:
         image_captions = await _caption_images_for_summary(
             session,
@@ -1657,6 +1708,12 @@ async def ensure_context_summary(
         )
         return public
     finally:
+        if renew_task is not None:
+            renew_task.cancel()
+            try:
+                await renew_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         await _release_summary_lock(redis, conv_id, lock)
 
 
