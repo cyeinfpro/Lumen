@@ -137,98 +137,27 @@ SHOT_COMPOSITION_REQUIREMENTS = {
 }
 
 TEMPLATE_LABELS = {
-    "white_ecommerce": "white background ecommerce catalog",
-    "premium_studio": "premium gray studio editorial ecommerce",
-    "urban_commute": "urban commute street scene with clean commercial lighting",
-    "lifestyle": "polished lifestyle scene with uncluttered product focus",
-    "social_seed": "social commerce editorial image with clean product readability",
+    "white_ecommerce": "白底电商图",
+    "premium_studio": "高级灰棚拍",
+    "urban_commute": "城市通勤场景",
+    "lifestyle": "自然生活场景",
+    "social_seed": "社媒种草图",
 }
-
-TEMPLATE_REQUIREMENTS = {
-    "white_ecommerce": (
-        "TEMPLATE HARD REQUIREMENT: pure white or very light neutral seamless "
-        "background, catalog ecommerce lighting, no street, no room, no furniture, "
-        "no props, minimal shadow, product-first full outfit readability."
-    ),
-    "premium_studio": (
-        "TEMPLATE HARD REQUIREMENT: premium neutral gray studio backdrop, softbox "
-        "commercial lighting, refined editorial ecommerce styling, no outdoor scene, "
-        "no furniture-heavy set, restrained premium mood."
-    ),
-    "urban_commute": (
-        "TEMPLATE HARD REQUIREMENT: modern city commute environment, clean sidewalk "
-        "or office-district street context, natural commercial daylight, subtle urban "
-        "background depth, no studio backdrop, no white catalog background."
-    ),
-    "lifestyle": (
-        "TEMPLATE HARD REQUIREMENT: polished lifestyle environment such as a clean "
-        "interior, cafe-adjacent, hotel lobby, or minimal home setting, natural pose, "
-        "uncluttered scene, product remains the focus, no plain studio/catalog backdrop."
-    ),
-    "social_seed": (
-        "TEMPLATE HARD REQUIREMENT: social commerce editorial visual, mobile-first "
-        "fashion content feel, dynamic but clean composition, tasteful lifestyle or "
-        "street/editorial context, not a plain catalog image, keep garment details clear."
-    ),
-}
-
-
-def _flatten_product_text(product_analysis: dict[str, Any]) -> str:
-    values: list[str] = []
-    for key in ("category", "color", "material_guess", "silhouette", "key_details", "summary_text"):
-        value = product_analysis.get(key)
-        if isinstance(value, list):
-            values.extend(str(item) for item in value)
-        elif value:
-            values.append(str(value))
-    return " ".join(values).lower()
-
-
-def _lifestyle_scene_requirement(product_analysis: dict[str, Any]) -> str:
-    text = _flatten_product_text(product_analysis)
-    category = str(product_analysis.get("category") or "apparel")
-    silhouette = str(product_analysis.get("silhouette") or "")
-    color = str(product_analysis.get("color") or "")
-    material = str(product_analysis.get("material_guess") or "")
-    if any(word in text for word in ("运动", "瑜伽", "跑步", "健身", "legging", "sports", "active")):
-        scene = (
-            "a bright modern wellness studio, pilates corridor, or clean outdoor morning path; "
-            "healthy natural movement, no gym clutter, no neon sports poster look"
-        )
-    elif any(word in text for word in ("西装", "衬衫", "通勤", "大衣", "风衣", "blazer", "shirt", "coat", "trench")):
-        scene = (
-            "a refined weekday setting such as a boutique hotel lobby, quiet office atrium, "
-            "or modern gallery corridor; clean architecture, premium daylight, understated city mood"
-        )
-    elif any(word in text for word in ("连衣裙", "裙", "丝", "缎", "礼服", "dress", "skirt", "satin", "silk")):
-        scene = (
-            "an elegant lifestyle setting such as a sunlit gallery, tasteful terrace, or minimal cafe exterior; "
-            "soft natural light, graceful posture, no cheap party backdrop"
-        )
-    elif any(word in text for word in ("卫衣", "t恤", "t-shirt", "hoodie", "sweatshirt", "牛仔", "denim")):
-        scene = (
-            "a relaxed daily-life setting such as a clean bookshop frontage, design cafe street, "
-            "or quiet neighborhood sidewalk; casual but polished, no busy crowd"
-        )
-    else:
-        scene = (
-            "a tasteful real-life setting chosen to match the garment's category and mood, such as a clean "
-            "gallery corridor, boutique hotel lobby, quiet cafe exterior, or calm residential street"
-        )
-    return (
-        "TEMPLATE HARD REQUIREMENT: automatically matched lifestyle scene for this product. "
-        f"Product cues: category={category}, color={color}, material={material}, silhouette={silhouette}. "
-        f"Use this scene direction: {scene}. The model must be physically integrated into the scene: "
-        "consistent floor contact, perspective, shadows, ambient light direction, scale, and depth of field. "
-        "Avoid fake cutout/composited look, ugly random backgrounds, clutter, distorted architecture, "
-        "overly staged stock-photo sets, or scenes unrelated to the garment."
-    )
-
 
 def _template_requirement(template: str, product_analysis: dict[str, Any]) -> str:
-    if template == "lifestyle":
-        return _lifestyle_scene_requirement(product_analysis)
-    return TEMPLATE_REQUIREMENTS.get(template, "")
+    _ = product_analysis
+    return TEMPLATE_LABELS.get(template, template)
+
+
+def _showcase_prompt_brief(*, user_direction: str, template_direction: str) -> str:
+    direction_parts = [part for part in (user_direction.strip(), template_direction.strip()) if part]
+    direction = "，".join(direction_parts) or "高级自然电商场景，动作自然"
+    return (
+        "请根据商品图和已确认模特参考图，生成真实自然的真人服饰电商穿搭图。"
+        f"参考方向：{direction}。"
+        "可以是正面，也可以是侧面。"
+        "保持商品服饰和模特参考一致，画面清晰干净，无文字、无水印。"
+    )
 
 
 def _infer_age(text: str) -> int | None:
@@ -552,54 +481,12 @@ def _showcase_prompt(
     template: str,
     shot_type: str,
     final_quality: str,
+    user_prompt: str = "",
 ) -> str:
-    must_preserve = product_analysis.get("must_preserve")
-    if isinstance(must_preserve, list) and must_preserve:
-        preserve_text = ", ".join(str(item) for item in must_preserve)
-    else:
-        preserve_text = (
-            "garment color, silhouette, neckline, sleeve shape, length, fabric "
-            "impression, pattern, logo, button, pocket, zipper, and seam placement"
-        )
-    accessory_text = "no accessories"
-    accessory_requirement = (
-        "ACCESSORY REQUIREMENT: do not add accessories beyond what is already in the reference images."
-    )
-    if accessory_plan.get("enabled") is True:
-        items = accessory_plan.get("items")
-        if isinstance(items, list) and items:
-            accessory_text = f"{', '.join(str(i) for i in items)}"
-            accessory_requirement = (
-                "ACCESSORY HARD REQUIREMENT: include these selected accessories in the final image: "
-                f"{accessory_text}. Keep them tasteful and commercially styled, but make them visible. "
-                "Do not replace them with different accessory types."
-            )
-        else:
-            accessory_text = "subtle minimal accessories only"
-            accessory_requirement = (
-                "ACCESSORY HARD REQUIREMENT: include subtle minimal accessories, visible enough to evaluate, "
-                "without covering the garment."
-            )
-    brief = selected_candidate.model_brief_json or {}
-    model_text = str(brief.get("summary") or brief.get("style_prompt") or "confirmed synthetic model")
-    age_requirement = _age_direction(model_text)
-    height_requirement = str(
-        brief.get("height_requirement")
-        or _height_requirement(model_text)
-    )
-    template_label = TEMPLATE_LABELS.get(template, template)
-    template_requirement = _template_requirement(template, product_analysis)
-    return (
-        "请根据商品图和已确认模特参考图，生成真实自然的真人服饰电商穿搭图。\n"
-        "要求：\n"
-        "1. 模特必须穿着商品图中的这件衣服，颜色、版型和可见细节尽量还原，不要改款。\n"
-        f"2. 必须保留商品细节：{preserve_text}。\n"
-        f"3. 保持已确认模特的人脸、发型、身材比例、年龄感和整体气质一致。{age_requirement} {height_requirement}\n"
-        f"4. 场景/背景按当前模板执行：{template_label}。{template_requirement}\n"
-        f"5. {accessory_requirement} 配饰不能遮挡衣服关键结构。\n"
-        f"6. 镜头类型：{SHOT_LABELS.get(shot_type, shot_type)}。{SHOT_COMPOSITION_REQUIREMENTS.get(shot_type, '')}\n"
-        "7. 画面为自然商业摄影风格，清晰、真实、干净，适合淘宝/电商主图，无文字、无水印。\n"
-        f"已确认模特摘要：{model_text}。配饰方案：{accessory_text}。画质目标：{final_quality}。"
+    _ = selected_candidate, accessory_plan, shot_type, final_quality
+    return _showcase_prompt_brief(
+        user_direction=user_prompt,
+        template_direction=_template_requirement(template, product_analysis),
     )
 
 
@@ -2270,6 +2157,7 @@ async def create_showcase_images(
                 template=body.template,
                 shot_type=shot_type,
                 final_quality=body.final_quality,
+                user_prompt=run.user_prompt,
             ),
             attachment_ids=ref_ids,
             idempotency_key=f"wf:{run.id[:12]}:shot:{idx}:{new_uuid7()[:8]}",
