@@ -172,6 +172,8 @@ def test_update_script_restarts_services_and_health_checks_after_update() -> Non
     text = UPDATE.read_text(encoding="utf-8")
     assert "lumen_update_sync_systemd_units()" in text
     assert 'lumen_update_sync_systemd_units' in text
+    assert 'text = text.replace("/opt/lumendata", data_token)' in text
+    assert 'text = text.replace(data_token, "/opt/lumendata")' in text
     assert 'text = text.replace("/opt/lumen", root)' in text
     assert 'text = text.replace("ProtectHome=true", "ProtectHome=false")' in text
     assert 'service_user="root"' in text
