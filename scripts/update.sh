@@ -217,7 +217,10 @@ import sys
 
 src, dst, root, user, group = sys.argv[1:6]
 text = Path(src).read_text(encoding="utf-8")
+data_token = "__LUMEN_DATA_ROOT__"
+text = text.replace("/opt/lumendata", data_token)
 text = text.replace("/opt/lumen", root)
+text = text.replace(data_token, "/opt/lumendata")
 text = text.replace("User=lumen", f"User={user}")
 text = text.replace("Group=lumen", f"Group={group}")
 text = text.replace("id -u lumen", f"id -u {user}")
