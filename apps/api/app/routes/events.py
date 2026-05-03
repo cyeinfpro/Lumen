@@ -285,6 +285,12 @@ async def events(
         try:
             await pubsub.subscribe(*subscribed)
         except Exception:
+            logger.warning(
+                "sse pubsub subscribe failed user_id=%s channels=%d",
+                user.id,
+                len(subscribed),
+                exc_info=True,
+            )
             await pubsub.aclose()
             raise
 
