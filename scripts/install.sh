@@ -730,7 +730,7 @@ prepare_data_dirs() {
     if [ -e "${db_root}" ] && [ ! -d "${db_root}" ]; then
         log_error "${db_root} 已存在但不是目录，请先移走或删除后重试。"
         exit 1
-    }
+    fi
 
     lumen_run_as_root mkdir -p "${db_root}" \
         "${db_root}/postgres" \
