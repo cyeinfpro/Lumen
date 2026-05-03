@@ -114,8 +114,14 @@ def test_update_migrates_old_web_bind_and_proxy_env() -> None:
     update = UPDATE.read_text(encoding="utf-8")
     lib = LIB.read_text(encoding="utf-8")
 
+    assert "SCRIPT_ROOT=" in update
+    assert 'ROOT="${LUMEN_DEPLOY_ROOT}"' in update
+    assert 'LUMEN_REPO_DIR="${SCRIPT_ROOT}"' in update
+    assert '[ -d "${SCRIPT_ROOT}/.git" ]' in update
     assert 'if lumen_configure_proxy_env "${SHARED_ENV}"' in update
     assert "config_changed_redeploy" in update
+    assert 'emit_info check reason "missing_shared_env"' in update
+    assert 'emit_info check reason "target_tag_empty"' in update
     assert 'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"' in update
     assert 'emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"' in update
     assert "LUMEN_HTTP_PROXY HTTPS_PROXY HTTP_PROXY" in lib
@@ -479,6 +485,7 @@ def test_lumenctl_resolves_scripts_from_current_release(tmp_path: Path) -> None:
         f"""
         . {LUMENCTL}
         ROOT={deploy_root}
+        SCRIPT_DIR={deploy_root / "current" / "scripts"}
         detect_os() {{ printf 'linux\\n'; }}
         bash() {{ printf 'bash:%s\\n' "$*"; }}
         lumen_sudo() {{ printf 'sudo:%s\\n' "$*"; }}
@@ -499,6 +506,7 @@ def test_lumenctl_install_bootstraps_from_github_when_install_script_missing(tmp
         f"""
         . {LUMENCTL}
         ROOT={deploy_root}
+        SCRIPT_DIR={deploy_root / "scripts"}
         LUMEN_BRANCH=main
         mktemp() {{ printf '%s\\n' {downloaded}; }}
         ensure_cmd() {{ :; }}
