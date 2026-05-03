@@ -236,17 +236,11 @@ bootstrap_from_raw_script() {
             ;;
     esac
 
-    # 决定 exec 时传给 install.sh 的参数。如果调用方没传，按 BOOTSTRAP_MODE 走：
-    #   update  -> --update（直接交给 update.sh，不进交互菜单）
-    #   install -> --auto（自动判定：有 systemd active 走 update，否则走 install）
-    #   auto    -> --auto
+    # 决定 exec 时传给 install.sh 的参数。调用方没传时保留菜单入口；
+    # 需要无人值守更新时显式传 --auto 或 --update，避免脚本一运行就跳过菜单。
     local args=("$@")
     if [ "${#args[@]}" -eq 0 ]; then
-        if [ "${LUMEN_BOOTSTRAP_MODE}" = "update" ]; then
-            args=("--update")
-        else
-            args=("--auto")
-        fi
+        args=("menu")
     fi
 
     # 选 install.sh 路径：release 布局下 scripts/ 在 current 内（${ROOT}/current/scripts），

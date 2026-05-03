@@ -82,6 +82,8 @@ log_info "当前 release：${CURRENT_ID}"
 LUMEN_UPDATE_SYSTEMD_RUNTIME=0
 LUMEN_UPDATE_RUN_USER="$(id -un 2>/dev/null || echo "${USER:-root}")"
 LUMEN_UPDATE_RUN_GROUP="$(id -gn 2>/dev/null || echo "${LUMEN_UPDATE_RUN_USER}")"
+LUMEN_UPDATE_EXEC_USER="${LUMEN_UPDATE_RUN_USER}"
+LUMEN_UPDATE_EXEC_GROUP="${LUMEN_UPDATE_RUN_GROUP}"
 
 if lumen_systemd_has_any_units lumen-api.service lumen-worker.service lumen-web.service; then
     LUMEN_UPDATE_SYSTEMD_RUNTIME=1
@@ -126,12 +128,23 @@ if lumen_systemd_has_any_units lumen-api.service lumen-worker.service lumen-web.
         [ -L "${ROOT}/current" ] && chown -h "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${ROOT}/current" 2>/dev/null || true
     fi
 
-    log_info "检测到 systemd 部署，依赖/迁移/构建将以运行用户执行：${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}"
+    LUMEN_UPDATE_EXEC_USER="${LUMEN_UPDATE_RUN_USER}"
+    LUMEN_UPDATE_EXEC_GROUP="${LUMEN_UPDATE_RUN_GROUP}"
+    case "${ROOT}" in
+        /root|/root/*)
+            if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+                LUMEN_UPDATE_EXEC_USER="root"
+                LUMEN_UPDATE_EXEC_GROUP="root"
+                log_warn "检测到部署目录位于 ${ROOT}；依赖/迁移/构建将以 root 执行，避免 ${LUMEN_UPDATE_RUN_USER} 无法遍历 /root。"
+            fi
+            ;;
+    esac
+    log_info "检测到 systemd 部署，服务用户：${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}；构建用户：${LUMEN_UPDATE_EXEC_USER}:${LUMEN_UPDATE_EXEC_GROUP}"
 fi
 
 lumen_update_as_runtime_user() {
-    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
-        lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" "$@"
+    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ] && [ "${LUMEN_UPDATE_EXEC_USER}" != "$(id -un 2>/dev/null || true)" ]; then
+        lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" "$@"
     else
         "$@"
     fi
@@ -140,8 +153,8 @@ lumen_update_as_runtime_user() {
 lumen_update_runtime_command_path() {
     local cmd="$1"
     local path=""
-    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
-        path="$(lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc "command -v ${cmd}" 2>/dev/null || true)"
+    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ] && [ "${LUMEN_UPDATE_EXEC_USER}" != "$(id -un 2>/dev/null || true)" ]; then
+        path="$(lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" sh -lc "command -v ${cmd}" 2>/dev/null || true)"
     else
         path="$(command -v "${cmd}" 2>/dev/null || true)"
     fi
@@ -155,30 +168,30 @@ lumen_update_ensure_runtime_can_access_path() {
     local dir
     dir="$(dirname "${path}")"
 
-    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" != "1" ]; then
+    if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" != "1" ] || [ "${LUMEN_UPDATE_EXEC_USER}" = "root" ]; then
         return 0
     fi
-    if lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" test -r "${path}" >/dev/null 2>&1; then
+    if lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" test -r "${path}" >/dev/null 2>&1; then
         return 0
     fi
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-        log_error "${label} 对运行用户 ${LUMEN_UPDATE_RUN_USER} 不可读：${path}"
+        log_error "${label} 对构建用户 ${LUMEN_UPDATE_EXEC_USER} 不可读：${path}"
         log_error "请用 root 运行 update，或修复部署目录祖先权限。"
         return 1
     fi
 
-    log_warn "${label} 对运行用户 ${LUMEN_UPDATE_RUN_USER} 不可读，尝试修复部署目录遍历权限：${path}"
-    chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${dir}" 2>/dev/null || true
+    log_warn "${label} 对构建用户 ${LUMEN_UPDATE_EXEC_USER} 不可读，尝试修复部署目录遍历权限：${path}"
+    chown -R "${LUMEN_UPDATE_EXEC_USER}:${LUMEN_UPDATE_EXEC_GROUP}" "${dir}" 2>/dev/null || true
 
     if command -v setfacl >/dev/null 2>&1; then
         local walk="${dir}"
         while [ -n "${walk}" ] && [ "${walk}" != "/" ]; do
-            setfacl -m "u:${LUMEN_UPDATE_RUN_USER}:x" "${walk}" 2>/dev/null || true
+            setfacl -m "u:${LUMEN_UPDATE_EXEC_USER}:x" "${walk}" 2>/dev/null || true
             walk="$(dirname "${walk}")"
         done
     fi
 
-    if ! lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" test -r "${path}" >/dev/null 2>&1; then
+    if ! lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" test -r "${path}" >/dev/null 2>&1; then
         local walk="${dir}"
         while [ -n "${walk}" ] && [ "${walk}" != "/" ]; do
             chmod o+x "${walk}" 2>/dev/null || true
@@ -186,9 +199,9 @@ lumen_update_ensure_runtime_can_access_path() {
         done
     fi
 
-    if ! lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" test -r "${path}" >/dev/null 2>&1; then
-        log_error "${label} 对运行用户 ${LUMEN_UPDATE_RUN_USER} 仍不可读：${path}"
-        log_error "建议把 Lumen 部署到 /opt/lumen，或手动允许 ${LUMEN_UPDATE_RUN_USER} 遍历部署目录。"
+    if ! lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" test -r "${path}" >/dev/null 2>&1; then
+        log_error "${label} 对构建用户 ${LUMEN_UPDATE_EXEC_USER} 仍不可读：${path}"
+        log_error "建议把 Lumen 部署到 /opt/lumen，或手动允许 ${LUMEN_UPDATE_EXEC_USER} 遍历部署目录。"
         return 1
     fi
 }
@@ -207,7 +220,7 @@ lumen_update_require_runtime_cmd() {
     # /root/Lumen/.local/bin 并因 /root 权限失败。root 触发时优先安装到
     # /usr/local/bin 这类系统级 PATH，再让 runtime 用户重新 probe。
     if [ "${cmd}" = "uv" ] && [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
-        log_warn "uv 不在 ${LUMEN_UPDATE_RUN_USER} 的 PATH，尝试通过官方脚本自动安装……"
+        log_warn "uv 不在构建用户 ${LUMEN_UPDATE_EXEC_USER} 的 PATH，尝试通过官方脚本自动安装……"
         local installed_uv=0
         if [ "${EUID:-$(id -u)}" -eq 0 ]; then
             for uv_install_dir in /usr/local/bin /usr/bin; do
@@ -221,7 +234,7 @@ lumen_update_require_runtime_cmd() {
             done
         fi
         if [ "${installed_uv}" -ne 1 ]; then
-            if lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc \
+            if lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" sh -lc \
                     'curl -LsSf https://astral.sh/uv/install.sh | sh' >&2; then
                 installed_uv=1
             fi
@@ -236,7 +249,7 @@ lumen_update_require_runtime_cmd() {
             # uv installer 默认装到 ~/.local/bin，但有些环境 .profile 还没更新；
             # 直接尝试常见路径作为兜底。
             local home_dir
-            home_dir="$(lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc 'printf %s "${HOME}"' 2>/dev/null || true)"
+            home_dir="$(lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" sh -lc 'printf %s "${HOME}"' 2>/dev/null || true)"
             if [ -n "${home_dir}" ] && [ -x "${home_dir}/.local/bin/uv" ]; then
                 log_info "uv 自动安装完成：${home_dir}/.local/bin/uv"
                 printf '%s' "${home_dir}/.local/bin/uv"
@@ -246,7 +259,7 @@ lumen_update_require_runtime_cmd() {
         log_error "uv 自动安装失败或安装后仍不可达。"
     fi
 
-    log_error "缺少 ${cmd}，或运行用户 ${LUMEN_UPDATE_RUN_USER} 无法访问。"
+    log_error "缺少 ${cmd}，或构建用户 ${LUMEN_UPDATE_EXEC_USER} 无法访问。"
     log_error "${hint}"
     return 1
 }
@@ -527,11 +540,10 @@ fi
 lumen_step_end link_shared 0
 
 # link_shared 的 mkdir -p 是以 root 身份创建父目录（如 apps/web/.next）。
-# 后续 build_web / deps_python 是以 runtime 用户跑的，会因为这些目录的
-# ownership 写不进 .next/trace 等中间文件。把整个 release 强制 chown 给
-# runtime 用户，幂等。
+# 后续 build_web / deps_python 由构建用户执行；把 release 先交给构建用户，
+# 发布切换前再按服务用户需要调整。
 if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
-    chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${NEW_RELEASE}" 2>/dev/null || true
+    chown -R "${LUMEN_UPDATE_EXEC_USER}:${LUMEN_UPDATE_EXEC_GROUP}" "${NEW_RELEASE}" 2>/dev/null || true
 fi
 if ! lumen_update_ensure_runtime_can_access_path "${NEW_RELEASE}/uv.toml" "uv 配置文件"; then
     lumen_step_end link_shared 1
@@ -652,6 +664,10 @@ if [ "${BUILD_RC}" -ne 0 ]; then
     exit "${BUILD_RC}"
 fi
 lumen_step_end build_web 0
+
+if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
+    chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${NEW_RELEASE}" 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 9: switch
