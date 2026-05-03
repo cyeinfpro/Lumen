@@ -136,6 +136,25 @@ SHOT_COMPOSITION_REQUIREMENTS = {
     ),
 }
 
+SHOT_ACTION_REQUIREMENTS = {
+    "front_full_body": (
+        "Action requirement: standing front-facing with a relaxed ecommerce pose, "
+        "arms naturally at the sides or lightly angled, clearly showing the garment front."
+    ),
+    "natural_pose": (
+        "Action requirement: natural walking or turning pose with gentle movement, "
+        "different from the front-facing main image, while keeping the garment readable."
+    ),
+    "detail_half_body": (
+        "Action requirement: half-body detail pose, one hand may lightly adjust cuff, "
+        "collar, pocket, or hem without covering key product details."
+    ),
+    "side_or_back": (
+        "Action requirement: side or back three-quarter pose, looking slightly away "
+        "or over shoulder, clearly showing side/back structure and length."
+    ),
+}
+
 TEMPLATE_LABELS = {
     "white_ecommerce": "白底电商图",
     "premium_studio": "高级灰棚拍",
@@ -149,13 +168,21 @@ def _template_requirement(template: str, product_analysis: dict[str, Any]) -> st
     return TEMPLATE_LABELS.get(template, template)
 
 
-def _showcase_prompt_brief(*, user_direction: str, template_direction: str) -> str:
+def _showcase_prompt_brief(
+    *,
+    user_direction: str,
+    template_direction: str,
+    model_consistency: str,
+    shot_direction: str,
+) -> str:
     direction_parts = [part for part in (user_direction.strip(), template_direction.strip()) if part]
     direction = "，".join(direction_parts) or "高级自然电商场景，动作自然"
     return (
         "请根据商品图和已确认模特参考图，生成真实自然的真人服饰电商穿搭图。"
         f"参考方向：{direction}。"
-        "可以是正面，也可以是侧面。"
+        "超写实，自然商业摄影风格，细节清晰，整体风格适合电商主图。"
+        f"{model_consistency}"
+        f"{shot_direction}"
         "保持商品服饰和模特参考一致，画面清晰干净，无文字、无水印。"
     )
 
@@ -285,6 +312,18 @@ def _dedupe_nonempty(values: Iterable[str]) -> list[str]:
         seen.add(v)
         out.append(v)
     return out
+
+
+def _showcase_reference_image_ids(
+    *,
+    product_image_ids: Iterable[str],
+    model_image_id: str | None,
+    selected_accessory_image_id: str | None,
+) -> list[str]:
+    product_or_accessory_ids = (
+        [selected_accessory_image_id] if selected_accessory_image_id else product_image_ids
+    )
+    return _dedupe_nonempty([*product_or_accessory_ids, model_image_id or ""])
 
 
 async def _validate_owned_images(
@@ -483,10 +522,26 @@ def _showcase_prompt(
     final_quality: str,
     user_prompt: str = "",
 ) -> str:
-    _ = selected_candidate, accessory_plan, shot_type, final_quality
+    _ = accessory_plan, final_quality
+    brief = selected_candidate.model_brief_json or {}
+    height_cm = brief.get("height_cm")
+    height_text = f"身高约 {height_cm}cm，" if isinstance(height_cm, int) else ""
+    model_consistency = (
+        "严格保持已确认模特参考图中的同一张脸、发型、肤色、年龄感、"
+        f"{height_text}身材比例、肢体长度、肩宽、腿长和整体体态一致，不要换人。"
+    )
+    shot_label = SHOT_LABELS.get(shot_type, shot_type)
+    shot_action = SHOT_ACTION_REQUIREMENTS.get(shot_type, "")
+    shot_composition = SHOT_COMPOSITION_REQUIREMENTS.get(shot_type, "")
+    shot_direction = (
+        f"本张镜头：{shot_label}。{shot_action} {shot_composition} "
+        "This shot must use a distinct pose/action from the other generated showcase images. "
+    )
     return _showcase_prompt_brief(
         user_direction=user_prompt,
         template_direction=_template_requirement(template, product_analysis),
+        model_consistency=model_consistency,
+        shot_direction=shot_direction,
     )
 
 
@@ -2135,12 +2190,12 @@ async def create_showcase_images(
     if not isinstance(accessory_plan, dict):
         accessory_plan = AccessoryPlanIn().model_dump()
     selected_accessory_image_id = (approval.input_json or {}).get("selected_accessory_image_id")
-    ref_ids = _dedupe_nonempty(
-        [
-            *run.product_image_ids,
-            candidate.contact_sheet_image_id,
-            selected_accessory_image_id if isinstance(selected_accessory_image_id, str) else "",
-        ]
+    ref_ids = _showcase_reference_image_ids(
+        product_image_ids=run.product_image_ids,
+        model_image_id=candidate.contact_sheet_image_id,
+        selected_accessory_image_id=(
+            selected_accessory_image_id if isinstance(selected_accessory_image_id, str) else None
+        ),
     )
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
