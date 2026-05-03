@@ -21,6 +21,7 @@ from aiogram.types import (
 )
 
 from ..api_client import ApiError, LumenApi
+from ._helpers import require_message
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -88,9 +89,12 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
     if len(parts) != 3:
         await cb.answer()
         return
+    msg = await require_message(cb)
+    if msg is None:
+        return
     gen_id = parts[2]
     try:
-        gen = await api.get_generation(cb.message.chat.id, gen_id)
+        gen = await api.get_generation(msg.chat.id, gen_id)
     except ApiError as exc:
         await cb.answer(f"读取任务失败：{exc.message}", show_alert=True)
         return
@@ -107,7 +111,7 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
         for idx, image_id in enumerate(image_ids):
             try:
                 path, mime, size = await api.download_image_to_file(
-                    cb.message.chat.id, image_id
+                    msg.chat.id, image_id
                 )
             except ApiError as exc:
                 logger.warning("task send: download failed gen=%s img=%s err=%s", gen_id, image_id, exc)
@@ -121,7 +125,7 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
         sent_first = False
         for idx, (path, _mime, _size, filename) in enumerate(downloads):
             try:
-                await cb.message.answer_document(
+                await msg.answer_document(
                     document=FSInputFile(str(path), filename=filename),
                     caption=caption if idx == 0 else None,
                 )
@@ -129,7 +133,7 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("task send: document failed gen=%s err=%r", gen_id, exc)
         if not sent_first:
-            await cb.message.answer("⚠️ 全部图片下载失败，请稍后再试。")
+            await msg.answer("⚠️ 全部图片下载失败，请稍后再试。")
     finally:
         for path, *_ in downloads:
             try:

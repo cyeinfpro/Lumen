@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Message
 
 from ..keyboards import DEFAULT_PARAMS, main_menu, render_params_summary
 from ..states import GenFlow
+from ._helpers import require_message
 
 router = Router()
 
@@ -44,6 +45,9 @@ async def on_cfg(cb: CallbackQuery, state: FSMContext) -> None:
     if len(parts) < 2:
         await cb.answer()
         return
+    msg = await require_message(cb)
+    if msg is None:
+        return
     action = parts[1]
     data = await state.get_data()
     params = dict(data.get("params") or DEFAULT_PARAMS)
@@ -51,7 +55,7 @@ async def on_cfg(cb: CallbackQuery, state: FSMContext) -> None:
     if action == "start":
         await state.set_state(GenFlow.awaiting_prompt)
         await state.update_data(params=params)
-        await cb.message.edit_text(
+        await msg.edit_text(
             f"📝 现在发送你的 prompt（中英文均可）。\n\n{render_params_summary(params)}"
         )
         await cb.answer("等待 prompt…")
@@ -59,7 +63,7 @@ async def on_cfg(cb: CallbackQuery, state: FSMContext) -> None:
 
     if action == "cancel":
         await state.clear()
-        await cb.message.edit_text("已取消。/new 重新开始。")
+        await msg.edit_text("已取消。/new 重新开始。")
         await cb.answer()
         return
 
@@ -74,7 +78,7 @@ async def on_cfg(cb: CallbackQuery, state: FSMContext) -> None:
     params[field] = _coerce(field, raw_value)
     await state.update_data(params=params)
     try:
-        await cb.message.edit_text(
+        await msg.edit_text(
             f"生成参数\n{render_params_summary(params)}\n\n"
             "选好后点「开始生成」，再发送你的 prompt。",
             reply_markup=main_menu(params),

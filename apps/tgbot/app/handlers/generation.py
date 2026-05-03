@@ -20,6 +20,7 @@ from ..api_client import ApiError, LumenApi
 from ..keyboards import DEFAULT_PARAMS, enhance_choice_keyboard, render_params_summary
 from ..states import GenFlow
 from ..tracker import TaskTrack, tracker
+from ._helpers import require_message
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -131,6 +132,10 @@ async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
 @router.callback_query(GenFlow.confirming_enhanced, F.data.startswith("enh:"))
 async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi) -> None:
     choice = (cb.data or "").split(":", 1)[1] if cb.data else ""
+    msg = await require_message(cb)
+    if msg is None:
+        await state.clear()
+        return
     data = await state.get_data()
     original = str(data.get("original_prompt") or "")
     enhanced = str(data.get("enhanced_prompt") or "")
@@ -139,7 +144,7 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
     if choice == "cancel":
         await state.clear()
         try:
-            await cb.message.edit_reply_markup(reply_markup=None)
+            await msg.edit_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001
             pass
         await cb.answer("已取消")
@@ -148,14 +153,14 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
     if choice == "edit":
         # 进入手动编辑：先把按钮去掉避免重复点；再发一条单独的 message 让用户复制
         try:
-            await cb.message.edit_reply_markup(reply_markup=None)
+            await msg.edit_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001
             pass
         await state.set_state(GenFlow.editing_enhanced)
         # 单独一条只含优化文本的消息，方便长按 → 复制
         if enhanced:
-            await cb.message.answer(enhanced)
-        await cb.message.answer(
+            await msg.answer(enhanced)
+        await msg.answer(
             "✏️ 把改好的 prompt 发回来。\n（直接发送一条新消息即可；/cancel 放弃）"
         )
         await cb.answer()
@@ -169,12 +174,12 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
 
     # 去掉按钮避免重复点击
     try:
-        await cb.message.edit_reply_markup(reply_markup=None)
+        await msg.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
         pass
 
     await _submit_generation(
-        cb.message.chat.id, prompt, params, api, cb.message.answer
+        msg.chat.id, prompt, params, api, msg.answer
     )
     await state.clear()
     await cb.answer("已提交")
