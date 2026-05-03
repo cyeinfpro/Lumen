@@ -120,6 +120,9 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const accessoryImages = (approvalStep?.image_ids ?? [])
     .map((imageId) => imageById(workflow, imageId))
     .filter((image): image is BackendImageMeta => Boolean(image));
+  const accessoryPreviewRunning =
+    createAccessoryPreviews.isPending ||
+    (approvalStep?.status === "running" && (approvalStep.task_ids?.length ?? 0) > 0);
 
   const openPreview = (image: BackendImageMeta, list: BackendImageMeta[], index: number) => {
     setPreviewList(list);
@@ -238,13 +241,22 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             <Button
               variant="secondary"
               loading={createAccessoryPreviews.isPending}
-              disabled={!selectedCandidate || createAccessoryPreviews.isPending}
+              disabled={!selectedCandidate || accessoryPreviewRunning}
               onClick={generateAccessoryPreview}
             >
-              {accessoryImages.length > 0 ? "再生成配饰四宫格" : "生成配饰四宫格"}
+              {accessoryPreviewRunning
+                ? "配饰图生成中"
+                : accessoryImages.length > 0
+                  ? "再生成配饰四宫格"
+                  : "生成配饰四宫格"}
             </Button>
           </div>
-          {accessoryImages.length > 0 ? (
+          {accessoryPreviewRunning ? (
+            <RunningState
+              label="系统正在生成配饰四宫格，完成后会自动载入"
+              className="h-40"
+            />
+          ) : accessoryImages.length > 0 ? (
             <SelectableImageGrid
               images={accessoryImages}
               selectedImageId={selectedAccessoryImageId}
@@ -257,6 +269,8 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               }}
               onPreview={(image, index) => openPreview(image, accessoryImages, index)}
             />
+          ) : selectedCandidate ? (
+            <RunningState label="配饰图尚未生成，点击上方按钮开始生成" />
           ) : (
             <RunningState label="确认模特后可生成配饰四宫格" />
           )}

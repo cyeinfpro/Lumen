@@ -373,28 +373,23 @@ export function ApparelWorkflowNewPage() {
   return (
     <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)]">
       <OnlineBanner />
-      <ProjectTopBar
-        leadingSlot={
-          <Link
-            href="/projects"
-            className="inline-flex items-center gap-1 truncate text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)]"
-          >
-            项目 / 新建
-          </Link>
-        }
-      />
+      <ProjectTopBar />
 
       <main className="flex-1 overflow-y-auto px-4 py-5 md:px-8">
         <div className="mx-auto grid max-w-[1120px] gap-5 lg:grid-cols-[1fr_320px]">
           <section className="space-y-5">
             <div>
-              <Link
-                href="/projects"
-                className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-2)] hover:text-[var(--fg-0)]"
-              >
-                <ArrowLeft className="h-4 w-4" />
-                返回项目列表
-              </Link>
+              <nav aria-label="项目路径" className="flex items-center gap-1.5 text-sm">
+                <Link
+                  href="/projects"
+                  className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  项目
+                </Link>
+                <span aria-hidden className="text-[var(--fg-3)]">/</span>
+                <span className="text-[var(--fg-0)]">新建</span>
+              </nav>
               <h1 className="mt-3 text-[26px] font-semibold tracking-normal md:text-[32px]">
                 新建服饰模特展示图
               </h1>
