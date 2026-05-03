@@ -282,12 +282,18 @@ rsync_repo_to_release() {
     fi
     rsync -a \
         --exclude='/.git/' \
+        --exclude='/shared/' \
+        --exclude='/releases/' \
+        --exclude='/current' \
+        --exclude='/previous' \
         --exclude='/node_modules/' \
         --exclude='/.venv/' \
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/node_modules/' \
         --exclude='/apps/worker/var/' \
         --exclude='/var/' \
+        --exclude='/.lumen-script.lock/' \
+        --exclude='/.update.log' \
         "${src}/" "${dst}/"
 }
 
@@ -493,11 +499,16 @@ fi
 # ---------------------------------------------------------------------------
 emit_start fetch_release
 
-# 仓库镜像目录：默认 ROOT 本身就是仓库（install.sh 部署的发布物已含 scripts/）。
-# 如果 LUMEN_REPO_DIR 显式指定，优先采用。
-REPO_DIR="${LUMEN_REPO_DIR:-${ROOT}}"
-if [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}/.git" ] && [ -z "${LUMEN_REPO_DIR:-}" ]; then
+# 发布物来源目录：
+#   - LUMEN_REPO_DIR 显式指定时优先采用；
+#   - 标准 release 布局下从 current release 复制，确保新 release 根部有 docker-compose.yml；
+#   - 旧 in-place / 开发仓库下才从 ROOT 复制。
+if [ -n "${LUMEN_REPO_DIR:-}" ]; then
+    REPO_DIR="${LUMEN_REPO_DIR}"
+elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then
     REPO_DIR="${CURRENT_RELEASE}"
+else
+    REPO_DIR="${ROOT}"
 fi
 emit_info fetch_release repo_dir "${REPO_DIR}"
 
@@ -508,30 +519,29 @@ if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
         exit 1
     fi
     if [ ! -d "${REPO_DIR}/.git" ]; then
-        log_error "[fetch_release] ${REPO_DIR} 不是 git 仓库，无法 git pull。"
-        emit_fail fetch_release 1
-        exit 1
-    fi
-    GIT_REF="${LUMEN_UPDATE_GIT_REF:-}"
-    log_info "[fetch_release] git fetch in ${REPO_DIR}"
-    if ! ( cd "${REPO_DIR}" && git fetch --quiet --all --prune ); then
-        log_error "[fetch_release] git fetch 失败。"
-        emit_fail fetch_release 1
-        exit 1
-    fi
-    if [ -n "${GIT_REF}" ]; then
-        if ! ( cd "${REPO_DIR}" && git checkout --quiet "${GIT_REF}" ); then
-            log_error "[fetch_release] git checkout ${GIT_REF} 失败。"
+        log_warn "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续。"
+    else
+        GIT_REF="${LUMEN_UPDATE_GIT_REF:-}"
+        log_info "[fetch_release] git fetch in ${REPO_DIR}"
+        if ! ( cd "${REPO_DIR}" && git fetch --quiet --all --prune ); then
+            log_error "[fetch_release] git fetch 失败。"
             emit_fail fetch_release 1
             exit 1
         fi
-    else
-        # 默认 fast-forward 当前分支
-        local local_branch
-        local_branch="$(cd "${REPO_DIR}" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-        if [ -n "${local_branch}" ] && [ "${local_branch}" != "HEAD" ]; then
-            ( cd "${REPO_DIR}" && git pull --ff-only --quiet ) || \
-                log_warn "[fetch_release] git pull --ff-only 失败（可能已 detached），忽略。"
+        if [ -n "${GIT_REF}" ]; then
+            if ! ( cd "${REPO_DIR}" && git checkout --quiet "${GIT_REF}" ); then
+                log_error "[fetch_release] git checkout ${GIT_REF} 失败。"
+                emit_fail fetch_release 1
+                exit 1
+            fi
+        else
+            # 默认 fast-forward 当前分支
+            local local_branch
+            local_branch="$(cd "${REPO_DIR}" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+            if [ -n "${local_branch}" ] && [ "${local_branch}" != "HEAD" ]; then
+                ( cd "${REPO_DIR}" && git pull --ff-only --quiet ) || \
+                    log_warn "[fetch_release] git pull --ff-only 失败（可能已 detached），忽略。"
+            fi
         fi
     fi
 fi

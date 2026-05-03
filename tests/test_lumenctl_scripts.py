@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -96,6 +97,11 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     assert 'lumen_release_ensure_shared_env "${ROOT}"' in text
     # docker cutover：fetch_release 阶段改 rsync REPO_DIR -> NEW_RELEASE
     assert "rsync_repo_to_release" in text
+    assert 'elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then' in text
+    assert 'REPO_DIR="${CURRENT_RELEASE}"' in text
+    assert 'LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续' in text
+    assert "--exclude='/releases/'" in text
+    assert "--exclude='/shared/'" in text
     # release/.env 是 -> shared/.env 的 symlink，docker compose 自动识别
     assert 'ln -sfn "${SHARED_ENV}" "${NEW_RELEASE}/.env"' in text
     # 切换走 atomic switch helper
@@ -537,6 +543,47 @@ def test_runtime_dir_check_uses_systemd_service_user(tmp_path: Path) -> None:
     assert "运行用户：lumen:lumen" in result.stdout
 
 
+def test_lumen_with_lock_falls_back_to_mkdir_when_flock_missing(tmp_path: Path) -> None:
+    lock_root = tmp_path / "backup"
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        command() {{
+          if [ "$1" = "-v" ] && [ "${{2:-}}" = "flock" ]; then
+            return 1
+          fi
+          builtin command "$@"
+        }}
+        LUMEN_BACKUP_ROOT={lock_root}
+        lumen_with_lock update-test 30 bash -c 'printf locked'
+        test ! -d {lock_root / ".lumen-update.lock.d"}
+        """
+    )
+    assert result.stdout == "locked"
+
+
+def test_lumen_with_lock_mkdir_busy_returns_operation_busy(tmp_path: Path) -> None:
+    lock_root = tmp_path / "backup"
+    (lock_root / ".lumen-update.lock.d").mkdir(parents=True)
+
+    result = run_bash(
+        f"""
+        . {LIB}
+        command() {{
+          if [ "$1" = "-v" ] && [ "${{2:-}}" = "flock" ]; then
+            return 1
+          fi
+          builtin command "$@"
+        }}
+        LUMEN_BACKUP_ROOT={lock_root}
+        lumen_with_lock update-test 30 true
+        """
+    )
+
+    assert result.returncode == 75
+    assert '"code":"system_operation_busy"' in result.stdout
+
+
 def test_lumenctl_help_lists_every_documented_command() -> None:
     result = subprocess.run(
         ["bash", str(LUMENCTL), "help"],
@@ -596,7 +643,7 @@ def test_lumenctl_direct_commands_dispatch_to_expected_handlers() -> None:
     result = assert_bash_ok(
         f"""
         . {LUMENCTL}
-        run_lumen_script() {{ printf 'run_lumen_script:%s\\n' "$1"; }}
+        run_lumen_script() {{ printf 'run_lumen_script:%s %s\\n' "$1" "${{*:2}}"; }}
         install_image_job() {{ printf 'install_image_job\\n'; }}
         uninstall_image_job() {{ printf 'uninstall_image_job\\n'; }}
         nginx_scan() {{ printf 'nginx_scan\\n'; }}
@@ -622,9 +669,9 @@ def test_lumenctl_direct_commands_dispatch_to_expected_handlers() -> None:
         """
     )
     assert result.stdout.splitlines() == [
-        "run_lumen_script:install.sh",
-        "run_lumen_script:update.sh",
-        "run_lumen_script:uninstall.sh",
+        "run_lumen_script:install.sh --install",
+        "run_lumen_script:update.sh ",
+        "run_lumen_script:uninstall.sh ",
         "install_image_job",
         "uninstall_image_job",
         "nginx_scan",
@@ -650,7 +697,7 @@ def test_lumenctl_interactive_menu_dispatches_all_numbered_options() -> None:
           fi
           printf '%s' "${{reply:-$default}}"
         }}
-        run_lumen_script() {{ printf 'run_lumen_script:%s\\n' "$1"; }}
+        run_lumen_script() {{ printf 'run_lumen_script:%s %s\\n' "$1" "${{*:2}}"; }}
         install_image_job() {{ printf 'install_image_job\\n'; }}
         uninstall_image_job() {{ printf 'uninstall_image_job\\n'; }}
         nginx_scan() {{ printf 'nginx_scan\\n'; }}
@@ -665,14 +712,267 @@ def test_lumenctl_interactive_menu_dispatches_all_numbered_options() -> None:
         if line.startswith(("run_lumen_script:", "install_image_job", "uninstall_image_job", "nginx_"))
     ]
     assert dispatch_lines == [
-        "run_lumen_script:install.sh",
-        "run_lumen_script:update.sh",
-        "run_lumen_script:uninstall.sh",
+        "run_lumen_script:install.sh --install",
+        "run_lumen_script:update.sh ",
+        "run_lumen_script:uninstall.sh ",
         "install_image_job",
         "uninstall_image_job",
         "nginx_scan",
         "nginx_optimize",
     ]
+
+
+def test_lumenctl_install_lumen_preserves_explicit_install_flag() -> None:
+    result = assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        run_lumen_script() {{ printf 'run_lumen_script:%s %s\\n' "$1" "${{*:2}}"; }}
+
+        main install-lumen --image-tag=main
+        main install-lumen --install --image-tag=main
+        """
+    )
+
+    assert result.stdout.splitlines() == [
+        "run_lumen_script:install.sh --install --image-tag=main",
+        "run_lumen_script:install.sh --install --image-tag=main",
+    ]
+
+
+def test_lumenctl_install_update_uninstall_smoke_with_fake_docker(tmp_path: Path) -> None:
+    """
+    Runs the real lumenctl -> install.sh / update.sh / uninstall.sh entrypoints
+    against a temp release layout with fake docker/curl/sudo functions. This
+    verifies the one-click control flow without touching the host daemon or /opt.
+    """
+    sim_root = tmp_path / "sim"
+    deploy_root = sim_root / "deploy"
+    data_root = sim_root / "data"
+    log_dir = sim_root / "logs"
+    fakebin = sim_root / "fakebin"
+    log_dir.mkdir(parents=True)
+    fakebin.mkdir(parents=True)
+
+    (fakebin / "docker").write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\\n' "$*" >> "${LOG_DIR}/docker.log"
+if [ "$#" -ge 1 ] && [ "$1" = "--version" ]; then
+  printf 'Docker version 26.0.0, build fake\\n'
+  exit 0
+fi
+if [ "$#" -ge 2 ] && [ "$1" = "compose" ] && [ "$2" = "version" ]; then
+  printf 'Docker Compose version v2.27.0\\n'
+  exit 0
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "info" ]; then
+  exit 0
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
+  shift
+  [ "${1:-}" = "--ansi=never" ] && shift
+  if [ "${1:-}" = "ps" ]; then
+    svc="${*: -1}"
+    printf 'cid-%s\\n' "${svc}"
+    exit 0
+  fi
+  exit 0
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "inspect" ]; then
+  printf 'healthy\\n'
+  exit 0
+fi
+if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "prune" ]; then
+  exit 0
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "ps" ]; then
+  exit 0
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "rm" ]; then
+  exit 0
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "cp" ]; then
+  dest="${*: -1}"
+  mkdir -p "$(dirname "${dest}")"
+  printf 'redis-dump\\n' > "${dest}"
+  exit 0
+fi
+if [ "$#" -ge 1 ] && [ "$1" = "exec" ]; then
+  args="$*"
+  case "${args}" in
+    *redis-cli*LASTSAVE*)
+      sed -n 's/^lastsave=//p' "${TEST_DOCKER_STATE}" | tail -n1
+      exit 0
+      ;;
+    *redis-cli*BGSAVE*)
+      printf 'lastsave=2\\n' > "${TEST_DOCKER_STATE}"
+      printf 'Background saving started\\n'
+      exit 0
+      ;;
+    *redis-cli*)
+      printf 'OK\\n'
+      exit 0
+      ;;
+    *pg_dump*)
+      printf 'fake pg dump\\n'
+      exit 0
+      ;;
+  esac
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    (fakebin / "curl").write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+original="$*"
+printf 'curl %s\\n' "${original}" >> "${LOG_DIR}/curl.log"
+case "${original}" in
+  *api.github.com/repos/cyeinfpro/Lumen/releases/latest*)
+    printf '{"tag_name":"main"}\\n'
+    exit 0
+    ;;
+  *ghcr.io/token*)
+    printf '{"token":"fake"}\\n'
+    exit 0
+    ;;
+esac
+out=""
+write_code=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w)
+      write_code="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [ -n "${out}" ] && [ "${out}" != "/dev/null" ]; then
+  printf '{"tags":["latest","main","old"]}\\n' > "${out}"
+fi
+if [ -n "${write_code}" ]; then
+  printf '200'
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    (fakebin / "sudo").write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = "-n" ] && shift
+if [ "${1:-}" = "-u" ]; then
+  shift 2
+fi
+case "${1:-}" in
+  chown)
+    exit 0
+    ;;
+  chmod)
+    shift
+    command chmod "$@" 2>/dev/null || true
+    exit 0
+    ;;
+  mkdir|rm|ln|mv|cp)
+    command "$@"
+    ;;
+  docker)
+    shift
+    docker "$@"
+    ;;
+  *)
+    command "$@"
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    (fakebin / "systemctl").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    (fakebin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    for path in fakebin.iterdir():
+        path.chmod(0o755)
+
+    script = f"""
+    set -euo pipefail
+    SIM_ROOT={shlex.quote(str(sim_root))}
+    DEPLOY_ROOT={shlex.quote(str(deploy_root))}
+    DATA_ROOT={shlex.quote(str(data_root))}
+    LOG_DIR={shlex.quote(str(log_dir))}
+    export LOG_DIR
+    : > "${{LOG_DIR}}/docker.log"
+    : > "${{LOG_DIR}}/curl.log"
+    export TEST_DOCKER_STATE="${{SIM_ROOT}}/docker-state"
+    mkdir -p "${{SIM_ROOT}}"
+    printf 'lastsave=1\\n' > "${{TEST_DOCKER_STATE}}"
+    export PATH={shlex.quote(str(fakebin))}:$PATH
+
+    export LUMEN_DEPLOY_ROOT="${{DEPLOY_ROOT}}"
+    export LUMEN_DATA_ROOT="${{DATA_ROOT}}"
+    export LUMEN_NONINTERACTIVE=1
+    export LUMEN_ADMIN_EMAIL=admin@example.com
+    export LUMEN_ADMIN_PASSWORD=password123456
+    export LUMEN_HEALTH_COMPOSE_ATTEMPTS=1
+    export LUMEN_HEALTH_COMPOSE_INTERVAL=1
+    export LUMEN_RELEASE_KEEP=3
+    export LUMEN_BACKUP_RESTORE_LOCKFILE="${{DATA_ROOT}}/backup/backup-restore.lock"
+    export LUMEN_BACKUP_ROOT="${{DATA_ROOT}}/backup"
+
+    bash scripts/lumenctl.sh install-lumen --image-tag=old > "${{LOG_DIR}}/install.out" 2> "${{LOG_DIR}}/install.err"
+    test -L "${{DEPLOY_ROOT}}/current"
+    test -f "${{DEPLOY_ROOT}}/current/docker-compose.yml"
+    test -f "${{DEPLOY_ROOT}}/shared/.env"
+    grep -q '^LUMEN_IMAGE_TAG=old$' "${{DEPLOY_ROOT}}/shared/.env"
+
+    if grep -q '^LUMEN_UPDATE_CHANNEL=' "${{DEPLOY_ROOT}}/shared/.env"; then
+      sed -i.bak 's/^LUMEN_UPDATE_CHANNEL=.*/LUMEN_UPDATE_CHANNEL=main/' "${{DEPLOY_ROOT}}/shared/.env"
+      rm -f "${{DEPLOY_ROOT}}/shared/.env.bak"
+    else
+      printf 'LUMEN_UPDATE_CHANNEL=main\\n' >> "${{DEPLOY_ROOT}}/shared/.env"
+    fi
+
+    LUMEN_UPDATE_GIT_PULL=1 bash "${{DEPLOY_ROOT}}/current/scripts/lumenctl.sh" update-lumen > "${{LOG_DIR}}/update.out" 2> "${{LOG_DIR}}/update.err"
+    test -L "${{DEPLOY_ROOT}}/current"
+    test -f "${{DEPLOY_ROOT}}/current/docker-compose.yml"
+    grep -q '^LUMEN_IMAGE_TAG=main$' "${{DEPLOY_ROOT}}/shared/.env"
+    test "$(find "${{DEPLOY_ROOT}}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -ge 2
+    grep -q '不是 git 仓库；使用当前发布物快照继续' "${{LOG_DIR}}/update.err"
+    grep -q 'phase=migrate_db status=done' "${{LOG_DIR}}/update.out"
+    grep -q 'phase=restart_services status=done' "${{LOG_DIR}}/update.out"
+    grep -q 'phase=health_check status=done' "${{LOG_DIR}}/update.out"
+
+    LUMEN_UNINSTALL_NONINTERACTIVE=1 bash "${{DEPLOY_ROOT}}/current/scripts/lumenctl.sh" uninstall-lumen > "${{LOG_DIR}}/uninstall.out" 2> "${{LOG_DIR}}/uninstall.err"
+    grep -q '卸载总结' "${{LOG_DIR}}/uninstall.out"
+    grep -q '已 docker compose down 主栈' "${{LOG_DIR}}/uninstall.out"
+    """
+
+    result = run_bash(script)
+
+    def _maybe_log(name: str) -> str:
+        path = log_dir / name
+        if not path.exists():
+            return f"\n{name}: <missing>\n"
+        return f"\n{name}:\n" + path.read_text(encoding="utf-8", errors="replace")
+
+    assert result.returncode == 0, (
+        result.stderr
+        + result.stdout
+        + _maybe_log("install.out")
+        + _maybe_log("install.err")
+        + _maybe_log("update.out")
+        + _maybe_log("update.err")
+        + _maybe_log("uninstall.out")
+        + _maybe_log("uninstall.err")
+        + _maybe_log("docker.log")
+    )
 
 
 def test_lumenctl_validators_reject_unsafe_values() -> None:

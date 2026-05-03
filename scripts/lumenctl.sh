@@ -416,6 +416,17 @@ run_lumen_script() {
     esac
 }
 
+run_lumen_install_script() {
+    case "${1:-}" in
+        install|--install)
+            run_lumen_script install.sh "$@"
+            ;;
+        *)
+            run_lumen_script install.sh --install "$@"
+            ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Docker compose helpers（cutover plan §17 / §24）
 # lib.sh 已提供 lumen_compose / lumen_compose_in（注入 COMPOSE_PROJECT_NAME=lumen，§11.4）。
@@ -1767,7 +1778,7 @@ EOF
         local choice
         choice="$(read_or_default '请选择' '0')"
         case "${choice}" in
-            1) run_lumen_script install.sh ;;
+            1) run_lumen_install_script ;;
             2) run_lumen_script update.sh ;;
             3) run_lumen_script uninstall.sh ;;
             4) install_image_job ;;
@@ -1792,7 +1803,7 @@ main() {
     case "${command}" in
         menu) show_menu ;;
         # Lifecycle：透传额外 args 给底层脚本，install.sh / update.sh 可识别 --flag
-        install-lumen) run_lumen_script install.sh "$@" ;;
+        install-lumen) run_lumen_install_script "$@" ;;
         update-lumen) run_lumen_script update.sh "$@" ;;
         uninstall-lumen) run_lumen_script uninstall.sh "$@" ;;
         rollback) lumen_compose_rollback "$@" ;;
