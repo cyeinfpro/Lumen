@@ -222,8 +222,25 @@ text = text.replace("User=lumen", f"User={user}")
 text = text.replace("Group=lumen", f"Group={group}")
 text = text.replace("id -u lumen", f"id -u {user}")
 text = text.replace("id -g lumen", f"id -g {group}")
+if root == "/root" or root.startswith("/root/"):
+    text = text.replace("ProtectHome=true", "ProtectHome=false")
 Path(dst).write_text(text, encoding="utf-8")
 PY
+}
+
+lumen_update_dump_failed_unit_logs() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    command -v journalctl >/dev/null 2>&1 || return 0
+    local unit state
+    for unit in "$@"; do
+        state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+        if [ "${state}" = "active" ]; then
+            continue
+        fi
+        log_error "${unit} 当前状态：${state:-unknown}"
+        systemctl status "${unit}" --no-pager -l 2>/dev/null | tail -n 40 >&2 || true
+        journalctl -u "${unit}" -n "${LUMEN_SYSTEMD_LOG_TAIL_LINES:-80}" --no-pager 2>/dev/null >&2 || true
+    done
 }
 
 lumen_update_sync_systemd_units() {
@@ -772,6 +789,7 @@ if [ "${LUMEN_UPDATE_SYSTEMD_RUNTIME}" = "1" ]; then
     fi
     if ! lumen_restart_systemd_units "${LUMEN_RESTART_UNITS[@]}"; then
         log_error "[restart] systemctl restart 失败"
+        lumen_update_dump_failed_unit_logs "${LUMEN_RESTART_UNITS[@]}"
         lumen_step_end restart 1
         exit 1
     fi
