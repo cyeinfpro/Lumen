@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,12 @@ _STAGE_LABELS = {
 # 同 gen_id 5s 内最多 edit 一次进度，防 TG flood limit。终态事件（succeeded/failed）
 # 不受节流，必发。
 _PROGRESS_THROTTLE_SEC = 5.0
-_PROGRESS_LAST_EDIT: dict[str, float] = {}
+# OrderedDict + LRU cap：每条 entry 是 (gen_id, last_edit_monotonic)。终态事件不进
+# 这个表（gen_id 在 tracker 走 _expire_tracker 自然清），但 progress 事件刷得快：
+# 每个 gen 至少一条；cap 兜底防长跑用户多累积导致进程内存泄漏。
+# 2000 entry × ~200 bytes ≈ 400 KB worst case，对 bot 进程毫无压力。
+_PROGRESS_CACHE_CAP = 2000
+_PROGRESS_LAST_EDIT: "OrderedDict[str, float]" = OrderedDict()
 
 # 跨 user 上限。每个 user worker 内部已经串行；这个 sem 限的是多 user 同时
 # 大批量收尾时打 TG 的并发上限。
@@ -107,7 +113,12 @@ def _should_throttle_progress(gen_id: str) -> bool:
     last = _PROGRESS_LAST_EDIT.get(gen_id, 0.0)
     if now - last < _PROGRESS_THROTTLE_SEC:
         return True
+    # LRU 写入：先 pop 再插入末尾保证最新使用 → 末尾。超 cap 从头部剔除最旧。
+    if gen_id in _PROGRESS_LAST_EDIT:
+        _PROGRESS_LAST_EDIT.move_to_end(gen_id)
     _PROGRESS_LAST_EDIT[gen_id] = now
+    while len(_PROGRESS_LAST_EDIT) > _PROGRESS_CACHE_CAP:
+        _PROGRESS_LAST_EDIT.popitem(last=False)
     return False
 
 
