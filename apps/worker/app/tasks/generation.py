@@ -329,8 +329,12 @@ class _RedisSemaphore:
         if self._acquired:
             try:
                 await self.redis.decr(self.key)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # 不能 raise（aexit 链路），但必须看得见——否则 redis 抖动期间名额会持续
+                # 漏算（DECR 没成功）让后续 task 永远拿不到名额。
+                logger.warning(
+                    "redis sem decr failed key=%s err=%s", self.key, exc,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -524,12 +528,20 @@ async def _provider_active_count(redis: Any, provider_name: str) -> int:
     """Current in-flight task count for one provider after evicting stale
     entries (worker crash mid-flight). Cheap: O(log N) for the cleanup +
     O(1) for ZCARD.
+
+    On redis failure we return 0 so admission keeps moving instead of stalling
+    the queue, but log a warning—the previous silent fallback could over-admit
+    during a redis hiccup without leaving any trail.
     """
     key = _image_provider_active_key(provider_name)
     try:
         await redis.zremrangebyscore(key, "-inf", time.time())
         count = await redis.zcard(key)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "image queue active_count failed provider=%s err=%s",
+            provider_name, exc,
+        )
         return 0
     try:
         return int(count or 0)

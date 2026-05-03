@@ -2047,11 +2047,11 @@ async def _curl_post_multipart(
             form_args += ["-F", f"{k}={v}"]
         for field_name, (filename, raw, mime) in files:
             fd, tmp_path = tempfile.mkstemp(prefix="lumen_curl_", suffix=".bin")
+            tmpfiles.append(tmp_path)
             try:
                 await asyncio.to_thread(_write_bytes_file, fd, raw)
             finally:
                 os.close(fd)
-            tmpfiles.append(tmp_path)
             form_args += [
                 "-F",
                 f"{field_name}=@{tmp_path};filename={filename};type={mime}",
@@ -2209,34 +2209,13 @@ async def _iter_sse_curl(
     打日志 + 写 Prometheus。
     """
     trace_id = headers.get("x-trace-id") or _generate_trace_id()
+    # cancellation safe: body_path / proc 必须在第一个 await 之前就纳入 finally 守护范围。
+    # 否则 mkstemp 之后 / 主 try 之前任何 await 被 cancel（典型场景：4K 长任务 task_deadline
+    # 到期 raise TimeoutError）时，/tmp 会逐渐堆满孤儿 SSE body 临时文件、curl 子进程也会
+    # 没有人来 terminate。
     fd, body_path = tempfile.mkstemp(prefix="lumen_sse_body_", suffix=".json")
-    try:
-        await asyncio.to_thread(_write_json_body_file, fd, json_body)
-    finally:
-        os.close(fd)
-
-    header_args: list[str] = []
-    for k, v in headers.items():
-        header_args += ["-H", f"{k}: {v}"]
-    header_args += ["-H", "Content-Type: application/json"]
-    cmd = [
-        _CURL_BIN,
-        "-sS",
-        "-N",
-        "-i",  # 把 response headers 输出到 stdout 头部
-        *(["--proxy", proxy_url] if proxy_url else []),
-        *header_args,
-        "--data-binary",
-        f"@{body_path}",
-        url,
-    ]
+    proc: asyncio.subprocess.Process | None = None
     started = time.monotonic()
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    assert proc.stdout is not None
     # 上游响应头收集（用于 _log_upstream_call）。在解析 HTTP headers 行时填充。
     response_headers: dict[str, str] = {}
     final_status: int = 0
@@ -2329,6 +2308,35 @@ async def _iter_sse_curl(
         return b"".join(chunks)
 
     try:
+        # 0) 把 json body 落到 tmp 文件（curl --data-binary @path），并启动 curl 子进程。
+        #    这两个 await 之前的资源（fd / body_path）已经登记在最外层 finally 守护范围。
+        try:
+            await asyncio.to_thread(_write_json_body_file, fd, json_body)
+        finally:
+            os.close(fd)
+
+        header_args: list[str] = []
+        for k, v in headers.items():
+            header_args += ["-H", f"{k}: {v}"]
+        header_args += ["-H", "Content-Type: application/json"]
+        cmd = [
+            _CURL_BIN,
+            "-sS",
+            "-N",
+            "-i",  # 把 response headers 输出到 stdout 头部
+            *(["--proxy", proxy_url] if proxy_url else []),
+            *header_args,
+            "--data-binary",
+            f"@{body_path}",
+            url,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdout is not None
+
         # 1) 读状态行："HTTP/1.1 200 OK" / "HTTP/2 200"
         status_line = await next_line()
         if not status_line:
@@ -2443,7 +2451,8 @@ async def _iter_sse_curl(
     finally:
         # cancellation safe: 终止 curl 子进程 + 删除 tmp body file（在 except / 正常退出
         # 都生效）。即使外层 cancel 也保证不留僵尸进程 / 临时文件。
-        if proc.returncode is None:
+        # proc 可能为 None：mkstemp 之后到 create_subprocess_exec 之前被 cancel 时。
+        if proc is not None and proc.returncode is None:
             try:
                 proc.terminate()
             except Exception:
@@ -2459,6 +2468,12 @@ async def _iter_sse_curl(
                     await proc.wait()
                 except Exception:
                     pass
+        # fd 在主 try 段开头已经 close；但若 cancel 命中 _write_json_body_file 之前，
+        # fd 仍是打开状态——容错关一下（重复 close 抛 OSError 也吞掉，主要为防 fd 泄漏）。
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         try:
             os.unlink(body_path)
         except Exception:
