@@ -3,16 +3,18 @@
 import Link from "next/link";
 import { ArrowLeft, ChevronRight, PackageCheck, Shirt, Sparkles } from "lucide-react";
 
-import { DesktopTopNav } from "@/components/ui/shell";
+import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "@/components/ui/projects/components/ProjectTopBar";
 
 export default function NewProjectPage() {
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <DesktopTopNav active="projects" />
+    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
+      <ProjectMobileTopBar title="新建" subtitle="选择项目模板" backHref="/projects" />
+      <ProjectTopBar />
 
-      <main className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
+      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-6">
         <div className="mx-auto max-w-5xl">
-          <nav aria-label="项目路径" className="flex items-center gap-1.5 text-sm">
+          <nav aria-label="项目路径" className="hidden items-center gap-1.5 text-sm md:flex">
             <Link
               href="/projects"
               className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
@@ -23,11 +25,16 @@ export default function NewProjectPage() {
             <span aria-hidden className="text-[var(--fg-3)]">/</span>
             <span className="text-[var(--fg-0)]">模板</span>
           </nav>
-          <h1 className="mt-1 text-[26px] font-semibold tracking-normal md:text-[32px]">
-            新建项目
-          </h1>
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 shadow-[var(--shadow-1)] md:mt-0 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none">
+            <h1 className="text-[26px] font-semibold tracking-normal md:mt-1 md:text-[32px]">
+              新建项目
+            </h1>
+            <p className="mt-1 text-sm leading-6 text-[var(--fg-2)]">
+              选择一个可复用工作流，后续项目会沿用同一套导航、筛选和交付节奏。
+            </p>
+          </div>
 
-          <div className="mt-5 grid gap-3 md:grid-cols-3">
+          <div className="mt-4 grid gap-3 md:mt-5 md:grid-cols-3">
             <TemplateLink
               href="/projects/apparel-model-showcase/new"
               title="服饰模特展示图"
@@ -48,6 +55,7 @@ export default function NewProjectPage() {
           </div>
         </div>
       </main>
+      <ProjectMobileTabBar />
     </div>
   );
 }
@@ -85,9 +93,9 @@ function TemplateLink({
   );
 
   const className = [
-    "min-h-44 rounded-md border p-4 text-left transition-colors",
+    "min-h-44 rounded-xl border p-4 text-left transition-[background-color,border-color,opacity] md:rounded-md",
     active
-      ? "border-[var(--border-amber)] bg-[var(--accent-soft)] hover:bg-[var(--accent-soft)]/80"
+      ? "cursor-pointer border-[var(--border-amber)] bg-[var(--accent-soft)] hover:bg-[var(--accent-soft)]/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
       : "border-[var(--border)] bg-white/[0.025] opacity-70",
   ].join(" ");
 

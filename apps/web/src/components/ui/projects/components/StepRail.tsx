@@ -123,9 +123,27 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
 // 移动版横向条：上下箭头 + chip 列表 + 简化连接线。
 export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
   const currentIndex = STEP_INDEX[workflow.current_step] ?? 0;
+  const progress = workflowProgress(workflow);
   return (
-    <div className="-mx-1 mb-4 lg:hidden">
-      <div className="scrollbar-none flex gap-2 overflow-x-auto px-1 pb-1">
+    <div className="mb-4 rounded-xl border border-[var(--border)] bg-white/[0.028] p-3 lg:hidden">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[11px] tracking-[0.16em] text-[var(--fg-2)]">闭环进度</p>
+          <p className="mt-1 text-sm font-medium text-[var(--fg-0)]">
+            {currentIndex + 1} / {STEPS.length}
+          </p>
+        </div>
+        <span className="font-mono text-[18px] text-[var(--amber-300)]">
+          {Math.round(progress * 100)}%
+        </span>
+      </div>
+      <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/[0.06]">
+        <div
+          className="h-full rounded-full bg-[var(--accent)] shadow-[var(--shadow-amber)] transition-[width] duration-[var(--dur-slow)] ease-out"
+          style={{ width: `${progress * 100}%` }}
+        />
+      </div>
+      <div className="scrollbar-none -mx-1 mt-3 flex gap-2 overflow-x-auto px-1 pb-0.5">
         {STEPS.map((step, index) => {
           const isCurrent = workflow.current_step === step.key;
           const isPast = index < currentIndex;
@@ -134,7 +152,7 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
             <span
               key={step.key}
               className={cn(
-                "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors",
+                "inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors",
                 isCurrent
                   ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                   : isPast
