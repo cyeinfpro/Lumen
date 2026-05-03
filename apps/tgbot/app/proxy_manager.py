@@ -7,6 +7,9 @@
   manager 调 API report 失败 + 拿新 proxy URL → 直接 hot swap session._proxy →
   下一次 request 自动用新连接器
 - 全部 proxy 都试过仍失败时让原 exception 抛出，handler 层应该走静默重试或丢弃
+- 成功路径走 report_success：节流到 _SUCCESS_REPORT_INTERVAL_SEC（默认 60s）一次，
+  调 API 清服务端 cooldown + 清本进程 _failed_names。否则 _failed_names 单调增长，
+  长跑 bot 最终所有除当前外的代理都进黑名单，永不复活直到下次进程重启。
 
 注意：aiogram 的 AiohttpSession.proxy setter 内部会把 _should_reset_connector
 置 True，下一次 create_session() 会关闭旧的、用新参数重建。所以这一套整个
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -26,6 +30,9 @@ from aiohttp import ClientError
 from .api_client import ApiError, LumenApi
 
 logger = logging.getLogger(__name__)
+
+# 节流：成功上报最低间隔。TG bot QPS 远高于这个，没必要每发一条都打 API。
+_SUCCESS_REPORT_INTERVAL_SEC = 60.0
 
 
 def _normalize_proxy_url(url: str) -> str:
@@ -48,6 +55,8 @@ class ProxyManager:
         self._session: "FailoverSession | None" = None
         # bot 启动时缓存的 runtime-config 其它字段（token/username/whitelist 等）
         self.config: dict[str, Any] = {}
+        # 上次 report_success 的 monotonic 时间戳；0 = 从未上报
+        self._last_success_report: float = 0.0
 
     def attach(self, session: "FailoverSession") -> None:
         self._session = session
@@ -104,7 +113,15 @@ class ProxyManager:
             return True
 
     async def report_success(self) -> None:
-        """周期性清掉 failed 集，给曾经故障的代理重新进入候选的机会。"""
+        """周期性清掉 failed 集，给曾经故障的代理重新进入候选的机会。
+
+        节流到 _SUCCESS_REPORT_INTERVAL_SEC：FailoverSession 每个成功请求都会调用，
+        但实际打 API 最多每分钟一次，避免高频 TG 流量打爆 lumen-api。
+        """
+        now = time.monotonic()
+        if now - self._last_success_report < _SUCCESS_REPORT_INTERVAL_SEC:
+            return
+        self._last_success_report = now
         if self.current_name:
             try:
                 await self._api.report_proxy(self.current_name, success=True)
@@ -127,7 +144,7 @@ class FailoverSession(AiohttpSession):
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                return await super().make_request(bot, method, timeout=timeout)
+                result = await super().make_request(bot, method, timeout=timeout)
             except (TelegramNetworkError, ClientError) as exc:
                 last_exc = exc
                 logger.warning(
@@ -137,6 +154,13 @@ class FailoverSession(AiohttpSession):
                 swapped = await self._manager.failover()
                 if not swapped:
                     raise
+            else:
+                # 通路 OK：节流地通知 manager 清失败缓存。失败本身不影响主路径。
+                try:
+                    await self._manager.report_success()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("report_success ignored err=%r", exc)
+                return result
         # 极端情况：3 次仍失败
         if last_exc is not None:
             raise last_exc

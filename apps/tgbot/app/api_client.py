@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -20,6 +22,14 @@ import httpx
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+# 单进程并发下载上限：4K PNG 可能十几 MB。allow burst（status_message edit + image
+# fetch 同时多 task 并发）但又不至于把 socket / 磁盘 IO 排队卡死。
+_DOWNLOAD_CONCURRENCY = 4
+_download_sem = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
+
+# 下载前最低空闲磁盘门槛。低于此值直接拒绝下载，避免撑爆 /tmp 后整个 bot 崩。
+_MIN_FREE_DISK_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
 class ApiError(Exception):
@@ -145,31 +155,51 @@ class LumenApi:
 
         4K PNG 可能十几 MB，多张同时入内存会让 bot 进程吃满。落盘后用 FSInputFile
         发送，aiogram 内部自己读 + stream up。caller 发完务必 unlink()。
+
+        韧性保护：
+        - 全局 _download_sem 限并发，避免 batch 任务一次性下 16 张把 socket / IO 排满
+        - 下载前 shutil.disk_usage 检查 free，低于 _MIN_FREE_DISK_BYTES 直接拒绝，
+          避免把 /tmp 撑爆导致整个 bot 进程后续操作（FSM redis 写入 / 日志）连带崩
         """
         tmp_root = (settings.download_tmp_dir or "").strip() or tempfile.gettempdir()
         Path(tmp_root).mkdir(parents=True, exist_ok=True)
+        try:
+            usage = shutil.disk_usage(tmp_root)
+        except OSError as exc:
+            logger.warning("disk_usage check failed dir=%s err=%s", tmp_root, exc)
+        else:
+            if usage.free < _MIN_FREE_DISK_BYTES:
+                raise ApiError(
+                    code="disk_full",
+                    message=(
+                        f"临时目录空间不足（剩 {usage.free // (1024 * 1024)} MB），"
+                        "请稍后再试或联系管理员清理。"
+                    ),
+                    status=507,
+                )
         path = Path(tmp_root) / f"lumen-{image_id[:12]}-{uuid.uuid4().hex[:8]}.bin"
         size = 0
         mime = "image/jpeg"
-        try:
-            async with self._client.stream(
-                "GET",
-                f"/telegram/images/{image_id}/binary",
-                headers=self._hdr(chat_id),
-            ) as resp:
-                if not resp.is_success:
-                    await resp.aread()
-                    self._raise_for(resp)
-                mime = resp.headers.get("content-type", "image/jpeg")
-                with path.open("wb") as fp:
-                    async for chunk in resp.aiter_bytes():
-                        fp.write(chunk)
-                        size += len(chunk)
-        except Exception:
+        async with _download_sem:
             try:
-                if path.exists():
-                    path.unlink()
-            except OSError:
-                pass
-            raise
+                async with self._client.stream(
+                    "GET",
+                    f"/telegram/images/{image_id}/binary",
+                    headers=self._hdr(chat_id),
+                ) as resp:
+                    if not resp.is_success:
+                        await resp.aread()
+                        self._raise_for(resp)
+                    mime = resp.headers.get("content-type", "image/jpeg")
+                    with path.open("wb") as fp:
+                        async for chunk in resp.aiter_bytes():
+                            fp.write(chunk)
+                            size += len(chunk)
+            except Exception:
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+                raise
         return path, mime, size
