@@ -57,6 +57,9 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
   const [downloadState, setDownloadState] = useState<DownloadState | null>(null);
   const [linkShared, setLinkShared] = useState(false);
   const noticeTimerRef = useRef<number | null>(null);
+  // 一次性 setTimeout（download tail / linkShared reset）的句柄集合；unmount
+  // 统一清理，避免 React 19 strict mode 在 setState-on-unmounted 时 warn。
+  const transientTimersRef = useRef<Set<number>>(new Set());
   const createdLabel = safeDistanceToNow(data.created_at);
   const expiresLabel = data.expires_at
     ? safeFormat(data.expires_at, "yyyy-MM-dd HH:mm")
@@ -108,10 +111,15 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
   }, []);
 
   useEffect(() => {
+    const transientTimers = transientTimersRef.current;
     return () => {
       if (noticeTimerRef.current !== null) {
         window.clearTimeout(noticeTimerRef.current);
       }
+      for (const id of transientTimers) {
+        window.clearTimeout(id);
+      }
+      transientTimers.clear();
     };
   }, []);
 
@@ -158,11 +166,13 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
         kind: success ? "success" : "error",
         text: downloadResultText(result),
       });
-      window.setTimeout(() => {
+      const timerId = window.setTimeout(() => {
+        transientTimersRef.current.delete(timerId);
         setDownloadState((current) =>
           current?.imageId === image.id ? null : current,
         );
       }, 1700);
+      transientTimersRef.current.add(timerId);
     },
     [downloadState, isWeChat, showNotice],
   );
@@ -170,6 +180,13 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
   const handleShareLink = useCallback(async () => {
     if (typeof window === "undefined") return;
     const url = window.location.href;
+    const flashCopied = () => {
+      const timerId = window.setTimeout(() => {
+        transientTimersRef.current.delete(timerId);
+        setLinkShared(false);
+      }, 1600);
+      transientTimersRef.current.add(timerId);
+    };
     try {
       if (typeof navigator.share === "function") {
         await navigator.share({
@@ -182,7 +199,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
         await writeClipboardText(url);
         setLinkShared(true);
         showNotice({ kind: "success", text: "分享链接已复制" });
-        window.setTimeout(() => setLinkShared(false), 1600);
+        flashCopied();
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -190,7 +207,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
         await writeClipboardText(url);
         setLinkShared(true);
         showNotice({ kind: "success", text: "分享链接已复制" });
-        window.setTimeout(() => setLinkShared(false), 1600);
+        flashCopied();
       } catch {
         showNotice({ kind: "error", text: "复制失败" });
       }

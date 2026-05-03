@@ -11,7 +11,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowLeft, Check, ChevronDown, Loader2, MessageSquare, MoreVertical, PanelRightOpen, Pencil, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { Spinner } from "@/components/ui/primitives/Spinner";
@@ -152,7 +152,7 @@ function DetailHeader({
   const workflowTitle = workflow.title || "服饰模特展示图";
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(workflowTitle);
-  const [trackedWorkflowTitle, setTrackedWorkflowTitle] = useState(workflowTitle);
+  const trackedWorkflowTitleRef = useRef(workflowTitle);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const patch = usePatchWorkflowMutation({
@@ -170,10 +170,39 @@ function DetailHeader({
     },
     onError: (error) => toast.error(error.message || "删除失败"),
   });
-  if (!editing && trackedWorkflowTitle !== workflowTitle) {
-    setTrackedWorkflowTitle(workflowTitle);
+  // 上游 workflow.title 变化时把本地草稿同步过去；ref 替代之前 render 阶段
+  // setState 的 anti-pattern，React 19 strict mode 下会抛 warning。
+  // editing 时用户正在改，跳过覆盖，避免吞掉用户输入。
+  useEffect(() => {
+    if (editing) return;
+    if (trackedWorkflowTitleRef.current === workflowTitle) return;
+    trackedWorkflowTitleRef.current = workflowTitle;
     setTitle(workflowTitle);
-  }
+  }, [editing, workflowTitle]);
+
+  // menu 点外面关 + Esc 关
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointer = (event: PointerEvent) => {
+      if (!menuRef.current) return;
+      if (menuRef.current.contains(event.target as Node)) return;
+      setMenuOpen(false);
+      setConfirmDelete(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        setConfirmDelete(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
   const saveTitle = () => {
     const next = title.trim();
     if (!next) {
@@ -211,8 +240,16 @@ function DetailHeader({
               <input
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setTitle(workflowTitle);
+                    setEditing(false);
+                  }
+                }}
                 maxLength={120}
                 autoFocus
+                aria-label="项目名称"
                 className="h-10 min-w-0 max-w-[min(70vw,520px)] rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[20px] font-semibold text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)]"
               />
               <button
@@ -279,10 +316,12 @@ function DetailHeader({
           <PanelRightOpen className="h-3.5 w-3.5" />
           约束
         </button>
-        <div className="relative">
+        <div className="relative" ref={menuRef}>
           <button
             type="button"
             aria-label="项目操作"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
             onClick={() => {
               setMenuOpen((open) => !open);
               setConfirmDelete(false);
@@ -292,7 +331,7 @@ function DetailHeader({
             <MoreVertical className="h-4 w-4" />
           </button>
           {menuOpen ? (
-            <div className="absolute right-0 top-11 z-20 w-64 rounded-md border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)]">
+            <div role="menu" className="absolute right-0 top-11 z-20 w-64 rounded-md border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)]">
               {confirmDelete ? (
                 <div className="grid gap-2">
                   <p className="text-sm text-[var(--fg-0)]">确认删除这个项目？</p>
