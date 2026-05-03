@@ -15,6 +15,7 @@ import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
   useApproveModelCandidateMutation,
+  useCreateAccessoryPreviewsMutation,
   useCreateShowcaseImagesMutation,
   useSaveAccessorySelectionMutation,
 } from "@/lib/queries";
@@ -46,18 +47,29 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       }),
     onSuccess: () => toast.success("展示图任务已派发"),
   });
+  const createAccessoryPreviews = useCreateAccessoryPreviewsMutation(workflow.id, {
+    onError: (err) =>
+      toast.error("生成饰品图失败", {
+        description: err instanceof Error ? err.message : "请先确认模特后再重新生成饰品图",
+      }),
+    onSuccess: () => toast.success("饰品图任务已派发"),
+  });
 
   const [adjustments, setAdjustments] = useState("");
   const [template, setTemplate] = useState<CreateTemplate>("premium_studio");
   const [quality, setQuality] = useState<"high" | "4k">("high");
+  const [accessoryPrompt, setAccessoryPrompt] = useState("");
   const [previewList, setPreviewList] = useState<BackendImageMeta[]>([]);
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [chosenCandidateId, setChosenCandidateId] = useState<string | null>(null);
 
   const candidates = workflow.model_candidates;
   const approvalStep = stepOf(workflow, "model_approval");
   const showcaseStep = stepOf(workflow, "showcase_generation");
   const selectedCandidate = candidates.find((candidate) => candidate.status === "selected");
+  const chosenCandidate =
+    selectedCandidate ?? candidates.find((candidate) => candidate.id === chosenCandidateId);
   const accessoryPlan = approvalStep?.input_json?.accessory_plan;
   const accessoryEnabled =
     typeof accessoryPlan === "object" &&
@@ -112,11 +124,38 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     }
   };
 
+  const generateAccessoryPreview = () => {
+    if (!selectedCandidate) return;
+    createAccessoryPreviews.mutate({
+      candidate_id: selectedCandidate.id,
+      accessory_plan: {
+        enabled: accessoryEnabled,
+        items: accessoryItems,
+        strength: "subtle",
+      },
+      style_prompt: accessoryPrompt,
+    });
+  };
+
+  const approveChosenCandidate = () => {
+    if (!chosenCandidate) return;
+    approve.mutate({
+      candidate_id: chosenCandidate.id,
+      adjustments,
+      accessory_plan: {
+        enabled: accessoryEnabled,
+        items: accessoryItems,
+        strength: "subtle",
+      },
+      selected_accessory_image_id: selectedAccessoryImageId,
+    });
+  };
+
   return (
-      <StageFrame
-        title="模特候选"
-        subtitle="每套候选是同一个合成模特的四视图概念图。模特候选和饰品白底搭配图会并行生成。"
-      >
+    <StageFrame
+      title="模特候选"
+      subtitle="每套候选是同一个合成模特的四视图概念图。模特候选和饰品白底搭配图会并行生成。"
+    >
       {candidates.length === 0 ? (
         <RunningState label="等待创建模特候选" />
       ) : (
@@ -127,19 +166,12 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               workflow={workflow}
               candidate={candidate}
               approving={approve.isPending}
-              onPreview={(image, list, index) => openPreview(image, list, index)}
-              onApprove={() =>
-                approve.mutate({
-                  candidate_id: candidate.id,
-                  adjustments,
-                  accessory_plan: {
-                    enabled: accessoryEnabled,
-                    items: accessoryItems,
-                    strength: "subtle",
-                  },
-                  selected_accessory_image_id: selectedAccessoryImageId,
-                })
+              locallySelected={
+                chosenCandidate?.id === candidate.id && candidate.status !== "selected"
               }
+              onPreview={(image, list, index) => openPreview(image, list, index)}
+              onChoose={() => setChosenCandidateId(candidate.id)}
+              onApprove={approveChosenCandidate}
             />
           ))}
         </div>
@@ -155,26 +187,59 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)]"
           />
         </label>
+        <Button
+          className="self-end"
+          variant="primary"
+          loading={approve.isPending}
+          disabled={!chosenCandidate || Boolean(selectedCandidate)}
+          onClick={approveChosenCandidate}
+        >
+          确认模特并继续
+        </Button>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
         <div className="rounded-md border border-[var(--border)] bg-white/[0.03] px-3 py-2 text-sm leading-6 text-[var(--fg-1)]">
           饰品方案：{accessoryEnabled ? accessoryItems.join("、") || "自动推荐" : "关闭"}
         </div>
       </div>
 
-      {accessoryImages.length > 0 ? (
+      {accessoryEnabled ? (
         <div className="mt-4">
-          <p className="mb-2 text-sm text-[var(--fg-1)]">饰品预览</p>
-          <SelectableImageGrid
-            images={accessoryImages}
-            selectedImageId={selectedAccessoryImageId}
-            saving={saveAccessorySelection.isPending}
-            onSelect={(imageId) => {
-              setSelectedAccessoryImageId(imageId);
-              saveAccessorySelection.mutate({
-                selected_accessory_image_id: imageId,
-              });
-            }}
-            onPreview={(image, index) => openPreview(image, accessoryImages, index)}
-          />
+          <div className="mb-2 flex flex-wrap items-end gap-2">
+            <label className="min-w-0 flex-1">
+              <span className="text-sm text-[var(--fg-1)]">饰品图提示词</span>
+              <input
+                value={accessoryPrompt}
+                onChange={(event) => setAccessoryPrompt(event.target.value)}
+                placeholder={accessoryItems.join("、") || "例如：更简洁的白色运动鞋和帆布包"}
+                className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)]"
+              />
+            </label>
+            <Button
+              variant="secondary"
+              loading={createAccessoryPreviews.isPending}
+              disabled={!selectedCandidate || createAccessoryPreviews.isPending}
+              onClick={generateAccessoryPreview}
+            >
+              {accessoryImages.length > 0 ? "再生成饰品图" : "生成饰品图"}
+            </Button>
+          </div>
+          {accessoryImages.length > 0 ? (
+            <SelectableImageGrid
+              images={accessoryImages}
+              selectedImageId={selectedAccessoryImageId}
+              saving={saveAccessorySelection.isPending}
+              onSelect={(imageId) => {
+                setSelectedAccessoryImageId(imageId);
+                saveAccessorySelection.mutate({
+                  selected_accessory_image_id: imageId,
+                });
+              }}
+              onPreview={(image, index) => openPreview(image, accessoryImages, index)}
+            />
+          ) : (
+            <RunningState label="确认模特后可生成饰品预览" />
+          )}
         </div>
       ) : null}
 
@@ -217,7 +282,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             onClick={onClickGenerateShowcase}
             leftIcon={<Shirt className="h-4 w-4" />}
           >
-            {showcaseStep?.task_ids?.length ? "按当前方案重新生成展示图" : "开始生成展示图"}
+            {showcaseStep?.task_ids?.length ? "按当前方案再生成一批" : "开始生成展示图"}
           </Button>
         </div>
       ) : null}
@@ -232,9 +297,9 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       <ConfirmDialog
         open={confirmRegenerate}
         onOpenChange={setConfirmRegenerate}
-        title="重新生成展示图？"
-        description="这将丢弃当前 4 张展示图与对应的质检结论，按新模板重新派发任务。"
-        confirmText="重新生成"
+        title="再生成一批展示图？"
+        description="已生成的成品会继续保留，新一轮会按当前方案追加生成 4 张。"
+        confirmText="追加生成"
         tone="default"
         confirming={createShowcase.isPending}
         onConfirm={async () => {

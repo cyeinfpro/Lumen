@@ -172,18 +172,26 @@ def _showcase_prompt_brief(
     *,
     user_direction: str,
     template_direction: str,
+    product_preserve: str,
+    accessory_direction: str,
     model_consistency: str,
     shot_direction: str,
+    quality_direction: str,
 ) -> str:
     direction_parts = [part for part in (user_direction.strip(), template_direction.strip()) if part]
     direction = "，".join(direction_parts) or "高级自然电商场景，动作自然"
     return (
-        "请根据商品图和已确认模特参考图，生成真实自然的真人服饰电商穿搭图。"
-        f"参考方向：{direction}。"
-        "超写实，自然商业摄影风格，细节清晰，整体风格适合电商主图。"
-        f"{model_consistency}"
-        f"{shot_direction}"
-        "保持商品服饰和模特参考一致，画面清晰干净，无文字、无水印。"
+        "请根据白底产品图和已确认模特参考图，生成真实自然的真人模特穿搭电商图。"
+        "核心要求："
+        "1. 模特必须穿着产品图中的同一件衣服，严格还原商品服饰，不要改款、不要改变颜色、"
+        f"不要添加不存在的服装细节。必须保留：{product_preserve}。"
+        f"2. {model_consistency}"
+        f"3. {accessory_direction}"
+        f"4. 场景选择与衣服风格和用户方向匹配的干净商业摄影背景。参考方向：{direction}。"
+        "背景简洁高级，不杂乱，不抢主体，整体适合亚马逊/电商主图。"
+        f"5. {shot_direction}"
+        f"6. 画质：{quality_direction}，超写实，自然商业摄影风格，细节清晰，光线真实，干净高级。"
+        "7. 画面中不要出现文字、水印、logo 水印、畸形手脚、多余人物、衣架、假人或不自然背景物体。"
     )
 
 
@@ -324,6 +332,26 @@ def _showcase_reference_image_ids(
         [selected_accessory_image_id] if selected_accessory_image_id else product_image_ids
     )
     return _dedupe_nonempty([*product_or_accessory_ids, model_image_id or ""])
+
+
+def _showcase_target_image_count(
+    *,
+    existing_image_ids: Iterable[str],
+    output_count: int,
+) -> int:
+    return len(_dedupe_nonempty(existing_image_ids)) + output_count
+
+
+def _showcase_expected_image_count(
+    *,
+    showcase_input: dict[str, Any],
+    fallback_task_count: int,
+) -> int:
+    return int(
+        showcase_input.get("target_image_count")
+        or showcase_input.get("output_count")
+        or fallback_task_count
+    )
 
 
 async def _validate_owned_images(
@@ -522,13 +550,25 @@ def _showcase_prompt(
     final_quality: str,
     user_prompt: str = "",
 ) -> str:
-    _ = accessory_plan, final_quality
     brief = selected_candidate.model_brief_json or {}
     height_cm = brief.get("height_cm")
     height_text = f"身高约 {height_cm}cm，" if isinstance(height_cm, int) else ""
+    summary = str(brief.get("summary") or user_prompt or "自然电商模特")
+    must_preserve = product_analysis.get("must_preserve")
+    product_preserve = (
+        "、".join(str(item) for item in must_preserve if str(item).strip())
+        if isinstance(must_preserve, list)
+        else "颜色、版型、领口、袖型、衣长、面料质感、图案/logo、纽扣、口袋、拉链、缝线和所有可见结构"
+    )
     model_consistency = (
         "严格保持已确认模特参考图中的同一张脸、发型、肤色、年龄感、"
         f"{height_text}身材比例、肢体长度、肩宽、腿长和整体体态一致，不要换人。"
+        f"模特方向：{summary}。若为儿童或青少年，必须保持年龄合适、自然活泼，不能成人化、不能性感化。"
+    )
+    _ = accessory_plan
+    accessory_direction = (
+        "配饰只参考已提供的商品/饰品搭配参考图；如果参考图中已有配饰，则保持其风格和位置关系。"
+        "不要额外新增、替换或强化配饰，不要让配饰遮挡衣服主体，不要改变商品本身。"
     )
     shot_label = SHOT_LABELS.get(shot_type, shot_type)
     shot_action = SHOT_ACTION_REQUIREMENTS.get(shot_type, "")
@@ -537,11 +577,15 @@ def _showcase_prompt(
         f"本张镜头：{shot_label}。{shot_action} {shot_composition} "
         "This shot must use a distinct pose/action from the other generated showcase images. "
     )
+    quality_direction = "4K 终稿" if final_quality == "4k" else "2K 高质量"
     return _showcase_prompt_brief(
         user_direction=user_prompt,
         template_direction=_template_requirement(template, product_analysis),
+        product_preserve=product_preserve,
+        accessory_direction=accessory_direction,
         model_consistency=model_consistency,
         shot_direction=shot_direction,
+        quality_direction=quality_direction,
     )
 
 
@@ -1032,11 +1076,36 @@ async def _sync_workflow_outputs(
     quality_step = steps.get("quality_review")
     approval_step = steps.get("model_approval")
     if approval_step and approval_step.task_ids:
+        accessory_base_generations = (
+            await db.execute(
+                select(Generation).where(Generation.id.in_(approval_step.task_ids))
+            )
+        ).scalars().all()
+        accessory_bonus_generations = (
+            await db.execute(
+                select(Generation)
+                .where(
+                    Generation.user_id == run.user_id,
+                    Generation.upstream_request["parent_generation_id"].astext.in_(
+                        approval_step.task_ids
+                    ),
+                    Generation.upstream_request["is_dual_race_bonus"].as_boolean()
+                    == True,  # noqa: E712
+                )
+                .order_by(Generation.created_at.asc(), Generation.id.asc())
+            )
+        ).scalars().all()
+        accessory_generations = [
+            *accessory_base_generations,
+            *accessory_bonus_generations,
+        ]
         accessory_images = (
             await db.execute(
                 select(Image)
                 .where(
-                    Image.owner_generation_id.in_(approval_step.task_ids),
+                    Image.owner_generation_id.in_(
+                        [generation.id for generation in accessory_generations]
+                    ),
                     Image.deleted_at.is_(None),
                 )
                 .order_by(Image.created_at.asc(), Image.id.asc())
@@ -1082,9 +1151,9 @@ async def _sync_workflow_outputs(
         image_ids = _dedupe_nonempty(image.id for image in images)
         if image_ids:
             showcase_step.image_ids = image_ids
-        expected = int(
-            (showcase_step.input_json or {}).get("output_count")
-            or len(showcase_step.task_ids)
+        expected = _showcase_expected_image_count(
+            showcase_input=showcase_step.input_json or {},
+            fallback_task_count=len(showcase_step.task_ids),
         )
         succeeded = [
             generation
@@ -1111,41 +1180,11 @@ async def _sync_workflow_outputs(
                 output_json["succeeded_generation_ids"] = [g.id for g in succeeded]
                 output_json["recovered_by_bonus_images"] = True
                 showcase_step.output_json = output_json
-            if quality_step and quality_step.status in {"waiting_input", "running"}:
+            if quality_step:
+                quality_step.status = "waiting_input"
                 quality_step.image_ids = image_ids
-                if run.conversation_id:
-                    conv = await _get_owned_conversation(
-                        db,
-                        user_id=run.user_id,
-                        conversation_id=run.conversation_id,
-                    )
-                    owner = await db.get(User, run.user_id)
-                    if owner is None:
-                        raise _http("not_found", "workflow owner not found", 404)
-                    await _ensure_quality_review_tasks(
-                        db,
-                        user=owner,
-                        conv=conv,
-                        run=run,
-                        showcase_step=showcase_step,
-                        quality_step=quality_step,
-                    )
-                await _sync_quality_reports_from_tasks(
-                    db,
-                    run=run,
-                    quality_step=quality_step,
-                )
-                reports = await _load_quality_reports(db, run.id)
-                quality_step.status = (
-                    "needs_review" if len(reports) >= len(image_ids) else "running"
-                )
-                quality_step.output_json = _quality_summary_payload(reports)
-            run.current_step = "quality_review"
-            run.status = (
-                "needs_review"
-                if quality_step and quality_step.status == "needs_review"
-                else "running"
-            )
+            run.current_step = "showcase_generation"
+            run.status = "needs_review"
         elif showcase_step.status == "running" and failed and not active:
             showcase_step.status = "failed"
             showcase_step.output_json = {
@@ -1168,7 +1207,10 @@ async def _sync_workflow_outputs(
             ):
                 quality_step.status = "needs_review"
                 run.status = "needs_review"
-            quality_step.output_json = _quality_summary_payload(reports)
+            quality_step.output_json = _merge_quality_summary_payload(
+                quality_step.output_json,
+                reports,
+            )
 
 
 def _quality_summary_payload(reports: list[QualityReport]) -> dict[str, Any]:
@@ -1184,6 +1226,19 @@ def _quality_summary_payload(reports: list[QualityReport]) -> dict[str, Any]:
             1,
         ),
     }
+
+
+def _merge_quality_summary_payload(
+    current: dict[str, Any] | None,
+    reports: list[QualityReport],
+) -> dict[str, Any]:
+    payload = dict(current or {})
+    payload.update(_quality_summary_payload(reports))
+    review_tasks = (current or {}).get("review_tasks")
+    if isinstance(review_tasks, dict):
+        payload["review_tasks"] = review_tasks
+        payload["review_task_count"] = len(review_tasks)
+    return payload
 
 
 async def _load_quality_reports(db: AsyncSession, run_id: str) -> list[QualityReport]:
@@ -2197,6 +2252,8 @@ async def create_showcase_images(
             selected_accessory_image_id if isinstance(selected_accessory_image_id, str) else None
         ),
     )
+    existing_task_ids = _dedupe_nonempty(showcase.task_ids or [])
+    existing_image_ids = _dedupe_nonempty(showcase.image_ids or [])
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
     for idx, shot_type in enumerate(shot_plan, start=1):
@@ -2236,14 +2293,18 @@ async def create_showcase_images(
         task_ids.extend(gen_ids)
         bundles.append(bundle)
     showcase.status = "running"
-    showcase.task_ids = task_ids
-    showcase.image_ids = []
+    showcase.task_ids = _dedupe_nonempty([*existing_task_ids, *task_ids])
+    showcase.image_ids = existing_image_ids
     showcase.input_json = {
         "template": body.template,
         "shot_plan": shot_plan,
         "aspect_ratio": body.aspect_ratio,
         "final_quality": body.final_quality,
         "output_count": body.output_count,
+        "target_image_count": _showcase_target_image_count(
+            existing_image_ids=existing_image_ids,
+            output_count=body.output_count,
+        ),
         "reference_image_ids": ref_ids,
     }
     quality = await _step(db, run.id, "quality_review")

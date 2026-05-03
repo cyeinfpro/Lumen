@@ -141,6 +141,23 @@ def test_showcase_refs_use_accessory_preview_instead_of_product_images() -> None
     assert "product-2" not in refs
 
 
+def test_showcase_regeneration_target_keeps_existing_outputs() -> None:
+    assert (
+        workflows._showcase_target_image_count(  # noqa: SLF001
+            existing_image_ids=["old-1", "old-2", "old-2"],
+            output_count=4,
+        )
+        == 6
+    )
+    assert (
+        workflows._showcase_expected_image_count(  # noqa: SLF001
+            showcase_input={"target_image_count": 8, "output_count": 4},
+            fallback_task_count=12,
+        )
+        == 8
+    )
+
+
 def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -> None:
     prompt = workflows._candidate_prompt(  # noqa: SLF001
         style_prompt="premium natural model",
@@ -213,19 +230,21 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
         user_prompt="咖啡馆窗边，自然走动回头",
     )
 
-    assert "请根据商品图和已确认模特参考图" in prompt
-    assert "真实自然的真人服饰电商穿搭图" in prompt
+    assert "请根据白底产品图和已确认模特参考图" in prompt
+    assert "真实自然的真人模特穿搭电商图" in prompt
     assert "参考方向：咖啡馆窗边，自然走动回头，高级灰棚拍" in prompt
+    assert "必须保留：lapel shape、button position、pocket placement" in prompt
+    assert "配饰只参考已提供的商品/饰品搭配参考图" in prompt
+    assert "不要额外新增、替换或强化配饰" in prompt
+    assert "不要让配饰遮挡衣服主体" in prompt
     assert "超写实" in prompt
     assert "自然商业摄影风格" in prompt
     assert "细节清晰" in prompt
-    assert "适合电商主图" in prompt
+    assert "适合亚马逊/电商主图" in prompt
     assert "主图" in prompt
     assert "standing front-facing" in prompt
-    assert "无文字、无水印" in prompt
-    assert "lapel shape" not in prompt
-    assert "small earrings" not in prompt
-    assert len(prompt) < 700
+    assert "文字、水印" in prompt
+    assert len(prompt) < 1300
 
 
 def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() -> None:
@@ -250,6 +269,27 @@ def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() 
     assert "肢体长度" in prompt
     assert "腿长" in prompt
     assert "不要换人" in prompt
+    assert "不能成人化" in prompt
+    assert "不能性感化" in prompt
+
+
+def test_showcase_prompt_uses_quality_mode_variable() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "clean ecommerce model", "height_cm": 168},
+    )
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="white_ecommerce",
+        shot_type="front_full_body",
+        final_quality="4k",
+    )
+
+    assert "画质：4K 终稿" in prompt
+    assert "不要额外新增、替换或强化配饰" in prompt
 
 
 def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
@@ -355,3 +395,21 @@ def test_quality_review_prompt_focuses_on_core_ecommerce_checks() -> None:
     assert "电商主图" in prompt
     assert "只返回严格 JSON" in prompt
     assert "approve 或 revise" in prompt
+
+
+def test_quality_summary_merge_preserves_review_task_map() -> None:
+    report = SimpleNamespace(overall_score=88, recommendation="approve")
+
+    payload = workflows._merge_quality_summary_payload(  # noqa: SLF001
+        {
+            "review_tasks": {"image-1": "completion-1"},
+            "review_task_count": 1,
+        },
+        [report],  # type: ignore[list-item]
+    )
+
+    assert payload["overall"] == "approve"
+    assert payload["image_count"] == 1
+    assert payload["average_score"] == 88.0
+    assert payload["review_tasks"] == {"image-1": "completion-1"}
+    assert payload["review_task_count"] == 1
