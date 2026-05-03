@@ -61,7 +61,7 @@ export default function UsagePage() {
               用量统计
             </h1>
             <p className="text-sm text-[var(--fg-1)] mt-1.5">
-              过去 {selectedPeriod.label} 的使用记录（内测期无配额限制）
+              过去 {selectedPeriod.label} 的使用记录
             </p>
             {q.data && (
               <p className="text-xs text-neutral-500 mt-1 font-mono tabular-nums">
