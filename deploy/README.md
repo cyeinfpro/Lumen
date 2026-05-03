@@ -36,21 +36,21 @@ bash scripts/lumenctl.sh install-lumen
 
 ## 数据目录与权限
 
-`/opt/lumendata` 是所有持久化数据根目录（`LUMEN_DATA_ROOT` 可改）。**按服务分别 chown，禁止整体 `chown -R 10001:10001 /opt/lumendata`**——否则 PostgreSQL（uid 70）和 Redis（uid 999）启动会失败（参考 `docs/docker-full-stack-cutover-plan.md` §15.2）：
+默认 `/opt/lumendata` 是所有持久化数据根目录（`LUMEN_DATA_ROOT` 可改）。如果它是 CIFS/NAS，使用 `LUMEN_DB_ROOT` 把 PostgreSQL / Redis 单独放到本机 Linux 文件系统，storage/backup 仍留在 CIFS。**按服务分别 chown，禁止整体 `chown -R 10001:10001`**——否则 PostgreSQL（uid 70）和 Redis（uid 999）启动会失败（参考 `docs/docker-full-stack-cutover-plan.md` §15.2）：
 
 ```bash
 sudo mkdir -p \
-  /opt/lumendata/postgres \
-  /opt/lumendata/redis \
+  /var/lib/lumen-data/postgres \
+  /var/lib/lumen-data/redis \
   /opt/lumendata/storage \
   /opt/lumendata/backup
 
-sudo chown -R 70:70   /opt/lumendata/postgres
-sudo chown -R 999:999 /opt/lumendata/redis
+sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chown -R 10001:10001 /opt/lumendata/storage
 sudo chown -R 10001:10001 /opt/lumendata/backup
 
-sudo chmod 700 /opt/lumendata/postgres /opt/lumendata/redis
+sudo chmod 700 /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
 sudo chmod 750 /opt/lumendata/storage /opt/lumendata/backup
 
 # /opt/lumendata 顶层归 root，不递归
@@ -63,6 +63,15 @@ sudo chmod 755 /opt/lumendata
 ```bash
 sudo setfacl -R -m u:root:rwx /opt/lumendata/backup
 sudo setfacl -R -d -m u:10001:rwx /opt/lumendata/backup
+```
+
+对应 `.env`：
+
+```dotenv
+LUMEN_DATA_ROOT=/opt/lumendata
+LUMEN_DB_ROOT=/var/lib/lumen-data
+STORAGE_ROOT=/opt/lumendata/storage
+BACKUP_ROOT=/opt/lumendata/backup
 ```
 
 ## 备份与恢复
