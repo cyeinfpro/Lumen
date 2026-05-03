@@ -18,12 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, TextIO
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
-from ..audit import hash_email, request_ip_hash, write_audit_isolated
 from ..config import settings
 from ..deps import AdminUser, verify_csrf
+from ._admin_common import admin_http as _http, write_admin_audit_isolated
 
 
 router = APIRouter(prefix="/admin/backups", tags=["admin"])
@@ -40,10 +40,6 @@ class _ScriptResult(NamedTuple):
     returncode: int
     stdout: str
     stderr: str
-
-
-def _http(code: str, msg: str, http: int = 400) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
 
 
 def _open_private_append(path: Path) -> TextIO:
@@ -227,11 +223,10 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
 
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "")[-1000:]
-        await write_audit_isolated(
+        await write_admin_audit_isolated(
+            request,
+            admin,
             event_type="admin.backup.create.fail",
-            user_id=admin.id,
-            actor_email_hash=hash_email(admin.email),
-            actor_ip_hash=request_ip_hash(request),
             details={"returncode": proc.returncode},
         )
         return BackupNowOut(ok=False, stderr_tail=tail)
@@ -249,11 +244,10 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
                         break
             if ts:
                 break
-    await write_audit_isolated(
+    await write_admin_audit_isolated(
+        request,
+        admin,
         event_type="admin.backup.create",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={"timestamp": ts},
     )
     return BackupNowOut(ok=True, timestamp=ts)
@@ -321,11 +315,10 @@ async def restore_backup(
         )
     finally:
         log_fh.close()
-    await write_audit_isolated(
+    await write_admin_audit_isolated(
+        request,
+        admin,
         event_type="admin.backup.restore",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={"timestamp": ts},
     )
     return RestoreOut(

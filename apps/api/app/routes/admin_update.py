@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncIterator, TextIO
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,11 +25,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
 from lumen_core.runtime_settings import get_spec
 
-from ..audit import hash_email, request_ip_hash, write_audit_isolated
 from ..config import settings
 from ..deps import AdminUser, verify_csrf
 from ..db import get_db
 from ..runtime_settings import get_setting
+from ._admin_common import (
+    admin_http as _http,
+    cleanup_marker_when_done,
+    write_admin_audit_isolated,
+)
 from .admin_proxies import _load_proxies
 from .admin_backups import _discover_scripts_dir, _open_private_append
 
@@ -74,10 +78,6 @@ class UpdateMarker:
     pid: int
     started_at: str | None
     unit: str | None = None
-
-
-def _http(code: str, msg: str, http: int = 400) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
 
 
 def _update_script() -> Path:
@@ -1342,11 +1342,10 @@ async def trigger_update(
     finally:
         log_fh.close()
 
-    await write_audit_isolated(
+    await write_admin_audit_isolated(
+        request,
+        admin,
         event_type="admin.update.trigger",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={"pid": pid or None, "unit": unit, "proxy_name": proxy.name if proxy else None},
     )
 
@@ -1364,14 +1363,11 @@ async def trigger_update(
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
-    await asyncio.to_thread(proc.wait)
-    pid = int(proc.pid)
-    marker = _read_marker()
-    if marker and marker.pid == pid:
-        try:
-            _update_marker_path().unlink()
-        except OSError:
-            pass
+    await cleanup_marker_when_done(
+        proc,
+        read_marker_fn=_read_marker,
+        marker_path_fn=_update_marker_path,
+    )
 
 
 __all__ = [

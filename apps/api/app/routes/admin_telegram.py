@@ -16,10 +16,10 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..redis_client import get_redis
+from ._admin_common import write_admin_audit
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +45,11 @@ async def restart_bot(
     except Exception as exc:  # noqa: BLE001
         logger.error("publish restart failed: %s", exc)
         receivers = 0
-    await write_audit(
+    await write_admin_audit(
         db,
+        request,
+        admin,
         event_type="admin.telegram.restart",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=request_ip_hash(request),
         details={"receivers": receivers},
     )
     await db.commit()
