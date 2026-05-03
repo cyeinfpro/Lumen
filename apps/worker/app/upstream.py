@@ -1013,10 +1013,87 @@ def _with_error_context(
     return exc
 
 
-def _extract_image_result(
-    payload: Any, status_code: int
+async def _fetch_image_url_as_bytes(
+    image_url: str,
+    *,
+    proxy_url: str | None = None,
+) -> bytes:
+    """下载 images API 在 data[].url 里返回的图片，转成原始字节。
+
+    OpenAI 协议合法的两种响应形态之一：当 response_format=url（旧默认 / 部分
+    第三方网关行为）时，图片以 CDN 链接返回而非 b64_json。沿用 provider 的
+    proxy（同一 images_client）以便穿透同样的网关链路。
+    """
+    client = await (
+        _get_images_client(proxy_url) if proxy_url else _get_images_client()
+    )
+    started = time.monotonic()
+    trace_id = _generate_trace_id()
+    try:
+        resp = await client.get(image_url)
+    except _RETRY_HTTPX_EXC as exc:
+        _log_upstream_call(
+            endpoint="image_url_download",
+            status=0,
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            trace_id=trace_id,
+            response_headers=None,
+        )
+        raise UpstreamError(
+            f"image url download failed: {exc}",
+            status_code=0,
+            error_code=EC.DIRECT_IMAGE_REQUEST_FAILED.value,
+            payload={"url": image_url, "path": "images/result", "method": "GET"},
+        ) from exc
+    _log_upstream_call(
+        endpoint="image_url_download",
+        status=resp.status_code,
+        duration_ms=(time.monotonic() - started) * 1000.0,
+        trace_id=trace_id,
+        response_headers=getattr(resp, "headers", None),
+    )
+    if resp.status_code >= 400:
+        raise UpstreamError(
+            f"image url download http {resp.status_code}",
+            status_code=resp.status_code,
+            error_code=EC.UPSTREAM_ERROR.value,
+            payload={"url": image_url, "path": "images/result", "method": "GET"},
+        )
+    raw = resp.content
+    if not raw:
+        raise UpstreamError(
+            "image url download returned empty body",
+            status_code=resp.status_code,
+            error_code=EC.NO_IMAGE_RETURNED.value,
+            payload={"url": image_url, "path": "images/result", "method": "GET"},
+        )
+    if len(raw) > _IMAGE_JOB_DOWNLOAD_MAX_BYTES:
+        raise UpstreamError(
+            "image url download exceeded max bytes",
+            status_code=resp.status_code,
+            error_code=EC.STREAM_TOO_LARGE.value,
+            payload={
+                "url": image_url,
+                "bytes": len(raw),
+                "max_bytes": _IMAGE_JOB_DOWNLOAD_MAX_BYTES,
+            },
+        )
+    return raw
+
+
+async def _extract_image_result(
+    payload: Any,
+    status_code: int,
+    *,
+    proxy_url: str | None = None,
 ) -> tuple[str, str | None]:
-    """从 images API 响应体里抽出 (b64_json, revised_prompt?)。缺失则抛 UpstreamError。"""
+    """从 images API 响应体里抽出 (b64_json, revised_prompt?)。缺失则抛 UpstreamError。
+
+    上游可能返回两种合法形态（OpenAI 协议都支持）：
+    - data[0].b64_json：直接 base64（response_format=b64_json，gpt-image-* 强制此项）
+    - data[0].url：CDN 链接（response_format=url，部分第三方兼容网关默认行为）
+    后者出现时下载并就地转 base64，调用方拿到的仍是 base64，不需要感知差异。
+    """
     if not isinstance(payload, dict):
         raise UpstreamError(
             "upstream returned non-object",
@@ -1039,18 +1116,25 @@ def _extract_image_result(
             error_code=EC.NO_IMAGE_RETURNED.value,
             payload=payload,
         )
-    b64 = first.get("b64_json")
-    if not isinstance(b64, str) or not b64:
-        raise UpstreamError(
-            "upstream returned no image",
-            status_code=status_code,
-            error_code=EC.NO_IMAGE_RETURNED.value,
-            payload=payload,
-        )
     revised = first.get("revised_prompt")
     if not isinstance(revised, str):
         revised = None
-    return b64, revised
+
+    b64 = first.get("b64_json")
+    if isinstance(b64, str) and b64:
+        return b64, revised
+
+    image_url = first.get("url")
+    if isinstance(image_url, str) and image_url:
+        raw = await _fetch_image_url_as_bytes(image_url, proxy_url=proxy_url)
+        return base64.b64encode(raw).decode("ascii"), revised
+
+    raise UpstreamError(
+        "upstream returned no image",
+        status_code=status_code,
+        error_code=EC.NO_IMAGE_RETURNED.value,
+        payload=payload,
+    )
 
 
 def _api_base(base: str) -> str:
@@ -1291,7 +1375,9 @@ async def _direct_generate_image_once(
     # JSON 响应里的 usage（如有）也走标准埋点。
     if isinstance(payload, dict):
         _record_usage(payload.get("usage"))
-    return _extract_image_result(payload, resp.status_code)
+    return await _extract_image_result(
+        payload, resp.status_code, proxy_url=proxy_url
+    )
 
 
 async def _direct_edit_image_once(
@@ -1353,6 +1439,7 @@ async def _direct_edit_image_once(
     trace_id = _generate_trace_id()
     headers = _auth_headers(api_key_override, trace_id=trace_id)
     timeout_config = await _resolve_timeout_config()
+    proxy_url = await resolve_provider_proxy_url(proxy_override)
     started = time.monotonic()
     try:
         status, payload = await _curl_post_multipart(
@@ -1361,7 +1448,7 @@ async def _direct_edit_image_once(
             files=files,
             headers=headers,
             timeout_s=timeout_config.read,
-            proxy_url=await resolve_provider_proxy_url(proxy_override),
+            proxy_url=proxy_url,
         )
     except (asyncio.CancelledError, UpstreamCancelled):
         raise
@@ -1404,7 +1491,7 @@ async def _direct_edit_image_once(
         )
     if isinstance(payload, dict):
         _record_usage(payload.get("usage"))
-    return _extract_image_result(payload, status)
+    return await _extract_image_result(payload, status, proxy_url=proxy_url)
 
 
 def _image_job_body_base(

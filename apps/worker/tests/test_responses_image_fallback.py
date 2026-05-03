@@ -1797,3 +1797,72 @@ async def test_responses_image_stream_surfaces_moderation_code(
 
     assert exc_info.value.error_code == "moderation_blocked"
     assert "safety" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_extract_image_result_accepts_b64_json() -> None:
+    payload = {"data": [{"b64_json": PNG_B64, "revised_prompt": "rp"}]}
+    b64, revised = await upstream._extract_image_result(payload, 200)
+    assert b64 == PNG_B64
+    assert revised == "rp"
+
+
+@pytest.mark.asyncio
+async def test_extract_image_result_falls_back_to_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """data[].url 形态（部分第三方网关默认 response_format=url）应被下载并转 b64。"""
+    raw_bytes = TINY_PNG
+    requested_urls: list[str] = []
+
+    class _UrlClient:
+        async def get(self, url: str) -> ImageJobResponse:
+            requested_urls.append(url)
+            return ImageJobResponse(200, None, content=raw_bytes)
+
+    async def fake_get_images_client(proxy_url: str | None = None) -> _UrlClient:
+        return _UrlClient()
+
+    monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
+
+    payload = {
+        "data": [
+            {
+                "url": "https://cdn.example/imgs/abc.png",
+                "revised_prompt": "via url",
+            }
+        ]
+    }
+    b64, revised = await upstream._extract_image_result(payload, 200)
+
+    assert base64.b64decode(b64) == raw_bytes
+    assert revised == "via url"
+    assert requested_urls == ["https://cdn.example/imgs/abc.png"]
+
+
+@pytest.mark.asyncio
+async def test_extract_image_result_raises_when_neither_b64_nor_url() -> None:
+    payload = {"data": [{"revised_prompt": "no image"}]}
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await upstream._extract_image_result(payload, 200)
+    assert exc_info.value.error_code == "no_image_returned"
+
+
+@pytest.mark.asyncio
+async def test_extract_image_result_url_download_failure_raises_upstream_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BadUrlClient:
+        async def get(self, url: str) -> ImageJobResponse:
+            return ImageJobResponse(404, {"error": "not found"})
+
+    async def fake_get_images_client(proxy_url: str | None = None) -> _BadUrlClient:
+        return _BadUrlClient()
+
+    monkeypatch.setattr(upstream, "_get_images_client", fake_get_images_client)
+
+    payload = {"data": [{"url": "https://cdn.example/missing.png"}]}
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await upstream._extract_image_result(payload, 200)
+    assert exc_info.value.status_code == 404
+    assert "image url download" in str(exc_info.value).lower()
