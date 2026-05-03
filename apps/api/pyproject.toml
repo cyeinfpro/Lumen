@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-api"
-version = "0.1.0"
+version = "1.0.0"
 description = "Lumen FastAPI — DESIGN.md §5 REST + SSE"
 requires-python = ">=3.12"
 dependencies = [

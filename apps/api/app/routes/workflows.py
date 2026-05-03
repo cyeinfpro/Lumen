@@ -549,7 +549,8 @@ def _seed_steps(run: WorkflowRun, *, user_prompt: str) -> list[WorkflowStep]:
 def _product_analysis_prompt(user_prompt: str) -> str:
     return (
         "请分析上传的服饰商品图，只描述图片中可见信息，不确定填 unknown。"
-        "返回严格 JSON，字段固定为：category, color, material_guess, silhouette, "
+        "必须只返回一个 JSON object，不要 Markdown，不要代码块，不要解释文字。"
+        "字段固定为：category, color, material_guess, silhouette, "
         "key_details, must_preserve, risks, styling_recommendations。"
         "除 unknown 和字段名外，内容用简体中文。must_preserve 列出后续生成必须还原的"
         "颜色、廓形、领口、袖型、长度、面料观感、图案/logo、纽扣、口袋、拉链、缝线/拼接等可见细节。"
@@ -696,33 +697,126 @@ def _quality_review_prompt(
     )
 
 
+PRODUCT_ANALYSIS_FIELDS = {
+    "category",
+    "color",
+    "material_guess",
+    "silhouette",
+    "key_details",
+    "must_preserve",
+    "risks",
+    "styling_recommendations",
+}
+
+
+def _extract_jsonish_value(value: Any) -> Any:
+    """Unwrap common model/API envelopes until a likely JSON payload is reached."""
+    if isinstance(value, dict):
+        for key in ("parsed", "json", "arguments", "content", "text", "output_text"):
+            inner = value.get(key)
+            if inner not in (None, ""):
+                return _extract_jsonish_value(inner)
+        if "output" in value:
+            return _extract_jsonish_value(value["output"])
+        return value
+    if isinstance(value, list):
+        if len(value) == 1:
+            return _extract_jsonish_value(value[0])
+        dict_items = [item for item in value if isinstance(item, dict)]
+        if dict_items and all(
+            any(key in item for key in ("type", "text", "content")) for item in dict_items
+        ):
+            chunks = [
+                str(_extract_jsonish_value(item))
+                for item in dict_items
+                if _extract_jsonish_value(item) not in (None, "")
+            ]
+            return "\n".join(chunks)
+    return value
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return _dedupe_nonempty(str(item) for item in value if item not in (None, ""))
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw or raw.lower() == "unknown":
+            return []
+        return _dedupe_nonempty(re.split(r"[、,，;\n]+", raw))
+    return []
+
+
+def _normalize_product_analysis_payload(parsed: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(parsed)
+    alias_map = {
+        "material": "material_guess",
+        "details": "key_details",
+        "preserve": "must_preserve",
+        "must_keep": "must_preserve",
+        "recommendations": "styling_recommendations",
+    }
+    for source, target in alias_map.items():
+        if target not in payload and source in payload:
+            payload[target] = payload[source]
+
+    for key in ("key_details", "must_preserve", "risks", "styling_recommendations"):
+        payload[key] = _coerce_string_list(payload.get(key))
+    for key in ("category", "color", "material_guess", "silhouette"):
+        value = payload.get(key)
+        payload[key] = str(value).strip() if value not in (None, "") else "unknown"
+
+    preserve = _coerce_string_list(payload.get("must_preserve"))
+    if not preserve:
+        visible_bits = [
+            payload.get("color"),
+            payload.get("silhouette"),
+            *payload.get("key_details", []),
+        ]
+        preserve = _dedupe_nonempty(
+            str(item)
+            for item in visible_bits
+            if item not in (None, "", "unknown")
+        )
+    payload["must_preserve"] = preserve or ["颜色", "廓形", "可见商品细节"]
+    return {key: payload.get(key) for key in PRODUCT_ANALYSIS_FIELDS}
+
+
 def _try_parse_json_text(text: str) -> dict[str, Any]:
     raw = (text or "").strip()
     if not raw:
-        return {}
+        raw = "模型没有返回商品理解内容，请重新生成或手动修正。"
     if raw.startswith("```"):
         raw = raw.strip("`")
         raw = raw.removeprefix("json").strip()
     try:
-        value = json.loads(raw)
-        return value if isinstance(value, dict) else {"summary": value}
+        value = _extract_jsonish_value(json.loads(raw))
+        if isinstance(value, str) and value.strip() != raw:
+            return _try_parse_json_text(value)
+        if isinstance(value, dict):
+            return _normalize_product_analysis_payload(value)
+        return {"summary_text": value}
     except json.JSONDecodeError:
         start = raw.find("{")
         end = raw.rfind("}")
         if start >= 0 and end > start:
             try:
-                value = json.loads(raw[start : end + 1])
-                return value if isinstance(value, dict) else {"summary": value}
+                value = _extract_jsonish_value(json.loads(raw[start : end + 1]))
+                if isinstance(value, str):
+                    return _try_parse_json_text(value)
+                if isinstance(value, dict):
+                    return _normalize_product_analysis_payload(value)
+                return {"summary_text": value}
             except json.JSONDecodeError:
                 pass
     return {
-        "category": "unknown",
-        "color": "unknown",
-        "material_guess": "unknown",
-        "silhouette": "unknown",
-        "key_details": [],
+        "category": "需人工复核",
+        "color": "需人工复核",
+        "material_guess": "需人工复核",
+        "silhouette": "需人工复核",
+        "key_details": [raw],
         "must_preserve": ["颜色", "廓形", "可见商品细节"],
         "risks": ["模型没有返回结构化 JSON，请人工复核文本摘要"],
+        "styling_recommendations": [],
         "summary_text": raw,
     }
 

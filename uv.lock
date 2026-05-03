@@ -875,7 +875,7 @@ dev = [
 
 [[package]]
 name = "lumen-api"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "alembic" },
@@ -938,7 +938,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-core"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "pydantic" },
@@ -957,7 +957,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-tgbot"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "apps/tgbot" }
 dependencies = [
     { name = "aiogram" },
@@ -980,7 +980,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-worker"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "arq" },

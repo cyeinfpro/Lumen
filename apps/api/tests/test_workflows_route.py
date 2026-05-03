@@ -82,9 +82,23 @@ async def test_validate_owned_images_rejects_missing_or_foreign_image() -> None:
 def test_product_analysis_json_fallback_keeps_reviewable_constraints() -> None:
     out = workflows._try_parse_json_text("This looks like an ivory blazer.")  # noqa: SLF001
 
-    assert out["category"] == "unknown"
+    assert out["category"] == "需人工复核"
+    assert "This looks like an ivory blazer." in out["key_details"]
     assert "可见商品细节" in out["must_preserve"]
     assert out["summary_text"] == "This looks like an ivory blazer."
+
+
+def test_product_analysis_json_parser_unwraps_content_envelope() -> None:
+    out = workflows._try_parse_json_text(
+        '{"content":{"text":"{\\"category\\":\\"衬衫\\",\\"color\\":\\"蓝色\\",'
+        '\\"material\\":\\"棉\\",\\"silhouette\\":\\"宽松\\",'
+        '\\"details\\":[\\"翻领\\"],\\"preserve\\":[\\"蓝色\\",\\"翻领\\"]}"}}'
+    )  # noqa: SLF001
+
+    assert out["category"] == "衬衫"
+    assert out["material_guess"] == "棉"
+    assert out["key_details"] == ["翻领"]
+    assert out["must_preserve"] == ["蓝色", "翻领"]
 
 
 def test_product_analysis_prompt_requests_styling_recommendations() -> None:
@@ -95,6 +109,7 @@ def test_product_analysis_prompt_requests_styling_recommendations() -> None:
     assert "不需要覆盖所有饰品类别" in prompt
     assert "人群/年龄" in prompt
     assert "must_preserve" in prompt
+    assert "必须只返回一个 JSON object" in prompt
 
 
 def test_workflow_image_params_use_high_quality_jpeg() -> None:
