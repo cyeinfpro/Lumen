@@ -83,7 +83,9 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     assert 'lumen_release_ensure_shared_env "${ROOT}"' in text
     assert 'lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"' in text
     assert 'lumen_ensure_compose_db_env_vars "${NEW_RELEASE}/.env"' in text
+    assert '[ -e "${NEW_RELEASE}/uv.toml" ]' in text
     assert 'lumen_update_ensure_runtime_can_access_path "${NEW_RELEASE}/uv.toml" "uv 配置文件"' in text
+    assert "lumen_update_ensure_rsync" in text
 
 
 def test_compose_db_env_vars_backfilled_from_database_url(tmp_path: Path) -> None:
