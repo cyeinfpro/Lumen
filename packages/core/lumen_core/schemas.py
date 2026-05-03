@@ -260,6 +260,208 @@ class ImageOut(BaseOut):
     metadata_jsonb: dict[str, Any] = Field(default_factory=dict)
 
 
+# ---------- Workflows ----------
+
+WorkflowType = Literal["apparel_model_showcase"]
+WorkflowRunStatus = Literal[
+    "draft",
+    "running",
+    "needs_review",
+    "completed",
+    "failed",
+]
+WorkflowStepStatus = Literal[
+    "waiting_input",
+    "running",
+    "needs_review",
+    "approved",
+    "failed",
+    "completed",
+]
+WorkflowStepKey = Literal[
+    "upload_product",
+    "product_analysis",
+    "model_settings",
+    "model_candidates",
+    "model_approval",
+    "showcase_generation",
+    "quality_review",
+    "delivery",
+]
+
+
+class WorkflowStepOut(BaseOut):
+    id: str
+    workflow_run_id: str
+    step_key: str
+    status: str
+    input_json: dict[str, Any] = Field(default_factory=dict)
+    output_json: dict[str, Any] = Field(default_factory=dict)
+    task_ids: list[str] = Field(default_factory=list)
+    image_ids: list[str] = Field(default_factory=list)
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelCandidateOut(BaseOut):
+    id: str
+    workflow_run_id: str
+    candidate_index: int
+    portrait_image_id: str | None = None
+    front_image_id: str | None = None
+    side_image_id: str | None = None
+    back_image_id: str | None = None
+    contact_sheet_image_id: str | None = None
+    model_brief_json: dict[str, Any] = Field(default_factory=dict)
+    task_ids: list[str] = Field(default_factory=list)
+    status: str
+    selected_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class QualityReportOut(BaseOut):
+    id: str
+    workflow_run_id: str
+    image_id: str
+    overall_score: int
+    product_fidelity_score: int
+    model_consistency_score: int
+    aesthetic_score: int
+    artifact_score: int
+    issues_json: list[dict[str, Any]] = Field(default_factory=list)
+    recommendation: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowRunOut(BaseOut):
+    id: str
+    conversation_id: str | None = None
+    user_id: str
+    type: str
+    status: str
+    title: str
+    user_prompt: str
+    product_image_ids: list[str] = Field(default_factory=list)
+    current_step: str
+    quality_mode: str
+    metadata_jsonb: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+    steps: list[WorkflowStepOut] = Field(default_factory=list)
+    model_candidates: list[ModelCandidateOut] = Field(default_factory=list)
+    quality_reports: list[QualityReportOut] = Field(default_factory=list)
+    product_images: list[ImageOut] = Field(default_factory=list)
+    generated_images: list[ImageOut] = Field(default_factory=list)
+    generations: list[GenerationOut] = Field(default_factory=list)
+
+
+class WorkflowRunListItemOut(BaseOut):
+    id: str
+    conversation_id: str | None = None
+    type: str
+    status: str
+    title: str
+    user_prompt: str
+    product_image_ids: list[str] = Field(default_factory=list)
+    current_step: str
+    quality_mode: str
+    metadata_jsonb: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+    output_count: int = 0
+    next_action: str
+
+
+class WorkflowRunListOut(BaseModel):
+    items: list[WorkflowRunListItemOut]
+    next_cursor: str | None = None
+
+
+class ApparelWorkflowCreateIn(BaseModel):
+    conversation_id: str | None = None
+    product_image_ids: list[str] = Field(min_length=1, max_length=3)
+    user_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
+    quality_mode: Literal["standard", "premium"] = "premium"
+    title: str | None = Field(default=None, max_length=120)
+
+
+class ApparelWorkflowCreateOut(BaseModel):
+    workflow_run_id: str
+    status: str
+    current_step: str
+
+
+class ProductAnalysisApproveIn(BaseModel):
+    corrections: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelCandidatesCreateIn(BaseModel):
+    candidate_count: int = Field(default=3, ge=3, le=3)
+    style_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
+    avoid: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AccessoryPlanIn(BaseModel):
+    enabled: bool = True
+    items: list[str] = Field(default_factory=list, max_length=12)
+    strength: Literal["subtle", "medium", "strong"] = "subtle"
+
+
+class ModelCandidateApproveIn(BaseModel):
+    adjustments: str = Field(default="", max_length=MAX_PROMPT_CHARS)
+    accessory_plan: AccessoryPlanIn = Field(default_factory=AccessoryPlanIn)
+    selected_accessory_image_id: str | None = None
+
+
+class AccessoryPreviewCreateIn(BaseModel):
+    candidate_id: str
+    accessory_plan: AccessoryPlanIn = Field(default_factory=AccessoryPlanIn)
+    style_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
+
+
+class AccessorySelectionIn(BaseModel):
+    selected_accessory_image_id: str | None = None
+
+
+class ShowcaseImagesCreateIn(BaseModel):
+    template: Literal[
+        "white_ecommerce",
+        "premium_studio",
+        "urban_commute",
+        "lifestyle",
+        "social_seed",
+    ] = "premium_studio"
+    shot_plan: list[
+        Literal[
+            "front_full_body",
+            "natural_pose",
+            "detail_half_body",
+            "side_or_back",
+        ]
+    ] = Field(
+        default_factory=lambda: [
+            "front_full_body",
+            "natural_pose",
+            "detail_half_body",
+            "side_or_back",
+        ],
+        min_length=1,
+        max_length=4,
+    )
+    aspect_ratio: AspectRatioLiteral = "4:5"
+    final_quality: Literal["standard", "high", "4k"] = "high"
+    output_count: int = Field(default=4, ge=1, le=4)
+
+
+class ImageRevisionIn(BaseModel):
+    instruction: str = Field(max_length=MAX_PROMPT_CHARS)
+    scope: Literal["full_image", "local_repair"] = "full_image"
+
+
 # ---------- Worker payload (XADD into Redis Stream) ----------
 
 class TaskQueueItem(BaseModel):

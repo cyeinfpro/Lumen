@@ -343,6 +343,155 @@ class ImageVariant(Base, TimestampMixin):
     height: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+# ---------- Structured Workflows ----------
+
+class WorkflowRun(Base, TimestampMixin, SoftDeleteMixin):
+    """A resumable structured workflow project.
+
+    Workflows are intentionally separate from normal chat messages. A run may
+    use a backing conversation for generation/completion tasks, but the current
+    stage, approvals, candidate models, and QC reports live here.
+    """
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index("ix_workflow_runs_user_status_updated", "user_id", "status", "updated_at"),
+        Index("ix_workflow_runs_user_type_updated", "user_id", "type", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    user_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    product_image_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(String(36)),
+        nullable=False,
+        default=list,
+        server_default=text("ARRAY[]::varchar[]"),
+    )
+    current_step: Mapped[str] = mapped_column(String(64), nullable=False)
+    quality_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="premium")
+    metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+
+class WorkflowStep(Base, TimestampMixin):
+    """Per-stage state for a structured workflow run."""
+
+    __tablename__ = "workflow_steps"
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id", "step_key", name="uq_workflow_steps_run_key"),
+        Index("ix_workflow_steps_run_key", "workflow_run_id", "step_key"),
+        Index("ix_workflow_steps_run_status", "workflow_run_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="waiting_input")
+    input_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    output_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    task_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(String(36)),
+        nullable=False,
+        default=list,
+        server_default=text("ARRAY[]::varchar[]"),
+    )
+    image_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(String(36)),
+        nullable=False,
+        default=list,
+        server_default=text("ARRAY[]::varchar[]"),
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class ModelCandidate(Base, TimestampMixin):
+    """Synthetic model option generated before garment try-on."""
+
+    __tablename__ = "model_candidates"
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id", "candidate_index", name="uq_model_candidates_run_index"),
+        Index("ix_model_candidates_run_status", "workflow_run_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    candidate_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    portrait_image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    front_image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    side_image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    back_image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    contact_sheet_image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    model_brief_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    task_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(String(36)),
+        nullable=False,
+        default=list,
+        server_default=text("ARRAY[]::varchar[]"),
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class QualityReport(Base, TimestampMixin):
+    """Automatic QC result for a generated workflow image."""
+
+    __tablename__ = "quality_reports"
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id", "image_id", name="uq_quality_reports_run_image"),
+        Index("ix_quality_reports_run_recommendation", "workflow_run_id", "recommendation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    image_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    overall_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    product_fidelity_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_consistency_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    aesthetic_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    artifact_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    issues_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    recommendation: Mapped[str] = mapped_column(String(32), nullable=False, default="review")
+
+
 # ---------- Shares ----------
 
 class Share(Base, TimestampMixin):
@@ -539,6 +688,10 @@ __all__ = [
     "Completion",
     "Image",
     "ImageVariant",
+    "WorkflowRun",
+    "WorkflowStep",
+    "ModelCandidate",
+    "QualityReport",
     "Share",
     "OutboxEvent",
     "InviteLink",

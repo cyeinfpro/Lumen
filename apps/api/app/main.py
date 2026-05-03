@@ -434,7 +434,7 @@ async def readyz(
 
 
 # 路由挂载
-from .routes import auth, conversations, events, images, messages, tasks  # noqa: E402
+from .routes import auth, conversations, events, images, messages, tasks, workflows  # noqa: E402
 from .routes import generations as generations_router  # noqa: E402
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -446,6 +446,7 @@ app.include_router(generations_router.router, prefix="/generations", tags=["gene
 app.include_router(tasks.router, tags=["tasks"])
 app.include_router(images.router, prefix="/images", tags=["images"])
 app.include_router(events.router, tags=["events"])
+app.include_router(workflows.router)
 
 from .routes import admin as admin_router  # noqa: E402
 from .routes import admin_backups as admin_backups_router  # noqa: E402

@@ -2,7 +2,7 @@
 
 // 桌面端顶部主导航：复用在 DesktopStudio / DesktopStream / DesktopMe。
 // 三 Tab 横向导航 + 左侧 Logo + 可配置右侧 slot。
-// 与 MobileTabBar 的路由契约保持一致：/ → 创作；/stream → 图库；/me、/settings → 我的。
+// 与 MobileTabBar 的路由契约保持一致：/ → 创作；/projects → 项目；/stream → 图库；/me、/settings → 我的。
 
 import { motion } from "framer-motion";
 import { Menu } from "lucide-react";
@@ -12,7 +12,7 @@ import { useCallback, useMemo, type ReactNode } from "react";
 
 import { SPRING } from "@/lib/motion";
 
-export type DesktopNavTab = "studio" | "stream" | "me";
+export type DesktopNavTab = "studio" | "projects" | "stream" | "me";
 
 interface TabDef {
   key: DesktopNavTab;
@@ -22,6 +22,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { key: "studio", label: "创作", route: "/" },
+  { key: "projects", label: "项目", route: "/projects" },
   { key: "stream", label: "图库", route: "/stream" },
   { key: "me", label: "我的", route: "/me" },
 ];
@@ -38,6 +39,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
 
   const currentActive: DesktopNavTab = useMemo(() => {
     if (pathname === "/" || pathname === "") return "studio";
+    if (pathname.startsWith("/projects")) return "projects";
     if (pathname.startsWith("/stream")) return "stream";
     if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return "me";
     return active;

@@ -1165,7 +1165,9 @@ export function SettingsPanel() {
                 isLoading: adminModelsQ.isLoading,
                 isError: adminModelsQ.isError,
                 errorMessage: adminModelsQ.error?.message,
-                models: adminModelsQ.data?.models.map((model) => model.id) ?? [],
+                models: Array.isArray(adminModelsQ.data?.models)
+                  ? adminModelsQ.data.models.map((model) => model.id)
+                  : [],
               }}
               providerStatus={providerStatus}
               updateProxyOptions={proxiesQ.data?.items ?? []}
@@ -2025,7 +2027,8 @@ function shortReleaseId(id: string): string {
   return id.slice(0, 28) + "…";
 }
 
-function shortSha(sha: string): string {
+function shortSha(sha?: string | null): string {
+  if (!sha) return "未知";
   return sha.length > 7 ? sha.slice(0, 7) : sha;
 }
 
@@ -2734,7 +2737,7 @@ function ReleaseRow({
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
           <span>{formatDateTime(release.created_at)}</span>
-          <span className="font-mono" title={release.sha}>
+          <span className="font-mono" title={release.sha ?? undefined}>
             sha {shortSha(release.sha)}
           </span>
           {release.branch && <span>分支 {release.branch}</span>}
