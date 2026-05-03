@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import sys
+import uuid
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
@@ -136,18 +137,31 @@ def _bad_request(code: str, message: str) -> HTTPException:
     )
 
 
-def _service_unavailable(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=503,
-        detail={
-            "error": {
-                "code": "compression_unavailable",
-                "message": "compression unavailable",
-                "reason": reason,
-                "details": {"reason": reason},
-            }
-        },
-    )
+def _trace_id(request: Request | None = None) -> str:
+    """Cheap correlation id for high-traffic except paths.
+
+    Tries request.state.request_id first (in case middleware ever sets it),
+    falls back to a fresh 12-hex uuid. Returned to the user in the 503 body
+    so a screenshot of the error is enough to grep server logs.
+    """
+    if request is not None:
+        existing = getattr(getattr(request, "state", None), "request_id", None)
+        if isinstance(existing, str) and existing:
+            return existing
+    return uuid.uuid4().hex[:12]
+
+
+def _service_unavailable(reason: str, *, trace_id: str | None = None) -> HTTPException:
+    error: dict[str, Any] = {
+        "code": "compression_unavailable",
+        "message": "compression unavailable",
+        "reason": reason,
+        "details": {"reason": reason},
+    }
+    if trace_id:
+        error["trace_id"] = trace_id
+        error["details"]["trace_id"] = trace_id
+    return HTTPException(status_code=503, detail={"error": error})
 
 
 def _message_alive_filters() -> tuple[Any, ...]:
@@ -805,13 +819,19 @@ async def _check_manual_compact_cooldown(
         raw_reset_seconds = int(result[1])
         reset_seconds = raw_reset_seconds if raw_reset_seconds > 0 else cooldown_seconds
     except Exception as exc:
-        logger.error("manual compact cooldown limiter unavailable", exc_info=True)
+        tid = _trace_id()
+        logger.error(
+            "manual compact cooldown limiter unavailable",
+            exc_info=True,
+            extra={"trace_id": tid, "user_id": user_id, "conv_id": conv_id},
+        )
         raise HTTPException(
             status_code=503,
             detail={
                 "error": {
                     "code": "cooldown_limiter_unavailable",
                     "message": "manual compact cooldown limiter unavailable",
+                    "trace_id": tid,
                 }
             },
             headers={"Retry-After": "1"},
@@ -1353,7 +1373,11 @@ async def _estimate_context_window(
         ):
             latest_context_meta = upstream_request["context"]
     except Exception:
-        logger.debug("latest completion context lookup failed", exc_info=True)
+        logger.warning(
+            "latest completion context lookup failed",
+            exc_info=True,
+            extra={"trace_id": _trace_id(), "user_id": user_id, "conv_id": conv.id},
+        )
     latest_fallback = latest_context_meta.get("fallback_reason")
     if not isinstance(latest_fallback, str):
         latest_fallback = _summary_str(summary, "last_fallback_reason")
@@ -1375,7 +1399,11 @@ async def _estimate_context_window(
         compressible_messages_count = len(source_messages)
         compressible_tokens = _estimate_messages_tokens(source_messages)
     except Exception:
-        logger.debug("context compressible estimate failed", exc_info=True)
+        logger.warning(
+            "context compressible estimate failed",
+            exc_info=True,
+            extra={"trace_id": _trace_id(), "user_id": user_id, "conv_id": conv.id},
+        )
     effective_summary_cost = (
         summary_block_tokens + sticky_tokens
         if summary_available
@@ -1965,8 +1993,12 @@ async def _enqueue_manual_compact_job(
             MANUAL_COMPACT_ACTIVE_TTL_SECONDS,
         )
     except Exception as exc:
-        logger.exception("manual compact active lock failed")
-        raise _service_unavailable("upstream_error") from exc
+        tid = _trace_id()
+        logger.exception(
+            "manual compact active lock failed",
+            extra={"trace_id": tid, "user_id": user_id, "conv_id": conv_id, "job_id": job_id},
+        )
+        raise _service_unavailable("upstream_error", trace_id=tid) from exc
     if not locked:
         try:
             active = await _redis_get_json(redis, active_key)
@@ -2020,14 +2052,22 @@ async def _enqueue_manual_compact_job(
             model,
         )
     except Exception as exc:
-        logger.exception("manual compact enqueue failed")
+        tid = _trace_id()
+        logger.exception(
+            "manual compact enqueue failed",
+            extra={"trace_id": tid, "user_id": user_id, "conv_id": conv_id, "job_id": job_id},
+        )
         try:
             await redis.delete(active_key)
             await redis.delete(job_key)
             await redis.delete(cooldown_key)
         except Exception:
-            logger.debug("manual compact enqueue cleanup failed", exc_info=True)
-        raise _service_unavailable("upstream_error") from exc
+            logger.debug(
+                "manual compact enqueue cleanup failed",
+                exc_info=True,
+                extra={"trace_id": tid},
+            )
+        raise _service_unavailable("upstream_error", trace_id=tid) from exc
 
     return _compact_pending_payload(job_id=job_id, status="pending")
 
@@ -2171,8 +2211,12 @@ async def compact_conversation(
 
     ensure = _import_ensure_context_summary()
     if ensure is None:
-        logger.error("ensure_context_summary unavailable for manual compact")
-        raise _service_unavailable("upstream_error")
+        tid = _trace_id(request)
+        logger.error(
+            "ensure_context_summary unavailable for manual compact",
+            extra={"trace_id": tid, "user_id": user.id, "conv_id": conv.id},
+        )
+        raise _service_unavailable("upstream_error", trace_id=tid)
 
     runtime_settings: dict[str, Any] = {
         "context.summary_target_tokens": target_tokens,
@@ -2195,12 +2239,28 @@ async def compact_conversation(
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — surfaced as 503
-        logger.exception("manual context compaction failed")
-        raise _service_unavailable("upstream_error") from exc
+        tid = _trace_id(request)
+        logger.exception(
+            "manual context compaction failed",
+            extra={"trace_id": tid, "user_id": user.id, "conv_id": conv.id, "boundary_id": boundary.id},
+        )
+        raise _service_unavailable("upstream_error", trace_id=tid) from exc
 
     if result is None or not isinstance(result, dict) or "failed" in str(result.get("status") or ""):
         reason = _classify_compact_failure(result)
-        raise _service_unavailable(reason)
+        tid = _trace_id(request)
+        logger.warning(
+            "manual context compaction returned non-ok result reason=%s",
+            reason,
+            extra={
+                "trace_id": tid,
+                "user_id": user.id,
+                "conv_id": conv.id,
+                "boundary_id": boundary.id,
+                "result_status": (result or {}).get("status") if isinstance(result, dict) else None,
+            },
+        )
+        raise _service_unavailable(reason, trace_id=tid)
 
     summary_payload = _build_compact_summary_payload(result=result, conv=conv)
     return {"status": "ok", "compacted": True, "summary": summary_payload}
@@ -2210,6 +2270,7 @@ async def compact_conversation(
 async def get_compact_conversation_status(
     conv_id: str,
     job_id: str,
+    request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, Any]:
@@ -2223,12 +2284,23 @@ async def get_compact_conversation_status(
     try:
         job = await _redis_get_json(redis, job_key)
     except Exception as exc:
-        logger.warning("manual compact status unavailable", exc_info=True)
-        raise _service_unavailable("upstream_error") from exc
+        tid = _trace_id(request)
+        logger.warning(
+            "manual compact status unavailable",
+            exc_info=True,
+            extra={"trace_id": tid, "user_id": user.id, "conv_id": conv_id, "job_id": job_id},
+        )
+        raise _service_unavailable("upstream_error", trace_id=tid) from exc
     payload = _compact_payload_from_job(job, job_id=job_id)
     if payload is None:
         raise _not_found()
     if payload.get("status") == "failed":
         reason = str(payload.get("reason") or "upstream_error")
-        raise _service_unavailable(reason)
+        tid = _trace_id(request)
+        logger.warning(
+            "manual compact job reported failed reason=%s",
+            reason,
+            extra={"trace_id": tid, "user_id": user.id, "conv_id": conv_id, "job_id": job_id},
+        )
+        raise _service_unavailable(reason, trace_id=tid)
     return payload
