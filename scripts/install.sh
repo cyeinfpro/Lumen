@@ -293,8 +293,6 @@ fi
 
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OS="$(detect_os)"
-LOCK_DIR="${ROOT}/.lumen-script.lock"
-LOCK_HELD=0
 
 # ---------------------------------------------------------------------------
 # 入口：菜单 / auto / install / update / uninstall 分发
@@ -413,42 +411,83 @@ dispatch_entrypoint "$@"
 
 # ---------------------------------------------------------------------------
 # 失败处理 / 锁
+# 锁机制：使用 lib.sh 的 lumen_acquire_lock（${ROOT}/.lumen-maintenance.lock），
+# 与 update.sh / uninstall.sh 互斥。lumen_release_lock 由 EXIT trap 自动调用。
 # ---------------------------------------------------------------------------
 INSTALL_PHASE=""               # 当前阶段名（用于错误时报告 + step protocol）
 INSTALL_STARTED_SERVICES=()    # 已启动的 compose service 列表（失败时 stop）
+INSTALL_SWITCHED=0             # current symlink 是否已切到本次 RELEASE_DIR
+INSTALL_PREV_CURRENT_TARGET="" # switch 前 current 指向的相对路径（失败回滚用）
 
 on_error() {
     local line="$1"
     log_error "安装失败：第 ${line} 行返回非零状态（阶段=${INSTALL_PHASE:-unknown}）。"
 }
 
-# 失败清理：停止已启动的容器但保留数据卷；打印 docker compose logs --tail=40
+# 失败清理：停止已启动的容器、回滚 current symlink、删除半完成的 release。
+# 数据卷与 shared/.env 永远保留，让用户重跑 install 时复用。
 cleanup_on_failure() {
     local rc=$?
     trap - EXIT INT TERM ERR
     if [ "${rc}" -ne 0 ]; then
-        log_error "安装在阶段 [${INSTALL_PHASE:-unknown}] 失败，正在清理已启动的容器（保留数据卷）。"
+        log_error "安装在阶段 [${INSTALL_PHASE:-unknown}] 失败，正在清理已启动的容器（数据卷与 shared/.env 保留）。"
         if [ "${#INSTALL_STARTED_SERVICES[@]}" -gt 0 ]; then
             local svc
             for svc in "${INSTALL_STARTED_SERVICES[@]}"; do
                 log_warn "  最近 40 行 ${svc} 日志："
-                _install_compose logs --tail=40 "${svc}" 2>/dev/null || true
+                _install_compose logs --tail=40 "${svc}" 2>/dev/null || log_warn "    （取日志失败，已忽略）"
             done
             log_warn "停止已启动的服务（数据卷保留）：${INSTALL_STARTED_SERVICES[*]}"
-            _install_compose stop "${INSTALL_STARTED_SERVICES[@]}" 2>/dev/null || true
+            if ! _install_compose stop "${INSTALL_STARTED_SERVICES[@]}" 2>/dev/null; then
+                log_warn "  docker compose stop 返回非零（已忽略，请手动 docker compose ps 检查）"
+            fi
         fi
+
+        # 如果 current 已经被切到本次 RELEASE_DIR，但后续阶段失败，则切回 previous（如有）。
+        # DEPLOY_ROOT 在主流程里赋值，可能在 lumen_acquire_lock 失败时还未定义；用 :- 防御。
+        local _deploy_root="${DEPLOY_ROOT:-}"
+        if [ -n "${_deploy_root}" ] \
+                && [ "${INSTALL_SWITCHED}" = "1" ] \
+                && [ -n "${INSTALL_PREV_CURRENT_TARGET:-}" ] \
+                && [ -d "${_deploy_root}/${INSTALL_PREV_CURRENT_TARGET}" ]; then
+            log_warn "回滚 current symlink → ${INSTALL_PREV_CURRENT_TARGET}（${INSTALL_PHASE} 之后失败）"
+            if ! lumen_atomic_replace_symlink "${INSTALL_PREV_CURRENT_TARGET}" "${_deploy_root}/current" 2>/dev/null; then
+                log_error "  current 回滚失败！请手动：ln -sfn ${INSTALL_PREV_CURRENT_TARGET} ${_deploy_root}/current"
+            fi
+        fi
+
+        # 半完成的 release 目录：rsync 已落地但 current 从未切到它（或已切回 previous），删除。
+        if [ -n "${RELEASE_DIR:-}" ] && [ -d "${RELEASE_DIR}" ]; then
+            local cur_target=""
+            if [ -n "${_deploy_root}" ] && [ -L "${_deploy_root}/current" ]; then
+                cur_target="$(readlink "${_deploy_root}/current" 2>/dev/null || true)"
+            fi
+            if [ "${cur_target}" != "releases/${RELEASE_ID:-}" ]; then
+                log_warn "清理半完成的 release：${RELEASE_DIR}"
+                if ! lumen_safe_rm_rf "${RELEASE_DIR}" 2>/dev/null; then
+                    if ! lumen_safe_rm_rf_as_root "${RELEASE_DIR}" 2>/dev/null; then
+                        log_warn "  release 删除失败，请手动：sudo rm -rf '${RELEASE_DIR}'"
+                    fi
+                fi
+            fi
+        fi
+
         # 只在新流程触发的 step protocol 上下文里写 fail；emit_step 函数在 lib.sh
         if command -v lumen_emit_step >/dev/null 2>&1 && [ -n "${INSTALL_PHASE:-}" ]; then
-            lumen_emit_step "phase=${INSTALL_PHASE}" "status=fail" "rc=${rc}" "dur_ms=0" || true
+            lumen_emit_step "phase=${INSTALL_PHASE}" "status=fail" "rc=${rc}" "dur_ms=0" 2>/dev/null \
+                || log_warn "lumen_emit_step 写入失败（已忽略）"
         fi
         log_error ""
         log_error "可恢复命令："
-        log_error "  cd ${RELEASE_DIR:-${ROOT}}"
+        log_error "  cd ${_deploy_root:-${ROOT}}/current 2>/dev/null || cd ${ROOT}"
         log_error "  COMPOSE_PROJECT_NAME=lumen docker compose ps"
         log_error "  COMPOSE_PROJECT_NAME=lumen docker compose logs --tail=200 api worker web"
         log_error "  bash ${SCRIPT_DIR}/install.sh --install   # 修复后重跑（幂等）"
     fi
-    release_script_lock
+    # lumen_release_lock 由 lumen_acquire_lock 安装的 EXIT trap 处理；这里手动也调一次幂等
+    if command -v lumen_release_lock >/dev/null 2>&1; then
+        lumen_release_lock 2>/dev/null || true
+    fi
     return "${rc}"
 }
 
@@ -457,57 +496,6 @@ on_signal() {
     local rc="$2"
     log_error "安装被 ${signal_name} 中断，正在清理脚本锁。"
     exit "${rc}"
-}
-
-release_script_lock() {
-    if [ "${LOCK_HELD}" -eq 1 ]; then
-        rm -rf "${LOCK_DIR}"
-        LOCK_HELD=0
-    fi
-}
-
-acquire_script_lock() {
-    local lock_pid=""
-    local started_at=""
-
-    if mkdir "${LOCK_DIR}" 2>/dev/null; then
-        LOCK_HELD=1
-        {
-            printf 'pid=%s\n' "$$"
-            printf 'script=%s\n' "install.sh"
-            printf 'started_at=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || true)"
-        } > "${LOCK_DIR}/info"
-        return 0
-    fi
-
-    if [ -f "${LOCK_DIR}/info" ]; then
-        lock_pid="$(sed -n 's/^pid=//p' "${LOCK_DIR}/info" | head -n1 || true)"
-        started_at="$(sed -n 's/^started_at=//p' "${LOCK_DIR}/info" | head -n1 || true)"
-    fi
-
-    if [[ "${lock_pid}" =~ ^[0-9]+$ ]] && kill -0 "${lock_pid}" 2>/dev/null; then
-        log_error "另一个 Lumen 运维脚本正在运行（pid=${lock_pid}${started_at:+, started_at=${started_at}}）。"
-        log_error "为避免 .env、docker compose 操作竞态，本次安装已停止。"
-        exit 1
-    fi
-
-    if [ ! -e "${LOCK_DIR}" ]; then
-        log_error "无法创建脚本锁 ${LOCK_DIR}。请检查项目目录写权限后重试。"
-        exit 1
-    fi
-
-    log_warn "发现陈旧脚本锁 ${LOCK_DIR}，将清理后重试加锁。"
-    rm -rf "${LOCK_DIR}"
-    if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-        log_error "无法获取脚本锁 ${LOCK_DIR}。请确认没有 install/update/uninstall 正在运行后重试。"
-        exit 1
-    fi
-    LOCK_HELD=1
-    {
-        printf 'pid=%s\n' "$$"
-        printf 'script=%s\n' "install.sh"
-        printf 'started_at=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || true)"
-    } > "${LOCK_DIR}/info"
 }
 
 # ---------------------------------------------------------------------------
@@ -746,8 +734,10 @@ prepare_data_dirs() {
     }
 
     # 顶层 root:root 755（不递归）
-    lumen_run_as_root chown root:root "${root}" || true
-    lumen_run_as_root chmod 755 "${root}" || true
+    lumen_run_as_root chown root:root "${root}" \
+        || log_warn "chown root:root ${root} 失败（已忽略，子目录单独 chown）"
+    lumen_run_as_root chmod 755 "${root}" \
+        || log_warn "chmod 755 ${root} 失败（已忽略）"
 
     # 按服务分别 chown（禁止整体 chown 10001 给所有目录 —— §15.2）
     lumen_run_as_root chown -R 70:70   "${root}/postgres" || {
@@ -763,8 +753,10 @@ prepare_data_dirs() {
         exit 1
     }
 
-    lumen_run_as_root chmod 700 "${root}/postgres" "${root}/redis" || true
-    lumen_run_as_root chmod 750 "${root}/storage" "${root}/backup" || true
+    lumen_run_as_root chmod 700 "${root}/postgres" "${root}/redis" \
+        || log_warn "chmod 700 postgres/redis 失败（已忽略，但容器可能因权限问题起不来）"
+    lumen_run_as_root chmod 750 "${root}/storage" "${root}/backup" \
+        || log_warn "chmod 750 storage/backup 失败（已忽略，但 api/worker 可能写不进去）"
 
     log_info "数据目录权限设置完成（postgres=70, redis=999, storage/backup=10001）。"
     emit_info "key=data_root" "value=${root}"
@@ -803,15 +795,18 @@ prepare_release_layout() {
     }
     # DEPLOY_ROOT 写权限给当前用户（compose 要从 RELEASE_DIR 读 docker-compose.yml）
     if [ ! -w "${DEPLOY_ROOT}" ]; then
-        lumen_run_as_root chown "$(id -un):$(id -gn)" "${DEPLOY_ROOT}" "${DEPLOY_ROOT}/releases" "${SHARED_DIR}" 2>/dev/null || true
+        lumen_run_as_root chown "$(id -un):$(id -gn)" "${DEPLOY_ROOT}" "${DEPLOY_ROOT}/releases" "${SHARED_DIR}" 2>/dev/null \
+            || log_warn "chown ${DEPLOY_ROOT} 失败（已忽略，rsync 可能因权限失败）"
     fi
 
     if [ -e "${RELEASE_DIR}" ] && [ "$(ls -A "${RELEASE_DIR}" 2>/dev/null | head -1)" ]; then
-        log_warn "release 目录已存在且非空：${RELEASE_DIR}（同一秒重跑？覆盖式继续。）"
+        # 加了 PID 后缀后同秒冲突理论上不会发生；保留 warn 用作早期诊断
+        log_warn "release 目录已存在且非空：${RELEASE_DIR}（异常情况，覆盖式继续。）"
     fi
     mkdir -p "${RELEASE_DIR}" 2>/dev/null || lumen_run_as_root mkdir -p "${RELEASE_DIR}"
     if [ ! -w "${RELEASE_DIR}" ]; then
-        lumen_run_as_root chown -R "$(id -un):$(id -gn)" "${RELEASE_DIR}" 2>/dev/null || true
+        lumen_run_as_root chown -R "$(id -un):$(id -gn)" "${RELEASE_DIR}" 2>/dev/null \
+            || log_warn "chown ${RELEASE_DIR} 失败（已忽略，rsync 可能因权限失败）"
     fi
 
     # 把当前仓库内容 rsync 到 release 目录（保留 release 布局，§11.1）
@@ -1048,13 +1043,15 @@ probe_ghcr_image_tag() {
 pull_or_build_images() {
     if [ "${INSTALL_BUILD_FLAG}" = "1" ]; then
         emit_step_start containers "本地构建镜像（lumen_compose build）"
-        if ! _install_compose build; then
+        # build 失败通常是 Dockerfile / 资源问题，重试 2 次（每次都是 from-scratch 的网络拉基础镜像）。
+        if ! lumen_retry 2 5 "docker compose build" _install_compose build; then
             log_error "本地 docker compose build 失败。"
             exit 1
         fi
     else
         emit_step_start containers "拉取镜像（lumen_compose pull）"
-        if ! _install_compose pull; then
+        # 网络抖动是 pull 失败最常见的原因；先重试 3 次（指数退避 5/10/20），仍失败再走 fallback。
+        if ! lumen_retry 3 5 "docker compose pull" _install_compose pull; then
             local shared_env="${SHARED_DIR}/.env"
             local registry current_tag
             registry="$(env_file_get LUMEN_IMAGE_REGISTRY "${shared_env}")"
@@ -1067,7 +1064,7 @@ pull_or_build_images() {
                 if ! grep -q '^# install.sh: fallback to main after pull failure' "${shared_env}"; then
                     printf '\n# install.sh: fallback to main after pull failure; publish stable/latest then switch back\n' >> "${shared_env}"
                 fi
-                if _install_compose pull; then
+                if lumen_retry 2 5 "docker compose pull (main fallback)" _install_compose pull; then
                     log_info "已使用 LUMEN_IMAGE_TAG=main 拉取镜像。"
                 else
                     log_error "docker compose pull 失败（fallback main 后仍失败）。"
@@ -1196,14 +1193,23 @@ start_application_services() {
 switch_current_symlink() {
     emit_step_start switch "切换 current symlink → releases/${RELEASE_ID}"
     local cur="${DEPLOY_ROOT}/current"
+    # 保存切换前的 target，cleanup_on_failure 在后续 health 失败时切回。
+    INSTALL_PREV_CURRENT_TARGET=""
     if [ -L "${cur}" ]; then
         local prev_target
         prev_target="$(readlink "${cur}" 2>/dev/null || true)"
-        if [ -n "${prev_target}" ]; then
-            ln -sfn "${prev_target}" "${DEPLOY_ROOT}/previous" 2>/dev/null || true
+        if [ -n "${prev_target}" ] && [ "${prev_target}" != "releases/${RELEASE_ID}" ]; then
+            INSTALL_PREV_CURRENT_TARGET="${prev_target}"
+            if ! lumen_atomic_replace_symlink "${prev_target}" "${DEPLOY_ROOT}/previous" 2>/dev/null; then
+                log_warn "无法更新 previous symlink → ${prev_target}（已忽略，不阻断 switch）"
+            fi
         fi
     fi
-    ln -sfn "releases/${RELEASE_ID}" "${cur}"
+    if ! lumen_atomic_replace_symlink "releases/${RELEASE_ID}" "${cur}"; then
+        log_error "切换 current → releases/${RELEASE_ID} 失败。"
+        exit 1
+    fi
+    INSTALL_SWITCHED=1
     log_info "${cur} → releases/${RELEASE_ID}"
     emit_step_done
 }
@@ -1309,7 +1315,8 @@ trap cleanup_on_failure EXIT
 trap 'on_signal SIGINT 130' INT
 trap 'on_signal SIGTERM 143' TERM
 
-acquire_script_lock
+# 全局维护锁：与 update.sh / uninstall.sh 互斥（共用 ${ROOT}/.lumen-maintenance.lock）。
+lumen_acquire_lock "${ROOT}" "install.sh"
 
 # 解析最终的部署目录与数据目录（命令行 / 环境变量 / 默认值优先级）
 DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
@@ -1351,5 +1358,5 @@ warn_about_legacy_systemd
 print_summary
 
 trap - ERR EXIT
-release_script_lock
+lumen_release_lock 2>/dev/null || true
 exit 0

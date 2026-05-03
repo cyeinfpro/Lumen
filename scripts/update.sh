@@ -423,12 +423,23 @@ on_err() {
     log_error "更新失败：返回码 ${rc}"
     if [ "${ROLLBACK_DONE}" -eq 0 ]; then
         ROLLBACK_DONE=1
-        if [ "${SWITCHED}" -eq 1 ]; then
-            log_warn "rollback：尝试把 current 切回 ${CURRENT_ID}"
-            lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" 2>/dev/null || true
+        if [ "${SWITCHED}" -eq 1 ] && [ -n "${CURRENT_ID:-}" ]; then
+            # 切回前先验证 previous release 还在；不在的话拒绝盲切（手动恢复）
+            if [ ! -d "${ROOT}/releases/${CURRENT_ID}" ]; then
+                log_error "rollback：previous release ${CURRENT_ID} 目录不存在，拒绝盲切。请手动恢复："
+                log_error "  ls ${ROOT}/releases/  # 找到合法 release id"
+                log_error "  ln -sfn releases/<id> ${ROOT}/current"
+            elif lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}"; then
+                log_warn "rollback：current 已切回 ${CURRENT_ID}（业务容器仍是新版本，建议人工 docker compose up -d）"
+            else
+                log_error "rollback：current 切回 ${CURRENT_ID} 失败，请手动："
+                log_error "  ln -sfn releases/${CURRENT_ID} ${ROOT}/current"
+            fi
         elif [ -n "${NEW_RELEASE}" ] && [ -d "${NEW_RELEASE}" ]; then
             log_warn "rollback：删除未启用的 release ${NEW_ID}"
-            rm -rf "${NEW_RELEASE}" 2>/dev/null || true
+            if ! lumen_release_remove_unused "${ROOT}" "${NEW_ID}"; then
+                log_warn "  release 删除失败，请手动 sudo rm -rf '${NEW_RELEASE}'"
+            fi
         fi
     fi
     exit "${rc}"
@@ -607,7 +618,9 @@ else
         exit 1
     fi
     log_info "[backup_preflight] 调用 ${BACKUP_SCRIPT}（BACKUP_ROOT=${UPDATE_LOG_DIR}）"
+    # LUMEN_BACKUP_FORCE=1：跳过 backup.sh 内的维护锁 try-acquire（本进程已持有同一把维护锁）。
     if ! LUMEN_ENV_FILE="${SHARED_ENV}" LUMEN_BACKUP_ROOT="${UPDATE_LOG_DIR}" BACKUP_ROOT="${UPDATE_LOG_DIR}" \
+            LUMEN_BACKUP_FORCE=1 \
             DB_USER="$(lumen_env_value DB_USER "${SHARED_ENV}")" \
             DB_NAME="$(lumen_env_value DB_NAME "${SHARED_ENV}")" \
             REDIS_PASSWORD="$(lumen_env_value REDIS_PASSWORD "${SHARED_ENV}")" \
@@ -785,7 +798,9 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
         emit_info pull_images proxy "configured"
     fi
 
-    if ! lumen_compose_in "${NEW_RELEASE}" pull; then
+    # 网络抖动是 pull 失败最常见原因，先重试 3 次（指数退避 5/10/20s），仍失败再走 fallback。
+    if ! lumen_retry 3 5 "docker compose pull tag=${TARGET_TAG}" \
+            lumen_compose_in "${NEW_RELEASE}" pull; then
         if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-1}" = "1" ]; then
             log_warn "[pull_images] docker compose pull tag=${TARGET_TAG} 失败，自动回退到 main 后重试。"
             emit_info pull_images target_tag_fallback "main"
@@ -795,8 +810,10 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
                 emit_fail pull_images 1
                 exit 1
             fi
-            printf '%s\n' "${TARGET_TAG}" > "${NEW_RELEASE}/.image-tag" 2>/dev/null || true
-            if ! lumen_compose_in "${NEW_RELEASE}" pull; then
+            printf '%s\n' "${TARGET_TAG}" > "${NEW_RELEASE}/.image-tag" 2>/dev/null \
+                || log_warn "[pull_images] .image-tag 写入失败（已忽略，仅影响事后定位）"
+            if ! lumen_retry 2 5 "docker compose pull (main fallback)" \
+                    lumen_compose_in "${NEW_RELEASE}" pull; then
                 log_error "[pull_images] fallback main 后 docker compose pull 仍失败。"
                 log_error "  请检查 GHCR 可达性或代理配置。"
                 log_error "  当前服务保持不变。"
@@ -875,15 +892,39 @@ if lumen_compose_in "${CURRENT_LINK}" up -d --wait api worker web; then
 else
     log_error "[restart_services] api/worker/web 启动失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
     emit_warn restart_services "starting_auto_rollback"
+    # 事务化回滚：先备份新 tag、改 .env，pull/up 任一步失败就把 .env 恢复成新 tag，
+    # 确保 SHARED_ENV 与 current symlink 状态一致（不会出现 .env 是旧 tag 但 current
+    # 仍是新 release 的中间态）。
+    ROLLBACK_OK=0
     if [ -n "${PREVIOUS_TAG}" ] && [ "${PREVIOUS_TAG}" != "${TARGET_TAG}" ]; then
-        if lumen_set_image_tag_in_env "${SHARED_ENV}" "${PREVIOUS_TAG}" \
-            && lumen_compose_in "${CURRENT_LINK}" pull \
-            && lumen_compose_in "${CURRENT_LINK}" up -d --wait api worker web; then
-            log_warn "[restart_services] 已用 ${PREVIOUS_TAG} 回滚成功；本次 update 视为失败。"
-            emit_info restart_services rolled_back_to "${PREVIOUS_TAG}"
-            emit_fail restart_services 1
-            exit 1
+        # 还要验证 PREVIOUS release 目录还在；缺失时回滚没意义，直接走手动恢复路径
+        if [ -z "${CURRENT_ID:-}" ] || [ ! -d "${ROOT}/releases/${CURRENT_ID}" ]; then
+            log_error "[restart_services] previous release 目录不存在（${ROOT}/releases/${CURRENT_ID:-<none>}），跳过自动回滚。"
+        else
+            if lumen_set_image_tag_in_env "${SHARED_ENV}" "${PREVIOUS_TAG}"; then
+                if lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
+                    && lumen_compose_in "${CURRENT_LINK}" pull \
+                    && lumen_compose_in "${CURRENT_LINK}" up -d --wait api worker web; then
+                    SWITCHED=0  # current 已切回旧 release，on_err 不再重复切
+                    log_warn "[restart_services] 已用 ${PREVIOUS_TAG} 回滚成功（current → ${CURRENT_ID}）；本次 update 视为失败。"
+                    emit_info restart_services rolled_back_to "${PREVIOUS_TAG}"
+                    emit_info restart_services rolled_back_release "${CURRENT_ID}"
+                    ROLLBACK_OK=1
+                else
+                    # pull/up 失败：把 .env 恢复成 TARGET_TAG，避免下次重启拉错镜像
+                    log_error "[restart_services] 回滚 pull/up 失败，恢复 SHARED_ENV 到 ${TARGET_TAG} 以避免错位。"
+                    if ! lumen_set_image_tag_in_env "${SHARED_ENV}" "${TARGET_TAG}"; then
+                        log_error "  恢复 SHARED_ENV 到 ${TARGET_TAG} 也失败！请手动检查 ${SHARED_ENV}"
+                    fi
+                fi
+            else
+                log_error "[restart_services] 改写 SHARED_ENV 到 ${PREVIOUS_TAG} 失败，跳过自动回滚。"
+            fi
         fi
+    fi
+    if [ "${ROLLBACK_OK}" = "1" ]; then
+        emit_fail restart_services 1
+        exit 1
     fi
     log_error "[restart_services] 自动回滚失败 → 请按 §18 手动回滚："
     log_error "  ln -sfn releases/${CURRENT_ID:-<id>} ${ROOT}/current"
@@ -969,8 +1010,12 @@ return 0
 }  # end do_update
 
 # ---------------------------------------------------------------------------
-# 入口：用 lumen_with_lock 套全局锁
+# 入口：双层锁
+#   - 维护锁（${ROOT}/.lumen-maintenance.lock）：与 install.sh / uninstall.sh 互斥
+#   - 全局更新锁（${LUMEN_BACKUP_ROOT}/.lumen-update.lock）：与并发 update 互斥
 # ---------------------------------------------------------------------------
+lumen_acquire_lock "${ROOT}" "update.sh"
+
 if lumen_with_lock "update" 1830 do_update; then
     # 解 trap，让 EXIT 只做 lock 释放
     trap - ERR
