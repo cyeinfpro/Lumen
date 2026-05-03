@@ -38,6 +38,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -362,6 +363,9 @@ export function DesktopLightbox() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const imageWrapRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const dialogTitleId = useId();
 
   const hideActiveImageLayer = useCallback(() => {
     const wrap = imageWrapRef.current;
@@ -811,6 +815,34 @@ export function DesktopLightbox() {
         handleClose();
         return;
       }
+      // Tab 焦点循环：把 Tab 限制在 dialog 内部可聚焦元素之间，防止 Tab 出 dialog
+      // 让用户聚焦到背景被 inert 不掉的元素（chat 输入框等）。
+      if (e.key === "Tab") {
+        const root = containerRef.current;
+        if (!root) return;
+        const focusables = Array.from(
+          root.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((el) => !el.hasAttribute("data-focus-skip"));
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey) {
+          if (active === first || !root.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+        return;
+      }
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
 
@@ -862,15 +894,28 @@ export function DesktopLightbox() {
     gotoDelta,
   ]);
 
-  // 打开时聚焦容器（便于键盘 & 无障碍阅读器识别 dialog 上下文）
-  // 用 rAF 保证 DOM 已挂载；preventScroll 避免浏览器滚动到刚获得焦点的节点位置
+  // 打开时记住打开前的焦点 + 聚焦关闭按钮（screen reader 第一焦点要在 dialog 内
+  // 的可操作元素，而不是容器本身）；关闭时还原焦点到打开者
   useEffect(() => {
     if (!lightbox.open) return;
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
     let raf = 0;
     raf = requestAnimationFrame(() => {
-      containerRef.current?.focus({ preventScroll: true });
+      const target = closeButtonRef.current ?? containerRef.current;
+      target?.focus({ preventScroll: true });
     });
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      const prev = previouslyFocusedRef.current;
+      if (prev && typeof prev.focus === "function") {
+        try {
+          prev.focus({ preventScroll: true });
+        } catch {
+          /* noop */
+        }
+      }
+      previouslyFocusedRef.current = null;
+    };
   }, [lightbox.open]);
 
   useEffect(() => {
@@ -1125,7 +1170,7 @@ export function DesktopLightbox() {
           tabIndex={-1}
           role="dialog"
           aria-modal="true"
-          aria-label={lightbox.imageAlt || "图片预览"}
+          aria-labelledby={dialogTitleId}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -1156,6 +1201,13 @@ export function DesktopLightbox() {
             transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
             aria-hidden
           />
+
+          {/* dialog accessible name：屏幕阅读器朗读 prompt 文本作为窗口标题 */}
+          <span id={dialogTitleId} className="sr-only">
+            {lightbox.imageAlt
+              ? `图片预览：${lightbox.imageAlt}`
+              : "图片预览"}
+          </span>
 
           {/* 隐藏下载触发器 */}
           <a ref={downloadAnchorRef} className="hidden" aria-hidden="true" />
@@ -1289,6 +1341,7 @@ export function DesktopLightbox() {
                 active={detailsOpen}
               />
               <button
+                ref={closeButtonRef}
                 type="button"
                 onClick={handleClose}
                 aria-label="关闭（Esc）"

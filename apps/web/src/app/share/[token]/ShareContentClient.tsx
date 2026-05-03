@@ -5,6 +5,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -457,6 +458,10 @@ function ShareLightbox({
   const multiple = images.length > 1;
   const gestureRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const [dragX, setDragX] = useState(0);
+  const dialogRootRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const dialogTitleId = useId();
 
   useEffect(() => {
     const body = document.body;
@@ -499,7 +504,36 @@ function ShareLightbox({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key === "Tab") {
+        const root = dialogRootRef.current;
+        if (!root) return;
+        const focusables = Array.from(
+          root.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((el) => !el.hasAttribute("data-focus-skip"));
+        if (focusables.length === 0) {
+          event.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (event.shiftKey) {
+          if (active === first || !root.contains(active)) {
+            event.preventDefault();
+            last.focus();
+          }
+        } else if (active === last) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
       if (!multiple) return;
       if (event.key === "ArrowLeft") onPrev();
       if (event.key === "ArrowRight") onNext();
@@ -507,6 +541,28 @@ function ShareLightbox({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [multiple, onClose, onNext, onPrev]);
+
+  // 打开时焦点移到关闭按钮，关闭时还原焦点到打开者（通常是 grid 上的 tile button）
+  useEffect(() => {
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
+    let raf = 0;
+    raf = requestAnimationFrame(() => {
+      const target = closeButtonRef.current ?? dialogRootRef.current;
+      target?.focus({ preventScroll: true });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      const prev = previouslyFocusedRef.current;
+      if (prev && typeof prev.focus === "function") {
+        try {
+          prev.focus({ preventScroll: true });
+        } catch {
+          /* noop */
+        }
+      }
+      previouslyFocusedRef.current = null;
+    };
+  }, []);
 
   if (!image) return null;
 
@@ -549,10 +605,16 @@ function ShareLightbox({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex bg-black text-white share-dialog-in"
+      ref={dialogRootRef}
+      tabIndex={-1}
+      className="fixed inset-0 z-50 flex bg-black text-white share-dialog-in outline-none"
       role="dialog"
       aria-modal="true"
+      aria-labelledby={dialogTitleId}
     >
+      <span id={dialogTitleId} className="sr-only">
+        {`图片预览：${shareImageAlt(image)}`}
+      </span>
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(242,169,58,0.10),transparent_28rem),linear-gradient(180deg,rgba(255,255,255,0.05),transparent_35%)]" />
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 border-b border-white/10 bg-black/45 px-3 pb-3 pt-[calc(env(safe-area-inset-top,0px)+0.75rem)] backdrop-blur-xl mobile-perf-surface">
@@ -584,6 +646,7 @@ function ShareLightbox({
               {downloading ? "准备中" : "下载"}
             </button>
             <button
+              ref={closeButtonRef}
               type="button"
               aria-label="关闭"
               onClick={onClose}
