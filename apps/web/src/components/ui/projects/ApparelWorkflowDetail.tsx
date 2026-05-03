@@ -149,8 +149,10 @@ function DetailHeader({
 }) {
   const status = workflow.status;
   const router = useRouter();
+  const workflowTitle = workflow.title || "服饰模特展示图";
   const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(workflow.title || "服饰模特展示图");
+  const [title, setTitle] = useState(workflowTitle);
+  const [trackedWorkflowTitle, setTrackedWorkflowTitle] = useState(workflowTitle);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const patch = usePatchWorkflowMutation({
@@ -168,9 +170,10 @@ function DetailHeader({
     },
     onError: (error) => toast.error(error.message || "删除失败"),
   });
-  useEffect(() => {
-    if (!editing) setTitle(workflow.title || "服饰模特展示图");
-  }, [editing, workflow.title]);
+  if (!editing && trackedWorkflowTitle !== workflowTitle) {
+    setTrackedWorkflowTitle(workflowTitle);
+    setTitle(workflowTitle);
+  }
   const saveTitle = () => {
     const next = title.trim();
     if (!next) {
