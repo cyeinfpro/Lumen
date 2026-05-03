@@ -7,7 +7,7 @@
 // 4) 文件大小 / 类型 / 数量校验
 // 5) 字符计数（标题 / 基础需求）
 
-import { ArrowLeft, Loader2, Trash2, Upload, WandSparkles, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Loader2, Trash2, Upload, WandSparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -19,7 +19,7 @@ import { API_BASE } from "@/lib/apiClient";
 import { readCookie } from "@/lib/api/http";
 import { cn } from "@/lib/utils";
 import { OnlineBanner } from "./components/OnlineBanner";
-import { ProjectTopBar } from "./components/ProjectTopBar";
+import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
 import { InfoPanel } from "./components/StageFrame";
 import { MAX_PRODUCT_IMAGES, MAX_PRODUCT_IMAGE_BYTES } from "./types";
 import { formatBytes } from "./utils";
@@ -371,15 +371,22 @@ export function ApparelWorkflowNewPage() {
   }, [files]);
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)]">
+      <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
+      <ProjectMobileTopBar
+        title="新建"
+        subtitle="服饰模特展示图"
+        backHref="/projects/new"
+        backLabel="返回项目模板"
+      />
       <ProjectTopBar />
 
-      <main className="flex-1 overflow-y-auto px-4 py-5 md:px-8">
+      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
         <div className="mx-auto grid max-w-[1120px] gap-5 lg:grid-cols-[1fr_320px]">
           <section className="space-y-5">
-            <div>
-              <nav aria-label="项目路径" className="flex items-center gap-1.5 text-sm">
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 shadow-[var(--shadow-1)] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none">
+              <nav aria-label="项目路径" className="hidden items-center gap-1.5 text-sm md:flex">
                 <Link
                   href="/projects"
                   className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
@@ -390,7 +397,7 @@ export function ApparelWorkflowNewPage() {
                 <span aria-hidden className="text-[var(--fg-3)]">/</span>
                 <span className="text-[var(--fg-0)]">新建</span>
               </nav>
-              <h1 className="mt-3 text-[26px] font-semibold tracking-normal md:text-[32px]">
+              <h1 className="mt-0 text-[26px] font-semibold tracking-normal md:mt-3 md:text-[32px]">
                 新建服饰模特展示图
               </h1>
               <p className="mt-1 text-sm text-[var(--fg-2)]">
@@ -398,7 +405,7 @@ export function ApparelWorkflowNewPage() {
               </p>
             </div>
 
-            <div className="rounded-md border border-[var(--border)] bg-white/[0.035] p-4">
+            <div className="rounded-xl border border-[var(--border)] bg-white/[0.035] p-4 shadow-[var(--shadow-1)] md:rounded-md">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-medium text-[var(--fg-0)]">
                   商品图
@@ -434,7 +441,7 @@ export function ApparelWorkflowNewPage() {
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   className={cn(
-                    "flex min-h-44 w-full flex-col items-center justify-center gap-3 rounded-md border border-dashed text-center transition-all duration-[var(--dur-base)]",
+                    "flex min-h-48 w-full cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed text-center transition-[background-color,border-color,box-shadow] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-44 md:rounded-md",
                     dragActive
                       ? "border-[var(--border-amber)] bg-[var(--accent-soft)] shadow-[var(--shadow-amber)]"
                       : "border-[var(--border-strong)] bg-[var(--bg-1)] hover:bg-white/[0.04]",
@@ -478,7 +485,7 @@ export function ApparelWorkflowNewPage() {
                     <li
                       key={item.uid}
                       className={cn(
-                        "group relative overflow-hidden rounded-md border bg-[var(--bg-2)]",
+                        "group relative overflow-hidden rounded-xl border bg-[var(--bg-2)] md:rounded-md",
                         item.status === "error"
                           ? "border-[var(--danger)]/40"
                           : item.status === "done"
@@ -519,7 +526,7 @@ export function ApparelWorkflowNewPage() {
                               type="button"
                               aria-label="重新上传"
                               onClick={() => uploadOne(item)}
-                              className="rounded-md px-1.5 py-0.5 text-[var(--amber-300)] transition-colors hover:bg-white/[0.06]"
+                              className="min-h-9 rounded-md px-2 py-0.5 text-[var(--amber-300)] transition-colors hover:bg-white/[0.06]"
                             >
                               重试
                             </button>
@@ -529,7 +536,7 @@ export function ApparelWorkflowNewPage() {
                               type="button"
                               aria-label="取消上传"
                               onClick={() => item.controller?.abort()}
-                              className="rounded-md px-1.5 py-0.5 transition-colors hover:bg-white/[0.06]"
+                              className="min-h-9 rounded-md px-2 py-0.5 transition-colors hover:bg-white/[0.06]"
                             >
                               取消
                             </button>
@@ -539,24 +546,24 @@ export function ApparelWorkflowNewPage() {
                             aria-label="上移"
                             disabled={index === 0}
                             onClick={() => moveFile(item.uid, -1)}
-                            className="rounded-md px-1 py-0.5 transition-colors hover:bg-white/[0.06] disabled:opacity-40"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-white/[0.06] disabled:opacity-40"
                           >
-                            ←
+                            <ArrowUp className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
                             aria-label="下移"
                             disabled={index === files.length - 1}
                             onClick={() => moveFile(item.uid, 1)}
-                            className="rounded-md px-1 py-0.5 transition-colors hover:bg-white/[0.06] disabled:opacity-40"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-white/[0.06] disabled:opacity-40"
                           >
-                            →
+                            <ArrowDown className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
                             aria-label="移除"
                             onClick={() => removeFile(item.uid)}
-                            className="rounded-md px-1 py-0.5 transition-colors hover:bg-white/[0.06] hover:text-[var(--danger)]"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-white/[0.06] hover:text-[var(--danger)]"
                           >
                             <Trash2 className="h-3 w-3" />
                           </button>
@@ -582,7 +589,8 @@ export function ApparelWorkflowNewPage() {
                 value={projectTitle}
                 onChange={(event) => setProjectTitle(event.target.value.slice(0, TITLE_MAX))}
                 maxLength={TITLE_MAX}
-                className="mt-3 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)]"
+                aria-label="项目名称"
+                className="mt-3 h-11 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)] md:h-10 md:text-sm"
               />
             </FieldCard>
 
@@ -618,16 +626,17 @@ export function ApparelWorkflowNewPage() {
                 onChange={(event) => setExtraPrompt(event.target.value.slice(0, 120))}
                 maxLength={120}
                 rows={3}
+                aria-label="补充说明"
                 placeholder="补充说明（可选），例如：更活泼一点，适合校园通勤"
-                className="mt-3 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2 text-sm leading-6 text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)]"
+                className="mt-3 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2 text-[15px] leading-6 text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)] md:text-sm"
               />
-              <div className="mt-3 rounded-md border border-[var(--border)] bg-white/[0.025] px-3 py-2 text-xs leading-5 text-[var(--fg-2)]">
+              <div className="mt-3 rounded-lg border border-[var(--border)] bg-white/[0.025] px-3 py-2 text-xs leading-5 text-[var(--fg-2)] md:rounded-md">
                 将用于后续模特候选和最终图：{composedPrompt}
               </div>
             </FieldCard>
 
             {error ? (
-              <div className="rounded-md border border-[var(--danger)]/30 bg-[var(--danger-soft)] p-3 text-sm text-[var(--fg-0)]">
+              <div className="rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-soft)] p-3 text-sm text-[var(--fg-0)] md:rounded-md">
                 <X className="mr-1.5 inline h-4 w-4 align-text-bottom text-[var(--danger)]" />
                 {error}
               </div>
@@ -640,6 +649,7 @@ export function ApparelWorkflowNewPage() {
               disabled={!files.length}
               onClick={onCreate}
               leftIcon={<WandSparkles className="h-4 w-4" />}
+              className="w-full md:w-auto"
             >
               {allDone ? "创建项目并开始分析" : "上传图片并创建项目"}
             </Button>
@@ -653,11 +663,12 @@ export function ApparelWorkflowNewPage() {
               <p>默认高质量模式，优先模特一致性、商品还原度和高级质感。</p>
             </InfoPanel>
             <InfoPanel title="顺序与主图">
-              <p>第一张图作为商品主图。可拖拽 ← / → 调整顺序。</p>
+              <p>第一张图作为商品主图。可用上移 / 下移调整顺序。</p>
             </InfoPanel>
           </aside>
         </div>
       </main>
+      <ProjectMobileTabBar />
     </div>
   );
 }
@@ -676,7 +687,7 @@ function FieldCard({
   const usage = (max - remaining) / max;
   const warning = usage > 0.92;
   return (
-    <label className="block rounded-md border border-[var(--border)] bg-white/[0.035] p-4">
+    <section className="block rounded-xl border border-[var(--border)] bg-white/[0.035] p-4 shadow-[var(--shadow-1)] md:rounded-md">
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium text-[var(--fg-0)]">{label}</span>
         <span
@@ -689,7 +700,7 @@ function FieldCard({
         </span>
       </div>
       {children}
-    </label>
+    </section>
   );
 }
 
@@ -710,7 +721,7 @@ function ParamSelect({
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="mt-1.5 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)]"
+        className="mt-1.5 h-11 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)] md:h-10 md:text-sm"
       >
         {options.map(([text, optionValue]) => (
           <option key={`${label}-${text}`} value={optionValue}>

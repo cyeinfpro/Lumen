@@ -21,7 +21,7 @@ import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { ConstraintDrawer, ConstraintPanel } from "./components/ConstraintPanel";
 import { OnlineBanner } from "./components/OnlineBanner";
-import { ProjectTopBar } from "./components/ProjectTopBar";
+import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
 import { StageErrorBoundary } from "./components/StageErrorBoundary";
 import { MobileStageStrip, StepRail } from "./components/StepRail";
 import { ProductUploadSummary } from "./stages/ProductUploadSummary";
@@ -41,8 +41,14 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
   const workflow = query.data;
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)]">
+      <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
+      <ProjectMobileTopBar
+        title="项目"
+        subtitle={workflow ? STATUS_LABEL[workflow.status] ?? workflow.status : "加载中"}
+        backHref="/projects"
+      />
       <ProjectTopBar />
 
       {!workflow && query.isLoading ? (
@@ -54,6 +60,7 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
       ) : (
         <ProjectConsole workflow={workflow} refreshing={query.isFetching} />
       )}
+      <ProjectMobileTabBar />
     </div>
   );
 }
@@ -80,7 +87,7 @@ function ProjectConsole({
   }, []);
 
   return (
-    <main className="grid flex-1 overflow-hidden lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_320px]">
+    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid flex-1 overflow-hidden md:mb-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_320px]">
       <aside className="hidden border-r border-[var(--border)] bg-white/[0.025] p-4 lg:block">
         <StepRail workflow={workflow} />
       </aside>
@@ -122,7 +129,7 @@ function ProjectConsole({
 
 function DetailBreadcrumb({ workflow }: { workflow: WorkflowRun }) {
   return (
-    <nav aria-label="项目路径" className="mb-4 flex min-w-0 items-center gap-1.5 text-sm">
+    <nav aria-label="项目路径" className="mb-4 hidden min-w-0 items-center gap-1.5 text-sm md:flex">
       <Link
         href="/projects"
         className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
@@ -226,9 +233,9 @@ function DetailHeader({
   }, [status]);
 
   return (
-    <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
+    <header className="mb-4 rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/70 p-3 shadow-[var(--shadow-1)] md:flex md:flex-wrap md:items-start md:justify-between md:gap-3 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none">
       <div className="min-w-0">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {editing ? (
             <form
               className="flex min-w-0 items-center gap-1.5"
@@ -250,13 +257,13 @@ function DetailHeader({
                 maxLength={120}
                 autoFocus
                 aria-label="项目名称"
-                className="h-10 min-w-0 max-w-[min(70vw,520px)] rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[20px] font-semibold text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)]"
+                className="h-11 min-w-0 max-w-[min(70vw,520px)] rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[18px] font-semibold text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)] md:h-10 md:text-[20px]"
               />
               <button
                 type="submit"
                 aria-label="保存项目名称"
                 disabled={patch.isPending}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] disabled:opacity-50"
+                className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] disabled:opacity-50 md:h-9 md:w-9"
               >
                 {patch.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
               </button>
@@ -264,7 +271,7 @@ function DetailHeader({
                 type="button"
                 aria-label="取消重命名"
                 onClick={() => setEditing(false)}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:h-9 md:w-9"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -273,9 +280,9 @@ function DetailHeader({
             <button
               type="button"
               onClick={() => setEditing(true)}
-              className="group/title flex min-w-0 items-center gap-2 rounded-md text-left"
+              className="group/title flex min-w-0 cursor-pointer items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
             >
-              <h1 className="truncate text-[22px] font-semibold tracking-normal text-[var(--fg-0)]">
+              <h1 className="line-clamp-2 text-[22px] font-semibold leading-[1.18] tracking-normal text-[var(--fg-0)] md:truncate">
                 {workflow.title || "服饰模特展示图"}
               </h1>
               <Pencil className="h-4 w-4 shrink-0 text-[var(--fg-3)] opacity-0 transition-opacity group-hover/title:opacity-100" />
@@ -300,7 +307,7 @@ function DetailHeader({
           更新于 {formatRelativeTime(workflow.updated_at)}
         </p>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="mt-3 flex items-center justify-between gap-2 md:mt-0 md:justify-start">
         {refreshing ? (
           <span className="inline-flex items-center gap-1.5 text-xs text-[var(--fg-2)]">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -311,7 +318,7 @@ function DetailHeader({
           type="button"
           onClick={onOpenDrawer}
           aria-label="查看项目约束 (⌘ .)"
-          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08] xl:hidden"
+          className="inline-flex min-h-10 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08] xl:hidden"
         >
           <PanelRightOpen className="h-3.5 w-3.5" />
           约束
@@ -326,12 +333,12 @@ function DetailHeader({
               setMenuOpen((open) => !open);
               setConfirmDelete(false);
             }}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)] transition-colors hover:bg-white/[0.08] hover:text-[var(--fg-0)]"
+            className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md border border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)] transition-colors hover:bg-white/[0.08] hover:text-[var(--fg-0)] md:h-9 md:w-9"
           >
             <MoreVertical className="h-4 w-4" />
           </button>
           {menuOpen ? (
-            <div role="menu" className="absolute right-0 top-11 z-20 w-64 rounded-md border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)]">
+            <div role="menu" className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] rounded-lg border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)] md:top-11 md:w-64 md:rounded-md">
               {confirmDelete ? (
                 <div className="grid gap-2">
                   <p className="text-sm text-[var(--fg-0)]">确认删除这个项目？</p>
@@ -353,7 +360,8 @@ function DetailHeader({
                       setEditing(true);
                       setMenuOpen(false);
                     }}
-                    className="flex h-9 items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                    role="menuitem"
+                    className="flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:min-h-9"
                   >
                     <Pencil className="h-4 w-4" />
                     重命名
@@ -361,7 +369,8 @@ function DetailHeader({
                   <button
                     type="button"
                     onClick={() => setConfirmDelete(true)}
-                    className="flex h-9 items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
+                    role="menuitem"
+                    className="flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] md:min-h-9"
                   >
                     <Trash2 className="h-4 w-4" />
                     删除
