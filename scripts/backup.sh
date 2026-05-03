@@ -78,7 +78,11 @@ REDIS_CONTAINER="${REDIS_CONTAINER:-lumen-redis}"
 REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 PG_USER="${DB_USER:-lumen}"
 PG_DB="${DB_NAME:-lumen}"
-LOCKFILE="${LUMEN_BACKUP_RESTORE_LOCKFILE:-${TMPDIR:-/tmp}/lumen-backup-restore.lock}"
+LOCK_BASE="${LUMEN_BACKUP_RESTORE_LOCKDIR:-${XDG_RUNTIME_DIR:-/run/lock}}"
+if [ ! -d "$LOCK_BASE" ] || [ ! -w "$LOCK_BASE" ]; then
+    LOCK_BASE="${TMPDIR:-/tmp}"
+fi
+LOCKFILE="${LUMEN_BACKUP_RESTORE_LOCKFILE:-${LOCK_BASE}/lumen-backup-restore.lock}"
 LOCKDIR="$LOCKFILE.d"
 LOCK_KIND=""
 TMP_DIR=""

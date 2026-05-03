@@ -110,6 +110,31 @@ def test_web_port_defaults_to_public_bind_and_install_migrates_old_env() -> None
     assert 'env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"' in install
 
 
+def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    install = INSTALL.read_text(encoding="utf-8")
+    update = UPDATE.read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "${LUMEN_DB_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data" in compose
+    assert "${LUMEN_DB_ROOT:-/opt/lumendata}/redis:/data" in compose
+    assert "${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage" in compose
+    assert "${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup" in compose
+    assert "LUMEN_DB_ROOT=/opt/lumendata" in env_example
+    assert 'user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"' in compose
+    assert '- "${LUMEN_APP_STORAGE_GID:-10001}"' in compose
+    assert "LUMEN_APP_STORAGE_GID=10001" in env_example
+    assert 'env_file_set "${shared_env}" LUMEN_DB_ROOT        "${LUMEN_DB_ROOT}"' in install
+    assert 'env_file_set "${shared_env}" LUMEN_APP_STORAGE_GID "${LUMEN_APP_STORAGE_GID}"' in install
+    assert 'LUMEN_DB_ROOT="${INSTALL_DB_ROOT_OVERRIDE:-${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}}"' in install
+    assert 'LUMEN_DB_ROOT="${_LUMEN_UPDATE_INPUT_DB_ROOT:-${shared_db_root:-${LUMEN_DATA_ROOT}}}"' in update
+    assert 'shared_db_root="$(lumen_env_value LUMEN_DB_ROOT "${SHARED_ENV}"' in update
+    assert '"${LUMEN_DB_ROOT}/postgres"' in update
+    assert '"${LUMEN_DATA_ROOT}/storage"' in update
+    assert "enable_local_build_fallback()" in update
+    assert "GHCR 镜像不可用，自动启用本地 build 继续" in update
+
+
 def test_update_migrates_old_web_bind_and_proxy_env() -> None:
     update = UPDATE.read_text(encoding="utf-8")
     lib = LIB.read_text(encoding="utf-8")
@@ -478,7 +503,12 @@ def test_lumenctl_runs_lumen_updates_from_resolved_root_with_sudo_on_linux() -> 
         assert "sudo:" not in result.stdout
         assert f"bash:{ROOT / 'scripts' / 'update.sh'}" in result.stdout
     else:
-        assert f"sudo:bash {ROOT / 'scripts' / 'update.sh'}" in result.stdout
+        # run_lumen_script 通过 lumen_sudo 透传 LUMEN_* 环境变量，命令形如：
+        #   sudo:env LUMEN_FOO=... LUMEN_BAR=... bash /path/to/update.sh
+        # 旧形式 "sudo:bash <path>" 也接受（无 LUMEN_* env 时）。
+        update_path = ROOT / "scripts" / "update.sh"
+        assert "sudo:" in result.stdout
+        assert f"bash {update_path}" in result.stdout or f"bash:{update_path}" in result.stdout
 
 
 def test_lumenctl_resolves_scripts_from_current_release(tmp_path: Path) -> None:
@@ -951,6 +981,7 @@ exit 0
         """#!/usr/bin/env bash
 set -euo pipefail
 [ "${1:-}" = "-n" ] && shift
+unset LUMEN_UPDATE_GIT_PULL
 if [ "${1:-}" = "-u" ]; then
   shift 2
 fi
@@ -979,6 +1010,7 @@ esac
     )
     (fakebin / "systemctl").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
     (fakebin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (fakebin / "uname").write_text("#!/usr/bin/env bash\nprintf 'Linux\\n'\n", encoding="utf-8")
     for path in fakebin.iterdir():
         path.chmod(0o755)
 

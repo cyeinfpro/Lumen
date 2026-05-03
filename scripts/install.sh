@@ -722,6 +722,8 @@ prepare_data_dirs() {
     emit_step_start prepare "准备数据目录与权限（data=${LUMEN_DATA_ROOT}, db=${LUMEN_DB_ROOT}）"
     local data_root="${LUMEN_DATA_ROOT}"
     local db_root="${LUMEN_DB_ROOT}"
+    local app_uid="${LUMEN_APP_UID:-10001}"
+    local app_storage_gid="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"
 
     if [ -e "${data_root}" ] && [ ! -d "${data_root}" ]; then
         log_error "${data_root} 已存在但不是目录，请先移走或删除后重试。"
@@ -750,7 +752,7 @@ prepare_data_dirs() {
     lumen_run_as_root chmod 755 "${data_root}" "${db_root}" \
         || log_warn "chmod 755 数据根失败（已忽略）"
 
-    # 按服务分别 chown（禁止整体 chown 10001 给所有目录 —— §15.2）
+    # 按服务分别 chown（禁止整体 chown 给所有目录 —— §15.2）
     lumen_run_as_root chown -R 70:70   "${db_root}/postgres" || {
         log_error "chown postgres 数据目录失败。"
         exit 1
@@ -759,7 +761,7 @@ prepare_data_dirs() {
         log_error "chown redis 数据目录失败。"
         exit 1
     }
-    lumen_run_as_root chown -R 10001:10001 "${data_root}/storage" "${data_root}/backup" || {
+    lumen_run_as_root chown -R "${app_uid}:${app_storage_gid}" "${data_root}/storage" "${data_root}/backup" || {
         log_error "chown storage/backup 数据目录失败。"
         exit 1
     }
@@ -954,6 +956,9 @@ prepare_env_file() {
     env_file_set "${shared_env}" LUMEN_VERSION        "${lumen_version}"
     env_file_set "${shared_env}" LUMEN_DATA_ROOT      "${LUMEN_DATA_ROOT}"
     env_file_set "${shared_env}" LUMEN_DB_ROOT        "${LUMEN_DB_ROOT}"
+    env_file_set "${shared_env}" LUMEN_APP_UID        "${LUMEN_APP_UID}"
+    env_file_set "${shared_env}" LUMEN_APP_GID        "${LUMEN_APP_GID}"
+    env_file_set "${shared_env}" LUMEN_APP_STORAGE_GID "${LUMEN_APP_STORAGE_GID}"
     if [ "${LUMEN_WEB_BIND_HOST:-}" = "" ] \
         && [ "$(env_file_get WEB_BIND_HOST "${shared_env}")" = "127.0.0.1" ]; then
         log_info "WEB_BIND_HOST 仍是旧默认 127.0.0.1，自动改为 0.0.0.0 暴露宿主机 3000。"
@@ -1348,6 +1353,9 @@ esac
 
 LUMEN_DATA_ROOT="${INSTALL_DATA_ROOT_OVERRIDE:-${LUMEN_DATA_ROOT:-/opt/lumendata}}"
 LUMEN_DB_ROOT="${INSTALL_DB_ROOT_OVERRIDE:-${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}}"
+LUMEN_APP_UID="${LUMEN_APP_UID:-10001}"
+LUMEN_APP_GID="${LUMEN_APP_GID:-10001}"
+LUMEN_APP_STORAGE_GID="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID}}"
 RELEASE_DIR=""
 RELEASE_ID=""
 SHARED_DIR=""

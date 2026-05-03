@@ -70,9 +70,12 @@ sudo setfacl -R -d -m u:10001:rwx /opt/lumendata/backup
 ```dotenv
 LUMEN_DATA_ROOT=/opt/lumendata
 LUMEN_DB_ROOT=/var/lib/lumen-data
+LUMEN_APP_STORAGE_GID=10001
 STORAGE_ROOT=/opt/lumendata/storage
 BACKUP_ROOT=/opt/lumendata/backup
 ```
+
+CIFS/NAS 如果强制把 `/opt/lumendata` 映射成宿主机 `lumen` 组（例如 gid 994），不要把数据库放回 CIFS；保留 `LUMEN_DB_ROOT=/var/lib/lumen-data`，并把 `LUMEN_APP_STORAGE_GID` 设成 CIFS 目录属组 gid，让 `api/worker` 通过补充组写 storage/backup。
 
 ## 备份与恢复
 

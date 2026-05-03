@@ -21,6 +21,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_LUMEN_UPDATE_INPUT_DATA_ROOT="${LUMEN_DATA_ROOT-}"
+_LUMEN_UPDATE_INPUT_DB_ROOT="${LUMEN_DB_ROOT-}"
+_LUMEN_UPDATE_INPUT_BACKUP_ROOT="${LUMEN_BACKUP_ROOT-}"
+_LUMEN_UPDATE_INPUT_APP_UID="${LUMEN_APP_UID-}"
+_LUMEN_UPDATE_INPUT_APP_GID="${LUMEN_APP_GID-}"
+_LUMEN_UPDATE_INPUT_APP_STORAGE_GID="${LUMEN_APP_STORAGE_GID-}"
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
@@ -209,14 +215,28 @@ if [ -z "${LUMEN_UPDATE_ROOT:-}" ] \
 fi
 SHARED_DIR="${ROOT}/shared"
 SHARED_ENV="${SHARED_DIR}/.env"
+shared_data_root=""
+shared_db_root=""
+shared_backup_root=""
+shared_app_uid=""
+shared_app_gid=""
+shared_app_storage_gid=""
 if [ -f "${SHARED_ENV}" ]; then
-    LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-$(lumen_env_value LUMEN_DATA_ROOT "${SHARED_ENV}" 2>/dev/null || true)}"
-    LUMEN_DB_ROOT="${LUMEN_DB_ROOT:-$(lumen_env_value LUMEN_DB_ROOT "${SHARED_ENV}" 2>/dev/null || true)}"
+    shared_data_root="$(lumen_env_value LUMEN_DATA_ROOT "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_db_root="$(lumen_env_value LUMEN_DB_ROOT "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_backup_root="$(lumen_env_value LUMEN_BACKUP_ROOT "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_backup_root="${shared_backup_root:-$(lumen_env_value BACKUP_ROOT "${SHARED_ENV}" 2>/dev/null || true)}"
+    shared_app_uid="$(lumen_env_value LUMEN_APP_UID "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_app_gid="$(lumen_env_value LUMEN_APP_GID "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_app_storage_gid="$(lumen_env_value LUMEN_APP_STORAGE_GID "${SHARED_ENV}" 2>/dev/null || true)"
 fi
-LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-/opt/lumendata}"
-LUMEN_DB_ROOT="${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}"
-LUMEN_BACKUP_ROOT="${LUMEN_BACKUP_ROOT:-${LUMEN_DATA_ROOT}/backup}"
-export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT
+LUMEN_DATA_ROOT="${_LUMEN_UPDATE_INPUT_DATA_ROOT:-${shared_data_root:-/opt/lumendata}}"
+LUMEN_DB_ROOT="${_LUMEN_UPDATE_INPUT_DB_ROOT:-${shared_db_root:-${LUMEN_DATA_ROOT}}}"
+LUMEN_BACKUP_ROOT="${_LUMEN_UPDATE_INPUT_BACKUP_ROOT:-${shared_backup_root:-${LUMEN_DATA_ROOT}/backup}}"
+LUMEN_APP_UID="${_LUMEN_UPDATE_INPUT_APP_UID:-${shared_app_uid:-10001}}"
+LUMEN_APP_GID="${_LUMEN_UPDATE_INPUT_APP_GID:-${shared_app_gid:-10001}}"
+LUMEN_APP_STORAGE_GID="${_LUMEN_UPDATE_INPUT_APP_STORAGE_GID:-${shared_app_storage_gid:-${LUMEN_APP_GID}}}"
+export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT LUMEN_APP_UID LUMEN_APP_GID LUMEN_APP_STORAGE_GID
 UPDATE_LOG_DIR="${LUMEN_BACKUP_ROOT}"
 OPERATION_ID="update-$(date -u +%Y%m%d-%H%M%S)-$$"
 
@@ -266,7 +286,7 @@ disk_free_gb_opt() {
     printf '%s' "-1"
 }
 
-# 校验数据目录属主：postgres=70, redis=999, storage/backup=10001。
+# 校验数据目录属主：postgres=70, redis=999, storage/backup 对齐应用 storage gid。
 # 不严格 chown，只 warn——install.sh 才负责强制 chown。
 check_data_owners() {
     local missing=0
@@ -285,16 +305,16 @@ check_data_owners() {
         return 1
     fi
     # 仅做 warn，不阻断（install.sh 是 single source of truth）
-    local uid
+    local uid gid
     if command -v stat >/dev/null 2>&1; then
         uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || echo "")"
         [ -n "${uid}" ] && [ "${uid}" != "70" ] && log_warn "${LUMEN_DB_ROOT}/postgres 属主非 70（实际 ${uid}），postgres 容器可能起不来。"
         uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || echo "")"
         [ -n "${uid}" ] && [ "${uid}" != "999" ] && log_warn "${LUMEN_DB_ROOT}/redis 属主非 999（实际 ${uid}），redis 容器可能起不来。"
-        uid="$(stat -c '%u' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || stat -f '%u' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || echo "")"
-        [ -n "${uid}" ] && [ "${uid}" != "10001" ] && log_warn "${LUMEN_DATA_ROOT}/storage 属主非 10001（实际 ${uid}），api/worker 可能写不进去。"
-        uid="$(stat -c '%u' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || stat -f '%u' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || echo "")"
-        [ -n "${uid}" ] && [ "${uid}" != "10001" ] && log_warn "${LUMEN_DATA_ROOT}/backup 属主非 10001（实际 ${uid}），备份/日志可能写不进去。"
+        gid="$(stat -c '%g' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || stat -f '%g' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || echo "")"
+        [ -n "${gid}" ] && [ "${gid}" != "${LUMEN_APP_STORAGE_GID}" ] && log_warn "${LUMEN_DATA_ROOT}/storage 属组非 ${LUMEN_APP_STORAGE_GID}（实际 ${gid}），api/worker 可能写不进去。"
+        gid="$(stat -c '%g' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || stat -f '%g' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || echo "")"
+        [ -n "${gid}" ] && [ "${gid}" != "${LUMEN_APP_STORAGE_GID}" ] && log_warn "${LUMEN_DATA_ROOT}/backup 属组非 ${LUMEN_APP_STORAGE_GID}（实际 ${gid}），备份/日志可能写不进去。"
     fi
     return 0
 }
@@ -734,28 +754,24 @@ ln -sfn "${SHARED_ENV}" "${NEW_RELEASE}/.env"
 # 探测 GHCR 上 tag 是否真的存在（lumen-api 作为代表）
 LUMEN_IMAGE_REGISTRY="$(lumen_env_value LUMEN_IMAGE_REGISTRY "${SHARED_ENV}" 2>/dev/null || echo "")"
 [ -n "${LUMEN_IMAGE_REGISTRY}" ] || LUMEN_IMAGE_REGISTRY="ghcr.io/cyeinfpro"
+enable_local_build_fallback() {
+    if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
+        log_warn "[fetch_release] GHCR 镜像不可用，自动启用本地 build 继续。"
+    fi
+    LUMEN_UPDATE_BUILD=1
+    export LUMEN_UPDATE_BUILD
+    emit_info fetch_release build_fallback "local"
+}
 if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
     if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-1}" = "1" ]; then
         log_warn "[fetch_release] 目标镜像 tag=${TARGET_TAG} 不存在，自动回退到 main。"
         emit_info fetch_release target_tag_fallback "main"
         TARGET_TAG="main"
         if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
-            log_error "[fetch_release] fallback main 镜像也不存在：${LUMEN_IMAGE_REGISTRY}/lumen-api:${TARGET_TAG}"
-            log_error "[fetch_release] 解决方法（任选其一）："
-            log_error "  1) 等 GitHub Actions 推 GHCR 完成后重试（检查 Actions 日志和包的 Public 可见性）"
-            log_error "  2) 本地构建：LUMEN_UPDATE_BUILD=1 bash ${SCRIPT_DIR}/update.sh"
-            log_error "  3) 沿用当前 .env 的 tag：LUMEN_UPDATE_CHANNEL=pinned bash ${SCRIPT_DIR}/update.sh"
-            emit_fail fetch_release 1
-            exit 1
+            enable_local_build_fallback
         fi
     else
-        log_error "[fetch_release] 目标镜像不存在：${LUMEN_IMAGE_REGISTRY}/lumen-api:${TARGET_TAG}"
-        log_error "[fetch_release] 解决方法（任选其一）："
-        log_error "  1) 检查 GHCR 上是否已发布该 tag、包可见性是否为 Public"
-        log_error "  2) 切到 main 通道：LUMEN_UPDATE_CHANNEL=main bash ${SCRIPT_DIR}/update.sh"
-        log_error "  3) 本地构建：LUMEN_UPDATE_BUILD=1 bash ${SCRIPT_DIR}/update.sh"
-        emit_fail fetch_release 1
-        exit 1
+        enable_local_build_fallback
     fi
 fi
 

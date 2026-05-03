@@ -772,7 +772,7 @@ services:
   backup/
 ```
 
-Docker named volumes 只作为兼容模式保留，例如从旧部署平滑升级时先不移动 PG/Redis 数据。长期推荐迁移到 `/opt/lumendata/postgres` 和 `/opt/lumendata/redis`，这样备份、迁移和排查都更直观。
+Docker named volumes 只作为兼容模式保留，例如从旧部署平滑升级时先不移动 PG/Redis 数据。长期推荐迁移到 `${LUMEN_DB_ROOT:-$LUMEN_DATA_ROOT}/postgres` 和 `${LUMEN_DB_ROOT:-$LUMEN_DATA_ROOT}/redis`，这样备份、迁移和排查都更直观；当 `LUMEN_DATA_ROOT` 是 CIFS/NAS 时，把 `LUMEN_DB_ROOT` 指到本机盘。
 
 ### 8.3 端口暴露
 
@@ -841,7 +841,7 @@ healthcheck:
 redis:
   entrypoint: ["/bin/sh", "/usr/local/bin/lumen-redis-entrypoint"]
   volumes:
-    - ${LUMEN_DATA_ROOT:-/opt/lumendata}/redis:/data
+    - ${LUMEN_DB_ROOT:-/opt/lumendata}/redis:/data
     - ./deploy/redis/redis-entrypoint.sh:/usr/local/bin/lumen-redis-entrypoint:ro
 ```
 
@@ -1027,25 +1027,24 @@ docker compose build
   releases/              可选，保留管理后台版本记录
   logs/                  可选，保存 install/update 日志
 
-/opt/lumendata/
-  storage/
-  backup/
-  postgres/
-  redis/
-```
-
-生产体验最优的默认方案是把 PostgreSQL / Redis 数据也放进 `/opt/lumendata` 下的明确目录，便于整机迁移和人工备份：
+默认生产布局：
 
 ```text
-/opt/lumendata/postgres
-/opt/lumendata/redis
+${LUMEN_DATA_ROOT:-/opt/lumendata}/storage
+${LUMEN_DATA_ROOT:-/opt/lumendata}/backup
+${LUMEN_DB_ROOT:-$LUMEN_DATA_ROOT}/postgres
+${LUMEN_DB_ROOT:-$LUMEN_DATA_ROOT}/redis
 ```
+
+如果 `/opt/lumendata` 是 CIFS/NAS，建议 `LUMEN_DATA_ROOT=/opt/lumendata`
+继续承载 storage/backup，同时设 `LUMEN_DB_ROOT=/var/lib/lumen-data`
+把 PostgreSQL / Redis 放到本机 Linux 文件系统。
 
 两种 Compose 都可以保留：
 
 | 文件 | 数据位置 | 适用 |
 | --- | --- | --- |
-| `docker-compose.yml` | `/opt/lumendata` 本地目录 | 默认推荐 |
+| `docker-compose.yml` | `LUMEN_DATA_ROOT` + 可选 `LUMEN_DB_ROOT` | 默认推荐 |
 | `docker-compose.volume.yml` | Docker named volumes | 兼容旧部署或简单试用 |
 
 安装脚本默认使用 `/opt/lumendata` 本地目录版本，除非用户设置 `LUMEN_STORAGE_MODE=volume`。
@@ -1593,30 +1592,32 @@ Browser -> Web /api/* -> api:8000
 
 | 服务 | 容器内 uid:gid | 来源 | 对应 bind mount |
 | --- | --- | --- | --- |
-| `postgres` | `70:70` | `postgres:16-alpine` 内置 `postgres` 用户 | `/opt/lumendata/postgres` |
-| `redis` | `999:999` | `redis:7-alpine` 内置 `redis` 用户 | `/opt/lumendata/redis` |
-| `api` / `worker` / `web` / `tgbot` | `10001:10001` | 自建 `lumen` 用户（§7.1） | `/opt/lumendata/storage`、`/opt/lumendata/backup` |
+| `postgres` | `70:70` | `postgres:16-alpine` 内置 `postgres` 用户 | `${LUMEN_DB_ROOT:-/opt/lumendata}/postgres` |
+| `redis` | `999:999` | `redis:7-alpine` 内置 `redis` 用户 | `${LUMEN_DB_ROOT:-/opt/lumendata}/redis` |
+| `api` / `worker` | `${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}` + `${LUMEN_APP_STORAGE_GID:-10001}` 补充组 | 自建 `lumen` 用户（§7.1），CIFS/NAS 可只覆盖 storage gid | `/opt/lumendata/storage`、`/opt/lumendata/backup` |
+| `web` / `tgbot` | `10001:10001` | 自建 `lumen` / `nextjs` 用户 | 无持久写入 bind mount |
 
 postgres / redis 的 uid 是 alpine 镜像内置约定，不可改（改了会失去 PGDATA 兼容性）。当前 `docker-compose.yml:20,46` 已经显式 `user: "70:70"` / `user: "999:999"`，新 compose 必须保留。
 
-### 15.2 `/opt/lumendata` 权限设置
+### 15.2 数据目录权限设置
 
-按服务分别 chown，**禁止整体 `chown -R 10001:10001 /opt/lumendata`**——否则 postgres 以 uid 70 启动会读不了 PGDATA，redis 以 uid 999 启动同样失败。
+按服务分别 chown，**禁止整体 `chown -R 10001:10001`**——否则 postgres 以 uid 70 启动会读不了 PGDATA，redis 以 uid 999 启动同样失败。`LUMEN_DB_ROOT` 未设置时默认等于 `LUMEN_DATA_ROOT`；CIFS/NAS 场景建议拆开：
 
 ```bash
+sudo mkdir -p /var/lib/lumen-data
 sudo mkdir -p \
-  /opt/lumendata/postgres \
-  /opt/lumendata/redis \
+  /var/lib/lumen-data/postgres \
+  /var/lib/lumen-data/redis \
   /opt/lumendata/storage \
   /opt/lumendata/backup
 
-sudo chown -R 70:70   /opt/lumendata/postgres
-sudo chown -R 999:999 /opt/lumendata/redis
+sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chown -R 10001:10001 /opt/lumendata/storage
 sudo chown -R 10001:10001 /opt/lumendata/backup
 
-sudo chmod 700 /opt/lumendata/postgres
-sudo chmod 700 /opt/lumendata/redis
+sudo chmod 700 /var/lib/lumen-data/postgres
+sudo chmod 700 /var/lib/lumen-data/redis
 sudo chmod 750 /opt/lumendata/storage /opt/lumendata/backup
 ```
 
@@ -1625,6 +1626,16 @@ sudo chmod 750 /opt/lumendata/storage /opt/lumendata/backup
 ```bash
 sudo chown root:root /opt/lumendata
 sudo chmod 755 /opt/lumendata
+```
+
+CIFS/NAS 场景如果目录属主无法 `chown` 成 `10001:10001`，保持挂载端的 uid/gid 映射即可；把 `LUMEN_APP_STORAGE_GID` 设为 `/opt/lumendata/storage` 的属组 gid，`api/worker` 会通过补充组获得写权限。PostgreSQL / Redis 仍必须放在本机 Linux 文件系统：
+
+```dotenv
+LUMEN_DATA_ROOT=/opt/lumendata
+LUMEN_DB_ROOT=/var/lib/lumen-data
+LUMEN_APP_UID=10001
+LUMEN_APP_GID=10001
+LUMEN_APP_STORAGE_GID=<cifs-storage-gid>
 ```
 
 宿主机脚本备份（`scripts/backup.sh`）当前依赖 `docker exec lumen-pg pg_dump`，备份产物落 `/opt/lumendata/backup`，必须由容器内 uid 10001 可写——上面 `chown` 已覆盖。如需让宿主机 root 直接写入 backup（运维人工备份），加 ACL：
@@ -1716,24 +1727,24 @@ docker run --rm -v "$OLD_PG_VOL":/src alpine du -sh /src
 docker run --rm -v "$OLD_REDIS_VOL":/src alpine du -sh /src
 
 # 4. 创建 bind mount 目标目录与权限（§15.2）
-sudo mkdir -p /opt/lumendata/postgres /opt/lumendata/redis
-sudo chown -R 70:70   /opt/lumendata/postgres
-sudo chown -R 999:999 /opt/lumendata/redis
-sudo chmod 700 /opt/lumendata/postgres /opt/lumendata/redis
+sudo mkdir -p /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
+sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/redis
+sudo chmod 700 /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
 
 # 5. 拷贝（保留属主和权限）
 docker run --rm \
   -v "$OLD_PG_VOL":/src:ro \
-  -v /opt/lumendata/postgres:/dst \
+  -v /var/lib/lumen-data/postgres:/dst \
   alpine sh -c "cp -a /src/. /dst/"
 docker run --rm \
   -v "$OLD_REDIS_VOL":/src:ro \
-  -v /opt/lumendata/redis:/dst \
+  -v /var/lib/lumen-data/redis:/dst \
   alpine sh -c "cp -a /src/. /dst/"
 
 # 6. 校验关键文件存在
-sudo test -f /opt/lumendata/postgres/PG_VERSION || { echo "PG 数据未就位"; exit 1; }
-sudo ls /opt/lumendata/redis/ | grep -E '\.(rdb|aof)$' || echo "redis 数据未就位（如果是首次部署可忽略）"
+sudo test -f /var/lib/lumen-data/postgres/PG_VERSION || { echo "PG 数据未就位"; exit 1; }
+sudo ls /var/lib/lumen-data/redis/ | grep -E '\.(rdb|aof)$' || echo "redis 数据未就位（如果是首次部署可忽略）"
 
 # 7. 启动新栈（COMPOSE_PROJECT_NAME=lumen，bind mount 生效）
 COMPOSE_PROJECT_NAME=lumen docker compose up -d --wait postgres redis

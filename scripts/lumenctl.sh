@@ -413,7 +413,19 @@ run_lumen_script() {
         install.sh|update.sh|uninstall.sh|backup.sh|restore.sh)
             if [ "$(detect_os)" = "linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
                 ensure_cmd sudo "请安装 sudo，或切换到 root 后重试"
-                lumen_sudo bash "${script_path}" "$@"
+                # sudo 默认 env_reset 会把 LUMEN_UPDATE_GIT_PULL 等 inline env vars 全部 strip。
+                # 用 env KEY=val 显式重建，确保 update.sh / install.sh 能读到调用方的 LUMEN_*。
+                local env_args=()
+                local _v
+                while IFS= read -r _v; do
+                    [ -n "${_v}" ] || continue
+                    env_args+=("${_v}=${!_v}")
+                done < <(compgen -e 2>/dev/null | grep '^LUMEN_' || true)
+                if [ "${#env_args[@]}" -gt 0 ]; then
+                    lumen_sudo env "${env_args[@]}" bash "${script_path}" "$@"
+                else
+                    lumen_sudo bash "${script_path}" "$@"
+                fi
             else
                 bash "${script_path}" "$@"
             fi
