@@ -312,12 +312,25 @@ probe_sub2api_upstream() {
     exit 1
 }
 
+lumenctl_resolve_script() {
+    local script_name="$1"
+    if [ -f "${ROOT}/current/scripts/${script_name}" ]; then
+        printf '%s' "${ROOT}/current/scripts/${script_name}"
+        return 0
+    fi
+    if [ -f "${ROOT}/scripts/${script_name}" ]; then
+        printf '%s' "${ROOT}/scripts/${script_name}"
+        return 0
+    fi
+    return 1
+}
+
 run_lumen_script() {
     local script_name="$1"
-    local script_path="${ROOT}/scripts/${script_name}"
+    local script_path=""
     log_step "执行 ${script_name}"
-    if [ ! -f "${script_path}" ]; then
-        log_error "找不到脚本：${script_path}"
+    if ! script_path="$(lumenctl_resolve_script "${script_name}")"; then
+        log_error "找不到脚本：${ROOT}/current/scripts/${script_name} 或 ${ROOT}/scripts/${script_name}"
         exit 1
     fi
     case "${script_name}" in
