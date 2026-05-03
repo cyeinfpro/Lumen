@@ -112,6 +112,45 @@ if lumen_systemd_has_any_units lumen-api.service lumen-worker.service lumen-web.
     LUMEN_UPDATE_SYSTEMD_RUNTIME=1
     LUMEN_UPDATE_RUN_USER="$(lumen_runtime_service_user)"
     LUMEN_UPDATE_RUN_GROUP="$(lumen_runtime_service_group "${LUMEN_UPDATE_RUN_USER}")"
+
+    # systemd unit 里写了 User=lumen，但系统里可能根本没建过这个用户。
+    # 这种状态在"systemd unit 已 deploy 但 install 中途中断 / 旧版 migrate 没建用户"
+    # 时会出现。如果当前是 root 且有 useradd，就自动建一个 system 用户。
+    if [ -n "${LUMEN_UPDATE_RUN_USER}" ] \
+            && [ "${LUMEN_UPDATE_RUN_USER}" != "root" ] \
+            && ! id "${LUMEN_UPDATE_RUN_USER}" >/dev/null 2>&1; then
+        log_warn "systemd unit 要求运行用户 ${LUMEN_UPDATE_RUN_USER}，但系统中不存在；尝试自动创建。"
+        if [ "$(id -u)" -ne 0 ]; then
+            log_error "需要 root 权限创建 ${LUMEN_UPDATE_RUN_USER}。请用 sudo 重跑，或手动执行："
+            log_error "  sudo useradd --system --home-dir ${ROOT} --shell /usr/sbin/nologin ${LUMEN_UPDATE_RUN_USER}"
+            exit 1
+        fi
+        if ! command -v useradd >/dev/null 2>&1; then
+            log_error "缺少 useradd（shadow-utils），无法自动创建用户。"
+            log_error "请安装 shadow-utils 后重跑，或手动 useradd ${LUMEN_UPDATE_RUN_USER}。"
+            exit 1
+        fi
+        LUMEN_NOLOGIN_SHELL=/usr/sbin/nologin
+        [ -x "${LUMEN_NOLOGIN_SHELL}" ] || LUMEN_NOLOGIN_SHELL=/sbin/nologin
+        [ -x "${LUMEN_NOLOGIN_SHELL}" ] || LUMEN_NOLOGIN_SHELL=/bin/false
+        if ! useradd --system --home-dir "${ROOT}" --shell "${LUMEN_NOLOGIN_SHELL}" --create-home \
+                "${LUMEN_UPDATE_RUN_USER}" 2>/dev/null; then
+            # --create-home 在 home-dir 已存在时报错；重试不带 --create-home
+            useradd --system --home-dir "${ROOT}" --shell "${LUMEN_NOLOGIN_SHELL}" \
+                "${LUMEN_UPDATE_RUN_USER}"
+        fi
+        # 同步 group 名（useradd 默认会建同名 primary group）。
+        LUMEN_UPDATE_RUN_GROUP="$(id -gn "${LUMEN_UPDATE_RUN_USER}" 2>/dev/null || echo "${LUMEN_UPDATE_RUN_USER}")"
+        log_info "已创建 system 用户：${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}（home=${ROOT}, shell=${LUMEN_NOLOGIN_SHELL}）"
+
+        # 把 ROOT 的几个关键运行时目录归还给新建的用户，让后续 fetch / build 能写。
+        # 只动 release / shared / current / .env 这几个明确属于运行时的路径，避免误改宿主侧文件。
+        for path in "${ROOT}/releases" "${ROOT}/shared" "${ROOT}/.env"; do
+            [ -e "${path}" ] && chown -R "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${path}" 2>/dev/null || true
+        done
+        [ -L "${ROOT}/current" ] && chown -h "${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}" "${ROOT}/current" 2>/dev/null || true
+    fi
+
     log_info "检测到 systemd 部署，依赖/迁移/构建将以运行用户执行：${LUMEN_UPDATE_RUN_USER}:${LUMEN_UPDATE_RUN_GROUP}"
 fi
 
