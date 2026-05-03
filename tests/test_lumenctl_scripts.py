@@ -105,6 +105,16 @@ def test_update_script_runs_dependency_steps_as_systemd_runtime_user() -> None:
     assert 'lumen_update_as_runtime_user "${NPM_BIN}" run build' in text
 
 
+def test_update_installs_missing_uv_to_system_path_before_runtime_home() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+    assert 'env UV_INSTALL_DIR="${uv_install_dir}" sh -lc' in text
+    assert "/usr/local/bin /usr/bin" in text
+    assert "installed_uv=1" in text
+    assert 'lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc \\' in text
+    assert 'curl -LsSf https://astral.sh/uv/install.sh | sh' in text
+    assert "home_dir}/.local/bin/uv" in text
+
+
 def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
     text = LIB.read_text(encoding="utf-8")
     assert "lumen_check_runtime_health()" in text
