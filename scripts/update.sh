@@ -696,13 +696,17 @@ else
 fi
 
 if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
+    emit_info fetch_release debug_in_git_pull_block "yes"
     if ! command -v git >/dev/null 2>&1; then
         log_error "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但缺少 git。"
         emit_fail fetch_release 1
         exit 1
     fi
     if [ ! -d "${REPO_DIR}/.git" ]; then
+        emit_info fetch_release debug_about_to_log_warn "yes"
+        printf '[DEBUG] update.sh: about to call log_warn (stderr fd=2 isatty=%s)\n' "$(if [ -t 2 ]; then echo yes; else echo no; fi)" >&2
         log_warn "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续。"
+        emit_info fetch_release debug_after_log_warn "yes"
     else
         GIT_REF="${LUMEN_UPDATE_GIT_REF:-}"
         log_info "[fetch_release] git fetch in ${REPO_DIR}"
