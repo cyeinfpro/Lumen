@@ -2,7 +2,7 @@
 
 // 模特候选 + 方案确认 阶段。
 // 关键改进：
-// 1) 饰品图在模特候选阶段并行生成；这里仅选择饰品图
+// 1) 确认模特后，可生成带配饰的模特四宫格参考图；这里选择饰品参考图
 // 2) 表单值持久化在 useState（页面跳转后仍保留输入）
 // 3) showcase 重生成走 ConfirmDialog 兜底（已有 task 时点击=重新生成）
 // 4) 模板/质量切换在生成中禁用
@@ -24,7 +24,13 @@ import { CandidateCard } from "../components/CandidateCard";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { SelectableImageGrid } from "../components/SelectableImageGrid";
 import { RunningState, StageFrame } from "../components/StageFrame";
-import { SHOT_PLAN_DEFAULT, TEMPLATE_LABELS, type CreateTemplate } from "../types";
+import {
+  ASPECT_RATIO_LABELS,
+  SHOT_PLAN_DEFAULT,
+  TEMPLATE_LABELS,
+  type CreateAspectRatio,
+  type CreateTemplate,
+} from "../types";
 import { imageById, stepOf, stringArray, stringValue } from "../utils";
 
 export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
@@ -55,9 +61,17 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     onSuccess: () => toast.success("饰品图任务已派发"),
   });
 
+  const showcaseStep = stepOf(workflow, "showcase_generation");
+  const initialTemplate = coerceTemplate(showcaseStep?.input_json?.template);
+  const initialAspectRatio = coerceAspectRatio(showcaseStep?.input_json?.aspect_ratio);
+  const initialQuality = coerceQuality(showcaseStep?.input_json?.final_quality);
+
   const [adjustments, setAdjustments] = useState("");
-  const [template, setTemplate] = useState<CreateTemplate>("premium_studio");
-  const [quality, setQuality] = useState<"high" | "4k">("high");
+  const [template, setTemplate] = useState<CreateTemplate>(initialTemplate);
+  const [aspectRatio, setAspectRatio] = useState<CreateAspectRatio>(initialAspectRatio);
+  const [quality, setQuality] = useState<"high" | "4k">(initialQuality);
+  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}`;
+  const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
   const [accessoryPrompt, setAccessoryPrompt] = useState("");
   const [previewList, setPreviewList] = useState<BackendImageMeta[]>([]);
   const [previewIndex, setPreviewIndex] = useState(-1);
@@ -66,10 +80,16 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
 
   const candidates = workflow.model_candidates;
   const approvalStep = stepOf(workflow, "model_approval");
-  const showcaseStep = stepOf(workflow, "showcase_generation");
   const selectedCandidate = candidates.find((candidate) => candidate.status === "selected");
   const chosenCandidate =
     selectedCandidate ?? candidates.find((candidate) => candidate.id === chosenCandidateId);
+  const isShowcaseRunning = showcaseStep?.status === "running";
+  if (!isShowcaseRunning && trackedConfigKey !== currentConfigKey) {
+    setTrackedConfigKey(currentConfigKey);
+    setTemplate(initialTemplate);
+    setAspectRatio(initialAspectRatio);
+    setQuality(initialQuality);
+  }
   const accessoryPlan = approvalStep?.input_json?.accessory_plan;
   const accessoryEnabled =
     typeof accessoryPlan === "object" &&
@@ -110,7 +130,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     createShowcase.mutate({
       template,
       shot_plan: [...SHOT_PLAN_DEFAULT],
-      aspect_ratio: "4:5",
+      aspect_ratio: aspectRatio,
       final_quality: quality,
       output_count: 4,
     });
@@ -154,7 +174,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   return (
     <StageFrame
       title="模特候选"
-      subtitle="每套候选是同一个合成模特的四视图概念图。模特候选和饰品白底搭配图会并行生成。"
+      subtitle="每套候选是同一个合成模特的四视图概念图。确认模特后可生成带配饰的四宫格参考图。"
     >
       {candidates.length === 0 ? (
         <RunningState label="等待创建模特候选" />
@@ -207,7 +227,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         <div className="mt-4">
           <div className="mb-2 flex flex-wrap items-end gap-2">
             <label className="min-w-0 flex-1">
-              <span className="text-sm text-[var(--fg-1)]">饰品图提示词</span>
+              <span className="text-sm text-[var(--fg-1)]">配饰四宫格提示词</span>
               <input
                 value={accessoryPrompt}
                 onChange={(event) => setAccessoryPrompt(event.target.value)}
@@ -221,7 +241,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               disabled={!selectedCandidate || createAccessoryPreviews.isPending}
               onClick={generateAccessoryPreview}
             >
-              {accessoryImages.length > 0 ? "再生成饰品图" : "生成饰品图"}
+              {accessoryImages.length > 0 ? "再生成配饰四宫格" : "生成配饰四宫格"}
             </Button>
           </div>
           {accessoryImages.length > 0 ? (
@@ -238,23 +258,38 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               onPreview={(image, index) => openPreview(image, accessoryImages, index)}
             />
           ) : (
-            <RunningState label="确认模特后可生成饰品预览" />
+            <RunningState label="确认模特后可生成配饰四宫格" />
           )}
         </div>
       ) : null}
 
       {selectedCandidate ? (
         <div className="mt-4 rounded-md border border-[var(--border)] bg-white/[0.03] p-3">
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-3">
             <label>
               <span className="text-sm text-[var(--fg-1)]">输出模板</span>
               <select
                 value={template}
                 onChange={(event) => setTemplate(event.target.value as CreateTemplate)}
-                disabled={createShowcase.isPending || showcaseStep?.status === "running"}
+                disabled={createShowcase.isPending || isShowcaseRunning}
                 className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
               >
                 {TEMPLATE_LABELS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="text-sm text-[var(--fg-1)]">画幅比例</span>
+              <select
+                value={aspectRatio}
+                onChange={(event) => setAspectRatio(event.target.value as CreateAspectRatio)}
+                disabled={createShowcase.isPending || isShowcaseRunning}
+                className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
+              >
+                {ASPECT_RATIO_LABELS.map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
                   </option>
@@ -266,7 +301,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               <select
                 value={quality}
                 onChange={(event) => setQuality(event.target.value as "high" | "4k")}
-                disabled={createShowcase.isPending || showcaseStep?.status === "running"}
+                disabled={createShowcase.isPending || isShowcaseRunning}
                 className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
               >
                 <option value="high">2K 高质量</option>
@@ -278,7 +313,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             className="mt-3"
             variant="primary"
             loading={createShowcase.isPending}
-            disabled={showcaseStep?.status === "running"}
+            disabled={isShowcaseRunning}
             onClick={onClickGenerateShowcase}
             leftIcon={<Shirt className="h-4 w-4" />}
           >
@@ -298,7 +333,9 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         open={confirmRegenerate}
         onOpenChange={setConfirmRegenerate}
         title="再生成一批展示图？"
-        description="已生成的成品会继续保留，新一轮会按当前方案追加生成 4 张。"
+        description={`已生成的成品会继续保留，新一轮会按当前选择的模板、${aspectRatio} 画幅和 ${
+          quality === "4k" ? "4K 终稿" : "2K 高质量"
+        } 模式追加生成 4 张。`}
         confirmText="追加生成"
         tone="default"
         confirming={createShowcase.isPending}
@@ -309,4 +346,20 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       />
     </StageFrame>
   );
+}
+
+function coerceTemplate(value: unknown): CreateTemplate {
+  return TEMPLATE_LABELS.some(([option]) => option === value)
+    ? (value as CreateTemplate)
+    : "premium_studio";
+}
+
+function coerceAspectRatio(value: unknown): CreateAspectRatio {
+  return ASPECT_RATIO_LABELS.some(([option]) => option === value)
+    ? (value as CreateAspectRatio)
+    : "4:5";
+}
+
+function coerceQuality(value: unknown): "high" | "4k" {
+  return value === "4k" ? "4k" : "high";
 }

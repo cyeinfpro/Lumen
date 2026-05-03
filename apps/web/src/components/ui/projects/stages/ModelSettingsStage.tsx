@@ -104,7 +104,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
         </div>
       </label>
       <div className="mt-4 rounded-md border border-[var(--border-amber)]/40 bg-[var(--accent-soft)] p-3 text-sm leading-6 text-[var(--fg-1)]">
-        模特方案图未试穿商品，仅用于确认模特形象。饰品会同时生成白底平面搭配图，下一阶段直接选择。
+        模特方案图未试穿商品，仅用于确认模特形象。确认模特后，可基于该模特生成带配饰的白底四宫格参考图。
       </div>
       <Button
         className="mt-4"
@@ -113,7 +113,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
         onClick={submit}
         leftIcon={<Sparkles className="h-4 w-4" />}
       >
-        生成模特候选和饰品图
+        生成模特候选
       </Button>
     </StageFrame>
   );

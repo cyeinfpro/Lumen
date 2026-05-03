@@ -27,7 +27,6 @@ import { ProductAnalysisStage } from "./stages/ProductAnalysisStage";
 import { ModelSettingsStage } from "./stages/ModelSettingsStage";
 import { ModelCandidatesStage } from "./stages/ModelCandidatesStage";
 import { ShowcaseGenerationStage } from "./stages/ShowcaseGenerationStage";
-import { DeliveryStage } from "./stages/DeliveryStage";
 import { STATUS_LABEL } from "./types";
 import { formatRelativeTime } from "./utils";
 
@@ -210,9 +209,8 @@ function WorkflowStagePanel({ workflow }: { workflow: WorkflowRun }) {
       return <ModelCandidatesStage workflow={workflow} />;
     case "showcase_generation":
     case "quality_review":
-      return <ShowcaseGenerationStage workflow={workflow} />;
     case "delivery":
-      return <DeliveryStage workflow={workflow} />;
+      return <ShowcaseGenerationStage workflow={workflow} />;
     default:
       return <ProductUploadSummary workflow={workflow} />;
   }

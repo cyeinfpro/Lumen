@@ -21,10 +21,20 @@ import type { BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
 import { ImageGrid, ReferenceBlock } from "../components/ImageGrid";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { RunningState, StageFrame } from "../components/StageFrame";
-import { SHOT_PLAN_DEFAULT, TEMPLATE_LABELS, type CreateTemplate } from "../types";
+import {
+  ASPECT_RATIO_LABELS,
+  SHOT_PLAN_DEFAULT,
+  TEMPLATE_LABELS,
+  type CreateAspectRatio,
+  type CreateTemplate,
+} from "../types";
 import { imageById, showcaseImages, stepOf } from "../utils";
 
 export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun }) {
+  const step = stepOf(workflow, "showcase_generation");
+  const initialTemplate = coerceTemplate(step?.input_json?.template);
+  const initialAspectRatio = coerceAspectRatio(step?.input_json?.aspect_ratio);
+  const initialQuality = coerceQuality(step?.input_json?.final_quality);
   const create = useCreateShowcaseImagesMutation(workflow.id, {
     onError: (err) =>
       toast.error("生成展示图失败", {
@@ -46,17 +56,25 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       }),
     onSuccess: () => toast.success("项目已进入交付状态"),
   });
-  const step = stepOf(workflow, "showcase_generation");
   const [previewList, setPreviewList] = useState<BackendImageMeta[]>([]);
   const [previewIndex, setPreviewIndex] = useState(-1);
-  const [template, setTemplate] = useState<CreateTemplate>("premium_studio");
-  const [quality, setQuality] = useState<"high" | "4k">("high");
+  const [template, setTemplate] = useState<CreateTemplate>(initialTemplate);
+  const [aspectRatio, setAspectRatio] = useState<CreateAspectRatio>(initialAspectRatio);
+  const [quality, setQuality] = useState<"high" | "4k">(initialQuality);
+  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}`;
+  const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
   const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [confirmDeliver, setConfirmDeliver] = useState(false);
 
   const hasTasks = Boolean(step?.task_ids?.length);
   const isRunning = step?.status === "running";
+  if (!isRunning && trackedConfigKey !== currentConfigKey) {
+    setTrackedConfigKey(currentConfigKey);
+    setTemplate(initialTemplate);
+    setAspectRatio(initialAspectRatio);
+    setQuality(initialQuality);
+  }
   const generated = showcaseImages(workflow);
   const productImages = workflow.product_images;
   const modelImages = workflow.model_candidates
@@ -73,7 +91,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
     create.mutate({
       template,
       shot_plan: [...SHOT_PLAN_DEFAULT],
-      aspect_ratio: "4:5",
+      aspect_ratio: aspectRatio,
       final_quality: quality,
       output_count: 4,
     });
@@ -116,7 +134,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         </Button>
       </div>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
         <label>
           <span className="text-sm text-[var(--fg-1)]">输出模板</span>
           <select
@@ -126,6 +144,21 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
             className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
           >
             {TEMPLATE_LABELS.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span className="text-sm text-[var(--fg-1)]">画幅比例</span>
+          <select
+            value={aspectRatio}
+            onChange={(event) => setAspectRatio(event.target.value as CreateAspectRatio)}
+            disabled={isRunning}
+            className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
+          >
+            {ASPECT_RATIO_LABELS.map(([value, label]) => (
               <option key={value} value={value}>
                 {label}
               </option>
@@ -151,7 +184,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
           <Layers className="h-3.5 w-3.5" />
           预计生成 4 张
         </span>
-        ，使用 {quality === "4k" ? "4K 终稿" : "2K 高质量"} 模式，等待时间取决于队列与上游速度。
+        ，{aspectRatio} 画幅，使用 {quality === "4k" ? "4K 终稿" : "2K 高质量"} 模式，等待时间取决于队列与上游速度。
       </div>
 
       <Button
@@ -215,7 +248,9 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         open={confirmRegenerate}
         onOpenChange={setConfirmRegenerate}
         title="再生成一批展示图？"
-        description="已生成的成品会继续保留，新一轮会按当前模板和质量模式追加生成 4 张。"
+        description={`已生成的成品会继续保留，新一轮会按当前选择的模板、${aspectRatio} 画幅和 ${
+          quality === "4k" ? "4K 终稿" : "2K 高质量"
+        } 模式追加生成 4 张。`}
         confirmText="追加生成"
         confirming={create.isPending}
         onConfirm={async () => {
@@ -238,4 +273,20 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       />
     </StageFrame>
   );
+}
+
+function coerceTemplate(value: unknown): CreateTemplate {
+  return TEMPLATE_LABELS.some(([option]) => option === value)
+    ? (value as CreateTemplate)
+    : "premium_studio";
+}
+
+function coerceAspectRatio(value: unknown): CreateAspectRatio {
+  return ASPECT_RATIO_LABELS.some(([option]) => option === value)
+    ? (value as CreateAspectRatio)
+    : "4:5";
+}
+
+function coerceQuality(value: unknown): "high" | "4k" {
+  return value === "4k" ? "4k" : "high";
 }
