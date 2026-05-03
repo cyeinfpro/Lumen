@@ -1761,6 +1761,25 @@ EOF
     done
 }
 
+# 把任何菜单动作包成"失败也回菜单"的 action：
+#   - 失败时 log_warn rc 并暂停等用户按 Enter（让他看清上方错误）
+#   - 成功时直接返回，无暂停（避免 annoying）
+#   - Ctrl+C / 中断（rc=130/143）等同失败处理
+#   - 无论 rc 多少，本函数总返回 0，不让 set -e 把菜单进程也带退出
+menu_action() {
+    local rc=0
+    "$@" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        log_warn "命令以非零状态结束（rc=${rc}），返回主菜单。"
+        if [ -r /dev/tty ]; then
+            printf '\n按 Enter 返回菜单... ' >&2
+            IFS= read -r _ </dev/tty 2>/dev/null || true
+            printf '\n' >&2
+        fi
+    fi
+    return 0
+}
+
 show_menu() {
     while :; do
         cat <<EOF
@@ -1786,21 +1805,21 @@ EOF
         local choice
         choice="$(read_or_default '请选择' '0')"
         case "${choice}" in
-            1) run_lumen_install_script ;;
-            2) run_lumen_script update.sh ;;
-            3) run_lumen_script uninstall.sh ;;
-            4) install_image_job ;;
-            5) uninstall_image_job ;;
-            6) nginx_scan || true ;;
-            7) nginx_optimize ;;
-            8) lumen_compose_status ;;
-            9) lumen_compose_logs api ;;
-            10) lumen_compose_restart ;;
-            11) lumen_compose_start ;;
-            12) lumen_compose_stop ;;
-            13) lumen_compose_migrate ;;
-            0) exit 0 ;;
-            *) log_warn "无效选项：${choice}" ;;
+            1)  menu_action run_lumen_install_script ;;
+            2)  menu_action run_lumen_script update.sh ;;
+            3)  menu_action run_lumen_script uninstall.sh ;;
+            4)  menu_action install_image_job ;;
+            5)  menu_action uninstall_image_job ;;
+            6)  menu_action nginx_scan ;;
+            7)  menu_action nginx_optimize ;;
+            8)  menu_action lumen_compose_status ;;
+            9)  menu_action lumen_compose_logs api ;;
+            10) menu_action lumen_compose_restart ;;
+            11) menu_action lumen_compose_start ;;
+            12) menu_action lumen_compose_stop ;;
+            13) menu_action lumen_compose_migrate ;;
+            0)  exit 0 ;;
+            *)  log_warn "无效选项：${choice}" ;;
         esac
     done
 }
