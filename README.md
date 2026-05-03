@@ -570,7 +570,7 @@ Nginx 关键约束：
 # 更新代码依赖和迁移
 bash scripts/update.sh
 
-# 卸载向导，默认保留数据
+# 卸载向导：停止 systemd / 本地进程 / 容器；数据与 nginx 配置默认保留
 bash scripts/uninstall.sh
 
 # 备份 PostgreSQL + Redis
