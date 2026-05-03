@@ -263,6 +263,29 @@ def test_lumenctl_runs_lumen_updates_from_resolved_root_with_sudo_on_linux() -> 
         assert f"sudo:bash {ROOT / 'scripts' / 'update.sh'}" in result.stdout
 
 
+def test_lumenctl_resolves_scripts_from_current_release(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "Lumen"
+    release = deploy_root / "releases" / "20260503010101-abcdef0"
+    scripts_dir = release / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "update.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (deploy_root / "current").symlink_to(release)
+
+    result = assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        ROOT={deploy_root}
+        detect_os() {{ printf 'linux\\n'; }}
+        bash() {{ printf 'bash:%s\\n' "$*"; }}
+        lumen_sudo() {{ printf 'sudo:%s\\n' "$*"; }}
+        run_lumen_script update.sh
+        """
+    )
+
+    assert f"{deploy_root / 'current' / 'scripts' / 'update.sh'}" in result.stdout
+    assert f"{deploy_root / 'scripts' / 'update.sh'}" not in result.stderr
+
+
 def test_runtime_health_check_fails_when_api_unhealthy() -> None:
     result = run_bash(
         f"""
