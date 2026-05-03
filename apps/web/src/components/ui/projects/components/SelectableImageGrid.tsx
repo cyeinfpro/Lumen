@@ -5,6 +5,7 @@
 
 import { Check } from "lucide-react";
 
+import { Spinner } from "@/components/ui/primitives/Spinner";
 import type { BackendImageMeta } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { imageSrc } from "../utils";
@@ -25,14 +26,14 @@ export function SelectableImageGrid({
   onPreview,
 }: SelectableImageGridProps) {
   return (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+    <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       {images.map((image, index) => {
         const selected = selectedImageId === image.id;
         return (
           <article
             key={image.id}
             className={cn(
-              "overflow-hidden rounded-md border bg-white/[0.03] transition-all duration-[var(--dur-base)]",
+              "overflow-hidden rounded-md border bg-white/[0.035] p-3 transition-all duration-[var(--dur-base)]",
               selected
                 ? "border-[var(--border-amber)] shadow-[var(--shadow-amber)]"
                 : "border-[var(--border)] hover:border-[var(--border-strong)]",
@@ -48,7 +49,7 @@ export function SelectableImageGrid({
                   src={imageSrc(image)}
                   alt="饰品预览"
                   loading="lazy"
-                  className="aspect-[4/5] w-full object-cover transition-transform duration-[var(--dur-slow)] hover:scale-[1.02]"
+                  className="aspect-[4/5] w-full rounded-md object-cover transition-transform duration-[var(--dur-slow)] hover:scale-[1.02]"
                 />
               </button>
               {selected ? (
@@ -63,7 +64,7 @@ export function SelectableImageGrid({
               onClick={() => onSelect(selected ? null : image.id)}
               disabled={saving}
               className={cn(
-                "h-9 w-full border-t px-2 text-sm transition-colors",
+                "mt-3 h-9 w-full rounded-md border px-2 text-sm transition-colors",
                 selected
                   ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
                   : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04]",
@@ -75,6 +76,33 @@ export function SelectableImageGrid({
           </article>
         );
       })}
+    </div>
+  );
+}
+
+export function SelectableImageGridLoading({
+  count = 4,
+  label = "生成中…",
+}: {
+  count?: number;
+  label?: string;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+      {Array.from({ length: count }).map((_, index) => (
+        <article
+          key={index}
+          className="overflow-hidden rounded-md border border-[var(--border)] bg-white/[0.035] p-3"
+        >
+          <div className="flex aspect-[4/5] items-center justify-center rounded-md bg-[var(--bg-2)]">
+            <div className="flex flex-col items-center gap-2 text-xs text-[var(--fg-2)]">
+              <Spinner size={20} />
+              <span>{label}</span>
+            </div>
+          </div>
+          <div className="mt-3 h-9 rounded-md border border-[var(--border)] bg-white/[0.025]" />
+        </article>
+      ))}
     </div>
   );
 }

@@ -60,6 +60,7 @@ from lumen_core.schemas import (
     WorkflowRunListItemOut,
     WorkflowRunListOut,
     WorkflowRunOut,
+    WorkflowRunPatchIn,
     WorkflowStepOut,
 )
 
@@ -1737,6 +1738,55 @@ async def get_workflow(
     out = await _build_run_out(db, run)
     await db.commit()
     return out
+
+
+@router.patch(
+    "/{workflow_run_id}",
+    response_model=WorkflowRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def patch_workflow(
+    workflow_run_id: str,
+    body: WorkflowRunPatchIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> WorkflowRunOut:
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise _http("invalid_title", "title cannot be empty", 422)
+        run.title = title
+        if run.conversation_id:
+            conv = (
+                await db.execute(
+                    select(Conversation).where(
+                        Conversation.id == run.conversation_id,
+                        Conversation.user_id == user.id,
+                        Conversation.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if conv is not None:
+                conv.title = title
+    out = await _build_run_out(db, run)
+    await db.commit()
+    return out
+
+
+@router.delete(
+    "/{workflow_run_id}",
+    dependencies=[Depends(verify_csrf)],
+)
+async def delete_workflow(
+    workflow_run_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
+    run.deleted_at = _now()
+    await db.commit()
+    return {"ok": True}
 
 
 @router.post(

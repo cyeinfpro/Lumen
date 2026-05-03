@@ -1076,6 +1076,11 @@ async def _maybe_enqueue_workflow_quality_review(
     generation: Generation,
     image_id: str,
 ) -> None:
+    # Automatic QC for apparel workflows is intentionally disabled. The API keeps
+    # generated showcase images in needs_review for manual review, so creating a
+    # vision completion here would waste quota and surprise users.
+    return
+
     req = generation.upstream_request if isinstance(generation.upstream_request, dict) else {}
     if req.get("workflow_type") != "apparel_model_showcase":
         return

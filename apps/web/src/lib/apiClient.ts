@@ -362,6 +362,10 @@ export interface CreateApparelWorkflowIn {
   title?: string | null;
 }
 
+export interface PatchWorkflowIn {
+  title?: string;
+}
+
 export interface CreateApparelWorkflowOut {
   workflow_run_id: string;
   status: string;
@@ -475,6 +479,20 @@ export function listWorkflows(
 
 export function getWorkflow(id: string): Promise<WorkflowRun> {
   return apiFetch<WorkflowRun>(`/workflows/${id}`);
+}
+
+export function patchWorkflow(
+  id: string,
+  body: PatchWorkflowIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteWorkflow(id: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(`/workflows/${id}`, { method: "DELETE" });
 }
 
 export function createApparelWorkflow(

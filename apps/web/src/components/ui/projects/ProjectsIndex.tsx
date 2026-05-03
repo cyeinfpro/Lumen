@@ -7,14 +7,15 @@
 // 4) 错误态可重试；空态升级为带占位渐变的 hero
 
 import { motion } from "framer-motion";
-import { ChevronRight, Image as ImageIcon, Plus, RefreshCw, Search, Shirt, Sparkles, X } from "lucide-react";
+import { ChevronRight, Image as ImageIcon, MoreVertical, Pencil, Plus, RefreshCw, Search, Shirt, Sparkles, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { useDeferredValue, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { EmptyState } from "@/components/ui/primitives/EmptyState";
 import { Skeleton } from "@/components/ui/primitives/Skeleton";
-import { useWorkflowsQuery } from "@/lib/queries";
+import { toast } from "@/components/ui/primitives/Toast";
+import { useDeleteWorkflowMutation, usePatchWorkflowMutation, useWorkflowsQuery } from "@/lib/queries";
 import type { WorkflowRunListItem } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { ProjectTopBar } from "./components/ProjectTopBar";
@@ -243,8 +244,38 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
   const needsReview = item.status === "needs_review";
   const completed = item.status === "completed";
   const failed = item.status === "failed";
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [title, setTitle] = useState(item.title || "服饰模特展示图");
+  const patch = usePatchWorkflowMutation({
+    onSuccess: () => {
+      toast.success("项目已重命名");
+      setRenaming(false);
+      setMenuOpen(false);
+    },
+    onError: (error) => toast.error(error.message || "重命名失败"),
+  });
+  const remove = useDeleteWorkflowMutation({
+    onSuccess: () => toast.success("项目已删除"),
+    onError: (error) => toast.error(error.message || "删除失败"),
+  });
+  const saveTitle = () => {
+    const next = title.trim();
+    if (!next) {
+      toast.error("项目名称不能为空");
+      return;
+    }
+    if (next === item.title) {
+      setRenaming(false);
+      return;
+    }
+    patch.mutate({ id: item.id, title: next });
+  };
+
   return (
     <motion.div
+      className="relative"
       layout
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
@@ -294,7 +325,9 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
             <p className="truncate text-sm font-medium text-[var(--fg-0)]">
               {item.title || "服饰模特展示图"}
             </p>
-            <ChevronRight className="h-4 w-4 shrink-0 text-[var(--fg-2)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-[var(--fg-0)]" />
+            <span className="mr-7">
+              <ChevronRight className="h-4 w-4 shrink-0 text-[var(--fg-2)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-[var(--fg-0)]" />
+            </span>
           </div>
           <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">
             {item.user_prompt || "未填写基础需求"}
@@ -312,6 +345,80 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
           </div>
         </div>
       </Link>
+      <button
+        type="button"
+        aria-label="项目操作"
+        onClick={() => {
+          setMenuOpen((open) => !open);
+          setConfirmingDelete(false);
+          setRenaming(false);
+          setTitle(item.title || "服饰模特展示图");
+        }}
+        className="absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-[var(--fg-2)] transition-colors hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
+      >
+        <MoreVertical className="h-4 w-4" />
+      </button>
+      {menuOpen ? (
+        <div className="absolute right-3 top-12 z-10 w-64 rounded-md border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)]">
+          {renaming ? (
+            <form
+              className="grid gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveTitle();
+              }}
+            >
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                maxLength={120}
+                autoFocus
+                className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)]"
+              />
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" size="sm" onClick={() => setRenaming(false)}>
+                  取消
+                </Button>
+                <Button type="submit" size="sm" disabled={patch.isPending}>
+                  保存
+                </Button>
+              </div>
+            </form>
+          ) : confirmingDelete ? (
+            <div className="grid gap-2">
+              <p className="text-sm text-[var(--fg-0)]">确认删除这个项目？</p>
+              <p className="text-xs leading-5 text-[var(--fg-2)]">项目会从列表移除，关联对话不会被删除。</p>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)}>
+                  取消
+                </Button>
+                <Button type="button" variant="danger" size="sm" disabled={remove.isPending} onClick={() => remove.mutate(item.id)}>
+                  删除
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-1">
+              <button
+                type="button"
+                onClick={() => setRenaming(true)}
+                className="flex h-9 items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+              >
+                <Pencil className="h-4 w-4" />
+                重命名
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                className="flex h-9 items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
+              >
+                <Trash2 className="h-4 w-4" />
+                删除
+              </button>
+            </div>
+          )}
+        </div>
+      ) : null}
     </motion.div>
   );
 }

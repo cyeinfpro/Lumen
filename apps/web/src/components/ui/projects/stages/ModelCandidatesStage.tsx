@@ -22,7 +22,10 @@ import {
 import type { BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
 import { CandidateCard } from "../components/CandidateCard";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
-import { SelectableImageGrid } from "../components/SelectableImageGrid";
+import {
+  SelectableImageGrid,
+  SelectableImageGridLoading,
+} from "../components/SelectableImageGrid";
 import { RunningState, StageFrame } from "../components/StageFrame";
 import {
   ASPECT_RATIO_LABELS,
@@ -252,10 +255,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             </Button>
           </div>
           {accessoryPreviewRunning ? (
-            <RunningState
-              label="系统正在生成配饰四宫格，完成后会自动载入"
-              className="h-40"
-            />
+            <SelectableImageGridLoading label="配饰图生成中" />
           ) : accessoryImages.length > 0 ? (
             <SelectableImageGrid
               images={accessoryImages}
