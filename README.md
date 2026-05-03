@@ -235,23 +235,25 @@ COMPOSE_PROJECT_NAME=lumen docker compose logs -f api
 
 ## 数据目录与权限
 
-所有持久化数据都落在 `/opt/lumendata`（`LUMEN_DATA_ROOT` 可改）：
+默认所有持久化数据都落在 `/opt/lumendata`（`LUMEN_DATA_ROOT` 可改）。如果
+`LUMEN_DATA_ROOT` 是 CIFS/NAS，建议用 `LUMEN_DB_ROOT` 把 PostgreSQL / Redis
+单独放到本机 Linux 文件系统：
 
 ```text
-/opt/lumendata/postgres   # PostgreSQL PGDATA（容器 uid 70:70）
-/opt/lumendata/redis      # Redis dump/aof（容器 uid 999:999）
-/opt/lumendata/storage    # 图片原图、display/preview/thumb（容器 uid 10001:10001）
-/opt/lumendata/backup     # PG dump + Redis dump（容器 uid 10001:10001）
+${LUMEN_DB_ROOT:-/opt/lumendata}/postgres   # PostgreSQL PGDATA（容器 uid 70:70）
+${LUMEN_DB_ROOT:-/opt/lumendata}/redis      # Redis dump/aof（容器 uid 999:999）
+${LUMEN_DATA_ROOT:-/opt/lumendata}/storage  # 图片原图、display/preview/thumb（容器 uid 10001:10001）
+${LUMEN_DATA_ROOT:-/opt/lumendata}/backup   # PG dump + Redis dump（容器 uid 10001:10001）
 ```
 
-`/opt/lumendata` 顶层归 root，子目录按服务分别 chown，禁止整体 `chown -R 10001:10001 /opt/lumendata` —— 否则 PostgreSQL（uid 70）、Redis（uid 999）启动会失败。安装脚本会自动按这张表设置；手动恢复时参考 `docs/docker-full-stack-cutover-plan.md` §15.2：
+数据根顶层归 root，子目录按服务分别 chown，禁止整体 `chown -R 10001:10001` —— 否则 PostgreSQL（uid 70）、Redis（uid 999）启动会失败。安装脚本会自动按这张表设置；手动恢复时参考 `docs/docker-full-stack-cutover-plan.md` §15.2：
 
 ```bash
-sudo mkdir -p /opt/lumendata/{postgres,redis,storage,backup}
-sudo chown -R 70:70   /opt/lumendata/postgres
-sudo chown -R 999:999 /opt/lumendata/redis
+sudo mkdir -p /var/lib/lumen-data/{postgres,redis} /opt/lumendata/{storage,backup}
+sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chown -R 10001:10001 /opt/lumendata/storage /opt/lumendata/backup
-sudo chmod 700 /opt/lumendata/postgres /opt/lumendata/redis
+sudo chmod 700 /var/lib/lumen-data/postgres /var/lib/lumen-data/redis
 sudo chmod 750 /opt/lumendata/storage /opt/lumendata/backup
 sudo chown root:root /opt/lumendata
 sudo chmod 755 /opt/lumendata
