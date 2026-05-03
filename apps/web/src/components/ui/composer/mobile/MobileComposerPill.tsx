@@ -168,6 +168,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
   const didMountRef = useRef(false);
   const focusExpandedOnOpenRef = useRef(false);
   const enhanceAbortRef = useRef<AbortController | null>(null);
+  const shutterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 展开/折叠 haptic（跳过首次 mount）
   useEffect(() => {
@@ -219,6 +220,10 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
       enhanceAbortRef.current?.abort();
       isComposingRef.current = false;
       submittingRef.current = false;
+      if (shutterTimerRef.current) {
+        clearTimeout(shutterTimerRef.current);
+        shutterTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -306,7 +311,11 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
     // 快门闪：200ms scale 0.92→1 + 光晕
     setShutterBurst(true);
     haptic("medium");
-    window.setTimeout(() => setShutterBurst(false), 200);
+    if (shutterTimerRef.current) clearTimeout(shutterTimerRef.current);
+    shutterTimerRef.current = setTimeout(() => {
+      shutterTimerRef.current = null;
+      setShutterBurst(false);
+    }, 200);
     // 斜杠命令最终落地：剥离前缀
     const parsed = parseSlash(text);
     if (parsed.force) {
