@@ -78,6 +78,9 @@ services:
     build: *app-build
     working_dir: /app/apps/api
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
+    group_add:
+      - "${LUMEN_APP_STORAGE_GID:-10001}"
     env_file: .env
     restart: unless-stopped
     stop_grace_period: 60s
@@ -109,6 +112,9 @@ services:
     build: *app-build
     working_dir: /app/apps/worker
     command: ["python", "-m", "arq", "app.main.WorkerSettings"]
+    user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
+    group_add:
+      - "${LUMEN_APP_STORAGE_GID:-10001}"
     env_file: .env
     restart: unless-stopped
     stop_signal: SIGTERM

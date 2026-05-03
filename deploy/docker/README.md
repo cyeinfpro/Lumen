@@ -18,6 +18,8 @@ chown -R 10001:10001 /tmp/lumen-local/storage /tmp/lumen-local/backup
 
 cp .env.example .env.local
 LUMEN_DATA_ROOT=/tmp/lumen-local \
+LUMEN_DB_ROOT=/tmp/lumen-local \
+LUMEN_APP_STORAGE_GID=10001 \
 LUMEN_IMAGE_TAG=local \
 COMPOSE_PROJECT_NAME=lumen-local \
 docker compose --env-file .env.local -f docker-compose.yml -f deploy/docker/docker-compose.local.yml config
