@@ -1885,32 +1885,46 @@ lumen_emit_info() {
     printf '%s\n' "${line}" >&2
 }
 
-# 全局更新锁（§12.5）：基于 flock + ${LUMEN_BACKUP_ROOT}/.lumen-update.lock。
+# 全局更新锁（§12.5）：优先 flock，macOS / 精简环境无 flock 时用 mkdir 目录锁兜底。
 # 用法：lumen_with_lock <operation_id> <ttl_seconds> <cmd...>；占用时输出 system_operation_busy 并退出 75。
 lumen_with_lock() {
     local op_id="$1"
     local ttl="$2"
     shift 2 || true
-    if ! command -v flock >/dev/null 2>&1; then
-        log_error "lumen_with_lock 需要 flock；请安装 util-linux 后重试。"
-        exit 1
-    fi
     local lock_dir="${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}"
     local lock_file="${lock_dir}/.lumen-update.lock"
+    local lock_mkdir="${lock_file}.d"
+    local rc=0
     mkdir -p "${lock_dir}" 2>/dev/null || true
-    if ! exec 8>"${lock_file}" 2>/dev/null; then
-        log_error "无法打开更新锁文件：${lock_file}"
-        exit 1
+
+    if command -v flock >/dev/null 2>&1; then
+        if ! exec 8>"${lock_file}" 2>/dev/null; then
+            log_error "无法打开更新锁文件：${lock_file}"
+            exit 1
+        fi
+        if ! flock -n 8; then
+            printf '{"error":{"code":"system_operation_busy","operation_id":"%s","retry_after":%s}}\n' \
+                "${op_id}" "${ttl}"
+            exec 8>&- 2>/dev/null || true
+            exit 75
+        fi
+        "$@" || rc=$?
+        flock -u 8 2>/dev/null || true
+        exec 8>&- 2>/dev/null || true
+        return "${rc}"
     fi
-    if ! flock -n 8; then
+
+    if ! mkdir "${lock_mkdir}" 2>/dev/null; then
         printf '{"error":{"code":"system_operation_busy","operation_id":"%s","retry_after":%s}}\n' \
             "${op_id}" "${ttl}"
-        exec 8>&- 2>/dev/null || true
         exit 75
     fi
-    local rc=0
+    {
+        printf 'pid=%s\n' "$$"
+        printf 'operation_id=%s\n' "${op_id}"
+        printf 'started_at=%s\n' "$(date -u +%FT%TZ 2>/dev/null || date)"
+    } > "${lock_mkdir}/owner" 2>/dev/null || true
     "$@" || rc=$?
-    flock -u 8 2>/dev/null || true
-    exec 8>&- 2>/dev/null || true
+    rm -rf "${lock_mkdir}" 2>/dev/null || true
     return "${rc}"
 }
