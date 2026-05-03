@@ -79,6 +79,31 @@ def test_update_proxy_can_be_loaded_from_shared_env_file(
     assert env["NO_PROXY"] == "localhost,127.0.0.1,::1,10.0.0.0/8"
 
 
+def test_update_step_fail_lines_are_reported_as_failed_done_steps() -> None:
+    log = "\n".join(
+        [
+            "=== update trigger at=2026-05-03T00:00:00+00:00 user=1 proxy=none ===",
+            "::lumen-step:: phase=fetch_release status=start ts=2026-05-03T00:00:01Z",
+            "::lumen-info:: phase=fetch_release key=reason value=rsync_failed",
+            "::lumen-step:: phase=fetch_release status=fail rc=1 ts=2026-05-03T00:00:02Z",
+        ]
+    )
+
+    phases = admin_update._parse_steps(log)
+    event, payload = admin_update._classify_log_line(
+        "::lumen-step:: phase=fetch_release status=fail rc=1 ts=2026-05-03T00:00:02Z"
+    )
+
+    assert len(phases) == 1
+    assert phases[0].phase == "fetch_release"
+    assert phases[0].status == "done"
+    assert phases[0].rc == 1
+    assert phases[0].info["reason"] == "rsync_failed"
+    assert event == "step"
+    assert payload["status"] == "done"
+    assert payload["rc"] == 1
+
+
 def test_update_trigger_note_mentions_restart_and_health_check() -> None:
     # The response currently passes the note inline from trigger_update; keep the
     # user-facing contract visible even if that implementation is later refactored.
@@ -172,6 +197,7 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
                 "LUMEN_UPDATE_GIT_PULL": "1",
                 "LUMEN_UPDATE_BUILD": "0",
                 "LUMEN_UPDATE_CHANNEL": "pinned",
+                "LUMEN_REPO_DIR": "/root/Lumen",
                 "LUMEN_IMAGE_TAG": "v1.2.3",
                 "HTTP_PROXY": "http://proxy.example:3128",
                 "PATH": "/should/not/leak",
@@ -189,6 +215,7 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
     assert "LUMEN_UPDATE_NONINTERACTIVE=1" in env_text
     assert "LUMEN_UPDATE_BUILD=0" in env_text
     assert "LUMEN_UPDATE_CHANNEL=pinned" in env_text
+    assert "LUMEN_REPO_DIR=/root/Lumen" in env_text
     assert "LUMEN_IMAGE_TAG=v1.2.3" in env_text
     assert "HTTP_PROXY=http://proxy.example:3128" in env_text
     # Non-allowlisted vars must not leak into the runner env file.

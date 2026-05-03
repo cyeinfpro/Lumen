@@ -55,7 +55,7 @@ _RELEASE_LIST_LIMIT = 10
 
 # Step protocol regexes — see update.sh contract.
 _STEP_LINE_RE = re.compile(
-    r"^::lumen-step::\s+phase=(?P<phase>[A-Za-z0-9_]+)\s+status=(?P<status>start|done)"
+    r"^::lumen-step::\s+phase=(?P<phase>[A-Za-z0-9_]+)\s+status=(?P<status>start|done|fail)"
     r"(?:\s+rc=(?P<rc>-?\d+))?"
     r"(?:\s+dur_ms=(?P<dur_ms>-?\d+))?"
     r"(?:\s+ts=(?P<ts>\S+))?"
@@ -172,6 +172,9 @@ def _runner_env_lines(env: dict[str, str]) -> list[str]:
         "LUMEN_UPDATE_CHANNEL",
         "LUMEN_IMAGE_TAG",
         "LUMEN_UPDATE_PROXY_URL",
+        "LUMEN_UPDATE_ROOT",
+        "LUMEN_REPO_DIR",
+        "LUMEN_SOURCE_ROOT",
         "LUMEN_HTTP_PROXY",
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -389,6 +392,8 @@ def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
         "LOGNAME",
         "LANG",
         "LC_ALL",
+        "LUMEN_REPO_DIR",
+        "LUMEN_SOURCE_ROOT",
         "LUMEN_HTTP_PROXY",
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -829,7 +834,8 @@ def _parse_steps(log_text: str) -> list[StepRecord]:
         m = _STEP_LINE_RE.match(line)
         if m:
             phase = m.group("phase")
-            status = m.group("status")
+            raw_status = m.group("status")
+            status = "done" if raw_status == "fail" else raw_status
             ts = m.group("ts")
             rc = m.group("rc")
             dur = m.group("dur_ms")
@@ -1121,7 +1127,7 @@ def _classify_log_line(line: str) -> tuple[str, dict[str, object]]:
         dur = m.group("dur_ms")
         return "step", {
             "phase": m.group("phase"),
-            "status": m.group("status"),
+            "status": "done" if m.group("status") == "fail" else m.group("status"),
             "ts": m.group("ts"),
             "rc": int(rc) if rc is not None else None,
             "dur_ms": int(dur) if dur is not None else None,
