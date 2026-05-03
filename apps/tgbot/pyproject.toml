@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-tgbot"
-version = "1.0.1"
+version = "1.0.2"
 description = "Lumen Telegram bot — 菜单驱动生图、任务列表、失败重试"
 requires-python = ">=3.12"
 dependencies = [
