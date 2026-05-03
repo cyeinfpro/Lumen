@@ -11,6 +11,7 @@ import asyncio
 import errno
 import hashlib
 import io
+import logging
 import os
 import secrets
 import stat
@@ -37,11 +38,17 @@ from ..audit import hash_email, request_ip_hash, write_audit
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
-from ..ratelimit import PUBLIC_IMAGE_LIMITER, UPLOADS_LIMITER, client_ip
+from ..ratelimit import (
+    PUBLIC_IMAGE_LIMITER,
+    UPLOADS_LIMITER,
+    client_ip,
+    require_client_ip,
+)
 from ..redis_client import get_redis
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _LINK_UNSUPPORTED_ERRNOS = {
     errno.EPERM,
@@ -224,6 +231,9 @@ async def _ensure_display_variant(
     except FileExistsError:
         pass  # concurrent writer already created the file
     except Exception:
+        logger.exception(
+            "display variant write failed image_id=%s key=%s", img.id, key
+        )
         await db.delete(variant)
         await db.commit()
         raise
@@ -267,6 +277,15 @@ async def _check_public_image_lookup_rate_limit(request: Request) -> None:
     redis = get_redis()
     await PUBLIC_IMAGE_LIMITER.check(
         redis, f"rl:image-key:{client_ip(request)}"
+    )
+
+
+async def _check_signed_image_rate_limit(request: Request) -> None:
+    """Public unauthenticated signed-image route: reject when client IP is
+    unknown so anonymous clients can't share one bucket and DoS the rest."""
+    redis = get_redis()
+    await PUBLIC_IMAGE_LIMITER.check(
+        redis, f"rl:image-sig:{require_client_ip(request)}"
     )
 
 
@@ -576,7 +595,7 @@ async def get_image_signed(
         raise _http("signed_proxy_disabled", "image signing not configured", 503)
     if variant not in SIGNED_ALLOWED_VARIANTS:
         raise _http("invalid_variant", "unsupported image variant", 400)
-    await _check_public_image_lookup_rate_limit(request)
+    await _check_signed_image_rate_limit(request)
     if not verify_image_sig(
         image_id, variant, exp, sig, secret_str.encode("utf-8")
     ):

@@ -73,6 +73,7 @@ def _disable_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(images, "_check_public_image_lookup_rate_limit", _noop)
+    monkeypatch.setattr(images, "_check_signed_image_rate_limit", _noop)
 
 
 @pytest.fixture
