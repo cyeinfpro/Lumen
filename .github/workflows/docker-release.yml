@@ -93,13 +93,17 @@ jobs:
       - name: Image start smoke
         env:
           LUMEN_DATA_ROOT: /tmp/lumen-ci-data
+          # docker-compose.yml 现在用 ${LUMEN_DB_ROOT:-/opt/lumendata}/postgres；
+          # 不在 CI 显式 override 的话，PG 会挂到 /opt/lumendata/postgres（无权限/不存在）。
+          # 让 DB_ROOT 跟随 DATA_ROOT，与 lib.sh 的默认 fallback 行为一致。
+          LUMEN_DB_ROOT: /tmp/lumen-ci-data
           LUMEN_SKIP_MIGRATION_CHECK: "1"
           COMPOSE_PROJECT_NAME: lumen-ci
         run: |
           set -euo pipefail
-          mkdir -p "$LUMEN_DATA_ROOT"/{postgres,redis,storage,backup}
-          sudo chown -R 70:70 "$LUMEN_DATA_ROOT/postgres"
-          sudo chown -R 999:999 "$LUMEN_DATA_ROOT/redis"
+          mkdir -p "$LUMEN_DB_ROOT"/{postgres,redis} "$LUMEN_DATA_ROOT"/{storage,backup}
+          sudo chown -R 70:70 "$LUMEN_DB_ROOT/postgres"
+          sudo chown -R 999:999 "$LUMEN_DB_ROOT/redis"
           sudo chown -R 10001:10001 "$LUMEN_DATA_ROOT/storage" "$LUMEN_DATA_ROOT/backup"
           docker compose --env-file .env.example -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait postgres redis
           docker compose --env-file .env.example -f docker-compose.yml -f deploy/docker/docker-compose.local.yml --profile migrate run --rm migrate
@@ -111,6 +115,7 @@ jobs:
         if: always()
         env:
           LUMEN_DATA_ROOT: /tmp/lumen-ci-data
+          LUMEN_DB_ROOT: /tmp/lumen-ci-data
           COMPOSE_PROJECT_NAME: lumen-ci
         run: docker compose --env-file .env.example -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
 
