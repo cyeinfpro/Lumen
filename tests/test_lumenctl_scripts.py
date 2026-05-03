@@ -63,6 +63,13 @@ def test_install_script_defaults_to_starting_runtime_after_install() -> None:
     assert "未启动前，浏览器访问 3000 不会有响应" in text
 
 
+def test_install_bootstrap_defaults_to_menu_not_auto_update() -> None:
+    text = INSTALL.read_text(encoding="utf-8")
+    assert 'args=("menu")' in text
+    assert "避免脚本一运行就跳过菜单" in text
+    assert 'exec bash "${script_path}" "${args[@]}" </dev/tty' in text
+
+
 def test_update_script_requires_release_layout_and_prepares_new_release() -> None:
     text = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
     assert "Capistrano 风格 release + symlink 原子切换版" in text
@@ -181,10 +188,14 @@ def test_update_script_restarts_services_and_health_checks_after_update() -> Non
     assert 'log_info "release ${NEW_ID} 已上线（previous: ${CURRENT_ID}）"' in text
 
 
-def test_update_script_runs_dependency_steps_as_systemd_runtime_user() -> None:
+def test_update_script_runs_dependency_steps_as_build_user() -> None:
     text = UPDATE.read_text(encoding="utf-8")
     assert "LUMEN_UPDATE_SYSTEMD_RUNTIME=1" in text
     assert 'LUMEN_UPDATE_RUN_USER="$(lumen_runtime_service_user)"' in text
+    assert 'LUMEN_UPDATE_EXEC_USER="${LUMEN_UPDATE_RUN_USER}"' in text
+    assert 'LUMEN_UPDATE_EXEC_USER="root"' in text
+    assert "服务用户：" in text
+    assert "构建用户：" in text
     assert "setfacl -m" in text
     assert "chmod o+x" in text
     assert 'lumen_update_as_runtime_user "${UV_BIN}" sync --frozen --all-packages' in text
@@ -198,7 +209,7 @@ def test_update_installs_missing_uv_to_system_path_before_runtime_home() -> None
     assert 'env UV_INSTALL_DIR="${uv_install_dir}" sh -lc' in text
     assert "/usr/local/bin /usr/bin" in text
     assert "installed_uv=1" in text
-    assert 'lumen_run_as_user "${LUMEN_UPDATE_RUN_USER}" sh -lc \\' in text
+    assert 'lumen_run_as_user "${LUMEN_UPDATE_EXEC_USER}" sh -lc \\' in text
     assert 'curl -LsSf https://astral.sh/uv/install.sh | sh' in text
     assert "home_dir}/.local/bin/uv" in text
 
