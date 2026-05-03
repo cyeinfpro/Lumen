@@ -138,12 +138,20 @@ async def _save_cursor(redis: aioredis.Redis, user_id: str, sse_id: str) -> None
     await redis.set(_cursor_key(user_id), sse_id)
 
 
+_RECONNECT_BACKOFF_MAX_SEC = 60.0
+_RECONNECT_ALERT_THRESHOLD = 50
+
+
 async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> None:
     """常驻 task：发现 user streams，按需起 / 重启 per-user worker。
 
-    出错（包括 redis 抖动）只 warn 不抬，sleep 后重连。
+    出错（包括 redis 抖动）只 warn 不抬，sleep 后重连。退避到 60s 上限；连续失败
+    超过 _RECONNECT_ALERT_THRESHOLD 次抬到 ERROR 级，便于 systemd / 监控告警，但
+    继续重试不退出（systemd Restart=always 已经够，进程死不死无关紧要；listener
+    死了用户拿不到推送，比"退出让 systemd 拉起"更糟）。
     """
     backoff = 1.0
+    consecutive_failures = 0
     redis: aioredis.Redis | None = None
     workers: dict[str, asyncio.Task] = {}
     try:
@@ -157,10 +165,21 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
                         "listener: connected to %s (stream mode)", settings.redis_url
                     )
                     backoff = 1.0
+                    consecutive_failures = 0
                 user_ids = await _scan_user_streams(redis)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "listener: discovery err: %s; retry in %.1fs", exc, backoff
+                consecutive_failures += 1
+                level = (
+                    logging.ERROR
+                    if consecutive_failures >= _RECONNECT_ALERT_THRESHOLD
+                    else logging.WARNING
+                )
+                logger.log(
+                    level,
+                    "listener: discovery err: %s; retry in %.1fs (failures=%d)",
+                    exc,
+                    backoff,
+                    consecutive_failures,
                 )
                 if redis is not None:
                     try:
@@ -169,7 +188,7 @@ async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> No
                         pass
                     redis = None
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                backoff = min(backoff * 2, _RECONNECT_BACKOFF_MAX_SEC)
                 continue
 
             # 起新 user worker；清理已 done 的
@@ -241,7 +260,7 @@ async def _user_worker(
                 backoff,
             )
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
+            backoff = min(backoff * 2, _RECONNECT_BACKOFF_MAX_SEC)
             continue
         backoff = 1.0
         if not resp:

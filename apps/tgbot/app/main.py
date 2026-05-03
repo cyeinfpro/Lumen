@@ -15,6 +15,8 @@ import signal
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import DefaultKeyBuilder, RedisStorage
+from redis import asyncio as aioredis
 
 from .api_client import ApiError, LumenApi
 from .config import settings
@@ -22,6 +24,12 @@ from .handlers import build_root_router
 from .listener import run_listener
 from .middlewares import AccessGate
 from .proxy_manager import FailoverSession, ProxyManager, _normalize_proxy_url
+
+
+# FSM 状态过期时间。/new 走完一个生成或丢弃后状态被 clear()，正常路径不会留垃圾。
+# 但用户中途退出（关闭 TG / 长时间不回复）的状态需要兜底过期，避免 redis 里
+# 沉积上百万条死状态。1h 比 enhance/iter 流程的合理交互窗口宽十几倍。
+_FSM_STATE_TTL_SEC = 3600
 
 
 _CONTROL_CHANNEL = "admin:tgbot:control"
@@ -36,6 +44,11 @@ async def _run_control_listener(stop_event: asyncio.Event) -> None:
 
     logger = logging.getLogger("lumen-tgbot.control")
     backoff = 1.0
+    consecutive_failures = 0
+    # control 通道丢消息只影响管理面（一键重启），重要性低于 listener；上限 60s
+    # 重试，连续 50 次失败后告警一次便于排查，但继续重试不退出。
+    backoff_max = 60.0
+    alert_threshold = 50
     while not stop_event.is_set():
         pubsub = None
         client = None
@@ -45,6 +58,7 @@ async def _run_control_listener(stop_event: asyncio.Event) -> None:
             await pubsub.subscribe(_CONTROL_CHANNEL)
             logger.info("control: subscribed to %s", _CONTROL_CHANNEL)
             backoff = 1.0
+            consecutive_failures = 0
             async for msg in pubsub.listen():
                 if stop_event.is_set():
                     break
@@ -61,9 +75,19 @@ async def _run_control_listener(stop_event: asyncio.Event) -> None:
                     # systemd 拉起。这里不直接 sys.exit，避免和 main 关闭逻辑打架。
                     return
         except Exception as exc:  # noqa: BLE001
-            logger.warning("control listener error: %s; reconnect in %.1fs", exc, backoff)
+            consecutive_failures += 1
+            level = (
+                logging.ERROR if consecutive_failures >= alert_threshold else logging.WARNING
+            )
+            logger.log(
+                level,
+                "control listener error: %s; reconnect in %.1fs (failures=%d)",
+                exc,
+                backoff,
+                consecutive_failures,
+            )
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
+            backoff = min(backoff * 2, backoff_max)
         finally:
             try:
                 if pubsub is not None:
@@ -154,7 +178,32 @@ async def _amain() -> None:
     if session is not None:
         bot_kwargs["session"] = session
     bot = Bot(**bot_kwargs)
-    dp = Dispatcher(storage=MemoryStorage())
+
+    # FSM storage 优先 Redis（进程重启 /new 菜单状态不丢）；连接失败兜底
+    # MemoryStorage，让 bot 仍可启动（用户最坏体验是单次 /new 中断后要重开，
+    # 比 bot 拒绝起完全失联好）。
+    fsm_redis: aioredis.Redis | None = None
+    storage: MemoryStorage | RedisStorage
+    try:
+        fsm_redis = aioredis.from_url(settings.redis_url, decode_responses=False)
+        await fsm_redis.ping()
+        storage = RedisStorage(
+            redis=fsm_redis,
+            key_builder=DefaultKeyBuilder(prefix="tg:bot:fsm"),
+            state_ttl=_FSM_STATE_TTL_SEC,
+            data_ttl=_FSM_STATE_TTL_SEC,
+        )
+        logger.info("fsm: using RedisStorage (ttl=%ds)", _FSM_STATE_TTL_SEC)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fsm: redis unavailable (%s); fallback to MemoryStorage", exc)
+        if fsm_redis is not None:
+            try:
+                await fsm_redis.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            fsm_redis = None
+        storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
 
     # DI：handler 用 `api: LumenApi` 注解就能拿到
     dp["api"] = api
@@ -209,6 +258,11 @@ async def _amain() -> None:
                 pass
         await bot.session.close()
         await api.aclose()
+        if fsm_redis is not None:
+            try:
+                await fsm_redis.aclose()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def main() -> None:
