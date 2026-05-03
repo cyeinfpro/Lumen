@@ -76,6 +76,7 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     assert 'lumen_release_ensure_shared_env "${ROOT}"' in text
     assert 'lumen_release_link_shared "${NEW_RELEASE}" "${ROOT}/shared"' in text
     assert 'lumen_ensure_compose_db_env_vars "${NEW_RELEASE}/.env"' in text
+    assert 'lumen_update_ensure_runtime_can_access_path "${NEW_RELEASE}/uv.toml" "uv 配置文件"' in text
 
 
 def test_compose_db_env_vars_backfilled_from_database_url(tmp_path: Path) -> None:
@@ -184,6 +185,8 @@ def test_update_script_runs_dependency_steps_as_systemd_runtime_user() -> None:
     text = UPDATE.read_text(encoding="utf-8")
     assert "LUMEN_UPDATE_SYSTEMD_RUNTIME=1" in text
     assert 'LUMEN_UPDATE_RUN_USER="$(lumen_runtime_service_user)"' in text
+    assert "setfacl -m" in text
+    assert "chmod o+x" in text
     assert 'lumen_update_as_runtime_user "${UV_BIN}" sync --frozen --all-packages' in text
     assert 'lumen_update_as_runtime_user "${UV_BIN}" run alembic upgrade head' in text
     assert 'lumen_update_as_runtime_user "${NPM_BIN}" ci' in text
