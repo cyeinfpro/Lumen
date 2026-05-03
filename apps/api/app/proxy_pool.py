@@ -249,8 +249,6 @@ async def measure_latency(
 
     SOCKS5 走 httpx[socks]；SSH 通过 resolve_provider_proxy_url 临时起本地隧道。
     """
-    import time
-
     import httpx
 
     proxy_url = await resolve_provider_proxy_url(proxy)

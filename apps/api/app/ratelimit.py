@@ -129,6 +129,12 @@ class RateLimiter:
     async def check(self, redis: Redis, key: str, cost: int = 1) -> None:
         import time
 
+        # Lua refill+check loop will reject forever if cost > capacity (the
+        # bucket can never hold enough tokens). All current callers use cost=1
+        # so this is a fail-fast guard for new code, not a runtime issue.
+        if cost > self.capacity:
+            raise ValueError("cost exceeds capacity")
+
         is_dev = _is_dev_env()
         if not self.always_on:
             # dev/local/test 仍可通过 USER_RATE_LIMIT_ENABLED 开关开启；
