@@ -162,11 +162,11 @@ def test_age_direction_adapts_child_model_pose_and_expression() -> None:
     assert "around 128cm" in candidate_prompt
     assert "age-appropriate" in candidate_prompt
     assert "non-adultized" in candidate_prompt
-    assert "around 128cm" in showcase_prompt
-    assert "年龄感" in showcase_prompt
+    assert "已确认模特参考图" in showcase_prompt
+    assert "自然生活场景" in showcase_prompt
 
 
-def test_showcase_prompt_enforces_product_fidelity_and_model_identity() -> None:
+def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     candidate = SimpleNamespace(
         id="cand-1",
         model_brief_json={"summary": "clean cold commute model"},
@@ -185,14 +185,18 @@ def test_showcase_prompt_enforces_product_fidelity_and_model_identity() -> None:
         template="premium_studio",
         shot_type="front_full_body",
         final_quality="high",
+        user_prompt="咖啡馆窗边，自然走动回头",
     )
 
     assert "请根据商品图和已确认模特参考图" in prompt
-    assert "lapel shape" in prompt
-    assert "不要改款" in prompt
-    assert "保持已确认模特" in prompt
-    assert "适合淘宝/电商主图" in prompt
+    assert "真实自然的真人服饰电商穿搭图" in prompt
+    assert "参考方向：咖啡馆窗边，自然走动回头，高级灰棚拍" in prompt
+    assert "正面" in prompt
+    assert "侧面" in prompt
     assert "无文字、无水印" in prompt
+    assert "lapel shape" not in prompt
+    assert "small earrings" not in prompt
+    assert len(prompt) < 160
 
 
 def test_accessory_preview_prompt_is_flat_lay_product_and_accessories_only() -> None:
@@ -230,11 +234,14 @@ def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None
         template="lifestyle",
         shot_type="front_full_body",
         final_quality="high",
+        user_prompt="美术馆长廊，轻松侧身",
     )
 
-    assert "automatically matched lifestyle scene" in prompt
-    assert "boutique hotel lobby" in prompt or "office atrium" in prompt
-    assert "场景/背景按当前模板执行" in prompt
+    assert "美术馆长廊，轻松侧身" in prompt
+    assert "自然生活场景" in prompt
+    assert "西装外套" not in prompt
+    assert "羊毛混纺" not in prompt
+    assert "boutique hotel lobby" not in prompt
 
 
 def test_revision_prompt_is_short_repair_brief() -> None:
