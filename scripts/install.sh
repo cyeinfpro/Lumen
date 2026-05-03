@@ -5,10 +5,11 @@
 #        bash scripts/install.sh --install --build # 用本地 Dockerfile 构建而不是 pull 远程镜像
 #        bash scripts/install.sh --install --image-tag=vX.Y.Z   # 钉死镜像 tag
 #        bash scripts/install.sh --install --data-root=/data    # 自定义 LUMEN_DATA_ROOT
+#        bash scripts/install.sh --install --db-root=/var/lib/lumen-data # 自定义 PG/Redis 根
 #
 # 行为概述：
 #   A. 检查 docker / docker compose v2 / openssl / curl
-#   B. 准备 /opt/lumendata 子目录（按服务分别 chown 70/999/10001，§15.2）
+#   B. 准备数据目录（PG/Redis 可通过 LUMEN_DB_ROOT 与 storage/backup 分离）
 #   C. 准备 release 布局（${LUMEN_DEPLOY_ROOT:-/opt/lumen}/{releases,shared,current}）
 #   D. 生成或合并 shared/.env（强随机替换 placeholder；symlink release/.env -> shared/.env）
 #   E. 探测 GHCR 镜像可用性，未发布 latest 时回退到 main
@@ -311,7 +312,8 @@ Lumen 安装入口（Docker Compose 全栈版）
 
 --install 可选参数：
   --image-tag=vX.Y.Z      钉死镜像 tag（默认探测 GHCR latest，找不到回退 main）
-  --data-root=/path       LUMEN_DATA_ROOT 数据根目录（默认 /opt/lumendata）
+  --data-root=/path       LUMEN_DATA_ROOT 文件/备份根目录（默认 /opt/lumendata）
+  --db-root=/path         LUMEN_DB_ROOT 数据库根目录（默认跟随 LUMEN_DATA_ROOT）
   --build                 用本地 Dockerfile 构建而不是 pull GHCR（等价 LUMEN_INSTALL_BUILD=1）
 
 环境变量：
@@ -352,10 +354,11 @@ dispatch_auto() {
     # fall through 到 install path
 }
 
-# 解析 --image-tag / --data-root / --build；其它参数报错。
+# 解析 --image-tag / --data-root / --db-root / --build；其它参数报错。
 # 调用方：dispatch_entrypoint 在收到 install/--install 后调用本函数。
 INSTALL_IMAGE_TAG_OVERRIDE=""
 INSTALL_DATA_ROOT_OVERRIDE=""
+INSTALL_DB_ROOT_OVERRIDE=""
 INSTALL_BUILD_FLAG="${LUMEN_INSTALL_BUILD:-0}"
 
 parse_install_args() {
@@ -364,6 +367,7 @@ parse_install_args() {
         case "${arg}" in
             --image-tag=*) INSTALL_IMAGE_TAG_OVERRIDE="${arg#*=}" ;;
             --data-root=*) INSTALL_DATA_ROOT_OVERRIDE="${arg#*=}" ;;
+            --db-root=*)   INSTALL_DB_ROOT_OVERRIDE="${arg#*=}" ;;
             --build)       INSTALL_BUILD_FLAG=1 ;;
             *)
                 usage
@@ -711,55 +715,63 @@ check_prerequisites() {
 
 # ---------------------------------------------------------------------------
 # B. 准备数据目录与权限（§15.2 + §17.0）
-# 按服务分别 chown，禁止整体 chown -R 10001。
+# LUMEN_DB_ROOT 承载 postgres/redis；LUMEN_DATA_ROOT 承载 storage/backup。
+# 未显式设置 LUMEN_DB_ROOT 时保持旧行为：两者使用同一个根。
 # ---------------------------------------------------------------------------
 prepare_data_dirs() {
-    emit_step_start prepare "准备数据目录与权限（${LUMEN_DATA_ROOT}）"
-    local root="${LUMEN_DATA_ROOT}"
+    emit_step_start prepare "准备数据目录与权限（data=${LUMEN_DATA_ROOT}, db=${LUMEN_DB_ROOT}）"
+    local data_root="${LUMEN_DATA_ROOT}"
+    local db_root="${LUMEN_DB_ROOT}"
 
-    # /opt/lumendata 顶层归 root 755
-    if [ -e "${root}" ] && [ ! -d "${root}" ]; then
-        log_error "${root} 已存在但不是目录，请先移走或删除后重试。"
+    if [ -e "${data_root}" ] && [ ! -d "${data_root}" ]; then
+        log_error "${data_root} 已存在但不是目录，请先移走或删除后重试。"
         exit 1
     fi
-    lumen_run_as_root mkdir -p "${root}" \
-        "${root}/postgres" \
-        "${root}/redis" \
-        "${root}/storage" \
-        "${root}/backup" \
-        "${root}/backup/pg" \
-        "${root}/backup/redis" || {
-        log_error "无法创建 ${root} 子目录。请确认当前用户有 sudo 权限。"
+    if [ -e "${db_root}" ] && [ ! -d "${db_root}" ]; then
+        log_error "${db_root} 已存在但不是目录，请先移走或删除后重试。"
         exit 1
     }
 
-    # 顶层 root:root 755（不递归）
-    lumen_run_as_root chown root:root "${root}" \
-        || log_warn "chown root:root ${root} 失败（已忽略，子目录单独 chown）"
-    lumen_run_as_root chmod 755 "${root}" \
-        || log_warn "chmod 755 ${root} 失败（已忽略）"
+    lumen_run_as_root mkdir -p "${db_root}" \
+        "${db_root}/postgres" \
+        "${db_root}/redis" \
+        "${data_root}" \
+        "${data_root}/storage" \
+        "${data_root}/backup" \
+        "${data_root}/backup/pg" \
+        "${data_root}/backup/redis" || {
+        log_error "无法创建数据目录。请确认当前用户有 sudo 权限。"
+        exit 1
+    }
+
+    # 顶层 root:root 755（不递归）；CIFS/NAS 场景可能不支持，允许继续。
+    lumen_run_as_root chown root:root "${data_root}" "${db_root}" \
+        || log_warn "chown root:root 数据根失败（已忽略，子目录单独 chown）"
+    lumen_run_as_root chmod 755 "${data_root}" "${db_root}" \
+        || log_warn "chmod 755 数据根失败（已忽略）"
 
     # 按服务分别 chown（禁止整体 chown 10001 给所有目录 —— §15.2）
-    lumen_run_as_root chown -R 70:70   "${root}/postgres" || {
+    lumen_run_as_root chown -R 70:70   "${db_root}/postgres" || {
         log_error "chown postgres 数据目录失败。"
         exit 1
     }
-    lumen_run_as_root chown -R 999:999 "${root}/redis" || {
+    lumen_run_as_root chown -R 999:999 "${db_root}/redis" || {
         log_error "chown redis 数据目录失败。"
         exit 1
     }
-    lumen_run_as_root chown -R 10001:10001 "${root}/storage" "${root}/backup" || {
+    lumen_run_as_root chown -R 10001:10001 "${data_root}/storage" "${data_root}/backup" || {
         log_error "chown storage/backup 数据目录失败。"
         exit 1
     }
 
-    lumen_run_as_root chmod 700 "${root}/postgres" "${root}/redis" \
+    lumen_run_as_root chmod 700 "${db_root}/postgres" "${db_root}/redis" \
         || log_warn "chmod 700 postgres/redis 失败（已忽略，但容器可能因权限问题起不来）"
-    lumen_run_as_root chmod 750 "${root}/storage" "${root}/backup" \
+    lumen_run_as_root chmod 750 "${data_root}/storage" "${data_root}/backup" \
         || log_warn "chmod 750 storage/backup 失败（已忽略，但 api/worker 可能写不进去）"
 
-    log_info "数据目录权限设置完成（postgres=70, redis=999, storage/backup=10001）。"
-    emit_info "key=data_root" "value=${root}"
+    log_info "数据目录权限设置完成（postgres/redis 在 ${db_root}；storage/backup 在 ${data_root}）。"
+    emit_info "key=data_root" "value=${data_root}"
+    emit_info "key=db_root" "value=${db_root}"
     emit_step_done
 }
 
@@ -846,7 +858,7 @@ prepare_release_layout() {
 # D. 生成或合并 shared/.env
 #   - 不存在：从 release 内的 .env.example 拷贝，然后 awk 替换 placeholder
 #   - 存在：原样保留
-#   - 写入 LUMEN_IMAGE_REGISTRY / LUMEN_IMAGE_TAG / LUMEN_VERSION / LUMEN_DATA_ROOT
+#   - 写入 LUMEN_IMAGE_REGISTRY / LUMEN_IMAGE_TAG / LUMEN_VERSION / LUMEN_DATA_ROOT / LUMEN_DB_ROOT
 #   - 在 release dir 创建 .env -> shared/.env 的相对 symlink，让 docker compose 自动读
 # ---------------------------------------------------------------------------
 prepare_env_file() {
@@ -941,6 +953,7 @@ prepare_env_file() {
     env_file_set "${shared_env}" LUMEN_IMAGE_TAG      "${image_tag}"
     env_file_set "${shared_env}" LUMEN_VERSION        "${lumen_version}"
     env_file_set "${shared_env}" LUMEN_DATA_ROOT      "${LUMEN_DATA_ROOT}"
+    env_file_set "${shared_env}" LUMEN_DB_ROOT        "${LUMEN_DB_ROOT}"
     if [ "${LUMEN_WEB_BIND_HOST:-}" = "" ] \
         && [ "$(env_file_get WEB_BIND_HOST "${shared_env}")" = "127.0.0.1" ]; then
         log_info "WEB_BIND_HOST 仍是旧默认 127.0.0.1，自动改为 0.0.0.0 暴露宿主机 3000。"
@@ -1291,7 +1304,7 @@ print_summary() {
                      默认 PROVIDERS=[]，需添加 1 条才能调图像 API
 
   部署目录 ......... ${DEPLOY_ROOT}/current → releases/${RELEASE_ID}
-  数据目录 ......... ${LUMEN_DATA_ROOT}/{postgres,redis,storage,backup}
+  数据目录 ......... storage/backup=${LUMEN_DATA_ROOT}，postgres/redis=${LUMEN_DB_ROOT}
   共享 .env ........ ${SHARED_DIR}/.env
   镜像 tag ......... ${image_tag}
 
@@ -1334,13 +1347,14 @@ case "${ROOT}" in
 esac
 
 LUMEN_DATA_ROOT="${INSTALL_DATA_ROOT_OVERRIDE:-${LUMEN_DATA_ROOT:-/opt/lumendata}}"
+LUMEN_DB_ROOT="${INSTALL_DB_ROOT_OVERRIDE:-${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}}"
 RELEASE_DIR=""
 RELEASE_ID=""
 SHARED_DIR=""
 INSTALL_ADMIN_EMAIL=""
 COMPOSE_LABEL="COMPOSE_PROJECT_NAME=lumen docker compose"
 
-log_step "Lumen Docker Compose 全栈安装（OS=${OS}, deploy=${DEPLOY_ROOT}, data=${LUMEN_DATA_ROOT}）"
+log_step "Lumen Docker Compose 全栈安装（OS=${OS}, deploy=${DEPLOY_ROOT}, data=${LUMEN_DATA_ROOT}, db=${LUMEN_DB_ROOT}）"
 
 check_prerequisites
 prepare_data_dirs

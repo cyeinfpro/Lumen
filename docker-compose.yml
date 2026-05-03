@@ -37,7 +37,7 @@ services:
     ports:
       - "${POSTGRES_BIND_HOST:-127.0.0.1}:5432:5432"
     volumes:
-      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data
+      - ${LUMEN_DB_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data
     networks:
       - lumen_backend
     healthcheck:
@@ -61,7 +61,7 @@ services:
       - "${REDIS_BIND_HOST:-127.0.0.1}:6379:6379"
     entrypoint: ["/bin/sh", "/usr/local/bin/lumen-redis-entrypoint"]
     volumes:
-      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/redis:/data
+      - ${LUMEN_DB_ROOT:-/opt/lumendata}/redis:/data
       - ./deploy/redis/redis-entrypoint.sh:/usr/local/bin/lumen-redis-entrypoint:ro
     networks:
       - lumen_backend

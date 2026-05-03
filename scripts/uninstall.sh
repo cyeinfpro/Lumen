@@ -2,7 +2,7 @@
 # Lumen 卸载脚本（Docker compose 版）
 # 用法：
 #   bash scripts/uninstall.sh                  # 交互式：停容器、保留数据
-#   bash scripts/uninstall.sh --purge          # 同时删除 /opt/lumendata 等数据
+#   bash scripts/uninstall.sh --purge          # 同时删除持久化数据目录
 #   bash scripts/uninstall.sh --disable-systemd  # 自动 disable 旧 lumen-* systemd 服务
 #   LUMEN_UNINSTALL_NONINTERACTIVE=1 bash scripts/uninstall.sh  # 跳过所有确认
 #   LUMEN_UNINSTALL_PURGE=1 bash scripts/uninstall.sh           # 同 --purge
@@ -10,7 +10,7 @@
 # 行为（与 docker-full-stack-cutover-plan.md §17.9 / §24 对齐）：
 #   1. 安全确认（NONINTERACTIVE=1 跳过）
 #   2. docker compose down --remove-orphans（含 tgbot profile）
-#   3. 询问/通过 flag 决定是否 down -v + 删 /opt/lumendata（purge）
+#   3. 询问/通过 flag 决定是否 down -v + 删持久化数据目录（purge）
 #   4. 检测到旧 lumen-* systemd unit 仍 enabled 时给出提示；可选 --disable-systemd 自动禁用
 #   5. purge 时清理 .update.path / .update-runner 单元（仅当显式 purge）
 #   6. 输出汇总
@@ -52,7 +52,7 @@ Lumen 卸载脚本
   bash scripts/uninstall.sh [选项]
 
 选项：
-  --purge                同时删除数据卷与 /opt/lumendata 等持久化数据
+  --purge                同时删除数据卷与持久化数据目录
   --disable-systemd      自动 disable 旧 lumen-* systemd unit
   --yes / --noninteractive  跳过所有交互确认
   -h / --help            显示本帮助
@@ -61,7 +61,8 @@ Lumen 卸载脚本
   LUMEN_UNINSTALL_NONINTERACTIVE=1  同 --yes
   LUMEN_UNINSTALL_PURGE=1           同 --purge
   LUMEN_DEPLOY_ROOT=/opt/lumen      compose 工作目录的备选路径
-  LUMEN_DATA_ROOT=/opt/lumendata    数据/备份/存储父目录
+  LUMEN_DATA_ROOT=/opt/lumendata    文件/备份父目录
+  LUMEN_DB_ROOT=\$LUMEN_DATA_ROOT     PostgreSQL/Redis 父目录
 USAGE
             exit 0
             ;;
@@ -79,6 +80,7 @@ log_info "项目根目录：${ROOT}"
 
 LUMEN_DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
 LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-/opt/lumendata}"
+LUMEN_DB_ROOT="${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}"
 LUMEN_COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-lumen}"
 export COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT}"
 
@@ -327,11 +329,21 @@ lumen_uninstall_purge_data_volumes() {
 
 lumen_uninstall_purge_data_dirs() {
     log_step "删除持久化数据目录"
-    local targets=("${LUMEN_DATA_ROOT}")
+    local targets=()
+    local seen=" "
+    local candidate
+    for candidate in "${LUMEN_DATA_ROOT}" "${LUMEN_DB_ROOT}"; do
+        [ -n "${candidate}" ] || continue
+        case "${seen}" in
+            *" ${candidate} "*) continue ;;
+        esac
+        seen="${seen}${candidate} "
+        targets+=("${candidate}")
+    done
     local d
     for d in "${targets[@]}"; do
         if [ -e "${d}" ] || [ -L "${d}" ]; then
-            log_warn "即将删除 ${d}（含 PG / Redis bind mount、storage、backup 等所有数据）"
+            log_warn "即将删除 ${d}（持久化数据目录，操作不可恢复）"
             # lumen_safe_rm_rf_as_root 内部用 lumen_path_safe_for_rm 拦截 / /usr /opt 等系统目录
             if lumen_safe_rm_rf_as_root "${d}"; then
                 log_info "已删除 ${d}"
@@ -471,8 +483,7 @@ cat <<EOF
   本向导将分步进行：
     1) docker compose down --remove-orphans（同时停 tgbot profile）
     2) 检测旧 systemd 部署并给出提示（--disable-systemd 时自动禁用）
-    3) 默认保留 ${LUMEN_DATA_ROOT} 下的持久化数据
-       （PG/Redis bind mount、storage、backup 等）；
+    3) 默认保留 storage/backup=${LUMEN_DATA_ROOT} 与 postgres/redis=${LUMEN_DB_ROOT}
        传入 --purge 或 LUMEN_UNINSTALL_PURGE=1 时才会删除
     4) --purge 时同步清理仓库 release 目录与一键更新 systemd unit
 
@@ -520,7 +531,7 @@ if [ "${LUMEN_UNINSTALL_PURGE}" = "1" ]; then
     PURGE_DECIDED=1
 elif [ "${LUMEN_UNINSTALL_NONINTERACTIVE}" = "1" ]; then
     PURGE_DECIDED=0
-elif confirm "是否同时删除数据卷与 ${LUMEN_DATA_ROOT}（不可恢复）？"; then
+elif confirm "是否同时删除数据卷与持久化数据目录（不可恢复）？"; then
     PURGE_DECIDED=1
 fi
 
@@ -528,11 +539,11 @@ if [ "${PURGE_DECIDED}" = "1" ]; then
     # purge 必须二次确认，除非 NONINTERACTIVE+PURGE 同时设置（CI / 自动化场景）
     PURGE_OK=1
     if [ "${LUMEN_UNINSTALL_NONINTERACTIVE}" != "1" ]; then
-        log_warn "purge 将删除：所有 docker 卷、${LUMEN_DATA_ROOT}（PG/Redis bind mount、storage、backup）"
+        log_warn "purge 将删除：所有 docker 卷、storage/backup=${LUMEN_DATA_ROOT}、postgres/redis=${LUMEN_DB_ROOT}"
         if ! confirm "再次确认 purge？此操作不可恢复"; then
             PURGE_OK=0
             log_info "已取消 purge，仅停止容器、保留数据。"
-            KEPT+=("用户取消 purge：保留 ${LUMEN_DATA_ROOT} / 数据卷")
+            KEPT+=("用户取消 purge：保留 ${LUMEN_DATA_ROOT} / ${LUMEN_DB_ROOT} / 数据卷")
         fi
     fi
 
@@ -543,7 +554,7 @@ if [ "${PURGE_DECIDED}" = "1" ]; then
         lumen_uninstall_purge_update_units
     fi
 else
-    KEPT+=("数据卷与 ${LUMEN_DATA_ROOT} 保留（下次 install 直接复用）")
+    KEPT+=("数据卷与 ${LUMEN_DATA_ROOT} / ${LUMEN_DB_ROOT} 保留（下次 install 直接复用）")
     KEPT+=("一键更新 systemd unit 保留（仅 --purge 时清理）")
 fi
 

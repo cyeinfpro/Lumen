@@ -209,8 +209,15 @@ if [ -z "${LUMEN_UPDATE_ROOT:-}" ] \
 fi
 SHARED_DIR="${ROOT}/shared"
 SHARED_ENV="${SHARED_DIR}/.env"
+if [ -f "${SHARED_ENV}" ]; then
+    LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-$(lumen_env_value LUMEN_DATA_ROOT "${SHARED_ENV}" 2>/dev/null || true)}"
+    LUMEN_DB_ROOT="${LUMEN_DB_ROOT:-$(lumen_env_value LUMEN_DB_ROOT "${SHARED_ENV}" 2>/dev/null || true)}"
+fi
 LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-/opt/lumendata}"
-UPDATE_LOG_DIR="${LUMEN_DATA_ROOT}/backup"
+LUMEN_DB_ROOT="${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}"
+LUMEN_BACKUP_ROOT="${LUMEN_BACKUP_ROOT:-${LUMEN_DATA_ROOT}/backup}"
+export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT
+UPDATE_LOG_DIR="${LUMEN_BACKUP_ROOT}"
 OPERATION_ID="update-$(date -u +%Y%m%d-%H%M%S)-$$"
 
 NEW_ID=""
@@ -259,14 +266,18 @@ disk_free_gb_opt() {
     printf '%s' "-1"
 }
 
-# 校验 /opt/lumendata 子目录属主：postgres=70, redis=999, storage/backup=10001。
+# 校验数据目录属主：postgres=70, redis=999, storage/backup=10001。
 # 不严格 chown，只 warn——install.sh 才负责强制 chown。
 check_data_owners() {
     local missing=0
-    local d
-    for d in postgres redis storage backup; do
-        if [ ! -d "${LUMEN_DATA_ROOT}/${d}" ]; then
-            log_error "缺少数据目录：${LUMEN_DATA_ROOT}/${d}"
+    local path
+    for path in \
+        "${LUMEN_DB_ROOT}/postgres" \
+        "${LUMEN_DB_ROOT}/redis" \
+        "${LUMEN_DATA_ROOT}/storage" \
+        "${LUMEN_DATA_ROOT}/backup"; do
+        if [ ! -d "${path}" ]; then
+            log_error "缺少数据目录：${path}"
             missing=1
         fi
     done
@@ -276,10 +287,10 @@ check_data_owners() {
     # 仅做 warn，不阻断（install.sh 是 single source of truth）
     local uid
     if command -v stat >/dev/null 2>&1; then
-        uid="$(stat -c '%u' "${LUMEN_DATA_ROOT}/postgres" 2>/dev/null || stat -f '%u' "${LUMEN_DATA_ROOT}/postgres" 2>/dev/null || echo "")"
-        [ -n "${uid}" ] && [ "${uid}" != "70" ] && log_warn "${LUMEN_DATA_ROOT}/postgres 属主非 70（实际 ${uid}），postgres 容器可能起不来。"
-        uid="$(stat -c '%u' "${LUMEN_DATA_ROOT}/redis" 2>/dev/null || stat -f '%u' "${LUMEN_DATA_ROOT}/redis" 2>/dev/null || echo "")"
-        [ -n "${uid}" ] && [ "${uid}" != "999" ] && log_warn "${LUMEN_DATA_ROOT}/redis 属主非 999（实际 ${uid}），redis 容器可能起不来。"
+        uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || echo "")"
+        [ -n "${uid}" ] && [ "${uid}" != "70" ] && log_warn "${LUMEN_DB_ROOT}/postgres 属主非 70（实际 ${uid}），postgres 容器可能起不来。"
+        uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || echo "")"
+        [ -n "${uid}" ] && [ "${uid}" != "999" ] && log_warn "${LUMEN_DB_ROOT}/redis 属主非 999（实际 ${uid}），redis 容器可能起不来。"
         uid="$(stat -c '%u' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || stat -f '%u' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || echo "")"
         [ -n "${uid}" ] && [ "${uid}" != "10001" ] && log_warn "${LUMEN_DATA_ROOT}/storage 属主非 10001（实际 ${uid}），api/worker 可能写不进去。"
         uid="$(stat -c '%u' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || stat -f '%u' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || echo "")"
@@ -529,6 +540,8 @@ emit_info check channel       "${LUMEN_UPDATE_CHANNEL}"
 emit_info check current_tag   "${CURRENT_TAG:-<none>}"
 emit_info check target_tag    "${TARGET_TAG}"
 emit_info check current_id    "${CURRENT_ID:-<none>}"
+emit_info check data_root     "${LUMEN_DATA_ROOT}"
+emit_info check db_root       "${LUMEN_DB_ROOT}"
 emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"
 if [ -n "${LUMEN_PROXY_URL}" ]; then
     emit_info check proxy "configured"
@@ -586,9 +599,10 @@ if [ "${ENV_MISSING}" -eq 1 ]; then
     exit 1
 fi
 
-# /opt/lumendata 目录与权限
+# 数据目录与权限。PG/Redis 可通过 LUMEN_DB_ROOT 放本机盘；
+# storage/backup 继续跟随 LUMEN_DATA_ROOT（可为 CIFS/NAS）。
 if ! check_data_owners; then
-    log_error "[preflight] ${LUMEN_DATA_ROOT} 子目录不齐全，请先跑 install.sh。"
+    log_error "[preflight] 数据目录不齐全，请先跑 install.sh 或手动准备 LUMEN_DB_ROOT / LUMEN_DATA_ROOT。"
     emit_fail preflight 1
     exit 1
 fi
@@ -727,12 +741,19 @@ if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
         TARGET_TAG="main"
         if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
             log_error "[fetch_release] fallback main 镜像也不存在：${LUMEN_IMAGE_REGISTRY}/lumen-api:${TARGET_TAG}"
+            log_error "[fetch_release] 解决方法（任选其一）："
+            log_error "  1) 等 GitHub Actions 推 GHCR 完成后重试（检查 Actions 日志和包的 Public 可见性）"
+            log_error "  2) 本地构建：LUMEN_UPDATE_BUILD=1 bash ${SCRIPT_DIR}/update.sh"
+            log_error "  3) 沿用当前 .env 的 tag：LUMEN_UPDATE_CHANNEL=pinned bash ${SCRIPT_DIR}/update.sh"
             emit_fail fetch_release 1
             exit 1
         fi
     else
         log_error "[fetch_release] 目标镜像不存在：${LUMEN_IMAGE_REGISTRY}/lumen-api:${TARGET_TAG}"
-        log_error "[fetch_release] 可临时执行：LUMEN_UPDATE_CHANNEL=main bash ${SCRIPT_DIR}/update.sh"
+        log_error "[fetch_release] 解决方法（任选其一）："
+        log_error "  1) 检查 GHCR 上是否已发布该 tag、包可见性是否为 Public"
+        log_error "  2) 切到 main 通道：LUMEN_UPDATE_CHANNEL=main bash ${SCRIPT_DIR}/update.sh"
+        log_error "  3) 本地构建：LUMEN_UPDATE_BUILD=1 bash ${SCRIPT_DIR}/update.sh"
         emit_fail fetch_release 1
         exit 1
     fi

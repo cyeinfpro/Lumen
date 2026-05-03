@@ -47,11 +47,14 @@ log_step() {
 
 # 默认运维路径与 Compose project name（§11.4 死规则：project name 必须固定）。
 # 调用方可通过环境变量覆盖；fallback 全部走 /opt/lumendata 与 /opt/lumen 约定。
+# LUMEN_DB_ROOT 只承载 postgres / redis，便于把数据库放在本机盘，
+# 同时让 storage / backup 继续使用 LUMEN_DATA_ROOT（例如 CIFS/NAS）。
 : "${LUMEN_DATA_ROOT:=/opt/lumendata}"
+: "${LUMEN_DB_ROOT:=$LUMEN_DATA_ROOT}"
 : "${LUMEN_BACKUP_ROOT:=$LUMEN_DATA_ROOT/backup}"
 : "${LUMEN_DEPLOY_ROOT:=/opt/lumen}"
 : "${LUMEN_COMPOSE_PROJECT:=lumen}"
-export LUMEN_DATA_ROOT LUMEN_BACKUP_ROOT LUMEN_DEPLOY_ROOT LUMEN_COMPOSE_PROJECT
+export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT LUMEN_DEPLOY_ROOT LUMEN_COMPOSE_PROJECT
 
 lumen_read_dotenv_value() {
     local key="$1"
