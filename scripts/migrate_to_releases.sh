@@ -158,6 +158,22 @@ extract_to_shared() {
         mkdir -p "${rdir}/apps/web/.next"
         ln -s "${ROOT}/shared/web-next-cache" "${rdir}/apps/web/.next/cache"
     fi
+
+    # docker compose 用的根 .env：搬到 shared/.env，并在 ROOT 留软链兜底。
+    # 这样 update.sh 的 link_shared 能把它链入新 release（compose 在 release
+    # 目录下找 .env 时不会再缺 DB_USER/REDIS_PASSWORD）。
+    if [ -f "${ROOT}/.env" ] && [ ! -L "${ROOT}/.env" ]; then
+        log_info "把 ${ROOT}/.env 移入 shared/.env 并在 ROOT 保留软链"
+        if [ -f "${ROOT}/shared/.env" ]; then
+            log_warn "shared/.env 已存在，备份 ROOT/.env 到 .pre-migrate"
+            mv "${ROOT}/.env" "${ROOT}/.env.pre-migrate.$(date -u +%Y%m%d%H%M%S)" || true
+        else
+            mv "${ROOT}/.env" "${ROOT}/shared/.env"
+        fi
+        ln -s "shared/.env" "${ROOT}/.env"
+    elif [ ! -e "${ROOT}/shared/.env" ] && [ -L "${ROOT}/.env" ]; then
+        log_warn "${ROOT}/.env 是软链但 shared/.env 不存在；请人工检查 .env 配置。"
+    fi
 }
 
 # 复制最新 systemd unit 到 /etc/systemd/system/ 并 daemon-reload。
