@@ -8,7 +8,9 @@
 
 set -euo pipefail
 
-if SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"; then
+# `curl | bash` 远程模式下 BASH_SOURCE 是空数组，set -u 会让访问 [0] 报
+# unbound variable 噪音；用 :- 兜底，dirname "" 返回 "." 落到 cwd。
+if SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"; then
     :
 else
     SCRIPT_DIR="$(pwd)"
