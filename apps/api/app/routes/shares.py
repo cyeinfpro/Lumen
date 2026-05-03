@@ -25,7 +25,11 @@ from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, ensure_utc, verify_csrf
 from ..public_urls import resolve_public_base_url
-from ..ratelimit import PUBLIC_IMAGE_LIMITER, PUBLIC_PREVIEW_LIMITER, client_ip
+from ..ratelimit import (
+    PUBLIC_IMAGE_LIMITER,
+    PUBLIC_PREVIEW_LIMITER,
+    require_client_ip,
+)
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 
@@ -189,8 +193,9 @@ def _image_etag(img: Image) -> str:
 
 
 async def _check_share_image_rate_limit(request: Request) -> None:
+    # Public unauthenticated route: refuse to share a single "unknown" bucket.
     await PUBLIC_IMAGE_LIMITER.check(
-        get_redis(), f"rl:share_image:{client_ip(request)}"
+        get_redis(), f"rl:share_image:{require_client_ip(request)}"
     )
 
 
@@ -595,7 +600,7 @@ async def get_public_share(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PublicShareOut:
     await PUBLIC_PREVIEW_LIMITER.check(
-        get_redis(), f"rl:share_meta:{client_ip(request)}"
+        get_redis(), f"rl:share_meta:{require_client_ip(request)}"
     )
     now = datetime.now(timezone.utc)
     row = (
