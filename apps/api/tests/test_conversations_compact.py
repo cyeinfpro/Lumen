@@ -359,14 +359,14 @@ async def test_compact_503_on_lock_busy(
         )
 
     assert excinfo.value.status_code == 503
-    assert excinfo.value.detail == {
-        "error": {
-            "code": "compression_unavailable",
-            "message": "compression unavailable",
-            "reason": "lock_busy",
-            "details": {"reason": "lock_busy"},
-        }
-    }
+    error = excinfo.value.detail["error"]
+    assert error["code"] == "compression_unavailable"
+    assert error["message"] == "compression unavailable"
+    assert error["reason"] == "lock_busy"
+    assert error["details"]["reason"] == "lock_busy"
+    # 503 path now propagates a trace_id so users can quote it in bug reports.
+    assert isinstance(error.get("trace_id"), str) and error["trace_id"]
+    assert error["details"].get("trace_id") == error["trace_id"]
 
 
 # ---------- 5. force=False + 历史未超预算 → compacted=false（不打上游） ----------
