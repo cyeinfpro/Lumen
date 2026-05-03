@@ -285,6 +285,22 @@ log_step "[fetch] 在新 release 目录里同步代码"
 
 CURRENT_SHA="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" rev-parse HEAD 2>/dev/null || echo unknown)"
 CURRENT_BRANCH="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+# release 在 fetch 阶段 git checkout 到具体 sha 后变成 detached HEAD，
+# rev-parse --abbrev-ref HEAD 会返回字面 "HEAD"。这会让后面 fetch + rev-parse
+# origin/${CURRENT_BRANCH} 解析成 origin/HEAD（指向 clone 那一刻的 sha），
+# 与 current_sha 永远相等，从而错误地走 noop_already_latest 分支，永远拉不到
+# 远端新 commit。fallback 顺序：.lumen_release.json 里记录的 branch → main。
+if [ "${CURRENT_BRANCH}" = "HEAD" ] || [ -z "${CURRENT_BRANCH}" ]; then
+    CURRENT_BRANCH=""
+    if [ -f "${CURRENT_RELEASE}/.lumen_release.json" ]; then
+        CURRENT_BRANCH="$(sed -nE 's/.*"branch"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' \
+            "${CURRENT_RELEASE}/.lumen_release.json" 2>/dev/null | head -n1)"
+    fi
+    if [ -z "${CURRENT_BRANCH}" ] || [ "${CURRENT_BRANCH}" = "HEAD" ]; then
+        CURRENT_BRANCH="main"
+    fi
+    log_warn "[fetch] release 处于 detached HEAD，使用 fallback 分支：${CURRENT_BRANCH}"
+fi
 GIT_REMOTE_URL="$(cd "${CURRENT_RELEASE}" && lumen_update_as_runtime_user "${GIT_BIN}" config --get remote.origin.url 2>/dev/null || echo "")"
 
 lumen_step_info fetch current_sha "${CURRENT_SHA}"
