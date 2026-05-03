@@ -44,6 +44,7 @@ from ..background_removal import (
 
 from lumen_core.constants import (
     DEFAULT_CHAT_MODEL,
+    DEFAULT_IMAGE_RESPONSES_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     CompletionStage,
     CompletionStatus,
@@ -1291,6 +1292,15 @@ def _request_render_quality(
     return "medium"
 
 
+def _request_responses_model(upstream_request: dict[str, Any]) -> str:
+    value = upstream_request.get("responses_model")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if bool(upstream_request.get("fast")):
+        return DEFAULT_IMAGE_RESPONSES_MODEL_FAST
+    return DEFAULT_IMAGE_RESPONSES_MODEL
+
+
 def _image_request_options(
     upstream_request: dict[str, Any] | None,
     *,
@@ -1318,6 +1328,7 @@ def _image_request_options(
         output_format = "png"
     options: dict[str, Any] = {
         "fast": fast_mode,
+        "responses_model": _request_responses_model(req),
         "render_quality": render_quality,
         "output_format": output_format,
         "background": background,
@@ -2082,7 +2093,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             gen.upstream_request,
             size=size_requested,
         )
-        fast_mode = bool(image_request_options.get("fast"))
 
         try:
             await _ensure_generation_conversation_alive(
@@ -2449,7 +2459,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             gen.upstream_request,
             size=resolved.size,
         )
-        fast_mode = bool(image_request_options.get("fast"))
 
         async with SessionLocal() as session:
             references = await _load_reference_images(session, input_image_ids)
@@ -2658,11 +2667,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 except Exception:  # noqa: BLE001
                     pass
                 try:
-                    fast_model = (
-                        DEFAULT_IMAGE_RESPONSES_MODEL_FAST
-                        if fast_mode
-                        else None
-                    )
+                    responses_model = str(image_request_options["responses_model"])
                     # Retry 打散：把当前 task attempt 写入 ContextVar，下游 body 构造点会读到。
                     # 必须用 `attempt`（line 2084 _bounded_next_attempt 算出的新值）而非 `gen.attempt`
                     # （load 时刻的旧值）——后者会让 ContextVar 错位 1 格：数据库 attempt=2 时 push
@@ -2689,7 +2694,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 output_compression=image_request_options.get("output_compression"),
                                 background=str(image_request_options["background"]),
                                 moderation=str(image_request_options["moderation"]),
-                                model=fast_model,
+                                model=responses_model,
                                 progress_callback=publish_image_progress,
                                 provider_override=(
                                     None if is_dual_race else reserved_provider
@@ -2704,7 +2709,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 output_compression=image_request_options.get("output_compression"),
                                 background=str(image_request_options["background"]),
                                 moderation=str(image_request_options["moderation"]),
-                                model=fast_model,
+                                model=responses_model,
                                 progress_callback=publish_image_progress,
                                 provider_override=(
                                     None if is_dual_race else reserved_provider

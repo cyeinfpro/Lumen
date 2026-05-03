@@ -108,6 +108,8 @@ class ImageParamsIn(BaseModel):
     fixed_size: str | None = None
     style_preset_id: str | None = None
     count: int = Field(default=1, ge=1, le=16)
+    # Image Fast uses the lighter responses reasoning model for image_generation:
+    # gpt-5.4-mini when enabled, gpt-5.4 when disabled.
     fast: bool = False
     # Rendering quality is distinct from the UI's 1K/2K/4K resolution preset.
     render_quality: Literal["auto", "low", "medium", "high"] = "medium"

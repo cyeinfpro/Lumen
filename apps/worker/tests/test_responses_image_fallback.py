@@ -40,6 +40,7 @@ def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
         size="3840x2160",
     )
     assert medium_4k["render_quality"] == "medium"
+    assert medium_4k["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
     assert medium_4k["output_compression"] == 100
 
     fast_4k = generation._image_request_options(  # noqa: SLF001
@@ -47,6 +48,7 @@ def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
         size="3840x2160",
     )
     assert fast_4k["render_quality"] == "high"
+    assert fast_4k["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
     assert fast_4k["output_compression"] == 95
 
 

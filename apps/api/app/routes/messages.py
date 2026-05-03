@@ -27,6 +27,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import (
+    DEFAULT_IMAGE_RESPONSES_MODEL,
+    DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     EV_COMP_QUEUED,
     EV_CONV_MSG_APPENDED,
     EV_GEN_QUEUED,
@@ -186,6 +188,11 @@ def _image_upstream_request(
         output_format_source = "transparent_background"
     upstream_request: dict[str, Any] = {
         "fast": bool(image_params.fast),
+        "responses_model": (
+            DEFAULT_IMAGE_RESPONSES_MODEL_FAST
+            if image_params.fast
+            else DEFAULT_IMAGE_RESPONSES_MODEL
+        ),
         "render_quality": render_quality,
         "output_format": output_format,
         "output_format_source": output_format_source,

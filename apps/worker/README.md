@@ -33,8 +33,8 @@ fallback 读取，方便平滑迁移；API 启动时会把旧值 backfill 到
 
 生成参数从 `Generation.upstream_request` 读取：`render_quality` 映射到上游
 `quality`，`output_format/output_compression/background/moderation` 同时透传给 direct
-Image API 和 responses image tool。Fast 只切换到 5.4 mini 模型，不传 reasoning，
-也不改渲染质量。
+Image API 和 responses image tool。Fast 只把 responses 生图主模型切到 5.4 mini；
+关闭 Fast 时使用默认 5.4，不改渲染质量。
 默认输出 JPEG，JPEG/WebP 默认 `output_compression=0`
 以接近 PNG 的保真度；透明背景请求会强制走 PNG 并保留 alpha。
 
