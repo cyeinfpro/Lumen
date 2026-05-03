@@ -199,6 +199,28 @@ async def _ensure_display_variant(
     data, size = await asyncio.to_thread(_make_display_variant, src_path)
     key = _variant_key_for_image(img, DISPLAY_VARIANT)
 
+    # Why: write file FIRST, then commit DB row. Reverse order from previous
+    # implementation. Trade-off:
+    #   - old order (DB commit -> file write): file failure required deleting
+    #     the DB row, and if that delete-commit also failed we left an orphan
+    #     row pointing at a missing file (404 forever for that variant).
+    #   - new order (file write -> DB commit): if the DB commit fails, an
+    #     orphan FILE is left on disk with no DB pointer. The next call to
+    #     _ensure_display_variant for the same image_id derives the same key
+    #     (deterministic from image_id + kind), _write_new_file_atomic raises
+    #     FileExistsError (we pass), then commits the row. Self-healing.
+    # Orphan files are harmless (small WEBP, can be reclaimed by an offline
+    # `find storage_root -name '*.display2048.webp' | ...` if ever needed)
+    # whereas orphan rows poison the variant lookup forever.
+    dst_path = _fs_path(key)
+    try:
+        await asyncio.to_thread(_write_new_file_atomic, dst_path, data)
+    except FileExistsError:
+        # Concurrent writer (or self-heal from a previous failed commit) won
+        # the disk write race. Continue to commit our row — IntegrityError
+        # below handles the case where they also won the DB race.
+        pass
+
     variant = ImageVariant(
         image_id=img.id,
         kind=DISPLAY_VARIANT,
@@ -222,20 +244,17 @@ async def _ensure_display_variant(
         if winner:
             return winner
         raise
-
-    # DB record committed, now write file.
-    # If file write fails, delete the DB record to avoid orphan rows.
-    dst_path = _fs_path(key)
-    try:
-        await asyncio.to_thread(_write_new_file_atomic, dst_path, data)
-    except FileExistsError:
-        pass  # concurrent writer already created the file
     except Exception:
-        logger.exception(
-            "display variant write failed image_id=%s key=%s", img.id, key
+        # DB commit failed after file landed on disk. The file is now an
+        # orphan; the next call self-heals via FileExistsError + new row.
+        # Log loudly so ops can spot persistent commit failures (e.g. PG
+        # outage) and reclaim disk via a cron sweeper if needed.
+        await db.rollback()
+        logger.error(
+            "display variant DB commit failed (orphan file left at %s) "
+            "image_id=%s key=%s",
+            dst_path, img.id, key,
         )
-        await db.delete(variant)
-        await db.commit()
         raise
 
     await db.refresh(variant)
