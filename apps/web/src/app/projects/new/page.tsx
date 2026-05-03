@@ -3,22 +3,26 @@
 import Link from "next/link";
 import { ArrowLeft, ChevronRight, PackageCheck, Shirt, Sparkles } from "lucide-react";
 
+import { DesktopTopNav } from "@/components/ui/shell";
+
 export default function NewProjectPage() {
   return (
     <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <header className="sticky top-0 z-20 flex h-11 items-center justify-between border-b border-white/[0.05] bg-[var(--bg-0)]/80 px-3 backdrop-blur-xl md:px-5">
-        <Link href="/projects" className="inline-flex items-center gap-2 text-sm text-[var(--fg-1)]">
-          <ArrowLeft className="h-4 w-4" />
-          项目
-        </Link>
-        <Link href="/" className="text-sm text-[var(--fg-2)] hover:text-[var(--fg-0)]">
-          创作
-        </Link>
-      </header>
+      <DesktopTopNav active="projects" />
 
       <main className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
         <div className="mx-auto max-w-5xl">
-          <p className="text-xs text-[var(--fg-2)]">项目模板</p>
+          <nav aria-label="项目路径" className="flex items-center gap-1.5 text-sm">
+            <Link
+              href="/projects"
+              className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              项目
+            </Link>
+            <span aria-hidden className="text-[var(--fg-3)]">/</span>
+            <span className="text-[var(--fg-0)]">模板</span>
+          </nav>
           <h1 className="mt-1 text-[26px] font-semibold tracking-normal md:text-[32px]">
             新建项目
           </h1>

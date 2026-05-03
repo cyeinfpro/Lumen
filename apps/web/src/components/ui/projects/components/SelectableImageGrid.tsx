@@ -70,7 +70,7 @@ export function SelectableImageGrid({
                 "disabled:cursor-not-allowed disabled:opacity-60",
               )}
             >
-              {selected ? "取消选择" : "选择此饰品方案"}
+              {saving ? "正在保存…" : selected ? "取消选择" : "选择此饰品方案"}
             </button>
           </article>
         );

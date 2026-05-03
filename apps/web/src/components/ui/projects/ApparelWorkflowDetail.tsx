@@ -41,21 +41,7 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
   return (
     <div className="flex min-h-[100dvh] flex-col bg-[var(--bg-0)]">
       <OnlineBanner />
-      <ProjectTopBar
-        leadingSlot={
-          <Link
-            href="/projects"
-            className="inline-flex items-center gap-1.5 truncate text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)]"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            项目
-            <span className="text-[var(--fg-3)]">/</span>
-            <span className="truncate text-[var(--fg-0)]">
-              {workflow?.title || "服饰模特展示图"}
-            </span>
-          </Link>
-        }
-      />
+      <ProjectTopBar />
 
       {!workflow && query.isLoading ? (
         <DetailSkeleton />
@@ -98,6 +84,7 @@ function ProjectConsole({
       </aside>
 
       <section className="min-w-0 overflow-y-auto p-4 md:p-6">
+        <DetailBreadcrumb workflow={workflow} />
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
 
@@ -128,6 +115,24 @@ function ProjectConsole({
         onClose={() => setDrawerOpen(false)}
       />
     </main>
+  );
+}
+
+function DetailBreadcrumb({ workflow }: { workflow: WorkflowRun }) {
+  return (
+    <nav aria-label="项目路径" className="mb-4 flex min-w-0 items-center gap-1.5 text-sm">
+      <Link
+        href="/projects"
+        className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" />
+        项目
+      </Link>
+      <span aria-hidden className="text-[var(--fg-3)]">/</span>
+      <span className="min-w-0 truncate text-[var(--fg-0)]">
+        {workflow.title || "服饰模特展示图"}
+      </span>
+    </nav>
   );
 }
 
