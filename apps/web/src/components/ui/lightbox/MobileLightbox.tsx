@@ -38,6 +38,7 @@ import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -290,6 +291,10 @@ export function MobileLightbox() {
   const [useFallback, setUseFallback] = useState(false);
   const gestureTargetRef = useRef<HTMLDivElement | null>(null);
   const downloadAnchorRef = useRef<HTMLAnchorElement | null>(null);
+  const dialogRootRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const dialogTitleId = useId();
   const dragX = useMotionValue(0);
   const dragY = useMotionValue(0);
   const scale = useMotionValue(1);
@@ -685,17 +690,74 @@ export function MobileLightbox() {
     replaceRef.current(null);
   }, [clearChromeTimer, resetMotion, stopSwipeAnimation]);
 
-  // —— 键盘：Esc 关 / ←→ 切 ——
+  // —— 键盘：Esc 关 / ←→ 切 / Tab 焦点循环 ——
   useEffect(() => {
     if (!state) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-      else if (e.key === "ArrowLeft") goto(-1);
-      else if (e.key === "ArrowRight") goto(1);
+      if (e.key === "Escape") {
+        close();
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        goto(-1);
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        goto(1);
+        return;
+      }
+      if (e.key === "Tab") {
+        const root = dialogRootRef.current;
+        if (!root) return;
+        const focusables = Array.from(
+          root.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((el) => !el.hasAttribute("data-focus-skip"));
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey) {
+          if (active === first || !root.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [state, close, goto]);
+
+  // —— 打开时焦点移到关闭按钮，关闭时还原 ——
+  useEffect(() => {
+    if (!state) return;
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
+    let raf = 0;
+    raf = requestAnimationFrame(() => {
+      const target = closeButtonRef.current ?? dialogRootRef.current;
+      target?.focus({ preventScroll: true });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      const prev = previouslyFocusedRef.current;
+      if (prev && typeof prev.focus === "function") {
+        try {
+          prev.focus({ preventScroll: true });
+        } catch {
+          /* noop */
+        }
+      }
+      previouslyFocusedRef.current = null;
+    };
+  }, [state]);
 
   // —— body 滚动锁（防 iOS 橡皮筋穿透）——
   const isOpen = state !== null;
@@ -1050,15 +1112,20 @@ export function MobileLightbox() {
 
   return (
     <div
+      ref={dialogRootRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
-      aria-label="图片查看器"
-      className="fixed inset-0 overflow-hidden"
+      aria-labelledby={dialogTitleId}
+      className="fixed inset-0 overflow-hidden outline-none"
       style={{
         zIndex: "var(--z-lightbox, 80)" as unknown as number,
         touchAction: "none",
       }}
     >
+      <span id={dialogTitleId} className="sr-only">
+        {current.prompt ? `图片预览：${current.prompt}` : "图片查看器"}
+      </span>
       <motion.div
         aria-hidden
         className="absolute inset-0 bg-black"
@@ -1185,6 +1252,7 @@ export function MobileLightbox() {
         )}
       >
         <MobileIconButton
+          ref={closeButtonRef}
           icon={<X className="w-5 h-5" />}
           label="关闭"
           variant="plain"
