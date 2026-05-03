@@ -1751,7 +1751,8 @@ async def _redis_get_json(redis: Any, key: str) -> dict[str, Any] | None:
         return None
     try:
         value = json.loads(raw)
-    except Exception:
+    except (json.JSONDecodeError, ValueError, TypeError):
+        logger.warning("redis_get_json invalid payload key=%s", key)
         return None
     return value if isinstance(value, dict) else None
 
@@ -1945,6 +1946,7 @@ async def _enqueue_manual_compact_job(
     try:
         active = await _redis_get_json(redis, active_key)
     except Exception:
+        logger.warning("manual compact active read failed", exc_info=True)
         active = None
     active_job_id = active.get("job_id") if isinstance(active, dict) else None
     if isinstance(active_job_id, str) and active_job_id:
@@ -1969,6 +1971,7 @@ async def _enqueue_manual_compact_job(
         try:
             active = await _redis_get_json(redis, active_key)
         except Exception:
+            logger.warning("manual compact active recheck failed", exc_info=True)
             active = None
         active_job_id = (
             active.get("job_id") if isinstance(active, dict) else None

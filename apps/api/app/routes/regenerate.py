@@ -8,6 +8,7 @@ POST /conversations/{cid}/messages/{mid}/regenerate
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -55,6 +56,7 @@ from .messages import (
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
@@ -240,7 +242,11 @@ async def _image_params_from_target(
                 "low",
             ),
         )
-    except Exception:
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "regenerate image params fallback target_msg=%s err=%s",
+            target_msg_id, exc,
+        )
         return ImageParamsIn()
 
 
