@@ -372,6 +372,7 @@ export interface ModelCandidatesIn {
   candidate_count?: 3;
   style_prompt: string;
   avoid?: string[];
+  accessory_plan?: AccessoryPlan;
 }
 
 export interface AccessoryPlan {

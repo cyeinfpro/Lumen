@@ -32,7 +32,13 @@ class _Db:
 
 
 def test_model_candidates_mvp_requires_three_candidates() -> None:
-    ModelCandidatesCreateIn(candidate_count=3, style_prompt="premium")
+    body = ModelCandidatesCreateIn(
+        candidate_count=3,
+        style_prompt="premium",
+        accessory_plan={"enabled": True, "items": ["white sneakers"], "strength": "subtle"},
+    )
+
+    assert body.accessory_plan.items == ["white sneakers"]
 
     with pytest.raises(ValidationError):
         ModelCandidatesCreateIn(candidate_count=2, style_prompt="premium")
@@ -86,10 +92,9 @@ def test_product_analysis_prompt_requests_styling_recommendations() -> None:
 
     assert "styling_recommendations" in prompt
     assert "1-3 个" in prompt
-    assert "帽子、鞋子、包、首饰、袜子、发饰" in prompt
-    assert "不需要覆盖" in prompt
-    assert "根据用户方向里的年龄/人群判断" in prompt
-    assert "成人就按成人服饰场景自然推荐" in prompt
+    assert "不需要覆盖所有饰品类别" in prompt
+    assert "人群/年龄" in prompt
+    assert "must_preserve" in prompt
 
 
 def test_workflow_image_params_use_high_quality_jpeg() -> None:
@@ -97,9 +102,24 @@ def test_workflow_image_params_use_high_quality_jpeg() -> None:
 
     assert params.output_format == "jpeg"
     assert params.output_compression == 100
+    assert params.fast is False
 
 
-def test_candidate_prompt_uses_uniform_ivory_base_clothes_and_barefoot() -> None:
+def test_workflow_image_params_can_use_fast_high_quality_for_showcase() -> None:
+    params = workflows._image_params(  # noqa: SLF001
+        aspect_ratio="4:5",
+        count=1,
+        render_quality="high",
+        final_quality="high",
+        fast=True,
+    )
+
+    assert params.fast is True
+    assert params.render_quality == "high"
+    assert params.fixed_size == "1600x2000"
+
+
+def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -> None:
     prompt = workflows._candidate_prompt(  # noqa: SLF001
         style_prompt="premium natural model",
         product_analysis={"category": "连衣裙"},
@@ -109,12 +129,13 @@ def test_candidate_prompt_uses_uniform_ivory_base_clothes_and_barefoot() -> None
 
     assert "warm ivory sleeveless top" in prompt
     assert "warm ivory shorts" in prompt
-    assert "2x2 four-panel contact sheet" in prompt
-    assert "exactly four" in prompt
-    assert "barefoot" in prompt
-    assert "consistent across every panel and every candidate" in prompt
-    assert "must be barefoot" in prompt
-    assert "no shoes" in prompt
+    assert "exactly four views" in prompt
+    assert "front full body" in prompt
+    assert "side full body" in prompt
+    assert "back full body" in prompt
+    assert "close-up headshot" in prompt
+    assert "No text labels" in prompt
+    assert "no height labels" in prompt
 
 
 def test_age_direction_adapts_child_model_pose_and_expression() -> None:
@@ -138,13 +159,11 @@ def test_age_direction_adapts_child_model_pose_and_expression() -> None:
     )
 
     assert "around 8 years old" in candidate_prompt
-    assert "身高 128cm" in candidate_prompt
-    assert "inferred model height is 128cm" in candidate_prompt
-    assert "childlike energy" in candidate_prompt
-    assert "Avoid adult fashion-model poses" in candidate_prompt
-    assert "身高 128cm" in showcase_prompt
-    assert "match the target age" in showcase_prompt
-    assert "avoid generic adult ecommerce poses" in showcase_prompt
+    assert "around 128cm" in candidate_prompt
+    assert "age-appropriate" in candidate_prompt
+    assert "non-adultized" in candidate_prompt
+    assert "around 128cm" in showcase_prompt
+    assert "年龄感" in showcase_prompt
 
 
 def test_showcase_prompt_enforces_product_fidelity_and_model_identity() -> None:
@@ -168,13 +187,28 @@ def test_showcase_prompt_enforces_product_fidelity_and_model_identity() -> None:
         final_quality="high",
     )
 
-    assert "Use the confirmed synthetic model reference" in prompt
-    assert "Use the product image as the locked garment reference" in prompt
+    assert "请根据商品图和已确认模特参考图" in prompt
     assert "lapel shape" in prompt
-    assert "Do not change the garment design" in prompt
-    assert "ultra-photorealistic" in prompt
-    assert "real skin texture" in prompt
-    assert "Avoid AI-generated appearance" in prompt
+    assert "不要改款" in prompt
+    assert "保持已确认模特" in prompt
+    assert "适合淘宝/电商主图" in prompt
+    assert "无文字、无水印" in prompt
+
+
+def test_accessory_preview_prompt_is_flat_lay_product_and_accessories_only() -> None:
+    prompt = workflows._accessory_preview_prompt(  # noqa: SLF001
+        accessory_plan={"items": ["small earrings", "white sneakers"], "strength": "subtle"},
+        style_prompt="natural clean styling",
+    )
+
+    assert "原商品图" in prompt
+    assert "白底平面商品搭配预览图" in prompt
+    assert "只能出现原商品和所选饰品" in prompt
+    assert "不要出现模特" in prompt
+    assert "不要出现" in prompt and "人体" in prompt
+    assert "不要改款" in prompt
+    assert "不要让饰品遮挡商品关键结构" in prompt
+    assert "平铺图" in prompt
 
 
 def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None:
@@ -200,5 +234,40 @@ def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None
 
     assert "automatically matched lifestyle scene" in prompt
     assert "boutique hotel lobby" in prompt or "office atrium" in prompt
-    assert "consistent floor contact" in prompt
-    assert "Avoid fake cutout/composited look" in prompt
+    assert "场景/背景按当前模板执行" in prompt
+
+
+def test_revision_prompt_is_short_repair_brief() -> None:
+    candidate = SimpleNamespace(id="cand-1")
+
+    prompt = workflows._revision_prompt(  # noqa: SLF001
+        instruction="衣服颜色更接近商品图",
+        product_analysis={"must_preserve": ["米白色", "宽松版型"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+    )
+
+    assert "返修" in prompt
+    assert "保持已确认模特" in prompt
+    assert "不要改款" in prompt
+    assert "米白色" in prompt
+    assert "衣服颜色更接近商品图" in prompt
+
+
+def test_quality_review_prompt_focuses_on_core_ecommerce_checks() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "clean commute model"},
+    )
+
+    prompt = workflows._quality_review_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": ["领口", "纽扣"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        shot_type="front_full_body",
+    )
+
+    assert "自动质检" in prompt
+    assert "是否还是同一件商品" in prompt
+    assert "模特人脸" in prompt
+    assert "电商主图" in prompt
+    assert "只返回严格 JSON" in prompt
+    assert "approve 或 revise" in prompt

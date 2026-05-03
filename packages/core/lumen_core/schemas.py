@@ -399,16 +399,17 @@ class ProductAnalysisApproveIn(BaseModel):
     corrections: dict[str, Any] = Field(default_factory=dict)
 
 
-class ModelCandidatesCreateIn(BaseModel):
-    candidate_count: int = Field(default=3, ge=3, le=3)
-    style_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
-    avoid: list[str] = Field(default_factory=list, max_length=20)
-
-
 class AccessoryPlanIn(BaseModel):
     enabled: bool = True
     items: list[str] = Field(default_factory=list, max_length=12)
     strength: Literal["subtle", "medium", "strong"] = "subtle"
+
+
+class ModelCandidatesCreateIn(BaseModel):
+    candidate_count: int = Field(default=3, ge=3, le=3)
+    style_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
+    avoid: list[str] = Field(default_factory=list, max_length=20)
+    accessory_plan: AccessoryPlanIn = Field(default_factory=AccessoryPlanIn)
 
 
 class ModelCandidateApproveIn(BaseModel):

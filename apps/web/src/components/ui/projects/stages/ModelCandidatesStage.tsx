@@ -2,20 +2,19 @@
 
 // 模特候选 + 方案确认 阶段。
 // 关键改进：
-// 1) 选定候选后再决定饰品方案；饰品图选中态由 SelectableImageGrid 维持
+// 1) 饰品图在模特候选阶段并行生成；这里仅选择饰品图
 // 2) 表单值持久化在 useState（页面跳转后仍保留输入）
 // 3) showcase 重生成走 ConfirmDialog 兜底（已有 task 时点击=重新生成）
 // 4) 模板/质量切换在生成中禁用
 
-import { Shirt, Sparkles } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Shirt } from "lucide-react";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
   useApproveModelCandidateMutation,
-  useCreateAccessoryPreviewsMutation,
   useCreateShowcaseImagesMutation,
   useSaveAccessorySelectionMutation,
 } from "@/lib/queries";
@@ -25,7 +24,7 @@ import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { SelectableImageGrid } from "../components/SelectableImageGrid";
 import { RunningState, StageFrame } from "../components/StageFrame";
 import { SHOT_PLAN_DEFAULT, TEMPLATE_LABELS, type CreateTemplate } from "../types";
-import { accessorySuggestionText, imageById, stepOf, stringValue } from "../utils";
+import { imageById, stepOf, stringArray, stringValue } from "../utils";
 
 export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const approve = useApproveModelCandidateMutation(workflow.id, {
@@ -33,13 +32,6 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       toast.error("确认模特失败", {
         description: err instanceof Error ? err.message : "请稍后重试",
       }),
-  });
-  const accessoryPreview = useCreateAccessoryPreviewsMutation(workflow.id, {
-    onError: (err) =>
-      toast.error("生成饰品预览失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
-      }),
-    onSuccess: () => toast.success("饰品预览已派发"),
   });
   const saveAccessorySelection = useSaveAccessorySelectionMutation(workflow.id, {
     onError: (err) =>
@@ -56,11 +48,6 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   });
 
   const [adjustments, setAdjustments] = useState("");
-  const [accessoryEnabled, setAccessoryEnabled] = useState(true);
-  const suggestedAccessories = accessorySuggestionText(workflow);
-  const [accessories, setAccessories] = useState(
-    suggestedAccessories || "简洁鞋子、小巧发饰、轻量包袋",
-  );
   const [template, setTemplate] = useState<CreateTemplate>("premium_studio");
   const [quality, setQuality] = useState<"high" | "4k">("high");
   const [previewList, setPreviewList] = useState<BackendImageMeta[]>([]);
@@ -71,6 +58,18 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const approvalStep = stepOf(workflow, "model_approval");
   const showcaseStep = stepOf(workflow, "showcase_generation");
   const selectedCandidate = candidates.find((candidate) => candidate.status === "selected");
+  const accessoryPlan = approvalStep?.input_json?.accessory_plan;
+  const accessoryEnabled =
+    typeof accessoryPlan === "object" &&
+    accessoryPlan !== null &&
+    "enabled" in accessoryPlan &&
+    accessoryPlan.enabled === false
+      ? false
+      : true;
+  const accessoryItems =
+    typeof accessoryPlan === "object" && accessoryPlan !== null && "items" in accessoryPlan
+      ? stringArray(accessoryPlan.items)
+      : [];
 
   const persistedAccessoryId =
     stringValue(approvalStep?.input_json?.selected_accessory_image_id) ??
@@ -86,13 +85,9 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     setSelectedAccessoryImageId(persistedAccessoryId);
   }
 
-  const accessoryImages = useMemo(
-    () =>
-      (approvalStep?.image_ids ?? [])
-        .map((imageId) => imageById(workflow, imageId))
-        .filter((image): image is BackendImageMeta => Boolean(image)),
-    [approvalStep?.image_ids, workflow],
-  );
+  const accessoryImages = (approvalStep?.image_ids ?? [])
+    .map((imageId) => imageById(workflow, imageId))
+    .filter((image): image is BackendImageMeta => Boolean(image));
 
   const openPreview = (image: BackendImageMeta, list: BackendImageMeta[], index: number) => {
     setPreviewList(list);
@@ -118,10 +113,10 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   };
 
   return (
-    <StageFrame
-      title="模特候选"
-      subtitle="每套候选是同一个合成模特的四宫格概念图。先确认模特，再决定饰品方案与最终模板。"
-    >
+      <StageFrame
+        title="模特候选"
+        subtitle="每套候选是同一个合成模特的四视图概念图。模特候选和饰品白底搭配图会并行生成。"
+      >
       {candidates.length === 0 ? (
         <RunningState label="等待创建模特候选" />
       ) : (
@@ -139,10 +134,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
                   adjustments,
                   accessory_plan: {
                     enabled: accessoryEnabled,
-                    items: accessories
-                      .split(/[,，、]/)
-                      .map((item) => item.trim())
-                      .filter(Boolean),
+                    items: accessoryItems,
                     strength: "subtle",
                   },
                   selected_accessory_image_id: selectedAccessoryImageId,
@@ -163,57 +155,9 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)]"
           />
         </label>
-        <label className="block">
-          <span className="text-sm text-[var(--fg-1)]">饰品方案</span>
-          <div className="mt-2 flex gap-2">
-            <button
-              type="button"
-              onClick={() => setAccessoryEnabled((value) => !value)}
-              className={[
-                "h-10 rounded-md border px-3 text-sm transition-colors",
-                accessoryEnabled
-                  ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                  : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-              ].join(" ")}
-            >
-              {accessoryEnabled ? "开启" : "关闭"}
-            </button>
-            <input
-              value={accessories}
-              onChange={(event) => setAccessories(event.target.value)}
-              disabled={!accessoryEnabled}
-              className="h-10 min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)] disabled:opacity-50"
-            />
-          </div>
-        </label>
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button
-          variant="secondary"
-          loading={accessoryPreview.isPending}
-          disabled={!selectedCandidate?.contact_sheet_image_id}
-          onClick={() => {
-            if (!selectedCandidate) return;
-            accessoryPreview.mutate({
-              candidate_id: selectedCandidate.id,
-              accessory_plan: {
-                enabled: accessoryEnabled,
-                items: accessoryEnabled
-                  ? accessories
-                      .split(/[,，、]/)
-                      .map((item) => item.trim())
-                      .filter(Boolean)
-                  : [],
-                strength: "subtle",
-              },
-              style_prompt: adjustments,
-            });
-          }}
-          leftIcon={<Sparkles className="h-4 w-4" />}
-        >
-          {selectedCandidate ? "生成饰品预览" : "先确认模特后生成饰品预览"}
-        </Button>
+        <div className="rounded-md border border-[var(--border)] bg-white/[0.03] px-3 py-2 text-sm leading-6 text-[var(--fg-1)]">
+          饰品方案：{accessoryEnabled ? accessoryItems.join("、") || "自动推荐" : "关闭"}
+        </div>
       </div>
 
       {accessoryImages.length > 0 ? (

@@ -261,9 +261,8 @@ def _infer_model_height_cm(text: str) -> int:
 def _height_requirement(text: str) -> str:
     height_cm = _infer_model_height_cm(text)
     return (
-        f"HEIGHT LOCK: inferred model height is {height_cm}cm. Display a clear Chinese label "
-        f"\"身高 {height_cm}cm\" on the model concept sheet. Keep this exact perceived height, "
-        "head-to-body ratio, limb length, and scale consistent across all candidate panels and all later images."
+        f"Keep the model's perceived height around {height_cm}cm, with consistent "
+        "head-to-body ratio, limb length, and scale across all reference views and later images."
     )
 
 
@@ -275,25 +274,22 @@ def _age_direction(text: str) -> str:
     ):
         age_text = f"around {age} years old" if age is not None else "child age range"
         return (
-            f"AGE AND DEMEANOR REQUIREMENT: the model should be {age_text}, with child-appropriate "
-            "body proportion, face softness, height, posture, and expression. Use natural childlike "
-            "energy: relaxed, curious, playful, lively, and unforced. Avoid adult fashion-model poses, "
-            "mature facial expression, heavy makeup, serious luxury editorial attitude, old-fashioned "
-            "studio posing, or making the child look older than the requested age."
+            f"The model should be {age_text}, with age-appropriate body proportion, face, "
+            "posture, expression, and styling. Keep the look natural and non-adultized."
         )
     if age is not None and age < 18:
         return (
-            f"AGE AND DEMEANOR REQUIREMENT: the model should be around {age} years old, with teen-appropriate "
-            "proportions, casual natural expression, and age-appropriate pose. Avoid adult glamour styling."
+            f"The model should be around {age} years old, with teen-appropriate proportions, "
+            "expression, pose, and styling."
         )
     if age is not None:
         return (
-            f"AGE AND DEMEANOR REQUIREMENT: the model should look around {age} years old, with expression, "
-            "posture, styling, and scene adjusted to that age rather than a generic model."
+            f"The model should look around {age} years old, with expression, pose, styling, "
+            "and scene adjusted to that age."
         )
     return (
-        "AGE AND DEMEANOR REQUIREMENT: infer the target age from the user's direction and product context; "
-        "make expression, posture, movement, and scene age-appropriate instead of generic or old-fashioned."
+        "Follow the user's requested model type, age impression, expression, pose, and styling; "
+        "if unspecified, choose a natural ecommerce model that fits the garment."
     )
 
 
@@ -511,16 +507,13 @@ def _seed_steps(run: WorkflowRun, *, user_prompt: str) -> list[WorkflowStep]:
 
 def _product_analysis_prompt(user_prompt: str) -> str:
     return (
-        "请分析上传的服饰商品图，用于电商模特展示图工作流。只描述图片中可见的信息，"
-        "不确定的字段填 unknown。必须返回严格 JSON，字段固定为：category, color, "
-        "material_guess, silhouette, key_details, must_preserve, risks, styling_recommendations。"
-        "除 unknown 和字段名外，所有可读内容都用简体中文返回。"
-        "must_preserve 需要包含可见的商品颜色、廓形、领口、袖型、长度、面料观感、"
-        "图案、logo、纽扣、口袋、拉链、缝线/拼接位置等后续生成必须保留的信息。"
-        "styling_recommendations 必须是数组，只推荐 1-3 个适合该商品和用户方向的搭配项。"
-        "优先选择低存在感、自然、不过度抢商品主体的单品；不需要覆盖帽子、鞋子、包、"
-        "首饰、袜子、发饰全部类别，除非商品本身明显需要。必须根据用户方向里的年龄/人群判断："
-        "儿童就避免复杂首饰和成人化搭配，成人就按成人服饰场景自然推荐。"
+        "请分析上传的服饰商品图，只描述图片中可见信息，不确定填 unknown。"
+        "返回严格 JSON，字段固定为：category, color, material_guess, silhouette, "
+        "key_details, must_preserve, risks, styling_recommendations。"
+        "除 unknown 和字段名外，内容用简体中文。must_preserve 列出后续生成必须还原的"
+        "颜色、廓形、领口、袖型、长度、面料观感、图案/logo、纽扣、口袋、拉链、缝线/拼接等可见细节。"
+        "styling_recommendations 只给 1-3 个低存在感、适合商品和用户方向的搭配建议，"
+        "不需要覆盖所有饰品类别，并根据用户指定的人群/年龄保持搭配合适。"
         f"用户方向：{user_prompt or '高级电商服饰模特展示图'}"
     )
 
@@ -539,22 +532,13 @@ def _candidate_prompt(
     height_requirement = _height_requirement(style)
     avoid_text = ", ".join(avoid) if avoid else "celebrity likeness, influencer likeness, dramatic makeup"
     return (
-        "Create a synthetic fashion model concept sheet for ecommerce apparel usage. "
+        "Create one clean ecommerce model reference sheet with exactly four views: "
+        "front full body, side full body, back full body, and close-up headshot. "
+        "Use the same synthetic model in every view, keeping face, hairstyle, body proportion, "
+        "skin tone, and lighting consistent. The model is not wearing the user's product yet. "
+        f"Use simple neutral base clothing: {base_styling}. Do not add any product-specific garment details. "
         f"{age_requirement} {height_requirement} "
-        "The output must be one clean 2x2 four-panel contact sheet, not a single portrait, "
-        "not a collage with extra panels, and not separate images. The model is not wearing "
-        "the user's product yet. Generate one consistent synthetic model across exactly four "
-        "labeled panels: front full body, side full body, back full body, close-up headshot. "
-        "Each panel must include a clear Chinese label for the view and the same height label. "
-        "Use the same simple neutral base clothing "
-        f"for all candidates: {base_styling}. The base outfit must be a clean warm ivory "
-        "sleeveless top plus warm ivory shorts, consistent across every panel and every candidate. "
-        "The candidate model must be barefoot in every full-body panel; no shoes, no socks, "
-        "no sandals, no cropped-out feet in full-body views. "
-        "Keep identity, face, hairstyle, body proportion, and skin lighting consistent "
-        "across all views. Do not copy any real person, celebrity, influencer, or "
-        "identifiable private individual. Do not add product-specific garment details "
-        "at this stage. The sheet must be clearly labeled as model reference only. "
+        "No text labels, no height labels, no watermark, no logo, no celebrity or real-person likeness. "
         f"Style direction: {style}. Product category context: {product_category}. "
         f"Candidate variation number: {candidate_index}. Avoid: {avoid_text}."
     )
@@ -606,35 +590,16 @@ def _showcase_prompt(
     template_label = TEMPLATE_LABELS.get(template, template)
     template_requirement = _template_requirement(template, product_analysis)
     return (
-        "Create an ultra-photorealistic, natural real-camera fashion photograph for ecommerce. "
-        "It must look like an actual professional photo shoot with a real person, real fabric, "
-        "real skin texture, natural body posture, believable hands, realistic hair, coherent shadows, "
-        "and physically plausible garment drape. Avoid AI-generated appearance, plastic skin, waxy face, "
-        "over-smoothed beauty retouching, doll-like proportions, stiff pose, fake smile, floating body, "
-        "pasted-on garment, warped hands, distorted feet, surreal background, HDR overprocessing, "
-        "CGI render, illustration, mannequin look, and synthetic stock-photo gloss. "
-        f"{age_requirement} {height_requirement} "
-        f"Selected output template: {template_label}. {template_requirement} "
-        f"{accessory_requirement} "
-        "The selected output template is mandatory and must control the environment, "
-        "background, lighting, and composition. Use the confirmed synthetic "
-        "model reference for face, hairstyle, body proportion, and overall identity. "
-        "Use the product image as the locked garment reference. Preserve the garment "
-        f"{preserve_text}. The model should wear the product naturally and realistically. "
-        "The pose and styling must support clear product display. Do not change the "
-        "garment design. Do not add new patterns, logos, pockets, belts, or decorative "
-        "elements. Do not cover important garment details with arms, hair, accessories, "
-        f"or props. Shot type: {SHOT_LABELS.get(shot_type, shot_type)}. Accessory plan: {accessory_text}. "
-        "Make the model belong to the scene with coherent lighting, cast shadow, contact points, camera height, "
-        "lens perspective, and environmental color reflection. "
-        "Pose, gesture, facial expression, and movement must match the target age and the product mood; "
-        "avoid generic adult ecommerce poses when the project is for children. "
-        f"{SHOT_COMPOSITION_REQUIREMENTS.get(shot_type, '')} "
-        f"Confirmed model brief: {model_text}. Use natural camera optics: realistic focal length, "
-        "subtle depth of field, true-to-life contrast, skin pores and fabric weave visible where appropriate, "
-        "no excessive sharpening, no painterly texture, no beauty-filter blur. Output should look like a "
-        "high-end but believable ecommerce campaign photograph, clean, sharp, realistic, and commercially usable. "
-        f"Quality target: {final_quality}."
+        "请根据商品图和已确认模特参考图，生成真实自然的真人服饰电商穿搭图。\n"
+        "要求：\n"
+        "1. 模特必须穿着商品图中的这件衣服，颜色、版型和可见细节尽量还原，不要改款。\n"
+        f"2. 必须保留商品细节：{preserve_text}。\n"
+        f"3. 保持已确认模特的人脸、发型、身材比例、年龄感和整体气质一致。{age_requirement} {height_requirement}\n"
+        f"4. 场景/背景按当前模板执行：{template_label}。{template_requirement}\n"
+        f"5. {accessory_requirement} 配饰不能遮挡衣服关键结构。\n"
+        f"6. 镜头类型：{SHOT_LABELS.get(shot_type, shot_type)}。{SHOT_COMPOSITION_REQUIREMENTS.get(shot_type, '')}\n"
+        "7. 画面为自然商业摄影风格，清晰、真实、干净，适合淘宝/电商主图，无文字、无水印。\n"
+        f"已确认模特摘要：{model_text}。配饰方案：{accessory_text}。画质目标：{final_quality}。"
     )
 
 
@@ -647,36 +612,28 @@ def _revision_prompt(
     must_preserve = product_analysis.get("must_preserve")
     preserve = ", ".join(str(x) for x in must_preserve) if isinstance(must_preserve, list) else ""
     return (
-        "Revise this ecommerce apparel model showcase image. Keep the confirmed "
-        "synthetic model identity, face, hairstyle, and body proportion. Keep the "
-        "same product design and preserve the garment details from the product "
-        f"reference: {preserve or 'color, silhouette, neckline, sleeve shape, length, logos, pockets, buttons, seams'}. "
-        "Do not redesign the garment. Apply this repair instruction: "
-        f"{instruction}. Candidate reference id: {selected_candidate.id}."
+        "请根据用户要求返修这张服饰电商模特图。保持已确认模特的人脸、发型、身材比例和整体身份不变；"
+        "保持商品为同一件衣服，不要改款。需要保留的商品细节："
+        f"{preserve or '颜色、版型、领口、袖型、长度、logo/图案、口袋、纽扣、缝线'}。"
+        f"返修要求：{instruction}。参考模特方案：{selected_candidate.id}。"
     )
 
 
 def _accessory_preview_prompt(
     *,
-    selected_candidate: ModelCandidate,
     accessory_plan: dict[str, Any],
     style_prompt: str,
 ) -> str:
     items = accessory_plan.get("items")
     item_text = ", ".join(str(item) for item in items) if isinstance(items, list) else ""
     strength = str(accessory_plan.get("strength") or "subtle")
-    brief = selected_candidate.model_brief_json or {}
-    model_text = str(brief.get("summary") or style_prompt or "")
-    age_requirement = _accessory_age_direction(model_text)
     return (
-        "Create an accessory styling preview for the confirmed synthetic model "
-        "reference. Keep the same face, hairstyle, body proportion, and identity. "
-        f"{age_requirement} "
-        "Use simple neutral base clothing only; do not put the user's product on "
-        "the model yet. Show the proposed accessories clearly enough for approval. "
+        "请根据上传的原商品图，生成一张白底平面商品搭配预览图。画面中只能出现原商品和所选饰品，"
+        "不要出现模特、人体、衣架、假人、场景、家具或多余道具。保持原商品的颜色、版型、材质观感和可见细节，"
+        "不要改款，不要让饰品遮挡商品关键结构。饰品应与原商品自然摆放在同一张白底商品图中，"
+        "像电商商品搭配图或平铺图，构图干净，主体完整，适合用户确认搭配。"
         f"Accessories: {item_text or 'no accessories'}. Styling strength: {strength}. "
-        f"Additional direction: {style_prompt or 'clean ecommerce styling'}. "
-        f"Confirmed model brief: {brief.get('summary') or 'synthetic ecommerce model'}."
+        f"Additional direction: {style_prompt or 'clean ecommerce styling'}."
     )
 
 
@@ -694,22 +651,15 @@ def _quality_review_prompt(
     )
     brief = selected_candidate.model_brief_json or {}
     return (
-        "Perform automatic visual quality control for one generated ecommerce "
-        "apparel model showcase image. Compare it against the attached product "
-        "reference, the confirmed synthetic model reference, and the generated "
-        "showcase image. Check whether the product is still the same garment, "
-        "whether color and structural details are preserved, whether the model "
-        "identity is close to the confirmed candidate, whether there are visible "
-        "hand, leg, face, garment edge, or background artifacts, and whether the "
-        "image is commercially usable as a premium ecommerce asset. Also check "
-        "photorealism and naturalness: real-camera lighting, believable skin texture, "
-        "natural pose, correct shadows, physically integrated scene, non-plastic face, "
-        "non-waxy skin, and no obvious AI/composited look. "
-        "Return strict JSON only with keys: overall_score, product_fidelity_score, "
-        "model_consistency_score, aesthetic_score, artifact_score, issues, "
-        "recommendation. Scores are 0-100. recommendation must be approve or revise. "
-        f"Must preserve: {preserve}. Shot type: {shot_type or 'unknown'}. "
-        f"Confirmed model brief: {brief.get('summary') or 'synthetic ecommerce model'}."
+        "请对生成的服饰电商模特图做自动质检。对比商品参考图、已确认模特参考图和最终图，检查："
+        "1. 是否还是同一件商品，颜色、版型和关键细节是否保留；"
+        "2. 模特人脸、发型、身材比例和年龄感是否接近确认方案；"
+        "3. 手、脚、脸、衣服边缘、背景是否有明显瑕疵；"
+        "4. 是否适合作为电商主图使用。"
+        "只返回严格 JSON，字段：overall_score, product_fidelity_score, model_consistency_score, "
+        "aesthetic_score, artifact_score, issues, recommendation。分数 0-100，recommendation 只能是 approve 或 revise。"
+        f"必须保留：{preserve}。镜头类型：{shot_type or 'unknown'}。"
+        f"已确认模特摘要：{brief.get('summary') or 'synthetic ecommerce model'}。"
     )
 
 
@@ -917,6 +867,7 @@ def _image_params(
     count: int = 1,
     render_quality: str = "high",
     final_quality: str | None = None,
+    fast: bool = False,
 ) -> ImageParamsIn:
     fixed = _fixed_size_for_quality(aspect_ratio, final_quality or "high")
     return ImageParamsIn(
@@ -924,6 +875,7 @@ def _image_params(
         size_mode="fixed" if fixed else "auto",
         fixed_size=fixed,
         count=count,
+        fast=fast,
         render_quality=render_quality,  # type: ignore[arg-type]
         output_format="jpeg",
         output_compression=100,
@@ -1909,6 +1861,7 @@ async def create_model_candidates(
         "style_prompt": body.style_prompt or run.user_prompt,
         "avoid": body.avoid,
         "candidate_count": body.candidate_count,
+        "accessory_plan": body.accessory_plan.model_dump(),
     }
     candidate_step = await _step(db, run.id, "model_candidates")
     candidate_step.status = "running"
@@ -1966,6 +1919,35 @@ async def create_model_candidates(
         task_ids.extend(gen_ids)
         bundles.append(bundle)
     candidate_step.task_ids = task_ids
+    approval = await _step(db, run.id, "model_approval")
+    approval.input_json = {
+        **(approval.input_json or {}),
+        "accessory_plan": body.accessory_plan.model_dump(),
+        "style_prompt": body.style_prompt or run.user_prompt,
+    }
+    if body.accessory_plan.enabled:
+        accessory_bundle, _, accessory_gen_ids = await _create_workflow_task(
+            db=db,
+            user=user,
+            conv=conv,
+            intent=Intent.IMAGE_TO_IMAGE,
+            text=_accessory_preview_prompt(
+                accessory_plan=body.accessory_plan.model_dump(),
+                style_prompt=body.style_prompt or run.user_prompt,
+            ),
+            attachment_ids=run.product_image_ids or [],
+            idempotency_key=f"wf:{run.id[:24]}:acc:init",
+            workflow_run_id=run.id,
+            workflow_step_key="model_approval",
+            image_params=_image_params(aspect_ratio="4:5", count=1, render_quality="high"),
+            workflow_meta={
+                "workflow_action": "accessory_preview",
+                "workflow_origin": "model_candidates",
+            },
+        )
+        approval.status = "running"
+        approval.task_ids = _dedupe_nonempty([*(approval.task_ids or []), *accessory_gen_ids])
+        bundles.append(accessory_bundle)
     conv.last_activity_at = _now()
     await db.commit()
     await _publish_bundles(db, user_id=user.id, conv_id=conv.id, bundles=bundles)
@@ -2146,11 +2128,10 @@ async def create_accessory_previews(
         conv=conv,
         intent=Intent.IMAGE_TO_IMAGE,
         text=_accessory_preview_prompt(
-            selected_candidate=candidate,
             accessory_plan=body.accessory_plan.model_dump(),
             style_prompt=body.style_prompt,
         ),
-        attachment_ids=[candidate.contact_sheet_image_id],
+        attachment_ids=run.product_image_ids or [],
         idempotency_key=f"wf:{run.id[:12]}:acc:{candidate.id[:8]}:{new_uuid7()[:8]}",
         workflow_run_id=run.id,
         workflow_step_key="model_approval",
@@ -2299,6 +2280,7 @@ async def create_showcase_images(
                 count=1,
                 render_quality="high" if body.final_quality != "standard" else "medium",
                 final_quality=body.final_quality,
+                fast=True,
             ),
             workflow_meta={
                 "workflow_action": "showcase_image",

@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
-ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
 NGINX_FILES=()
 LUMEN_USE_SUDO="${LUMEN_USE_SUDO:-0}"
 
@@ -314,10 +314,32 @@ probe_sub2api_upstream() {
 
 run_lumen_script() {
     local script_name="$1"
+    local script_path="${ROOT}/scripts/${script_name}"
     log_step "执行 ${script_name}"
+    if [ ! -f "${script_path}" ]; then
+        log_error "找不到脚本：${script_path}"
+        exit 1
+    fi
     case "${script_name}" in
-        install.sh) bash "${SCRIPT_DIR}/${script_name}" --install ;;
-        *) bash "${SCRIPT_DIR}/${script_name}" ;;
+        install.sh)
+            if [ "$(detect_os)" = "linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+                ensure_cmd sudo "请安装 sudo，或切换到 root 后重试"
+                lumen_sudo bash "${script_path}" --install
+            else
+                bash "${script_path}" --install
+            fi
+            ;;
+        update.sh|uninstall.sh)
+            if [ "$(detect_os)" = "linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+                ensure_cmd sudo "请安装 sudo，或切换到 root 后重试"
+                lumen_sudo bash "${script_path}"
+            else
+                bash "${script_path}"
+            fi
+            ;;
+        *)
+            bash "${script_path}"
+            ;;
     esac
 }
 

@@ -362,6 +362,19 @@ detect_os() {
     esac
 }
 
+lumen_resolve_repo_root() {
+    local script_dir="$1"
+    local script_phys probe probe_parent
+    script_phys="$(cd "${script_dir}" && pwd -P)"
+    probe="$(cd "${script_phys}/.." && pwd -P)"
+    probe_parent="$(cd "${probe}/.." && pwd -P)"
+    if [ "$(basename "${probe_parent}")" = "releases" ]; then
+        (cd "${probe_parent}/.." && pwd -P)
+        return 0
+    fi
+    printf '%s' "${probe}"
+}
+
 # port_in_use <port> -> 返回 0 表示被占用，1 表示空闲（或无可用检测工具）
 # 优先 lsof，其次 ss，再次 netstat。
 port_in_use() {

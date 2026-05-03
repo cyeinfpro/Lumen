@@ -115,6 +115,40 @@ def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
     assert "lumen_tail_runtime_log \"Worker\"" in text
 
 
+def test_shared_root_resolver_handles_release_current_symlink(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "lumen"
+    release = deploy_root / "releases" / "20260503010101-abcdef0"
+    scripts_dir = release / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (deploy_root / "current").symlink_to(release)
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        lumen_resolve_repo_root {deploy_root / "current" / "scripts"}
+        """
+    )
+    assert Path(result.stdout.strip()) == deploy_root
+
+
+def test_lumenctl_runs_lumen_updates_from_resolved_root_with_sudo_on_linux() -> None:
+    result = assert_bash_ok(
+        f"""
+        . {LUMENCTL}
+        detect_os() {{ printf 'linux\\n'; }}
+        ensure_cmd() {{ :; }}
+        bash() {{ printf 'bash:%s\\n' "$*"; }}
+        lumen_sudo() {{ printf 'sudo:%s\\n' "$*"; }}
+        run_lumen_script update.sh
+        """
+    )
+    if os.geteuid() == 0:
+        assert "sudo:" not in result.stdout
+        assert f"bash:{ROOT / 'scripts' / 'update.sh'}" in result.stdout
+    else:
+        assert f"sudo:bash {ROOT / 'scripts' / 'update.sh'}" in result.stdout
+
+
 def test_runtime_health_check_fails_when_api_unhealthy() -> None:
     result = run_bash(
         f"""
