@@ -17,7 +17,9 @@ interface CandidateCardProps {
   workflow: WorkflowRun;
   candidate: ModelCandidate;
   approving: boolean;
+  locallySelected?: boolean;
   onPreview: (image: BackendImageMeta, list: BackendImageMeta[], index: number) => void;
+  onChoose?: () => void;
   onApprove: () => void;
 }
 
@@ -25,7 +27,9 @@ export function CandidateCard({
   workflow,
   candidate,
   approving,
+  locallySelected = false,
   onPreview,
+  onChoose,
   onApprove,
 }: CandidateCardProps) {
   const candidateImageIds = stringArray(candidate.model_brief_json.candidate_image_ids);
@@ -49,7 +53,9 @@ export function CandidateCard({
         "rounded-md border bg-white/[0.035] p-3 transition-shadow",
         selected
           ? "border-[var(--border-amber)] shadow-[var(--shadow-amber)]"
-          : "border-[var(--border)] hover:border-[var(--border-strong)]",
+          : locallySelected
+            ? "border-[var(--border-amber)]"
+            : "border-[var(--border)] hover:border-[var(--border-strong)]",
       )}
     >
       <div className="relative">
@@ -64,7 +70,11 @@ export function CandidateCard({
               <button
                 type="button"
                 key={candidateImage.id}
-                onClick={() => onPreview(candidateImage, images, index)}
+                onClick={() =>
+                  images.length > 1
+                    ? onPreview(candidateImage, images, index)
+                    : onChoose?.()
+                }
                 className="group h-full min-h-0 w-full overflow-hidden focus-visible:outline-none"
               >
                 <img
@@ -121,14 +131,20 @@ export function CandidateCard({
       </p>
       <Button
         className="mt-3"
-        variant={selected ? "secondary" : "primary"}
+        variant={selected || locallySelected ? "secondary" : "primary"}
         fullWidth
         disabled={!firstImage || selected || generating}
         loading={approving && !selected}
-        onClick={onApprove}
-        leftIcon={selected ? <Check className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+        onClick={onChoose ?? onApprove}
+        leftIcon={
+          selected || locallySelected ? (
+            <Check className="h-4 w-4" />
+          ) : (
+            <Sparkles className="h-4 w-4" />
+          )
+        }
       >
-        {selected ? "已确认" : generating ? "生成中…" : "确认此模特"}
+        {selected ? "已确认" : generating ? "生成中…" : locallySelected ? "已选中" : "选择此模特"}
       </Button>
     </motion.article>
   );

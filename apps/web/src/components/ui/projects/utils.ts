@@ -125,7 +125,7 @@ export function formatRelativeTime(value: string): string {
 }
 
 export function canDownload(image: BackendImageMeta): string | null {
-  return image.display_url || image.url || null;
+  return image.url || image.display_url || null;
 }
 
 export function workflowProgress(workflow: WorkflowRun): number {

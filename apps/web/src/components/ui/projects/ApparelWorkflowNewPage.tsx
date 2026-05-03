@@ -28,6 +28,40 @@ const TITLE_MAX = 60;
 const PROMPT_MAX = 240;
 const ACCEPT = ["image/png", "image/jpeg", "image/webp"];
 
+const AGE_SEGMENTS = [
+  ["不指定", ""],
+  ["幼儿", "幼儿"],
+  ["儿童", "儿童"],
+  ["青少年", "青少年"],
+  ["青年", "青年"],
+  ["成年", "成年"],
+  ["中老年", "中老年"],
+  ["老年", "老年"],
+] as const;
+
+const GENDERS = [
+  ["女", "女性"],
+  ["男", "男性"],
+] as const;
+
+const APPEARANCE_DIRECTIONS = [
+  ["不限", ""],
+  ["欧美", "欧美"],
+  ["亚洲", "亚洲"],
+  ["拉美", "拉美"],
+  ["中东", "中东"],
+  ["非洲", "非洲"],
+] as const;
+
+const STYLE_DIRECTIONS = [
+  ["自然日常", "自然日常"],
+  ["运动活力", "运动活力"],
+  ["高级简洁", "高级简洁"],
+  ["甜美亲和", "甜美亲和"],
+  ["酷感街头", "酷感街头"],
+  ["商务通勤", "商务通勤"],
+] as const;
+
 interface PendingFile {
   uid: string;
   file: File;
@@ -127,7 +161,11 @@ export function ApparelWorkflowNewPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [files, setFiles] = useState<PendingFile[]>([]);
   const [projectTitle, setProjectTitle] = useState("服饰模特展示图");
-  const [prompt, setPrompt] = useState("高级通勤感，冷淡气质模特，适合独立站女装");
+  const [ageSegment, setAgeSegment] = useState("成年");
+  const [gender, setGender] = useState("女性");
+  const [appearanceDirection, setAppearanceDirection] = useState("");
+  const [styleDirection, setStyleDirection] = useState("高级简洁");
+  const [extraPrompt, setExtraPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -144,7 +182,17 @@ export function ApparelWorkflowNewPage() {
   });
 
   const titleRemaining = TITLE_MAX - projectTitle.length;
-  const promptRemaining = PROMPT_MAX - prompt.length;
+  const composedPrompt = useMemo(() => {
+    const parts = [
+      ageSegment ? `年龄段：${ageSegment}` : "",
+      gender ? `性别：${gender}` : "",
+      appearanceDirection ? `外貌方向：${appearanceDirection}` : "",
+      styleDirection ? `风格气质：${styleDirection}` : "",
+      extraPrompt.trim() ? `补充说明：${extraPrompt.trim()}` : "",
+    ].filter(Boolean);
+    return parts.join("，") || "自然电商服饰模特展示";
+  }, [ageSegment, gender, appearanceDirection, styleDirection, extraPrompt]);
+  const promptRemaining = PROMPT_MAX - composedPrompt.length;
 
   // 释放 ObjectURL，避免内存泄漏
   useEffect(() => {
@@ -282,8 +330,8 @@ export function ApparelWorkflowNewPage() {
       setError(`请上传 1 到 ${MAX_PRODUCT_IMAGES} 张商品图`);
       return;
     }
-    if (!prompt.trim()) {
-      setError("请填写基础需求，便于 AI 理解风格");
+    if (composedPrompt.length > PROMPT_MAX) {
+      setError("基础参数过长，请精简补充说明");
       return;
     }
     setSubmitting(true);
@@ -304,7 +352,7 @@ export function ApparelWorkflowNewPage() {
       }
       createMutation.mutate({
         product_image_ids: ids,
-        user_prompt: prompt,
+        user_prompt: composedPrompt,
         quality_mode: "premium",
         title: projectTitle.trim() || "服饰模特展示图",
       });
@@ -543,14 +591,44 @@ export function ApparelWorkflowNewPage() {
               />
             </FieldCard>
 
-            <FieldCard label="基础需求" remaining={promptRemaining} max={PROMPT_MAX}>
+            <FieldCard label="基础参数" remaining={promptRemaining} max={PROMPT_MAX}>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <ParamSelect
+                  label="年龄段"
+                  value={ageSegment}
+                  options={AGE_SEGMENTS}
+                  onChange={setAgeSegment}
+                />
+                <ParamSelect
+                  label="性别"
+                  value={gender}
+                  options={GENDERS}
+                  onChange={setGender}
+                />
+                <ParamSelect
+                  label="外貌方向"
+                  value={appearanceDirection}
+                  options={APPEARANCE_DIRECTIONS}
+                  onChange={setAppearanceDirection}
+                />
+                <ParamSelect
+                  label="风格气质"
+                  value={styleDirection}
+                  options={STYLE_DIRECTIONS}
+                  onChange={setStyleDirection}
+                />
+              </div>
               <textarea
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value.slice(0, PROMPT_MAX))}
-                maxLength={PROMPT_MAX}
-                rows={5}
+                value={extraPrompt}
+                onChange={(event) => setExtraPrompt(event.target.value.slice(0, 120))}
+                maxLength={120}
+                rows={3}
+                placeholder="补充说明（可选），例如：更活泼一点，适合校园通勤"
                 className="mt-3 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2 text-sm leading-6 text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)]"
               />
+              <div className="mt-3 rounded-md border border-[var(--border)] bg-white/[0.025] px-3 py-2 text-xs leading-5 text-[var(--fg-2)]">
+                将用于后续模特候选和最终图：{composedPrompt}
+              </div>
             </FieldCard>
 
             {error ? (
@@ -616,6 +694,35 @@ function FieldCard({
         </span>
       </div>
       {children}
+    </label>
+  );
+}
+
+function ParamSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: readonly (readonly [string, string])[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs text-[var(--fg-2)]">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1.5 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)]"
+      >
+        {options.map(([text, optionValue]) => (
+          <option key={`${label}-${text}`} value={optionValue}>
+            {text}
+          </option>
+        ))}
+      </select>
     </label>
   );
 }

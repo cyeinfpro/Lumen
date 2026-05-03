@@ -6,13 +6,14 @@
 // 2) 展示图运行中显示带骨架的 placeholder 网格
 // 3) 模板/质量在运行态禁用
 
-import { Layers, RefreshCw, Shirt } from "lucide-react";
+import { Check, Layers, RefreshCw, Shirt } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
+  useCompleteWorkflowDeliveryMutation,
   useCreateShowcaseImagesMutation,
   useReopenModelSelectionMutation,
 } from "@/lib/queries";
@@ -38,6 +39,13 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       }),
     onSuccess: () => toast.success("已返回模特候选阶段"),
   });
+  const complete = useCompleteWorkflowDeliveryMutation(workflow.id, {
+    onError: (err) =>
+      toast.error("交付失败", {
+        description: err instanceof Error ? err.message : "请稍后重试",
+      }),
+    onSuccess: () => toast.success("项目已进入交付状态"),
+  });
   const step = stepOf(workflow, "showcase_generation");
   const [previewList, setPreviewList] = useState<BackendImageMeta[]>([]);
   const [previewIndex, setPreviewIndex] = useState(-1);
@@ -45,6 +53,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const [quality, setQuality] = useState<"high" | "4k">("high");
   const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [confirmDeliver, setConfirmDeliver] = useState(false);
 
   const hasTasks = Boolean(step?.task_ids?.length);
   const isRunning = step?.status === "running";
@@ -153,8 +162,21 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         onClick={() => (hasTasks ? setConfirmRegenerate(true) : generateShowcase())}
         leftIcon={hasTasks ? <RefreshCw className="h-4 w-4" /> : <Shirt className="h-4 w-4" />}
       >
-        {hasTasks ? "按当前模板重新生成" : "开始生成展示图"}
+        {hasTasks ? "按当前模板再生成一批" : "开始生成展示图"}
       </Button>
+
+      {generated.length > 0 ? (
+        <Button
+          className="mt-3"
+          variant="primary"
+          loading={complete.isPending}
+          disabled={isRunning}
+          onClick={() => setConfirmDeliver(true)}
+          leftIcon={<Check className="h-4 w-4" />}
+        >
+          确认交付
+        </Button>
+      ) : null}
 
       {hasTasks ? (
         generated.length === 0 ? (
@@ -192,13 +214,26 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       <ConfirmDialog
         open={confirmRegenerate}
         onOpenChange={setConfirmRegenerate}
-        title="重新生成展示图？"
-        description="将丢弃当前 4 张展示图与对应质检结论，按新参数派发新一轮任务。"
-        confirmText="确认重新生成"
+        title="再生成一批展示图？"
+        description="已生成的成品会继续保留，新一轮会按当前模板和质量模式追加生成 4 张。"
+        confirmText="追加生成"
         confirming={create.isPending}
         onConfirm={async () => {
           generateShowcase();
           setConfirmRegenerate(false);
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmDeliver}
+        onOpenChange={setConfirmDeliver}
+        title="确认交付项目？"
+        description="项目状态将变为已交付，当前成品图开放下载。"
+        confirmText="确认交付"
+        confirming={complete.isPending}
+        onConfirm={async () => {
+          complete.mutate();
+          setConfirmDeliver(false);
         }}
       />
     </StageFrame>
