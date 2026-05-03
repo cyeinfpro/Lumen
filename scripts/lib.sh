@@ -126,6 +126,45 @@ PY
     log_warn "${file} 缺少 DB_USER/DB_PASSWORD/DB_NAME，已从 DATABASE_URL 补全供 docker compose 使用。"
 }
 
+lumen_release_ensure_shared_env() {
+    local root="$1"
+    local shared_env="${root}/shared/.env"
+    local root_env="${root}/.env"
+    local current_env="${root}/current/.env"
+
+    mkdir -p "${root}/shared" 2>/dev/null || true
+
+    if [ -f "${shared_env}" ]; then
+        return 0
+    fi
+
+    if [ -f "${root_env}" ] && [ ! -L "${root_env}" ]; then
+        log_warn "shared/.env 缺失，检测到 ROOT/.env；自动移入 shared/.env 并保留软链。"
+        if ! mv "${root_env}" "${shared_env}"; then
+            log_error "无法把 ${root_env} 移入 ${shared_env}。"
+            return 1
+        fi
+        ln -sfn "shared/.env" "${root_env}" 2>/dev/null || true
+        return 0
+    fi
+
+    if [ -f "${current_env}" ]; then
+        log_warn "shared/.env 缺失，检测到 current/.env；自动复制到 shared/.env。"
+        if ! cp "${current_env}" "${shared_env}"; then
+            log_error "无法把 ${current_env} 复制到 ${shared_env}。"
+            return 1
+        fi
+        if [ ! -e "${root_env}" ] || [ -L "${root_env}" ]; then
+            ln -sfn "shared/.env" "${root_env}" 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    log_error "shared/.env 缺失，且未找到可恢复的 ROOT/.env 或 current/.env。"
+    log_error "请把生产 .env 放到 ${shared_env} 后重跑 update。"
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Step protocol（结构化阶段协议）
 # 由 admin_update.py 通过 .update.log 解析；格式必须严格保持。
