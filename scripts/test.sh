@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 export STORAGE_ROOT
 
 echo "==> scripts/uninstall"
-bash -n scripts/uninstall.sh scripts/test_uninstall.sh scripts/lib.sh
+bash -n scripts/lib.sh scripts/uninstall.sh scripts/test_uninstall.sh
 bash scripts/test_uninstall.sh
 
 ensure_web_deps() {

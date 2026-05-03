@@ -846,28 +846,74 @@ lumen_stop_local_runtime_jobs() {
 # 列出占用某端口的 PID（每行一个）。优先 lsof，其次 ss，最后 netstat。
 lumen_pids_listening_on_port() {
     local port="$1"
+    local out=""
     if command -v lsof >/dev/null 2>&1; then
-        lsof -tiTCP:"${port}" -sTCP:LISTEN -nP 2>/dev/null | sort -u
-        return 0
+        out="$(lsof -tiTCP:"${port}" -sTCP:LISTEN -nP 2>/dev/null | sort -u || true)"
+        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            out="$(lumen_run_as_root lsof -tiTCP:"${port}" -sTCP:LISTEN -nP 2>/dev/null | sort -u || true)"
+        fi
+        printf '%s\n' "${out}" | sed '/^$/d'
+        if [ -n "${out}" ]; then
+            return 0
+        fi
     fi
     if command -v ss >/dev/null 2>&1; then
         # ss -ltnpH 输出含 users:(("name",pid=NNN,fd=...)) 的字段
-        ss -ltnpH 2>/dev/null \
+        out="$(ss -ltnpH 2>/dev/null \
             | awk -v port="${port}" '$4 ~ ":"port"$" {print $0}' \
             | grep -oE 'pid=[0-9]+' \
             | awk -F= '{print $2}' \
-            | sort -u
-        return 0
+            | sort -u || true)"
+        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            out="$(lumen_run_as_root ss -ltnpH 2>/dev/null \
+                | awk -v port="${port}" '$4 ~ ":"port"$" {print $0}' \
+                | grep -oE 'pid=[0-9]+' \
+                | awk -F= '{print $2}' \
+                | sort -u || true)"
+        fi
+        printf '%s\n' "${out}" | sed '/^$/d'
+        if [ -n "${out}" ]; then
+            return 0
+        fi
     fi
     if command -v netstat >/dev/null 2>&1; then
-        netstat -ltnp 2>/dev/null \
+        out="$(netstat -ltnp 2>/dev/null \
             | awk -v port="${port}" '$4 ~ ":"port"$" {print $7}' \
             | awk -F'/' '{print $1}' \
             | grep -E '^[0-9]+$' \
-            | sort -u
+            | sort -u || true)"
+        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            out="$(lumen_run_as_root netstat -ltnp 2>/dev/null \
+                | awk -v port="${port}" '$4 ~ ":"port"$" {print $7}' \
+                | awk -F'/' '{print $1}' \
+                | grep -E '^[0-9]+$' \
+                | sort -u || true)"
+        fi
+        printf '%s\n' "${out}" | sed '/^$/d'
         return 0
     fi
     return 0
+}
+
+lumen_kill_pid() {
+    local pid="$1"
+    local signal="${2:-TERM}"
+    [ -n "${pid}" ] || return 1
+    kill "-${signal}" "${pid}" 2>/dev/null && return 0
+    if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+        lumen_run_as_root kill "-${signal}" "${pid}" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+lumen_pid_exists() {
+    local pid="$1"
+    [ -n "${pid}" ] || return 1
+    kill -0 "${pid}" 2>/dev/null && return 0
+    if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+        lumen_run_as_root kill -0 "${pid}" 2>/dev/null && return 0
+    fi
+    return 1
 }
 
 # 抓 PID 的命令行文本（用于识别是不是 lumen 自己起的进程）。
@@ -879,7 +925,13 @@ lumen_pid_cmdline() {
     fi
     if command -v ps >/dev/null 2>&1; then
         # macOS ps 没有 /proc，用 -o command= 拿全命令行
-        ps -o command= -p "${pid}" 2>/dev/null || ps -o args= -p "${pid}" 2>/dev/null || true
+        ps -o command= -p "${pid}" 2>/dev/null || ps -o args= -p "${pid}" 2>/dev/null || {
+            if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+                lumen_run_as_root ps -o command= -p "${pid}" 2>/dev/null \
+                    || lumen_run_as_root ps -o args= -p "${pid}" 2>/dev/null \
+                    || true
+            fi
+        }
     fi
 }
 
@@ -894,11 +946,20 @@ lumen_pid_cwd() {
     fi
     if command -v lsof >/dev/null 2>&1; then
         # macOS 的 lsof 即便加 -p PID 仍可能输出全表，必须先匹配 p<pid> 再取它后面的 n 行。
-        lsof -p "${pid}" -d cwd -Fpn 2>/dev/null \
+        local out
+        out="$(lsof -p "${pid}" -d cwd -Fpn 2>/dev/null \
             | awk -v pid="${pid}" '
                 /^p/ { current = substr($0, 2); next }
                 /^n/ && current == pid { sub(/^n/, ""); print; exit }
-            '
+            ' || true)"
+        if [ -z "${out}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            out="$(lumen_run_as_root lsof -p "${pid}" -d cwd -Fpn 2>/dev/null \
+                | awk -v pid="${pid}" '
+                    /^p/ { current = substr($0, 2); next }
+                    /^n/ && current == pid { sub(/^n/, ""); print; exit }
+                ' || true)"
+        fi
+        printf '%s' "${out}"
     fi
 }
 
@@ -958,8 +1019,8 @@ lumen_stop_persisted_runtime() {
     fi
     local pid sent=0
     for pid in "${pids[@]}"; do
-        if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
-            kill "${pid}" 2>/dev/null || true
+        if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
+            lumen_kill_pid "${pid}" TERM || true
             sent=1
         fi
     done
@@ -968,7 +1029,7 @@ lumen_stop_persisted_runtime() {
         for _i in $(seq 1 "${wait_seconds}"); do
             local alive=0
             for pid in "${pids[@]}"; do
-                if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
+                if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
                     alive=1
                     break
                 fi
@@ -977,8 +1038,8 @@ lumen_stop_persisted_runtime() {
             sleep 1
         done
         for pid in "${pids[@]}"; do
-            if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
-                kill -9 "${pid}" 2>/dev/null || true
+            if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
+                lumen_kill_pid "${pid}" KILL || true
             fi
         done
     fi
@@ -1008,7 +1069,7 @@ lumen_release_port_if_lumen() {
     for pid in "${pids[@]}"; do
         if lumen_is_lumen_runtime_process "${pid}"; then
             log_warn "${label}：发现 Lumen 残留进程 pid=${pid}，发送 SIGTERM。"
-            kill "${pid}" 2>/dev/null || true
+            lumen_kill_pid "${pid}" TERM || true
             matched=1
         fi
     done
@@ -1024,9 +1085,9 @@ lumen_release_port_if_lumen() {
         sleep 1
     done
     for pid in "${pids[@]}"; do
-        if kill -0 "${pid}" 2>/dev/null && lumen_is_lumen_runtime_process "${pid}"; then
+        if lumen_pid_exists "${pid}" && lumen_is_lumen_runtime_process "${pid}"; then
             log_warn "${label}：pid=${pid} 未在 SIGTERM 后退出，发送 SIGKILL。"
-            kill -9 "${pid}" 2>/dev/null || true
+            lumen_kill_pid "${pid}" KILL || true
         fi
     done
     sleep 1
