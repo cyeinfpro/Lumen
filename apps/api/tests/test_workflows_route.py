@@ -136,9 +136,8 @@ def test_showcase_refs_use_accessory_preview_instead_of_product_images() -> None
         selected_accessory_image_id="accessory-preview-1",
     )
 
-    assert refs == ["accessory-preview-1", "model-1"]
-    assert "product-1" not in refs
-    assert "product-2" not in refs
+    assert refs == ["product-1", "product-2", "accessory-preview-1"]
+    assert "model-1" not in refs
 
 
 def test_showcase_regeneration_target_keeps_existing_outputs() -> None:
@@ -202,7 +201,8 @@ def test_age_direction_adapts_child_model_pose_and_expression() -> None:
     assert "age-appropriate" in candidate_prompt
     assert "non-adultized" in candidate_prompt
     assert "已确认模特参考图" in showcase_prompt
-    assert "自然生活场景" in showcase_prompt
+    assert "智能生活场景" in showcase_prompt
+    assert "不要纯灰棚拍" in showcase_prompt
     assert "同一张脸" in showcase_prompt
     assert "身材比例" in showcase_prompt
     assert "肢体长度" in showcase_prompt
@@ -232,7 +232,8 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
 
     assert "请根据白底产品图和已确认模特参考图" in prompt
     assert "真实自然的真人模特穿搭电商图" in prompt
-    assert "参考方向：咖啡馆窗边，自然走动回头，高级灰棚拍" in prompt
+    assert "咖啡馆窗边，自然走动回头" in prompt
+    assert "模板强约束：高级灰棚拍" in prompt
     assert "必须保留：lapel shape、button position、pocket placement" in prompt
     assert "配饰只参考已提供的商品/饰品搭配参考图" in prompt
     assert "不要额外新增、替换或强化配饰" in prompt
@@ -316,20 +317,18 @@ def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
     assert len(set(prompts.values())) == len(workflows.DEFAULT_SHOT_PLAN)
 
 
-def test_accessory_preview_prompt_is_flat_lay_product_and_accessories_only() -> None:
+def test_accessory_preview_prompt_is_model_quad_with_accessories_only() -> None:
     prompt = workflows._accessory_preview_prompt(  # noqa: SLF001
         accessory_plan={"items": ["small earrings", "white sneakers"], "strength": "subtle"},
         style_prompt="natural clean styling",
     )
 
-    assert "原商品图" in prompt
-    assert "白底平面商品搭配预览图" in prompt
-    assert "只能出现原商品和所选饰品" in prompt
-    assert "不要出现模特" in prompt
-    assert "不要出现" in prompt and "人体" in prompt
-    assert "不要改款" in prompt
-    assert "不要让饰品遮挡商品关键结构" in prompt
-    assert "平铺图" in prompt
+    assert "已确认模特四宫格参考图" in prompt
+    assert "白底模特配饰四宫格参考图" in prompt
+    assert "正面全身、侧面全身、背面全身、近景头像" in prompt
+    assert "不要穿商品图中的衣服" in prompt
+    assert "不要出现任何商品服饰" in prompt
+    assert "只在模特身上加入所选配饰" in prompt
 
 
 def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None:
@@ -355,8 +354,12 @@ def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None
     )
 
     assert "美术馆长廊，轻松侧身" in prompt
-    assert "自然生活场景" in prompt
-    assert "西装外套" not in prompt
+    assert "智能生活场景" in prompt
+    assert "不要纯灰棚拍" in prompt
+    assert "不要纯色背景" in prompt
+    assert "不要白底" in prompt
+    assert "真实环境线索" in prompt
+    assert "西装外套" in prompt
     assert "羊毛混纺" not in prompt
     assert "boutique hotel lobby" not in prompt
 
@@ -395,6 +398,20 @@ def test_quality_review_prompt_focuses_on_core_ecommerce_checks() -> None:
     assert "电商主图" in prompt
     assert "只返回严格 JSON" in prompt
     assert "approve 或 revise" in prompt
+
+
+@pytest.mark.asyncio
+async def test_quality_review_tasks_are_not_auto_created() -> None:
+    bundles = await workflows._ensure_quality_review_tasks(  # noqa: SLF001
+        None,  # type: ignore[arg-type]
+        user=None,  # type: ignore[arg-type]
+        conv=None,  # type: ignore[arg-type]
+        run=None,  # type: ignore[arg-type]
+        showcase_step=SimpleNamespace(image_ids=["image-1"]),
+        quality_step=SimpleNamespace(output_json={}, task_ids=[]),
+    )
+
+    assert bundles == []
 
 
 def test_quality_summary_merge_preserves_review_task_map() -> None:

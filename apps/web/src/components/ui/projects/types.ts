@@ -117,12 +117,22 @@ export const TEMPLATE_LABELS = [
   ["social_seed", "社媒种草图"],
 ] as const;
 
+export const ASPECT_RATIO_LABELS = [
+  ["4:5", "4:5 竖版主图"],
+  ["3:4", "3:4 竖版"],
+  ["1:1", "1:1 方图"],
+  ["9:16", "9:16 竖屏"],
+  ["16:9", "16:9 横图"],
+] as const;
+
 export type CreateTemplate =
   | "white_ecommerce"
   | "premium_studio"
   | "urban_commute"
   | "lifestyle"
   | "social_seed";
+
+export type CreateAspectRatio = (typeof ASPECT_RATIO_LABELS)[number][0];
 
 export const MAX_PRODUCT_IMAGES = 3;
 export const MAX_PRODUCT_IMAGE_BYTES = 12 * 1024 * 1024;

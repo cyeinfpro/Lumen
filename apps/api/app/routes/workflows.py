@@ -159,13 +159,37 @@ TEMPLATE_LABELS = {
     "white_ecommerce": "白底电商图",
     "premium_studio": "高级灰棚拍",
     "urban_commute": "城市通勤场景",
-    "lifestyle": "自然生活场景",
+    "lifestyle": "智能生活场景",
     "social_seed": "社媒种草图",
 }
 
 def _template_requirement(template: str, product_analysis: dict[str, Any]) -> str:
-    _ = product_analysis
-    return TEMPLATE_LABELS.get(template, template)
+    category = str(product_analysis.get("category") or "服饰").strip() or "服饰"
+    requirements = {
+        "white_ecommerce": (
+            "模板强约束：白底电商主图，纯白或近白背景，柔和棚拍光，主体清晰完整，"
+            "不要生活场景、家具、街景或复杂道具。"
+        ),
+        "premium_studio": (
+            "模板强约束：高级灰棚拍，浅灰/中性灰摄影棚背景，柔和商业布光，"
+            "背景极简高级，不要生活空间、户外街景或杂乱道具。"
+        ),
+        "urban_commute": (
+            f"模板强约束：城市通勤场景，背景必须是与{category}匹配的真实城市环境，"
+            "例如街区、人行道、办公楼大堂、地铁口、咖啡店外或城市橱窗。"
+            "不要纯灰棚拍、不要纯色背景、不要白底。"
+        ),
+        "lifestyle": (
+            f"模板强约束：智能生活场景，背景必须是与{category}匹配的真实生活空间，"
+            "例如现代家居、智能客厅、校园/居家活动空间、简洁室内生活场景或轻生活方式场景。"
+            "必须有自然的空间层次和真实环境线索；不要纯灰棚拍、不要纯色背景、不要白底。"
+        ),
+        "social_seed": (
+            f"模板强约束：社媒种草图，背景必须是与{category}匹配的真实生活方式/街拍/室内场景，"
+            "构图更自然、有分享感，但仍保持商品清晰。不要纯灰棚拍、不要纯色背景、不要白底。"
+        ),
+    }
+    return requirements.get(template, TEMPLATE_LABELS.get(template, template))
 
 
 def _showcase_prompt_brief(
@@ -328,10 +352,13 @@ def _showcase_reference_image_ids(
     model_image_id: str | None,
     selected_accessory_image_id: str | None,
 ) -> list[str]:
-    product_or_accessory_ids = (
-        [selected_accessory_image_id] if selected_accessory_image_id else product_image_ids
+    model_reference_id = selected_accessory_image_id or model_image_id
+    return _dedupe_nonempty(
+        [
+            *product_image_ids,
+            model_reference_id or "",
+        ]
     )
-    return _dedupe_nonempty([*product_or_accessory_ids, model_image_id or ""])
 
 
 def _showcase_target_image_count(
@@ -614,10 +641,12 @@ def _accessory_preview_prompt(
     item_text = ", ".join(str(item) for item in items) if isinstance(items, list) else ""
     strength = str(accessory_plan.get("strength") or "subtle")
     return (
-        "请根据上传的原商品图，生成一张白底平面商品搭配预览图。画面中只能出现原商品和所选饰品，"
-        "不要出现模特、人体、衣架、假人、场景、家具或多余道具。保持原商品的颜色、版型、材质观感和可见细节，"
-        "不要改款，不要让饰品遮挡商品关键结构。饰品应与原商品自然摆放在同一张白底商品图中，"
-        "像电商商品搭配图或平铺图，构图干净，主体完整，适合用户确认搭配。"
+        "请根据上传的已确认模特四宫格参考图，生成一张新的白底模特配饰四宫格参考图。"
+        "画面仍然是同一个模特的四个视图：正面全身、侧面全身、背面全身、近景头像。"
+        "严格保持模特的人脸、发型、肤色、年龄感、身高、身材比例、肢体长度和整体体态一致，不要换人。"
+        "模特只穿原参考图中的简单中性基础服装，不要穿商品图中的衣服，不要出现任何商品服饰。"
+        "只在模特身上加入所选配饰，用于确认配饰上身效果；配饰要自然、低存在感、不要遮挡身体关键结构。"
+        "白底或近白底，干净商业参考图风格，无场景、无家具、无多余道具、无文字、无水印。"
         f"Accessories: {item_text or 'no accessories'}. Styling strength: {strength}. "
         f"Additional direction: {style_prompt or 'clean ecommerce styling'}."
     )
@@ -1344,87 +1373,8 @@ async def _ensure_quality_review_tasks(
     showcase_step: WorkflowStep,
     quality_step: WorkflowStep,
 ) -> list[_PublishBundle]:
-    image_ids = _dedupe_nonempty(showcase_step.image_ids or [])
-    if not image_ids:
-        return []
-    output_json = dict(quality_step.output_json or {})
-    review_map = output_json.get("review_tasks")
-    if not isinstance(review_map, dict):
-        review_map = {}
-    missing_image_ids = [image_id for image_id in image_ids if image_id not in review_map]
-    if not missing_image_ids:
-        return []
-
-    product_step = await _step(db, run.id, "product_analysis")
-    candidate = await _selected_candidate(db, run.id)
-    showcase_input = showcase_step.input_json or {}
-    shot_plan = showcase_input.get("shot_plan")
-    shot_by_image: dict[str, str | None] = {}
-    if isinstance(shot_plan, list):
-        for image_id, shot_type in zip(image_ids, shot_plan, strict=False):
-            shot_by_image[image_id] = str(shot_type) if shot_type is not None else None
-
-    bundles: list[_PublishBundle] = []
-    for image_id in missing_image_ids:
-        existing_completion = (
-            await db.execute(
-                select(Completion.id).where(
-                    Completion.user_id == user.id,
-                    Completion.upstream_request["workflow_run_id"].astext == run.id,
-                    Completion.upstream_request["workflow_step_key"].astext
-                    == "quality_review",
-                    Completion.upstream_request["workflow_review_image_id"].astext
-                    == image_id,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing_completion:
-            review_map[image_id] = existing_completion
-            quality_step.task_ids = _dedupe_nonempty(
-                [*(quality_step.task_ids or []), existing_completion]
-            )
-            continue
-        attachment_ids = _dedupe_nonempty(
-            [
-                *(run.product_image_ids or []),
-                candidate.contact_sheet_image_id or "",
-                image_id,
-            ]
-        )
-        bundle, completion_id, _ = await _create_workflow_task(
-            db=db,
-            user=user,
-            conv=conv,
-            intent=Intent.VISION_QA,
-            text=_quality_review_prompt(
-                product_analysis=product_step.output_json or {},
-                selected_candidate=candidate,
-                shot_type=shot_by_image.get(image_id),
-            ),
-            attachment_ids=attachment_ids,
-            idempotency_key=f"wf:{run.id[:18]}:qc:{image_id[:20]}",
-            workflow_run_id=run.id,
-            workflow_step_key="quality_review",
-            chat_params=ChatParamsIn(reasoning_effort="low", stream=True),
-            workflow_meta={
-                "workflow_action": "quality_review",
-                "workflow_review_image_id": image_id,
-            },
-        )
-        if completion_id:
-            review_map[image_id] = completion_id
-            quality_step.task_ids = _dedupe_nonempty(
-                [*(quality_step.task_ids or []), completion_id]
-            )
-            bundles.append(bundle)
-    output_json["review_tasks"] = review_map
-    output_json["review_task_count"] = len(review_map)
-    quality_step.output_json = output_json
-    if bundles:
-        quality_step.status = "running"
-        run.status = "running"
-        run.current_step = "quality_review"
-    return bundles
+    """Automatic quality review is disabled for apparel workflows."""
+    return []
 
 
 async def _ensure_legacy_quality_reports(
@@ -1923,28 +1873,7 @@ async def create_model_candidates(
         "style_prompt": body.style_prompt or run.user_prompt,
     }
     if body.accessory_plan.enabled:
-        accessory_bundle, _, accessory_gen_ids = await _create_workflow_task(
-            db=db,
-            user=user,
-            conv=conv,
-            intent=Intent.IMAGE_TO_IMAGE,
-            text=_accessory_preview_prompt(
-                accessory_plan=body.accessory_plan.model_dump(),
-                style_prompt=body.style_prompt or run.user_prompt,
-            ),
-            attachment_ids=run.product_image_ids or [],
-            idempotency_key=f"wf:{run.id[:24]}:acc:init",
-            workflow_run_id=run.id,
-            workflow_step_key="model_approval",
-            image_params=_image_params(aspect_ratio="4:5", count=1, render_quality="high"),
-            workflow_meta={
-                "workflow_action": "accessory_preview",
-                "workflow_origin": "model_candidates",
-            },
-        )
-        approval.status = "running"
-        approval.task_ids = _dedupe_nonempty([*(approval.task_ids or []), *accessory_gen_ids])
-        bundles.append(accessory_bundle)
+        approval.status = "waiting_input"
     conv.last_activity_at = _now()
     await db.commit()
     await _publish_bundles(db, user_id=user.id, conv_id=conv.id, bundles=bundles)
@@ -2128,7 +2057,7 @@ async def create_accessory_previews(
             accessory_plan=body.accessory_plan.model_dump(),
             style_prompt=body.style_prompt,
         ),
-        attachment_ids=run.product_image_ids or [],
+        attachment_ids=[candidate.contact_sheet_image_id],
         idempotency_key=f"wf:{run.id[:12]}:acc:{candidate.id[:8]}:{new_uuid7()[:8]}",
         workflow_run_id=run.id,
         workflow_step_key="model_approval",
@@ -2381,7 +2310,7 @@ async def revise_showcase_image(
     showcase.task_ids = [*(showcase.task_ids or []), *gen_ids]
     showcase.status = "running"
     quality = await _step(db, run.id, "quality_review")
-    quality.status = "running"
+    quality.status = "waiting_input"
     quality.input_json = {
         **(quality.input_json or {}),
         "latest_revision": {
@@ -2390,7 +2319,7 @@ async def revise_showcase_image(
             "scope": body.scope,
         },
     }
-    run.current_step = "quality_review"
+    run.current_step = "showcase_generation"
     run.status = "running"
     conv.last_activity_at = _now()
     await db.commit()
