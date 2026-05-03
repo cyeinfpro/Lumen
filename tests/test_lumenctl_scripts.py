@@ -1386,7 +1386,17 @@ def test_docker_release_workflow_builds_amd64_and_arm64() -> None:
     workflow = (ROOT / ".github" / "workflows" / "docker-release.yml").read_text(
         encoding="utf-8"
     )
-    assert "platforms: linux/amd64,linux/arm64" in workflow
+    # platforms 现在通过 matrix 字段配置（lumen-web 单独 amd64-only，
+    # 因为 QEMU emulated arm64 跑 Next.js Turbopack 会 SIGILL）。
+    assert 'platforms: "linux/amd64,linux/arm64"' in workflow, (
+        "expected python images (api/worker/tgbot) to build amd64+arm64"
+    )
+    assert 'platforms: "linux/amd64"' in workflow, (
+        "expected lumen-web matrix entry to be amd64-only"
+    )
+    assert "platforms: ${{ matrix.image.platforms }}" in workflow, (
+        "expected build step to read platforms from matrix"
+    )
     assert "needs: quality-gate" in workflow
     assert "type=semver,pattern=v{{version}}" in workflow
     assert "type=semver,pattern=v{{major}}.{{minor}}" in workflow
