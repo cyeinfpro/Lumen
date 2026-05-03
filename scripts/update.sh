@@ -529,10 +529,10 @@ if [ "${LUMEN_UPDATE_SKIP_BACKUP:-0}" = "1" ]; then
     emit_done backup_preflight 0
 else
     BACKUP_SCRIPT=""
-    if [ -n "${CURRENT_RELEASE}" ] && [ -x "${CURRENT_RELEASE}/scripts/backup.sh" ]; then
-        BACKUP_SCRIPT="${CURRENT_RELEASE}/scripts/backup.sh"
-    elif [ -x "${SCRIPT_DIR}/backup.sh" ]; then
+    if [ -x "${SCRIPT_DIR}/backup.sh" ]; then
         BACKUP_SCRIPT="${SCRIPT_DIR}/backup.sh"
+    elif [ -n "${CURRENT_RELEASE}" ] && [ -x "${CURRENT_RELEASE}/scripts/backup.sh" ]; then
+        BACKUP_SCRIPT="${CURRENT_RELEASE}/scripts/backup.sh"
     fi
     if [ -z "${BACKUP_SCRIPT}" ]; then
         log_error "[backup_preflight] 找不到 backup.sh，无法生成备份；如需跳过，显式 export LUMEN_UPDATE_SKIP_BACKUP=1（不推荐）。"
@@ -540,9 +540,15 @@ else
         exit 1
     fi
     log_info "[backup_preflight] 调用 ${BACKUP_SCRIPT}（BACKUP_ROOT=${UPDATE_LOG_DIR}）"
-    if ! LUMEN_BACKUP_ROOT="${UPDATE_LOG_DIR}" BACKUP_ROOT="${UPDATE_LOG_DIR}" \
+    if ! LUMEN_ENV_FILE="${SHARED_ENV}" LUMEN_BACKUP_ROOT="${UPDATE_LOG_DIR}" BACKUP_ROOT="${UPDATE_LOG_DIR}" \
+            DB_USER="$(lumen_env_value DB_USER "${SHARED_ENV}")" \
+            DB_NAME="$(lumen_env_value DB_NAME "${SHARED_ENV}")" \
+            REDIS_PASSWORD="$(lumen_env_value REDIS_PASSWORD "${SHARED_ENV}")" \
             bash "${BACKUP_SCRIPT}"; then
+        emit_info backup_preflight backup_script "${BACKUP_SCRIPT}"
         log_error "[backup_preflight] 备份失败 → abort（不允许无备份继续，4K 任务环境死规则）。"
+        log_error "[backup_preflight] 已使用 env 文件：${SHARED_ENV}"
+        log_error "[backup_preflight] 请查看上方 backup 日志中的 pg_dump/redis 具体错误。"
         emit_fail backup_preflight 1
         exit 1
     fi
