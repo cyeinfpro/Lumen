@@ -336,8 +336,16 @@ probe_sub2api_upstream() {
 
 lumenctl_resolve_script() {
     local script_name="$1"
+    if [ -f "${SCRIPT_DIR}/${script_name}" ]; then
+        printf '%s' "${SCRIPT_DIR}/${script_name}"
+        return 0
+    fi
     if [ -f "${ROOT}/current/scripts/${script_name}" ]; then
         printf '%s' "${ROOT}/current/scripts/${script_name}"
+        return 0
+    fi
+    if [ -f "${LUMEN_DEPLOY_ROOT}/current/scripts/${script_name}" ]; then
+        printf '%s' "${LUMEN_DEPLOY_ROOT}/current/scripts/${script_name}"
         return 0
     fi
     if [ -f "${ROOT}/scripts/${script_name}" ]; then

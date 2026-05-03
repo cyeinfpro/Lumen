@@ -192,7 +192,21 @@ fi
 # ---------------------------------------------------------------------------
 # ROOT / 状态变量
 # ---------------------------------------------------------------------------
-ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
+SCRIPT_ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
+ROOT="${LUMEN_UPDATE_ROOT:-${SCRIPT_ROOT}}"
+ROOT_SOURCE="script"
+if [ -z "${LUMEN_UPDATE_ROOT:-}" ] \
+        && [ "${ROOT}" != "${LUMEN_DEPLOY_ROOT}" ] \
+        && [ ! -f "${ROOT}/shared/.env" ] \
+        && [ ! -L "${ROOT}/current" ] \
+        && [ -f "${LUMEN_DEPLOY_ROOT}/shared/.env" ]; then
+    ROOT="${LUMEN_DEPLOY_ROOT}"
+    ROOT_SOURCE="deploy_root"
+    if [ -z "${LUMEN_REPO_DIR:-}" ] && [ -f "${SCRIPT_ROOT}/docker-compose.yml" ]; then
+        LUMEN_REPO_DIR="${SCRIPT_ROOT}"
+        export LUMEN_REPO_DIR
+    fi
+fi
 SHARED_DIR="${ROOT}/shared"
 SHARED_ENV="${SHARED_DIR}/.env"
 LUMEN_DATA_ROOT="${LUMEN_DATA_ROOT:-/opt/lumendata}"
@@ -209,6 +223,9 @@ ROLLBACK_DONE=0
 lumen_install_signal_handlers
 
 log_info "项目根目录：${ROOT}"
+if [ "${ROOT_SOURCE}" = "deploy_root" ]; then
+    log_info "检测到已安装部署目录：${ROOT}；发布物来源：${LUMEN_REPO_DIR:-${SCRIPT_ROOT}}"
+fi
 log_info "operation_id：${OPERATION_ID}"
 
 # ---------------------------------------------------------------------------
@@ -380,7 +397,14 @@ fi
 
 # 确保 shared/.env 至少存在（用 lib.sh 的 helper）
 if ! lumen_release_ensure_shared_env "${ROOT}"; then
+    emit_info check reason "missing_shared_env"
     log_error "[check] shared/.env 不可用，无法继续。"
+    log_error "[check] 当前检查目录：${ROOT}"
+    if [ "${ROOT}" != "${LUMEN_DEPLOY_ROOT}" ] && [ -f "${LUMEN_DEPLOY_ROOT}/shared/.env" ]; then
+        log_error "[check] 发现 ${LUMEN_DEPLOY_ROOT}/shared/.env；请执行：LUMEN_UPDATE_ROOT=${LUMEN_DEPLOY_ROOT} bash ${SCRIPT_DIR}/update.sh"
+    else
+        log_error "[check] 如果还没完整安装，请先执行安装；已安装实例请从部署目录的 current/scripts/lumenctl.sh 执行更新。"
+    fi
     emit_fail check 1
     exit 1
 fi
@@ -416,7 +440,9 @@ fi
 # 解析目标 tag
 TARGET_TAG="$(lumen_image_tag_resolve "${LUMEN_UPDATE_CHANNEL}" "${SHARED_ENV}" 2>/dev/null || echo "")"
 if [ -z "${TARGET_TAG}" ]; then
+    emit_info check reason "target_tag_empty"
     log_error "[check] 无法解析目标 tag（channel=${LUMEN_UPDATE_CHANNEL}）。"
+    log_error "[check] 可临时执行：LUMEN_UPDATE_CHANNEL=main bash ${SCRIPT_DIR}/update.sh"
     emit_fail check 1
     exit 1
 fi
@@ -531,10 +557,13 @@ emit_start fetch_release
 
 # 发布物来源目录：
 #   - LUMEN_REPO_DIR 显式指定时优先采用；
+#   - 当前脚本来自完整 git 仓库时，优先从该仓库复制（让脚本/compose 修复进入新 release）；
 #   - 标准 release 布局下从 current release 复制，确保新 release 根部有 docker-compose.yml；
 #   - 旧 in-place / 开发仓库下才从 ROOT 复制。
 if [ -n "${LUMEN_REPO_DIR:-}" ]; then
     REPO_DIR="${LUMEN_REPO_DIR}"
+elif [ -f "${SCRIPT_ROOT}/docker-compose.yml" ] && [ -d "${SCRIPT_ROOT}/.git" ]; then
+    REPO_DIR="${SCRIPT_ROOT}"
 elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then
     REPO_DIR="${CURRENT_RELEASE}"
 else
