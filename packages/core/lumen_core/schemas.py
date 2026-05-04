@@ -464,8 +464,10 @@ ModelAgeSegment = Literal[
     "middle_aged",
     "senior",
 ]
-ModelLibrarySource = Literal["preset", "favorite", "user_upload"]
+ModelLibrarySource = Literal["preset", "favorite", "user_upload", "generated"]
 ModelLibraryVisibilityScope = Literal["global_preset", "user_private"]
+# 模特库独立生成任务允许的张数档位。前端展示按钮 1/2/4/16，后端做白名单校验。
+ModelLibraryGenerateCount = Literal[1, 2, 4, 16]
 
 
 class ApparelModelLibrarySyncOut(BaseModel):
@@ -513,7 +515,7 @@ class ApparelModelLibraryListOut(BaseModel):
 
 
 class ApparelModelLibraryItemCreateIn(BaseModel):
-    source: Literal["favorite", "user_upload"] = "user_upload"
+    source: Literal["favorite", "user_upload", "generated"] = "user_upload"
     visibility_scope: Literal["user_private"] = "user_private"
     image_id: str
     title: str = Field(min_length=1, max_length=120)
@@ -521,6 +523,8 @@ class ApparelModelLibraryItemCreateIn(BaseModel):
     gender: str | None = Field(default=None, max_length=40)
     appearance_direction: str | None = Field(default=None, max_length=80)
     style_tags: list[str] = Field(default_factory=list, max_length=12)
+    # 上传/收藏入库时是否在后台触发 vision 自动识别（默认开）。
+    auto_tag: bool = True
 
 
 class ApparelModelLibraryItemPatchIn(BaseModel):
@@ -534,6 +538,84 @@ class ApparelModelLibraryItemPatchIn(BaseModel):
 class ApparelModelLibrarySelectIn(BaseModel):
     library_item_id: str
     mode: Literal["use_directly"] = "use_directly"
+
+
+class ApparelModelLibraryGenerateIn(BaseModel):
+    """模特库独立生成入参（不绑定项目）。
+
+    后端会创建一条隐藏的 WorkflowRun(type="apparel_model_library_generate")
+    + 一个 step + N 个 candidate 任务，每个 candidate 输出一张独立模特肖像。
+    """
+
+    age_segment: ModelAgeSegment
+    gender: Literal["female", "male"] = "female"
+    appearance_direction: str | None = Field(default=None, max_length=80)
+    extra_requirements: str | None = Field(default=None, max_length=400)
+    style_tags: list[str] = Field(default_factory=list, max_length=12)
+    count: ModelLibraryGenerateCount = 4
+    # 生成完是否对每张自动 vision 打标签（用户筛选/收藏前预填字段，默认开）。
+    auto_tag: bool = True
+
+
+class ApparelModelLibraryJobItemOut(BaseModel):
+    """模特库任务里的单张产出。已收藏的 image_id 也可在浏览页里查到。"""
+
+    image_id: str
+    image_url: str
+    thumb_url: str | None = None
+    saved_item_id: str | None = None  # 已收藏入库时携带 library item id
+    style_tags: list[str] = Field(default_factory=list)
+    appearance_direction: str | None = None
+
+
+class ApparelModelLibraryJobOut(BaseModel):
+    """聚合视图：
+
+    - origin="library_generate"：独立模特库生成 workflow
+    - origin="project_candidate"：项目里的 model_candidates step（聚合用，方便用户在一处看到所有生成中/已生成的模特）
+    """
+
+    job_id: str
+    origin: Literal["library_generate", "project_candidate"]
+    workflow_run_id: str
+    project_title: str | None = None  # 仅 project_candidate 场景填
+    status: Literal["queued", "running", "succeeded", "failed", "partial"]
+    requested_count: int
+    finished_count: int
+    age_segment: ModelAgeSegment | None = None
+    gender: str | None = None
+    appearance_direction: str | None = None
+    extra_requirements: str | None = None
+    items: list[ApparelModelLibraryJobItemOut] = Field(default_factory=list)
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class ApparelModelLibraryJobsOut(BaseModel):
+    items: list[ApparelModelLibraryJobOut]
+
+
+class ApparelModelLibrarySaveJobItemIn(BaseModel):
+    """从任务中心把一张 generated 图收藏入库。"""
+
+    title: str = Field(min_length=1, max_length=120)
+    age_segment: ModelAgeSegment
+    gender: Literal["female", "male"] = "female"
+    appearance_direction: str | None = Field(default=None, max_length=80)
+    style_tags: list[str] = Field(default_factory=list, max_length=12)
+    auto_tag: bool = True
+
+
+class ApparelModelLibraryAutoTagOut(BaseModel):
+    """vision 自动识别返回。"""
+
+    item_id: str
+    style_tags: list[str] = Field(default_factory=list)
+    appearance_direction: str | None = None
+    age_segment: ModelAgeSegment | None = None
+    gender: str | None = None
+    notes: str | None = None  # 模型给出的简短说明（可选展示）
 
 
 class ModelCandidateSaveToLibraryIn(BaseModel):

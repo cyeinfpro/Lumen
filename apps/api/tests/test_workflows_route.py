@@ -691,3 +691,175 @@ def test_quality_summary_merge_preserves_review_task_map() -> None:
     assert payload["average_score"] == 88.0
     assert payload["review_tasks"] == {"image-1": "completion-1"}
     assert payload["review_task_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 模特库独立生成 + 任务中心 + auto-tag helper 单测
+# ---------------------------------------------------------------------------
+
+
+def test_model_library_run_title_includes_age_gender_and_appearance() -> None:
+    title = workflows._model_library_run_title(  # noqa: SLF001
+        age_segment="young_adult",
+        gender="female",
+        appearance_direction="asian",
+    )
+    assert "模特库生成" in title
+    assert "青年女性" in title
+    assert "asian" in title
+
+
+def test_model_library_run_title_handles_missing_appearance() -> None:
+    title = workflows._model_library_run_title(  # noqa: SLF001
+        age_segment="adult",
+        gender="male",
+        appearance_direction=None,
+    )
+    assert "模特库生成" in title
+    assert "成年男性" in title
+    # 没有 appearance 不应留尾随 ·
+    assert not title.endswith("·")
+
+
+def test_model_library_generate_prompt_embeds_age_gender_appearance() -> None:
+    prompt = workflows._model_library_generate_prompt(  # noqa: SLF001
+        age_segment="young_adult",
+        gender="female",
+        appearance_direction="asian",
+        extra_requirements="natural studio",
+        style_tags=["minimal", "soft light"],
+        candidate_index=2,
+    )
+    assert "Gender: female" in prompt
+    assert "young adult proportions" in prompt
+    assert "Appearance direction: asian." in prompt
+    assert "natural studio" in prompt
+    assert "minimal" in prompt
+    assert "Variation index: 2." in prompt
+
+
+def test_model_library_job_status_combines_step_status_and_count() -> None:
+    f = workflows._model_library_job_status  # noqa: SLF001
+    # running with no images -> running
+    assert f(step_status="running", requested_count=4, finished_count=0) == "running"
+    # running with partial -> still running
+    assert f(step_status="running", requested_count=4, finished_count=2) == "running"
+    # succeeded with full -> succeeded
+    assert f(step_status="succeeded", requested_count=4, finished_count=4) == "succeeded"
+    # succeeded with partial -> partial
+    assert f(step_status="succeeded", requested_count=4, finished_count=2) == "partial"
+    # failed with no images -> failed
+    assert f(step_status="failed", requested_count=4, finished_count=0) == "failed"
+    # failed with some succeeded -> partial
+    assert f(step_status="failed", requested_count=4, finished_count=2) == "partial"
+
+
+def test_model_library_run_inputs_normalizes_input_json() -> None:
+    step = SimpleNamespace(
+        input_json={
+            "age_segment": "young_adult",
+            "gender": "F",
+            "appearance_direction": "  asian  ",
+            "style_tags": ["minimal", "minimal", "studio"],
+            "count": 4,
+            "auto_tag": True,
+        },
+        task_ids=["t1", "t2", "t3", "t4"],
+    )
+    out = workflows._model_library_run_inputs(step)  # noqa: SLF001
+    assert out["age_segment"] == "young_adult"
+    assert out["gender"] == "female"
+    assert out["appearance_direction"] == "asian"
+    assert out["style_tags"] == ["minimal", "studio"]
+    assert out["count"] == 4
+    assert out["auto_tag"] is True
+
+
+def test_merge_library_item_fields_overwrites_style_tags_only() -> None:
+    existing = {
+        "id": "user:1",
+        "title": "preset",
+        "age_segment": "user_favorites",
+        "gender": "",
+        "appearance_direction": None,
+        "style_tags": ["old"],
+    }
+    merged = workflows._merge_library_item_fields(  # noqa: SLF001
+        existing=existing,
+        style_tags=["new", "tag"],
+        appearance_direction="european",
+        age_segment="young_adult",
+        gender="female",
+        notes="auto tagged",
+    )
+    # style_tags overwrites unconditionally
+    assert merged["style_tags"] == ["new", "tag"]
+    # appearance_direction empty before -> filled
+    assert merged["appearance_direction"] == "european"
+    # age_segment user_favorites -> upgraded
+    assert merged["age_segment"] == "young_adult"
+    # gender empty -> filled
+    assert merged["gender"] == "female"
+    assert merged["auto_tag_notes"] == "auto tagged"
+
+
+def test_merge_library_item_fields_preserves_user_filled_appearance() -> None:
+    existing = {
+        "id": "user:1",
+        "title": "preset",
+        "age_segment": "adult",
+        "gender": "male",
+        "appearance_direction": "european",
+        "style_tags": [],
+    }
+    merged = workflows._merge_library_item_fields(  # noqa: SLF001
+        existing=existing,
+        style_tags=["minimal"],
+        appearance_direction="asian",
+        age_segment="senior",
+        gender="female",
+        notes=None,
+    )
+    # 用户已填的字段保守不被覆盖
+    assert merged["appearance_direction"] == "european"
+    assert merged["age_segment"] == "adult"
+    assert merged["gender"] == "male"
+    # 仅 style_tags 被覆盖
+    assert merged["style_tags"] == ["minimal"]
+
+
+def test_normalize_tagged_age_recognizes_aliases() -> None:
+    f = workflows._normalize_tagged_age  # noqa: SLF001
+    assert f("young_adult") == "young_adult"
+    assert f("YOUNG") == "young_adult"
+    assert f("kids") == "child"
+    assert f("middleaged") == "middle_aged"
+    assert f("garbage") is None
+
+
+def test_normalize_tagged_gender_normalizes_aliases() -> None:
+    f = workflows._normalize_tagged_gender  # noqa: SLF001
+    assert f("female") == "female"
+    assert f("Woman") == "female"
+    assert f("M") == "male"
+    assert f("unknown") is None
+
+
+def test_parse_tagging_text_strips_markdown_fences() -> None:
+    payload = workflows._parse_tagging_text(  # noqa: SLF001
+        '```json\n{"style_tags": ["a", "b"], "gender": "female"}\n```'
+    )
+    assert payload["style_tags"] == ["a", "b"]
+    assert payload["gender"] == "female"
+
+
+def test_parse_tagging_text_extracts_json_from_noisy_text() -> None:
+    payload = workflows._parse_tagging_text(  # noqa: SLF001
+        'Here is the JSON: {"style_tags": ["x"]}\nthank you'
+    )
+    assert payload == {"style_tags": ["x"]}
+
+
+def test_parse_tagging_text_returns_empty_on_invalid_json() -> None:
+    assert workflows._parse_tagging_text("not json at all") == {}  # noqa: SLF001
+    assert workflows._parse_tagging_text("") == {}  # noqa: SLF001

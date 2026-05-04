@@ -46,6 +46,13 @@ MODEL_LIBRARY_IMAGE_SUFFIXES: frozenset[str] = frozenset(
     {".png", ".jpg", ".jpeg", ".webp"}
 )
 MODEL_LIBRARY_GENDER_SEGMENTS: frozenset[str] = frozenset({"female", "male"})
+# 模特库独立生成允许的张数档位；前端按钮组也按此白名单。
+MODEL_LIBRARY_GENERATE_COUNTS: frozenset[int] = frozenset({1, 2, 4, 16})
+# 隐藏 workflow type：模特库独立生成任务，不出现在 ProjectsIndex 列表里。
+WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE = "apparel_model_library_generate"
+# 该类型 workflow 的 step_key 和 worker action，与 model_candidates 区分。
+MODEL_LIBRARY_GENERATE_STEP_KEY = "model_library_generate"
+MODEL_LIBRARY_GENERATE_WORKER_ACTION = "model_library_generate"
 MODEL_LIBRARY_FOLDER_BY_AGE: MappingProxyType[str, str] = MappingProxyType(
     {
         "user_favorites": "00_user_favorites",
@@ -167,6 +174,9 @@ __all__ = [
     "MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS",
     "MODEL_LIBRARY_FOLDER_BY_AGE",
     "MODEL_LIBRARY_GENDER_SEGMENTS",
+    "MODEL_LIBRARY_GENERATE_COUNTS",
+    "MODEL_LIBRARY_GENERATE_STEP_KEY",
+    "MODEL_LIBRARY_GENERATE_WORKER_ACTION",
     "MODEL_LIBRARY_IMAGE_SUFFIXES",
     "MODEL_LIBRARY_MAX_BINARY_BYTES",
     "MODEL_LIBRARY_SCHEMA_VERSION",
@@ -174,6 +184,7 @@ __all__ = [
     "MODEL_LIBRARY_SYNC_COOLDOWN_SECONDS",
     "MODEL_LIBRARY_SYNC_MODES",
     "MODEL_LIBRARY_SYNC_RETRY_COOLDOWN_SECONDS",
+    "WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE",
     "_SYNC_LOCK",
     "_age_segment_from_folder_name",
     "_gender_from_folder_name",

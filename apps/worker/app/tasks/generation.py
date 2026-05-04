@@ -1236,6 +1236,106 @@ async def _maybe_enqueue_workflow_quality_review(
     _ = redis
 
 
+async def _maybe_record_model_library_generate_image(
+    *,
+    session: Any,
+    user_id: str,
+    generation: Generation,
+    image_id: str,
+) -> None:
+    """模特库独立生成 worker 钩子。
+
+    在主生成事务内：把刚生成的 image_id 追加到对应 WorkflowStep.image_ids；
+    若 input_json.auto_tag=True，立即同步调 vision tagging（每张独立轻量），
+    把识别结果写到 step.output_json.tagging_results[image_id]。
+
+    一切异常 graceful：tagging 失败不能让主生成任务从 succeeded 翻成 failed。
+    """
+    req = (
+        generation.upstream_request
+        if isinstance(generation.upstream_request, dict)
+        else {}
+    )
+    if req.get("workflow_action") != "model_library_generate":
+        return
+    if req.get("workflow_step_key") != "model_library_generate":
+        return
+    run_id = req.get("workflow_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+
+    run = (
+        await session.execute(
+            select(WorkflowRun).where(
+                WorkflowRun.id == run_id,
+                WorkflowRun.user_id == user_id,
+                WorkflowRun.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        return
+    step = (
+        await session.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run.id,
+                WorkflowStep.step_key == "model_library_generate",
+            )
+        )
+    ).scalar_one_or_none()
+    if step is None:
+        return
+
+    image_ids = list(step.image_ids or [])
+    if image_id not in image_ids:
+        image_ids.append(image_id)
+    step.image_ids = list(dict.fromkeys(image_ids))
+
+    input_json = step.input_json if isinstance(step.input_json, dict) else {}
+    auto_tag = bool(input_json.get("auto_tag", False))
+    requested = int(input_json.get("count") or 0) or len(step.task_ids or [])
+
+    output_json = dict(step.output_json or {})
+    if auto_tag:
+        try:
+            from .model_library_tagging import auto_tag_model_image
+
+            result = await auto_tag_model_image(
+                session,
+                image_id=image_id,
+                user_id=user_id,
+            )
+            tagging_results = output_json.get("tagging_results")
+            if not isinstance(tagging_results, dict):
+                tagging_results = {}
+            tagging_results[image_id] = {
+                "style_tags": list(result.style_tags or []),
+                "appearance_direction": result.appearance_direction,
+                "age_segment": result.age_segment,
+                "gender": result.gender,
+                "notes": result.notes,
+            }
+            output_json["tagging_results"] = tagging_results
+        except (TimeoutError, asyncio.CancelledError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "model_library_generate tagging skipped run=%s image=%s err=%s",
+                run.id,
+                image_id,
+                exc,
+            )
+
+    # 当所有 task 都跑完时把 step.status 推到 succeeded（部分失败保留 partial 语义由 API 层判定）。
+    finished_count = len(step.image_ids or [])
+    if finished_count >= requested and requested > 0:
+        if step.status == "running":
+            step.status = "succeeded"
+            run.status = "completed"
+            run.current_step = "model_library_generate"
+    step.output_json = output_json
+
+
 def _primary_input_image_id_valid(
     primary_input_image_id: str | None, input_image_ids: list[str]
 ) -> bool:
@@ -3055,6 +3155,23 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     generation=gen,
                     image_id=image_id,
                 )
+
+                try:
+                    await _maybe_record_model_library_generate_image(
+                        session=session,
+                        user_id=user_id,
+                        generation=gen,
+                        image_id=image_id,
+                    )
+                except (TimeoutError, asyncio.CancelledError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # 模特库 hook 任何异常都不能让主生成任务从 succeeded 翻成 failed
+                    logger.info(
+                        "model_library_generate post-success hook failed task=%s err=%s",
+                        task_id,
+                        exc,
+                    )
 
                 await session.commit()
 
