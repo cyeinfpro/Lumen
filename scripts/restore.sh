@@ -14,9 +14,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
+if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
+    echo "[restore] ERROR: ${SCRIPT_DIR}/lib.sh missing" >&2
+    exit 1
+fi
 # shellcheck source=lib.sh
-if [ -f "${SCRIPT_DIR}/lib.sh" ]; then
-    . "${SCRIPT_DIR}/lib.sh"
+. "${SCRIPT_DIR}/lib.sh"
+
+# 自动从 shared/.env 兜底：lumenctl 调用本脚本时只透传 LUMEN_* 系列 env，
+# 不会传 REDIS_URL / REDIS_PASSWORD / DB_*。无 .env 兜底则 redis_cli 拿不到密码。
+ENV_FILE="$(lumen_find_shared_env "${SCRIPT_ROOT}" 2>/dev/null || true)"
+if [ -n "${ENV_FILE}" ]; then
+    export LUMEN_ENV_FILE="${ENV_FILE}"
+    for key in DB_USER DB_NAME DB_PASSWORD REDIS_URL REDIS_PASSWORD BACKUP_ROOT PG_CONTAINER REDIS_CONTAINER; do
+        lumen_dotenv_export_if_unset "${key}" "${ENV_FILE}"
+    done
 fi
 
 TS="${1:-}"
@@ -34,7 +46,8 @@ PG_FILE="$BACKUP_ROOT/pg/$TS.pg.dump.gz"
 REDIS_FILE="$BACKUP_ROOT/redis/$TS.redis.tgz"
 PG_CONTAINER="${PG_CONTAINER:-lumen-pg}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-lumen-redis}"
-REDIS_PASSWORD="${REDIS_PASSWORD:-}"
+# 优先用 REDIS_URL 嵌入的密码（与 api/worker 共用同一真值）；兜底单独那一行 REDIS_PASSWORD。
+REDIS_PASSWORD="$(lumen_redis_resolve_password)"
 PG_USER="${DB_USER:-lumen}"
 PG_DB="${DB_NAME:-lumen}"
 LOCK_BASE="${LUMEN_BACKUP_RESTORE_LOCKDIR:-${XDG_RUNTIME_DIR:-/run/lock}}"
@@ -141,11 +154,24 @@ pg_quote_literal() {
 }
 
 redis_cli() {
+    # redis-cli 把协议错误（NOAUTH/WRONGPASS/...）当作正常回复打印到 stdout 并 exit 0；
+    # 必须 wrapper 里识别协议错误。否则 ping 检查会把 "AUTH failed" 误识别成"未起来"。
+    local out rc
     if [ -n "$REDIS_PASSWORD" ]; then
-        REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH "$REDIS_CONTAINER" redis-cli --no-auth-warning "$@"
+        out="$(REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH "$REDIS_CONTAINER" redis-cli --no-auth-warning "$@" 2>&1)"
     else
-        docker exec "$REDIS_CONTAINER" redis-cli "$@"
+        out="$(docker exec "$REDIS_CONTAINER" redis-cli "$@" 2>&1)"
     fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "ERROR: redis-cli $* exit=$rc out=${out}"
+        return "$rc"
+    fi
+    if lumen_redis_is_error_reply "$out"; then
+        log "ERROR: redis-cli $* protocol error: ${out}"
+        return 1
+    fi
+    printf '%s' "$out"
 }
 
 redis_host_dir() {
@@ -212,15 +238,27 @@ rm -rf "$REDIS_HOST_DIR"/dump.rdb "$REDIS_HOST_DIR"/appendonly.aof "$REDIS_HOST_
 
 docker start "$REDIS_CONTAINER" >/dev/null
 REDIS_NEEDS_START=0
-# 等 redis 起来
+# 等 redis 起来：循环里用静默探测（启动初期 docker exec 必然报错，不打日志）。
+redis_ping_quiet() {
+    local out rc
+    if [ -n "$REDIS_PASSWORD" ]; then
+        out="$(REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH "$REDIS_CONTAINER" redis-cli --no-auth-warning PING 2>/dev/null)"
+        rc=$?
+    else
+        out="$(docker exec "$REDIS_CONTAINER" redis-cli PING 2>/dev/null)"
+        rc=$?
+    fi
+    [ "$rc" -eq 0 ] && [ "$out" = "PONG" ]
+}
 for _ in $(seq 1 30); do
-    if redis_cli ping 2>/dev/null | grep -q PONG; then
+    if redis_ping_quiet; then
         break
     fi
     sleep 1
 done
-if ! redis_cli ping 2>/dev/null | grep -q PONG; then
-    log "ERROR: redis did not come back up"
+# 最终判决用 verbose 版：失败时 log 会留下是 docker exec 错还是协议错（AUTH 等）。
+if ! ping_out="$(redis_cli PING)" || [ "$ping_out" != "PONG" ]; then
+    log "ERROR: redis did not come back up (check container status & REDIS_URL/REDIS_PASSWORD vs requirepass)"
     exit 5
 fi
 log "redis restored"

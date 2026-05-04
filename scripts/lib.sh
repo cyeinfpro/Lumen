@@ -819,6 +819,83 @@ lumen_set_env_value_in_file() {
     ' "${file}" > "${tmp}" && mv "${tmp}" "${file}"
 }
 
+lumen_find_shared_env() {
+    local script_root="${1:-}"
+    local candidate
+    for candidate in \
+        "${LUMEN_ENV_FILE:-}" \
+        "${script_root:+${script_root}/.env}" \
+        "${script_root:+${script_root}/shared/.env}" \
+        "/opt/lumen/shared/.env"; do
+        [ -n "${candidate}" ] || continue
+        if [ -f "${candidate}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+lumen_dotenv_export_if_unset() {
+    local key="$1"
+    local file="$2"
+    local value=""
+    if [ -n "${!key:-}" ]; then
+        return 0
+    fi
+    if [ ! -f "${file}" ]; then
+        return 0
+    fi
+    value="$(lumen_env_value "${key}" "${file}")"
+    if [ -n "${value}" ]; then
+        export "${key}=${value}"
+    fi
+}
+
+lumen_redis_password_from_url() {
+    local url="${1:-}"
+    case "${url}" in
+        redis://*|rediss://*) ;;
+        *) return 1 ;;
+    esac
+    local rest="${url#*://}"
+    case "${rest}" in
+        *@*) ;;
+        *) return 1 ;;
+    esac
+    local userpass="${rest%@*}"
+    case "${userpass}" in
+        *:*) printf '%s' "${userpass#*:}" ;;
+        *)   printf '%s' "${userpass}" ;;
+    esac
+}
+
+# 优先以 REDIS_URL 嵌入密码为准（与 docker-compose 中 api/worker 共用同一 URL，
+# 即容器实际 requirepass）；fallback 到 .env 单独那一行 REDIS_PASSWORD。
+# 调用前确保 REDIS_URL / REDIS_PASSWORD 已 export 到当前 shell。
+lumen_redis_resolve_password() {
+    local from_url=""
+    if [ -n "${REDIS_URL:-}" ]; then
+        from_url="$(lumen_redis_password_from_url "${REDIS_URL}" 2>/dev/null || true)"
+    fi
+    if [ -n "${from_url}" ]; then
+        printf '%s' "${from_url}"
+        return 0
+    fi
+    printf '%s' "${REDIS_PASSWORD:-}"
+}
+
+# Redis 协议错误（NOAUTH / WRONGPASS / ERR ...）会以正常输出形式返回 stdout
+# 且 redis-cli 进程仍 exit 0；wrapper 必须主动识别避免后续把错误当数据处理。
+lumen_redis_is_error_reply() {
+    case "${1:-}" in
+        "(error) "*|"NOAUTH "*|"WRONGPASS "*|"AUTH failed"*|"ERR "*|"ERROR "*|"NOPERM "*|"NOSCRIPT "*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 lumen_effective_proxy_url() {
     local env_file="${1:-}"
     local key value

@@ -11,59 +11,18 @@ SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 # 复用 lib.sh 的 lumen_try_acquire_lock，让 backup 与 install/update/uninstall 互斥。
 # 在 backup 自己的 backup-restore 锁之前加一层维护锁；维护锁被占用时跳过本次（exit 0）。
-# shellcheck source=lib.sh
-if [ -f "${SCRIPT_DIR}/lib.sh" ]; then
-    . "${SCRIPT_DIR}/lib.sh"
+if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
+    echo "[backup] ERROR: ${SCRIPT_DIR}/lib.sh missing" >&2
+    exit 1
 fi
+# shellcheck source=lib.sh
+. "${SCRIPT_DIR}/lib.sh"
 
-backup_dotenv_value() {
-    local key="$1"
-    local file="$2"
-    local raw=""
-    raw="$(sed -n "s/^${key}=//p" "${file}" 2>/dev/null | head -n1 || true)"
-    raw="${raw%$'\r'}"
-    if [[ "${raw}" == \'*\' && "${raw}" == *\' ]]; then
-        raw="${raw:1:${#raw}-2}"
-    elif [[ "${raw}" == \"*\" && "${raw}" == *\" ]]; then
-        raw="${raw:1:${#raw}-2}"
-    fi
-    printf '%s' "${raw}"
-}
-
-backup_find_env_file() {
-    local candidate
-    for candidate in \
-        "${LUMEN_ENV_FILE:-}" \
-        "${SCRIPT_ROOT}/.env" \
-        "${SCRIPT_ROOT}/shared/.env" \
-        "/opt/lumen/shared/.env"; do
-        [ -n "${candidate}" ] || continue
-        if [ -f "${candidate}" ]; then
-            printf '%s' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-backup_export_dotenv_key() {
-    local key="$1"
-    local file="$2"
-    local value=""
-    if [ -n "${!key:-}" ]; then
-        return 0
-    fi
-    value="$(backup_dotenv_value "${key}" "${file}")"
-    if [ -n "${value}" ]; then
-        export "${key}=${value}"
-    fi
-}
-
-ENV_FILE="$(backup_find_env_file 2>/dev/null || true)"
+ENV_FILE="$(lumen_find_shared_env "${SCRIPT_ROOT}" 2>/dev/null || true)"
 if [ -n "${ENV_FILE}" ]; then
     export LUMEN_ENV_FILE="${ENV_FILE}"
-    for key in DB_USER DB_NAME DB_PASSWORD REDIS_PASSWORD BACKUP_ROOT LUMEN_BACKUP_ROOT PG_CONTAINER REDIS_CONTAINER; do
-        backup_export_dotenv_key "${key}" "${ENV_FILE}"
+    for key in DB_USER DB_NAME DB_PASSWORD REDIS_URL REDIS_PASSWORD BACKUP_ROOT LUMEN_BACKUP_ROOT PG_CONTAINER REDIS_CONTAINER; do
+        lumen_dotenv_export_if_unset "${key}" "${ENV_FILE}"
     done
 fi
 
@@ -75,7 +34,9 @@ MAX_KEEP="${MAX_KEEP:-40}"
 
 PG_CONTAINER="${PG_CONTAINER:-lumen-pg}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-lumen-redis}"
-REDIS_PASSWORD="${REDIS_PASSWORD:-}"
+# 优先用 REDIS_URL 嵌入的密码（与 api/worker 共用同一真值，即 lumen-redis 的 requirepass）；
+# 兜底到单独那一行 REDIS_PASSWORD。这样 .env 两处字段漂移不会导致 backup 认证失败。
+REDIS_PASSWORD="$(lumen_redis_resolve_password)"
 PG_USER="${DB_USER:-lumen}"
 PG_DB="${DB_NAME:-lumen}"
 LOCK_BASE="${LUMEN_BACKUP_RESTORE_LOCKDIR:-${XDG_RUNTIME_DIR:-/run/lock}}"
@@ -164,11 +125,27 @@ make_tmp_dir() {
 }
 
 redis_cli() {
+    # redis-cli 把协议错误（NOAUTH/WRONGPASS/...）当作正常回复打印到 stdout 并 exit 0；
+    # set -euo pipefail 拦不住，必须 wrapper 里识别。捕获合并后的输出再判决：
+    #   - docker exec 非零 → 报错返回非零
+    #   - 输出匹配协议错误前缀 → 报错返回非零（不输出 stdout，避免上层把错误当数据）
+    #   - 否则 stdout 透传
+    local out rc
     if [ -n "$REDIS_PASSWORD" ]; then
-        REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH "$REDIS_CONTAINER" redis-cli --no-auth-warning "$@"
+        out="$(REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH "$REDIS_CONTAINER" redis-cli --no-auth-warning "$@" 2>&1)"
     else
-        docker exec "$REDIS_CONTAINER" redis-cli "$@"
+        out="$(docker exec "$REDIS_CONTAINER" redis-cli "$@" 2>&1)"
     fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "ERROR: redis-cli $* exit=$rc out=${out}"
+        return "$rc"
+    fi
+    if lumen_redis_is_error_reply "$out"; then
+        log "ERROR: redis-cli $* protocol error: ${out}"
+        return 1
+    fi
+    printf '%s' "$out"
 }
 
 docker_cp_redis() {
@@ -265,9 +242,19 @@ log "pg dump ok size=$PG_SIZE"
 
 # ---- Redis ----
 REDIS_OUT="$REDIS_DIR/$TS.redis.tgz"
+# BGSAVE 前先 ping，让认证失败立刻报错，而不是绕一圈伪装成 "BGSAVE did not complete in 60s"。
+if ! ping_out="$(redis_cli PING)" || [ "$ping_out" != "PONG" ]; then
+    log "ERROR: redis ping failed before BGSAVE — check REDIS_URL/REDIS_PASSWORD vs lumen-redis requirepass"
+    exit 3
+fi
 log "triggering redis BGSAVE"
-# 记录 lastsave 时间戳，轮询到它变化视为 BGSAVE 完成
+# 记录 lastsave 时间戳，轮询到它变化视为 BGSAVE 完成。
+# LASTSAVE 协议返回 unix timestamp（纯数字），非数字一律视为异常。
 LAST_BEFORE="$(redis_cli LASTSAVE | tr -d '\r\n')"
+if ! [[ "$LAST_BEFORE" =~ ^[0-9]+$ ]]; then
+    log "ERROR: LASTSAVE returned non-numeric: ${LAST_BEFORE}"
+    exit 3
+fi
 LAST_NOW="$LAST_BEFORE"
 redis_cli BGSAVE >/dev/null
 for _ in $(seq 1 60); do
