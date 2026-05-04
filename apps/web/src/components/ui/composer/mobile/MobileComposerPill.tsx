@@ -271,7 +271,6 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
     (text.trim().length > 0 || attachments.length > 0);
 
   const {
-    ingestMany,
     handlePaste,
     handleFileInput,
     openFilePicker,

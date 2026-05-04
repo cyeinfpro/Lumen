@@ -1,7 +1,7 @@
 "use client";
 
 import { BookmarkPlus } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
 import { Input } from "@/components/ui/primitives/Input";
@@ -52,6 +52,8 @@ export function SaveCandidateDialog({
   open,
   onOpenChange,
 }: SaveCandidateDialogProps) {
+  // state 重置由父组件用 key 强制 re-mount 完成（React 19 不允许 effect 中
+  // setState）；初始值就是空表单 + 推断出的年龄段。
   const [title, setTitle] = useState("");
   const [ageSegment, setAgeSegment] = useState<ModelLibraryItemAgeSegment>(
     defaultAgeSegment(workflow),
@@ -60,16 +62,6 @@ export function SaveCandidateDialog({
   const [appearance, setAppearance] = useState("");
   const [tagsEnabled, setTagsEnabled] = useState(false);
   const [tags, setTags] = useState("");
-  // 关闭时重置全部输入，避免下次打开看到上一个 candidate 的残留
-  useEffect(() => {
-    if (open) return;
-    setTitle("");
-    setAgeSegment(defaultAgeSegment(workflow));
-    setGender("female");
-    setAppearance("");
-    setTagsEnabled(false);
-    setTags("");
-  }, [open, workflow]);
   const save = useSaveModelCandidateToLibraryMutation(workflow.id, candidate?.id ?? "", {
     onSuccess: () => {
       toast.success("已收藏到模特库");
