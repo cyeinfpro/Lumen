@@ -37,6 +37,8 @@ Lifecycle commands:
   uninstall-lumen      卸载 Lumen（调用 scripts/uninstall.sh）
   rollback             回滚到 previous release（pull 旧 tag + compose up）
   version              输出 VERSION + 镜像 tag + git sha
+  bootstrap-scripts    应急：从 GitHub main 强制热替换 lib/backup/restore/update/lumenctl
+                       （平时入口处自动 self-update，TTL=600s；本命令突破 TTL）
 
 Docker compose runtime:
   status               docker compose ps + 健康检查
@@ -1836,8 +1838,50 @@ EOF
     done
 }
 
+# 哪些子命令值得在执行前 self-update：
+#   - 写命令 / 维护命令 / 菜单：是
+#   - 纯查询（status/logs/version/help）：否，避免完全无副作用的查询都打外网
+lumenctl_command_needs_self_update() {
+    case "$1" in
+        menu|install-lumen|update-lumen|uninstall-lumen|rollback|backup|restore|migrate|bootstrap|migrate-env|migrate-env-apply|bootstrap-scripts)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# lumenctl 入口处的 self-update：拉 GitHub 最新 scripts/，更新到 SCRIPT_DIR；
+# 走 TTL 缓存（默认 600s）避免菜单反复打开就反复拉；网络/校验失败 → WARN 继续。
+# lumenctl.sh 或 lib.sh 自己变了 → re-exec lumenctl 让函数定义/逻辑生效。
+lumenctl_maybe_self_update() {
+    if [ "${LUMEN_LUMENCTL_SELF_UPDATED:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ "${LUMEN_LUMENCTL_SELF_UPDATE:-1}" = "0" ]; then
+        return 0
+    fi
+
+    lumen_self_update_scripts "${SCRIPT_DIR}" \
+        "${LUMEN_SELF_UPDATE_BRANCH:-main}" \
+        "${LUMEN_SELF_UPDATE_TTL:-600}"
+
+    case " ${LUMEN_SELF_UPDATE_CHANGED:-} " in
+        *" lumenctl.sh "*|*" lib.sh "*)
+            log_info "[lumenctl] 核心脚本已更新（${LUMEN_SELF_UPDATE_CHANGED}），re-exec 新版。"
+            export LUMEN_LUMENCTL_SELF_UPDATED=1
+            exec bash "${SCRIPT_DIR}/lumenctl.sh" "$@"
+            ;;
+    esac
+}
+
 main() {
     local command="${1:-menu}"
+
+    # 在 dispatch 之前拉一次最新脚本（带 TTL）。命令路由用原始 args，不要 shift。
+    if lumenctl_command_needs_self_update "${command}"; then
+        lumenctl_maybe_self_update "$@"
+    fi
+
     shift || true
     case "${command}" in
         menu) show_menu ;;
@@ -1847,6 +1891,24 @@ main() {
         uninstall-lumen) run_lumen_script uninstall.sh "$@" ;;
         rollback) lumen_compose_rollback "$@" ;;
         version) lumen_compose_version ;;
+        # 应急：突破 TTL 强拉 scripts/（"我刚改了 scripts，想立刻生效"）
+        bootstrap-scripts)
+            LUMEN_SELF_UPDATE_FORCE=1 \
+                lumen_self_update_scripts "${SCRIPT_DIR}" \
+                    "${LUMEN_SELF_UPDATE_BRANCH:-main}" 0
+            case "${LUMEN_SELF_UPDATE_RESULT:-}" in
+                ok)
+                    if [ -n "${LUMEN_SELF_UPDATE_CHANGED:-}" ]; then
+                        log_info "[bootstrap-scripts] 已更新：${LUMEN_SELF_UPDATE_CHANGED}（备份 *.bak.${LUMEN_SELF_UPDATE_BACKUP_TS}）。"
+                    else
+                        log_info "[bootstrap-scripts] 远端与本地一致，无需替换。"
+                    fi
+                    ;;
+                failed)   log_error "[bootstrap-scripts] 拉取失败，详见上方 WARN。"; exit 1 ;;
+                disabled) log_warn "[bootstrap-scripts] 已通过 LUMEN_SELF_UPDATE=0 全局关闭。" ;;
+                *)        log_info "[bootstrap-scripts] 跳过（${LUMEN_SELF_UPDATE_RESULT:-unknown}）。" ;;
+            esac
+            ;;
         # Docker compose runtime
         status) lumen_compose_status ;;
         logs) lumen_compose_logs "${1:-api}" ;;

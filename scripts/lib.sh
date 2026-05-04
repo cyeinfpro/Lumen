@@ -896,6 +896,157 @@ lumen_redis_is_error_reply() {
     return 1
 }
 
+# 从 LUMEN_REPO_URL 对应的 GitHub raw 拉指定脚本到 scripts_dir，让管理脚本能"自我升级"。
+# 失败软降级（network/校验错只 WARN，不阻塞 caller）；TTL marker 防止短时间重复拉。
+#
+# 用法：
+#   lumen_self_update_scripts <scripts_dir> [branch] [ttl_sec] [files...]
+#
+# 默认参数：
+#   branch    = ${LUMEN_SELF_UPDATE_BRANCH:-main}
+#   ttl_sec   = ${LUMEN_SELF_UPDATE_TTL:-600}（10 分钟内复调直接 noop；0 / FORCE=1 强拉）
+#   files...  = lib.sh backup.sh restore.sh update.sh lumenctl.sh
+#
+# 输出（全局变量；调用方据此决定后续动作）：
+#   LUMEN_SELF_UPDATE_RESULT     ok | skipped | failed | disabled
+#   LUMEN_SELF_UPDATE_CHANGED    "f1 f2 ..."（空格分隔；可空表示远端=本地）
+#   LUMEN_SELF_UPDATE_BACKUP_TS  YYYYMMDD-HHMMSS（备份后缀；仅 ok 时有效）
+#   LUMEN_SELF_UPDATE_SOURCE     raw URL base
+#
+# 环境变量：
+#   LUMEN_REPO_URL               默认 https://github.com/cyeinfpro/Lumen.git
+#   LUMEN_SELF_UPDATE_FORCE=1    突破 TTL 强制拉
+#   LUMEN_SELF_UPDATE=0          全局关闭（caller 自己另外暴露开关也可以）
+#
+# 返回值：始终 0（softfail；caller 看 LUMEN_SELF_UPDATE_RESULT 判定）。
+lumen_self_update_scripts() {
+    LUMEN_SELF_UPDATE_RESULT=skipped
+    LUMEN_SELF_UPDATE_CHANGED=""
+    LUMEN_SELF_UPDATE_BACKUP_TS=""
+    LUMEN_SELF_UPDATE_SOURCE=""
+
+    local scripts_dir="${1:-}"
+    local branch="${2:-${LUMEN_SELF_UPDATE_BRANCH:-main}}"
+    local ttl_sec="${3:-${LUMEN_SELF_UPDATE_TTL:-600}}"
+    if [ "$#" -gt 3 ]; then
+        shift 3
+    else
+        shift "$#"
+    fi
+    local files=("$@")
+    if [ "${#files[@]}" -eq 0 ]; then
+        files=(lib.sh backup.sh restore.sh update.sh lumenctl.sh)
+    fi
+
+    if [ "${LUMEN_SELF_UPDATE:-1}" = "0" ]; then
+        LUMEN_SELF_UPDATE_RESULT=disabled
+        return 0
+    fi
+    if [ -z "${scripts_dir}" ] || [ ! -d "${scripts_dir}" ]; then
+        LUMEN_SELF_UPDATE_RESULT=skipped
+        return 0
+    fi
+
+    local marker="${scripts_dir}/.lumen-self-update.last"
+    if [ "${LUMEN_SELF_UPDATE_FORCE:-0}" != "1" ] && [ -f "${marker}" ]; then
+        local last_ts now_ts age
+        last_ts="$(cat "${marker}" 2>/dev/null || echo 0)"
+        case "${last_ts}" in
+            ''|*[!0-9]*) last_ts=0 ;;
+        esac
+        now_ts="$(date -u +%s)"
+        age=$((now_ts - last_ts))
+        if [ "${ttl_sec}" -gt 0 ] && [ "${age}" -lt "${ttl_sec}" ] && [ "${age}" -ge 0 ]; then
+            LUMEN_SELF_UPDATE_RESULT=skipped
+            return 0
+        fi
+    fi
+
+    local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
+    local raw_base=""
+    case "${repo_url}" in
+        https://github.com/*)
+            local owner_repo="${repo_url#https://github.com/}"
+            owner_repo="${owner_repo%.git}"
+            raw_base="https://raw.githubusercontent.com/${owner_repo}/${branch}/scripts"
+            ;;
+    esac
+    if [ -z "${raw_base}" ]; then
+        if command -v log_warn >/dev/null 2>&1; then
+            log_warn "[self_update] LUMEN_REPO_URL 不是 https://github.com/<owner>/<repo>(.git)：${repo_url}，跳过。"
+        fi
+        LUMEN_SELF_UPDATE_RESULT=failed
+        return 0
+    fi
+    LUMEN_SELF_UPDATE_SOURCE="${raw_base}"
+
+    local proxy_url=""
+    proxy_url="$(lumen_effective_proxy_url "${SHARED_ENV:-}" 2>/dev/null || true)"
+    local curl_cmd=(curl -fsSL --connect-timeout 10 --max-time 60)
+    if [ -n "${proxy_url}" ]; then
+        curl_cmd+=(--proxy "${proxy_url}")
+    fi
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d 2>/dev/null)" || { LUMEN_SELF_UPDATE_RESULT=failed; return 0; }
+
+    local f
+    for f in "${files[@]}"; do
+        if ! "${curl_cmd[@]}" "${raw_base}/${f}" -o "${tmp_dir}/${f}" 2>/dev/null; then
+            if command -v log_warn >/dev/null 2>&1; then
+                log_warn "[self_update] 下载 ${f} 失败（GitHub 不可达？），跳过 self-update（继续用本地脚本）。"
+            fi
+            rm -rf "${tmp_dir}" 2>/dev/null || true
+            LUMEN_SELF_UPDATE_RESULT=failed
+            return 0
+        fi
+        if ! bash -n "${tmp_dir}/${f}" 2>/dev/null; then
+            if command -v log_warn >/dev/null 2>&1; then
+                log_warn "[self_update] ${f} bash -n 校验不过，跳过 self-update。"
+            fi
+            rm -rf "${tmp_dir}" 2>/dev/null || true
+            LUMEN_SELF_UPDATE_RESULT=failed
+            return 0
+        fi
+    done
+
+    LUMEN_SELF_UPDATE_BACKUP_TS="$(date -u +%Y%m%d-%H%M%S)"
+    local changed=""
+    for f in "${files[@]}"; do
+        if [ -f "${scripts_dir}/${f}" ] && cmp -s "${tmp_dir}/${f}" "${scripts_dir}/${f}"; then
+            continue
+        fi
+        if [ -f "${scripts_dir}/${f}" ]; then
+            cp -a "${scripts_dir}/${f}" "${scripts_dir}/${f}.bak.${LUMEN_SELF_UPDATE_BACKUP_TS}" 2>/dev/null || true
+        fi
+        cp -a "${tmp_dir}/${f}" "${scripts_dir}/${f}.new"
+        mv "${scripts_dir}/${f}.new" "${scripts_dir}/${f}"
+        changed="${changed}${f} "
+    done
+
+    # 关键脚本执行权限（只对仓库里本来就 +x 的）
+    local exec_f
+    for exec_f in backup.sh restore.sh update.sh install.sh uninstall.sh lumenctl.sh migrate_to_releases.sh; do
+        if [ -f "${scripts_dir}/${exec_f}" ]; then
+            chmod +x "${scripts_dir}/${exec_f}" 2>/dev/null || true
+        fi
+    done
+
+    date -u +%s > "${marker}" 2>/dev/null || true
+    rm -rf "${tmp_dir}" 2>/dev/null || true
+
+    LUMEN_SELF_UPDATE_CHANGED="${changed}"
+    LUMEN_SELF_UPDATE_RESULT=ok
+    if command -v log_info >/dev/null 2>&1; then
+        if [ -z "${changed}" ]; then
+            log_info "[self_update] 远端 ${raw_base} 与本地一致，无需替换。"
+        else
+            log_info "[self_update] 已从 ${raw_base} 同步：${changed}（旧版备份 *.bak.${LUMEN_SELF_UPDATE_BACKUP_TS}）。"
+        fi
+    fi
+    return 0
+}
+
 lumen_effective_proxy_url() {
     local env_file="${1:-}"
     local key value
