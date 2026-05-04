@@ -42,6 +42,24 @@ class _ScriptResult(NamedTuple):
     stderr: str
 
 
+def _chmod_tolerate_eperm(path: Path | str, mode: int) -> None:
+    """chmod that swallows EPERM from squashing mounts (CIFS/NFS).
+
+    Production /opt/lumendata is commonly mounted CIFS with
+    ``forceuid,forcegid,uid=...,gid=...,file_mode=0664``. The mount option
+    pins the on-wire mode and uid; every chmod from any caller — even the
+    file's apparent local owner — returns EPERM because the CIFS server
+    doesn't accept the mode change. The mount itself already enforces
+    file_mode, so our redundant chmod is purely defensive on local fs.
+    Any other OSError still propagates so genuine faults (ENOSPC, EBADF,
+    EROFS, ...) keep failing fast.
+    """
+    try:
+        os.chmod(path, mode)
+    except PermissionError:
+        pass
+
+
 def _open_private_append(path: Path) -> TextIO:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -49,12 +67,9 @@ def _open_private_append(path: Path) -> TextIO:
         try:
             os.fchmod(fd, 0o600)
         except PermissionError:
-            # In containerised deploys lumen-api (uid=LUMEN_APP_UID, e.g. 10001)
-            # appends to .update.log that lumen-update-runner.service writes
-            # from the host (often a different uid). Non-owner fchmod returns
-            # EPERM. The O_CREAT mode arg already covers fresh files; existing
-            # file modes are the host's responsibility — don't crash trigger_update
-            # over a tightening pass we can't perform.
+            # Same EPERM-on-squashed-mount story as _chmod_tolerate_eperm; see
+            # there for the full rationale. Kept inline because os.fchmod takes
+            # a fd, not a path, so the helper signature doesn't fit.
             pass
         return os.fdopen(fd, "a", encoding="utf-8")
     except Exception:
