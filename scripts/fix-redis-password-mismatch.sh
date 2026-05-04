@@ -13,14 +13,15 @@
 # 干跑（只检查不修改）：
 #   sudo DRY_RUN=1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/cyeinfpro/Lumen/main/scripts/fix-redis-password-mismatch.sh)"
 #
+# 自动探测 .env 路径：docker compose label / systemd EnvironmentFile / 常见硬编码位置。
+#
 # 环境变量：
-#   LUMEN_SHARED_ENV   .env 路径（默认 /root/Lumen/shared/.env）
+#   LUMEN_SHARED_ENV   显式 .env 路径，覆盖自动探测
 #   REDIS_CONTAINER    redis 容器名（默认 lumen-redis）
 #   DRY_RUN=1          只验证不写入
 
 set -euo pipefail
 
-SHARED="${LUMEN_SHARED_ENV:-/root/Lumen/shared/.env}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-lumen-redis}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -28,10 +29,64 @@ log()  { printf '[fix-redis %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 fail() { printf '[fix-redis ERROR] %s\n' "$*" >&2; exit 1; }
 
 # 0. 前置检查
-[ -f "$SHARED" ]           || fail "找不到 .env: $SHARED（可用 LUMEN_SHARED_ENV 覆盖）"
 command -v docker >/dev/null 2>&1 || fail "docker 不可用"
 command -v awk    >/dev/null 2>&1 || fail "awk 不可用"
 [ "$(id -u)" -eq 0 ]       || fail "需要 root 权限（请用 sudo 执行）"
+
+# 1. 自动探测 shared/.env 路径
+#    优先级（先命中先用）：
+#      a. LUMEN_SHARED_ENV / LUMEN_ENV_FILE 环境变量
+#      b. LUMEN_DEPLOY_ROOT/shared/.env
+#      c. 已运行容器的 com.docker.compose.project.working_dir label（最可靠）
+#      d. systemd unit 的 EnvironmentFile=
+#      e. 常见硬编码位置（root/opt 部署）
+SHARED=""
+candidates=()
+
+[ -n "${LUMEN_SHARED_ENV:-}" ] && candidates+=("$LUMEN_SHARED_ENV")
+[ -n "${LUMEN_ENV_FILE:-}"   ] && candidates+=("$LUMEN_ENV_FILE")
+[ -n "${LUMEN_DEPLOY_ROOT:-}" ] && candidates+=("${LUMEN_DEPLOY_ROOT}/shared/.env")
+
+# 从 docker compose label 抽 project working dir：v2 compose 会给容器设
+# com.docker.compose.project.working_dir = docker-compose.yml 所在目录。
+for c in lumen-api lumen-worker lumen-redis lumen-web lumen-tgbot; do
+    wd="$(docker inspect "$c" --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null || true)"
+    if [ -n "$wd" ] && [ "$wd" != "<no value>" ]; then
+        candidates+=("$wd/shared/.env" "$wd/.env" "$wd/../shared/.env")
+    fi
+done
+
+# 从 systemd EnvironmentFile= 抽（lumen-api 有就够，多个 unit 都指向同一个 .env）
+if command -v systemctl >/dev/null 2>&1; then
+    for unit in lumen-api lumen-worker lumen-tgbot; do
+        while IFS= read -r ef; do
+            ef="${ef#-}"  # 去掉可选前缀 -（EnvironmentFile=-/path）
+            [ -n "$ef" ] && candidates+=("$ef")
+        done < <(systemctl cat "$unit" 2>/dev/null | sed -nE 's|^EnvironmentFile=(.+)$|\1|p')
+    done
+fi
+
+candidates+=(
+    "/root/Lumen/shared/.env"
+    "/opt/lumen/shared/.env"
+    "/opt/Lumen/shared/.env"
+    "/srv/lumen/shared/.env"
+)
+
+for c in "${candidates[@]}"; do
+    [ -z "$c" ] && continue
+    if [ -f "$c" ]; then
+        SHARED="$c"
+        break
+    fi
+done
+
+if [ -z "$SHARED" ]; then
+    fail "找不到 shared/.env，尝试过的位置：
+$(printf '  - %s\n' "${candidates[@]}")
+请显式指定：LUMEN_SHARED_ENV=/path/to/.env sudo -E bash -c \"\$(curl -fsSL ...)\""
+fi
+log "使用 .env: $SHARED"
 
 # 1. 从 REDIS_URL 解析嵌入密码
 P_URL="$(sed -n 's|^REDIS_URL=redis://:||p' "$SHARED" | head -n1 | sed 's|@.*||')"
