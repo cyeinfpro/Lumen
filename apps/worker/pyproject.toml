@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-worker"
-version = "1.0.2"
+version = "1.0.3"
 description = "Lumen arq Worker — DESIGN.md §6 + §7 上游集成"
 requires-python = ">=3.12"
 dependencies = [

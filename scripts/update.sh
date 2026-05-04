@@ -428,8 +428,13 @@ probe_ghcr_tag() {
     if [ -z "${token}" ]; then
         return 0
     fi
+    # 多架构 buildx 推上来的 tag 在 GHCR 是 OCI Image Index / manifest list，
+    # 不带 list/index 的 mediaType 会被 registry 当成 unknown manifest 返回 404，
+    # 导致 update.sh 误判镜像不存在并回退到本地 build。所以四种 mediaType 全列上。
     http_code="$(curl -s -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/vnd.oci.image.index.v1+json" \
+        -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
         -H "Accept: application/vnd.oci.image.manifest.v1+json" \
         -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
         "${manifest_url}" 2>/dev/null || echo "000")"
