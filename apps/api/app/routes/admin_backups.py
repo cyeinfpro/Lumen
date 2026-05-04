@@ -46,7 +46,16 @@ def _open_private_append(path: Path) -> TextIO:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        except PermissionError:
+            # In containerised deploys lumen-api (uid=LUMEN_APP_UID, e.g. 10001)
+            # appends to .update.log that lumen-update-runner.service writes
+            # from the host (often a different uid). Non-owner fchmod returns
+            # EPERM. The O_CREAT mode arg already covers fresh files; existing
+            # file modes are the host's responsibility — don't crash trigger_update
+            # over a tightening pass we can't perform.
+            pass
         return os.fdopen(fd, "a", encoding="utf-8")
     except Exception:
         os.close(fd)
