@@ -25,6 +25,7 @@ export function MobileStudio() {
   const promoteImageToReference = useChatStore((s) => s.promoteImageToReference);
   const setText = useChatStore((s) => s.setText);
   const setMode = useChatStore((s) => s.setMode);
+  // runtime_defaults 由 RuntimeDefaultsBootstrap（layout 级）统一同步到 store
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const search = useSearchParams();

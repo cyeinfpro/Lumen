@@ -20,7 +20,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import AllowedEmail, AuthSession, InviteLink, User
-from lumen_core.schemas import LoginIn, SignupIn, UserOut
+from lumen_core.runtime_settings import get_spec
+from lumen_core.schemas import LoginIn, RuntimeDefaultsOut, SignupIn, UserOut
 
 from ..audit import request_ip_hash, write_audit, write_audit_isolated
 from ..config import settings
@@ -50,11 +51,13 @@ from ..ratelimit import (
     require_client_ip,
 )
 from ..redis_client import get_redis
+from ..runtime_settings import get_setting
 
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+_GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 
 # Why: strip control chars (incl. NUL/CR/LF/DEL) before persisting UA so log
 # injection / DB driver quirks can't slip through user-controlled headers.
@@ -166,6 +169,27 @@ class PasswordResetConfirmIn(BaseModel):
 
 class OkOut(BaseModel):
     ok: bool
+
+
+async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
+    # 默认 fast=True：未配置 generation.fast_default 或值不是 "0"/"1" 时
+    # 走 V1 体验偏好（Fast 模式默认开启）。get_setting 已包含 env fallback。
+    fast_default = True
+    spec = get_spec(_GENERATION_FAST_DEFAULT_KEY)
+    if spec is not None:
+        raw = await get_setting(db, spec)
+        if raw in {"0", "1"}:
+            fast_default = raw == "1"
+    return RuntimeDefaultsOut(fast=fast_default)
+
+
+async def _user_out_with_runtime_defaults(
+    user: User,
+    db: AsyncSession,
+) -> UserOut:
+    out = UserOut.model_validate(user)
+    out.runtime_defaults = await _runtime_defaults(db)
+    return out
 
 
 async def _create_session(
@@ -359,7 +383,7 @@ async def signup(
         details={"role": role},
     )
     _set_auth_cookies(response, session.id, csrf)
-    return UserOut.model_validate(user)
+    return await _user_out_with_runtime_defaults(user, db)
 
 
 @router.post(
@@ -415,7 +439,7 @@ async def login(
         extra={"email_hash": _log_hash(email), "user_id": user.id},
     )
     _set_auth_cookies(response, session.id, csrf)
-    return UserOut.model_validate(user)
+    return await _user_out_with_runtime_defaults(user, db)
 
 
 @router.post("/password/reset-request", response_model=OkOut)
@@ -573,5 +597,8 @@ async def logout(
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: CurrentUser) -> UserOut:
-    return UserOut.model_validate(user)
+async def me(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserOut:
+    return await _user_out_with_runtime_defaults(user, db)

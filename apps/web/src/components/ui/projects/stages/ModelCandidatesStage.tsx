@@ -22,6 +22,7 @@ import {
 import type { BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
 import { CandidateCard } from "../components/CandidateCard";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
+import { SaveCandidateDialog } from "../components/SaveCandidateDialog";
 import {
   SelectableImageGrid,
   SelectableImageGridLoading,
@@ -45,7 +46,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   });
   const saveAccessorySelection = useSaveAccessorySelectionMutation(workflow.id, {
     onError: (err) =>
-      toast.error("保存饰品选择失败", {
+      toast.error("保存配饰四宫格选择失败", {
         description: err instanceof Error ? err.message : "请稍后重试",
       }),
   });
@@ -58,10 +59,10 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   });
   const createAccessoryPreviews = useCreateAccessoryPreviewsMutation(workflow.id, {
     onError: (err) =>
-      toast.error("生成饰品图失败", {
-        description: err instanceof Error ? err.message : "请先确认模特后再重新生成饰品图",
+      toast.error("生成配饰四宫格失败", {
+        description: err instanceof Error ? err.message : "请先确认模特后再重新生成配饰四宫格",
       }),
-    onSuccess: () => toast.success("饰品图任务已派发"),
+    onSuccess: () => toast.success("配饰四宫格任务已派发"),
   });
 
   const showcaseStep = stepOf(workflow, "showcase_generation");
@@ -80,6 +81,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [chosenCandidateId, setChosenCandidateId] = useState<string | null>(null);
+  const [savingCandidateId, setSavingCandidateId] = useState<string | null>(null);
 
   const candidates = workflow.model_candidates;
   const approvalStep = stepOf(workflow, "model_approval");
@@ -180,7 +182,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   return (
     <StageFrame
       title="模特候选"
-      subtitle="每套候选是同一个合成模特的四视图概念图。确认模特后可生成带配饰的四宫格参考图。"
+      subtitle="每套候选是同一个合成模特的四视图概念图。确认模特后继续生成并选择配饰四宫格。"
     >
       {candidates.length === 0 ? (
         <RunningState label="等待创建模特候选" />
@@ -198,6 +200,8 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               onPreview={(image, list, index) => openPreview(image, list, index)}
               onChoose={() => setChosenCandidateId(candidate.id)}
               onApprove={approveChosenCandidate}
+              onSaveToLibrary={() => setSavingCandidateId(candidate.id)}
+              savingToLibrary={savingCandidateId === candidate.id}
             />
           ))}
         </div>
@@ -225,7 +229,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-2">
         <div className="rounded-md border border-[var(--border)] bg-white/[0.03] px-3 py-2 text-sm leading-6 text-[var(--fg-1)]">
-          饰品方案：{accessoryEnabled ? accessoryItems.join("、") || "自动推荐" : "关闭"}
+          配饰四宫格方向：{accessoryEnabled ? accessoryItems.join("、") || "自动推荐" : "关闭"}
         </div>
       </div>
 
@@ -237,7 +241,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               <input
                 value={accessoryPrompt}
                 onChange={(event) => setAccessoryPrompt(event.target.value)}
-                placeholder={accessoryItems.join("、") || "例如：更简洁的白色运动鞋和帆布包"}
+                placeholder={accessoryItems.join("、") || "例如：简洁耳饰、浅色鞋子、小号包袋"}
                 className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)]"
               />
             </label>
@@ -248,14 +252,14 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               onClick={generateAccessoryPreview}
             >
               {accessoryPreviewRunning
-                ? "配饰图生成中"
+                ? "配饰四宫格生成中"
                 : accessoryImages.length > 0
                   ? "再生成配饰四宫格"
                   : "生成配饰四宫格"}
             </Button>
           </div>
           {accessoryPreviewRunning ? (
-            <SelectableImageGridLoading count={1} label="配饰图生成中" />
+            <SelectableImageGridLoading count={1} label="配饰四宫格生成中" />
           ) : accessoryImages.length > 0 ? (
             <SelectableImageGrid
               images={accessoryImages}
@@ -270,7 +274,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               onPreview={(image, index) => openPreview(image, accessoryImages, index)}
             />
           ) : selectedCandidate ? (
-            <RunningState label="配饰图尚未生成，点击上方按钮开始生成" />
+            <RunningState label="配饰四宫格尚未生成，点击上方按钮开始生成" />
           ) : (
             <RunningState label="确认模特后可生成配饰四宫格" />
           )}
@@ -341,6 +345,14 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         index={previewIndex}
         onIndexChange={setPreviewIndex}
         onClose={() => setPreviewIndex(-1)}
+      />
+      <SaveCandidateDialog
+        workflow={workflow}
+        candidate={candidates.find((candidate) => candidate.id === savingCandidateId) ?? null}
+        open={Boolean(savingCandidateId)}
+        onOpenChange={(open) => {
+          if (!open) setSavingCandidateId(null);
+        }}
       />
 
       <ConfirmDialog

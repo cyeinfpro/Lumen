@@ -424,6 +424,8 @@ async def test_image_output_format_system_setting_is_default(
         return None
 
     async def fake_get_setting(_db: Any, spec: Any) -> str | None:
+        if spec.key == "generation.fast_default":
+            return "0"
         assert spec.key == "image.output_format"
         return "png"
 
@@ -455,6 +457,110 @@ async def test_image_output_format_system_setting_is_default(
     assert gen.upstream_request["output_format"] == "png"
     assert gen.upstream_request["output_format_source"] == "system_default"
     assert "output_compression" not in gen.upstream_request
+
+
+@pytest.mark.asyncio
+async def test_fast_default_applies_when_client_omits_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_appended(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_assistant_task(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_get_setting(_db: Any, spec: Any) -> str | None:
+        if spec.key == "generation.fast_default":
+            return "1"
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
+    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(messages, "get_setting", fake_get_setting)
+
+    chat_db = _Db([_Result(_conv()), _Result(None), _Result(None)])
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(idempotency_key="idem-fast-chat", text="hello", intent="chat"),
+        _user(),  # type: ignore[arg-type]
+        chat_db,  # type: ignore[arg-type]
+    )
+    user_msg = next(
+        item for item in chat_db.added if getattr(item, "role", None) == "user"
+    )
+    assert user_msg.content["fast"] is True
+
+    image_db = _Db([_Result(_conv()), _Result(None), _Result(None)])
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-fast-image",
+            text="make an image",
+            intent="text_to_image",
+            image_params=ImageParamsIn(
+                aspect_ratio="1:1",
+                size_mode="fixed",
+                fixed_size="1024x1024",
+            ),
+        ),
+        _user(),  # type: ignore[arg-type]
+        image_db,  # type: ignore[arg-type]
+    )
+    gen = next(item for item in image_db.added if item.__class__.__name__ == "Generation")
+    assert gen.upstream_request["fast"] is True
+    assert gen.upstream_request["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
+
+
+@pytest.mark.asyncio
+async def test_explicit_fast_false_overrides_system_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_appended(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_assistant_task(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_get_setting(_db: Any, spec: Any) -> str | None:
+        if spec.key == "generation.fast_default":
+            return "1"
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
+    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(messages, "get_setting", fake_get_setting)
+
+    db = _Db([_Result(_conv()), _Result(None), _Result(None)])
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-fast-explicit-off",
+            text="make an image",
+            intent="text_to_image",
+            image_params=ImageParamsIn(
+                aspect_ratio="1:1",
+                size_mode="fixed",
+                fixed_size="1024x1024",
+                fast=False,
+            ),
+        ),
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
+    assert gen.upstream_request["fast"] is False
+    assert gen.upstream_request["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
 
 
 @pytest.mark.asyncio

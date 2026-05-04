@@ -33,7 +33,7 @@ class _Db:
         self.rolled_back = False
 
     async def execute(self, _stmt):
-        return _ScalarResult(self.results.pop(0))
+        return _ScalarResult(self.results.pop(0) if self.results else None)
 
     def add(self, value):
         self.added.append(value)

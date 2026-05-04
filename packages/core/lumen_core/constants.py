@@ -11,6 +11,9 @@ from enum import StrEnum
 # 不是数据库字段限制，而是为了避免误粘超长文本撑爆请求体 / 上游上下文。
 MAX_PROMPT_CHARS = 10_000
 
+# 单条消息最多携带的参考图数量。前端 Composer、API schema 和 worker 入参共用。
+MAX_MESSAGE_ATTACHMENTS = 4
+
 
 # --- intent / messages ---
 

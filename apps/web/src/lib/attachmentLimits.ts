@@ -1,0 +1,1 @@
+export const MAX_COMPOSER_ATTACHMENTS = 4;

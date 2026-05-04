@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,15 +21,26 @@ class _Result:
     def all(self) -> list[Any]:
         return self.rows
 
+    def scalar_one_or_none(self) -> Any | None:
+        return self.rows[0] if self.rows else None
+
 
 class _Db:
     def __init__(self, rows: list[Any]) -> None:
         self.rows = rows
         self.statements: list[Any] = []
+        self.added: list[Any] = []
+        self.flushed = False
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
         return _Result(self.rows)
+
+    def add(self, row: Any) -> None:
+        self.added.append(row)
+
+    async def flush(self) -> None:
+        self.flushed = True
 
 
 def test_model_candidates_mvp_requires_three_candidates() -> None:
@@ -42,6 +54,127 @@ def test_model_candidates_mvp_requires_three_candidates() -> None:
 
     with pytest.raises(ValidationError):
         ModelCandidatesCreateIn(candidate_count=2, style_prompt="premium")
+
+
+def test_github_folder_metadata_uses_directory_and_filename() -> None:
+    item = workflows._metadata_from_github_file(  # noqa: SLF001
+        {
+            "type": "file",
+            "name": "adult-asian-minimal-studio-001.png",
+            "path": "assets/apparel-model-presets/05_adult/female/adult-asian-minimal-studio-001.png",
+            "download_url": "https://raw.githubusercontent.com/cyeinfpro/Lumen/main/assets/apparel-model-presets/05_adult/female/adult-asian-minimal-studio-001.png",
+            "sha": "abc",
+        }
+    )
+
+    assert item is not None
+    assert item["preset_id"] == "adult-asian-minimal-studio-001"
+    assert item["age_segment"] == "adult"
+    assert item["library_folder"] == "05_adult/female"
+    assert item["gender"] == "female"
+    assert item["appearance_direction"] == "asian"
+    assert "minimal" in item["style_tags"]
+
+
+def test_github_folder_metadata_accepts_jpg_and_webp() -> None:
+    for suffix in ("jpg", "webp"):
+        item = workflows._metadata_from_github_file(  # noqa: SLF001
+            {
+                "type": "file",
+                "name": f"adult-minimal-studio-001.{suffix}",
+                "path": f"assets/apparel-model-presets/05_adult/male/adult-minimal-studio-001.{suffix}",
+                "download_url": f"https://example.invalid/adult-minimal-studio-001.{suffix}",
+            }
+        )
+
+        assert item is not None
+        assert item["age_segment"] == "adult"
+        assert item["gender"] == "male"
+        assert item["library_folder"] == "05_adult/male"
+
+
+def test_github_folder_metadata_ignores_thumb_files() -> None:
+    item = workflows._metadata_from_github_file(  # noqa: SLF001
+        {
+            "type": "file",
+            "name": "adult-female-001.thumb.webp",
+            "path": "assets/apparel-model-presets/05_adult/female/adult-female-001.thumb.webp",
+            "download_url": "https://example.invalid/thumb.webp",
+        }
+    )
+
+    assert item is None
+
+
+def test_model_library_folder_helpers_support_numbered_age_dirs() -> None:
+    assert workflows._normalize_age_segment("05_adult") == "adult"  # noqa: SLF001
+    assert workflows._normalize_age_segment("04_young_adult") == "young_adult"  # noqa: SLF001
+    assert workflows._model_library_folder_for_age("senior", "male") == "07_senior/male"  # noqa: SLF001
+    assert workflows._model_library_folder_for_age("bad", "female") == "00_user_favorites/female"  # noqa: SLF001
+    assert workflows._model_library_folder_for_age("adult", "bad") == "05_adult/female"  # noqa: SLF001
+
+
+def test_primary_candidate_image_prefers_contact_sheet_then_candidate_ids() -> None:
+    assert (
+        workflows._primary_candidate_image_id(  # noqa: SLF001
+            SimpleNamespace(contact_sheet_image_id="sheet", model_brief_json={})
+        )
+        == "sheet"
+    )
+    assert (
+        workflows._primary_candidate_image_id(  # noqa: SLF001
+            SimpleNamespace(
+                contact_sheet_image_id=None,
+                model_brief_json={"candidate_image_ids": ["first", "second"]},
+            )
+        )
+        == "first"
+    )
+    assert (
+        workflows._primary_candidate_image_id(  # noqa: SLF001
+            SimpleNamespace(contact_sheet_image_id=None, model_brief_json={})
+        )
+        is None
+    )
+
+
+def test_default_github_contents_url_points_to_user_repo_folder() -> None:
+    assert workflows._github_contents_url().startswith(  # noqa: SLF001
+        "https://api.github.com/repos/cyeinfpro/Lumen/contents/assets/apparel-model-presets"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_user_image_from_preset_copies_to_user_private_storage(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(workflows.settings, "storage_root", str(tmp_path))
+    source_key = "apparel-model-library/presets/adult-female/v1.png"
+    source_path = tmp_path / source_key
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        )
+    )
+    db = _Db([])
+
+    img = await workflows._create_user_image_from_preset(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        item={
+            "id": "preset:adult-female:v1",
+            "preset_id": "adult-female",
+            "version": 1,
+            "image_storage_key": source_key,
+        },
+    )
+
+    assert db.flushed is True
+    assert img.storage_key.startswith("u/user-1/apparel-model-library/")
+    assert img.storage_key.endswith(".png")
+    assert img.storage_key != source_key
+    assert (tmp_path / img.storage_key).read_bytes() == source_path.read_bytes()
+    assert img.metadata_jsonb["cached_from_storage_key"] == source_key
+    assert img.metadata_jsonb["shared_storage"] is False
 
 
 @pytest.mark.asyncio
@@ -92,23 +225,29 @@ def test_product_analysis_json_parser_unwraps_content_envelope() -> None:
     out = workflows._try_parse_json_text(
         '{"content":{"text":"{\\"category\\":\\"衬衫\\",\\"color\\":\\"蓝色\\",'
         '\\"material\\":\\"棉\\",\\"silhouette\\":\\"宽松\\",'
-        '\\"details\\":[\\"翻领\\"],\\"preserve\\":[\\"蓝色\\",\\"翻领\\"]}"}}'
+        '\\"details\\":[\\"翻领\\"],\\"preserve\\":[\\"蓝色\\",\\"翻领\\"],'
+        '\\"background\\":\\"明亮自然的日常随拍氛围\\"}"}}'
     )  # noqa: SLF001
 
     assert out["category"] == "衬衫"
     assert out["material_guess"] == "棉"
     assert out["key_details"] == ["翻领"]
     assert out["must_preserve"] == ["蓝色", "翻领"]
+    assert out["background_recommendation"] == "明亮自然的日常随拍氛围"
 
 
 def test_product_analysis_prompt_requests_styling_recommendations() -> None:
     prompt = workflows._product_analysis_prompt("8岁童装")  # noqa: SLF001
 
     assert "styling_recommendations" in prompt
+    assert "background_recommendation" in prompt
+    assert "只服务后续生成真人模特穿搭图" in prompt
     assert "1-3 个" in prompt
-    assert "不需要覆盖所有饰品类别" in prompt
-    assert "人群/年龄" in prompt
+    assert "开放式背景氛围建议" in prompt
+    assert "不要列具体地点或具体空间名" in prompt
+    assert "低存在感" in prompt
     assert "must_preserve" in prompt
+    assert "3-8 个" in prompt
     assert "必须只返回一个 JSON object" in prompt
 
 
@@ -181,13 +320,39 @@ def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -
 
     assert "warm ivory sleeveless top" in prompt
     assert "warm ivory shorts" in prompt
-    assert "exactly four views" in prompt
+    assert "2x2 ecommerce model reference contact sheet" in prompt
+    assert "exactly four panels" in prompt
     assert "front full body" in prompt
-    assert "side full body" in prompt
-    assert "back full body" in prompt
+    assert "left 90-degree profile full body" in prompt
+    assert "straight back full body" in prompt
     assert "close-up headshot" in prompt
+    assert "same camera height and distance" in prompt
+    assert "only one eye visible" in prompt
+    assert "not a three-quarter pose" in prompt
+    assert "face not visible" in prompt
+    assert "plain seamless white or light gray studio background" in prompt
+    assert "real commercially photographed person" in prompt
+    assert "natural facial asymmetry" in prompt
+    assert "believable skin texture" in prompt
+    assert "generic influencer face" in prompt
+    assert "plastic skin" in prompt
     assert "No text labels" in prompt
     assert "no height labels" in prompt
+
+
+def test_candidate_image_params_use_lossless_png_reference() -> None:
+    params = workflows._candidate_image_params()  # noqa: SLF001
+
+    assert params.aspect_ratio == "4:5"
+    assert params.size_mode == "fixed"
+    assert params.fixed_size == "1600x2000"
+    assert params.count == 1
+    assert params.render_quality == "high"
+    assert params.fast is False
+    assert params.output_format == "png"
+    assert params.output_compression is None
+    assert params.background == "opaque"
+    assert params.moderation == "low"
 
 
 def test_age_direction_adapts_child_model_pose_and_expression() -> None:
@@ -214,12 +379,9 @@ def test_age_direction_adapts_child_model_pose_and_expression() -> None:
     assert "around 128cm" in candidate_prompt
     assert "age-appropriate" in candidate_prompt
     assert "non-adultized" in candidate_prompt
-    assert "已确认模特参考图" in showcase_prompt
-    assert "智能生活场景" in showcase_prompt
-    assert "不要纯灰棚拍" in showcase_prompt
+    assert "模特图" in showcase_prompt
     assert "同一张脸" in showcase_prompt
     assert "身材比例" in showcase_prompt
-    assert "肢体长度" in showcase_prompt
 
 
 def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
@@ -231,6 +393,7 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     prompt = workflows._showcase_prompt(  # noqa: SLF001
         product_analysis={
             "must_preserve": ["lapel shape", "button position", "pocket placement"],
+            "background_recommendation": "明亮松弛的日常随拍氛围",
         },
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={
@@ -241,38 +404,29 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
         template="premium_studio",
         shot_type="front_full_body",
         final_quality="high",
-        user_prompt="咖啡馆窗边，自然走动回头",
+        user_prompt="明亮松弛，自然走动回头",
     )
 
-    assert "请根据白底产品图和已确认模特参考图" in prompt
-    assert "真实自然的真人模特穿搭电商图" in prompt
-    assert "REFERENCE USE:" in prompt
-    assert "SCENE:" in prompt
-    assert "CAMERA / PHOTO STYLE:" in prompt
-    assert "SHOT:" in prompt
-    assert "OUTPUT:" in prompt
-    assert "咖啡馆窗边，自然走动回头" in prompt
-    assert "模板强约束：高级灰棚拍" in prompt
-    assert "必须保留：lapel shape、button position、pocket placement" in prompt
-    assert "配饰只参考已提供的商品/饰品搭配参考图" in prompt
-    assert "不要额外新增、替换或强化配饰" in prompt
-    assert "不要让配饰遮挡衣服主体" in prompt
+    assert "请根据这张白底产品图和模特图" in prompt
+    assert "生成真实自然的真人模特穿搭图" in prompt
+    assert "要求：" in prompt
+    assert "明亮松弛" in prompt
+    assert "走动" not in prompt
+    assert "回头" not in prompt
+    assert "明亮松弛的日常随拍氛围" in prompt
+    assert "重点保留：lapel shape、button position、pocket placement" in prompt
+    assert "少量自然搭配" in prompt
+    assert "small earrings" not in prompt
+    assert "优先参考它" in prompt
+    assert "不要抢衣服主体" in prompt
     assert "超写实" in prompt
-    assert "真实 Canon 相机商业摄影风格" in prompt
-    assert "Real Canon full-frame commercial fashion photography" in prompt
-    assert "realistic lens rendering" in prompt
-    assert "true-to-life skin texture" in prompt
-    assert "自然商业摄影风格" in prompt
-    assert "细节清晰" in prompt
-    assert "适合亚马逊/电商主图" in prompt
-    assert "透视、地面接触、脚下阴影、反射、环境光和色温一致" in prompt
-    assert "不要像抠图贴到背景上" in prompt
-    assert "中等景深" in prompt
-    assert "不要大光圈虚化、强 bokeh 或背景过度模糊" in prompt
-    assert "主图" in prompt
-    assert "standing front-facing" in prompt
-    assert "文字、水印" in prompt
-    assert len(prompt) < 1800
+    assert "商业摄影" in prompt
+    assert "适合亚马逊电商主图" in prompt
+    assert "全身照" in prompt
+    assert "正面全身" in prompt
+    assert "欧美风格" in prompt
+    assert "无文字水印" in prompt
+    assert len(prompt) < 650
 
 
 def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() -> None:
@@ -292,13 +446,9 @@ def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() 
 
     assert "同一张脸" in prompt
     assert "发型" in prompt
-    assert "身高约 128cm" in prompt
     assert "身材比例" in prompt
-    assert "肢体长度" in prompt
-    assert "腿长" in prompt
     assert "不要换人" in prompt
-    assert "不能成人化" in prompt
-    assert "不能性感化" in prompt
+    assert "身高约" not in prompt
 
 
 def test_showcase_prompt_uses_quality_mode_variable() -> None:
@@ -317,7 +467,27 @@ def test_showcase_prompt_uses_quality_mode_variable() -> None:
     )
 
     assert "画质：4K 终稿" in prompt
-    assert "不要额外新增、替换或强化配饰" in prompt
+    assert "少量自然搭配" in prompt
+    assert "不要抢衣服主体" in prompt
+
+
+def test_showcase_prompt_respects_explicit_non_european_style_region() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "亚洲女性，自然电商模特", "height_cm": 168},
+    )
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": []},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="premium_studio",
+        shot_type="front_full_body",
+        final_quality="high",
+    )
+
+    assert "亚洲风格" in prompt
+    assert "重点保留：颜色、版型、款式" in prompt
 
 
 def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
@@ -337,10 +507,17 @@ def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
         for shot in workflows.DEFAULT_SHOT_PLAN
     }
 
-    assert "standing front-facing" in prompts["front_full_body"]
-    assert "natural walking or turning" in prompts["natural_pose"]
-    assert "half-body detail pose" in prompts["detail_half_body"]
-    assert "side or back three-quarter pose" in prompts["side_or_back"]
+    assert "正面全身" in prompts["front_full_body"]
+    assert "姿势生动活泼有活力" in prompts["natural_pose"]
+    assert "姿态自由不死板" in prompts["natural_pose"]
+    assert "另一张自然全身展示" in prompts["detail_half_body"]
+    assert "姿态自然不重复" in prompts["detail_half_body"]
+    assert "侧面" in prompts["side_or_back"]
+    assert "背面" not in prompts["side_or_back"]
+    for prompt in prompts.values():
+        assert "走动" not in prompt
+        assert "回头" not in prompt
+        assert "扶袖口" not in prompt
     assert len(set(prompts.values())) == len(workflows.DEFAULT_SHOT_PLAN)
 
 
@@ -352,10 +529,44 @@ def test_accessory_preview_prompt_is_model_quad_with_accessories_only() -> None:
 
     assert "已确认模特四宫格参考图" in prompt
     assert "白底模特配饰四宫格参考图" in prompt
+    assert "2x2 四宫格参考图" in prompt
     assert "正面全身、侧面全身、背面全身、近景头像" in prompt
+    assert "左上正面全身、右上侧面全身、左下背面全身、右下近景头像" in prompt
     assert "不要穿商品图中的衣服" in prompt
     assert "不要出现任何商品服饰" in prompt
-    assert "只在模特身上加入所选配饰" in prompt
+    assert "只添加这些配饰：small earrings、white sneakers" in prompt
+    assert "不要自动新增未列出的包、帽子、腰带、眼镜、首饰、鞋子或道具" in prompt
+    assert "耳饰在耳垂位置" in prompt
+    assert "不能漂浮、变形、穿模" in prompt
+    assert "不要让配饰遮挡未来商品展示区域" in prompt
+    assert "natural clean styling" in prompt
+
+
+def test_accessory_preview_prompt_adapts_child_accessory_styling() -> None:
+    prompt = workflows._accessory_preview_prompt(  # noqa: SLF001
+        accessory_plan={"items": ["canvas shoes"], "strength": "strong"},
+        style_prompt="8岁儿童，活泼自然",
+        age_context="童装",
+    )
+
+    assert "child-appropriate" in prompt
+    assert "no adult jewelry styling" in prompt
+    assert "更明显但仍克制" in prompt
+
+
+def test_accessory_preview_image_params_use_png_reference_quality() -> None:
+    params = workflows._accessory_preview_image_params()  # noqa: SLF001
+
+    assert params.aspect_ratio == "4:5"
+    assert params.size_mode == "fixed"
+    assert params.fixed_size == "1600x2000"
+    assert params.count == 1
+    assert params.render_quality == "high"
+    assert params.fast is False
+    assert params.output_format == "png"
+    assert params.output_compression is None
+    assert params.background == "opaque"
+    assert params.moderation == "low"
 
 
 def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None:
@@ -371,24 +582,47 @@ def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None
             "material_guess": "羊毛混纺",
             "silhouette": "修身通勤",
             "must_preserve": ["深灰色", "西装驳领"],
+            "background_recommendation": "克制高级的精品空间氛围",
         },
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
         template="lifestyle",
         shot_type="front_full_body",
         final_quality="high",
-        user_prompt="美术馆长廊，轻松侧身",
+        user_prompt="克制高级，轻松侧身",
     )
 
-    assert "美术馆长廊，轻松侧身" in prompt
-    assert "智能生活场景" in prompt
-    assert "不要纯灰棚拍" in prompt
-    assert "不要纯色背景" in prompt
-    assert "不要白底" in prompt
-    assert "真实环境线索" in prompt
+    assert "克制高级" in prompt
+    assert "精品空间氛围" in prompt
+    assert "画廊" not in prompt
+    assert "酒店" not in prompt
+    assert "咖啡馆" not in prompt
+    assert "买手店" not in prompt
     assert "西装外套" in prompt
     assert "羊毛混纺" not in prompt
     assert "boutique hotel lobby" not in prompt
+
+
+def test_daily_snapshot_template_uses_phone_realistic_scene() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "成年女性，欧美，自然日常"},
+    )
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"category": "针织上衣", "must_preserve": ["浅灰色", "短款版型"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": True, "items": ["帆布包"], "strength": "subtle"},
+        template="daily_snapshot",
+        shot_type="natural_pose",
+        final_quality="high",
+    )
+
+    assert "日常随拍质感" in prompt
+    assert "手机拍摄感" in prompt
+    assert "超真实、超自然" in prompt
+    assert "不像棚拍" in prompt
+    assert "帆布包" not in prompt
 
 
 def test_revision_prompt_is_short_repair_brief() -> None:

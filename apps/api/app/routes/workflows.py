@@ -8,19 +8,28 @@ refreshing or closing the browser does not lose progress.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, Iterable
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
+from PIL import Image as PILImage
 from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import (
     CompletionStatus,
     GenerationStatus,
+    ImageSource,
+    ImageVisibility,
     Intent,
     MessageStatus,
     Role,
@@ -44,6 +53,14 @@ from lumen_core.schemas import (
     AccessoryPlanIn,
     AccessoryPreviewCreateIn,
     AccessorySelectionIn,
+    AgeSegment,
+    ApparelModelLibraryItemCreateIn,
+    ApparelModelLibraryItemOut,
+    ApparelModelLibraryItemPatchIn,
+    ApparelModelLibraryListOut,
+    ApparelModelLibrarySelectIn,
+    ApparelModelLibrarySyncOut,
+    ApparelModelLibrarySyncStateOut,
     ApparelWorkflowCreateIn,
     ApparelWorkflowCreateOut,
     ChatParamsIn,
@@ -52,6 +69,7 @@ from lumen_core.schemas import (
     ImageParamsIn,
     ImageRevisionIn,
     ModelCandidateApproveIn,
+    ModelCandidateSaveToLibraryIn,
     ModelCandidatesCreateIn,
     ModelCandidateOut,
     ProductAnalysisApproveIn,
@@ -66,6 +84,7 @@ from lumen_core.schemas import (
 
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
+from ..config import settings
 from ..redis_client import get_redis
 from .messages import (
     _create_assistant_task,
@@ -97,9 +116,36 @@ DEFAULT_SHOT_PLAN = [
     "side_or_back",
 ]
 
+MODEL_LIBRARY_ROOT_KEY = "apparel-model-library"
+# apparel-model-library 常量 + 纯 helper 全部从 _apparel_library 导入。
+# 这里 re-export 是为了让既有测试（apps/api/tests/test_workflows_route.py）
+# 仍能通过 `workflows._normalize_age_segment` 等私有路径访问。
+from app.routes._apparel_library import (  # noqa: E402, F401
+    MODEL_LIBRARY_AGE_SEGMENTS,
+    MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS,
+    MODEL_LIBRARY_FOLDER_BY_AGE,
+    MODEL_LIBRARY_GENDER_SEGMENTS,
+    MODEL_LIBRARY_IMAGE_SUFFIXES,
+    MODEL_LIBRARY_MAX_BINARY_BYTES,
+    MODEL_LIBRARY_SCHEMA_VERSION,
+    MODEL_LIBRARY_SOURCES,
+    MODEL_LIBRARY_SYNC_COOLDOWN_SECONDS,
+    MODEL_LIBRARY_SYNC_MODES,
+    MODEL_LIBRARY_SYNC_RETRY_COOLDOWN_SECONDS,
+    _SYNC_LOCK,
+    _age_segment_from_folder_name,
+    _gender_from_folder_name,
+    _library_item_url,
+    _model_library_folder_for_age,
+    _normalize_age_segment,
+    _normalize_model_gender,
+    _preset_id_from_path,
+    _title_from_preset_id,
+)
+
 STEP_LABELS = {
     "upload_product": "上传商品",
-    "product_analysis": "商品理解",
+    "product_analysis": "商品约束",
     "model_settings": "模特设定",
     "model_candidates": "模特候选",
     "model_approval": "方案确认",
@@ -109,86 +155,36 @@ STEP_LABELS = {
 }
 
 SHOT_LABELS = {
-    "front_full_body": "主图：干净背景，全身正面，突出商品轮廓",
-    "natural_pose": "姿态图：自然站姿或轻微动态，展示穿着氛围",
-    "detail_half_body": "细节图：半身或局部，突出面料和结构细节",
-    "side_or_back": "侧背图：侧面或背面角度，展示版型和长度",
-}
-
-SHOT_COMPOSITION_REQUIREMENTS = {
-    "front_full_body": (
-        "Composition requirement: full-body, head-to-toe framing, the complete "
-        "model must be visible from top of head to shoes/feet, no cropping at "
-        "head, hands, legs, knees, ankles, or feet, enough margin around the body."
-    ),
-    "natural_pose": (
-        "Composition requirement: full-body or near full-body natural pose, keep "
-        "head-to-toe readability whenever possible, do not crop feet or head, "
-        "show the garment on the complete body silhouette."
-    ),
-    "detail_half_body": (
-        "Composition requirement: half-body or detail framing is allowed, but the "
-        "garment structure must remain readable and not be obscured."
-    ),
-    "side_or_back": (
-        "Composition requirement: side or back angle with full outfit readability; "
-        "prefer full-body framing and avoid cropping feet/head unless absolutely "
-        "necessary for the angle."
-    ),
-}
-
-SHOT_ACTION_REQUIREMENTS = {
-    "front_full_body": (
-        "Action requirement: standing front-facing with a relaxed ecommerce pose, "
-        "arms naturally at the sides or lightly angled, clearly showing the garment front."
-    ),
-    "natural_pose": (
-        "Action requirement: natural walking or turning pose with gentle movement, "
-        "different from the front-facing main image, while keeping the garment readable."
-    ),
-    "detail_half_body": (
-        "Action requirement: half-body detail pose, one hand may lightly adjust cuff, "
-        "collar, pocket, or hem without covering key product details."
-    ),
-    "side_or_back": (
-        "Action requirement: side or back three-quarter pose, looking slightly away "
-        "or over shoulder, clearly showing side/back structure and length."
-    ),
+    "front_full_body": "正面全身，自然不僵硬",
+    "natural_pose": "自然全身展示，姿态自由不死板",
+    "detail_half_body": "另一张自然全身展示，姿态自然不重复",
+    "side_or_back": "侧面全身，姿态自然",
 }
 
 TEMPLATE_LABELS = {
-    "white_ecommerce": "白底电商图",
-    "premium_studio": "高级灰棚拍",
-    "urban_commute": "城市通勤场景",
-    "lifestyle": "智能生活场景",
-    "social_seed": "社媒种草图",
+    "white_ecommerce": "白底主图",
+    "premium_studio": "高级棚拍",
+    "urban_commute": "质感街拍",
+    "lifestyle": "精品空间",
+    "daily_snapshot": "日常随拍",
+    "social_seed": "自然种草",
 }
 
 def _template_requirement(template: str, product_analysis: dict[str, Any]) -> str:
     category = str(product_analysis.get("category") or "服饰").strip() or "服饰"
+    recommended_background = str(product_analysis.get("background_recommendation") or "").strip()
+    matched_background = (
+        recommended_background
+        if recommended_background and recommended_background.lower() != "unknown"
+        else f"根据{category}选择好看的服饰商业摄影氛围"
+    )
     requirements = {
-        "white_ecommerce": (
-            "模板强约束：白底电商主图，纯白或近白背景，柔和棚拍光，主体清晰完整，"
-            "不要生活场景、家具、街景或复杂道具。"
-        ),
-        "premium_studio": (
-            "模板强约束：高级灰棚拍，浅灰/中性灰摄影棚背景，柔和商业布光，"
-            "背景极简高级，不要生活空间、户外街景或杂乱道具。"
-        ),
-        "urban_commute": (
-            f"模板强约束：城市通勤场景，背景必须是与{category}匹配的真实城市环境，"
-            "例如街区、人行道、办公楼大堂、地铁口、咖啡店外或城市橱窗。"
-            "不要纯灰棚拍、不要纯色背景、不要白底。"
-        ),
-        "lifestyle": (
-            f"模板强约束：智能生活场景，背景必须是与{category}匹配的真实生活空间，"
-            "例如现代家居、智能客厅、校园/居家活动空间、简洁室内生活场景或轻生活方式场景。"
-            "必须有自然的空间层次和真实环境线索；不要纯灰棚拍、不要纯色背景、不要白底。"
-        ),
-        "social_seed": (
-            f"模板强约束：社媒种草图，背景必须是与{category}匹配的真实生活方式/街拍/室内场景，"
-            "构图更自然、有分享感，但仍保持商品清晰。不要纯灰棚拍、不要纯色背景、不要白底。"
-        ),
+        "white_ecommerce": "白底或近白底，柔和棚拍光",
+        "premium_studio": f"{matched_background}，高级棚拍质感，柔和光影",
+        "urban_commute": f"与{category}匹配的质感街拍氛围，真实自然但不杂乱",
+        "lifestyle": f"与{category}匹配的精品空间氛围，克制、高级、有层次",
+        "daily_snapshot": f"与{category}匹配的日常随拍质感，手机拍摄感，超真实、超自然、不像棚拍",
+        "social_seed": f"与{category}匹配的自然种草氛围，松弛、真实、有生活感",
     }
     return requirements.get(template, TEMPLATE_LABELS.get(template, template))
 
@@ -202,37 +198,23 @@ def _showcase_prompt_brief(
     model_consistency: str,
     shot_direction: str,
     quality_direction: str,
+    style_region: str,
 ) -> str:
-    direction_parts = [part for part in (user_direction.strip(), template_direction.strip()) if part]
-    direction = "，".join(direction_parts) or "高级自然电商场景，动作自然"
+    direction = template_direction.strip() or "背景与衣服图片搭配"
+    extra_direction = _compact_showcase_user_direction(user_direction, style_region)
+    if extra_direction:
+        direction = f"{direction}；{extra_direction}"
     return "\n".join(
         [
-            "生成一张真实自然的真人模特穿搭电商图。请根据白底产品图和已确认模特参考图完成。",
+            "请根据这张白底产品图和模特图，生成真实自然的真人模特穿搭图。",
             "",
-            "REFERENCE USE:",
-            "- 商品白底图是服装唯一来源；模特必须穿着同一件衣服，严格还原商品服饰，"
-            f"不要改款、不要改变颜色、不要添加不存在的服装细节。必须保留：{product_preserve}。",
-            f"- 模特参考图是人物身份来源；{model_consistency}",
-            f"- {accessory_direction}",
-            "",
-            "SCENE:",
-            f"- 场景选择与衣服风格和用户方向匹配的干净商业摄影背景。参考方向：{direction}。",
-            "- 人物必须真实站在同一环境里，透视、地面接触、脚下阴影、反射、环境光和色温一致，"
-            "不要像抠图贴到背景上。",
-            "- 背景简洁高级，不杂乱，不抢主体，整体适合亚马逊/电商主图；不能纯靠强虚化制造高级感。",
-            "",
-            "CAMERA / PHOTO STYLE:",
-            f"- 画质：{quality_direction}，超写实，真实 Canon 相机商业摄影风格，自然商业摄影风格。",
-            "- Real Canon full-frame commercial fashion photography, realistic lens rendering, clean color, "
-            "true-to-life skin texture, no over-retouching.",
-            "- 使用中等景深，衣服、脸、手脚和近处环境都清晰；不要大光圈虚化、强 bokeh 或背景过度模糊。",
-            "",
-            "SHOT:",
-            f"- {shot_direction}",
-            "",
-            "OUTPUT:",
-            "- 细节清晰，光线真实，干净高级。",
-            "- 画面中不要出现文字、水印、logo 水印、畸形手脚、多余人物、衣架、假人或不自然背景物体。",
+            "要求：",
+            f"1. 模特穿着这件衣服，颜色、版型、款式还原原图；重点保留：{product_preserve}。",
+            f"2. 模特参考模特图，{model_consistency}身材和表情自然。",
+            f"3. 配饰：{accessory_direction}",
+            f"4. 场景：背景与衣服风格搭配，{direction}。",
+            f"5. 画质：{quality_direction}，超写实商业摄影，干净高级，适合亚马逊电商主图，无文字水印。",
+            f"6. 构图：全身照，{style_region}风格，姿势生动活泼有活力，{shot_direction}。",
         ]
     )
 
@@ -324,6 +306,43 @@ def _accessory_age_direction(text: str) -> str:
     )
 
 
+def _accessory_strength_direction(strength: str) -> str:
+    if strength == "strong":
+        return "更明显但仍克制，必须服务整体造型，不要压过模特身份和后续服装主体"
+    if strength == "medium":
+        return "中等存在感，清楚可见但不要主导画面"
+    return "低存在感，近看可辨认，远看不抢主体"
+
+
+def _style_region_from_text(text: str) -> str:
+    for region in ("欧美", "亚洲", "拉美", "中东", "非洲"):
+        if region in text:
+            return region
+    return "欧美"
+
+
+def _compact_showcase_user_direction(text: str, style_region: str) -> str:
+    direction = (text or "").strip()
+    if not direction:
+        return ""
+    for token in (
+        f"外貌方向：{style_region}",
+        style_region,
+        "模特姿势生动活泼有活力",
+        "姿势生动活泼有活力",
+        "生动活泼有活力",
+        "全身照",
+        "自然走动回头",
+        "走动回头",
+        "自然走动",
+        "走动",
+        "回头",
+    ):
+        direction = direction.replace(token, "")
+    direction = re.sub(r"[，,、；;\s]+", "，", direction).strip("，,、；; ")
+    return direction[:60]
+
+
 class _PublishBundle:
     def __init__(
         self,
@@ -362,6 +381,747 @@ def _dedupe_nonempty(values: Iterable[str]) -> list[str]:
         seen.add(v)
         out.append(v)
     return out
+
+
+def _clean_optional_text(value: str | None, *, max_len: int = 120) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_len]
+
+
+def _clean_style_tags(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        tag = raw.strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag[:32])
+        if len(out) >= 12:
+            break
+    return out
+
+
+def _clean_string_list(values: Iterable[str], *, max_items: int, max_len: int) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        item = raw.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item[:max_len])
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _safe_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _iso_now() -> str:
+    return _now().isoformat().replace("+00:00", "Z")
+
+
+def _storage_root() -> Path:
+    return Path(settings.storage_root).resolve()
+
+
+def _storage_path(storage_key: str) -> Path:
+    root = _storage_root()
+    if not storage_key or "\x00" in storage_key:
+        raise _http("invalid_path", "invalid storage path", 400)
+    key_path = Path(storage_key)
+    if key_path.is_absolute():
+        raise _http("invalid_path", "absolute storage paths are not allowed", 400)
+    path = (root / key_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise _http("invalid_path", "storage path escapes root", 400)
+    return path
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        _fsync_dir(path.parent)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _fsync_dir(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_json_file(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict(default)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise _http("invalid_index", f"invalid model library index: {path.name}", 500) from exc
+    if not isinstance(data, dict):
+        raise _http("invalid_index", f"invalid model library index: {path.name}", 500)
+    return data
+
+
+def _library_root() -> Path:
+    return _storage_path(MODEL_LIBRARY_ROOT_KEY)
+
+
+def _library_index_path() -> Path:
+    return _library_root() / "index.json"
+
+
+def _library_sync_state_path() -> Path:
+    return _library_root() / "sync-state.json"
+
+
+def _library_user_index_path(user_id: str) -> Path:
+    return _library_root() / "users" / user_id / "index.json"
+
+
+def _default_library_index() -> dict[str, Any]:
+    return {
+        "schema_version": MODEL_LIBRARY_SCHEMA_VERSION,
+        "updated_at": None,
+        "preset_items": [],
+    }
+
+
+def _default_user_library_index() -> dict[str, Any]:
+    return {
+        "schema_version": MODEL_LIBRARY_SCHEMA_VERSION,
+        "updated_at": None,
+        "hidden_preset_ids": [],
+        "items": [],
+    }
+
+
+def _default_sync_state() -> dict[str, Any]:
+    return {
+        "schema_version": MODEL_LIBRARY_SCHEMA_VERSION,
+        "last_success_at": None,
+        "last_error": None,
+        "last_attempt_at": None,
+        "last_result": None,
+    }
+
+
+def _github_contents_url() -> str:
+    return settings.apparel_model_library_github_contents_url.strip()
+
+
+def _sync_mode() -> str:
+    mode = settings.apparel_model_library_sync_mode.strip().lower()
+    return mode if mode in MODEL_LIBRARY_SYNC_MODES else "admin_only"
+
+
+def _can_sync_library(user: User) -> bool:
+    mode = _sync_mode()
+    if mode == "disabled":
+        return False
+    if mode == "any_authenticated":
+        return True
+    return user.role == "admin"
+
+
+def _sync_state_out(user: User) -> ApparelModelLibrarySyncStateOut:
+    state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+    return ApparelModelLibrarySyncStateOut(
+        last_success_at=_safe_datetime(state.get("last_success_at")),
+        last_error=_clean_optional_text(state.get("last_error"), max_len=1000),
+        can_sync=_can_sync_library(user),
+        github_contents_url=_github_contents_url() or None,
+    )
+
+
+def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
+    item_id = str(raw.get("id") or "").strip()
+    source = str(raw.get("source") or "").strip()
+    if source not in {"preset", "favorite", "user_upload"}:
+        source = "user_upload"
+    image_id = _clean_optional_text(raw.get("image_id"), max_len=64)
+    image_url = (
+        f"/api/images/{image_id}/binary"
+        if image_id
+        else _library_item_url(item_id, "binary")
+    )
+    thumb_url = (
+        f"/api/images/{image_id}/variants/display2048"
+        if image_id
+        else _library_item_url(item_id, "thumb")
+    )
+    created_at = _safe_datetime(raw.get("created_at")) or _safe_datetime(raw.get("updated_at")) or _now()
+    visibility_scope = "global_preset" if source == "preset" else "user_private"
+    return ApparelModelLibraryItemOut(
+        id=item_id,
+        source=source,  # type: ignore[arg-type]
+        visibility_scope=visibility_scope,  # type: ignore[arg-type]
+        title=str(raw.get("title") or "未命名模特").strip()[:120],
+        age_segment=_normalize_age_segment(raw.get("age_segment")),  # type: ignore[arg-type]
+        gender=_clean_optional_text(raw.get("gender"), max_len=40),
+        appearance_direction=_clean_optional_text(
+            raw.get("appearance_direction"), max_len=80
+        ),
+        style_tags=_clean_style_tags(raw.get("style_tags") or raw.get("tags") or []),
+        image_url=image_url,
+        thumb_url=thumb_url,
+        image_id=image_id,
+        preset_id=_clean_optional_text(raw.get("preset_id"), max_len=160),
+        version=raw.get("version") if isinstance(raw.get("version"), int) else None,
+        library_folder=_clean_optional_text(
+            raw.get("library_folder")
+            or _model_library_folder_for_age(raw.get("age_segment"), raw.get("gender")),
+            max_len=40,
+        ),
+        prompt_hint=_clean_optional_text(raw.get("prompt_hint"), max_len=300),
+        created_at=created_at,
+        updated_at=_safe_datetime(raw.get("updated_at")),
+    )
+
+
+def _load_global_library_index() -> dict[str, Any]:
+    return _read_json_file(_library_index_path(), _default_library_index())
+
+
+def _load_user_library_index(user_id: str) -> dict[str, Any]:
+    return _read_json_file(_library_user_index_path(user_id), _default_user_library_index())
+
+
+def _save_global_library_index(index: dict[str, Any]) -> None:
+    index["schema_version"] = MODEL_LIBRARY_SCHEMA_VERSION
+    index["updated_at"] = _iso_now()
+    _write_json_atomic(_library_index_path(), index)
+
+
+def _save_user_library_index(user_id: str, index: dict[str, Any]) -> None:
+    index["schema_version"] = MODEL_LIBRARY_SCHEMA_VERSION
+    index["updated_at"] = _iso_now()
+    _write_json_atomic(_library_user_index_path(user_id), index)
+
+
+def _save_sync_state(state: dict[str, Any]) -> None:
+    state["schema_version"] = MODEL_LIBRARY_SCHEMA_VERSION
+    _write_json_atomic(_library_sync_state_path(), state)
+
+
+def _combined_library_items(user_id: str) -> list[dict[str, Any]]:
+    global_index = _load_global_library_index()
+    user_index = _load_user_library_index(user_id)
+    hidden = set(_dedupe_nonempty(user_index.get("hidden_preset_ids") or []))
+    preset_items = [
+        dict(item)
+        for item in global_index.get("preset_items", [])
+        if isinstance(item, dict) and str(item.get("id") or "") not in hidden
+    ]
+    user_items = [
+        dict(item)
+        for item in user_index.get("items", [])
+        if isinstance(item, dict)
+    ]
+    return [*preset_items, *user_items]
+
+
+def _filter_library_items(
+    items: Iterable[dict[str, Any]],
+    *,
+    source: str,
+    age_segment: str,
+    q: str,
+) -> list[dict[str, Any]]:
+    query = q.strip().lower()
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        item_source = str(item.get("source") or "")
+        if source != "all" and item_source != source:
+            continue
+        item_age = _normalize_age_segment(item.get("age_segment"))
+        if age_segment != "all" and item_age != age_segment:
+            continue
+        if query:
+            haystack = " ".join(
+                [
+                    str(item.get("title") or ""),
+                    str(item.get("gender") or ""),
+                    str(item.get("appearance_direction") or ""),
+                    " ".join(_clean_style_tags(item.get("style_tags") or item.get("tags") or [])),
+                ]
+            ).lower()
+            if query not in haystack:
+                continue
+        filtered.append(item)
+    source_rank = {"preset": 0, "favorite": 1, "user_upload": 2}
+    return sorted(
+        filtered,
+        key=lambda item: (
+            source_rank.get(str(item.get("source") or ""), 9),
+            _normalize_age_segment(item.get("age_segment")),
+            str(item.get("title") or ""),
+            str(item.get("id") or ""),
+        ),
+    )
+
+
+def _find_library_item(user_id: str, item_id: str) -> dict[str, Any] | None:
+    for item in _combined_library_items(user_id):
+        if str(item.get("id") or "") == item_id:
+            return item
+    return None
+
+
+def _guess_mime(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _open_library_storage_file(storage_key: str) -> tuple[Path, str, str]:
+    path = _storage_path(storage_key)
+    if not path.is_file():
+        raise _http("not_found", "library binary missing", 404)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    return path, _guess_mime(path), sha
+
+
+def _stream_file(path: Path) -> Iterable[bytes]:
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(64 * 1024)
+            if not chunk:
+                break
+            yield chunk
+
+
+def _library_binary_response(storage_key: str, request: Request) -> Response:
+    path, media_type, sha = _open_library_storage_file(storage_key)
+    size = path.stat().st_size
+    if size > MODEL_LIBRARY_MAX_BINARY_BYTES:
+        # 拒绝异常大文件，防止恶意/损坏 preset 拖垮带宽（FastAPI 会按 413 返回）
+        raise _http(
+            "library_binary_too_large",
+            f"library binary exceeds {MODEL_LIBRARY_MAX_BINARY_BYTES} bytes",
+            413,
+        )
+    etag = f'"{sha}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": "private, max-age=86400"},
+        )
+    return StreamingResponse(
+        _stream_file(path),
+        media_type=media_type,
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "ETag": etag,
+            "Content-Length": str(size),
+        },
+    )
+
+
+def _preset_storage_key(preset_id: str, version: int, image_path: str) -> str:
+    suffix = Path(image_path).suffix.lower() or ".webp"
+    return f"{MODEL_LIBRARY_ROOT_KEY}/presets/{preset_id}/v{version}{suffix}"
+
+
+def _preset_thumb_storage_key(preset_id: str, thumb_path: str | None, image_key: str) -> str:
+    if not thumb_path:
+        return image_key
+    suffix = Path(thumb_path).suffix.lower() or ".webp"
+    return f"{MODEL_LIBRARY_ROOT_KEY}/presets/{preset_id}/thumb{suffix}"
+
+
+def _write_bytes_replace(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        _fsync_dir(path.parent)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+async def _fetch_bytes(client: httpx.AsyncClient, url: str) -> bytes:
+    resp = await client.get(url)
+    resp.raise_for_status()
+    return resp.content
+
+
+def _github_api_child_url(base_url: str, child_name: str) -> str:
+    prefix, _, query = base_url.partition("?")
+    return (
+        f"{prefix.rstrip('/')}/{child_name}?{query}"
+        if query
+        else f"{prefix.rstrip('/')}/{child_name}"
+    )
+
+
+async def _walk_github_contents(
+    client: httpx.AsyncClient,
+    contents_url: str,
+) -> list[dict[str, Any]]:
+    resp = await client.get(
+        contents_url,
+        headers={"Accept": "application/vnd.github+json"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and data.get("type") == "file":
+        return [data]
+    if not isinstance(data, list):
+        raise ValueError("GitHub contents response must be an array")
+    files: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        entry_type = entry.get("type")
+        name = str(entry.get("name") or "")
+        if entry_type == "dir":
+            child_url = str(entry.get("url") or "") or _github_api_child_url(contents_url, name)
+            files.extend(await _walk_github_contents(client, child_url))
+        elif entry_type == "file":
+            files.append(entry)
+    return files
+
+
+def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
+    path_value = str(entry.get("path") or entry.get("name") or "").strip()
+    if not path_value:
+        return None
+    path = Path(path_value)
+    suffix = path.suffix.lower()
+    if suffix not in MODEL_LIBRARY_IMAGE_SUFFIXES:
+        return None
+    stem = path.stem
+    if stem.endswith(".thumb"):
+        return None
+    download_url = str(entry.get("download_url") or "").strip()
+    if not download_url:
+        return None
+    path_parts = [
+        part for part in path.parts if part not in {"assets", "apparel-model-presets"}
+    ]
+    parent_dirs = path_parts[:-1]
+    age_segment = next(
+        (
+            age
+            for part in reversed(parent_dirs)
+            if (age := _age_segment_from_folder_name(part)) is not None
+        ),
+        "user_favorites",
+    )
+    gender_from_folder = next(
+        (
+            gender_value
+            for part in reversed(parent_dirs)
+            if (gender_value := _gender_from_folder_name(part)) is not None
+        ),
+        None,
+    )
+    preset_id = _preset_id_from_path(path_value)
+    lower_name = path.name.lower()
+    gender = gender_from_folder
+    if any(token in lower_name for token in ("female", "woman", "girl")):
+        gender = "female"
+    elif any(token in lower_name for token in ("male", "man", "boy")):
+        gender = "male"
+    appearance = None
+    for token in ("asian", "european", "latin", "middle-east", "african"):
+        if token in lower_name:
+            appearance = token
+            break
+    words = [
+        part
+        for part in re.split(r"[-_]+", path.stem)
+        if part and not part.isdigit() and part not in {age_segment, "female", "male", "woman", "man"}
+    ]
+    return {
+        "preset_id": preset_id,
+        "version": 1,
+        "title": _title_from_preset_id(preset_id),
+        "age_segment": age_segment,
+        "library_folder": _model_library_folder_for_age(age_segment, gender),
+        "gender": gender,
+        "appearance_direction": appearance,
+        "style_tags": _clean_style_tags(words[:6]),
+        "image_path": path_value,
+        "download_url": download_url,
+        "sha": _clean_optional_text(entry.get("sha"), max_len=80),
+        "prompt_hint": _title_from_preset_id(preset_id),
+    }
+
+
+def _cached_sync_response(state: dict[str, Any]) -> ApparelModelLibrarySyncOut:
+    """从 sync state 拼装一个 'skipped' 响应，用于 cooldown 命中时返回。"""
+    result = state.get("last_result") if isinstance(state.get("last_result"), dict) else {}
+    return ApparelModelLibrarySyncOut(
+        status="skipped",
+        added=int(result.get("added") or 0),
+        updated=int(result.get("updated") or 0),
+        skipped=int(result.get("skipped") or 0),
+        errors=_clean_string_list(
+            result.get("errors") or [],
+            max_items=20,
+            max_len=300,
+        ),
+        last_success_at=_safe_datetime(state.get("last_success_at")),
+        last_error=_clean_optional_text(state.get("last_error"), max_len=1000),
+    )
+
+
+async def _sync_library_presets_from_github_folder(
+    contents_url: str,
+) -> ApparelModelLibrarySyncOut:
+    if not contents_url:
+        raise _http("sync_not_configured", "preset GitHub folder url is not configured", 503)
+    # _SYNC_LOCK 防同进程并发；cooldown 用 last_success_at（5min）和
+    # last_attempt_at（30s 失败重试保护），避免失败被锁死或滥用 hammer GitHub。
+    async with _SYNC_LOCK:
+        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+        last_success = _safe_datetime(state.get("last_success_at"))
+        if last_success is not None:
+            success_age = (_now() - last_success).total_seconds()
+            if success_age < MODEL_LIBRARY_SYNC_COOLDOWN_SECONDS:
+                return _cached_sync_response(state)
+        last_attempt = _safe_datetime(state.get("last_attempt_at"))
+        if last_attempt is not None:
+            attempt_age = (_now() - last_attempt).total_seconds()
+            if attempt_age < MODEL_LIBRARY_SYNC_RETRY_COOLDOWN_SECONDS:
+                return _cached_sync_response(state)
+        return await _do_sync_library_presets(contents_url, state)
+
+
+async def _do_sync_library_presets(
+    contents_url: str,
+    state: dict[str, Any],
+) -> ApparelModelLibrarySyncOut:
+    now = _now()
+    state["last_attempt_at"] = now.isoformat().replace("+00:00", "Z")
+    _save_sync_state(state)
+
+    added = 0
+    updated = 0
+    skipped = 0
+    errors: list[str] = []
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS)
+        ) as client:
+            files = await _walk_github_contents(client, contents_url)
+            parsed_items = [
+                item
+                for item in (_metadata_from_github_file(entry) for entry in files)
+                if item is not None
+            ]
+            thumb_by_base: dict[str, dict[str, Any]] = {}
+            for entry in files:
+                path_value = str(entry.get("path") or entry.get("name") or "")
+                path = Path(path_value)
+                if path.suffix.lower() not in MODEL_LIBRARY_IMAGE_SUFFIXES:
+                    continue
+                if not path.stem.endswith(".thumb"):
+                    continue
+                base = str(path.with_name(f"{path.stem[:-len('.thumb')]}{path.suffix}"))
+                thumb_by_base[base] = entry
+
+            index = _load_global_library_index()
+            existing_by_id = {
+                str(item.get("id") or ""): dict(item)
+                for item in index.get("preset_items", [])
+                if isinstance(item, dict)
+            }
+            next_items = existing_by_id
+            for parsed in parsed_items:
+                preset_id = parsed["preset_id"]
+                version = int(parsed["version"])
+                item_id = f"preset:{preset_id}:v{version}"
+                image_key = _preset_storage_key(
+                    preset_id, version, str(parsed["image_path"])
+                )
+                thumb_entry = thumb_by_base.get(str(parsed["image_path"]))
+                thumb_key = _preset_thumb_storage_key(
+                    preset_id,
+                    str(thumb_entry.get("path")) if thumb_entry else None,
+                    image_key,
+                )
+
+                image_url = str(parsed["download_url"])
+                try:
+                    data = await _fetch_bytes(client, image_url)
+                except Exception as exc:  # noqa: BLE001
+                    skipped += 1
+                    errors.append(f"{preset_id}: image download failed: {exc!r}")
+                    continue
+                actual_sha = hashlib.sha256(data).hexdigest()
+                image_path = _storage_path(image_key)
+                previous = next_items.get(item_id)
+                needs_image_write = not image_path.is_file()
+                if previous and previous.get("sha256") != actual_sha:
+                    needs_image_write = True
+                if needs_image_write:
+                    _write_bytes_replace(image_path, data)
+
+                if thumb_entry:
+                    thumb_path = _storage_path(thumb_key)
+                    thumb_url = str(thumb_entry.get("download_url") or "")
+                    try:
+                        thumb_data = await _fetch_bytes(client, thumb_url)
+                        thumb_sha = hashlib.sha256(thumb_data).hexdigest()
+                        if not thumb_path.is_file() or (
+                            previous and previous.get("thumb_sha256") != thumb_sha
+                        ):
+                            _write_bytes_replace(thumb_path, thumb_data)
+                    except Exception as exc:  # noqa: BLE001
+                        thumb_key = image_key
+                        thumb_sha = actual_sha
+                        errors.append(f"{preset_id}: thumb fallback to original: {exc!r}")
+                else:
+                    thumb_sha = actual_sha
+
+                item = {
+                    "id": item_id,
+                    "source": "preset",
+                    "preset_id": preset_id,
+                    "version": version,
+                    "title": parsed["title"],
+                    "age_segment": parsed["age_segment"],
+                    "library_folder": parsed["library_folder"],
+                    "gender": parsed["gender"],
+                    "appearance_direction": parsed["appearance_direction"],
+                    "style_tags": parsed["style_tags"],
+                    "image_storage_key": image_key,
+                    "thumb_storage_key": thumb_key,
+                    "sha256": actual_sha,
+                    "thumb_sha256": thumb_sha,
+                    "prompt_hint": parsed["prompt_hint"],
+                    "github_image_path": parsed["image_path"],
+                    "github_thumb_path": str(thumb_entry.get("path")) if thumb_entry else None,
+                    "github_sha": parsed.get("sha"),
+                    "created_at": (previous or {}).get("created_at") or _iso_now(),
+                    "updated_at": _iso_now(),
+                }
+                if previous is None:
+                    added += 1
+                elif {
+                    k: previous.get(k)
+                    for k in (
+                        "title",
+                        "age_segment",
+                        "gender",
+                        "appearance_direction",
+                        "style_tags",
+                        "sha256",
+                        "thumb_sha256",
+                        "prompt_hint",
+                    )
+                } != {
+                    k: item.get(k)
+                    for k in (
+                        "title",
+                        "age_segment",
+                        "gender",
+                        "appearance_direction",
+                        "style_tags",
+                        "sha256",
+                        "thumb_sha256",
+                        "prompt_hint",
+                    )
+                }:
+                    updated += 1
+                else:
+                    skipped += 1
+                next_items[item_id] = item
+
+        index["preset_items"] = sorted(
+            next_items.values(),
+            key=lambda item: (
+                _normalize_age_segment(item.get("age_segment")),
+                str(item.get("preset_id") or ""),
+                int(item.get("version") or 0),
+            ),
+        )
+        _save_global_library_index(index)
+        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+        state["last_success_at"] = now.isoformat().replace("+00:00", "Z")
+        state["last_error"] = None
+        state["last_result"] = {
+            "added": added,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors[:20],
+        }
+        _save_sync_state(state)
+        return ApparelModelLibrarySyncOut(
+            status="ok",
+            added=added,
+            updated=updated,
+            skipped=skipped,
+            errors=errors[:20],
+            last_success_at=now,
+            last_error=None,
+        )
+    except Exception as exc:
+        state = _read_json_file(_library_sync_state_path(), _default_sync_state())
+        msg = str(exc)
+        state["last_error"] = msg[:1000]
+        state["last_result"] = {
+            "added": added,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": [*errors[:19], msg[:300]],
+        }
+        _save_sync_state(state)
+        if isinstance(exc, HTTPException):
+            raise
+        raise _http("preset_sync_failed", msg or "preset sync failed", 502) from exc
 
 
 def _showcase_reference_image_ids(
@@ -428,6 +1188,245 @@ async def _validate_owned_images(
             400,
         )
     return ids
+
+
+async def _owned_image(db: AsyncSession, *, user_id: str, image_id: str) -> Image:
+    img = (
+        await db.execute(
+            select(Image).where(
+                Image.id == image_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if img is None:
+        raise _http("invalid_image", "image is not owned by current user or was deleted", 400)
+    return img
+
+
+def _image_url(image_id: str) -> str:
+    return f"/api/images/{image_id}/binary"
+
+
+def _image_variant_url(image_id: str, kind: str = "display2048") -> str:
+    return f"/api/images/{image_id}/variants/{kind}"
+
+
+async def _create_user_image_from_preset(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    item: dict[str, Any],
+) -> Image:
+    item_id = str(item.get("id") or "").strip()
+    existing = (
+        await db.execute(
+            select(Image).where(
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+                Image.metadata_jsonb["apparel_model_library_item_id"].astext == item_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    image_key = str(item.get("image_storage_key") or "").strip()
+    path = _storage_path(image_key)
+    if not path.is_file():
+        raise _http("not_found", "preset image binary is missing", 404)
+    data = path.read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    width = 0
+    height = 0
+    try:
+        with PILImage.open(path) as im:
+            width, height = im.size
+    except Exception:
+        logger.warning("failed to inspect preset image dimensions key=%s", image_key)
+    image_id = new_uuid7()
+    suffix = path.suffix.lower() or ".webp"
+    copy_key = f"u/{user_id}/apparel-model-library/{image_id}{suffix}"
+    # 先把字节落盘，再写 DB 行：避免 DB 行存在但二进制 404 的孤儿
+    copy_path = _storage_path(copy_key)
+    _write_bytes_replace(copy_path, data)
+    try:
+        img = Image(
+            id=image_id,
+            user_id=user_id,
+            source=ImageSource.UPLOADED.value,
+            storage_key=copy_key,
+            mime=_guess_mime(path),
+            width=width,
+            height=height,
+            size_bytes=copy_path.stat().st_size,
+            sha256=sha,
+            blurhash=None,
+            visibility=ImageVisibility.PRIVATE.value,
+            metadata_jsonb={
+                "apparel_model_library_item_id": item_id,
+                "apparel_model_library_source": "preset",
+                "preset_id": item.get("preset_id"),
+                "preset_version": item.get("version"),
+                "cached_from_storage_key": image_key,
+                "shared_storage": False,
+            },
+        )
+        db.add(img)
+        await db.flush()
+    except Exception:
+        # DB flush 失败时清理刚写的孤儿文件，避免下次重试时 sha 命中残留路径
+        copy_path.unlink(missing_ok=True)
+        raise
+    return img
+
+
+def _library_item_to_user_index_entry(
+    *,
+    item_id: str,
+    source: str,
+    image_id: str,
+    title: str,
+    age_segment: str,
+    gender: str | None,
+    appearance_direction: str | None,
+    style_tags: list[str],
+) -> dict[str, Any]:
+    now = _iso_now()
+    normalized_age = _normalize_age_segment(age_segment)
+    normalized_gender = _normalize_model_gender(gender)
+    return {
+        "id": item_id,
+        "source": source,
+        "title": title.strip()[:120],
+        "age_segment": normalized_age,
+        "library_folder": _model_library_folder_for_age(normalized_age, normalized_gender),
+        "gender": normalized_gender,
+        "appearance_direction": _clean_optional_text(appearance_direction, max_len=80),
+        "style_tags": _clean_style_tags(style_tags),
+        "image_id": image_id,
+        "owner_user_id": "",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _user_index_entry_from_image(
+    *,
+    user_id: str,
+    source: str,
+    image_id: str,
+    title: str,
+    age_segment: str,
+    gender: str | None,
+    appearance_direction: str | None,
+    style_tags: list[str],
+) -> dict[str, Any]:
+    item = _library_item_to_user_index_entry(
+        item_id=f"user:{new_uuid7()}",
+        source=source,
+        image_id=image_id,
+        title=title,
+        age_segment=age_segment,
+        gender=gender,
+        appearance_direction=appearance_direction,
+        style_tags=style_tags,
+    )
+    item["owner_user_id"] = user_id
+    return item
+
+
+async def _add_user_library_item(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    source: str,
+    image_id: str,
+    title: str,
+    age_segment: str,
+    gender: str | None,
+    appearance_direction: str | None,
+    style_tags: list[str],
+) -> dict[str, Any]:
+    await _owned_image(db, user_id=user_id, image_id=image_id)
+    index = _load_user_library_index(user_id)
+    item = _user_index_entry_from_image(
+        user_id=user_id,
+        source=source,
+        image_id=image_id,
+        title=title,
+        age_segment=age_segment,
+        gender=gender,
+        appearance_direction=appearance_direction,
+        style_tags=style_tags,
+    )
+    index["items"] = [*index.get("items", []), item]
+    _save_user_library_index(user_id, index)
+    return item
+
+
+def _primary_candidate_image_id(candidate: ModelCandidate) -> str | None:
+    if candidate.contact_sheet_image_id:
+        return candidate.contact_sheet_image_id
+    brief = candidate.model_brief_json or {}
+    candidate_image_ids = brief.get("candidate_image_ids")
+    if isinstance(candidate_image_ids, list):
+        for image_id in candidate_image_ids:
+            if isinstance(image_id, str) and image_id:
+                return image_id
+    return None
+
+
+def _infer_age_segment_from_workflow(run: WorkflowRun) -> str:
+    meta = run.metadata_jsonb or {}
+    profile = meta.get("model_profile")
+    if isinstance(profile, dict):
+        age = _normalize_age_segment(profile.get("age_segment"))
+        if age != "user_favorites":
+            return age
+    return _infer_age_segment_from_text(run.user_prompt or "")
+
+
+def _metadata_model_profile_from_prompt(text: str) -> dict[str, Any]:
+    gender = None
+    if "女性" in text or "女" in text:
+        gender = "female"
+    elif "男性" in text or "男" in text:
+        gender = "male"
+    appearance = None
+    for zh, value in (
+        ("欧美", "european"),
+        ("亚洲", "asian"),
+        ("拉美", "latin"),
+        ("中东", "middle_eastern"),
+        ("非洲", "african"),
+    ):
+        if zh in text:
+            appearance = value
+            break
+    return {
+        "age_segment": _normalize_age_segment(_infer_age_segment_from_text(text)),
+        "gender": gender,
+        "appearance_direction": appearance,
+    }
+
+
+def _infer_age_segment_from_text(text: str) -> str:
+    if "幼儿" in text:
+        return "toddler"
+    if any(word in text for word in ("儿童", "童装", "小朋友", "孩子")):
+        return "child"
+    if "青少年" in text:
+        return "teen"
+    if "青年" in text:
+        return "young_adult"
+    if "中老年" in text:
+        return "middle_aged"
+    if "老年" in text:
+        return "senior"
+    if "成年" in text:
+        return "adult"
+    return "user_favorites"
 
 
 async def _get_owned_conversation(
@@ -548,14 +1547,17 @@ def _seed_steps(run: WorkflowRun, *, user_prompt: str) -> list[WorkflowStep]:
 
 def _product_analysis_prompt(user_prompt: str) -> str:
     return (
-        "请分析上传的服饰商品图，只描述图片中可见信息，不确定填 unknown。"
+        "请分析上传的服饰白底商品图。这个步骤只服务后续生成真人模特穿搭图，"
+        "不要写复杂营销文案，只提取最终提示词真正需要的信息。只描述图片中可见信息，"
+        "不确定填 unknown。"
         "必须只返回一个 JSON object，不要 Markdown，不要代码块，不要解释文字。"
         "字段固定为：category, color, material_guess, silhouette, "
-        "key_details, must_preserve, risks, styling_recommendations。"
-        "除 unknown 和字段名外，内容用简体中文。must_preserve 列出后续生成必须还原的"
-        "颜色、廓形、领口、袖型、长度、面料观感、图案/logo、纽扣、口袋、拉链、缝线/拼接等可见细节。"
-        "styling_recommendations 只给 1-3 个低存在感、适合商品和用户方向的搭配建议，"
-        "不需要覆盖所有饰品类别，并根据用户指定的人群/年龄保持搭配合适。"
+        "key_details, must_preserve, styling_recommendations, background_recommendation, risks。"
+        "除 unknown 和字段名外，内容用简体中文。must_preserve 只列 3-8 个后续生成必须完全还原的"
+        "视觉点，例如颜色、版型、领口、袖型、衣长、面料观感、图案/logo、纽扣、口袋、拉链、缝线/拼接。"
+        "styling_recommendations 只给 1-3 个低存在感、适合商品和用户方向的配饰/搭配建议，"
+        "用来让整体更搭配，不要遮挡衣服主体。background_recommendation 给 1 句与衣服风格匹配的"
+        "开放式背景氛围建议，不要列具体地点或具体空间名，适合亚马逊/电商主图。risks 只列会影响商品还原的风险。"
         f"用户方向：{user_prompt or '高级电商服饰模特展示图'}"
     )
 
@@ -574,10 +1576,23 @@ def _candidate_prompt(
     height_requirement = _height_requirement(style)
     avoid_text = ", ".join(avoid) if avoid else "celebrity likeness, influencer likeness, dramatic makeup"
     return (
-        "Create one clean ecommerce model reference sheet with exactly four views: "
-        "front full body, side full body, back full body, and close-up headshot. "
+        "Create one clean 2x2 ecommerce model reference contact sheet with exactly four panels in this order: "
+        "top-left front full body, top-right left 90-degree profile full body, "
+        "bottom-left straight back full body, bottom-right close-up headshot. "
+        "Each panel should have a clear crop and consistent framing, with the three full-body views "
+        "shot from the same camera height and distance. The side-view panel must be a true left profile, "
+        "not a three-quarter pose: only one eye visible, nose and chin in profile, shoulders, hips, knees, "
+        "and feet all pointing sideways in the same direction, arms relaxed and not hiding the body outline. "
+        "The back-view panel must be a straight rear view with the face not visible. "
+        "Use a plain seamless white or light gray studio background, soft even lighting, no scene, no props, "
+        "no furniture, no text labels, and no panel captions. "
         "Use the same synthetic model in every view, keeping face, hairstyle, body proportion, "
-        "skin tone, and lighting consistent. The model is not wearing the user's product yet. "
+        "skin tone, age impression, limb length, posture language, and lighting consistent. "
+        "Make the model look like a real commercially photographed person rather than an AI beauty render: "
+        "natural facial asymmetry, individual facial structure, believable skin texture, normal pores, "
+        "subtle expression, realistic hairline, and ordinary human proportions. Avoid generic influencer face, "
+        "plastic skin, doll-like eyes, over-smoothed beauty retouching, exaggerated symmetry, and runway glamour. "
+        "The model is not wearing the user's product yet. "
         f"Use simple neutral base clothing: {base_styling}. Do not add any product-specific garment details. "
         f"{age_requirement} {height_requirement} "
         "No text labels, no height labels, no watermark, no logo, no celebrity or real-person likeness. "
@@ -597,33 +1612,23 @@ def _showcase_prompt(
     user_prompt: str = "",
 ) -> str:
     brief = selected_candidate.model_brief_json or {}
-    height_cm = brief.get("height_cm")
-    height_text = f"身高约 {height_cm}cm，" if isinstance(height_cm, int) else ""
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
     must_preserve = product_analysis.get("must_preserve")
-    product_preserve = (
-        "、".join(str(item) for item in must_preserve if str(item).strip())
+    fallback_preserve = "颜色、版型、款式"
+    preserve_items = (
+        [str(item).strip() for item in must_preserve if str(item).strip()]
         if isinstance(must_preserve, list)
-        else "颜色、版型、领口、袖型、衣长、面料质感、图案/logo、纽扣、口袋、拉链、缝线和所有可见结构"
+        else []
     )
+    product_preserve = "、".join(preserve_items[:5]) or fallback_preserve
     model_consistency = (
-        "严格保持已确认模特参考图中的同一张脸、发型、肤色、年龄感、"
-        f"{height_text}身材比例、肢体长度、肩宽、腿长和整体体态一致，不要换人。"
-        f"模特方向：{summary}。若为儿童或青少年，必须保持年龄合适、自然活泼，不能成人化、不能性感化。"
+        "保持同一张脸、发型、年龄感和身材比例一致，不要换人。"
+        f"模特方向：{summary}。"
     )
-    _ = accessory_plan
-    accessory_direction = (
-        "配饰只参考已提供的商品/饰品搭配参考图；如果参考图中已有配饰，则保持其风格和位置关系。"
-        "不要额外新增、替换或强化配饰，不要让配饰遮挡衣服主体，不要改变商品本身。"
-    )
-    shot_label = SHOT_LABELS.get(shot_type, shot_type)
-    shot_action = SHOT_ACTION_REQUIREMENTS.get(shot_type, "")
-    shot_composition = SHOT_COMPOSITION_REQUIREMENTS.get(shot_type, "")
-    shot_direction = (
-        f"本张镜头：{shot_label}。{shot_action} {shot_composition} "
-        "This shot must use a distinct pose/action from the other generated showcase images. "
-    )
-    quality_direction = "4K 终稿" if final_quality == "4k" else "2K 高质量"
+    accessory_direction = "少量自然搭配，不要抢衣服主体；如果附件中包含已选配饰四宫格，优先参考它。"
+    shot_direction = SHOT_LABELS.get(shot_type, shot_type)
+    quality_direction = "4K 终稿" if final_quality == "4k" else "高质量"
+    style_region = _style_region_from_text(summary)
     return _showcase_prompt_brief(
         user_direction=user_prompt,
         template_direction=_template_requirement(template, product_analysis),
@@ -632,6 +1637,7 @@ def _showcase_prompt(
         model_consistency=model_consistency,
         shot_direction=shot_direction,
         quality_direction=quality_direction,
+        style_region=style_region,
     )
 
 
@@ -655,19 +1661,46 @@ def _accessory_preview_prompt(
     *,
     accessory_plan: dict[str, Any],
     style_prompt: str,
+    age_context: str = "",
 ) -> str:
     items = accessory_plan.get("items")
-    item_text = ", ".join(str(item) for item in items) if isinstance(items, list) else ""
+    item_list = _clean_string_list(
+        (str(item) for item in items) if isinstance(items, list) else [],
+        max_items=8,
+        max_len=80,
+    )
+    item_text = "、".join(item_list)
     strength = str(accessory_plan.get("strength") or "subtle")
+    enabled = bool(accessory_plan.get("enabled", True))
+    accessory_line = (
+        f"只添加这些配饰：{item_text}。不要自动新增未列出的包、帽子、腰带、眼镜、首饰、鞋子或道具。"
+        if enabled and item_text
+        else "不添加新配饰；保持参考图里的基础造型干净稳定。"
+    )
+    style = style_prompt.strip() or "干净高级的电商参考图，克制自然"
+    age_direction = _accessory_age_direction(" ".join([age_context, style]).strip())
     return (
         "请根据上传的已确认模特四宫格参考图，生成一张新的白底模特配饰四宫格参考图。"
-        "画面仍然是同一个模特的四个视图：正面全身、侧面全身、背面全身、近景头像。"
-        "严格保持模特的人脸、发型、肤色、年龄感、身高、身材比例、肢体长度和整体体态一致，不要换人。"
-        "模特只穿原参考图中的简单中性基础服装，不要穿商品图中的衣服，不要出现任何商品服饰。"
-        "只在模特身上加入所选配饰，用于确认配饰上身效果；配饰要自然、低存在感、不要遮挡身体关键结构。"
-        "白底或近白底，干净商业参考图风格，无场景、无家具、无多余道具、无文字、无水印。"
-        f"Accessories: {item_text or 'no accessories'}. Styling strength: {strength}. "
-        f"Additional direction: {style_prompt or 'clean ecommerce styling'}."
+        "核心目标是在同一个模特、同一套基础中性服装上预览配饰效果，供后续商品融合图参考；"
+        "不要生成最终商品穿搭图。"
+        "画面必须保持 2x2 四宫格参考图，不要拆成多张图；"
+        "四格内容固定为：正面全身、侧面全身、背面全身、近景头像；"
+        "布局顺序为左上正面全身、右上侧面全身、左下背面全身、右下近景头像。"
+        "每一格都用白底或近白底、同一摄影棚光线、清晰边界；"
+        "不要文字标签、编号、边框标题或水印。"
+        "严格保持参考图里的同一张脸、发型、肤色、年龄感、身高、身材比例、肢体长度、"
+        "体态和基础服装；不要换人，不要美颜成网红脸，不要改成时装大片造型。"
+        "模特只穿原参考图中的简单中性基础服装，不要穿商品图中的衣服，"
+        "不要出现任何商品服饰、logo、图案或新衣服细节。"
+        f"配饰要求：{accessory_line}"
+        f"配饰强度：{_accessory_strength_direction(strength)}。"
+        "配饰必须真实贴合身体和透视：耳饰在耳垂位置，项链贴合颈部，包带、腰带、鞋帽与姿态一致；"
+        "不能漂浮、变形、穿模，不能遮挡脸、手、脚和身体轮廓。"
+        "不要让配饰遮挡未来商品展示区域；不要添加多余道具、家具、背景场景或手持物，"
+        "除非明确列在配饰里。"
+        f"年龄与风格：{age_direction} "
+        f"补充方向：{style}。"
+        "输出风格：高质量真实商业摄影参考图，清晰、干净、可作为后续服饰电商生成的稳定参考。"
     )
 
 
@@ -706,6 +1739,7 @@ PRODUCT_ANALYSIS_FIELDS = {
     "must_preserve",
     "risks",
     "styling_recommendations",
+    "background_recommendation",
 }
 
 
@@ -754,6 +1788,10 @@ def _normalize_product_analysis_payload(parsed: dict[str, Any]) -> dict[str, Any
         "preserve": "must_preserve",
         "must_keep": "must_preserve",
         "recommendations": "styling_recommendations",
+        "accessories": "styling_recommendations",
+        "background": "background_recommendation",
+        "scene": "background_recommendation",
+        "scene_recommendation": "background_recommendation",
     }
     for source, target in alias_map.items():
         if target not in payload and source in payload:
@@ -764,6 +1802,10 @@ def _normalize_product_analysis_payload(parsed: dict[str, Any]) -> dict[str, Any
     for key in ("category", "color", "material_guess", "silhouette"):
         value = payload.get(key)
         payload[key] = str(value).strip() if value not in (None, "") else "unknown"
+    background = payload.get("background_recommendation")
+    payload["background_recommendation"] = (
+        str(background).strip() if background not in (None, "") else "unknown"
+    )
 
     preserve = _coerce_string_list(payload.get("must_preserve"))
     if not preserve:
@@ -784,7 +1826,7 @@ def _normalize_product_analysis_payload(parsed: dict[str, Any]) -> dict[str, Any
 def _try_parse_json_text(text: str) -> dict[str, Any]:
     raw = (text or "").strip()
     if not raw:
-        raw = "模型没有返回商品理解内容，请重新生成或手动修正。"
+        raw = "模型没有返回商品约束内容，请重新生成或手动修正。"
     if raw.startswith("```"):
         raw = raw.strip("`")
         raw = raw.removeprefix("json").strip()
@@ -815,8 +1857,9 @@ def _try_parse_json_text(text: str) -> dict[str, Any]:
         "silhouette": "需人工复核",
         "key_details": [raw],
         "must_preserve": ["颜色", "廓形", "可见商品细节"],
-        "risks": ["模型没有返回结构化 JSON，请人工复核文本摘要"],
         "styling_recommendations": [],
+        "background_recommendation": "根据衣服风格选择干净高级的商业摄影氛围",
+        "risks": ["模型没有返回结构化 JSON，请人工复核文本摘要"],
         "summary_text": raw,
     }
 
@@ -1009,6 +2052,22 @@ def _image_params(
         background="opaque",
         moderation="low",
     )
+
+
+def _candidate_image_params() -> ImageParamsIn:
+    params = _image_params(aspect_ratio="4:5", count=1, render_quality="high")
+    return params.model_copy(update={"output_format": "png", "output_compression": None})
+
+
+def _accessory_preview_image_params() -> ImageParamsIn:
+    params = _image_params(
+        aspect_ratio="4:5",
+        count=1,
+        render_quality="high",
+        final_quality="high",
+        fast=False,
+    )
+    return params.model_copy(update={"output_format": "png", "output_compression": None})
 
 
 def _merge_product_corrections(
@@ -1536,7 +2595,7 @@ def _next_action_for(run: WorkflowRun) -> str:
     if run.status == "completed":
         return "查看交付"
     return {
-        "product_analysis": "确认商品信息",
+        "product_analysis": "确认商品约束",
         "model_settings": "生成模特候选",
         "model_candidates": "等待模特候选",
         "model_approval": "确认模特",
@@ -1769,6 +2828,7 @@ async def create_apparel_model_showcase(
             "template": WORKFLOW_TYPE,
             "mvp_scope": "adult_daily_apparel",
             "priority": ["model_consistency", "product_fidelity", "premium_aesthetic"],
+            "model_profile": _metadata_model_profile_from_prompt(body.user_prompt),
         },
     )
     db.add(run)
@@ -1799,6 +2859,169 @@ async def create_apparel_model_showcase(
         status=run.status,
         current_step=run.current_step,
     )
+
+
+@router.get("/apparel-model-library", response_model=ApparelModelLibraryListOut)
+async def list_apparel_model_library(
+    user: CurrentUser,
+    age_segment: AgeSegment = Query(default="all"),
+    source: str = Query(default="all"),
+    q: str = Query(default=""),
+) -> ApparelModelLibraryListOut:
+    source = source.strip() or "all"
+    if source not in MODEL_LIBRARY_SOURCES:
+        raise _http("invalid_source", "invalid model library source", 422)
+    age = str(age_segment)
+    if age not in MODEL_LIBRARY_AGE_SEGMENTS:
+        raise _http("invalid_age_segment", "invalid model library age segment", 422)
+    items = _filter_library_items(
+        _combined_library_items(user.id),
+        source=source,
+        age_segment=age,
+        q=q,
+    )
+    return ApparelModelLibraryListOut(
+        items=[_model_library_item_out(item) for item in items],
+        sync=_sync_state_out(user),
+    )
+
+
+@router.post(
+    "/apparel-model-library/sync-presets",
+    response_model=ApparelModelLibrarySyncOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def sync_apparel_model_library_presets(
+    user: CurrentUser,
+) -> ApparelModelLibrarySyncOut:
+    if not _can_sync_library(user):
+        raise _http("forbidden", "model library preset sync is not allowed", 403)
+    # cooldown / 并发控制全部在 _sync_library_presets_from_github_folder 内部处理
+    return await _sync_library_presets_from_github_folder(_github_contents_url())
+
+
+@router.get("/apparel-model-library/items/{item_id:path}/binary")
+async def get_apparel_model_library_item_binary(
+    item_id: str,
+    request: Request,
+    user: CurrentUser,
+) -> Response:
+    item = _find_library_item(user.id, item_id)
+    if item is None:
+        raise _http("not_found", "model library item not found", 404)
+    if item.get("image_id"):
+        raise _http("use_image_api", "user library image is served by image API", 400)
+    storage_key = str(item.get("image_storage_key") or "").strip()
+    return _library_binary_response(storage_key, request)
+
+
+@router.get("/apparel-model-library/items/{item_id:path}/thumb")
+async def get_apparel_model_library_item_thumb(
+    item_id: str,
+    request: Request,
+    user: CurrentUser,
+) -> Response:
+    item = _find_library_item(user.id, item_id)
+    if item is None:
+        raise _http("not_found", "model library item not found", 404)
+    if item.get("image_id"):
+        raise _http("use_image_api", "user library image is served by image API", 400)
+    storage_key = str(
+        item.get("thumb_storage_key") or item.get("image_storage_key") or ""
+    ).strip()
+    return _library_binary_response(storage_key, request)
+
+
+@router.post(
+    "/apparel-model-library/items",
+    response_model=ApparelModelLibraryItemOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def create_apparel_model_library_item(
+    body: ApparelModelLibraryItemCreateIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApparelModelLibraryItemOut:
+    item = await _add_user_library_item(
+        db,
+        user_id=user.id,
+        source=body.source,
+        image_id=body.image_id,
+        title=body.title,
+        age_segment=body.age_segment,
+        gender=body.gender,
+        appearance_direction=body.appearance_direction,
+        style_tags=body.style_tags,
+    )
+    await db.commit()
+    return _model_library_item_out(item)
+
+
+@router.patch(
+    "/apparel-model-library/items/{item_id:path}",
+    response_model=ApparelModelLibraryItemOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def patch_apparel_model_library_item(
+    item_id: str,
+    body: ApparelModelLibraryItemPatchIn,
+    user: CurrentUser,
+) -> ApparelModelLibraryItemOut:
+    index = _load_user_library_index(user.id)
+    items = [
+        dict(item)
+        for item in index.get("items", [])
+        if isinstance(item, dict)
+    ]
+    for item in items:
+        if str(item.get("id") or "") != item_id:
+            continue
+        if body.title is not None:
+            item["title"] = body.title.strip()[:120]
+        if body.age_segment is not None:
+            item["age_segment"] = body.age_segment
+        if body.gender is not None:
+            item["gender"] = _clean_optional_text(body.gender, max_len=40)
+        if body.appearance_direction is not None:
+            item["appearance_direction"] = _clean_optional_text(
+                body.appearance_direction, max_len=80
+            )
+        if body.style_tags is not None:
+            item["style_tags"] = _clean_style_tags(body.style_tags)
+        item["updated_at"] = _iso_now()
+        index["items"] = items
+        _save_user_library_index(user.id, index)
+        return _model_library_item_out(item)
+    raise _http("not_found", "model library item not found", 404)
+
+
+@router.delete(
+    "/apparel-model-library/items/{item_id:path}",
+    dependencies=[Depends(verify_csrf)],
+)
+async def delete_apparel_model_library_item(
+    item_id: str,
+    user: CurrentUser,
+) -> dict[str, bool]:
+    index = _load_user_library_index(user.id)
+    items = [
+        dict(item)
+        for item in index.get("items", [])
+        if isinstance(item, dict)
+    ]
+    next_items = [item for item in items if str(item.get("id") or "") != item_id]
+    if len(next_items) != len(items):
+        index["items"] = next_items
+        _save_user_library_index(user.id, index)
+        return {"ok": True}
+    # Presets are global; user-level delete means hide.
+    if item_id.startswith("preset:") and _find_library_item(user.id, item_id):
+        hidden = set(_dedupe_nonempty(index.get("hidden_preset_ids") or []))
+        hidden.add(item_id)
+        index["hidden_preset_ids"] = sorted(hidden)
+        _save_user_library_index(user.id, index)
+        return {"ok": True}
+    raise _http("not_found", "model library item not found", 404)
 
 
 @router.get("", response_model=WorkflowRunListOut)
@@ -2015,7 +3238,7 @@ async def create_model_candidates(
             idempotency_key=f"wf:{run.id[:24]}:cand:{idx}",
             workflow_run_id=run.id,
             workflow_step_key="model_candidates",
-            image_params=_image_params(aspect_ratio="4:5", count=1, render_quality="high"),
+            image_params=_candidate_image_params(),
             workflow_meta={
                 "workflow_action": "model_candidate",
                 "workflow_candidate_id": candidate.id,
@@ -2042,6 +3265,163 @@ async def create_model_candidates(
     out = await _build_run_out(db, run)
     await db.commit()
     return out
+
+
+@router.post(
+    "/{workflow_run_id}/model-library/select",
+    response_model=WorkflowRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def select_apparel_model_library_item(
+    workflow_run_id: str,
+    body: ApparelModelLibrarySelectIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> WorkflowRunOut:
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
+    await _sync_workflow_outputs(db, run)
+    product_step = await _step(db, run.id, "product_analysis")
+    if product_step.status != "approved":
+        raise _http("product_not_approved", "approve product analysis first", 409)
+    item = _find_library_item(user.id, body.library_item_id)
+    if item is None:
+        raise _http("not_found", "model library item not found", 404)
+    try:
+        if item.get("source") == "preset":
+            image = await _create_user_image_from_preset(db, user_id=user.id, item=item)
+        else:
+            image_id = str(item.get("image_id") or "").strip()
+            image = await _owned_image(db, user_id=user.id, image_id=image_id)
+    except HTTPException:
+        # 已是结构化错误（404/400/...），让 _get_run 的 row lock 在事务回滚时自动释放
+        await db.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await db.rollback()
+        logger.exception("select_apparel_model_library_item: image materialize failed")
+        raise _http(
+            "library_image_failed",
+            f"failed to materialize library image: {exc}",
+            500,
+        ) from exc
+
+    model_settings = await _step(db, run.id, "model_settings")
+    now = _now()
+    existing_count = (
+        await db.execute(
+            select(ModelCandidate.id).where(ModelCandidate.workflow_run_id == run.id)
+        )
+    ).scalars().all()
+    candidate = ModelCandidate(
+        workflow_run_id=run.id,
+        candidate_index=len(existing_count) + 1,
+        contact_sheet_image_id=image.id,
+        portrait_image_id=image.id,
+        status="ready",
+        selected_at=None,
+        model_brief_json={
+            "summary": item.get("title") or "库内模特",
+            "source": "model_library",
+            "library_item_id": body.library_item_id,
+            "age_segment": _normalize_age_segment(item.get("age_segment")),
+            "gender": item.get("gender"),
+            "appearance_direction": item.get("appearance_direction"),
+            "style_tags": _clean_style_tags(item.get("style_tags") or []),
+            "prompt_hint": item.get("prompt_hint"),
+            "candidate_image_ids": [image.id],
+            "note": "来自模特库，未试穿商品",
+        },
+    )
+    db.add(candidate)
+    await db.flush()
+    model_settings.status = "approved"
+    model_settings.approved_at = now
+    model_settings.approved_by = user.id
+    model_settings.output_json = {
+        **(model_settings.output_json or {}),
+        "style_prompt": (model_settings.output_json or {}).get("style_prompt") or run.user_prompt,
+        "selected_library_item_id": body.library_item_id,
+        "selected_library_image_id": image.id,
+    }
+    candidate_step = await _step(db, run.id, "model_candidates")
+    candidate_step.status = "needs_review"
+    candidate_step.input_json = {
+        **(candidate_step.input_json or {}),
+        "source": "model_library",
+        "library_item_id": body.library_item_id,
+    }
+    candidate_step.output_json = {
+        **(candidate_step.output_json or {}),
+        "library_candidate_id": candidate.id,
+    }
+    approval = await _step(db, run.id, "model_approval")
+    if approval.status == "waiting_input":
+        approval.status = "needs_review"
+    approval.input_json = {
+        **(approval.input_json or {}),
+        "source": "model_library",
+        "library_item_id": body.library_item_id,
+    }
+    run.current_step = "model_candidates"
+    run.status = "needs_review"
+    out = await _build_run_out(db, run)
+    await db.commit()
+    return out
+
+
+@router.post(
+    "/{workflow_run_id}/model-candidates/{candidate_id}/save-to-library",
+    response_model=ApparelModelLibraryItemOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def save_model_candidate_to_library(
+    workflow_run_id: str,
+    candidate_id: str,
+    body: ModelCandidateSaveToLibraryIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApparelModelLibraryItemOut:
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
+    await _sync_workflow_outputs(db, run)
+    candidate = (
+        await db.execute(
+            select(ModelCandidate).where(
+                ModelCandidate.id == candidate_id,
+                ModelCandidate.workflow_run_id == run.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if candidate is None:
+        raise _http("not_found", "model candidate not found", 404)
+    image_id = _primary_candidate_image_id(candidate)
+    if not image_id:
+        raise _http("candidate_image_missing", "candidate has no image to save", 422)
+    item = await _add_user_library_item(
+        db,
+        user_id=user.id,
+        source="favorite",
+        image_id=image_id,
+        title=body.title,
+        age_segment=body.age_segment or _infer_age_segment_from_workflow(run),
+        gender=body.gender,
+        appearance_direction=body.appearance_direction,
+        style_tags=body.style_tags,
+    )
+    brief = dict(candidate.model_brief_json or {})
+    saved_ids = _dedupe_nonempty(
+        [
+            *(
+                brief.get("saved_library_item_ids")
+                if isinstance(brief.get("saved_library_item_ids"), list)
+                else []
+            ),
+            str(item.get("id") or ""),
+        ]
+    )
+    brief["saved_library_item_ids"] = saved_ids
+    candidate.model_brief_json = brief
+    await db.commit()
+    return _model_library_item_out(item)
 
 
 @router.post(
@@ -2209,6 +3589,16 @@ async def create_accessory_previews(
         )
     approval = await _step(db, run.id, "model_approval")
     conv = await _get_owned_conversation(db, user_id=user.id, conversation_id=run.conversation_id or "")
+    brief = candidate.model_brief_json or {}
+    age_context = " ".join(
+        str(part)
+        for part in (
+            run.user_prompt,
+            brief.get("summary") if isinstance(brief, dict) else None,
+            body.style_prompt,
+        )
+        if part
+    )
     bundle, _, gen_ids = await _create_workflow_task(
         db=db,
         user=user,
@@ -2217,12 +3607,13 @@ async def create_accessory_previews(
         text=_accessory_preview_prompt(
             accessory_plan=body.accessory_plan.model_dump(),
             style_prompt=body.style_prompt,
+            age_context=age_context,
         ),
         attachment_ids=[candidate.contact_sheet_image_id],
         idempotency_key=f"wf:{run.id[:12]}:acc:{candidate.id[:8]}:{new_uuid7()[:8]}",
         workflow_run_id=run.id,
         workflow_step_key="model_approval",
-        image_params=_image_params(aspect_ratio="4:5", count=1, render_quality="high"),
+        image_params=_accessory_preview_image_params(),
         workflow_meta={
             "workflow_action": "accessory_preview",
             "workflow_candidate_id": candidate.id,

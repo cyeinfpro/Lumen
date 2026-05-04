@@ -681,7 +681,7 @@ function EmptyHero() {
         </Link>
       </div>
       <div className="mt-5 grid grid-cols-3 gap-2 text-center">
-        {["商品理解", "模特确认", "质检交付"].map((label, index) => (
+        {["商品约束", "模特配饰", "生成交付"].map((label, index) => (
           <div
             key={label}
             className="rounded-lg border border-[var(--border)] bg-white/[0.035] px-2 py-3 md:rounded-md"

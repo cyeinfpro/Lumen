@@ -1,15 +1,17 @@
 "use client";
 
-// 模特设定：把 user_prompt 作为风格初值；同时确认饰品方案，和模特候选并行生成。
+// 模特设定：把 user_prompt 作为风格初值；商品约束阶段推荐的配饰进入后续配饰四宫格。
 // 失败 toast；按钮 loading 时禁用。
 
-import { Sparkles } from "lucide-react";
+import { Library, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useCreateModelCandidatesMutation } from "@/lib/queries";
 import type { WorkflowRun } from "@/lib/apiClient";
+import type { ModelLibraryAgeSegment } from "@/lib/apiClient";
+import { ModelLibraryDialog } from "../components/ModelLibraryDialog";
 import { StageFrame } from "../components/StageFrame";
 import { accessorySuggestionText } from "../utils";
 
@@ -29,6 +31,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
   const [accessories, setAccessories] = useState(
     suggestedAccessories || "简洁鞋子、小巧发饰、轻量包袋",
   );
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   const submit = () => {
     if (!stylePrompt.trim()) {
@@ -54,11 +57,12 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
       },
     });
   };
+  const defaultAgeSegment = defaultLibraryAgeSegment(workflow);
 
   return (
     <StageFrame
       title="模特设定"
-      subtitle="第一阶段只确认模特本人，模特方案图不会提前试穿商品。"
+      subtitle="先确认模特本人。配饰会在确认模特后生成四宫格参考，不会提前试穿商品。"
     >
       <label className="block">
         <span className="text-sm text-[var(--fg-1)]">风格方向</span>
@@ -80,7 +84,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
         />
       </label>
       <label className="mt-4 block">
-        <span className="text-sm text-[var(--fg-1)]">推荐饰品</span>
+        <span className="text-sm text-[var(--fg-1)]">配饰四宫格方向</span>
         <div className="mt-2 flex gap-2">
           <button
             type="button"
@@ -104,17 +108,68 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
         </div>
       </label>
       <div className="mt-4 rounded-md border border-[var(--border-amber)]/40 bg-[var(--accent-soft)] p-3 text-sm leading-6 text-[var(--fg-1)]">
-        模特方案图未试穿商品，仅用于确认模特形象。确认模特后，可基于该模特生成带配饰的白底四宫格参考图。
+        模特方案图未试穿商品，仅用于确认模特形象。确认模特后，会基于该模特生成带配饰的白底四宫格参考图，最终展示图会参考你选中的配饰方案。
       </div>
-      <Button
-        className="mt-4"
-        variant="primary"
-        loading={create.isPending}
-        onClick={submit}
-        leftIcon={<Sparkles className="h-4 w-4" />}
-      >
-        生成模特候选
-      </Button>
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+        <Button
+          variant="primary"
+          onClick={() => setLibraryOpen(true)}
+          leftIcon={<Library className="h-4 w-4" />}
+        >
+          打开模特库
+        </Button>
+        <Button
+          variant="secondary"
+          loading={create.isPending}
+          onClick={submit}
+          leftIcon={<Sparkles className="h-4 w-4" />}
+        >
+          生成模特候选
+        </Button>
+      </div>
+      <ModelLibraryDialog
+        key={`${workflow.id}:${defaultAgeSegment}`}
+        open={libraryOpen}
+        workflow={workflow}
+        defaultAgeSegment={defaultAgeSegment}
+        onClose={() => setLibraryOpen(false)}
+        generatingCandidates={create.isPending}
+        onGenerateCandidates={() => {
+          setLibraryOpen(false);
+          submit();
+        }}
+      />
     </StageFrame>
   );
+}
+
+function defaultLibraryAgeSegment(workflow: WorkflowRun): ModelLibraryAgeSegment {
+  const profile = workflow.metadata_jsonb?.model_profile;
+  if (profile && typeof profile === "object" && "age_segment" in profile) {
+    const value = (profile as { age_segment?: unknown }).age_segment;
+    if (typeof value === "string" && isLibraryAgeSegment(value)) return value;
+  }
+  const text = workflow.user_prompt;
+  if (text.includes("幼儿")) return "toddler";
+  if (["儿童", "童装", "小朋友", "孩子"].some((word) => text.includes(word))) return "child";
+  if (text.includes("青少年")) return "teen";
+  if (text.includes("青年")) return "young_adult";
+  if (text.includes("中老年")) return "middle_aged";
+  if (text.includes("老年")) return "senior";
+  if (text.includes("成年")) return "adult";
+  return "all";
+}
+
+function isLibraryAgeSegment(value: string): value is ModelLibraryAgeSegment {
+  return [
+    "all",
+    "user_favorites",
+    "toddler",
+    "child",
+    "teen",
+    "young_adult",
+    "adult",
+    "middle_aged",
+    "senior",
+  ].includes(value);
 }

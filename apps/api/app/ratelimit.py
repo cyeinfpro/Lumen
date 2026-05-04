@@ -199,7 +199,14 @@ class RateLimiter:
 # messages POST: 20/min per user.
 MESSAGES_LIMITER = RateLimiter(capacity=20, refill_per_sec=20 / 60)
 # uploads: 30/min per user. Always on because upload accepts large request bodies.
-UPLOADS_LIMITER = RateLimiter(capacity=30, refill_per_sec=30 / 60, always_on=True)
+# Start with enough burst for one composer batch (currently 4 images), otherwise
+# selecting multiple files in one dialog hits 429 after the first upload.
+UPLOADS_LIMITER = RateLimiter(
+    capacity=30,
+    refill_per_sec=30 / 60,
+    always_on=True,
+    initial_tokens=4,
+)
 # Public unauthenticated reads (invite/share previews): 60/min per IP.
 # always_on=True：公开端点的防刷始终启用，不受 user_rate_limit_enabled 开关影响。
 PUBLIC_PREVIEW_LIMITER = RateLimiter(

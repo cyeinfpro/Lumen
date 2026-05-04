@@ -68,6 +68,8 @@ export function DesktopStudio() {
   const fast = useChatStore((s) => s.composer.fast);
   const setFast = useChatStore((s) => s.setFast);
 
+  // me query 同名 key 与 RuntimeDefaultsBootstrap 共享缓存（TanStack 自动去重），
+  // 不会触发额外请求；这里仅取 role 用于 isAdmin。
   const meQuery = useQuery<AuthUser & { role?: "admin" | "member" }>({
     queryKey: ["me"],
     queryFn: () =>

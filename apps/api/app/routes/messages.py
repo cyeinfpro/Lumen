@@ -40,6 +40,7 @@ from lumen_core.constants import (
     GenerationStatus,
     IMAGE_MULTI_GEN_STAGGER_CAP_S,
     IMAGE_MULTI_GEN_STAGGER_S,
+    MAX_MESSAGE_ATTACHMENTS,
     Intent,
     MAX_PROMPT_CHARS,
     MessageStatus,
@@ -90,6 +91,7 @@ _VECTOR_STORE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _IMAGE_RENDER_QUALITY_VALUES = {"low", "medium", "high"}
 _IMAGE_OUTPUT_FORMAT_VALUES = {"png", "jpeg", "webp"}
 _DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
+_GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 _IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
 _IMAGE_MODERATION_VALUES = {"auto", "low"}
 _POST_COMMIT_PUBLISH_TIMEOUT_S = 2.0
@@ -136,6 +138,34 @@ def _default_output_compression(
     fast: bool,
 ) -> int:
     return 0
+
+
+async def _resolve_fast_default(db: AsyncSession) -> bool:
+    spec = get_spec(_GENERATION_FAST_DEFAULT_KEY)
+    if spec is None:
+        return True
+    raw = await get_setting(db, spec)
+    if raw in {"0", "1"}:
+        return raw == "1"
+    return True
+
+
+def _image_params_with_fast_default(
+    image_params: ImageParamsIn,
+    fast_default: bool,
+) -> ImageParamsIn:
+    if image_params.fast is not None:
+        return image_params
+    return image_params.model_copy(update={"fast": fast_default})
+
+
+def _chat_params_with_fast_default(
+    chat_params: ChatParamsIn,
+    fast_default: bool,
+) -> ChatParamsIn:
+    if chat_params.fast is not None:
+        return chat_params
+    return chat_params.model_copy(update={"fast": fast_default})
 
 
 def _wants_transparent_background(prompt: str | None) -> bool:
@@ -913,28 +943,32 @@ async def submit_user_message(
         "text": body.text or "",
         "attachments": [{"image_id": i} for i in attachment_ids],
     }
+    fast_default = await _resolve_fast_default(db)
+    image_params = _image_params_with_fast_default(body.image_params, fast_default)
+    chat_params = _chat_params_with_fast_default(body.chat_params, fast_default)
+
     # 推理强度仅对文本/视觉问答有意义；非空才写入，保持 content 干净。
-    if intent in (Intent.CHAT, Intent.VISION_QA) and body.chat_params.reasoning_effort:
-        if body.chat_params.reasoning_effort not in ALLOWED_REASONING_EFFORTS:
+    if intent in (Intent.CHAT, Intent.VISION_QA) and chat_params.reasoning_effort:
+        if chat_params.reasoning_effort not in ALLOWED_REASONING_EFFORTS:
             raise _http("invalid_reasoning_effort", "invalid reasoning_effort", 422)
-        user_content["reasoning_effort"] = body.chat_params.reasoning_effort
+        user_content["reasoning_effort"] = chat_params.reasoning_effort
     # Fast 模式：chat 侧写进 user content；image 侧写进 Generation.upstream_request。
     # worker 读这些字段选择 priority / smaller rendering profiles。
-    if intent in (Intent.CHAT, Intent.VISION_QA) and body.chat_params.fast:
+    if intent in (Intent.CHAT, Intent.VISION_QA) and chat_params.fast:
         user_content["fast"] = True
-    if intent in (Intent.CHAT, Intent.VISION_QA) and body.chat_params.web_search:
+    if intent in (Intent.CHAT, Intent.VISION_QA) and chat_params.web_search:
         user_content["web_search"] = True
-    if intent in (Intent.CHAT, Intent.VISION_QA) and body.chat_params.file_search:
+    if intent in (Intent.CHAT, Intent.VISION_QA) and chat_params.file_search:
         user_content["file_search"] = True
-        if body.chat_params.vector_store_ids:
+        if chat_params.vector_store_ids:
             user_content["vector_store_ids"] = [
                 v.strip()
-                for v in body.chat_params.vector_store_ids
+                for v in chat_params.vector_store_ids
                 if isinstance(v, str) and v.strip()
             ]
-    if intent in (Intent.CHAT, Intent.VISION_QA) and body.chat_params.code_interpreter:
+    if intent in (Intent.CHAT, Intent.VISION_QA) and chat_params.code_interpreter:
         user_content["code_interpreter"] = True
-    if intent in (Intent.CHAT, Intent.VISION_QA) and body.chat_params.image_generation:
+    if intent in (Intent.CHAT, Intent.VISION_QA) and chat_params.image_generation:
         user_content["image_generation"] = True
 
     system_prompt = None
@@ -944,7 +978,7 @@ async def submit_user_message(
             user_id=user.id,
             default_system_prompt_id=user.default_system_prompt_id,
             conv=conv,
-            explicit_prompt=body.chat_params.system_prompt,
+            explicit_prompt=chat_params.system_prompt,
         )
     default_image_output_format = _DEFAULT_IMAGE_OUTPUT_FORMAT
     if intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE):
@@ -971,8 +1005,8 @@ async def submit_user_message(
         user_msg=user_msg,
         intent=intent,
         idempotency_key=body.idempotency_key,
-        image_params=body.image_params,
-        chat_params=body.chat_params,
+        image_params=image_params,
+        chat_params=chat_params,
         system_prompt=system_prompt,
         attachment_ids=attachment_ids,
         text=body.text or "",
@@ -1052,7 +1086,10 @@ class SilentGenerationIn(BaseModel):
     intent: Literal["text_to_image", "image_to_image"] = "text_to_image"
     image_params: ImageParamsIn = PydanticField(default_factory=ImageParamsIn)
     prompt: str = PydanticField(default="", max_length=MAX_PROMPT_CHARS)
-    attachment_image_ids: list[str] = PydanticField(default_factory=list)
+    attachment_image_ids: list[str] = PydanticField(
+        default_factory=list,
+        max_length=MAX_MESSAGE_ATTACHMENTS,
+    )
 
 
 class SilentGenerationOut(BaseModel):
@@ -1120,6 +1157,8 @@ async def create_silent_generation(
         raw_default_format = await get_setting(db, spec)
         if raw_default_format in _IMAGE_OUTPUT_FORMAT_VALUES:
             default_image_output_format = raw_default_format
+    fast_default = await _resolve_fast_default(db)
+    image_params = _image_params_with_fast_default(body.image_params, fast_default)
 
     result = await _create_assistant_task(
         db=db,
@@ -1128,7 +1167,7 @@ async def create_silent_generation(
         user_msg=parent_msg,
         intent=intent,
         idempotency_key=body.idempotency_key,
-        image_params=body.image_params,
+        image_params=image_params,
         chat_params=ChatParamsIn(),
         system_prompt=None,
         attachment_ids=attachment_ids,

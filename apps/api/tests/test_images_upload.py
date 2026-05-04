@@ -116,6 +116,10 @@ def test_upload_limiter_is_always_on() -> None:
     assert images.UPLOADS_LIMITER.always_on is True
 
 
+def test_upload_limiter_allows_composer_batch_burst() -> None:
+    assert images.UPLOADS_LIMITER.initial_tokens >= 4
+
+
 def test_upload_mime_constants_only_allow_images() -> None:
     assert "text/plain" not in images.ALLOWED_MIME
     assert images.EXT_BY_MIME == {
