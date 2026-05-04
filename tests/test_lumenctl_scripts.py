@@ -1056,6 +1056,11 @@ if [ "$#" -ge 1 ] && [ "$1" = "exec" ]; then
       printf 'Background saving started\\n'
       exit 0
       ;;
+    *redis-cli*PING*)
+      # backup.sh 在 BGSAVE 前会做 PING 预检（识别 AUTH 错误）；mock 必须返回 PONG
+      printf 'PONG\\n'
+      exit 0
+      ;;
     *redis-cli*)
       printf 'OK\\n'
       exit 0
@@ -1084,6 +1089,11 @@ case "${original}" in
   *ghcr.io/token*)
     printf '{"token":"fake"}\\n'
     exit 0
+    ;;
+  *raw.githubusercontent.com/*)
+    # self_update_scripts 的拉取：在测试环境用 404 让 self_update softfail，
+    # 走"继续用本地脚本"路径（避免把 mock 默认的 GHCR JSON 写进 update.sh 等）
+    exit 22
     ;;
 esac
 out=""
