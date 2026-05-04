@@ -124,6 +124,36 @@ server {
         proxy_read_timeout      600s;
     }
 
+    # ----- /api/images 二进制 sendfile hand-off（可选优化）---------------
+    # lumen-api 在 LUMEN_INTERNAL_REDIRECT_ENABLED=1 时，对 /api/images/*/binary
+    # 和 /api/images/*/variants/* 这类请求只返 X-Accel-Redirect 头，bytes 由
+    # nginx native sendfile + open_file_cache 直接读 storage 返回。Python 进程
+    # 完全不打开文件，CIFS 读速 + Python streaming 都不再是瓶颈。
+    #
+    # alias 路径必须等于 LUMEN_DATA_ROOT/storage（单机部署默认 /opt/lumendata/storage）。
+    # internal 指令禁止外部直接访问该 location，只允许 X-Accel-Redirect 内部跳转。
+    #
+    # 不开 LUMEN_INTERNAL_REDIRECT_ENABLED 时这段也无害——lumen-api 走 streaming
+    # fallback，nginx 永远不会发请求到这个 internal location。
+    location /_internal_storage/ {
+        internal;
+        alias /opt/lumendata/storage/;
+
+        sendfile                on;
+        sendfile_max_chunk      1m;
+        tcp_nopush              on;
+        # open_file_cache 让重复访问的热图省一次 stat() — 对灵感流场景收益大。
+        open_file_cache         max=2000 inactive=10m;
+        open_file_cache_valid   30s;
+        open_file_cache_min_uses 2;
+        open_file_cache_errors  off;
+
+        # immutable variants 让浏览器长缓存，CIFS 读速也不再被反复触发。
+        # lumen-api 已经在响应里带了 Cache-Control / ETag；nginx 不要覆盖它们，
+        # 也不要再次 gzip（image variants 全是 jpeg/webp，再压无效）。
+        gzip                    off;
+    }
+
     # ----- Next.js 静态资源 / 页面 ----------------------------------------
     location / {
         proxy_pass              http://lumen_web;

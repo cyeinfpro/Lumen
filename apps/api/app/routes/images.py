@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Iterator
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage, UnidentifiedImageError
 from sqlalchemy import or_, select
@@ -391,23 +391,102 @@ def _iter_open_file_and_close(f: BinaryIO) -> Iterator[bytes]:
         f.close()
 
 
+_INTERNAL_REDIRECT_PREFIX = "/_internal_storage/"
+
+
+def _internal_redirect_enabled() -> bool:
+    """Whether to emit X-Accel-Redirect for nginx sendfile hand-off.
+
+    Default off: lumen-api ships with the streaming fallback that works
+    behind any reverse proxy. Operators opt in by:
+
+      1. Adding an ``internal`` location in nginx that aliases to
+         storage_root (see deploy/nginx.conf.example).
+      2. Setting ``LUMEN_INTERNAL_REDIRECT_ENABLED=1`` in shared/.env.
+
+    With both in place, lumen-api stops opening files itself —
+    nginx native sendfile + open_file_cache + direct CIFS read takes over.
+    Without either, the streaming path keeps working unchanged.
+    """
+    return os.environ.get("LUMEN_INTERNAL_REDIRECT_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _etag_matches_if_none_match(etag: str, header_value: str) -> bool:
+    """RFC 7232 §3.2: If-None-Match accepts ``*`` or a comma list of opaque tags.
+
+    Both sides may carry the weak prefix ``W/``; for our use case (file-level
+    immutable variants) treating weak and strong as equivalent is fine — the
+    tag identity is what matters.
+    """
+    header_value = header_value.strip()
+    if header_value == "*":
+        return True
+    canonical = etag.removeprefix("W/").strip()
+    for raw in header_value.split(","):
+        candidate = raw.strip().removeprefix("W/").strip()
+        if candidate and candidate == canonical:
+            return True
+    return False
+
+
 def _storage_streaming_response(
     path: Path,
     *,
     media_type: str,
     etag: str,
     cache_control: str,
-) -> StreamingResponse:
-    f, size = _open_regular_file_no_symlink(path)
+    storage_key: str | None = None,
+    request: Request | None = None,
+) -> Response:
+    """Serve a file from storage_root with three escalating fast paths.
+
+    1. ``304 Not Modified`` short-circuit when the client's If-None-Match
+       matches our ETag — never opens the file. Always on, no opt-in needed.
+    2. ``X-Accel-Redirect`` hand-off to nginx when
+       ``LUMEN_INTERNAL_REDIRECT_ENABLED=1`` and a ``storage_key`` is supplied.
+       lumen-api emits headers only; nginx native sendfile streams the bytes.
+    3. Fallback: open the file in the Python process and stream chunks via
+       StreamingResponse — works without any nginx cooperation.
+    """
     headers = {
         "Cache-Control": cache_control,
-        "Content-Length": str(size),
         "ETag": etag,
     }
+
+    if request is not None:
+        inm = request.headers.get("if-none-match")
+        if inm and _etag_matches_if_none_match(etag, inm):
+            return Response(status_code=304, headers=headers)
+
+    if _internal_redirect_enabled() and storage_key:
+        # Defense in depth: re-validate the key resolves under storage_root.
+        # Callers normally already ran _fs_path; if the key somehow contains
+        # path traversal we fall through to the streaming path which uses
+        # _open_regular_file_no_symlink for the same protection.
+        try:
+            _fs_path(storage_key)
+        except HTTPException:
+            pass
+        else:
+            return Response(
+                status_code=200,
+                media_type=media_type,
+                headers={
+                    **headers,
+                    "X-Accel-Redirect": _INTERNAL_REDIRECT_PREFIX
+                    + storage_key.lstrip("/"),
+                },
+            )
+
+    f, size = _open_regular_file_no_symlink(path)
     return StreamingResponse(
         _iter_open_file_and_close(f),
         media_type=media_type,
-        headers=headers,
+        headers={**headers, "Content-Length": str(size)},
     )
 
 
@@ -520,9 +599,10 @@ async def get_image_meta(
 @router.get("/{image_id}/binary")
 async def get_image_binary(
     image_id: str,
+    request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> Response:
     img = (
         await db.execute(
             select(Image).where(
@@ -541,6 +621,8 @@ async def get_image_binary(
         media_type=img.mime,
         etag=f'"{img.sha256}"',
         cache_control="private, max-age=31536000, immutable",
+        storage_key=img.storage_key,
+        request=request,
     )
 
 
@@ -548,9 +630,10 @@ async def get_image_binary(
 async def get_image_variant(
     image_id: str,
     kind: str,
+    request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> StreamingResponse:
+) -> Response:
     if kind not in ALLOWED_VARIANTS:
         raise _http("invalid_variant", "unsupported image variant", 400)
     img = (
@@ -587,6 +670,8 @@ async def get_image_variant(
         media_type=media_type,
         etag=f'"{variant.image_id}-{variant.kind}"',
         cache_control="private, max-age=31536000, immutable",
+        storage_key=variant.storage_key,
+        request=request,
     )
 
 
@@ -658,6 +743,7 @@ async def get_image_signed(
         path = _fs_path(img.storage_key)
         media_type = img.mime
         etag = f'"{img.sha256}"'
+        storage_key = img.storage_key
     else:
         v = (
             await db.execute(
@@ -672,6 +758,7 @@ async def get_image_signed(
         path = _fs_path(v.storage_key)
         media_type = VARIANT_MEDIA_TYPE.get(variant, "application/octet-stream")
         etag = f'"{v.image_id}-{v.kind}"'
+        storage_key = v.storage_key
 
     return _storage_streaming_response(
         path,
@@ -679,6 +766,8 @@ async def get_image_signed(
         etag=etag,
         # 客户端 / 反代缓存 1h，远小于 sig 默认 TTL；既不浪费带宽也避免长缓存暴露失效签名。
         cache_control="public, max-age=3600",
+        storage_key=storage_key,
+        request=request,
     )
 
 
@@ -709,6 +798,8 @@ async def get_image_by_key(
         media_type=img.mime,
         etag=f'"{img.sha256}"',
         cache_control="private, max-age=31536000, immutable",
+        storage_key=img.storage_key,
+        request=request,
     )
 
 
