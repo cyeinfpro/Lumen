@@ -93,9 +93,17 @@ services:
         condition: service_healthy
     ports:
       - "${API_BIND_HOST:-127.0.0.1}:8000:8000"
+    environment:
+      # 容器化部署下让 admin_update 走 path-unit 触发，跳过容器内 systemctl 探测。
+      # 触发文件由 lumen-api 写到挂载的 backup 目录，宿主机 PID 1 监听并启动
+      # lumen-update-runner.service 真正执行 update.sh。
+      LUMEN_UPDATE_VIA_TRIGGER: "1"
     volumes:
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup
+      # admin_update / admin_backups 用 _discover_scripts_dir() 定位 update/backup
+      # 脚本，做 preflight 校验。镜像里不打包 scripts/，由 release 目录挂载提供。
+      - ./scripts:/app/scripts:ro
     networks:
       - lumen_backend
     healthcheck:
@@ -182,6 +190,10 @@ services:
     working_dir: /app/apps/tgbot
     command: ["python", "-m", "app.main"]
     env_file: .env
+    environment:
+      # tgbot 容器要走 docker network 调 lumen-api，不能用 config.py 里的
+      # 127.0.0.1:8000 默认值（那指向 tgbot 容器自己的 loopback）。
+      LUMEN_API_BASE: "http://api:8000"
     restart: unless-stopped
     stop_grace_period: 30s
     cpus: "0.5"

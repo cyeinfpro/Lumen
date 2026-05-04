@@ -1730,7 +1730,8 @@ web-next-cache|apps/web/.next/cache
 
         # 若 release 内已经有同名实体，先移走（不删除，备份成 .pre-link.<ts>）。
         if [ -e "${dst}" ] || [ -L "${dst}" ]; then
-            local backup="${dst}.pre-link.$(date -u +%Y%m%d%H%M%S)"
+            local backup
+            backup="${dst}.pre-link.$(date -u +%Y%m%d%H%M%S)"
             if ! mv "${dst}" "${backup}" 2>/dev/null; then
                 # 兜底删除：通过 lumen_safe_rm_rf 拦截 / /usr 等系统目录路径
                 lumen_safe_rm_rf "${dst}" 2>/dev/null || true
@@ -1936,6 +1937,38 @@ lumen_image_tag_resolve() {
             printf 'main\n'
             return 0
             ;;
+        minor)
+            if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+                printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/'
+                return 0
+            fi
+            if [ -n "${current_tag}" ]; then
+                log_warn "channel=minor 需要当前 LUMEN_IMAGE_TAG 形如 v1.2 或 v1.2.3，当前为 ${current_tag}；保持当前 tag。"
+                printf '%s\n' "${current_tag}"
+                return 0
+            fi
+            log_warn "channel=minor 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
+            printf 'main\n'
+            return 0
+            ;;
+        major)
+            if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+(\.[0-9]+){0,2}$'; then
+                printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+)(\.[0-9]+){0,2}$/\1/'
+                return 0
+            fi
+            if [ -n "${current_tag}" ]; then
+                log_warn "channel=major 需要当前 LUMEN_IMAGE_TAG 形如 v1、v1.2 或 v1.2.3，当前为 ${current_tag}；保持当前 tag。"
+                printf '%s\n' "${current_tag}"
+                return 0
+            fi
+            log_warn "channel=major 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
+            printf 'main\n'
+            return 0
+            ;;
+        v[0-9]*)
+            printf '%s\n' "${channel}"
+            return 0
+            ;;
     esac
     # stable / latest：查 GitHub Releases API 取 latest tag_name
     local api_url="https://api.github.com/repos/cyeinfpro/Lumen/releases/latest"
@@ -1967,6 +2000,16 @@ lumen_image_tag_resolve() {
     log_warn "GitHub Releases API 不可达且 .env 无 LUMEN_IMAGE_TAG，回退 main（§6.4 首发兜底）。"
     printf 'main\n'
     return 0
+}
+
+lumen_image_tag_is_rolling() {
+    local tag="${1:-}"
+    case "${tag}" in
+        main|latest)
+            return 0
+            ;;
+    esac
+    printf '%s\n' "${tag}" | grep -Eq '^v[0-9]+$|^v[0-9]+\.[0-9]+$'
 }
 
 # 把 LUMEN_IMAGE_TAG=<tag> 唯一写入指定 .env，禁止动其他字段（§6.4.1）。

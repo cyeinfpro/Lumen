@@ -225,6 +225,62 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
     assert trigger_text.startswith("2026-05-02T00:00:00")
 
 
+def test_runner_unit_available_short_circuits_in_trigger_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In docker-compose deploys lumen-api has no systemctl client at all.
+
+    LUMEN_UPDATE_VIA_TRIGGER=1 must make _runner_unit_available() return True
+    without trying to spawn systemctl — otherwise the trigger path is
+    permanently disabled and the trigger_update endpoint falls through to a
+    detached subprocess that can't actually run docker compose from inside
+    the api container.
+    """
+    monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
+
+    def _boom(*args: object, **kwargs: object) -> object:  # pragma: no cover - guard
+        raise AssertionError("must not invoke systemctl in trigger-only mode")
+
+    monkeypatch.setattr(admin_update.shutil, "which", _boom)
+    monkeypatch.setattr(admin_update.subprocess, "run", _boom)
+
+    assert admin_update._runner_unit_available() is True
+
+
+def test_start_update_via_path_unit_returns_immediately_in_trigger_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Containerised lumen-api can't poll _unit_is_running.
+
+    With LUMEN_UPDATE_VIA_TRIGGER=1 set, writing the trigger file is enough —
+    the host's path watcher takes over. The function must not block 15 s on
+    a wait loop that will never observe the unit going active.
+    """
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
+
+    def _boom_sleep(_seconds: float) -> None:  # pragma: no cover - guard
+        raise AssertionError("must not sleep when waiting is short-circuited")
+
+    monkeypatch.setattr(admin_update.time, "sleep", _boom_sleep)
+
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        outcome = admin_update._start_update_via_path_unit(
+            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            log_fh=log_fh,
+            started_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
+        )
+
+    assert outcome == (0, admin_update._UPDATE_RUNNER_UNIT)
+    assert (backup_root / ".update.trigger").is_file()
+    assert (backup_root / ".update.env").is_file()
+    assert (backup_root / ".update.running").is_file()
+
+
 def test_start_update_via_path_unit_cleans_up_when_runner_does_not_activate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
