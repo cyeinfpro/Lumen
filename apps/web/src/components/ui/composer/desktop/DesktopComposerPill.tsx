@@ -300,7 +300,6 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   })();
 
   const {
-    ingestMany,
     handlePaste,
     handleFileInput,
     openFilePicker,

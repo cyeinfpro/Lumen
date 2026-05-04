@@ -346,7 +346,10 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         onIndexChange={setPreviewIndex}
         onClose={() => setPreviewIndex(-1)}
       />
+      {/* key 让 dialog 在 open / candidate 变化时 re-mount，state 自动重置；
+          这是 React 19 推荐的派生 state 做法（替代 effect 中 setState）。 */}
       <SaveCandidateDialog
+        key={savingCandidateId ?? "closed"}
         workflow={workflow}
         candidate={candidates.find((candidate) => candidate.id === savingCandidateId) ?? null}
         open={Boolean(savingCandidateId)}
