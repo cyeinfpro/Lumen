@@ -130,15 +130,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # platforms：默认 amd64+arm64；lumen-web 单独 amd64-only —— Next.js 16
-        # Turbopack 在 QEMU emulated arm64 上做 page collection 时会 SIGILL
-        # （uncaught target signal 4 / Illegal instruction），需要 native arm64
-        # runner 才能稳。生产服务器都是 amd64，不阻塞发布。
+        # Python 镜像走 QEMU emulated 双架构（稳定，buildx 单 job 出多 arch）。
+        # lumen-web 拆到 build-web/merge-web 用 native runner —— Next.js 16
+        # Turbopack 在 QEMU emulated arm64 上 page collection 阶段会 SIGILL。
         image:
           - { name: lumen-api,    file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
           - { name: lumen-worker, file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
           - { name: lumen-tgbot,  file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
-          - { name: lumen-web,    file: ./apps/web/Dockerfile,  context: ./apps/web,  platforms: "linux/amd64" }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -206,10 +204,142 @@ jobs:
             LUMEN_REVISION=${{ github.sha }}
             LUMEN_CREATED=${{ steps.meta-vars.outputs.build_time }}
 
+  build-web:
+    name: Build & push lumen-web (${{ matrix.platform.tag }})
+    runs-on: ${{ matrix.platform.runs_on }}
+    needs: quality-gate
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { tag: amd64, name: linux/amd64, runs_on: ubuntu-latest }
+          - { tag: arm64, name: linux/arm64, runs_on: ubuntu-24.04-arm }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Compute build metadata
+        id: meta-vars
+        run: |
+          short_sha=$(git rev-parse --short=7 HEAD)
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "lumen_version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "lumen_version=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/web
+          file: ./apps/web/Dockerfile
+          platforms: ${{ matrix.platform.name }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=lumen-web-${{ matrix.platform.tag }}
+          cache-to: type=gha,mode=max,scope=lumen-web-${{ matrix.platform.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/cyeinfpro/Lumen
+            org.opencontainers.image.version=${{ steps.meta-vars.outputs.lumen_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            LUMEN_VERSION=${{ steps.meta-vars.outputs.lumen_version }}
+            LUMEN_GIT_SHA=${{ github.sha }}
+            LUMEN_BUILD_TIME=${{ steps.meta-vars.outputs.build_time }}
+            LUMEN_REVISION=${{ github.sha }}
+            LUMEN_CREATED=${{ steps.meta-vars.outputs.build_time }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-web-${{ matrix.platform.tag }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-web:
+    name: Merge lumen-web manifest list
+    runs-on: ubuntu-latest
+    needs: build-web
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-web-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web
+          tags: |
+            type=raw,value=sha-{{sha}}
+            type=ref,event=branch
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Create manifest list & push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web@sha256:%s ' *)
+
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web:${{ steps.meta.outputs.version }}
+
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, merge-web]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
