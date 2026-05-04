@@ -24,6 +24,10 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 
+IMAGE_EDIT_INPUT_TRANSPORT_VALUES = ("url", "file")
+DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT = "url"
+
+
 @dataclass(frozen=True)
 class ProviderProxyDefinition:
     name: str
@@ -76,6 +80,11 @@ class ProviderDefinition:
     # global `image.job_base_url` runtime setting. Lets us run multiple
     # sidecars (one per provider region/host) without cross-routing requests.
     image_jobs_base_url: str = ""
+    # Controls how image-job forwards reference images for /v1/images/edits:
+    #   "url"  — JSON body with images[].image_url, used by sub2api-style gateways
+    #   "file" — multipart/form-data image[] files, used by OpenAI/new-api-style gateways
+    # Direct non-image-job /v1/images/edits is already multipart and ignores this.
+    image_edit_input_transport: str = DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT
     # Per-provider concurrency cap for image generation tasks. Default 1
     # preserves the historical "one in-flight per provider" behaviour. Bump it
     # when a single account can sustain more concurrent generations (e.g. paid
@@ -233,6 +242,14 @@ def _parse_optional_bool(raw: Any) -> bool | None:
     return None
 
 
+def normalize_image_edit_input_transport(raw: Any) -> str:
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in IMAGE_EDIT_INPUT_TRANSPORT_VALUES:
+            return value
+    return DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT
+
+
 def _parse_proxy_protocol(raw: Any) -> str:
     if not isinstance(raw, str) or not raw.strip():
         return "socks5"
@@ -297,6 +314,9 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         candidate = raw_base.strip().rstrip("/")
         if candidate:
             image_jobs_base_url = candidate
+    image_edit_input_transport = normalize_image_edit_input_transport(
+        item.get("image_edit_input_transport")
+    )
     raw_conc = item.get("image_concurrency", 1)
     try:
         image_concurrency = max(1, int(raw_conc))
@@ -316,6 +336,7 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         image_jobs_endpoint=normalized_endpoint,
         image_jobs_endpoint_lock=image_jobs_endpoint_lock,
         image_jobs_base_url=image_jobs_base_url,
+        image_edit_input_transport=image_edit_input_transport,
         image_concurrency=image_concurrency,
         responses_supported=_parse_optional_bool(item.get("responses_supported")),
         image_generations_supported=_parse_optional_bool(
@@ -828,6 +849,8 @@ __all__ = [
     "ProviderProxyDefinition",
     "RoundRobinState",
     "DEFAULT_LEGACY_PROVIDER_BASE_URL",
+    "DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT",
+    "IMAGE_EDIT_INPUT_TRANSPORT_VALUES",
     "advance_round_robin_counter",
     "build_effective_provider_config",
     "build_effective_providers",
@@ -839,6 +862,7 @@ __all__ = [
     "parse_provider_json",
     "parse_proxy_item",
     "parse_proxy_json",
+    "normalize_image_edit_input_transport",
     "resolve_provider_proxy_url",
     "socks_proxy_url",
     "weighted_priority_order",

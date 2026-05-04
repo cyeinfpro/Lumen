@@ -86,6 +86,7 @@ class ProviderConfig:
     # 选号阶段过滤掉对端请求，failover 也不再回退到对端。
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""          # empty → fall back to global image.job_base_url
+    image_edit_input_transport: str = "url"  # image-job /v1/images/edits: "url" | "file"
     image_concurrency: int = 1             # 每 provider 同时进行的图片任务上限
     # Capability tri-state（详见 lumen_core.providers.ProviderDefinition 注释）
     responses_supported: bool | None = None
@@ -161,6 +162,7 @@ class ResolvedProvider:
     image_jobs_endpoint: str = "auto"
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
+    image_edit_input_transport: str = "url"
     image_concurrency: int = 1
     responses_supported: bool | None = None
     image_generations_supported: bool | None = None
@@ -247,6 +249,7 @@ class ProviderPool:
                 image_jobs_endpoint=p.image_jobs_endpoint,
                 image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                 image_jobs_base_url=p.image_jobs_base_url,
+                image_edit_input_transport=p.image_edit_input_transport,
                 image_concurrency=p.image_concurrency,
                 responses_supported=getattr(p, "responses_supported", None),
                 image_generations_supported=getattr(
@@ -291,6 +294,7 @@ class ProviderPool:
                             image_jobs_endpoint=p.image_jobs_endpoint,
                             image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                             image_jobs_base_url=p.image_jobs_base_url,
+                            image_edit_input_transport=p.image_edit_input_transport,
                             image_concurrency=p.image_concurrency,
                             responses_supported=p.responses_supported,
                             image_generations_supported=p.image_generations_supported,
@@ -410,6 +414,7 @@ class ProviderPool:
                         image_jobs_endpoint=p.image_jobs_endpoint,
                         image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                         image_jobs_base_url=p.image_jobs_base_url,
+                        image_edit_input_transport=p.image_edit_input_transport,
                         image_concurrency=p.image_concurrency,
                         responses_supported=p.responses_supported,
                         image_generations_supported=p.image_generations_supported,
@@ -713,6 +718,7 @@ class ProviderPool:
                 image_jobs_endpoint=p.image_jobs_endpoint,
                 image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                 image_jobs_base_url=p.image_jobs_base_url,
+                image_edit_input_transport=p.image_edit_input_transport,
                 image_concurrency=p.image_concurrency,
                 responses_supported=p.responses_supported,
                 image_generations_supported=p.image_generations_supported,

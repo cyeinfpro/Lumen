@@ -100,6 +100,7 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
             "image_rate_limit": " 5/min ",
             "image_daily_quota": "10",
             "image_jobs_enabled": True,
+            "image_edit_input_transport": " file ",
         },
         index=0,
     )
@@ -113,6 +114,20 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
     assert provider.image_rate_limit == "5/min"
     assert provider.image_daily_quota == 10
     assert provider.image_jobs_enabled is True
+    assert provider.image_edit_input_transport == "file"
+
+
+def test_parse_provider_item_defaults_unknown_edit_transport_to_url():
+    provider = parse_provider_item(
+        {
+            "base_url": "https://upstream.example",
+            "api_key": "sk-test",
+            "image_edit_input_transport": "auto",
+        },
+        index=0,
+    )
+
+    assert provider.image_edit_input_transport == "url"
 
 
 def test_parse_proxy_item_normalizes_s5_alias_and_hides_password_in_repr():

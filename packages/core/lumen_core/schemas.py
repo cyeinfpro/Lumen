@@ -635,6 +635,7 @@ class ProviderItemOut(BaseModel):
     image_jobs_endpoint: str = "auto"
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
+    image_edit_input_transport: Literal["url", "file"] = "url"
     image_concurrency: int = 1
     # Capability tri-state (image-stability-hardening §P2). null = 未知（默认）。
     responses_supported: bool | None = None
@@ -688,6 +689,7 @@ class ProviderItemIn(BaseModel):
     image_jobs_endpoint: str = "auto"
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
+    image_edit_input_transport: Literal["url", "file"] = "url"
     image_concurrency: int = 1
     # Capability tri-state（详见 ProviderItemOut 注释）
     responses_supported: bool | None = None

@@ -95,6 +95,7 @@ function toDraft(p: ProviderItemOut): Draft {
     image_jobs_endpoint: p.image_jobs_endpoint ?? "auto",
     image_jobs_endpoint_lock: p.image_jobs_endpoint_lock ?? false,
     image_jobs_base_url: p.image_jobs_base_url ?? "",
+    image_edit_input_transport: p.image_edit_input_transport ?? "url",
     image_concurrency: Math.max(1, p.image_concurrency ?? 1),
     proxy: p.proxy ?? null,
   };
@@ -113,6 +114,7 @@ function emptyDraft(): Draft {
     image_jobs_endpoint: "auto",
     image_jobs_endpoint_lock: false,
     image_jobs_base_url: "",
+    image_edit_input_transport: "url",
     image_concurrency: 1,
     proxy: null,
   };
@@ -409,6 +411,7 @@ export function ProvidersPanel() {
             ? false
             : Boolean(d.image_jobs_endpoint_lock),
         image_jobs_base_url: (d.image_jobs_base_url ?? "").trim(),
+        image_edit_input_transport: d.image_edit_input_transport ?? "url",
         image_concurrency: Math.max(
           1,
           Math.min(32, Number(d.image_concurrency ?? 1) || 1)
@@ -1255,6 +1258,21 @@ function ProviderCard({
                 />
               </>
             )}
+            {p.image_jobs_enabled && (
+              <>
+                <MetaSep />
+                <MetaItem
+                  label="Edit 输入"
+                  value={p.image_edit_input_transport ?? "url"}
+                  mono
+                  color={
+                    (p.image_edit_input_transport ?? "url") === "file"
+                      ? "text-amber-300"
+                      : "text-sky-300"
+                  }
+                />
+              </>
+            )}
           </>
         )}
         {probe?.latency_ms != null && (
@@ -1802,6 +1820,29 @@ const DraftCard = forwardRef<
                     />
                     <span className="mt-1 text-[11px] leading-4 text-neutral-600">
                       支持给不同 Provider 指定独立的 image-job sidecar，例如多区域部署时按 Provider 路由。
+                    </span>
+                  </div>
+                )}
+                {draft.image_jobs_enabled && (
+                  <div className="flex flex-col">
+                    <label className="text-xs text-neutral-300 font-medium mb-1.5">
+                      Edits 输入
+                    </label>
+                    <select
+                      value={draft.image_edit_input_transport ?? "url"}
+                      onChange={(e) =>
+                        onUpdate({
+                          image_edit_input_transport:
+                            (e.target.value as "url" | "file") || "url",
+                        })
+                      }
+                      className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-sky-500/50"
+                    >
+                      <option value="url">url（JSON image_url）</option>
+                      <option value="file">file（multipart image[]）</option>
+                    </select>
+                    <span className="mt-1 text-[11px] leading-4 text-neutral-600">
+                      只影响 image-job 转发 /v1/images/edits；未启用 image-job 时直连始终是 multipart 文件。
                     </span>
                   </div>
                 )}

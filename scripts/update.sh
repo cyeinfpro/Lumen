@@ -526,19 +526,82 @@ emit_start lock
 emit_info lock operation_id "${OPERATION_ID}"
 emit_done  lock 0
 
-# ---------------------------------------------------------------------------
-# Phase: check
-# 解析当前 / 目标 LUMEN_IMAGE_TAG，相同则直接跳到 cleanup。
-# ---------------------------------------------------------------------------
-emit_start check
-
-# 解析 current release（容忍首次部署时 current 不存在）
+# CURRENT_RELEASE 提前到 self_update_scripts 前解析（check phase 内仍会重赋值，幂等）；
+# 不放进 check phase 是为了 self_update_scripts 在 noop 判断之前就能拿到 release scripts 目录。
 CURRENT_RELEASE=""
 CURRENT_ID=""
 if [ -L "${ROOT}/current" ]; then
     CURRENT_RELEASE="$(lumen_release_current_path "${ROOT}" || true)"
     [ -n "${CURRENT_RELEASE}" ] && CURRENT_ID="$(basename "${CURRENT_RELEASE}")"
 fi
+
+# ---------------------------------------------------------------------------
+# Phase: self_update_scripts
+# 从 GitHub 拉最新 scripts/ 替换 current release 里的对应文件，让 backup_preflight
+# 等后续阶段直接用上仓库 main 的 bash 修复，避免"修一个 scripts/ bug 必须等下次
+# update 才生效"的鸡蛋问题。
+#
+# 位置：必须在 check phase 之前 —— 否则当 current_tag == target_tag（pinned tag noop）
+# 时 check 会 SKIP_TO_CLEANUP return，self_update_scripts 永远跑不到。
+#
+# 实现委托给 lib.sh 的 lumen_self_update_scripts（lumenctl 入口处也用同一个函数）。
+# update 阶段用短 TTL（60s）：lumenctl 入口刚拉过会命中 marker 跳过，避免一次 update 调用
+# 拉两次 GitHub；冷启动（admin systemd-run 直接跑 update.sh）会突破 TTL 拉一次。
+# 只取 lib.sh / backup.sh / restore.sh / update.sh 四个（lumenctl.sh 已在 lumenctl 入口处更新过）。
+# ---------------------------------------------------------------------------
+emit_start self_update_scripts
+
+if [ "${LUMEN_UPDATE_SELF_UPDATED:-0}" = "1" ]; then
+    log_info "[self_update_scripts] 已通过 self-update re-exec 重入，跳过自身。"
+    emit_done self_update_scripts 0
+elif [ "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS:-1}" = "0" ]; then
+    log_info "[self_update_scripts] 关闭（LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0）。"
+    emit_done self_update_scripts 0
+elif [ -z "${CURRENT_RELEASE}" ] || [ ! -d "${CURRENT_RELEASE}/scripts" ]; then
+    log_info "[self_update_scripts] 不是 release 布局（CURRENT_RELEASE 为空），跳过。"
+    emit_done self_update_scripts 0
+else
+    lumen_self_update_scripts \
+        "${CURRENT_RELEASE}/scripts" \
+        "${LUMEN_UPDATE_SCRIPTS_BRANCH:-main}" \
+        60 \
+        lib.sh backup.sh restore.sh update.sh
+    case "${LUMEN_SELF_UPDATE_RESULT:-}" in
+        ok)
+            if [ -n "${LUMEN_SELF_UPDATE_CHANGED:-}" ]; then
+                emit_info self_update_scripts source "${LUMEN_SELF_UPDATE_SOURCE}"
+                emit_info self_update_scripts changed "${LUMEN_SELF_UPDATE_CHANGED}"
+                emit_info self_update_scripts backup_suffix ".bak.${LUMEN_SELF_UPDATE_BACKUP_TS}"
+                # update.sh 自己变化 → re-exec 新版
+                case " ${LUMEN_SELF_UPDATE_CHANGED} " in
+                    *" update.sh "*)
+                        log_info "[self_update_scripts] update.sh 已变更，re-exec 新版（保留 OPERATION_ID）。"
+                        emit_done self_update_scripts 0
+                        export LUMEN_UPDATE_SELF_UPDATED=1
+                        export OPERATION_ID
+                        exec bash "${CURRENT_RELEASE}/scripts/update.sh" "$@"
+                        ;;
+                esac
+            fi
+            emit_done self_update_scripts 0
+            ;;
+        failed)
+            emit_warn self_update_scripts "fetch_or_validate_failed_continue_with_local"
+            emit_done self_update_scripts 0
+            ;;
+        disabled|skipped|*)
+            emit_done self_update_scripts 0
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# Phase: check
+# 解析当前 / 目标 LUMEN_IMAGE_TAG，相同则直接跳到 cleanup。
+# ---------------------------------------------------------------------------
+emit_start check
+
+# CURRENT_RELEASE / CURRENT_ID 已在 self_update_scripts phase 之前解析（line ~531）。
 
 # 确保 shared/.env 至少存在（用 lib.sh 的 helper）
 if ! lumen_release_ensure_shared_env "${ROOT}"; then
@@ -682,62 +745,6 @@ if ! check_data_owners; then
 fi
 
 emit_done preflight 0
-
-# ---------------------------------------------------------------------------
-# Phase: self_update_scripts
-# 从 GitHub 拉最新 scripts/ 替换 current release 里的对应文件，让 backup_preflight
-# 等后续阶段直接用上仓库 main 的 bash 修复，避免"修一个 scripts/ bug 必须等下次
-# update 才生效"的鸡蛋问题。
-#
-# 实现委托给 lib.sh 的 lumen_self_update_scripts（lumenctl 入口处也用同一个函数）。
-# update 阶段强制突破 TTL（LUMEN_SELF_UPDATE_FORCE=1）—— 升级时必须拿最新。
-# 只取 lib.sh / backup.sh / restore.sh / update.sh 四个（lumenctl.sh 已在 lumenctl 入口处更新过）。
-# ---------------------------------------------------------------------------
-emit_start self_update_scripts
-
-if [ "${LUMEN_UPDATE_SELF_UPDATED:-0}" = "1" ]; then
-    log_info "[self_update_scripts] 已通过 self-update re-exec 重入，跳过自身。"
-    emit_done self_update_scripts 0
-elif [ "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS:-1}" = "0" ]; then
-    log_info "[self_update_scripts] 关闭（LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0）。"
-    emit_done self_update_scripts 0
-elif [ -z "${CURRENT_RELEASE}" ] || [ ! -d "${CURRENT_RELEASE}/scripts" ]; then
-    log_info "[self_update_scripts] 不是 release 布局（CURRENT_RELEASE 为空），跳过。"
-    emit_done self_update_scripts 0
-else
-    LUMEN_SELF_UPDATE_FORCE=1 lumen_self_update_scripts \
-        "${CURRENT_RELEASE}/scripts" \
-        "${LUMEN_UPDATE_SCRIPTS_BRANCH:-main}" \
-        0 \
-        lib.sh backup.sh restore.sh update.sh
-    case "${LUMEN_SELF_UPDATE_RESULT:-}" in
-        ok)
-            if [ -n "${LUMEN_SELF_UPDATE_CHANGED:-}" ]; then
-                emit_info self_update_scripts source "${LUMEN_SELF_UPDATE_SOURCE}"
-                emit_info self_update_scripts changed "${LUMEN_SELF_UPDATE_CHANGED}"
-                emit_info self_update_scripts backup_suffix ".bak.${LUMEN_SELF_UPDATE_BACKUP_TS}"
-                # update.sh 自己变化 → re-exec 新版
-                case " ${LUMEN_SELF_UPDATE_CHANGED} " in
-                    *" update.sh "*)
-                        log_info "[self_update_scripts] update.sh 已变更，re-exec 新版（保留 OPERATION_ID）。"
-                        emit_done self_update_scripts 0
-                        export LUMEN_UPDATE_SELF_UPDATED=1
-                        export OPERATION_ID
-                        exec bash "${CURRENT_RELEASE}/scripts/update.sh" "$@"
-                        ;;
-                esac
-            fi
-            emit_done self_update_scripts 0
-            ;;
-        failed)
-            emit_warn self_update_scripts "fetch_or_validate_failed_continue_with_local"
-            emit_done self_update_scripts 0
-            ;;
-        disabled|skipped|*)
-            emit_done self_update_scripts 0
-            ;;
-    esac
-fi
 
 # ---------------------------------------------------------------------------
 # Phase: backup_preflight

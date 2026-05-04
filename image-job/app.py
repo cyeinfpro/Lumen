@@ -163,6 +163,12 @@ def json_dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def normalize_image_edit_input_transport(value: Any) -> str:
+    if isinstance(value, str) and value.strip().lower() == "file":
+        return "file"
+    return "url"
+
+
 # --- SQLite layer ------------------------------------------------------------
 #
 # Each call opens a fresh connection but applies tuning PRAGMAs. The SQLite
@@ -1321,6 +1327,92 @@ async def materialize_edit_input_urls(row: sqlite3.Row, body: dict[str, Any]) ->
     return rewritten
 
 
+def _candidate_filename(stem: str, candidate: ImageCandidate) -> tuple[str, str]:
+    width, height, fmt = image_metadata(candidate.data, candidate.mime_type)
+    if width is None or height is None or fmt == "bin":
+        raise JobFailure("图生图输入不是可识别的图片", upstream_status=400)
+    if fmt in {"jpg", "jpeg"}:
+        return f"{stem}.jpg", "image/jpeg"
+    if fmt == "webp":
+        return f"{stem}.webp", "image/webp"
+    if fmt == "png":
+        return f"{stem}.png", "image/png"
+    # gif 等其他格式：file 模式（OpenAI/new-api 风格）只接受 png/jpeg/webp。
+    # 之前 fallback 到 "image/png" 是 silent mismatch（声明 png 但字节是 gif），上游解析必失败。
+    raise JobFailure(
+        f"file 模式不支持图片格式 {fmt}（仅 png/jpeg/webp）",
+        upstream_status=400,
+        error_class=ERROR_CLASS_VALIDATION,
+    )
+
+
+async def materialize_edit_input_files(
+    client: httpx.AsyncClient,
+    body: dict[str, Any],
+) -> tuple[dict[str, str], list[tuple[str, tuple[str, bytes, str]]]]:
+    data: dict[str, str] = {}
+    for key, value in body.items():
+        if key in {"images", "mask"}:
+            continue
+        if value is None:
+            continue
+        # OpenAI/new-api 期望 multipart 字段是文本：dict/list 必须 JSON 序列化（直接 str() 会变 Python repr）；
+        # bool 用小写 true/false（json 风格，str(True) 给的是 "True" 上游 strict 解析会拒）。
+        if isinstance(value, bool):
+            data[key] = "true" if value else "false"
+        elif isinstance(value, (dict, list)):
+            data[key] = json_dump(value)
+        else:
+            data[key] = str(value)
+
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    cache: dict[str, ImageCandidate] = {}
+    images = body.get("images")
+    if not isinstance(images, list) or not images:
+        raise JobFailure(
+            "图生图 file 模式缺少 images",
+            upstream_status=400,
+            error_class=ERROR_CLASS_VALIDATION,
+        )
+    for index, item in enumerate(images):
+        if not isinstance(item, dict):
+            continue
+        candidate = image_candidate_from_ref(item)
+        url = item.get("image_url")
+        if candidate is None and isinstance(url, str):
+            candidate = await download_image_url(client, url, cache=cache)
+        if candidate is None:
+            continue
+        filename, mime = await asyncio.to_thread(
+            _candidate_filename,
+            f"ref-{index}",
+            candidate,
+        )
+        files.append(("image[]", (filename, candidate.data, mime)))
+    if not files:
+        raise JobFailure(
+            "图生图 file 模式没有可上传的参考图",
+            upstream_status=400,
+            error_class=ERROR_CLASS_VALIDATION,
+        )
+
+    mask = body.get("mask")
+    if isinstance(mask, dict):
+        candidate = image_candidate_from_ref(mask)
+        url = mask.get("image_url")
+        if candidate is None and isinstance(url, str):
+            candidate = await download_image_url(client, url, cache=cache)
+        if candidate is not None:
+            filename, mime = await asyncio.to_thread(
+                _candidate_filename,
+                "mask",
+                candidate,
+            )
+            files.append(("mask", (filename, candidate.data, mime)))
+
+    return data, files
+
+
 # --- Upstream call -----------------------------------------------------------
 
 
@@ -1380,6 +1472,7 @@ async def _call_upstream_once(
     headers: dict[str, str],
     body: dict[str, Any],
     endpoint: str,
+    image_edit_input_transport: str = "url",
 ) -> tuple[int, list[dict[str, Any]]]:
     assert _http_client is not None
     if endpoint == "/v1/responses":
@@ -1421,6 +1514,36 @@ async def _call_upstream_once(
                         error_class=ERROR_CLASS_IMAGE_SAVE,
                     ) from exc
         status_code = resp.status_code
+    elif endpoint == "/v1/images/edits" and image_edit_input_transport == "file":
+        multipart_headers = dict(headers)
+        multipart_headers.pop("Content-Type", None)
+        data, files = await materialize_edit_input_files(_http_client, body)
+        resp = await _http_client.post(
+            url,
+            headers=multipart_headers,
+            data=data,
+            files=files,
+        )
+        status_code = resp.status_code
+        if resp.status_code >= 400:
+            ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
+            raise JobFailure(
+                f"上游返回 HTTP {resp.status_code}",
+                upstream_status=resp.status_code,
+                upstream_body=body_preview(resp.content),
+                error_class=ec,
+            )
+        try:
+            candidates = await extract_response_images(resp, _http_client)
+        except (JobFailure, httpx.HTTPError):
+            raise
+        except Exception as exc:
+            raise JobFailure(
+                f"解析上游响应失败: {exc.__class__.__name__}: {exc}",
+                upstream_status=resp.status_code,
+                upstream_body=body_preview(resp.content),
+                error_class=ERROR_CLASS_IMAGE_SAVE,
+            ) from exc
     else:
         resp = await _http_client.post(url, headers=headers, json=body)
         status_code = resp.status_code
@@ -1493,8 +1616,12 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
     }
 
     body = payload["body"]
+    image_edit_input_transport = normalize_image_edit_input_transport(
+        payload.get("image_edit_input_transport")
+    )
     if endpoint == "/v1/images/edits" and isinstance(body, dict):
-        body = await materialize_edit_input_urls(row, body)
+        if image_edit_input_transport == "url":
+            body = await materialize_edit_input_urls(row, body)
 
     last_failure: JobFailure | None = None
     max_budget = max(RETRY_NETWORK_MAX, RETRY_RESPONSES_STREAM_MAX, RETRY_UPSTREAM_5XX_MAX)
@@ -1506,6 +1633,7 @@ async def call_upstream(row: sqlite3.Row) -> tuple[int, list[dict[str, Any]]]:
                 headers=headers,
                 body=body,
                 endpoint=endpoint,
+                image_edit_input_transport=image_edit_input_transport,
             )
         except httpx.HTTPError as exc:
             failure = JobFailure(
