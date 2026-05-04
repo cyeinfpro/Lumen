@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,62 @@ def test_backup_paths_resolve_from_settings_at_call_time(
     assert admin_backups._backup_root() == backup_root
     assert admin_backups._backup_script() == scripts_dir / "backup.sh"
     assert admin_backups._restore_script() == scripts_dir / "restore.sh"
+
+
+def test_open_private_append_tolerates_fchmod_eperm_for_non_owner_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """In docker-compose deploys lumen-api appends to .update.log that
+
+    lumen-update-runner.service writes from the host. Container uid (e.g.
+    LUMEN_APP_UID=10001) won't match the host owner, so non-owner fchmod
+    returns EPERM. Before this fix the trigger_update endpoint crashed with
+    a 500 (PermissionError [Errno 1] Operation not permitted) before even
+    writing the trigger file. _open_private_append must swallow EPERM —
+    O_CREAT already enforces 0o600 on fresh files; existing-file mode is
+    the host's responsibility.
+    """
+    log_path = tmp_path / ".update.log"
+    log_path.write_text("preexisting content\n", encoding="utf-8")
+
+    calls: list[tuple[int, int]] = []
+
+    def fake_fchmod(fd: int, mode: int) -> None:
+        calls.append((fd, mode))
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(admin_backups.os, "fchmod", fake_fchmod)
+
+    fh = admin_backups._open_private_append(log_path)
+    try:
+        fh.write("appended by lumen-api\n")
+    finally:
+        fh.close()
+
+    assert calls and calls[0][1] == 0o600, "expected fchmod attempt with 0o600"
+    text = log_path.read_text(encoding="utf-8")
+    assert text.startswith("preexisting content")
+    assert "appended by lumen-api" in text
+
+
+def test_open_private_append_re_raises_other_oserrors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only EPERM from a non-owner fchmod is benign — every other OSError
+    (ENOSPC, EBADF, EIO, ...) must still surface so the caller fails fast.
+    """
+    log_path = tmp_path / ".update.log"
+
+    def fake_fchmod(fd: int, mode: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(admin_backups.os, "fchmod", fake_fchmod)
+
+    with pytest.raises(OSError) as exc_info:
+        admin_backups._open_private_append(log_path)
+    assert exc_info.value.errno == 28
 
 
 @pytest.mark.asyncio
