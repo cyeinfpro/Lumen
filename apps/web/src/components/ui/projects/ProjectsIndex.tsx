@@ -7,6 +7,7 @@
 // 4) 错误态可重试；空态升级为带占位渐变的 hero
 
 import { motion, useReducedMotion } from "framer-motion";
+import Image from "next/image";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -102,7 +103,7 @@ export function ProjectsIndex() {
       : "服饰展示工作流";
 
   return (
-    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -119,7 +120,7 @@ export function ProjectsIndex() {
         }
       />
       <ProjectTopBar />
-      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
+      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
         <div className="mx-auto grid w-full max-w-[1400px] gap-4 md:gap-5">
           <Hero counts={counts} />
 
@@ -436,10 +437,12 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
       >
         <div className="relative flex aspect-[4/5] items-center justify-center overflow-hidden rounded-lg bg-[var(--bg-2)] md:rounded-md">
           {thumb ? (
-            <img
+            <Image
               src={thumb}
               alt={item.title || "商品图"}
-              loading="lazy"
+              fill
+              sizes="112px"
+              unoptimized
               className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] group-hover:scale-[1.025]"
             />
           ) : (

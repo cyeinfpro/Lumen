@@ -243,7 +243,7 @@ export function DesktopStudio() {
   );
 
   return (
-    <div className="relative flex flex-col h-[100dvh] bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 flex-col bg-[var(--bg-0)]">
       <DesktopTopNav
         active="studio"
         right={topNavRight}
@@ -252,7 +252,7 @@ export function DesktopStudio() {
 
       <main
         ref={scrollRef}
-        className="relative flex-1 overflow-y-auto overflow-x-hidden lumen-studio-bg"
+        className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden lumen-studio-bg"
       >
         <div
           className="mx-auto w-full max-w-[1680px] px-3 py-2 xl:px-4 2xl:px-6"

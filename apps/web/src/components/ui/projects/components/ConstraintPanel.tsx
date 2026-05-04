@@ -94,7 +94,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
                 type="button"
                 onClick={onClose}
                 aria-label="关闭"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
               >
                 <X className="h-4 w-4" />
               </button>

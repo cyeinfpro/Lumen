@@ -24,10 +24,10 @@ export function DesktopMe() {
   const avatarChar = userLabel ? userLabel.slice(0, 1).toUpperCase() : "U";
 
   return (
-    <div className="relative flex h-[100dvh] w-full flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full flex-col bg-[var(--bg-0)]">
       <DesktopTopNav active="me" />
 
-      <main className="flex-1 overflow-y-auto">
+      <main className="min-h-0 flex-1 overflow-y-auto">
         <div
           className={cn(
             "mx-auto max-w-[1080px] px-6 md:px-10 pt-8 pb-16",

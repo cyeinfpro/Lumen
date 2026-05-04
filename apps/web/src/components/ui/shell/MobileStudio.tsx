@@ -117,14 +117,14 @@ export function MobileStudio() {
   const isEmpty = messages.length === 0;
 
   return (
-    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <LandscapeBanner />
       <MobileStudioTopBar />
 
       <main
         ref={scrollRef}
-        className="flex-1 overflow-y-auto overscroll-contain"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         style={{
           paddingBottom:
             "calc(48px + 48px + 12px + env(safe-area-inset-bottom, 0px))",

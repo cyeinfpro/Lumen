@@ -4,6 +4,7 @@
 // hover 浮起 + 琥珀外环（与 SelectableImageGrid 风格保持一致）。
 
 import { Image as ImageIcon } from "lucide-react";
+import Image from "next/image";
 
 import type { BackendImageMeta } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
@@ -56,10 +57,13 @@ export function ImageGrid({
             "focus-visible:shadow-[var(--ring)] focus-visible:outline-none",
           )}
         >
-          <img
+          <Image
             src={imageSrc(image)}
             alt="项目图片"
-            loading="lazy"
+            width={compact ? 240 : 360}
+            height={compact ? 300 : 450}
+            sizes={compact ? "240px" : "(max-width: 768px) 50vw, 320px"}
+            unoptimized
             className="aspect-[4/5] w-full object-cover transition-transform duration-[var(--dur-slow)] group-hover:scale-[1.02]"
           />
         </button>

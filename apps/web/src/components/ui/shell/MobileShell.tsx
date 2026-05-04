@@ -51,7 +51,7 @@ export function MobileShell({
   return (
     <div
       className={[
-        "relative flex flex-col bg-[var(--bg-0)]",
+        "relative flex min-h-0 flex-col bg-[var(--bg-0)]",
         className,
       ].join(" ")}
       // 100dvh 在 iOS 地址栏伸缩时会抖动；用 min-height 配 -webkit-fill-available
@@ -65,7 +65,7 @@ export function MobileShell({
       {topBar}
 
       <main
-        className="flex-1 overflow-y-auto overscroll-contain"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         style={insetStyle(bottomInset)}
       >
         <div className="mx-auto max-w-[640px] px-4 pt-1">{children}</div>

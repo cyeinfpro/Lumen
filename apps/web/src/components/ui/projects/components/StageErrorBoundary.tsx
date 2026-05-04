@@ -57,7 +57,7 @@ export class StageErrorBoundary extends Component<Props, State> {
             <button
               type="button"
               onClick={this.reset}
-              className="mt-3 inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08]"
+              className="mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08]"
             >
               <RefreshCw className="h-3.5 w-3.5" />
               重试本阶段

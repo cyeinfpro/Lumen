@@ -7,12 +7,12 @@ import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "@/compo
 
 export default function NewProjectPage() {
   return (
-    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <ProjectMobileTopBar title="新建" subtitle="选择项目模板" backHref="/projects" />
       <ProjectTopBar />
 
-      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-6">
+      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-6">
         <div className="mx-auto max-w-5xl">
           <nav aria-label="项目路径" className="hidden items-center gap-1.5 text-sm md:flex">
             <Link

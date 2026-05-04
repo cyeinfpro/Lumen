@@ -21,6 +21,7 @@ import {
 
 import { apiFetch } from "@/lib/apiClient";
 import type { UsageOut } from "@/lib/types";
+import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 
 const PRIMARY_SKELETON_KEYS = [
   "messages",
@@ -48,15 +49,14 @@ export default function UsagePage() {
     USAGE_PERIODS.find((period) => period.value === days) ?? USAGE_PERIODS[1];
 
   return (
-    <motion.div
-      initial={false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, ease: "easeOut" }}
-      className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200"
-    >
-      <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10 safe-x mobile-compact">
-        <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
-          <div className="min-w-0">
+    <SettingsShell title="用量统计" subtitle={`USAGE · ${selectedPeriod.label}`}>
+      <motion.div
+        initial={false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2, ease: "easeOut" }}
+      >
+        <header className="mb-5 flex items-start justify-between gap-4 flex-wrap md:mb-8">
+          <div className="hidden min-w-0 md:block">
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
               用量统计
             </h1>
@@ -70,11 +70,11 @@ export default function UsagePage() {
               </p>
             )}
           </div>
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center md:w-auto">
             <UsageRangePicker value={days} onChange={setDays} pending={q.isFetching} />
             <Link
               href="/me"
-              className="inline-flex items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors"
+              className="hidden items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors md:inline-flex"
             >
               <ArrowLeft className="w-4 h-4" />
               返回我的
@@ -92,8 +92,8 @@ export default function UsagePage() {
         ) : q.data ? (
           <UsageView data={q.data} />
         ) : null}
-      </div>
-    </motion.div>
+      </motion.div>
+    </SettingsShell>
   );
 }
 

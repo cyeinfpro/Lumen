@@ -5,6 +5,7 @@
 
 import { motion } from "framer-motion";
 import { CheckCheck } from "lucide-react";
+import Image from "next/image";
 
 import { Button } from "@/components/ui/primitives/Button";
 import type { BackendImageMeta, QualityReport } from "@/lib/apiClient";
@@ -53,10 +54,13 @@ export function ResultImageCard({
         onClick={onPreview}
         className="block w-full overflow-hidden rounded-md focus-visible:outline-none"
       >
-        <img
+        <Image
           src={imageSrc(image)}
           alt="展示图"
-          loading="lazy"
+          width={360}
+          height={450}
+          sizes="(max-width: 768px) 100vw, 360px"
+          unoptimized
           className="aspect-[4/5] w-full object-cover transition-transform duration-[var(--dur-slow)] hover:scale-[1.02]"
         />
       </button>

@@ -5,6 +5,7 @@
 
 import { motion } from "framer-motion";
 import { Check, Sparkles } from "lucide-react";
+import Image from "next/image";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { Spinner } from "@/components/ui/primitives/Spinner";
@@ -77,10 +78,12 @@ export function CandidateCard({
                 }
                 className="group h-full min-h-0 w-full overflow-hidden focus-visible:outline-none"
               >
-                <img
+                <Image
                   src={imageSrc(candidateImage)}
                   alt={`模特候选 ${candidate.candidate_index}-${index + 1}`}
-                  loading="lazy"
+                  fill
+                  sizes="(max-width: 768px) 50vw, 160px"
+                  unoptimized
                   className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] group-hover:scale-[1.02]"
                 />
               </button>
