@@ -495,22 +495,26 @@ def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
     """
     text = UPDATE.read_text(encoding="utf-8")
     code = _strip_shell_comments(text)
-    # Existing dangling prune retained (with new env overlay).
-    assert "image prune -f --filter" in code
-    # Two new prune passes mandated by v1.0.9.
-    assert "image prune -a -f --filter" in code, (
+    # Three prune passes; --filter is conditional (helper builds it from env).
+    assert "image prune -f" in code
+    assert "image prune -a -f" in code, (
         "cleanup must prune untagged unused images so old :main digests "
         "and retired :v1.0.x layers don't accumulate on disk"
     )
-    assert "buildx prune -f --filter" in code, (
+    assert "buildx prune -f" in code, (
         "cleanup must prune buildx build cache; it grows unbounded if "
         "LUMEN_UPDATE_BUILD=1 ever runs (or just from compose builds)"
     )
     # Env overlay so operators can lengthen the buffer if they need
-    # week-long rollback windows on a particular host.
-    assert "LUMEN_CLEANUP_DANGLING_HOURS" in code
-    assert "LUMEN_CLEANUP_IMAGES_HOURS" in code
-    assert "LUMEN_CLEANUP_CACHE_HOURS" in code
+    # week-long rollback windows on a particular host. Defaults are 0 —
+    # an `until=Nh` filter that catches no candidates would defeat the
+    # whole point on a host that publishes versions faster than N hours.
+    assert "LUMEN_CLEANUP_DANGLING_HOURS:-0" in code
+    assert "LUMEN_CLEANUP_IMAGES_HOURS:-0" in code
+    assert "LUMEN_CLEANUP_CACHE_HOURS:-0" in code
+    # Helper that omits --filter when hours==0 so prune actually runs
+    # against everything, not "everything older than 0 hours".
+    assert "_cleanup_filter_args" in code
     # Each prune failure must warn-not-fail, otherwise a stale CIFS or
     # docker daemon hiccup would mark a perfectly applied update as failed.
     assert code.count("已忽略") >= 4
