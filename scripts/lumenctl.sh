@@ -1857,6 +1857,12 @@ lumenctl_command_needs_self_update() {
 # 走 TTL 缓存（默认 600s）避免菜单反复打开就反复拉；网络/校验失败 → WARN 继续。
 # lumenctl.sh 或 lib.sh 自己变了 → re-exec lumenctl 让函数定义/逻辑生效。
 lumenctl_maybe_self_update() {
+    # source 模式（测试 / interactive shell 用 `. lumenctl.sh; main ...` 调用）跳过：
+    # 否则 source 后调 main 会真去拉 GitHub + re-exec 替换当前 bash 进程，破坏测试。
+    # 直接执行时 BASH_SOURCE[0] == "$0"（同为 lumenctl.sh 路径），source 时 $0 是 caller。
+    if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+        return 0
+    fi
     if [ "${LUMEN_LUMENCTL_SELF_UPDATED:-0}" = "1" ]; then
         return 0
     fi
