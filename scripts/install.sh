@@ -241,7 +241,8 @@ bootstrap_from_raw_script() {
             ;;
         mixed)
             # 杂乱目录：备份后重新 clone，避免误删用户数据。
-            local backup="${install_dir}.bak.$(date -u +%Y%m%d%H%M%S 2>/dev/null || date +%s)"
+            local backup
+            backup="${install_dir}.bak.$(date -u +%Y%m%d%H%M%S 2>/dev/null || date +%s)"
             printf '[WARN] %s 已存在但不像 Lumen 部署，备份到 %s 后重新 clone。\n' "${install_dir}" "${backup}"
             mv "${install_dir}" "${backup}"
             git clone --branch "${branch}" "${repo_url}" "${install_dir}"
@@ -572,8 +573,8 @@ env_file_get() {
 # ---------------------------------------------------------------------------
 # Compose 调用 wrapper
 # 优先使用 lib.sh 提供的 lumen_compose；缺失时降级到 docker compose 直调。
-# 同 wave 的 lib.sh agent 计划实现 lumen_compose / lumen_compose_in（自动 COMPOSE_PROJECT_NAME=lumen）；
-# TODO: 如果 lib.sh 实际签名与本处不一致（例如 lumen_compose_in <dir> ...），按 lib.sh 实现 align。
+# lumen_compose_in 的签名固定为 <dir> 后接 docker compose 参数，并自动设置
+# COMPOSE_PROJECT_NAME=lumen。
 # ---------------------------------------------------------------------------
 _install_compose() {
     if command -v lumen_compose_in >/dev/null 2>&1 && [ -n "${RELEASE_DIR:-}" ]; then

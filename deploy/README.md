@@ -99,7 +99,7 @@ bash scripts/lumenctl.sh restore <ts>     # 等价 scripts/restore.sh <timestamp
 
 `systemd/lumen-update-runner.service` 是后台 "一键更新" 按钮的执行端，行为：
 
-- 触发链：管理后台写入 `${LUMEN_DEPLOY_ROOT}/.update-trigger` -> `lumen-update-trigger.path` 监听变化 -> 启动 `lumen-update-runner.service`
+- 触发链：管理后台写入 `/opt/lumendata/backup/.update.trigger` -> `lumen-update.path` 监听变化 -> 启动 `lumen-update-runner.service`
 - runner 默认 `LUMEN_UPDATE_BUILD=0` —— **优先 `docker compose pull` GHCR 预构建镜像**，仅当外部 `EnvironmentFile` 显式置 1 时才本地构建
 - runner 用宿主机用户身份调用 `scripts/update.sh`，按阶段输出 `phase=check / backup_preflight / fetch_release / set_image_tag / pull_images / start_infra / migrate_db / switch / restart_services / health_check / cleanup`
 - 后台 API 解析这些阶段并实时推送到前端
@@ -107,7 +107,7 @@ bash scripts/lumenctl.sh restore <ts>     # 等价 scripts/restore.sh <timestamp
 如要禁用后台一键更新：
 
 ```bash
-sudo systemctl disable --now lumen-update-trigger.path lumen-update-runner.service
+sudo systemctl disable --now lumen-update.path lumen-update-runner.service
 ```
 
 ## systemd 兜底（仅 §18.2 回滚）

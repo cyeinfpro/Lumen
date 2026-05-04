@@ -110,6 +110,53 @@ def test_web_port_defaults_to_public_bind_and_install_migrates_old_env() -> None
     assert 'env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"' in install
 
 
+def test_api_service_mounts_release_scripts_for_admin_update() -> None:
+    """admin_update preflight uses _discover_scripts_dir() to locate update.sh.
+
+    Containerised lumen-api can't see the release directory unless we mount it,
+    so the trigger button reports `missing /opt/lumen/scripts/update.sh`. The
+    mount must point at the release's scripts/ (which always travels with each
+    release via rsync), and admin_update must run in path-unit trigger mode.
+    """
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "./scripts:/app/scripts:ro" in compose, (
+        "lumen-api container must mount the release scripts directory or "
+        "admin_update preflight will fail with `missing update.sh`"
+    )
+    assert 'LUMEN_UPDATE_VIA_TRIGGER: "1"' in compose, (
+        "lumen-api needs LUMEN_UPDATE_VIA_TRIGGER=1 to skip systemctl probes "
+        "(systemctl is not present inside the api container)"
+    )
+
+
+def test_update_runner_docs_match_path_unit_contract() -> None:
+    path_unit = (ROOT / "deploy" / "systemd" / "lumen-update.path").read_text(
+        encoding="utf-8"
+    )
+    deploy_readme = (ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
+
+    assert "PathChanged=/opt/lumendata/backup/.update.trigger" in path_unit
+    assert "Unit=lumen-update-runner.service" in path_unit
+    assert "/opt/lumendata/backup/.update.trigger" in deploy_readme
+    assert "lumen-update.path" in deploy_readme
+    assert "lumen-update-trigger.path" not in deploy_readme
+    assert ".update-trigger" not in deploy_readme
+
+
+def test_tgbot_service_points_at_api_via_docker_network() -> None:
+    """tgbot's lumen_api_base default is 127.0.0.1:8000 — that's the tgbot
+
+    container's own loopback, not lumen-api. The compose file must override
+    LUMEN_API_BASE so tgbot resolves the api service through the docker
+    network instead of dying with httpx.ConnectError on startup.
+    """
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert 'LUMEN_API_BASE: "http://api:8000"' in compose, (
+        "tgbot needs LUMEN_API_BASE pointing at the api service hostname; "
+        "config.py default 127.0.0.1:8000 only works for in-process dev"
+    )
+
+
 def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
@@ -431,6 +478,30 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "uv sync" not in code
     assert "npm ci" not in code
     assert "npm run build" not in code
+
+
+def test_update_script_skips_tag_name_noop_for_rolling_channels() -> None:
+    """For rolling GHCR tags, tag-name equality is not enough to noop.
+
+    Every CI push to main re-publishes ``:main`` with a new digest under the
+    same tag string; semver aliases like ``v1`` / ``v1.2`` also move when a
+    newer release in that range is published. Comparing tag names would always
+    declare noop and production would never receive the newer digest. The check
+    phase must detect rolling TARGET_TAG values and force the full
+    pull/migrate/restart path instead.
+    """
+    text = UPDATE.read_text(encoding="utf-8")
+    code = _strip_shell_comments(text)
+    assert "NOOP_BY_TAG_NAME" in code, (
+        "expected the check phase to expose a NOOP_BY_TAG_NAME flag so rolling "
+        "image tags can override the tag-equality noop"
+    )
+    assert 'lumen_image_tag_is_rolling "${TARGET_TAG}"' in code
+    assert "NOOP_BY_TAG_NAME=0" in code
+    assert "target_tag=${TARGET_TAG}" in code
+    # Operator-visible action key used by the SSE dashboard to explain why a
+    # repeat click on a rolling tag still ran the full update.
+    assert 'rolling_force_redeploy' in code
 
 
 def test_update_script_supports_optional_local_build_when_env_set() -> None:
@@ -1382,21 +1453,75 @@ def test_image_tag_resolve_uses_channel_and_env_file_for_pinned(tmp_path: Path) 
     assert result.stdout.strip() == "v1.2.3"
 
 
+def test_image_tag_resolve_supports_main_minor_and_major_channels(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("LUMEN_IMAGE_TAG=v1.2.3\n", encoding="utf-8")
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        printf 'main=%s\\n' "$(lumen_image_tag_resolve main {env_file})"
+        printf 'minor=%s\\n' "$(lumen_image_tag_resolve minor {env_file})"
+        printf 'major=%s\\n' "$(lumen_image_tag_resolve major {env_file})"
+        printf 'literal=%s\\n' "$(lumen_image_tag_resolve v9.8.7 {env_file})"
+        """
+    )
+
+    assert "main=main" in result.stdout
+    assert "minor=v1.2" in result.stdout
+    assert "major=v1" in result.stdout
+    assert "literal=v9.8.7" in result.stdout
+
+
+def test_image_tag_is_rolling_matches_main_and_semver_aliases() -> None:
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        for tag in main latest v1 v1.2 v1.2.3 sha-deadbee; do
+            if lumen_image_tag_is_rolling "$tag"; then
+                printf '%s=rolling\\n' "$tag"
+            else
+                printf '%s=fixed\\n' "$tag"
+            fi
+        done
+        """
+    )
+
+    assert "main=rolling" in result.stdout
+    assert "latest=rolling" in result.stdout
+    assert "v1=rolling" in result.stdout
+    assert "v1.2=rolling" in result.stdout
+    assert "v1.2.3=fixed" in result.stdout
+    assert "sha-deadbee=fixed" in result.stdout
+
+
 def test_docker_release_workflow_builds_amd64_and_arm64() -> None:
     workflow = (ROOT / ".github" / "workflows" / "docker-release.yml").read_text(
         encoding="utf-8"
     )
-    # platforms 现在通过 matrix 字段配置（lumen-web 单独 amd64-only，
-    # 因为 QEMU emulated arm64 跑 Next.js Turbopack 会 SIGILL）。
+    # api/worker/tgbot 走 build matrix，QEMU 双架构稳定。
     assert 'platforms: "linux/amd64,linux/arm64"' in workflow, (
         "expected python images (api/worker/tgbot) to build amd64+arm64"
-    )
-    assert 'platforms: "linux/amd64"' in workflow, (
-        "expected lumen-web matrix entry to be amd64-only"
     )
     assert "platforms: ${{ matrix.image.platforms }}" in workflow, (
         "expected build step to read platforms from matrix"
     )
+    # lumen-web 拆到 build-web/merge-web：amd64 在 ubuntu-latest、arm64 在
+    # native ubuntu-24.04-arm runner，各自 push-by-digest，最后用
+    # buildx imagetools create 合并成多架构 manifest list。
+    assert "build-web:" in workflow, "expected dedicated build-web job"
+    assert "merge-web:" in workflow, "expected merge-web job"
+    assert "ubuntu-24.04-arm" in workflow, (
+        "expected build-web arm64 to run on native ARM runner"
+    )
+    assert "push-by-digest=true" in workflow, (
+        "expected per-platform web build to push by digest"
+    )
+    assert "docker buildx imagetools create" in workflow, (
+        "expected merge-web to assemble multi-arch manifest list"
+    )
+    assert "needs: build-web" in workflow
+    assert "needs: [build, merge-web]" in workflow
     assert "needs: quality-gate" in workflow
     assert "type=semver,pattern=v{{version}}" in workflow
     assert "type=semver,pattern=v{{major}}.{{minor}}" in workflow

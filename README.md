@@ -198,6 +198,15 @@ bash scripts/lumenctl.sh update-lumen
 
 如果服务器访问 GitHub/GHCR 需要代理，在 `shared/.env` 写入 `LUMEN_HTTP_PROXY=http://127.0.0.1:7890` 或 `LUMEN_UPDATE_PROXY_URL=...`；命令行更新和管理面板「一键更新」都会自动读取。
 
+如需追踪主分支构建，把 `/opt/lumen/shared/.env` 中两项改成：
+
+```env
+LUMEN_UPDATE_CHANNEL=main
+LUMEN_IMAGE_TAG=main
+```
+
+`main` 是 rolling tag；即使当前和目标 tag 名都叫 `main`，更新脚本也会重新 `pull` 最新 digest。
+
 实际阶段：`check` -> `backup_preflight` -> `fetch_release` -> `set_image_tag` -> `pull_images` -> `start_infra` -> `migrate_db` -> `switch` -> `restart_services` -> `health_check` -> `cleanup`。
 
 如果需要在本机用 Dockerfile 重新构建（无 GHCR 访问，或本地有改动）：

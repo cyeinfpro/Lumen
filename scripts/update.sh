@@ -39,7 +39,7 @@ _LUMEN_UPDATE_INPUT_APP_STORAGE_GID="${LUMEN_APP_STORAGE_GID-}"
 
 if ! command -v lumen_emit_step >/dev/null 2>&1; then
     lumen_emit_step() {
-        local phase="" status="" rc="" dur_ms=""
+        local phase="" status="" rc=""
         local kv key val
         for kv in "$@"; do
             key="${kv%%=*}"
@@ -48,7 +48,6 @@ if ! command -v lumen_emit_step >/dev/null 2>&1; then
                 phase) phase="${val}" ;;
                 status) status="${val}" ;;
                 rc) rc="${val}" ;;
-                dur_ms) dur_ms="${val}" ;;
             esac
         done
         case "${status}" in
@@ -138,11 +137,43 @@ if ! command -v lumen_image_tag_resolve >/dev/null 2>&1; then
     # 真正实现应该查 GitHub Releases；这里只让脚本能跑起来。
     lumen_image_tag_resolve() {
         local channel="${1:-stable}"
+        local env_file="${2:-}"
+        local current_tag=""
+        if [ -n "${env_file}" ] && [ -f "${env_file}" ]; then
+            current_tag="$(lumen_env_value LUMEN_IMAGE_TAG "${env_file}" 2>/dev/null || echo "")"
+        fi
         case "${channel}" in
             stable|"") printf 'latest' ;;
             main) printf 'main' ;;
+            pinned) printf '%s' "${current_tag:-main}" ;;
+            minor)
+                if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+                    printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/'
+                else
+                    printf '%s' "${current_tag:-main}"
+                fi
+                ;;
+            major)
+                if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+(\.[0-9]+){0,2}$'; then
+                    printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+)(\.[0-9]+){0,2}$/\1/'
+                else
+                    printf '%s' "${current_tag:-main}"
+                fi
+                ;;
             *) printf '%s' "${channel}" ;;
         esac
+    }
+fi
+
+if ! command -v lumen_image_tag_is_rolling >/dev/null 2>&1; then
+    lumen_image_tag_is_rolling() {
+        local tag="${1:-}"
+        case "${tag}" in
+            main|latest)
+                return 0
+                ;;
+        esac
+        printf '%s\n' "${tag}" | grep -Eq '^v[0-9]+$|^v[0-9]+\.[0-9]+$'
     }
 fi
 
@@ -422,7 +453,7 @@ probe_ghcr_tag() {
         return 0
     fi
     # 先拿匿名 token（GHCR 公开包流程：/token?scope=repository:<image>:pull）
-    local token resp http_code
+    local token http_code
     token="$(curl -fsSL "https://ghcr.io/token?scope=repository:${image#ghcr.io/}:pull" 2>/dev/null \
         | sed -nE 's/.*"token"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
     if [ -z "${token}" ]; then
@@ -572,13 +603,31 @@ if [ -n "${LUMEN_PROXY_URL}" ]; then
     emit_info check proxy "configured"
 fi
 
-if [ -n "${CURRENT_TAG}" ] && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${CONFIG_CHANGED}" -eq 0 ]; then
+# rolling image tag（main / latest / vMAJOR / vMAJOR.MINOR）即使 tag 名不变，
+# GHCR 上的 digest 仍会随 CI 推送变化；用 tag 名做 noop 比较等于永远拉不到
+# 新镜像。识别最终 TARGET_TAG 并跳过 noop，让 pull/migrate/restart 完整跑一遍
+# ——`docker compose pull` 自带 layer-level 去重，digest 没变时也只是 HEAD 几个
+# manifest 即返。
+NOOP_BY_TAG_NAME=1
+if lumen_image_tag_is_rolling "${TARGET_TAG}"; then
+    NOOP_BY_TAG_NAME=0
+fi
+
+if [ -n "${CURRENT_TAG}" ] \
+        && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] \
+        && [ "${CONFIG_CHANGED}" -eq 0 ] \
+        && [ "${NOOP_BY_TAG_NAME}" -eq 1 ]; then
     log_info "[check] 当前 tag ${CURRENT_TAG} 已是目标版本，跳过中间阶段，仅做 cleanup。"
     emit_info check action "noop_already_latest"
     emit_done  check 0
     SKIP_TO_CLEANUP=1
 else
-    if [ -n "${CURRENT_TAG}" ] && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${CONFIG_CHANGED}" -eq 1 ]; then
+    if [ "${NOOP_BY_TAG_NAME}" -eq 0 ] \
+            && [ -n "${CURRENT_TAG}" ] \
+            && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ]; then
+        log_info "[check] target_tag=${TARGET_TAG} 是 rolling tag，跳过 tag 名 noop 检查，强制 pull 拉新 digest。"
+        emit_info check action "rolling_force_redeploy"
+    elif [ -n "${CURRENT_TAG}" ] && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${CONFIG_CHANGED}" -eq 1 ]; then
         log_info "[check] 当前 tag ${CURRENT_TAG} 已是目标版本，但配置已变更，继续重建 release 并重启服务。"
         emit_info check action "config_changed_redeploy"
     fi
@@ -928,9 +977,8 @@ emit_done switch 0
 emit_start restart_services
 
 CURRENT_LINK="${ROOT}/current"
-RESTART_OK=0
 if lumen_compose_in "${CURRENT_LINK}" up -d --wait api worker web; then
-    RESTART_OK=1
+    :
 else
     log_error "[restart_services] api/worker/web 启动失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
     emit_warn restart_services "starting_auto_rollback"

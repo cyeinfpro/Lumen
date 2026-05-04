@@ -143,6 +143,21 @@ def _shared_env_path(script: Path | None = None) -> Path:
     return candidate
 
 
+def _runner_trigger_only_mode() -> bool:
+    """True when the API runs in a container that can only write the trigger file.
+
+    Containerised lumen-api has no systemctl client, no dbus session, and no
+    way to query systemd on the host. docker-compose sets
+    ``LUMEN_UPDATE_VIA_TRIGGER=1`` so this code path knows to skip the
+    systemctl probes and trust the host's lumen-update.path watcher.
+    """
+    return os.environ.get("LUMEN_UPDATE_VIA_TRIGGER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _runner_unit_available() -> bool:
     """True iff the system has lumen-update-runner.service installed.
 
@@ -150,6 +165,11 @@ def _runner_unit_available() -> bool:
     file. This sidesteps lumen-api's NoNewPrivileges/ProtectSystem sandbox
     entirely — no dbus, no sudo, no polkit needed.
     """
+    # Containerised deploys can't run systemctl. Trust LUMEN_UPDATE_VIA_TRIGGER
+    # — it's only set in docker-compose, where the host always has the path
+    # watcher installed (otherwise the operator misconfigured the host).
+    if _runner_trigger_only_mode():
+        return True
     if shutil.which("systemctl") is None:
         return False
     result = subprocess.run(
@@ -674,6 +694,11 @@ def _start_update_via_path_unit(
     # 4) Wait for the runner to come up. The path-watcher latency is normally
     #    < 1s; allow generous slack so a busy host doesn't return a misleading
     #    failure. Exit early as soon as we observe the unit active.
+    if _runner_trigger_only_mode():
+        # Containerised lumen-api can't query systemctl on the host. The path
+        # unit is enabled on the host (verified at deploy time); the SSE
+        # endpoint and .update.running marker give the user real status.
+        return 0, unit
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if _unit_is_running(unit):
