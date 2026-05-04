@@ -991,10 +991,22 @@ lumen_self_update_scripts() {
     tmp_dir="$(mktemp -d 2>/dev/null)" || { LUMEN_SELF_UPDATE_RESULT=failed; return 0; }
 
     local f
+    local first_two
     for f in "${files[@]}"; do
         if ! "${curl_cmd[@]}" "${raw_base}/${f}" -o "${tmp_dir}/${f}" 2>/dev/null; then
             if command -v log_warn >/dev/null 2>&1; then
                 log_warn "[self_update] 下载 ${f} 失败（GitHub 不可达？），跳过 self-update（继续用本地脚本）。"
+            fi
+            rm -rf "${tmp_dir}" 2>/dev/null || true
+            LUMEN_SELF_UPDATE_RESULT=failed
+            return 0
+        fi
+        # shebang 校验：拒绝 404 HTML / 限流 JSON / 任何非 shell 内容。
+        # bash -n 对 `{"tags":[...]}` 这种 JSON 也会"通过"（被理解为 brace group + 字符串），所以单靠语法检查不够。
+        first_two="$(head -c 2 "${tmp_dir}/${f}" 2>/dev/null || true)"
+        if [ "${first_two}" != "#!" ]; then
+            if command -v log_warn >/dev/null 2>&1; then
+                log_warn "[self_update] ${f} 不以 #! 开头（远端返回非脚本内容；可能 404 HTML / JSON / 限流页），跳过 self-update。"
             fi
             rm -rf "${tmp_dir}" 2>/dev/null || true
             LUMEN_SELF_UPDATE_RESULT=failed
