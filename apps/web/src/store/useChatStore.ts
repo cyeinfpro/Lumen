@@ -10,6 +10,7 @@
 import { create } from "zustand";
 import { uuid } from "@/lib/utils";
 import { logWarn } from "@/lib/logger";
+import { MAX_COMPOSER_ATTACHMENTS } from "@/lib/attachmentLimits";
 import {
   MAX_PROMPT_CHARS,
   PROMPT_TOO_LONG_MESSAGE,
@@ -90,6 +91,7 @@ interface ChatState {
   currentConvId: string | null;
   setCurrentUser: (id: string | null) => void;
   setCurrentConv: (id: string | null) => void;
+  applyRuntimeDefaults: (defaults: { fast?: boolean }) => void;
 
   // 数据
   messages: Message[];
@@ -261,6 +263,9 @@ const DEFAULT_COMPOSER: ComposerState = {
   imageGeneration: false,
 };
 
+let _runtimeFastDefault: boolean | null = null;
+let _fastTouchedByUser = false;
+
 type ChatDataSlice = Pick<
   ChatState,
   | "currentUserId"
@@ -277,8 +282,11 @@ type ChatDataSlice = Pick<
 >;
 
 function createInitialComposer(): ComposerState {
+  const fast =
+    _runtimeFastDefault == null ? DEFAULT_COMPOSER.fast : _runtimeFastDefault;
   return {
     ...DEFAULT_COMPOSER,
+    fast,
     attachments: [],
     params: { ...DEFAULT_PARAMS },
   };
@@ -1439,6 +1447,15 @@ function createChatStore() {
   return create<ChatState>((set, get) => ({
     ...createInitialChatData(),
     setCurrentUser: (id) => set({ currentUserId: id }),
+    applyRuntimeDefaults: (defaults) => {
+      if (typeof defaults.fast !== "boolean") return;
+      const fastDefault = defaults.fast;
+      _runtimeFastDefault = fastDefault;
+      set((s) => {
+        if (_fastTouchedByUser || s.composer.fast === fastDefault) return s;
+        return { composer: { ...s.composer, fast: fastDefault } };
+      });
+    },
     // 切换会话：只清 messages（UI 级），保留 generations / imagesById（全局任务池）。
     // 原因：切走时若后台还有 generation 在跑，它的 Generation 记录不能丢，否则：
     //   - GlobalTaskTray 不再显示该任务
@@ -1518,7 +1535,10 @@ function createChatStore() {
       })),
     setReasoningEffort: (v) =>
       set((s) => ({ composer: { ...s.composer, reasoningEffort: v } })),
-    setFast: (v) => set((s) => ({ composer: { ...s.composer, fast: v } })),
+    setFast: (v) => {
+      _fastTouchedByUser = true;
+      set((s) => ({ composer: { ...s.composer, fast: v } }));
+    },
     setWebSearch: (v) =>
       set((s) => ({ composer: { ...s.composer, webSearch: v } })),
     setFileSearch: (v) =>
@@ -1530,6 +1550,11 @@ function createChatStore() {
     addAttachment: (att) =>
       set((s) => {
         if (s.composer.attachments.some((a) => a.id === att.id)) return s;
+        if (s.composer.attachments.length >= MAX_COMPOSER_ATTACHMENTS) {
+          return {
+            composerError: `最多添加 ${MAX_COMPOSER_ATTACHMENTS} 张参考图`,
+          };
+        }
         return {
           composer: {
             ...s.composer,
@@ -1572,9 +1597,16 @@ function createChatStore() {
         source_image_id: img.id,
       };
       set((s) => ({
+        composerError:
+          s.composer.attachments.length >= MAX_COMPOSER_ATTACHMENTS
+            ? `最多添加 ${MAX_COMPOSER_ATTACHMENTS} 张参考图`
+            : s.composerError,
         composer: {
           ...s.composer,
-          attachments: [att, ...s.composer.attachments],
+          attachments:
+            s.composer.attachments.length >= MAX_COMPOSER_ATTACHMENTS
+              ? s.composer.attachments
+              : [att, ...s.composer.attachments],
           mode: "image",
         },
       }));
@@ -1887,7 +1919,7 @@ function createChatStore() {
         if (isImage) return undefined;
         const cp: Record<string, unknown> = {};
         if (reasoningEffort) cp.reasoning_effort = reasoningEffort;
-        if (fast) cp.fast = true;
+        cp.fast = fast;
         if (webSearch) cp.web_search = true;
         if (fileSearch) cp.file_search = true;
         if (codeInterpreter) cp.code_interpreter = true;
@@ -2447,7 +2479,7 @@ function createChatStore() {
           size_mode: "fixed",
           fixed_size: fixedSize,
           count: 1,
-          fast: false,
+          fast: _runtimeFastDefault ?? false,
           render_quality: "medium",
           background: "auto",
           moderation: "low",
@@ -2528,7 +2560,7 @@ function createChatStore() {
             ? gen.size_requested
             : undefined,
           count: 1,
-          fast: false,
+          fast: _runtimeFastDefault ?? false,
           render_quality: rerollRenderQuality,
           background: "auto",
           moderation: "low",

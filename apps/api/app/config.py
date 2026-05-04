@@ -103,6 +103,16 @@ class Settings(BaseSettings):
     cors_allow_origins: str = _DEFAULT_CORS_ALLOW_ORIGINS
     trusted_proxies: str = ""
 
+    # Apparel model library presets live in this repo under
+    # assets/apparel-model-presets/. After pushing that folder to GitHub, the
+    # sync endpoint enumerates the folder through GitHub Contents API and
+    # caches binaries into storage_root/apparel-model-library/.
+    apparel_model_library_github_contents_url: str = (
+        "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
+        "assets/apparel-model-presets?ref=main"
+    )
+    apparel_model_library_sync_mode: str = "admin_only"
+
     # ---------- 观测层（DESIGN §10 / V1.0 收尾） ----------
     # Sentry：dsn 为空则 init_sentry 静默 no-op
     sentry_dsn: str = ""

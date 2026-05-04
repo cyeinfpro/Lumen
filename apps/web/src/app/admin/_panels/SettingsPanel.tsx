@@ -137,6 +137,7 @@ type UpdateProxyOption = {
 
 const UPDATE_USE_PROXY_POOL_KEY = "update.use_proxy_pool";
 const UPDATE_PROXY_NAME_KEY = "update.proxy_name";
+const GENERATION_FAST_DEFAULT_KEY = "generation.fast_default";
 const IMAGE_ENGINE_KEY = "image.engine";
 const IMAGE_CHANNEL_KEY = "image.channel";
 const IMAGE_OUTPUT_FORMAT_KEY = "image.output_format";
@@ -297,6 +298,18 @@ const SETTING_META: Record<string, SettingMeta> = {
     defaultValue: "gpt-5.5",
     recommended: "建议填写稳定可用的主模型。",
     keywords: ["model", "default", "模型"],
+  },
+  [GENERATION_FAST_DEFAULT_KEY]: {
+    group: "upstream",
+    title: "Fast 默认开启",
+    summary: "控制全站新对话和新生图的 Fast 初始状态。",
+    detail:
+      "开启后，普通用户进入对话框时 Fast 默认打开；关闭后默认关闭。用户仍可在当前对话框里临时切换。",
+    kind: "toggle",
+    icon: Zap,
+    defaultValue: "1",
+    recommended: "这是管理员设定的全站默认值，不是个人偏好。",
+    keywords: ["fast", "default", "chat", "image", "默认", "快速"],
   },
   "upstream.global_concurrency": {
     group: "upstream",

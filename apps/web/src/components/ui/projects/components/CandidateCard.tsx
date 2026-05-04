@@ -4,7 +4,7 @@
 // 入选时 layout 会有微动画（Framer Motion 的 layout）。
 
 import { motion } from "framer-motion";
-import { Check, Sparkles } from "lucide-react";
+import { BookmarkPlus, Check, Sparkles } from "lucide-react";
 import Image from "next/image";
 
 import { Button } from "@/components/ui/primitives/Button";
@@ -22,6 +22,8 @@ interface CandidateCardProps {
   onPreview: (image: BackendImageMeta, list: BackendImageMeta[], index: number) => void;
   onChoose?: () => void;
   onApprove: () => void;
+  onSaveToLibrary?: () => void;
+  savingToLibrary?: boolean;
 }
 
 export function CandidateCard({
@@ -32,6 +34,8 @@ export function CandidateCard({
   onPreview,
   onChoose,
   onApprove,
+  onSaveToLibrary,
+  savingToLibrary = false,
 }: CandidateCardProps) {
   const candidateImageIds = stringArray(candidate.model_brief_json.candidate_image_ids);
   const imageIds = candidateImageIds.length
@@ -132,23 +136,35 @@ export function CandidateCard({
       <p className="mt-2 text-xs leading-5 text-[var(--fg-2)]">
         未试穿商品，仅用于确认模特形象。
       </p>
-      <Button
-        className="mt-3"
-        variant={selected || locallySelected ? "secondary" : "primary"}
-        fullWidth
-        disabled={!firstImage || selected || generating}
-        loading={approving && !selected}
-        onClick={onChoose ?? onApprove}
-        leftIcon={
-          selected || locallySelected ? (
-            <Check className="h-4 w-4" />
-          ) : (
-            <Sparkles className="h-4 w-4" />
-          )
-        }
-      >
-        {selected ? "已确认" : generating ? "生成中…" : locallySelected ? "已选中" : "选择此模特"}
-      </Button>
+      {/* 移动端 (<640px) 单列堆叠保证拇指可及；sm+ 双列横排省纵向空间 */}
+      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Button
+          variant={selected || locallySelected ? "secondary" : "primary"}
+          fullWidth
+          disabled={!firstImage || selected || generating}
+          loading={approving && !selected}
+          onClick={onChoose ?? onApprove}
+          leftIcon={
+            selected || locallySelected ? (
+              <Check className="h-4 w-4" />
+            ) : (
+              <Sparkles className="h-4 w-4" />
+            )
+          }
+        >
+          {selected ? "已确认" : generating ? "生成中…" : locallySelected ? "已选中" : "设为当前"}
+        </Button>
+        <Button
+          variant="outline"
+          fullWidth
+          disabled={!firstImage || generating}
+          loading={savingToLibrary}
+          onClick={onSaveToLibrary}
+          leftIcon={<BookmarkPlus className="h-4 w-4" />}
+        >
+          收藏到库
+        </Button>
+      </div>
     </motion.article>
   );
 }

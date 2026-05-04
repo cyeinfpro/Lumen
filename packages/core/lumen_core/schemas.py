@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 from .constants import (
+    MAX_MESSAGE_ATTACHMENTS,
     MAX_PROMPT_CHARS,
 )
 from .sizing import AspectRatio as AspectRatioLiteral
@@ -38,6 +39,10 @@ class LoginIn(BaseModel):
     password: str
 
 
+class RuntimeDefaultsOut(BaseModel):
+    fast: bool = True
+
+
 class UserOut(BaseOut):
     id: str
     email: str
@@ -45,6 +50,7 @@ class UserOut(BaseOut):
     role: str
     notification_email: bool
     default_system_prompt_id: str | None = None
+    runtime_defaults: RuntimeDefaultsOut = Field(default_factory=RuntimeDefaultsOut)
 
 
 # ---------- System Prompts ----------
@@ -110,7 +116,7 @@ class ImageParamsIn(BaseModel):
     count: int = Field(default=1, ge=1, le=16)
     # Image Fast uses the lighter responses reasoning model for image_generation:
     # gpt-5.4-mini when enabled, gpt-5.4 when disabled.
-    fast: bool = False
+    fast: bool | None = None
     # Rendering quality is distinct from the UI's 1K/2K/4K resolution preset.
     render_quality: Literal["auto", "low", "medium", "high"] = "medium"
     output_format: Literal["png", "jpeg", "webp"] | None = None
@@ -140,7 +146,7 @@ class ChatParamsIn(BaseModel):
     ) = None
     # Fast 模式：走上游 priority 处理通道，换更低更稳的延迟（付费、不降质）。
     # 对应上游 /v1/responses 的 service_tier="priority"。
-    fast: bool = False
+    fast: bool | None = None
     # Web search：仅 chat / vision_qa 生效。前端默认打开，模型按需调用。
     web_search: bool = False
     # File search：需要后台或请求侧提供 OpenAI vector_store id。
@@ -161,7 +167,10 @@ class PostMessageIn(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=64)
     # 上游 prompt 上限对齐：单条用户输入限制 10k 字符，避免恶意 / 误粘大文本撑爆 DB / 上游。
     text: str = Field(max_length=MAX_PROMPT_CHARS)
-    attachment_image_ids: list[str] = Field(default_factory=list)
+    attachment_image_ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_MESSAGE_ATTACHMENTS,
+    )
     # intent 必须由前端显式给出；V1 删掉了 auto 启发式（命中率低，易误判）。
     # 历史客户端若仍带 "auto"，统一按 chat 处理（后端在 intent.resolve_intent 里兜底）。
     intent: Literal["auto", "chat", "vision_qa", "text_to_image", "image_to_image"] = "chat"
@@ -434,12 +443,114 @@ class AccessorySelectionIn(BaseModel):
     selected_accessory_image_id: str | None = None
 
 
+AgeSegment = Literal[
+    "all",
+    "user_favorites",
+    "toddler",
+    "child",
+    "teen",
+    "young_adult",
+    "adult",
+    "middle_aged",
+    "senior",
+]
+ModelAgeSegment = Literal[
+    "user_favorites",
+    "toddler",
+    "child",
+    "teen",
+    "young_adult",
+    "adult",
+    "middle_aged",
+    "senior",
+]
+ModelLibrarySource = Literal["preset", "favorite", "user_upload"]
+ModelLibraryVisibilityScope = Literal["global_preset", "user_private"]
+
+
+class ApparelModelLibrarySyncOut(BaseModel):
+    status: Literal["ok", "failed", "skipped"] = "ok"
+    added: int = 0
+    updated: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+    last_success_at: datetime | None = None
+    last_error: str | None = None
+
+
+class ApparelModelLibrarySyncStateOut(BaseModel):
+    last_success_at: datetime | None = None
+    last_error: str | None = None
+    can_sync: bool = False
+    github_contents_url: str | None = None
+
+
+class ApparelModelLibraryItemOut(BaseModel):
+    id: str
+    source: ModelLibrarySource
+    visibility_scope: ModelLibraryVisibilityScope
+    title: str
+    age_segment: ModelAgeSegment
+    gender: str | None = None
+    appearance_direction: str | None = None
+    style_tags: list[str] = Field(default_factory=list)
+    image_url: str
+    thumb_url: str | None = None
+    image_id: str | None = None
+    preset_id: str | None = None
+    version: int | None = None
+    library_folder: str | None = None
+    prompt_hint: str | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class ApparelModelLibraryListOut(BaseModel):
+    items: list[ApparelModelLibraryItemOut]
+    sync: ApparelModelLibrarySyncStateOut = Field(
+        default_factory=ApparelModelLibrarySyncStateOut
+    )
+
+
+class ApparelModelLibraryItemCreateIn(BaseModel):
+    source: Literal["favorite", "user_upload"] = "user_upload"
+    visibility_scope: Literal["user_private"] = "user_private"
+    image_id: str
+    title: str = Field(min_length=1, max_length=120)
+    age_segment: ModelAgeSegment
+    gender: str | None = Field(default=None, max_length=40)
+    appearance_direction: str | None = Field(default=None, max_length=80)
+    style_tags: list[str] = Field(default_factory=list, max_length=12)
+
+
+class ApparelModelLibraryItemPatchIn(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    age_segment: ModelAgeSegment | None = None
+    gender: str | None = Field(default=None, max_length=40)
+    appearance_direction: str | None = Field(default=None, max_length=80)
+    style_tags: list[str] | None = Field(default=None, max_length=12)
+
+
+class ApparelModelLibrarySelectIn(BaseModel):
+    library_item_id: str
+    mode: Literal["use_directly"] = "use_directly"
+
+
+class ModelCandidateSaveToLibraryIn(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    age_segment: ModelAgeSegment
+    gender: str | None = Field(default=None, max_length=40)
+    appearance_direction: str | None = Field(default=None, max_length=80)
+    style_tags: list[str] = Field(default_factory=list, max_length=12)
+
+
 class ShowcaseImagesCreateIn(BaseModel):
     template: Literal[
         "white_ecommerce",
         "premium_studio",
         "urban_commute",
         "lifestyle",
+        "daily_snapshot",
         "social_seed",
     ] = "premium_studio"
     shot_plan: list[
@@ -786,6 +897,7 @@ class RegenerateOut(BaseModel):
 __all__ = [
     "SignupIn",
     "LoginIn",
+    "RuntimeDefaultsOut",
     "UserOut",
     "SystemPromptOut",
     "SystemPromptCreateIn",

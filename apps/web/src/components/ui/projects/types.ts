@@ -31,7 +31,7 @@ export interface StepDef {
 
 export const STEPS: StepDef[] = [
   { key: "upload_product", label: "上传商品", short: "上传", Icon: Upload },
-  { key: "product_analysis", label: "商品理解", short: "理解", Icon: FileText },
+  { key: "product_analysis", label: "商品约束", short: "约束", Icon: FileText },
   { key: "model_settings", label: "模特设定", short: "设定", Icon: WandSparkles },
   { key: "model_candidates", label: "模特候选", short: "候选", Icon: Sparkles },
   { key: "model_approval", label: "方案确认", short: "确认", Icon: Check },
@@ -69,18 +69,19 @@ export const RECOMMENDATION_LABEL: Record<string, string> = {
 };
 
 export const TEMPLATE_VALUE_LABEL: Record<string, string> = {
-  premium_studio: "高级灰棚拍",
-  white_ecommerce: "白底电商图",
-  urban_commute: "城市通勤场景",
-  lifestyle: "智能生活场景",
-  social_seed: "社媒种草图",
+  premium_studio: "高级棚拍",
+  white_ecommerce: "白底主图",
+  urban_commute: "质感街拍",
+  lifestyle: "精品空间",
+  daily_snapshot: "日常随拍",
+  social_seed: "自然种草",
 };
 
 export const SHOT_VALUE_LABEL: Record<string, string> = {
   front_full_body: "正面全身",
   natural_pose: "自然姿态",
-  detail_half_body: "半身细节",
-  side_or_back: "侧面或背面",
+  detail_half_body: "姿态变化",
+  side_or_back: "侧面一张",
 };
 
 export const QUALITY_VALUE_LABEL: Record<string, string> = {
@@ -94,7 +95,7 @@ export const QUALITY_VALUE_LABEL: Record<string, string> = {
 
 export const JSON_KEY_LABEL: Record<string, string> = {
   enabled: "是否开启",
-  items: "饰品",
+  items: "配饰",
   strength: "强度",
   template: "输出模板",
   shot_plan: "镜头计划",
@@ -106,15 +107,16 @@ export const JSON_KEY_LABEL: Record<string, string> = {
   average_score: "平均分",
   revise_count: "需返修数量",
   report_count: "质检数量",
-  selected_accessory_image_id: "已选饰品图",
+  selected_accessory_image_id: "已选配饰四宫格",
 };
 
 export const TEMPLATE_LABELS = [
-  ["premium_studio", "高级灰棚拍"],
-  ["white_ecommerce", "白底电商图"],
-  ["urban_commute", "城市通勤场景"],
-  ["lifestyle", "智能生活场景"],
-  ["social_seed", "社媒种草图"],
+  ["premium_studio", "高级棚拍"],
+  ["urban_commute", "质感街拍"],
+  ["lifestyle", "精品空间"],
+  ["daily_snapshot", "日常随拍"],
+  ["social_seed", "自然种草"],
+  ["white_ecommerce", "白底主图"],
 ] as const;
 
 export const ASPECT_RATIO_LABELS = [
@@ -130,6 +132,7 @@ export type CreateTemplate =
   | "premium_studio"
   | "urban_commute"
   | "lifestyle"
+  | "daily_snapshot"
   | "social_seed";
 
 export type CreateAspectRatio = (typeof ASPECT_RATIO_LABELS)[number][0];

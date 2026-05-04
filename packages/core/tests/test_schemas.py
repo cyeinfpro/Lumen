@@ -26,6 +26,7 @@ def test_image_params_support_render_and_output_options():
     assert params.moderation == "low"
     assert ImageParamsIn().render_quality == "medium"
     assert ImageParamsIn().output_format is None
+    assert ImageParamsIn().fast is None
 
     for kwargs in (
         {"background": "checkerboard"},
@@ -42,10 +43,15 @@ def test_image_params_support_render_and_output_options():
 def test_post_message_prompt_limit_uses_shared_constant():
     from pydantic import ValidationError
 
-    from lumen_core.constants import MAX_PROMPT_CHARS
+    from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS
     from lumen_core.schemas import PostMessageIn
 
     PostMessageIn(idempotency_key="idem", text="x" * MAX_PROMPT_CHARS)
+    PostMessageIn(
+        idempotency_key="idem",
+        text="ok",
+        attachment_image_ids=[f"img-{i}" for i in range(MAX_MESSAGE_ATTACHMENTS)],
+    )
 
     try:
         PostMessageIn(idempotency_key="idem", text="x" * (MAX_PROMPT_CHARS + 1))
@@ -53,3 +59,16 @@ def test_post_message_prompt_limit_uses_shared_constant():
         pass
     else:  # pragma: no cover
         raise AssertionError("expected prompt length validation error")
+
+    try:
+        PostMessageIn(
+            idempotency_key="idem",
+            text="ok",
+            attachment_image_ids=[
+                f"img-{i}" for i in range(MAX_MESSAGE_ATTACHMENTS + 1)
+            ],
+        )
+    except ValidationError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected attachment count validation error")

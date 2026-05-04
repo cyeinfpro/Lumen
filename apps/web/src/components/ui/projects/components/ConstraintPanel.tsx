@@ -31,13 +31,16 @@ function ConstraintBody({ workflow }: { workflow: WorkflowRun }) {
       <InfoPanel title="商品原图">
         <ImageGrid images={workflow.product_images} compact />
       </InfoPanel>
-      <InfoPanel title="必须保留">
+      <InfoPanel title="商品还原点">
         <p className="whitespace-pre-wrap">{jsonValue(product.must_preserve)}</p>
+      </InfoPanel>
+      <InfoPanel title="推荐背景">
+        <p className="whitespace-pre-wrap">{jsonValue(product.background_recommendation)}</p>
       </InfoPanel>
       <InfoPanel title="已确认模特">
         <p>{selected ? `方案 ${selected.candidate_index}` : "未确认"}</p>
       </InfoPanel>
-      <InfoPanel title="饰品方案">
+      <InfoPanel title="配饰四宫格">
         <p className="whitespace-pre-wrap">{jsonValue(accessory)}</p>
       </InfoPanel>
       <InfoPanel title="输出规格">

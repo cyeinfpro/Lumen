@@ -659,7 +659,7 @@ export function ApparelWorkflowNewPage() {
 
           <aside className="space-y-3">
             <InfoPanel title="默认闭环">
-              <p>商品理解、3 套模特候选、确认模特、4 张展示图、自动质检、一次文字返修。</p>
+              <p>商品约束、3 套模特候选、配饰四宫格、4 张展示图、一次文字返修。</p>
             </InfoPanel>
             <InfoPanel title="质量策略">
               <p>默认高质量模式，优先模特一致性、商品还原度和高级质感。</p>

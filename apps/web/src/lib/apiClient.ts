@@ -38,6 +38,9 @@ export interface AuthUser {
   email?: string;
   name?: string;
   default_system_prompt_id?: string | null;
+  runtime_defaults?: {
+    fast?: boolean;
+  };
 }
 
 export function login(email: string, password: string): Promise<AuthUser> {
@@ -401,12 +404,93 @@ export interface AccessorySelectionIn {
   selected_accessory_image_id: string | null;
 }
 
+export type ModelLibraryAgeSegment =
+  | "all"
+  | "user_favorites"
+  | "toddler"
+  | "child"
+  | "teen"
+  | "young_adult"
+  | "adult"
+  | "middle_aged"
+  | "senior";
+
+export type ModelLibraryItemAgeSegment = Exclude<ModelLibraryAgeSegment, "all">;
+export type ModelLibrarySource = "preset" | "favorite" | "user_upload";
+
+export interface ApparelModelLibrarySyncState {
+  last_success_at: string | null;
+  last_error: string | null;
+  can_sync: boolean;
+  github_contents_url?: string | null;
+}
+
+export interface ApparelModelLibraryItem {
+  id: string;
+  source: ModelLibrarySource;
+  visibility_scope: "global_preset" | "user_private";
+  title: string;
+  age_segment: ModelLibraryItemAgeSegment;
+  gender: string | null;
+  appearance_direction: string | null;
+  style_tags: string[];
+  image_url: string;
+  thumb_url: string | null;
+  image_id: string | null;
+  preset_id?: string | null;
+  version?: number | null;
+  library_folder?: string | null;
+  prompt_hint?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface ApparelModelLibraryListResponse {
+  items: ApparelModelLibraryItem[];
+  sync: ApparelModelLibrarySyncState;
+}
+
+export interface ApparelModelLibrarySyncResponse {
+  status: "ok" | "failed" | "skipped";
+  added: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+  last_success_at: string | null;
+  last_error: string | null;
+}
+
+export interface ApparelModelLibraryItemCreateIn {
+  source: "favorite" | "user_upload";
+  visibility_scope?: "user_private";
+  image_id: string;
+  title: string;
+  age_segment: ModelLibraryItemAgeSegment;
+  gender?: string | null;
+  appearance_direction?: string | null;
+  style_tags?: string[];
+}
+
+export interface ApparelModelLibrarySelectIn {
+  library_item_id: string;
+  mode?: "use_directly";
+}
+
+export interface ModelCandidateSaveToLibraryIn {
+  title: string;
+  age_segment: ModelLibraryItemAgeSegment;
+  gender?: string | null;
+  appearance_direction?: string | null;
+  style_tags?: string[];
+}
+
 export interface CreateShowcaseImagesIn {
   template:
     | "white_ecommerce"
     | "premium_studio"
     | "urban_commute"
     | "lifestyle"
+    | "daily_snapshot"
     | "social_seed";
   shot_plan: Array<
     "front_full_body" | "natural_pose" | "detail_half_body" | "side_or_back"
@@ -579,6 +663,74 @@ export function saveAccessorySelection(
     {
       method: "POST",
       body: JSON.stringify(body),
+    },
+  );
+}
+
+export function listApparelModelLibrary(
+  opts: {
+    age_segment?: ModelLibraryAgeSegment;
+    source?: "all" | ModelLibrarySource;
+    q?: string;
+  } = {},
+): Promise<ApparelModelLibraryListResponse> {
+  const qs = new URLSearchParams();
+  if (opts.age_segment) qs.set("age_segment", opts.age_segment);
+  if (opts.source) qs.set("source", opts.source);
+  if (opts.q) qs.set("q", opts.q);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<ApparelModelLibraryListResponse>(
+    `/workflows/apparel-model-library${suffix}`,
+  );
+}
+
+export function syncApparelModelLibraryPresets(): Promise<ApparelModelLibrarySyncResponse> {
+  return apiFetch<ApparelModelLibrarySyncResponse>(
+    "/workflows/apparel-model-library/sync-presets",
+    { method: "POST" },
+  );
+}
+
+export function createApparelModelLibraryItem(
+  body: ApparelModelLibraryItemCreateIn,
+): Promise<ApparelModelLibraryItem> {
+  return apiFetch<ApparelModelLibraryItem>("/workflows/apparel-model-library/items", {
+    method: "POST",
+    body: JSON.stringify({
+      visibility_scope: "user_private",
+      style_tags: [],
+      ...body,
+    }),
+  });
+}
+
+export function deleteApparelModelLibraryItem(itemId: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/workflows/apparel-model-library/items/${encodeURIComponent(itemId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function selectApparelModelLibraryItem(
+  workflowId: string,
+  body: ApparelModelLibrarySelectIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/model-library/select`, {
+    method: "POST",
+    body: JSON.stringify({ mode: "use_directly", ...body }),
+  });
+}
+
+export function saveModelCandidateToLibrary(
+  workflowId: string,
+  candidateId: string,
+  body: ModelCandidateSaveToLibraryIn,
+): Promise<ApparelModelLibraryItem> {
+  return apiFetch<ApparelModelLibraryItem>(
+    `/workflows/${workflowId}/model-candidates/${candidateId}/save-to-library`,
+    {
+      method: "POST",
+      body: JSON.stringify({ style_tags: [], ...body }),
     },
   );
 }

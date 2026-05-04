@@ -23,7 +23,9 @@ import {
   createMultiShare,
   createShare,
   createSystemPrompt,
+  createApparelModelLibraryItem,
   deleteConversation,
+  deleteApparelModelLibraryItem,
   deleteMyAccount,
   deleteSystemPrompt,
   deleteWorkflow,
@@ -32,6 +34,7 @@ import {
   getPublicShare,
   getWorkflow,
   getSystemSettings,
+  listApparelModelLibrary,
   listAdminRequestEvents,
   listAdminUsers,
   listAllowedEmails,
@@ -53,6 +56,8 @@ import {
   createModelCandidates,
   createShowcaseImages,
   saveAccessorySelection,
+  saveModelCandidateToLibrary,
+  selectApparelModelLibraryItem,
   reopenModelSelection,
   reviseWorkflowImage,
   removeAllowedEmail,
@@ -76,6 +81,11 @@ import {
   updateProviders,
   probeProviders,
   updateSystemSettings,
+  syncApparelModelLibraryPresets,
+  uploadImage,
+  type ApparelModelLibraryItem,
+  type ApparelModelLibraryItemCreateIn,
+  type ApparelModelLibraryListResponse,
   type ConversationListResponse,
   type ConversationSummary,
   type ConversationContextStats,
@@ -83,6 +93,7 @@ import {
   type ApproveModelCandidateIn,
   type AccessoryPreviewIn,
   type AccessorySelectionIn,
+  type ModelCandidateSaveToLibraryIn,
   type CreateApparelWorkflowIn,
   type CreateApparelWorkflowOut,
   type CreateShowcaseImagesIn,
@@ -94,11 +105,14 @@ import {
   type CreateSystemPromptIn,
   type PatchSystemPromptIn,
   type ModelCandidatesIn,
+  type ModelLibraryAgeSegment,
+  type ModelLibrarySource,
   type ReviseWorkflowImageIn,
   type SystemPrompt,
   type SystemPromptListResponse,
   type WorkflowRun,
   type WorkflowRunListResponse,
+  type UploadedImage,
 } from "./apiClient";
 import type {
   AdminUserOut,
@@ -156,6 +170,11 @@ export const qk = {
   workflows: (params?: { type?: string; limit?: number }) =>
     ["workflows", params ?? {}] as const,
   workflow: (id: string) => ["workflows", id] as const,
+  apparelModelLibrary: (params?: {
+    age_segment?: ModelLibraryAgeSegment;
+    source?: "all" | ModelLibrarySource;
+    q?: string;
+  }) => ["workflows", "apparel_model_library", params ?? {}] as const,
 };
 
 // ——— Queries ———
@@ -1216,5 +1235,118 @@ export function useCompleteWorkflowDeliveryMutation(
       qc.invalidateQueries({ queryKey: ["workflows"] });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
+  });
+}
+
+export function useApparelModelLibraryQuery(
+  params: {
+    age_segment?: ModelLibraryAgeSegment;
+    source?: "all" | ModelLibrarySource;
+    q?: string;
+  } = {},
+  options?: Omit<
+    UseQueryOptions<ApparelModelLibraryListResponse>,
+    "queryKey" | "queryFn"
+  >,
+) {
+  return useQuery<ApparelModelLibraryListResponse>({
+    queryKey: qk.apparelModelLibrary(params),
+    queryFn: () => listApparelModelLibrary(params),
+    staleTime: 15_000,
+    ...options,
+  });
+}
+
+export function useSyncApparelModelLibraryPresetsMutation(
+  options?: Omit<
+    UseMutationOptions<Awaited<ReturnType<typeof syncApparelModelLibraryPresets>>, Error, void>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<Awaited<ReturnType<typeof syncApparelModelLibraryPresets>>, Error, void>({
+    mutationFn: () => syncApparelModelLibraryPresets(),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCreateApparelModelLibraryItemMutation(
+  options?: Omit<
+    UseMutationOptions<ApparelModelLibraryItem, Error, ApparelModelLibraryItemCreateIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<ApparelModelLibraryItem, Error, ApparelModelLibraryItemCreateIn>({
+    mutationFn: createApparelModelLibraryItem,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useDeleteApparelModelLibraryItemMutation(
+  options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: deleteApparelModelLibraryItem,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useSelectApparelModelLibraryItemMutation(
+  workflowId: string,
+  options?: Omit<UseMutationOptions<WorkflowRun, Error, string>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, string>({
+    mutationFn: (library_item_id) =>
+      selectApparelModelLibraryItem(workflowId, { library_item_id }),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useSaveModelCandidateToLibraryMutation(
+  workflowId: string,
+  candidateId: string,
+  options?: Omit<
+    UseMutationOptions<ApparelModelLibraryItem, Error, ModelCandidateSaveToLibraryIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<ApparelModelLibraryItem, Error, ModelCandidateSaveToLibraryIn>({
+    mutationFn: (body) => saveModelCandidateToLibrary(workflowId, candidateId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      qc.invalidateQueries({ queryKey: qk.workflow(workflowId) });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useUploadImageMutation(
+  options?: Omit<UseMutationOptions<UploadedImage, Error, File>, "mutationFn">,
+) {
+  return useMutation<UploadedImage, Error, File>({
+    mutationFn: uploadImage,
+    ...options,
   });
 }

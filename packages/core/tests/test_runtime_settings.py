@@ -90,6 +90,18 @@ def test_image_output_format_setting_is_registered_and_validated():
         parse_value(spec, "webp")
 
 
+def test_generation_fast_default_setting_is_registered_and_validated():
+    spec = get_spec("generation.fast_default")
+    assert spec is not None
+
+    assert spec.parser is int
+    assert spec.env_fallback == "GENERATION_FAST_DEFAULT"
+    assert parse_value(spec, "0") == 0
+    assert parse_value(spec, "1") == 1
+    with pytest.raises(ValueError):
+        parse_value(spec, "2")
+
+
 def test_image_job_base_url_setting_is_registered_and_validated():
     spec = get_spec("image.job_base_url")
     assert spec is not None

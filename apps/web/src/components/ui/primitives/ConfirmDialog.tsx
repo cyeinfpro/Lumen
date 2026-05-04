@@ -153,9 +153,9 @@ export function ConfirmDialog({
               {title}
             </h2>
             {description ? (
-              <p className="mt-1.5 text-xs text-[var(--fg-1)] leading-relaxed text-pretty">
+              <div className="mt-1.5 text-xs text-[var(--fg-1)] leading-relaxed text-pretty">
                 {description}
-              </p>
+              </div>
             ) : null}
             <div
               className={cn(

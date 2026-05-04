@@ -13,6 +13,7 @@ import { MobileToastViewport } from "@/components/ui/primitives/mobile/Toast";
 import { PageTransitions } from "@/components/ui/shell/PageTransitions";
 import { CommandPalette } from "@/components/ui/CommandPalette";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
+import { RuntimeDefaultsBootstrap } from "@/components/RuntimeDefaultsBootstrap";
 
 // Self-hosted to keep `next build` offline. Google Fonts fetch fails behind
 // region-blocked / proxied production networks; switching to next/font/local
@@ -100,6 +101,33 @@ async function readRequestPathname(): Promise<string> {
   }
 }
 
+async function readRuntimeDefaults(): Promise<{ fast: boolean }> {
+  try {
+    const cookieStore = await cookies();
+    const cookie = cookieStore.toString();
+    if (!cookie) return { fast: true };
+
+    const backendUrl = (
+      process.env.LUMEN_BACKEND_URL ?? "http://127.0.0.1:8000"
+    ).replace(/\/+$/, "");
+    const res = await fetch(`${backendUrl}/auth/me`, {
+      headers: { cookie },
+      cache: "no-store",
+    });
+    if (!res.ok) return { fast: true };
+    const data = (await res.json().catch(() => null)) as
+      | { runtime_defaults?: { fast?: unknown } }
+      | null;
+    const fast =
+      typeof data?.runtime_defaults?.fast === "boolean"
+        ? data.runtime_defaults.fast
+        : true;
+    return { fast };
+  } catch {
+    return { fast: true };
+  }
+}
+
 // Server Component：读 cookie 决定初始 className。
 // - "system" → 不加类，让 CSS prefers-color-scheme 接管
 // - "light" → 加 theme-light
@@ -109,9 +137,10 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const [theme, pathname] = await Promise.all([
+  const [theme, pathname, runtimeDefaults] = await Promise.all([
     readInitialTheme(),
     readRequestPathname(),
+    readRuntimeDefaults(),
   ]);
   const themeClass = theme === "system" ? undefined : `theme-${theme}`;
   const isPublicShareRoute = pathname.startsWith("/share/");
@@ -132,6 +161,7 @@ export default async function RootLayout({
         ) : (
           <ErrorBoundary>
             <QueryProvider>
+              <RuntimeDefaultsBootstrap defaults={runtimeDefaults} />
               <SSEProvider>
                 <PageTransitions>{children}</PageTransitions>
               </SSEProvider>

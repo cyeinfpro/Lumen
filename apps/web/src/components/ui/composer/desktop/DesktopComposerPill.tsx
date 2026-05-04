@@ -8,8 +8,6 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  type ChangeEvent,
-  type ClipboardEvent,
   type KeyboardEvent,
   useCallback,
   useEffect,
@@ -53,6 +51,8 @@ import {
   DesktopPopover,
   PopoverList,
 } from "./DesktopPopover";
+import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
+import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
 
 interface DesktopComposerPillProps {
   onSubmit: () => void | Promise<void>;
@@ -116,9 +116,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const mode = useChatStore((s) => s.composer.mode);
   const setMode = useChatStore((s) => s.setMode);
   const attachments = useChatStore((s) => s.composer.attachments);
-  const addAttachment = useChatStore((s) => s.addAttachment);
   const removeAttachment = useChatStore((s) => s.removeAttachment);
-  const uploadAttachment = useChatStore((s) => s.uploadAttachment);
   const aspect = useChatStore((s) => s.composer.params.aspect_ratio);
   const setAspectRatio = useChatStore((s) => s.setAspectRatio);
   const count = useChatStore((s) => s.composer.params.count ?? 1);
@@ -150,6 +148,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const [originalText, setOriginalText] = useState<string | null>(null);
   const enhanceAbortRef = useRef<AbortController | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragActive, setIsDragActive] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [aspectPopoverOpen, setAspectPopoverOpen] = useState(false);
   const [reasoningPopoverOpen, setReasoningPopoverOpen] = useState(false);
@@ -167,6 +166,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const submittingRef = useRef(false);
   const didMountRef = useRef(false);
   const shutterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragDepthRef = useRef(0);
 
   // 展开/折叠 haptic（桌面无感，保留兼容）
   useEffect(() => {
@@ -206,6 +206,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       enhanceAbortRef.current?.abort();
       isComposingRef.current = false;
       submittingRef.current = false;
+      dragDepthRef.current = 0;
       if (shutterTimerRef.current) {
         clearTimeout(shutterTimerRef.current);
         shutterTimerRef.current = null;
@@ -298,36 +299,22 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
     return latest.text.trim().length > 0 || latest.attachments.length > 0;
   })();
 
-  const ingestFile = useCallback(
-    async (file: File): Promise<boolean> => {
-      if (!file.type.startsWith("image/")) return false;
-      try {
-        setIsUploading(true);
-        const att = await uploadAttachment(file);
-        addAttachment(att);
-        return true;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "上传失败";
-        setComposerError(msg);
-        pushMobileToast(msg, "danger");
-        return false;
-      } finally {
-        setIsUploading(false);
-      }
-    },
-    [uploadAttachment, addAttachment, setComposerError],
-  );
-
-  const ingestMany = useCallback(
-    async (files: File[]) => {
-      let ok = 0;
-      for (const f of files) {
-        if (await ingestFile(f)) ok += 1;
-      }
-      if (ok > 0) pushMobileToast(`已添加 ${ok} 张参考图`, "success");
-    },
-    [ingestFile],
-  );
+  const {
+    ingestMany,
+    handlePaste,
+    handleFileInput,
+    openFilePicker,
+    handleDragEnter,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+  } = useComposerAttachmentDnd({
+    fileInputRef,
+    dragDepthRef,
+    setIsUploading,
+    setIsDragActive,
+    setExpanded,
+  });
 
   const handleSubmit = useCallback(async () => {
     if (submittingRef.current) return;
@@ -378,28 +365,6 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       e.preventDefault();
       void handleSubmit();
     }
-  };
-
-  const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    const files: File[] = [];
-    for (const item of Array.from(items)) {
-      if (item.kind === "file") {
-        const f = item.getAsFile();
-        if (f && f.type.startsWith("image/")) files.push(f);
-      }
-    }
-    if (files.length > 0) {
-      e.preventDefault();
-      await ingestMany(files);
-    }
-  };
-
-  const handleFileInput = async (e: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    await ingestMany(files);
-    e.target.value = "";
   };
 
   const handleEnhance = useCallback(async () => {
@@ -465,6 +430,10 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   return (
     <motion.div
       ref={rootRef}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={(e) => void handleDrop(e)}
       initial={false}
       animate={{ height: expanded ? "auto" : 48 }}
       transition={SPRING.sheet}
@@ -475,7 +444,9 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
         "rounded-xl backdrop-blur-xl",
         "bg-[var(--bg-1)]/88 supports-[not(backdrop-filter:blur(1px))]:bg-[var(--bg-1)]/95",
         "border transition-[border-color,box-shadow] duration-200",
-        isImageMode
+        isDragActive
+          ? "border-[var(--amber-400)] shadow-[0_0_0_2px_rgba(242,169,58,0.22),var(--shadow-2)]"
+          : isImageMode
           ? "border-[var(--border-amber)]"
           : "border-[var(--border-subtle)]",
         "shadow-[var(--shadow-2)]",
@@ -491,7 +462,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
         <div className="flex items-center h-[48px] px-3 gap-2">
           <IconBtn
             label="添加参考图"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={openFilePicker}
             disabled={isUploading}
           >
             {isUploading ? (
@@ -549,6 +520,30 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       {/* 展开态 */}
       {expanded && (
         <div className="flex flex-col">
+          {/* 附件托盘 */}
+          <AnimatePresence>
+            {isDragActive && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: DURATION.quick }}
+                className="overflow-hidden"
+              >
+                <div
+                  className={cn(
+                    "mx-3 mt-3 flex items-center justify-center gap-2 rounded-lg",
+                    "border border-dashed border-[var(--amber-400)]/60 bg-[var(--amber-400)]/10",
+                    "px-3 py-3 text-xs text-[var(--amber-400)]",
+                  )}
+                >
+                  <Paperclip className="h-3.5 w-3.5" aria-hidden />
+                  <span>松开上传图片，最多 {MAX_COMPOSER_ATTACHMENTS} 张</span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* 附件托盘 */}
           {attachments.length > 0 && (
             <div
@@ -691,7 +686,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
           >
             <IconBtn
               label="添加参考图"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={openFilePicker}
               disabled={isUploading}
             >
               {isUploading ? (
@@ -984,6 +979,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
         type="file"
         accept="image/*"
         multiple
+        disabled={attachments.length >= MAX_COMPOSER_ATTACHMENTS}
         hidden
         onChange={handleFileInput}
       />

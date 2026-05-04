@@ -38,7 +38,7 @@ export default function NewProjectPage() {
             <TemplateLink
               href="/projects/apparel-model-showcase/new"
               title="服饰模特展示图"
-              description="商品理解、模特候选、确认模特、展示图生成、质检返修。"
+              description="商品约束、模特候选、配饰四宫格、展示图生成、返修交付。"
               active
               icon={<Shirt className="h-5 w-5" />}
             />

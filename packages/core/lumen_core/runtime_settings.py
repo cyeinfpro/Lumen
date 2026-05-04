@@ -109,6 +109,22 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         env_fallback="UPSTREAM_DEFAULT_MODEL",
     ),
     SettingSpec(
+        key="generation.fast_default",
+        description=(
+            "Fast 模式全站默认开关。0=默认关闭，1=默认开启；同时影响对话和生图的初始 "
+            "Fast 状态，但不锁死，用户仍可在对话框里临时切换。"
+            "示例：0 表示默认走完整 reasoning（更准更慢）；1 表示默认走 mini 路径（更快）。"
+            "用户在 composer 里手动切换后会被记住，不会被这里覆盖。"
+            "未配置时回退到 GENERATION_FAST_DEFAULT 环境变量；都没配则按 V1 默认 = 1（开启）。"
+        ),
+        sensitive=False,
+        parser=int,
+        env_fallback="GENERATION_FAST_DEFAULT",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
         key="chat.file_search_vector_store_ids",
         description=(
             "对话 file_search 默认 vector store id，多个用英文逗号分隔。"
