@@ -251,3 +251,127 @@ async def test_get_image_by_key_sets_cache_headers(
     assert response.headers["content-length"] == str(len(b"image-bytes"))
     assert response.headers["etag"] == '"abc123"'
     assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
+
+
+def _request_with_headers(headers: dict[str, str]) -> Request:
+    raw_headers = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": raw_headers,
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+
+def test_etag_match_helper_handles_star_list_and_weak_prefix() -> None:
+    """RFC 7232 §3.2 corner cases — wildcards, comma lists, and W/ prefix all
+    have to be parsed correctly or the 304 short-circuit either misses
+    legitimate cache hits (wasting CIFS reads) or matches incorrectly
+    (returns 304 with stale body).
+    """
+    assert images._etag_matches_if_none_match('"abc"', "*")
+    assert images._etag_matches_if_none_match('"abc"', '"abc"')
+    assert images._etag_matches_if_none_match('"abc"', '"xyz", "abc"')
+    assert images._etag_matches_if_none_match('"abc"', 'W/"abc"')
+    assert images._etag_matches_if_none_match('W/"abc"', '"abc"')
+    assert not images._etag_matches_if_none_match('"abc"', '"xyz"')
+    assert not images._etag_matches_if_none_match('"abc"', "")
+
+
+def test_storage_streaming_response_returns_304_on_etag_match(
+    tmp_path: Path,
+) -> None:
+    """If-None-Match hit must skip the file open entirely — no CIFS read,
+    no Python streaming, just a 304 with the cache headers.
+    """
+    old = settings.storage_root
+    settings.storage_root = str(tmp_path)
+    path = tmp_path / "u" / "img.png"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"never-read")
+    try:
+        response = images._storage_streaming_response(
+            path,
+            media_type="image/png",
+            etag='"abc123"',
+            cache_control="private, max-age=31536000, immutable",
+            storage_key="u/img.png",
+            request=_request_with_headers({"if-none-match": '"abc123"'}),
+        )
+    finally:
+        settings.storage_root = old
+
+    assert response.status_code == 304
+    assert response.headers["etag"] == '"abc123"'
+    assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
+    # 304 must not carry a body or content-length — that's the whole point.
+    assert "content-length" not in {k.lower() for k in response.headers}
+
+
+def test_storage_streaming_response_emits_x_accel_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LUMEN_INTERNAL_REDIRECT_ENABLED=1 + storage_key both required —
+    response carries X-Accel-Redirect with the internal alias path and no body.
+    nginx native sendfile takes over from there.
+    """
+    old = settings.storage_root
+    settings.storage_root = str(tmp_path)
+    path = tmp_path / "u" / "img.png"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"never-read-by-python")
+
+    monkeypatch.setenv("LUMEN_INTERNAL_REDIRECT_ENABLED", "1")
+    try:
+        response = images._storage_streaming_response(
+            path,
+            media_type="image/png",
+            etag='"abc"',
+            cache_control="private, max-age=31536000, immutable",
+            storage_key="u/img.png",
+            request=_request_with_headers({}),
+        )
+    finally:
+        settings.storage_root = old
+
+    assert response.status_code == 200
+    assert response.headers["x-accel-redirect"] == "/_internal_storage/u/img.png"
+    assert response.headers["etag"] == '"abc"'
+    # Body is empty — nginx supplies the bytes via sendfile.
+    assert response.body == b""
+
+
+def test_storage_streaming_response_falls_back_to_streaming_when_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env, no storage_key, no nginx — Python keeps streaming the bytes.
+    The fallback is what every existing deploy uses today; make sure the
+    new code didn't break it.
+    """
+    old = settings.storage_root
+    settings.storage_root = str(tmp_path)
+    path = tmp_path / "u" / "img.png"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"streamed-bytes")
+
+    monkeypatch.delenv("LUMEN_INTERNAL_REDIRECT_ENABLED", raising=False)
+    try:
+        response = images._storage_streaming_response(
+            path,
+            media_type="image/png",
+            etag='"abc"',
+            cache_control="private, max-age=31536000, immutable",
+            storage_key="u/img.png",  # provided but env disabled — must not redirect
+            request=_request_with_headers({}),
+        )
+    finally:
+        settings.storage_root = old
+
+    assert response.status_code == 200
+    assert "x-accel-redirect" not in {k.lower() for k in response.headers}
+    assert response.headers["content-length"] == str(len(b"streamed-bytes"))
