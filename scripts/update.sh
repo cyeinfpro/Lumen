@@ -1086,16 +1086,45 @@ emit_done health_check 0
 
 # ---------------------------------------------------------------------------
 # Phase: cleanup
-# docker image prune（仅 dangling）+ 旧 release 清理（保留 N=3）。
-# 失败不阻断成功。
+# 多级 prune：dangling images / 未引用 images / buildx cache / 旧 release。
+# 三个时间窗口可通过 env 覆盖；默认值给回滚保留 buffer：
+#   LUMEN_CLEANUP_DANGLING_HOURS  (default 24)  — dangling layer 最旧保留
+#   LUMEN_CLEANUP_IMAGES_HOURS    (default 72)  — untagged 旧 :main / :vX.Y 保留 3 天
+#   LUMEN_CLEANUP_CACHE_HOURS     (default 24)  — buildx cache 保留 1 天
+# 任一步失败仅 warn 不阻断，不让磁盘清理把成功的 update 拉成 fail。
 # ---------------------------------------------------------------------------
 emit_start cleanup
 
-# dangling-only prune；--filter "until=24h" 限制 24h 前的，避免误删本次 untag 的旧版
-if ! lumen_docker image prune -f --filter "until=24h" >/dev/null 2>&1; then
-    log_warn "[cleanup] docker image prune 失败（已忽略）。"
+CLEANUP_DANGLING_H="${LUMEN_CLEANUP_DANGLING_HOURS:-24}"
+CLEANUP_IMAGES_H="${LUMEN_CLEANUP_IMAGES_HOURS:-72}"
+CLEANUP_CACHE_H="${LUMEN_CLEANUP_CACHE_HOURS:-24}"
+
+# 1. dangling layers — 几乎 0 风险，每次都清。
+if ! lumen_docker image prune -f --filter "until=${CLEANUP_DANGLING_H}h" >/dev/null 2>&1; then
+    log_warn "[cleanup] docker image prune (dangling) 失败（已忽略）。"
+else
+    emit_info cleanup dangling_pruned "until=${CLEANUP_DANGLING_H}h"
 fi
 
+# 2. untagged unused images — 包含旧 :main / :v1.0.x 镜像，72h buffer 给回滚留余量。
+#    仍跑着的容器引用的 image 永远不会被 prune（docker 自己保护）。
+if ! lumen_docker image prune -a -f --filter "until=${CLEANUP_IMAGES_H}h" >/dev/null 2>&1; then
+    log_warn "[cleanup] docker image prune -a 失败（已忽略）。"
+else
+    emit_info cleanup unused_images_pruned "until=${CLEANUP_IMAGES_H}h"
+fi
+
+# 3. buildx build cache — local build 路径会无限增长，必须定期清。
+#    buildx 命令在老 docker 上没有，try 一下不存在就跳过。
+if lumen_docker buildx version >/dev/null 2>&1; then
+    if ! lumen_docker buildx prune -f --filter "until=${CLEANUP_CACHE_H}h" >/dev/null 2>&1; then
+        log_warn "[cleanup] docker buildx prune 失败（已忽略）。"
+    else
+        emit_info cleanup buildx_cache_pruned "until=${CLEANUP_CACHE_H}h"
+    fi
+fi
+
+# 4. 旧 release 目录 — keep 最近 N 个（含 current）。
 if ! lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-3}"; then
     log_warn "[cleanup] 旧 release 清理失败（已忽略）。"
 fi
