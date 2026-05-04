@@ -22,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
+    DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
     ProviderProxyDefinition,
     build_legacy_provider,
     endpoint_kind_allowed,
+    normalize_image_edit_input_transport,
     parse_proxy_item,
     resolve_provider_proxy_url,
 )
@@ -127,6 +129,7 @@ def _legacy_env_providers_raw() -> str | None:
                 "image_jobs_endpoint": "auto",
                 "image_jobs_endpoint_lock": False,
                 "image_jobs_base_url": "",
+                "image_edit_input_transport": DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
                 "image_concurrency": 1,
             }
         ],
@@ -214,6 +217,9 @@ def _to_out(it: dict, idx: int) -> ProviderItemOut:
         ),
         image_jobs_base_url=_normalize_image_jobs_base_url(
             it.get("image_jobs_base_url")
+        ),
+        image_edit_input_transport=normalize_image_edit_input_transport(
+            it.get("image_edit_input_transport")
         ),
         image_concurrency=_normalize_image_concurrency(
             it.get("image_concurrency")
@@ -442,6 +448,9 @@ async def update_providers(
             "image_jobs_base_url": _normalize_image_jobs_base_url(
                 it.image_jobs_base_url
             ),
+            "image_edit_input_transport": normalize_image_edit_input_transport(
+                it.image_edit_input_transport
+            ),
             "image_concurrency": _normalize_image_concurrency(it.image_concurrency),
         }
         # capability 三态：None 时不写入持久化结构，保持配置最小、避免污染老配置。
@@ -515,6 +524,9 @@ async def update_providers(
                 ),
                 image_jobs_base_url=_normalize_image_jobs_base_url(
                     it.get("image_jobs_base_url")
+                ),
+                image_edit_input_transport=normalize_image_edit_input_transport(
+                    it.get("image_edit_input_transport")
                 ),
                 image_concurrency=_normalize_image_concurrency(
                     it.get("image_concurrency")

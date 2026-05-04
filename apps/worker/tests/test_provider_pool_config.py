@@ -135,6 +135,7 @@ async def test_provider_pool_reload_preserves_image_job_fields(
                     "image_jobs_enabled": True,
                     "image_jobs_endpoint": "responses",
                     "image_jobs_base_url": "https://jobs.example",
+                    "image_edit_input_transport": "file",
                     "image_concurrency": 20,
                 }
             ]
@@ -164,10 +165,11 @@ async def test_provider_pool_reload_preserves_image_job_fields(
             provider.image_concurrency,
             provider.image_jobs_endpoint,
             provider.image_jobs_base_url,
+            provider.image_edit_input_transport,
         )
         for provider in providers
     ] == [
-        ("Flux", 20, "responses", "https://jobs.example"),
+        ("Flux", 20, "responses", "https://jobs.example", "file"),
     ]
 
 

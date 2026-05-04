@@ -521,6 +521,7 @@ async def test_put_providers_persists_capability_flags(
                 "responses_supported": True,
                 "image_generations_supported": False,
                 "image_responses_supported": True,
+                "image_edit_input_transport": "file",
             },
             {
                 "name": "p-without-cap",
@@ -544,6 +545,7 @@ async def test_put_providers_persists_capability_flags(
     assert p_with["responses_supported"] is True
     assert p_with["image_generations_supported"] is False
     assert p_with["image_responses_supported"] is True
+    assert p_with["image_edit_input_transport"] == "file"
     p_without = next(it for it in items if it["name"] == "p-without-cap")
     assert "responses_supported" not in p_without
     assert "image_generations_supported" not in p_without
@@ -552,5 +554,6 @@ async def test_put_providers_persists_capability_flags(
     out_with_cap = next(it for it in out.items if it.name == "p-with-cap")
     assert out_with_cap.responses_supported is True
     assert out_with_cap.image_generations_supported is False
+    assert out_with_cap.image_edit_input_transport == "file"
     out_without_cap = next(it for it in out.items if it.name == "p-without-cap")
     assert out_without_cap.responses_supported is None

@@ -1569,13 +1569,17 @@ def _image_job_payload(
     request_type: str,
     endpoint: str,
     body: dict[str, Any],
+    image_edit_input_transport: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "request_type": request_type,
         "endpoint": endpoint,
         "body": body,
         "retention_days": _IMAGE_JOB_RETENTION_DAYS,
     }
+    if image_edit_input_transport is not None:
+        payload["image_edit_input_transport"] = image_edit_input_transport
+    return payload
 
 
 def _build_responses_image_body(
@@ -2044,6 +2048,7 @@ async def _image_job_edit_once(
     api_key_override: str,
     base_url_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
+    image_edit_input_transport: str = "url",
     progress_callback: ImageProgressCallback | None = None,
 ) -> tuple[str, str | None]:
     body = _image_job_body_base(
@@ -2062,6 +2067,7 @@ async def _image_job_edit_once(
             request_type="edits",
             endpoint="/v1/images/edits",
             body=body,
+            image_edit_input_transport=image_edit_input_transport,
         ),
         base_url=base_url_override or await _resolve_image_job_base_url(),
         api_key=api_key_override,
@@ -4250,6 +4256,7 @@ async def _image_job_run_once(
     base_url: str,
     proxy: ProviderProxyDefinition | None,
     progress_callback: ImageProgressCallback | None,
+    image_edit_input_transport: str = "url",
 ) -> tuple[str, str | None]:
     """Single image-job submit dispatched by (action, endpoint).
 
@@ -4286,7 +4293,11 @@ async def _image_job_run_once(
                 error_code=EC.MISSING_INPUT_IMAGES.value,
                 status_code=400,
             )
-        return await _image_job_edit_once(images=images, **common)
+        return await _image_job_edit_once(
+            images=images,
+            image_edit_input_transport=image_edit_input_transport,
+            **common,
+        )
     return await _image_job_generate_once(**common)
 
 
@@ -4456,6 +4467,7 @@ async def _image_job_with_failover(
                         api_key=provider.api_key,
                         base_url=provider_base_url,
                         proxy=_provider_proxy(provider),
+                        image_edit_input_transport=provider.image_edit_input_transport,
                         progress_callback=progress_callback,
                     )
                 except (asyncio.CancelledError, UpstreamCancelled):

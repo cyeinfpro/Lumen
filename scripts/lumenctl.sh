@@ -1842,8 +1842,11 @@ EOF
 #   - 写命令 / 维护命令 / 菜单：是
 #   - 纯查询（status/logs/version/help）：否，避免完全无副作用的查询都打外网
 lumenctl_command_needs_self_update() {
+    # 触发 self-update 的命令：实际会调用本地 scripts/* 或会写入持久数据的命令。
+    # migrate / start / stop / restart / status / logs 是纯 docker compose 操作，
+    # 跟 scripts 无关，不触发避免无意义打外网。
     case "$1" in
-        menu|install-lumen|update-lumen|uninstall-lumen|rollback|backup|restore|migrate|bootstrap|migrate-env|migrate-env-apply|bootstrap-scripts)
+        menu|install-lumen|update-lumen|uninstall-lumen|rollback|backup|restore|bootstrap|migrate-env|migrate-env-apply|bootstrap-scripts)
             return 0
             ;;
     esac

@@ -189,3 +189,118 @@ def test_call_upstream_retries_responses_stream_interruption(monkeypatch) -> Non
     assert status == 200
     assert images == [{"url": "https://example.com/image.png"}]
     assert len(attempts) == 2
+
+
+def test_call_upstream_image_edits_file_mode_uses_multipart(monkeypatch) -> None:
+    app = load_app_module()
+    app.RETRY_NETWORK_MAX = 0
+    app.RETRY_RESPONSES_STREAM_MAX = 0
+    app.RETRY_UPSTREAM_5XX_MAX = 0
+
+    tiny_png = base64.b64decode(_tiny_png_b64())
+    calls: list[dict[str, object]] = []
+
+    class _MultipartClient:
+        async def post(self, url: str, **kwargs: object):
+            calls.append({"url": url, **kwargs})
+            return SimpleNamespace(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                content=b'{"data":[{"b64_json":"' + _tiny_png_b64().encode("ascii") + b'"}]}',
+            )
+
+    app._http_client = _MultipartClient()
+    row = {
+        "payload_json": app.json_dump(
+            {
+                "endpoint": "/v1/images/edits",
+                "body": {
+                    "model": "gpt-image-2",
+                    "prompt": "edit",
+                    "images": [
+                        {
+                            "image_url": "data:image/png;base64,"
+                            + base64.b64encode(tiny_png).decode("ascii")
+                        }
+                    ],
+                },
+                "request_type": "edits",
+                "image_edit_input_transport": "file",
+                "retention_days": 1,
+            }
+        ),
+        "auth_header": "Bearer sk-test",
+        "job_id": "job_file",
+        "created_at": "2026-05-04T00:00:00+00:00",
+        "retention_days": 1,
+    }
+
+    async def fake_save_images(*_args, **_kw):
+        return [{"url": "saved"}]
+
+    monkeypatch.setattr(app, "save_images", fake_save_images)
+    status, images = asyncio.run(app.call_upstream(row))
+
+    assert status == 200
+    assert images == [{"url": "saved"}]
+    assert calls
+    call = calls[0]
+    assert call["url"].endswith("/v1/images/edits")
+    assert "json" not in call
+    assert call["data"]["prompt"] == "edit"  # type: ignore[index]
+    assert call["files"][0][0] == "image[]"  # type: ignore[index]
+    assert call["headers"]["Authorization"] == "Bearer sk-test"  # type: ignore[index]
+    assert "Content-Type" not in call["headers"]  # type: ignore[operator]
+
+
+def _tiny_gif_bytes() -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(buf, format="GIF")
+    return buf.getvalue()
+
+
+def test_candidate_filename_rejects_gif() -> None:
+    app = load_app_module()
+    candidate = app.ImageCandidate(data=_tiny_gif_bytes(), mime_type="image/gif")
+    with pytest.raises(app.JobFailure) as excinfo:
+        app._candidate_filename("ref-0", candidate)
+    assert "gif" in str(excinfo.value).lower()
+    assert excinfo.value.upstream_status == 400
+
+
+def test_materialize_edit_input_files_serializes_dict_and_bool() -> None:
+    """multipart 上传时 dict/bool 必须 JSON 序列化（不是 Python repr）。"""
+    app = load_app_module()
+    tiny_png = base64.b64decode(_tiny_png_b64())
+
+    class _NoOpClient:
+        async def get(self, *_a, **_kw):  # 不会被调用（已经有 image_url=data:）
+            raise AssertionError("unexpected http call")
+
+    body = {
+        "prompt": "edit",
+        "model": "gpt-image-2",
+        "metadata": {"trace_id": "abc", "user": "u1"},
+        "tags": ["a", "b"],
+        "stream": True,
+        "n": 2,
+        "images": [
+            {
+                "image_url": "data:image/png;base64,"
+                + base64.b64encode(tiny_png).decode("ascii")
+            }
+        ],
+    }
+
+    data, files = asyncio.run(
+        app.materialize_edit_input_files(_NoOpClient(), body)
+    )
+
+    assert data["prompt"] == "edit"
+    assert data["model"] == "gpt-image-2"
+    assert data["metadata"] == '{"trace_id":"abc","user":"u1"}'  # JSON, 不是 repr
+    assert data["tags"] == '["a","b"]'
+    assert data["stream"] == "true"  # 小写 json bool
+    assert data["n"] == "2"
+    assert len(files) == 1
+    assert files[0][0] == "image[]"

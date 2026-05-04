@@ -1044,6 +1044,23 @@ lumen_self_update_scripts() {
         fi
     done
 
+    # 清理过老的 *.bak.<ts>：每个文件最多保留 LUMEN_SELF_UPDATE_BAK_KEEP（默认 5）份。
+    # 时间戳格式 YYYYMMDD-HHMMSS 字典序==时间序，sort+head 取最旧的删除。
+    local max_keep="${LUMEN_SELF_UPDATE_BAK_KEEP:-5}"
+    if [ "${max_keep}" -gt 0 ] 2>/dev/null; then
+        local prune_f total del_n
+        for prune_f in "${files[@]}"; do
+            total="$(ls -1 "${scripts_dir}/${prune_f}.bak."* 2>/dev/null | wc -l | tr -d '[:space:]')"
+            if [ -n "${total}" ] && [ "${total}" -gt "${max_keep}" ] 2>/dev/null; then
+                del_n=$((total - max_keep))
+                ls -1 "${scripts_dir}/${prune_f}.bak."* 2>/dev/null | sort | head -n "${del_n}" \
+                    | while IFS= read -r bak_path; do
+                        [ -n "${bak_path}" ] && rm -f "${bak_path}" 2>/dev/null || true
+                    done
+            fi
+        done
+    fi
+
     date -u +%s > "${marker}" 2>/dev/null || true
     rm -rf "${tmp_dir}" 2>/dev/null || true
 

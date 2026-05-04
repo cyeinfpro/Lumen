@@ -430,6 +430,7 @@ export interface AdminContextHealthOut {
 // ---------- Providers ----------
 
 export type ImageJobsEndpoint = "auto" | "generations" | "responses";
+export type ImageEditInputTransport = "url" | "file";
 
 export interface ProviderItemOut {
   name: string;
@@ -443,6 +444,7 @@ export interface ProviderItemOut {
   image_jobs_endpoint: ImageJobsEndpoint;
   image_jobs_endpoint_lock: boolean;
   image_jobs_base_url: string;
+  image_edit_input_transport: ImageEditInputTransport;
   image_concurrency: number;
 }
 
@@ -477,6 +479,7 @@ export interface ProviderItemIn {
   image_jobs_endpoint?: ImageJobsEndpoint;
   image_jobs_endpoint_lock?: boolean;
   image_jobs_base_url?: string;
+  image_edit_input_transport?: ImageEditInputTransport;
   image_concurrency?: number;
 }
 
