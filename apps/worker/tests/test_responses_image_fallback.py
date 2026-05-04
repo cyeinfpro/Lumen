@@ -173,6 +173,8 @@ class DummyResponse:
 
 class DummyStreamResponse:
     status_code = 200
+    # 声明 SSE Content-Type，避免触发 _iter_sse_with_runtime 的 non-SSE JSON fallback 分支
+    headers = {"content-type": "text/event-stream"}
 
     async def __aenter__(self) -> "DummyStreamResponse":
         return self
@@ -194,6 +196,7 @@ class DummyStreamResponse:
 
 class RealGatewayStreamResponse:
     status_code = 200
+    headers = {"content-type": "text/event-stream"}
 
     async def __aenter__(self) -> "RealGatewayStreamResponse":
         return self
@@ -215,6 +218,7 @@ class RealGatewayStreamResponse:
 
 class NoImageStreamResponse:
     status_code = 200
+    headers = {"content-type": "text/event-stream"}
 
     async def __aenter__(self) -> "NoImageStreamResponse":
         return self
@@ -521,6 +525,7 @@ def patch_responses_stream(
         headers: dict[str, str],
         timeout_s: float,
         proxy_url: str | None = None,
+        **_kwargs: Any,
     ):
         client.streams.append(
             {

@@ -279,6 +279,12 @@ async def events(
         # - 客户端断开（is_disconnected）→ break 走 finally 清理；
         # - 协程被取消（CancelledError，例如 ASGI 关闭、上游超时）→ finally 清理后 reraise，
         #   绝不 swallow 取消信号，避免后台资源泄漏。
+        #
+        # image-stability-hardening §P2 invariant：客户端断开 **不可** 写 task cancel key。
+        # 浏览器关页面、4G/5G 切换、移动端 App 后台都属于"暂时失联"，但生图任务往往
+        # 已花了几十秒上游算力——若 SSE 断开就杀任务，用户重连后什么都没拿到等于沉没成本。
+        # cancel 必须显式：POST /tasks/generations/{id}/cancel（见 routes/tasks.py）。
+        # worker 端 _is_cancelled 仅读 Redis cancel key，本路由只做 pubsub 订阅，二者解耦。
         pubsub = redis.pubsub()
         bridge_channels = _compaction_bridge_channels(valid)
         subscribed = [*valid, *bridge_channels.keys()]

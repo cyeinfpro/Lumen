@@ -64,6 +64,7 @@ from lumen_core.providers import (
     ProviderProxyDefinition,
     close_provider_proxy_tunnels,
     endpoint_kind_allowed,
+    provider_supports_route,
     resolve_provider_proxy_url,
 )
 
@@ -145,6 +146,39 @@ _KNOWN_OUTPUT_ITEM_TYPES = frozenset({
     "code_interpreter_call",
     "image_generation_call",  # /v1/responses + image_generation 工具的 item 类型
 })
+
+# ---- Responses SSE 终止事件白名单 ----
+# 兼容网关常见返回形态：除了官方 `response.completed`，部分实现会用 `response.done`
+# 作为成功终态；失败时则可能用 `response.failed` / `response.incomplete` / `error`。
+# 旧版只认 `response.completed` 会在两种场景误判：
+# 1) 上游已经 terminal，但 Lumen 还在等 EOF → 最终报 missing completed。
+# 2) 上游已给出 failed/incomplete details，但最终错误只表现为 drained without image，
+#    丢掉了上游真实原因（rate_limit / moderation / server_error）。
+_RESPONSES_SUCCESS_TERMINAL_EVENTS = frozenset({"response.completed", "response.done"})
+_RESPONSES_ERROR_TERMINAL_EVENTS = frozenset(
+    {"response.failed", "response.incomplete", "error"}
+)
+_RESPONSES_TERMINAL_EVENTS = (
+    _RESPONSES_SUCCESS_TERMINAL_EVENTS | _RESPONSES_ERROR_TERMINAL_EVENTS
+)
+
+
+def _is_responses_success_terminal(event_type: Any) -> bool:
+    return isinstance(event_type, str) and event_type in _RESPONSES_SUCCESS_TERMINAL_EVENTS
+
+
+def _is_responses_error_terminal(event_type: Any) -> bool:
+    return isinstance(event_type, str) and event_type in _RESPONSES_ERROR_TERMINAL_EVENTS
+
+
+# Sentinel event：iterator 在 200 但 Content-Type 不是 text/event-stream 时 yield，
+# 由 _responses_image_stream 主循环识别并按 JSON 提图。命名带 ``_lumen.`` 前缀，
+# 与上游事件类型不会冲突。
+_JSON_PAYLOAD_SENTINEL_TYPE = "_lumen.image.json_payload"
+# 单条非 SSE JSON body 上限：与单条 SSE 行字节上限一致（32 MB），覆盖 4K PNG b64
+# 的 ~11MB 上限并留余量；超出直接 STREAM_TOO_LARGE，避免被巨型 body 撑爆 worker 内存。
+# 注意：_SSE_MAX_LINE_BYTES 在文件后面定义，这里只能写字面值（保持两处同步）。
+_NON_SSE_JSON_MAX_BYTES = 32 * 1024 * 1024
 
 ImageProgressCallback = Callable[[dict[str, Any]], Any]
 
@@ -2377,8 +2411,13 @@ async def _iter_sse_curl(
     headers: dict[str, str],
     timeout_s: float,
     proxy_url: str | None = None,
+    allow_non_sse_payload: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """用 curl -N 子进程做 SSE 流式 POST，yield 每个解析后的事件 dict。
+
+    allow_non_sse_payload=True 时，2xx 响应若 Content-Type 不是 text/event-stream，
+    把剩余 body 整段读完按 JSON 解析并 yield 一个 sentinel event，
+    交给上层（_responses_image_stream）按 JSON 提图。
 
     和 _iter_sse_with_runtime yield 格式对齐：每个 dict 里带 "type"（若事件行给了
     `event: xxx` 则用它，否则用 data payload 的 `type` 字段）。`-i` 让 curl 把
@@ -2581,6 +2620,60 @@ async def _iter_sse_curl(
                 url=url,
             )
 
+        # 3.b) Content-Type 分流（仅 caller 显式允许时）：上游声明 stream=true 但回 JSON
+        # 时，直接把剩余 body 读完按 JSON yield sentinel 给 _responses_image_stream。
+        if allow_non_sse_payload:
+            content_type = response_headers.get("content-type", "")
+            if "text/event-stream" not in content_type.lower():
+                body_bytes = await drain_remaining()
+                if len(body_bytes) > _NON_SSE_JSON_MAX_BYTES:
+                    raise UpstreamError(
+                        "non-sse json payload exceeds max bytes",
+                        status_code=status_code,
+                        error_code=EC.STREAM_TOO_LARGE.value,
+                        payload={
+                            "path": "responses",
+                            "method": "POST",
+                            "url": url,
+                            "x_trace_id": trace_id,
+                            "max_bytes": _NON_SSE_JSON_MAX_BYTES,
+                            "actual_bytes": len(body_bytes),
+                        },
+                    )
+                body_text = body_bytes.decode("utf-8", errors="replace")
+                try:
+                    json_payload = json.loads(body_text)
+                except Exception as exc:  # noqa: BLE001
+                    raise UpstreamError(
+                        f"non-sse payload is not valid JSON: {exc}",
+                        status_code=status_code,
+                        error_code=EC.BAD_RESPONSE.value,
+                        payload={
+                            "path": "responses",
+                            "method": "POST",
+                            "url": url,
+                            "x_trace_id": trace_id,
+                            "content_type": content_type,
+                            "body_summary": body_text[:200],
+                        },
+                    ) from exc
+                yield {
+                    "type": _JSON_PAYLOAD_SENTINEL_TYPE,
+                    "payload": json_payload,
+                    "content_type": content_type,
+                }
+                # curl 子进程会自然 EOF；wait/finally 会清理资源。
+                rc = await proc.wait()
+                if rc != 0:
+                    stderr_s = ""
+                    if proc.stderr is not None:
+                        stderr_s = (await proc.stderr.read()).decode("utf-8", "replace")
+                    logger.debug(
+                        "curl json fallback exited rc=%s stderr=%.500s",
+                        rc, stderr_s,
+                    )
+                return
+
         # 4) 解析 SSE：按行累积 event/data，空行切分事件
         buf_type: str | None = None
         buf_data: list[str] = []
@@ -2672,10 +2765,10 @@ async def _iter_sse_curl(
 
 
 def _maybe_record_usage_from_event(event: dict[str, Any]) -> None:
-    """SSE 事件里如果带 usage 字段（多见于 response.completed），抽出并埋点。
+    """SSE 事件里如果带 usage 字段（多见于成功 terminal 帧），抽出并埋点。
 
-    上游 SSE 在 `response.completed` 帧的 `response.usage` 上挂 token 计数；少数情况下
-    也可能直接挂在事件 root 的 `usage`。两者都尝试。
+    上游 SSE 在 `response.completed` / `response.done` 帧的 `response.usage` 上挂 token
+    计数；少数情况下也可能直接挂在事件 root 的 `usage`。两者都尝试。
     """
     usage = event.get("usage")
     if not isinstance(usage, dict):
@@ -2684,8 +2777,9 @@ def _maybe_record_usage_from_event(event: dict[str, Any]) -> None:
             usage = resp.get("usage")
     if isinstance(usage, dict):
         _record_usage(usage)
-    # 响应完成帧里如果有 output 数组，扫一遍未知 type 给 warning（不让整条流挂掉）。
-    if event.get("type") == "response.completed":
+    # 成功 terminal 帧里如果有 output 数组，扫一遍未知 type 给 warning（不让整条流挂掉）。
+    # 兼容网关可能用 response.done 替代 response.completed，逻辑必须同时覆盖。
+    if _is_responses_success_terminal(event.get("type")):
         resp_obj = event.get("response")
         if isinstance(resp_obj, dict):
             outputs = resp_obj.get("output")
@@ -2731,6 +2825,128 @@ def _extract_response_revised_prompt(event: dict[str, Any]) -> str | None:
     item = event.get("item")
     if isinstance(item, dict) and isinstance(item.get("revised_prompt"), str):
         return item["revised_prompt"]
+    return None
+
+
+def _b64_value_if_str(value: Any) -> str | None:
+    """图像字段 narrow type guard——非空字符串才视为有效 b64。"""
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _extract_image_b64_from_payload(payload: Any) -> str | None:
+    """从兼容网关返回的 payload 中宽松抽取 base64 图像字符串。
+
+    sub2api / 各种 OpenAI-compatible 网关对图片字段命名差异较大；这里覆盖以下路径：
+    - Image API JSON: ``data[].b64_json``
+    - Responses 完整对象: ``response.output[].result`` /
+      ``response.output[].content[].result``
+    - 顶层 output 数组: ``output[].result`` / ``output[].content[].result``
+    - SSE event wrapper: ``response.output_item.done`` 事件的 ``item.result``
+      （直接传 event dict 也能命中）。
+
+    URL-only 图像（``data[].url`` 无 b64）返回 None——是否下载由调用方单独决策，
+    避免在通用 helper 里偷偷拉外部资源。
+    """
+    if not isinstance(payload, dict):
+        return None
+    # 1) 直接挂在 root 的 result/b64
+    direct = _b64_value_if_str(payload.get("result")) or _b64_value_if_str(
+        payload.get("b64_json")
+    )
+    if direct:
+        return direct
+    # 2) SSE event wrapper：response.output_item.done 等帧的 item
+    item = payload.get("item")
+    if isinstance(item, dict):
+        nested = _b64_value_if_str(item.get("result")) or _b64_value_if_str(
+            item.get("b64_json")
+        )
+        if nested:
+            return nested
+
+    # 3) Responses 对象：响应可能是 root，也可能在 root["response"] 里
+    candidates: list[dict[str, Any]] = [payload]
+    nested_resp = payload.get("response")
+    if isinstance(nested_resp, dict):
+        candidates.append(nested_resp)
+
+    for container in candidates:
+        # 3a) Image API：data[]
+        data = container.get("data")
+        if isinstance(data, list):
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                got = _b64_value_if_str(entry.get("b64_json")) or _b64_value_if_str(
+                    entry.get("result")
+                )
+                if got:
+                    return got
+        # 3b) Responses object：output[].result / output[].content[].result
+        outputs = container.get("output")
+        if isinstance(outputs, list):
+            for entry in outputs:
+                if not isinstance(entry, dict):
+                    continue
+                got = _b64_value_if_str(entry.get("result"))
+                if got:
+                    return got
+                content = entry.get("content")
+                if isinstance(content, list):
+                    for piece in content:
+                        if isinstance(piece, dict):
+                            got = _b64_value_if_str(piece.get("result")) or _b64_value_if_str(
+                                piece.get("b64_json")
+                            )
+                            if got:
+                                return got
+    return None
+
+
+def _extract_image_billable_count(payload: Any) -> int | None:
+    """从 payload 中宽松提取上游声明的"应计费图片数"。
+
+    覆盖路径：
+    - ``usage.images`` (OpenAI Image API / 部分网关)
+    - ``response.usage.images``
+    - ``tool_usage.image_gen.images`` (sub2api 私有路径)
+    - ``response.tool_usage.image_gen.images``
+
+    短期口径：仅用于日志 / metrics，不直接驱动账单。返回 None 表示上游没声明，
+    调用方按 ``len(data)`` 兜底自行决定。
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    def _coerce_int(value: Any) -> int | None:
+        if isinstance(value, bool):  # bool 是 int 子类，先排除
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        if isinstance(value, float) and value.is_integer():
+            return int(value) if value >= 0 else None
+        return None
+
+    containers: list[dict[str, Any]] = [payload]
+    nested_resp = payload.get("response")
+    if isinstance(nested_resp, dict):
+        containers.append(nested_resp)
+
+    for container in containers:
+        usage = container.get("usage")
+        if isinstance(usage, dict):
+            count = _coerce_int(usage.get("images"))
+            if count is not None:
+                return count
+        tool_usage = container.get("tool_usage")
+        if isinstance(tool_usage, dict):
+            image_gen = tool_usage.get("image_gen")
+            if isinstance(image_gen, dict):
+                count = _coerce_int(image_gen.get("images"))
+                if count is not None:
+                    return count
     return None
 
 
@@ -3098,6 +3314,9 @@ async def _responses_image_stream(
     # （rate_limit / policy / backend_unavailable 等）。SSE payload 扔掉就再也
     # 找不回来了。
     upstream_error_detail: dict[str, Any] | None = None
+    # JSON fallback 命中时记录响应 Content-Type / body 摘要，纳入失败诊断
+    json_fallback_content_type: str | None = None
+    json_fallback_body_summary: str | None = None
     await _emit_image_progress(progress_callback, "fallback_started", action=action, size=size)
     # curl 历史上是主稳定路径（详见函数上方注释）；use_httpx=True 时走 httpx——用在
     # edit race 的冗余 lane 上，换一套 client fingerprint，赌某次 curl 挂时 httpx 活。
@@ -3115,6 +3334,7 @@ async def _responses_image_stream(
             read_timeout_s=read_timeout_s,
             trace_id=call_trace_id,
             proxy_url=proxy_url,
+            allow_non_sse_payload=True,
         )
         if use_httpx
         else _iter_sse_curl(
@@ -3123,12 +3343,87 @@ async def _responses_image_stream(
             headers=call_headers,
             timeout_s=read_timeout_s,
             proxy_url=proxy_url,
+            allow_non_sse_payload=True,
         )
     )
     async for event in sse_source:
         event_type = event.get("type")
         if isinstance(event_type, str):
             last_event_type = event_type
+        # JSON fallback：iterator 在 2xx 非 SSE 时 yield 出来的 sentinel——
+        # 直接按 JSON payload 提图、提 usage、提 revised_prompt。
+        if event_type == _JSON_PAYLOAD_SENTINEL_TYPE:
+            json_payload = event.get("payload")
+            json_fallback_content_type = event.get("content_type") if isinstance(
+                event.get("content_type"), str
+            ) else None
+            if isinstance(json_payload, dict):
+                # 提取 usage（兼容 usage / response.usage / tool_usage.image_gen.images）
+                if isinstance(json_payload.get("usage"), dict):
+                    _record_usage(json_payload["usage"])
+                else:
+                    nested_resp = json_payload.get("response")
+                    if isinstance(nested_resp, dict) and isinstance(
+                        nested_resp.get("usage"), dict
+                    ):
+                        _record_usage(nested_resp["usage"])
+                billable = _extract_image_billable_count(json_payload)
+                if billable is not None:
+                    logger.info(
+                        "responses fallback json payload images_count=%d "
+                        "trace_id=%s action=%s size=%s",
+                        billable, call_trace_id, action, size,
+                    )
+                # 提图：复用 _extract_image_b64_from_payload 多路径宽松解析
+                b64 = _extract_image_b64_from_payload(json_payload)
+                if b64:
+                    final_b64 = b64
+                    # revised_prompt 可能在 data[*]/output[*]/item/response.output[*] 等位置
+                    rp_candidates: list[Any] = []
+                    data = json_payload.get("data")
+                    if isinstance(data, list):
+                        for entry in data:
+                            if isinstance(entry, dict):
+                                rp_candidates.append(entry.get("revised_prompt"))
+                    for container in (
+                        json_payload,
+                        json_payload.get("response")
+                        if isinstance(json_payload.get("response"), dict)
+                        else None,
+                    ):
+                        if not isinstance(container, dict):
+                            continue
+                        outputs = container.get("output")
+                        if isinstance(outputs, list):
+                            for entry in outputs:
+                                if isinstance(entry, dict):
+                                    rp_candidates.append(entry.get("revised_prompt"))
+                    item = json_payload.get("item")
+                    if isinstance(item, dict):
+                        rp_candidates.append(item.get("revised_prompt"))
+                    for rp in rp_candidates:
+                        if isinstance(rp, str) and rp:
+                            revised_prompt = rp
+                            break
+                    await _emit_image_progress(progress_callback, "final_image")
+                    await _emit_image_progress(progress_callback, "completed")
+                else:
+                    # JSON 没图：把 error / detail 当作上游错误体记录，便于失败路径定位
+                    err = json_payload.get("error")
+                    if isinstance(err, dict):
+                        upstream_error_detail = err
+                    # 抽 body 摘要（去敏感字段）方便排查
+                    summary_keys = sorted(json_payload.keys())[:10]
+                    json_fallback_body_summary = (
+                        f"keys={summary_keys}"
+                    )
+            else:
+                # 非 dict body 直接判失败，但保留 content_type / 摘要给后面诊断
+                json_fallback_body_summary = (
+                    f"non-object payload type={type(json_payload).__name__}"
+                )
+            # JSON fallback 帧后通常 iterator 会自然 EOF，无需 break；继续走主循环结束
+            continue
         if event_type == "response.image_generation_call.partial_image":
             partial_count += 1
             await _emit_image_progress(
@@ -3145,16 +3440,17 @@ async def _responses_image_stream(
             final_b64 = b64
             revised_prompt = _extract_response_revised_prompt(event) or revised_prompt
             await _emit_image_progress(progress_callback, "final_image")
-        if event_type == "response.completed":
+        # response.done 是兼容网关常见的 success terminal 替代名，按 completed 同等处理
+        if _is_responses_success_terminal(event_type):
             await _emit_image_progress(progress_callback, "completed")
         # 捕获失败类事件里的 error payload（上游告诉我们"为什么没出图"）
-        if event_type in ("response.failed", "response.incomplete", "error"):
+        if _is_responses_error_terminal(event_type):
             resp_obj = event.get("response")
             err = None
             if isinstance(resp_obj, dict):
                 err = resp_obj.get("error") or resp_obj.get("incomplete_details")
             if err is None:
-                err = event.get("error")
+                err = event.get("error") or event.get("incomplete_details")
             if isinstance(err, dict):
                 upstream_error_detail = err
         # image_generation_call item 的 failure 状态也可能携带 error
@@ -3178,13 +3474,26 @@ async def _responses_image_stream(
 
     if not final_b64:
         safe_upstream_error = _summarize_upstream_error_detail(upstream_error_detail)
+        # 失败诊断结构化：固定字段集合，便于运维查询
+        diagnostic: dict[str, Any] = {
+            "action": action,
+            "size": size,
+            "quality": image_quality,
+            "endpoint": "responses:image_generation",
+            "last_event_type": last_event_type,
+            "partial_count": partial_count,
+            "has_final_image": final_b64 is not None,
+            "trace_id": call_trace_id,
+            "upstream_error": safe_upstream_error,
+        }
+        if json_fallback_content_type is not None:
+            diagnostic["json_fallback_content_type"] = json_fallback_content_type
+        if json_fallback_body_summary is not None:
+            diagnostic["json_fallback_body_summary"] = json_fallback_body_summary
         logger.warning(
-            "responses fallback drained without image: action=%s size=%s "
-            "last_event_type=%s partial_count=%d upstream_error=%s",
-            action, size, last_event_type, partial_count,
-            json.dumps(safe_upstream_error, ensure_ascii=False, separators=(",", ":"))
-            if isinstance(safe_upstream_error, dict)
-            else safe_upstream_error,
+            "responses fallback drained without image: %s",
+            json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":"),
+                       default=str),
         )
         # 把上游明确的 error.code 透传出去，让 classifier 按真实原因决定 terminal/retriable——
         # 否则 moderation_blocked 这类硬拒会被当成 no_image_returned 去重试 6 次，既拿不回图也烧配额。
@@ -3208,6 +3517,9 @@ async def _responses_image_stream(
                 "last_event_type": last_event_type,
                 "partial_count": partial_count,
                 "upstream_error": upstream_error_detail,
+                "trace_id": call_trace_id,
+                "json_fallback_content_type": json_fallback_content_type,
+                "json_fallback_body_summary": json_fallback_body_summary,
             },
         )
     return final_b64, revised_prompt
@@ -3498,6 +3810,35 @@ def _provider_endpoint_locked_error(provider: Any, endpoint_kind: str) -> Upstre
     )
 
 
+def _provider_capability_error(provider: Any, endpoint_kind: str) -> UpstreamError | None:
+    if provider_supports_route(provider, route="image", endpoint_kind=endpoint_kind):
+        return None
+    provider_name = getattr(provider, "name", "unknown")
+    return UpstreamError(
+        f"provider {provider_name} does not support image endpoint {endpoint_kind}",
+        error_code=EC.NO_PROVIDERS.value,
+        status_code=503,
+        payload={
+            "provider": str(provider_name),
+            "endpoint_kind": endpoint_kind,
+            "reason": "capability_unsupported",
+        },
+    )
+
+
+def _provider_endpoint_unavailable_error(
+    provider: Any, endpoint_kind: str
+) -> UpstreamError | None:
+    return (
+        _provider_endpoint_locked_error(provider, endpoint_kind)
+        or _provider_capability_error(provider, endpoint_kind)
+    )
+
+
+def _provider_allows_image_endpoint(provider: Any, endpoint_kind: str) -> bool:
+    return _provider_endpoint_unavailable_error(provider, endpoint_kind) is None
+
+
 async def _responses_image_stream_with_retry(
     *,
     prompt: str,
@@ -3657,7 +3998,7 @@ async def _pool_select_compat(
                 return [
                     provider
                     for provider in providers
-                    if endpoint_kind_allowed(provider, endpoint_kind)
+                    if _provider_allows_image_endpoint(provider, endpoint_kind)
                 ]
         if endpoint_kind is None or "endpoint_kind" not in msg:
             raise
@@ -3666,7 +4007,7 @@ async def _pool_select_compat(
         return [
             provider
             for provider in providers
-            if endpoint_kind_allowed(provider, endpoint_kind)
+            if _provider_allows_image_endpoint(provider, endpoint_kind)
         ]
 
 
@@ -3735,9 +4076,11 @@ async def _direct_generate_image_with_failover(
         if lane_owns_inflight and i > 0:
             _pool_acquire_inflight(pool, provider.name, "generations")
         try:
-            lock_error = _provider_endpoint_locked_error(provider, "generations")
-            if lock_error is not None:
-                errors.append(lock_error)
+            unavailable_error = _provider_endpoint_unavailable_error(
+                provider, "generations"
+            )
+            if unavailable_error is not None:
+                errors.append(unavailable_error)
                 continue
             try:
                 kwargs: dict[str, Any] = {
@@ -4044,15 +4387,18 @@ async def _image_job_with_failover(
             elif endpoint_preference in ("generations", "responses"):
                 conflict_kind = endpoint_preference
             if conflict_kind is not None:
-                locked_err = _provider_endpoint_locked_error(provider, conflict_kind)
-                if locked_err is not None:
+                unavailable_err = _provider_endpoint_unavailable_error(
+                    provider, conflict_kind
+                )
+                if unavailable_err is not None:
                     logger.info(
-                        "image_jobs skip locked provider=%s configured=%s requested_kind=%s",
+                        "image_jobs skip provider=%s configured=%s requested_kind=%s reason=%s",
                         getattr(provider, "name", "unknown"),
                         configured_endpoint,
                         conflict_kind,
+                        unavailable_err.payload.get("reason"),
                     )
-                    errors.append(locked_err)
+                    errors.append(unavailable_err)
                     continue
 
             if endpoint_override is not None:
@@ -4067,6 +4413,23 @@ async def _image_job_with_failover(
                 endpoint_chain = pool.endpoint_chain(
                     provider.name, action, configured_endpoint
                 )
+            endpoint_chain = [
+                endpoint
+                for endpoint in endpoint_chain
+                if _provider_allows_image_endpoint(provider, endpoint)
+            ]
+            if not endpoint_chain:
+                blocked_err = UpstreamError(
+                    f"provider {provider.name} has no supported image-job endpoint",
+                    error_code=EC.NO_PROVIDERS.value,
+                    status_code=503,
+                    payload={
+                        "provider": provider.name,
+                        "reason": "capability_unsupported",
+                    },
+                )
+                errors.append(blocked_err)
+                continue
             provider_base_url = (
                 getattr(provider, "image_jobs_base_url", "") or fallback_base_url
             )
@@ -4327,9 +4690,11 @@ async def _direct_edit_image_with_failover(
         if lane_owns_inflight and i > 0:
             _pool_acquire_inflight(pool, provider.name, "generations")
         try:
-            lock_error = _provider_endpoint_locked_error(provider, "generations")
-            if lock_error is not None:
-                errors.append(lock_error)
+            unavailable_error = _provider_endpoint_unavailable_error(
+                provider, "generations"
+            )
+            if unavailable_error is not None:
+                errors.append(unavailable_error)
                 continue
             try:
                 kwargs: dict[str, Any] = {
@@ -4476,9 +4841,11 @@ async def _responses_image_stream_with_failover(
         if lane_owns_inflight and i > 0:
             _pool_acquire_inflight(pool, provider.name, "responses")
         try:
-            lock_error = _provider_endpoint_locked_error(provider, "responses")
-            if lock_error is not None:
-                errors.append(lock_error)
+            unavailable_error = _provider_endpoint_unavailable_error(
+                provider, "responses"
+            )
+            if unavailable_error is not None:
+                errors.append(unavailable_error)
                 continue
             try:
                 kwargs: dict[str, Any] = {
@@ -5217,9 +5584,11 @@ async def _image_dispatch_candidates(
     if provider_override is not None:
         endpoint_kind = _image_endpoint_kind_for_engine(engine)
         if endpoint_kind is not None:
-            lock_error = _provider_endpoint_locked_error(provider_override, endpoint_kind)
-            if lock_error is not None:
-                raise lock_error
+            unavailable_error = _provider_endpoint_unavailable_error(
+                provider_override, endpoint_kind
+            )
+            if unavailable_error is not None:
+                raise unavailable_error
         return [provider_override]
 
     pool = await provider_pool.get_pool()
@@ -5362,6 +5731,17 @@ async def _run_image_once_for_provider(
                 provider_name,
                 exc,
             )
+            responses_unavailable = _provider_endpoint_unavailable_error(
+                provider, "responses"
+            )
+            if responses_unavailable is not None:
+                raise _merge_image_path_errors(
+                    action=action,
+                    primary_path="image2",
+                    primary_error=exc,
+                    fallback_path="responses",
+                    fallback_error=responses_unavailable,
+                ) from exc
             try:
                 yield await _race_responses_image(
                     action=action,
@@ -5417,6 +5797,17 @@ async def _run_image_once_for_provider(
             provider_name,
             exc,
         )
+        generations_unavailable = _provider_endpoint_unavailable_error(
+            provider, "generations"
+        )
+        if generations_unavailable is not None:
+            raise _merge_image_path_errors(
+                action=action,
+                primary_path="responses",
+                primary_error=exc,
+                fallback_path="image2",
+                fallback_error=generations_unavailable,
+            ) from exc
         if action == "edit":
             if not images:
                 raise UpstreamError(
@@ -5507,7 +5898,7 @@ async def _dispatch_image(
             providers = [
                 provider
                 for provider in providers
-                if endpoint_kind_allowed(provider, endpoint_kind)
+                if _provider_allows_image_endpoint(provider, endpoint_kind)
             ]
     errors: list[BaseException] = []
     # provider_override 给定时 caller 已 acquire 过 inflight；这里不再持。否则
@@ -5684,6 +6075,7 @@ async def _iter_sse_with_runtime(
     interruption_error_code: str = "stream_interrupted",
     trace_id: str | None = None,
     proxy_url: str | None = None,
+    allow_non_sse_payload: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """httpx 流式 POST /v1/responses 并迭代解析 SSE 事件。
 
@@ -5692,6 +6084,10 @@ async def _iter_sse_with_runtime(
     本函数额外捕获 CancelledError 并 reraise（不 swallow），以及在主路径里使用
     try/finally 把 `resp.aclose()` 显式调用一次（context manager 已经做了，但显式
     写出更便于排查）。
+
+    allow_non_sse_payload=True 时，2xx 响应若 Content-Type 不是 text/event-stream，
+    读取完整 body 并 yield 一个 sentinel event ``_lumen.image.json_payload``，
+    交给上层（_responses_image_stream）按 JSON 提图。仅 image fallback 路径打开。
     """
     # 调用方未提供 trace_id 时本函数自生成；与 _iter_sse_curl 保持一致
     call_trace_id = trace_id or _generate_trace_id()
@@ -5741,6 +6137,54 @@ async def _iter_sse_with_runtime(
                     method="POST",
                     url=url,
                 )
+
+            # Content-Type 分流：当 caller 显式允许且响应非 SSE 时，按 JSON payload 处理。
+            # sub2api 这次的关键修复之一就是兜住"请求声明 stream=true 但上游回 JSON"的形态。
+            if allow_non_sse_payload:
+                content_type = (
+                    final_resp_headers.get("content-type")
+                    if final_resp_headers is not None
+                    else ""
+                ) or ""
+                if "text/event-stream" not in content_type.lower():
+                    raw = await resp.aread()
+                    if len(raw) > _NON_SSE_JSON_MAX_BYTES:
+                        raise UpstreamError(
+                            "non-sse json payload exceeds max bytes",
+                            status_code=resp.status_code,
+                            error_code=EC.STREAM_TOO_LARGE.value,
+                            payload={
+                                "path": "responses",
+                                "method": "POST",
+                                "url": url,
+                                "x_trace_id": call_trace_id,
+                                "max_bytes": _NON_SSE_JSON_MAX_BYTES,
+                                "actual_bytes": len(raw),
+                            },
+                        )
+                    raw_text = raw.decode("utf-8", errors="replace")
+                    try:
+                        json_payload = json.loads(raw_text)
+                    except Exception as exc:  # noqa: BLE001
+                        raise UpstreamError(
+                            f"non-sse payload is not valid JSON: {exc}",
+                            status_code=resp.status_code,
+                            error_code=EC.BAD_RESPONSE.value,
+                            payload={
+                                "path": "responses",
+                                "method": "POST",
+                                "url": url,
+                                "x_trace_id": call_trace_id,
+                                "content_type": content_type,
+                                "body_summary": raw_text[:200],
+                            },
+                        ) from exc
+                    yield {
+                        "type": _JSON_PAYLOAD_SENTINEL_TYPE,
+                        "payload": json_payload,
+                        "content_type": content_type,
+                    }
+                    return
 
             current_event: str | None = None
             line_count = 0
@@ -6001,6 +6445,8 @@ async def responses_call(
 
                 if "text/event-stream" in ct_lower:
                     completed: dict[str, Any] | None = None
+                    last_event_type: str | None = None
+                    error_terminal: dict[str, Any] | None = None
                     line_count = 0
                     byte_count = 0
                     current_event: str | None = None
@@ -6050,12 +6496,32 @@ async def responses_call(
                                     continue
                                 if "type" not in event and current_event:
                                     event["type"] = current_event
+                                ev_type = event.get("type")
+                                if isinstance(ev_type, str):
+                                    last_event_type = ev_type
                                 # 在帧内抓 usage 走标准埋点；与 stream 路径口径一致
                                 _maybe_record_usage_from_event(event)
-                                if event.get("type") == "response.completed":
+                                # 兼容网关：response.done 与 response.completed 同等成功 terminal
+                                if _is_responses_success_terminal(ev_type):
                                     resp_obj = event.get("response")
                                     if isinstance(resp_obj, dict):
                                         completed = resp_obj
+                                # error terminal：抓 error/incomplete_details，便于上层分类
+                                elif _is_responses_error_terminal(ev_type):
+                                    err = None
+                                    resp_obj = event.get("response")
+                                    if isinstance(resp_obj, dict):
+                                        err = (
+                                            resp_obj.get("error")
+                                            or resp_obj.get("incomplete_details")
+                                        )
+                                    if err is None:
+                                        err = (
+                                            event.get("error")
+                                            or event.get("incomplete_details")
+                                        )
+                                    if isinstance(err, dict):
+                                        error_terminal = err
                     except UpstreamError:
                         raise
                     except asyncio.CancelledError:
@@ -6077,19 +6543,46 @@ async def responses_call(
                             },
                         ) from exc
 
-                    if completed is None:
+                    if completed is not None:
+                        return completed
+                    # error terminal 优先抛具体的上游 error code，便于 caller 分类重试
+                    if error_terminal is not None:
+                        upstream_code = (
+                            error_terminal.get("code")
+                            or error_terminal.get("type")
+                        )
+                        upstream_msg = error_terminal.get("message")
                         raise UpstreamError(
-                            "responses_call sse missing response.completed frame",
+                            upstream_msg
+                            if isinstance(upstream_msg, str) and upstream_msg
+                            else "responses_call sse error terminal",
                             status_code=resp.status_code,
-                            error_code=EC.BAD_RESPONSE.value,
+                            error_code=(
+                                upstream_code
+                                if isinstance(upstream_code, str) and upstream_code
+                                else EC.BAD_RESPONSE.value
+                            ),
                             payload={
                                 "path": "responses",
                                 "method": "POST",
                                 "url": url,
                                 "x_trace_id": call_trace_id,
+                                "last_event_type": last_event_type,
+                                "upstream_error": error_terminal,
                             },
                         )
-                    return completed
+                    raise UpstreamError(
+                        "responses_call sse missing terminal frame",
+                        status_code=resp.status_code,
+                        error_code=EC.BAD_RESPONSE.value,
+                        payload={
+                            "path": "responses",
+                            "method": "POST",
+                            "url": url,
+                            "x_trace_id": call_trace_id,
+                            "last_event_type": last_event_type,
+                        },
+                    )
 
                 # JSON 路径
                 raw = await resp.aread()

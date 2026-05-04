@@ -63,6 +63,12 @@ RESPONSES_STREAM_MAX_BYTES = int(
 JOB_HEARTBEAT_INTERVAL_S = max(
     5, int(os.getenv("IMAGE_JOB_HEARTBEAT_INTERVAL_S", "15"))
 )
+# image-stability-hardening §P0：SSE 流 idle 上限。上游 TCP 活但没新行（codex 端
+# 偶发 stall）时，过去 sidecar 只能等到 client 全局 timeout 才放手。给读循环加每
+# 行级 idle wait，>60s 没新数据即抛 retryable JobFailure，让 worker 端可以 failover。
+RESPONSES_STREAM_IDLE_TIMEOUT_S = max(
+    10.0, float(os.getenv("IMAGE_JOB_RESPONSES_STREAM_IDLE_TIMEOUT_S", "60"))
+)
 RETENTION_SWEEP_INTERVAL_S = max(60, int(os.getenv("IMAGE_JOB_RETENTION_SWEEP_INTERVAL_S", "3600")))
 DEFAULT_RETENTION_DAYS = min(30, max(1, int(os.getenv("IMAGE_JOB_RETENTION_DAYS", "1"))))
 MAX_RETENTION_DAYS = min(
@@ -529,17 +535,41 @@ async def mark_failed(
 
 
 async def fail_interrupted_running_jobs() -> None:
+    """Sidecar 重启恢复语义（image-stability-hardening §image-job）：
+    - running + auth_header 在 → 重新排队（生图任务有 30-120s，重启不应丢）
+    - running + auth_header 缺 → 没法重发上游，只能标 failed
+
+    重新排队后 attempts +=1，retention_sweeper 不会立即清掉（status != succeeded/failed），
+    lifespan 启动末尾的 backlog 恢复循环会把它们 enqueue。
+    """
     now = iso()
-    await db_exec(
+    # 1) 有 auth_header 的 running 任务：转回 queued，清 started_at
+    requeued = await db_exec(
         """
         UPDATE jobs
-        SET status = 'failed', auth_header = NULL, finished_at = ?, updated_at = ?,
-            error = 'image job worker restarted before completion',
+        SET status = 'queued',
+            started_at = NULL,
+            updated_at = ?,
+            attempts = COALESCE(attempts, 0) + 1
+        WHERE status = 'running' AND auth_header IS NOT NULL AND auth_header != ''
+        """,
+        (now,),
+    )
+    if requeued:
+        LOG.info("restored %d running jobs to queue after restart", requeued)
+    # 2) 无 auth_header 的 running 任务：没法重发上游，标 failed
+    failed = await db_exec(
+        """
+        UPDATE jobs
+        SET status = 'failed', finished_at = ?, updated_at = ?,
+            error = 'image job worker restarted; no auth header to retry',
             error_class = ?
         WHERE status = 'running'
         """,
         (now, now, ERROR_CLASS_INTERNAL),
     )
+    if failed:
+        LOG.warning("failed %d running jobs without auth header after restart", failed)
 
 
 def row_to_response(row: sqlite3.Row) -> dict[str, Any]:
@@ -680,12 +710,34 @@ def object_image_context(value: dict[str, Any]) -> bool:
 # partial differs by a few bytes). The sidecar only needs the final image.
 _RESPONSES_PARTIAL_TYPE_HINT = ".partial_image"
 
+# image-stability-hardening §P0：兼容网关常见 terminal 事件名。
+# 成功 terminal：response.completed / response.done。
+# 错误 terminal：response.failed / response.incomplete / error。
+# 旧版只识别 ``response.failed`` + ``error``，response.incomplete 会被当成"流提前结束"
+# 错判为可重试 network 错（实际是 incomplete_details，重试仍会 incomplete）。
+_RESPONSES_SUCCESS_TERMINAL_EVENTS = frozenset({"response.completed", "response.done"})
+_RESPONSES_ERROR_TERMINAL_EVENTS = frozenset(
+    {"response.failed", "response.incomplete", "error"}
+)
+
 
 def _is_responses_partial_event(event: Any) -> bool:
     if not isinstance(event, dict):
         return False
     event_type = str(event.get("type", ""))
     return _RESPONSES_PARTIAL_TYPE_HINT in event_type
+
+
+def _is_responses_success_terminal(event: Any) -> bool:
+    if not isinstance(event, dict):
+        return False
+    return str(event.get("type", "")) in _RESPONSES_SUCCESS_TERMINAL_EVENTS
+
+
+def _is_responses_error_terminal(event: Any) -> bool:
+    if not isinstance(event, dict):
+        return False
+    return str(event.get("type", "")) in _RESPONSES_ERROR_TERMINAL_EVENTS
 
 
 async def download_image_url(
@@ -701,29 +753,64 @@ async def download_image_url(
     cached = cache.get(url)
     if cached is not None:
         return cached
+    # image-stability-hardening §image-job：用 streaming 边读边累计，超
+    # MAX_IMAGE_BYTES 立即中断，避免恶意 URL 返回巨型 body 把 sidecar 内存撑爆
+    # （旧实现 client.get 全量缓存后才检查大小）。Content-Length 提前可信时直接拒。
     try:
-        resp = await client.get(url, timeout=httpx.Timeout(60.0, connect=UPSTREAM_CONNECT_TIMEOUT_S))
+        async with client.stream(
+            "GET",
+            url,
+            timeout=httpx.Timeout(60.0, connect=UPSTREAM_CONNECT_TIMEOUT_S),
+        ) as resp:
+            if not resp.is_success:
+                # 错误体不会很大（一般 JSON），可以全读
+                err_content = await resp.aread()
+                ec = (
+                    ERROR_CLASS_UPSTREAM_5XX
+                    if resp.status_code >= 500
+                    else ERROR_CLASS_UPSTREAM_4XX
+                )
+                raise JobFailure(
+                    f"下载上游图片失败 HTTP {resp.status_code}",
+                    upstream_status=resp.status_code,
+                    upstream_body=body_preview(err_content),
+                    error_class=ec,
+                )
+            # Content-Length 已超 → 不下载
+            cl_raw = resp.headers.get("content-length")
+            if cl_raw:
+                try:
+                    if int(cl_raw) > MAX_IMAGE_BYTES:
+                        raise JobFailure(
+                            "上游图片超过大小限制（Content-Length 预检）",
+                            upstream_status=resp.status_code,
+                            error_class=ERROR_CLASS_IMAGE_SAVE,
+                        )
+                except ValueError:
+                    pass
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if not chunk:
+                    continue
+                # 累计判，超阈值立即中断 stream（async with 退出会 aclose）
+                if len(buf) + len(chunk) > MAX_IMAGE_BYTES:
+                    raise JobFailure(
+                        "上游图片超过大小限制",
+                        upstream_status=resp.status_code,
+                        error_class=ERROR_CLASS_IMAGE_SAVE,
+                    )
+                buf.extend(chunk)
+            content = bytes(buf)
+            content_type = resp.headers.get("content-type")
+    except JobFailure:
+        raise
     except httpx.HTTPError as exc:
         raise JobFailure(
             f"下载上游图片失败: {exc.__class__.__name__}: {exc}",
             retryable=True,
             error_class=ERROR_CLASS_NETWORK,
         ) from exc
-    if not resp.is_success:
-        ec = ERROR_CLASS_UPSTREAM_5XX if resp.status_code >= 500 else ERROR_CLASS_UPSTREAM_4XX
-        raise JobFailure(
-            f"下载上游图片失败 HTTP {resp.status_code}",
-            upstream_status=resp.status_code,
-            upstream_body=body_preview(resp.content),
-            error_class=ec,
-        )
-    if len(resp.content) > MAX_IMAGE_BYTES:
-        raise JobFailure(
-            "上游图片超过大小限制",
-            upstream_status=resp.status_code,
-            error_class=ERROR_CLASS_IMAGE_SAVE,
-        )
-    candidate = ImageCandidate(resp.content, resp.headers.get("content-type"))
+    candidate = ImageCandidate(content, content_type)
     cache[url] = candidate
     return candidate
 
@@ -841,6 +928,27 @@ def _first_stream_error(events: Iterable[Any]) -> dict[str, Any] | None:
                 "code": "response_failed",
                 "message": "Responses stream ended with response.failed",
             }
+        # image-stability-hardening §P0：response.incomplete 也是 terminal error
+        # 形态。typical payload：{"type":"response.incomplete","response":{
+        # "incomplete_details":{"reason":"max_output_tokens"}}}。旧版漏识别 →
+        # 当作"流提前结束"按 network 重试 → 反复 incomplete 烧配额。
+        if event_type == "response.incomplete":
+            response = event.get("response")
+            if isinstance(response, dict):
+                detail = (
+                    response.get("incomplete_details")
+                    or response.get("error")
+                )
+                if isinstance(detail, dict):
+                    out = dict(detail)
+                    out.setdefault("type", "response_incomplete")
+                    out.setdefault("code", "response_incomplete")
+                    return out
+            return {
+                "type": "response_incomplete",
+                "code": "response_incomplete",
+                "message": "Responses stream ended with response.incomplete",
+            }
     return None
 
 
@@ -920,6 +1028,14 @@ async def extract_responses_stream_images(
     Partial-image frames are progress previews. If the stream ends before a final
     image appears, treat it as a network-style interruption so the caller can
     retry or fail over instead of saving a partial preview as the result.
+
+    image-stability-hardening §P0 加固：
+    - 行级 idle timeout（``RESPONSES_STREAM_IDLE_TIMEOUT_S``，默认 60s）：上游 TCP
+      仍活但流卡住的场景下，过去只能等 client 全局 timeout 才放手；现在 idle
+      超过阈值即抛 retryable JobFailure，sidecar 资源（连接 / fd / 内存）立刻释放。
+    - 显式跟踪 ``response.completed`` / ``response.done`` 作为成功 terminal：流
+      结束但已收到成功 terminal + final image 时算正常完成；只缺 final 而 terminal
+      已到的极少数兼容网关也能识别（避免错判 retryable）。
     """
     cache: dict[str, ImageCandidate] = {}
     event_lines: list[str] = []
@@ -928,10 +1044,11 @@ async def extract_responses_stream_images(
     partial_candidates: list[ImageCandidate] = []
     final_candidates: list[ImageCandidate] = []
     saw_done = False
+    saw_success_terminal = False
     last_touch = time.monotonic()
 
     async def handle_event(obj: Any) -> None:
-        nonlocal partial_candidates, final_candidates
+        nonlocal partial_candidates, final_candidates, saw_success_terminal
         stream_error = _first_stream_error([obj])
         if stream_error is not None:
             raise JobFailure(
@@ -940,6 +1057,8 @@ async def extract_responses_stream_images(
                 upstream_body=stream_error,
                 error_class=_classify_stream_error(stream_error),
             )
+        if _is_responses_success_terminal(obj):
+            saw_success_terminal = True
         extracted = await extract_candidates(obj, client, cache=cache)
         if not extracted:
             return
@@ -948,7 +1067,27 @@ async def extract_responses_stream_images(
         else:
             final_candidates.extend(extracted)
 
-    async for line in resp.aiter_lines():
+    line_iter = resp.aiter_lines()
+    while True:
+        try:
+            line = await asyncio.wait_for(
+                line_iter.__anext__(), timeout=RESPONSES_STREAM_IDLE_TIMEOUT_S
+            )
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            raise JobFailure(
+                f"Responses stream idle for {RESPONSES_STREAM_IDLE_TIMEOUT_S:.0f}s",
+                upstream_status=resp.status_code,
+                upstream_body={
+                    "events_seen": events_seen,
+                    "partial_images_seen": len(partial_candidates),
+                    "bytes_seen": bytes_seen,
+                    "saw_success_terminal": saw_success_terminal,
+                },
+                retryable=True,
+                error_class=ERROR_CLASS_NETWORK,
+            ) from None
         bytes_seen += len(line) + 1
         if bytes_seen > RESPONSES_STREAM_MAX_BYTES:
             raise JobFailure(
@@ -991,6 +1130,7 @@ async def extract_responses_stream_images(
         "events_seen": events_seen,
         "partial_images_seen": len(partial_candidates),
         "saw_done": saw_done,
+        "saw_success_terminal": saw_success_terminal,
         "bytes_seen": bytes_seen,
     }
     if partial_candidates:
@@ -1670,12 +1810,38 @@ def _sweep_filesystem_sync(cutoff_ts: float) -> tuple[int, int]:
     return total_files, total_bytes
 
 
+async def _run_retention_pass() -> None:
+    """单次清理：FS sweep + job rows。提取为独立函数让启动时也能直接调用。"""
+    cutoff = utc_now() - timedelta(days=MAX_RETENTION_DAYS)
+    files, freed = await asyncio.to_thread(
+        _sweep_filesystem_sync, cutoff.timestamp()
+    )
+    if files:
+        LOG.info("retention sweeper removed %d files (%d bytes)", files, freed)
+
+    job_cutoff = (utc_now() - timedelta(days=JOB_TTL_DAYS)).isoformat()
+    removed_jobs = await db_exec(
+        "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
+        (job_cutoff,),
+    )
+    if removed_jobs:
+        LOG.info("retention sweeper removed %d job rows", removed_jobs)
+
+
 async def retention_sweeper() -> None:
     LOG.info(
         "retention sweeper started interval=%ss job_ttl_days=%d",
         RETENTION_SWEEP_INTERVAL_S,
         JOB_TTL_DAYS,
     )
+    # image-stability-hardening §image-job：启动时先 sweep 一次。崩溃恢复 / 长时间
+    # 停机后立刻起来如果还要等一个 INTERVAL（默认 1h），磁盘会持续被旧文件占用。
+    try:
+        await _run_retention_pass()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        LOG.exception("retention sweeper initial pass failed")
     try:
         while not _shutdown.is_set():
             try:
@@ -1684,20 +1850,7 @@ async def retention_sweeper() -> None:
             except asyncio.TimeoutError:
                 pass
             try:
-                cutoff = utc_now() - timedelta(days=MAX_RETENTION_DAYS)
-                files, freed = await asyncio.to_thread(
-                    _sweep_filesystem_sync, cutoff.timestamp()
-                )
-                if files:
-                    LOG.info("retention sweeper removed %d files (%d bytes)", files, freed)
-
-                job_cutoff = (utc_now() - timedelta(days=JOB_TTL_DAYS)).isoformat()
-                removed_jobs = await db_exec(
-                    "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
-                    (job_cutoff,),
-                )
-                if removed_jobs:
-                    LOG.info("retention sweeper removed %d job rows", removed_jobs)
+                await _run_retention_pass()
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -1424,6 +1424,21 @@ async def _await_with_lease_guard(
     task_id: str | None = None,
     cancel_poll_interval_s: float = 1.0,
 ) -> Any:
+    """同时监听 awaitable / lease_lost / 用户取消，三者任一触发都正确清理。
+
+    image-stability-hardening §P2 取消语义合约：
+    - **用户显式取消**（POST /tasks/.../cancel 写 Redis ``task:{id}:cancel``）：
+      cancel_task 命中 → ``work_task.cancel()`` → 上游 iterator finally aclose
+      → 抛 ``_TaskCancelled``，task 记 cancelled 终态。
+    - **Worker 进程 lease 丢失**（30s 续约失败 3 次）：lease_task 命中 → 同上但抛
+      ``_LeaseLost``，task 由 arq 重新 schedule。
+    - **Worker task deadline**（25 分钟硬上限）：上层 ``asyncio.timeout_at`` 抛
+      ``CancelledError`` 沿 awaitable 透传，上游 iterator finally 清理 curl 子进程
+      / httpx 连接 / 临时 body 文件。
+    - **浏览器 SSE 订阅断开**：**不会** 经过本函数；events.py 仅清理 pubsub，绝不写
+      cancel key。任务继续 drain 到 final image 或 terminal error，结果落 DB +
+      Redis stream，前端重连后 replay 拿到。
+    """
     if lease_lost.is_set():
         raise _LeaseLost("generation lease renewer failed")
 

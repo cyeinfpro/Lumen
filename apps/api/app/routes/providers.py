@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -181,6 +182,21 @@ def _parse_items(raw: str) -> list[dict]:
     return items
 
 
+def _normalize_capability(raw: Any) -> bool | None:
+    """Capability tri-state from persisted dict shape. None = 未知，保留旧行为。"""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"true", "1", "yes", "y"}:
+            return True
+        if text in {"false", "0", "no", "n"}:
+            return False
+    return None
+
+
 def _to_out(it: dict, idx: int) -> ProviderItemOut:
     endpoint = _normalize_image_jobs_endpoint(it.get("image_jobs_endpoint"))
     return ProviderItemOut(
@@ -201,6 +217,13 @@ def _to_out(it: dict, idx: int) -> ProviderItemOut:
         ),
         image_concurrency=_normalize_image_concurrency(
             it.get("image_concurrency")
+        ),
+        responses_supported=_normalize_capability(it.get("responses_supported")),
+        image_generations_supported=_normalize_capability(
+            it.get("image_generations_supported")
+        ),
+        image_responses_supported=_normalize_capability(
+            it.get("image_responses_supported")
         ),
     )
 
@@ -421,6 +444,15 @@ async def update_providers(
             ),
             "image_concurrency": _normalize_image_concurrency(it.image_concurrency),
         }
+        # capability 三态：None 时不写入持久化结构，保持配置最小、避免污染老配置。
+        for attr_in, key_out in (
+            ("responses_supported", "responses_supported"),
+            ("image_generations_supported", "image_generations_supported"),
+            ("image_responses_supported", "image_responses_supported"),
+        ):
+            val = _normalize_capability(getattr(it, attr_in, None))
+            if val is not None:
+                row[key_out] = val
         if provider_proxy:
             row["proxy"] = provider_proxy
         arr.append(row)
@@ -486,6 +518,15 @@ async def update_providers(
                 ),
                 image_concurrency=_normalize_image_concurrency(
                     it.get("image_concurrency")
+                ),
+                responses_supported=_normalize_capability(
+                    it.get("responses_supported")
+                ),
+                image_generations_supported=_normalize_capability(
+                    it.get("image_generations_supported")
+                ),
+                image_responses_supported=_normalize_capability(
+                    it.get("image_responses_supported")
                 ),
             )
         )
@@ -571,12 +612,46 @@ def _extract_sse_output_text(raw: str) -> str:
     return "".join(chunks)
 
 
+@dataclass
+class _ProbeOutcome:
+    ok: bool
+    latency_ms: int
+    error: str | None
+    http_status: int | None
+    # 详见 ProviderProbeResult.capability_signal 注释
+    capability_signal: str | None
+
+    def __iter__(self):
+        # 向后兼容：旧 caller 解包 ``ok, latency, err = await _probe_one(...)``
+        # 仍然工作；新调用方走属性访问。
+        yield self.ok
+        yield self.latency_ms
+        yield self.error
+
+
+def _classify_probe_status(status: int) -> tuple[str, str | None]:
+    """根据 HTTP status 给 capability_signal + 默认 error 描述。
+
+    - 404/405 → unsupported（端点不存在 / 方法不被允许，可据此把 capability=False）
+    - 401/403 → auth（鉴权 / 权限，不能判定能力）
+    - 429/5xx → transient（临时不健康，不能判定能力）
+    - 其它 4xx → 不明确（可能是请求体问题），保守返回 None
+    """
+    if status in (404, 405):
+        return "unsupported", f"HTTP {status}"
+    if status in (401, 403):
+        return "auth", f"HTTP {status}"
+    if status == 429 or 500 <= status < 600:
+        return "transient", f"HTTP {status}"
+    return "unsupported" if status == 501 else "", f"HTTP {status}"  # 511 等
+
+
 async def _probe_one(
     base_url: str,
     api_key: str,
     *,
     proxy: ProviderProxyDefinition | None = None,
-) -> tuple[bool, int, str | None]:
+) -> _ProbeOutcome:
     url = _responses_url(base_url)
     headers = {
         "authorization": f"Bearer {api_key}",
@@ -604,23 +679,62 @@ async def _probe_one(
             resp = await client.post(url, json=body, headers=headers)
         latency = int((time.monotonic() - t0) * 1000)
         if resp.status_code >= 400:
-            return False, latency, f"HTTP {resp.status_code}"
+            signal, err = _classify_probe_status(resp.status_code)
+            return _ProbeOutcome(
+                ok=False,
+                latency_ms=latency,
+                error=err,
+                http_status=resp.status_code,
+                capability_signal=signal or None,
+            )
         try:
             payload = resp.json()
             text = _extract_response_output_text(payload)
         except Exception:  # noqa: BLE001
             text = _extract_sse_output_text(resp.text)
             if not text:
-                return False, latency, "bad_json"
+                return _ProbeOutcome(
+                    ok=False,
+                    latency_ms=latency,
+                    error="bad_json",
+                    http_status=resp.status_code,
+                    capability_signal=None,
+                )
         if "9801" in text:
-            return True, latency, None
-        return False, latency, "wrong_answer"
+            # 200 + 文本能解析 → 端点确认支持
+            return _ProbeOutcome(
+                ok=True,
+                latency_ms=latency,
+                error=None,
+                http_status=resp.status_code,
+                capability_signal="supported",
+            )
+        # 200 但答错——可能是模型口径不一致；不是 capability 问题
+        return _ProbeOutcome(
+            ok=False,
+            latency_ms=latency,
+            error="wrong_answer",
+            http_status=resp.status_code,
+            capability_signal=None,
+        )
     except httpx.TimeoutException:
         latency = int((time.monotonic() - t0) * 1000)
-        return False, latency, "timeout"
+        return _ProbeOutcome(
+            ok=False,
+            latency_ms=latency,
+            error="timeout",
+            http_status=None,
+            capability_signal="transient",
+        )
     except Exception as exc:
         latency = int((time.monotonic() - t0) * 1000)
-        return False, latency, type(exc).__name__
+        return _ProbeOutcome(
+            ok=False,
+            latency_ms=latency,
+            error=type(exc).__name__,
+            http_status=None,
+            capability_signal=None,
+        )
 
 
 def _probe_blocked_by_endpoint_lock(it: dict[str, Any]) -> bool:
@@ -699,13 +813,15 @@ async def probe_providers(
             if isinstance(proxy_name, str) and proxy_name
             else None
         )
-        ok, latency, err = await _probe_one(base_url, api_key, proxy=proxy)
+        outcome = await _probe_one(base_url, api_key, proxy=proxy)
         return ProviderProbeResult(
             name=name,
-            ok=ok,
-            latency_ms=latency,
-            error=err,
-            status="healthy" if ok else "unhealthy",
+            ok=outcome.ok,
+            latency_ms=outcome.latency_ms,
+            error=outcome.error,
+            status="healthy" if outcome.ok else "unhealthy",
+            capability_signal=outcome.capability_signal,
+            http_status=outcome.http_status,
         )
 
     results = await asyncio.gather(

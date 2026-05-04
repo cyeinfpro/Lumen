@@ -46,8 +46,14 @@ def _counter(
     if not settings.metrics_enabled:
         return _NoopCounter(name)
 
-    from prometheus_client import Counter
+    from prometheus_client import REGISTRY, Counter
 
+    # Tests and dev reloads can import this module more than once after
+    # sys.modules cleanup while the global Prometheus registry is still alive.
+    # Reuse the existing collector instead of crashing on duplicate names.
+    existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+    if existing is not None:
+        return existing
     return Counter(name, documentation, labelnames=labelnames)
 
 
