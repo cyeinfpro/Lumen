@@ -480,6 +480,29 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "npm run build" not in code
 
 
+def test_update_script_pulls_tgbot_image_when_telegram_configured() -> None:
+    """tgbot in docker-compose.yml lives under profile=tgbot. A bare
+
+    ``docker compose pull`` skips profile-gated services, so the
+    ``--profile tgbot up -d tgbot`` in restart_services would re-use the
+    locally cached (pre-update) tgbot image and never advance to the new
+    GHCR digest. The pull_images phase must explicitly pull tgbot when
+    the deployment has TELEGRAM_BOT_TOKEN configured.
+    """
+    text = UPDATE.read_text(encoding="utf-8")
+    code = _strip_shell_comments(text)
+    # Guarded by the same env check used by restart_services so tgbot-less
+    # deployments don't waste a pull.
+    assert 'env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"' in code
+    # The actual pull command must include --profile tgbot pull tgbot.
+    assert "--profile tgbot pull tgbot" in code, (
+        "pull_images must explicitly pull the profile=tgbot image so "
+        "restart_services doesn't reuse the cached pre-update digest"
+    )
+    # Failure is non-blocking — tgbot is auxiliary; api/worker/web matter more.
+    assert "tgbot pull 失败" in text
+
+
 def test_update_script_skips_tag_name_noop_for_rolling_channels() -> None:
     """For rolling GHCR tags, tag-name equality is not enough to noop.
 

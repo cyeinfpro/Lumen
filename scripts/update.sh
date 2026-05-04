@@ -919,6 +919,20 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
             exit 1
         fi
     fi
+    # tgbot 在 docker-compose.yml 里走 profile=tgbot，bare `docker compose pull`
+    # 会跳过它。如果 .env 启用了 telegram，单独拉一次让 tgbot 镜像也跟到目标
+    # tag 对应的 GHCR digest——否则 restart_services 阶段的
+    # `--profile tgbot up -d tgbot` 会复用本地旧 image。失败仅 warn，不阻断
+    # 业务 API 升级。
+    if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
+        if ! lumen_retry 2 5 "docker compose pull tgbot" \
+                lumen_compose_in "${NEW_RELEASE}" --profile tgbot pull tgbot; then
+            log_warn "[pull_images] tgbot pull 失败，已忽略（业务 API 不受影响）。"
+            emit_info pull_images tgbot_pull "warn_skipped"
+        else
+            emit_info pull_images tgbot_pull "ok"
+        fi
+    fi
     emit_info pull_images tag "${TARGET_TAG}"
     emit_done pull_images 0
 else
