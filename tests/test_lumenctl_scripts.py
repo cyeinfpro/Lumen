@@ -480,6 +480,44 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "npm run build" not in code
 
 
+def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
+    """Each successful update must reclaim disk that builds up over time:
+
+    - dangling layers (existed before, just renamed in v1.0.9 to take an env)
+    - **untagged unused images** — old ``:main`` digests left behind by the
+      rolling tag move, plus retired ``:v1.0.x`` versions
+    - **buildx build cache** — local build paths leave 4 GB+ around if
+      never pruned; must clean periodically
+    - old release directories (existing keep=3 logic untouched)
+
+    All four are non-blocking — a cleanup hiccup must not flip a successful
+    update to fail.
+    """
+    text = UPDATE.read_text(encoding="utf-8")
+    code = _strip_shell_comments(text)
+    # Existing dangling prune retained (with new env overlay).
+    assert "image prune -f --filter" in code
+    # Two new prune passes mandated by v1.0.9.
+    assert "image prune -a -f --filter" in code, (
+        "cleanup must prune untagged unused images so old :main digests "
+        "and retired :v1.0.x layers don't accumulate on disk"
+    )
+    assert "buildx prune -f --filter" in code, (
+        "cleanup must prune buildx build cache; it grows unbounded if "
+        "LUMEN_UPDATE_BUILD=1 ever runs (or just from compose builds)"
+    )
+    # Env overlay so operators can lengthen the buffer if they need
+    # week-long rollback windows on a particular host.
+    assert "LUMEN_CLEANUP_DANGLING_HOURS" in code
+    assert "LUMEN_CLEANUP_IMAGES_HOURS" in code
+    assert "LUMEN_CLEANUP_CACHE_HOURS" in code
+    # Each prune failure must warn-not-fail, otherwise a stale CIFS or
+    # docker daemon hiccup would mark a perfectly applied update as failed.
+    assert code.count("已忽略") >= 4
+    # Existing release directory cleanup is preserved.
+    assert 'lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-3}"' in code
+
+
 def test_update_script_pulls_tgbot_image_when_telegram_configured() -> None:
     """tgbot in docker-compose.yml lives under profile=tgbot. A bare
 
