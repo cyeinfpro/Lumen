@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Annotated, Any, Iterable
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage
 from sqlalchemy import and_, desc, or_, select
@@ -54,10 +54,16 @@ from lumen_core.schemas import (
     AccessoryPreviewCreateIn,
     AccessorySelectionIn,
     AgeSegment,
+    ApparelModelLibraryAutoTagOut,
+    ApparelModelLibraryGenerateIn,
     ApparelModelLibraryItemCreateIn,
     ApparelModelLibraryItemOut,
     ApparelModelLibraryItemPatchIn,
+    ApparelModelLibraryJobItemOut,
+    ApparelModelLibraryJobOut,
+    ApparelModelLibraryJobsOut,
     ApparelModelLibraryListOut,
+    ApparelModelLibrarySaveJobItemIn,
     ApparelModelLibrarySelectIn,
     ApparelModelLibrarySyncOut,
     ApparelModelLibrarySyncStateOut,
@@ -125,6 +131,9 @@ from app.routes._apparel_library import (  # noqa: E402, F401
     MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS,
     MODEL_LIBRARY_FOLDER_BY_AGE,
     MODEL_LIBRARY_GENDER_SEGMENTS,
+    MODEL_LIBRARY_GENERATE_COUNTS,
+    MODEL_LIBRARY_GENERATE_STEP_KEY,
+    MODEL_LIBRARY_GENERATE_WORKER_ACTION,
     MODEL_LIBRARY_IMAGE_SUFFIXES,
     MODEL_LIBRARY_MAX_BINARY_BYTES,
     MODEL_LIBRARY_SCHEMA_VERSION,
@@ -132,6 +141,7 @@ from app.routes._apparel_library import (  # noqa: E402, F401
     MODEL_LIBRARY_SYNC_COOLDOWN_SECONDS,
     MODEL_LIBRARY_SYNC_MODES,
     MODEL_LIBRARY_SYNC_RETRY_COOLDOWN_SECONDS,
+    WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
     _SYNC_LOCK,
     _age_segment_from_folder_name,
     _gender_from_folder_name,
@@ -215,6 +225,7 @@ def _showcase_prompt_brief(
             f"4. 场景：背景与衣服风格搭配，{direction}。",
             f"5. 画质：{quality_direction}，超写实商业摄影，干净高级，适合亚马逊电商主图，无文字水印。",
             f"6. 构图：全身照，{style_region}风格，姿势生动活泼有活力，{shot_direction}。",
+            "7. 单人照。",
         ]
     )
 
@@ -1584,6 +1595,7 @@ def _candidate_prompt(
         "not a three-quarter pose: only one eye visible, nose and chin in profile, shoulders, hips, knees, "
         "and feet all pointing sideways in the same direction, arms relaxed and not hiding the body outline. "
         "The back-view panel must be a straight rear view with the face not visible. "
+        "The headshot panel must be a straight frontal face, looking directly at the camera with both eyes fully visible. "
         "Use a plain seamless white or light gray studio background, soft even lighting, no scene, no props, "
         "no furniture, no text labels, and no panel captions. "
         "Use the same synthetic model in every view, keeping face, hairstyle, body proportion, "
@@ -1722,7 +1734,8 @@ def _quality_review_prompt(
         "1. 是否还是同一件商品，颜色、版型和关键细节是否保留；"
         "2. 模特人脸、发型、身材比例和年龄感是否接近确认方案；"
         "3. 手、脚、脸、衣服边缘、背景是否有明显瑕疵；"
-        "4. 是否适合作为电商主图使用。"
+        "4. 是否适合作为电商主图使用；"
+        "5. 是否单人照，多人出现要 revise。"
         "只返回严格 JSON，字段：overall_score, product_fidelity_score, model_consistency_score, "
         "aesthetic_score, artifact_score, issues, recommendation。分数 0-100，recommendation 只能是 approve 或 revise。"
         f"必须保留：{preserve}。镜头类型：{shot_type or 'unknown'}。"
@@ -2941,6 +2954,7 @@ async def create_apparel_model_library_item(
     body: ApparelModelLibraryItemCreateIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
 ) -> ApparelModelLibraryItemOut:
     item = await _add_user_library_item(
         db,
@@ -2954,6 +2968,9 @@ async def create_apparel_model_library_item(
         style_tags=body.style_tags,
     )
     await db.commit()
+    item_id = str(item.get("id") or "")
+    if body.auto_tag and item_id:
+        background_tasks.add_task(_run_auto_tag_in_background, user.id, item_id)
     return _model_library_item_out(item)
 
 
@@ -3037,6 +3054,13 @@ async def list_workflows(
     )
     if type:
         stmt = stmt.where(WorkflowRun.type == type)
+    else:
+        # ProjectsIndex 默认隐藏"模特库独立生成" workflow——它是后台任务实体，
+        # 不是用户感知的"项目"。调用方明确传 type=apparel_model_library_generate
+        # 才会返回。
+        stmt = stmt.where(
+            WorkflowRun.type != WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE
+        )
     runs = list(
         (
             await db.execute(
@@ -3380,6 +3404,7 @@ async def save_model_candidate_to_library(
     body: ModelCandidateSaveToLibraryIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
 ) -> ApparelModelLibraryItemOut:
     run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
     await _sync_workflow_outputs(db, run)
@@ -3421,6 +3446,11 @@ async def save_model_candidate_to_library(
     brief["saved_library_item_ids"] = saved_ids
     candidate.model_brief_json = brief
     await db.commit()
+    # 项目流程里收藏到模特库：用户已经在标注里填了字段，但仍后台触发一次 vision
+    # 校正/补全（appearance_direction / style_tags 默认空时常见）。
+    item_id = str(item.get("id") or "")
+    if item_id:
+        background_tasks.add_task(_run_auto_tag_in_background, user.id, item_id)
     return _model_library_item_out(item)
 
 
@@ -3916,3 +3946,1031 @@ async def complete_delivery(
     out = await _build_run_out(db, run)
     await db.commit()
     return out
+
+
+# ---------------------------------------------------------------------------
+# 模特库独立生成 + 任务中心聚合 + vision 自动打标签
+#
+# 设计要点：
+# 1. 每次"生成 N 张模特"请求 = 一条隐藏的 WorkflowRun(type=
+#    apparel_model_library_generate) + 1 个 step(step_key=
+#    model_library_generate) + N 个 worker generation task。每张产出一张独立
+#    模特肖像；不创建 ModelCandidate（不和项目里的"候选 4 视图"逻辑混淆）。
+# 2. 任务中心同时聚合两类来源：模特库独立生成 + 项目里的 model_candidates
+#    step（origin 字段区分）。
+# 3. 自动打标签走 worker tasks/model_library_tagging.py 调 vision provider；
+#    解析失败 graceful，不影响主流程。
+# ---------------------------------------------------------------------------
+
+
+_MODEL_LIBRARY_TITLE_AGE_LABELS: dict[str, str] = {
+    "user_favorites": "收藏",
+    "toddler": "幼儿",
+    "child": "儿童",
+    "teen": "青少年",
+    "young_adult": "青年",
+    "adult": "成年",
+    "middle_aged": "中老年",
+    "senior": "老年",
+}
+
+
+def _model_library_run_title(
+    *,
+    age_segment: str,
+    gender: str,
+    appearance_direction: str | None,
+) -> str:
+    age_label = _MODEL_LIBRARY_TITLE_AGE_LABELS.get(age_segment, age_segment)
+    gender_label = "女性" if gender == "female" else "男性"
+    appearance = (appearance_direction or "").strip()
+    parts = [f"{age_label}{gender_label}"]
+    if appearance:
+        parts.append(appearance[:24])
+    title = " · ".join(["模特库生成", *parts])
+    return title[:120]
+
+
+def _model_library_generate_prompt(
+    *,
+    age_segment: str,
+    gender: str,
+    appearance_direction: str | None,
+    extra_requirements: str | None,
+    style_tags: list[str],
+    candidate_index: int,
+) -> str:
+    """构造一张 2x2 contact sheet 模特参考图的 prompt。
+
+    与项目流程 _candidate_prompt 同样格式（4 视图：正面 / 左侧面 / 背面 / 大头照），
+    这样库里的条目可以直接被 select_apparel_model_library_item 顶替项目候选使用。
+    每次按 count 并行生成 N 张独立模特的 contact sheet，candidate_index 用来引导差异化。
+    """
+    age_label = _MODEL_LIBRARY_TITLE_AGE_LABELS.get(age_segment, "")
+    _ = age_label
+    gender_label = "female" if gender == "female" else "male"
+    appearance = (appearance_direction or "").strip()
+    extras = (extra_requirements or "").strip()
+    tag_text = ", ".join(_clean_style_tags(style_tags)) if style_tags else ""
+    age_directive = ""
+    if age_segment == "toddler":
+        age_directive = "around 2-3 years old toddler proportions"
+    elif age_segment == "child":
+        age_directive = "around 8-10 years old child proportions"
+    elif age_segment == "teen":
+        age_directive = "around 14-17 years old teen proportions"
+    elif age_segment == "young_adult":
+        age_directive = "around 20-28 years old young adult proportions"
+    elif age_segment == "adult":
+        age_directive = "around 30-40 years old adult proportions"
+    elif age_segment == "middle_aged":
+        age_directive = "around 45-55 years old middle aged proportions"
+    elif age_segment == "senior":
+        age_directive = "around 65-75 years old senior proportions"
+    base_styling = "uniform warm ivory sleeveless top and warm ivory shorts, barefoot"
+    appearance_directive = (
+        f"Appearance direction: {appearance}." if appearance else ""
+    )
+    style_directive = f"Style references: {tag_text}." if tag_text else ""
+    extras_directive = f"User notes: {extras}." if extras else ""
+    return " ".join(
+        part
+        for part in [
+            "Create one clean 2x2 ecommerce model reference contact sheet with exactly four panels in this order: "
+            "top-left front full body, top-right left 90-degree profile full body, "
+            "bottom-left straight back full body, bottom-right close-up headshot.",
+            "Each panel should have a clear crop and consistent framing, with the three full-body views "
+            "shot from the same camera height and distance.",
+            "The side-view panel must be a true left profile, not a three-quarter pose: only one eye visible, "
+            "nose and chin in profile, shoulders, hips, knees, and feet all pointing sideways in the same direction, "
+            "arms relaxed and not hiding the body outline.",
+            "The back-view panel must be a straight rear view with the face not visible.",
+            "The headshot panel must be a straight frontal face, looking directly at the camera with both eyes fully visible.",
+            "Use a plain seamless white or light gray studio background, soft even lighting, no scene, no props, "
+            "no furniture, no text labels, and no panel captions.",
+            "Use the same synthetic model in every view, keeping face, hairstyle, body proportion, "
+            "skin tone, age impression, limb length, posture language, and lighting consistent.",
+            "Make the model look like a real commercially photographed person rather than an AI beauty render: "
+            "natural facial asymmetry, individual facial structure, believable skin texture, normal pores, "
+            "subtle expression, realistic hairline, and ordinary human proportions.",
+            "Avoid generic influencer face, plastic skin, doll-like eyes, over-smoothed beauty retouching, "
+            "exaggerated symmetry, and runway glamour.",
+            f"Use simple neutral base clothing: {base_styling}. Do not add any product-specific garment details.",
+            "No text labels, no height labels, no watermark, no logo, no celebrity or real-person likeness.",
+            f"Gender: {gender_label}. {age_directive}".strip(),
+            appearance_directive,
+            style_directive,
+            extras_directive,
+            f"Variation index: {candidate_index}.",
+        ]
+        if part
+    ).strip()
+
+
+def _model_library_generate_image_params() -> ImageParamsIn:
+    """模特库独立生成 2x2 contact sheet：4:5 跟项目候选一致，PNG 高质量。"""
+    params = _image_params(aspect_ratio="4:5", count=1, render_quality="high")
+    return params.model_copy(update={"output_format": "png", "output_compression": None})
+
+
+def _model_library_run_inputs(step: WorkflowStep) -> dict[str, Any]:
+    """从 step.input_json 拿生成请求快照（age_segment / gender 等）。"""
+    raw = step.input_json if isinstance(step.input_json, dict) else {}
+    return {
+        "age_segment": _normalize_age_segment(raw.get("age_segment")),
+        "gender": _normalize_model_gender(raw.get("gender")),
+        "appearance_direction": _clean_optional_text(
+            raw.get("appearance_direction"), max_len=80
+        ),
+        "extra_requirements": _clean_optional_text(
+            raw.get("extra_requirements"), max_len=400
+        ),
+        "style_tags": _clean_style_tags(raw.get("style_tags") or []),
+        "auto_tag": bool(raw.get("auto_tag", True)),
+        "count": int(raw.get("count") or 0) or len(step.task_ids or []),
+    }
+
+
+def _saved_image_id_set(user_id: str) -> dict[str, str]:
+    """{ image_id -> library_item_id } map: 看哪些图已经收藏到当前用户的库。"""
+    index = _load_user_library_index(user_id)
+    out: dict[str, str] = {}
+    for item in index.get("items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        image_id = str(item.get("image_id") or "").strip()
+        if not image_id:
+            continue
+        item_id = str(item.get("id") or "").strip()
+        if item_id:
+            out.setdefault(image_id, item_id)
+    return out
+
+
+def _model_library_job_status(
+    *,
+    step_status: str,
+    requested_count: int,
+    finished_count: int,
+) -> str:
+    """从 step.status + 张数推导 job 聚合 status。"""
+    if step_status == "failed":
+        return "partial" if finished_count > 0 else "failed"
+    if step_status in {"approved", "completed", "needs_review", "succeeded"}:
+        if requested_count > 0 and finished_count >= requested_count:
+            return "succeeded"
+        if finished_count > 0:
+            return "partial"
+        return "succeeded" if step_status == "succeeded" else "failed"
+    if step_status == "running":
+        return "running"
+    return "queued"
+
+
+async def _gather_job_image_outs(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    image_ids: list[str],
+) -> dict[str, ImageOut]:
+    if not image_ids:
+        return {}
+    images = list(
+        (
+            await db.execute(
+                select(Image)
+                .where(
+                    Image.id.in_(image_ids),
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+    )
+    return await _image_out_map(db, images)
+
+
+def _job_item_out(
+    *,
+    image_id: str,
+    image_out: ImageOut | None,
+    saved_item_id: str | None,
+    style_tags: list[str],
+    appearance_direction: str | None,
+) -> ApparelModelLibraryJobItemOut:
+    if image_out is not None:
+        image_url = image_out.url
+        thumb_url = image_out.thumb_url
+    else:
+        image_url = _image_url(image_id)
+        thumb_url = None
+    return ApparelModelLibraryJobItemOut(
+        image_id=image_id,
+        image_url=image_url,
+        thumb_url=thumb_url,
+        saved_item_id=saved_item_id,
+        style_tags=_clean_style_tags(style_tags),
+        appearance_direction=_clean_optional_text(appearance_direction, max_len=80),
+    )
+
+
+async def _job_from_library_run(
+    db: AsyncSession,
+    *,
+    run: WorkflowRun,
+    saved_map: dict[str, str],
+) -> ApparelModelLibraryJobOut:
+    step = (
+        await db.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run.id,
+                WorkflowStep.step_key == MODEL_LIBRARY_GENERATE_STEP_KEY,
+            )
+        )
+    ).scalar_one_or_none()
+    inputs: dict[str, Any] = {}
+    image_ids: list[str] = []
+    requested = 0
+    step_status = "queued"
+    if step is not None:
+        inputs = _model_library_run_inputs(step)
+        image_ids = [iid for iid in (step.image_ids or []) if isinstance(iid, str)]
+        requested = max(
+            inputs.get("count") or 0,
+            len(step.task_ids or []),
+            len(image_ids),
+        )
+        step_status = step.status
+    finished = len(image_ids)
+    image_out_map = await _gather_job_image_outs(
+        db, user_id=run.user_id, image_ids=image_ids
+    )
+    tagging_results = (step.output_json or {}).get("tagging_results") if step else None
+    tagging_map: dict[str, dict[str, Any]] = (
+        tagging_results if isinstance(tagging_results, dict) else {}
+    )
+    items = [
+        _job_item_out(
+            image_id=iid,
+            image_out=image_out_map.get(iid),
+            saved_item_id=saved_map.get(iid),
+            style_tags=(tagging_map.get(iid) or {}).get("style_tags") or [],
+            appearance_direction=(tagging_map.get(iid) or {}).get(
+                "appearance_direction"
+            ),
+        )
+        for iid in image_ids
+    ]
+    error_message = None
+    if step is not None and step.status == "failed":
+        out_json = step.output_json if isinstance(step.output_json, dict) else {}
+        error_message = _clean_optional_text(out_json.get("error_message"), max_len=400)
+    job_status = _model_library_job_status(
+        step_status=step_status,
+        requested_count=requested,
+        finished_count=finished,
+    )
+    return ApparelModelLibraryJobOut(
+        job_id=run.id,
+        origin="library_generate",
+        workflow_run_id=run.id,
+        project_title=None,
+        status=job_status,  # type: ignore[arg-type]
+        requested_count=requested,
+        finished_count=finished,
+        age_segment=inputs.get("age_segment"),
+        gender=inputs.get("gender"),
+        appearance_direction=inputs.get("appearance_direction"),
+        extra_requirements=inputs.get("extra_requirements"),
+        items=items,
+        error_message=error_message,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+async def _job_from_project_candidate_step(
+    db: AsyncSession,
+    *,
+    run: WorkflowRun,
+    step: WorkflowStep,
+    saved_map: dict[str, str],
+) -> ApparelModelLibraryJobOut:
+    image_ids = [iid for iid in (step.image_ids or []) if isinstance(iid, str)]
+    requested_count = MODEL_CANDIDATE_COUNT
+    raw_input = step.input_json if isinstance(step.input_json, dict) else {}
+    candidate_count = raw_input.get("candidate_count")
+    if isinstance(candidate_count, int) and candidate_count > 0:
+        requested_count = candidate_count
+    image_out_map = await _gather_job_image_outs(
+        db, user_id=run.user_id, image_ids=image_ids
+    )
+    items = [
+        _job_item_out(
+            image_id=iid,
+            image_out=image_out_map.get(iid),
+            saved_item_id=saved_map.get(iid),
+            style_tags=[],
+            appearance_direction=None,
+        )
+        for iid in image_ids
+    ]
+    job_status = _model_library_job_status(
+        step_status=step.status,
+        requested_count=requested_count,
+        finished_count=len(image_ids),
+    )
+    profile = (run.metadata_jsonb or {}).get("model_profile") or {}
+    age_segment = (
+        _normalize_age_segment(profile.get("age_segment"))
+        if isinstance(profile, dict)
+        else None
+    )
+    return ApparelModelLibraryJobOut(
+        job_id=f"{run.id}:model_candidates",
+        origin="project_candidate",
+        workflow_run_id=run.id,
+        project_title=run.title,
+        status=job_status,  # type: ignore[arg-type]
+        requested_count=requested_count,
+        finished_count=len(image_ids),
+        age_segment=age_segment,
+        gender=profile.get("gender") if isinstance(profile, dict) else None,
+        appearance_direction=(
+            profile.get("appearance_direction")
+            if isinstance(profile, dict)
+            else None
+        ),
+        extra_requirements=None,
+        items=items,
+        error_message=None,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+async def _enqueue_model_library_generate_tasks(
+    *,
+    db: AsyncSession,
+    user: User,
+    conv: Conversation,
+    run: WorkflowRun,
+    step: WorkflowStep,
+    body: ApparelModelLibraryGenerateIn,
+) -> tuple[list[_PublishBundle], list[str]]:
+    bundles: list[_PublishBundle] = []
+    task_ids: list[str] = []
+    for idx in range(1, int(body.count) + 1):
+        prompt = _model_library_generate_prompt(
+            age_segment=body.age_segment,
+            gender=body.gender,
+            appearance_direction=body.appearance_direction,
+            extra_requirements=body.extra_requirements,
+            style_tags=body.style_tags,
+            candidate_index=idx,
+        )
+        bundle, _, gen_ids = await _create_workflow_task(
+            db=db,
+            user=user,
+            conv=conv,
+            intent=Intent.TEXT_TO_IMAGE,
+            text=prompt,
+            attachment_ids=[],
+            idempotency_key=f"mlib:{run.id[:24]}:{idx}",
+            workflow_run_id=run.id,
+            workflow_step_key=MODEL_LIBRARY_GENERATE_STEP_KEY,
+            image_params=_model_library_generate_image_params(),
+            workflow_meta={
+                "workflow_action": MODEL_LIBRARY_GENERATE_WORKER_ACTION,
+                "workflow_candidate_index": idx,
+                "workflow_model_library_age_segment": body.age_segment,
+                "workflow_model_library_gender": body.gender,
+                "workflow_model_library_appearance_direction": (
+                    body.appearance_direction or ""
+                ),
+                "workflow_model_library_auto_tag": bool(body.auto_tag),
+            },
+        )
+        task_ids.extend(gen_ids)
+        bundles.append(bundle)
+    step.task_ids = task_ids
+    return bundles, task_ids
+
+
+@router.post(
+    "/apparel-model-library/generate",
+    response_model=ApparelModelLibraryJobOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def generate_apparel_model_library_job(
+    body: ApparelModelLibraryGenerateIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApparelModelLibraryJobOut:
+    """模特库独立生成入口。
+
+    创建一条隐藏 WorkflowRun + 一个 step + N 个 worker generation task。
+    返回一个 Job 视图（status=queued/running，items=空，前端再轮询 GET /jobs）。
+    """
+    if int(body.count) not in MODEL_LIBRARY_GENERATE_COUNTS:
+        raise _http(
+            "invalid_count",
+            f"count must be one of {sorted(MODEL_LIBRARY_GENERATE_COUNTS)}",
+            422,
+        )
+    title = _model_library_run_title(
+        age_segment=body.age_segment,
+        gender=body.gender,
+        appearance_direction=body.appearance_direction,
+    )
+    conv = await _get_or_create_workflow_conversation(
+        db,
+        user=user,
+        conversation_id=None,
+        title=title,
+    )
+    conv.title = title
+    conv.archived = True
+    run = WorkflowRun(
+        conversation_id=conv.id,
+        user_id=user.id,
+        type=WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
+        status="running",
+        title=title,
+        user_prompt=body.extra_requirements or "",
+        product_image_ids=[],
+        current_step=MODEL_LIBRARY_GENERATE_STEP_KEY,
+        quality_mode="standard",
+        metadata_jsonb={
+            "template": "apparel_model_library_generate",
+            "model_profile": {
+                "age_segment": body.age_segment,
+                "gender": body.gender,
+                "appearance_direction": body.appearance_direction,
+            },
+        },
+    )
+    db.add(run)
+    await db.flush()
+    step = WorkflowStep(
+        workflow_run_id=run.id,
+        step_key=MODEL_LIBRARY_GENERATE_STEP_KEY,
+        status="running",
+        input_json={
+            "age_segment": body.age_segment,
+            "gender": body.gender,
+            "appearance_direction": body.appearance_direction,
+            "extra_requirements": body.extra_requirements,
+            "style_tags": _clean_style_tags(body.style_tags),
+            "count": int(body.count),
+            "auto_tag": bool(body.auto_tag),
+        },
+        output_json={},
+    )
+    db.add(step)
+    await db.flush()
+    bundles, _ = await _enqueue_model_library_generate_tasks(
+        db=db,
+        user=user,
+        conv=conv,
+        run=run,
+        step=step,
+        body=body,
+    )
+    conv.last_activity_at = _now()
+    await db.commit()
+    await _publish_bundles(db, user_id=user.id, conv_id=conv.id, bundles=bundles)
+    saved_map = _saved_image_id_set(user.id)
+    run = await _get_run(db, user_id=user.id, run_id=run.id)
+    job = await _job_from_library_run(db, run=run, saved_map=saved_map)
+    await db.commit()
+    return job
+
+
+@router.get(
+    "/apparel-model-library/jobs",
+    response_model=ApparelModelLibraryJobsOut,
+)
+async def list_apparel_model_library_jobs(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=50, ge=1, le=100),
+) -> ApparelModelLibraryJobsOut:
+    """聚合任务中心：模特库独立生成 + 项目候选 step。"""
+    saved_map = _saved_image_id_set(user.id)
+    library_runs = list(
+        (
+            await db.execute(
+                select(WorkflowRun)
+                .where(
+                    WorkflowRun.user_id == user.id,
+                    WorkflowRun.deleted_at.is_(None),
+                    WorkflowRun.type == WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
+                )
+                .order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id))
+                .limit(limit)
+            )
+        ).scalars().all()
+    )
+    library_jobs: list[ApparelModelLibraryJobOut] = []
+    for run in library_runs:
+        library_jobs.append(
+            await _job_from_library_run(db, run=run, saved_map=saved_map)
+        )
+
+    project_runs = list(
+        (
+            await db.execute(
+                select(WorkflowRun)
+                .where(
+                    WorkflowRun.user_id == user.id,
+                    WorkflowRun.deleted_at.is_(None),
+                    WorkflowRun.type == WORKFLOW_TYPE,
+                )
+                .order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id))
+                .limit(limit)
+            )
+        ).scalars().all()
+    )
+    project_jobs: list[ApparelModelLibraryJobOut] = []
+    if project_runs:
+        run_ids = [run.id for run in project_runs]
+        run_index = {run.id: run for run in project_runs}
+        candidate_steps = list(
+            (
+                await db.execute(
+                    select(WorkflowStep).where(
+                        WorkflowStep.workflow_run_id.in_(run_ids),
+                        WorkflowStep.step_key == "model_candidates",
+                        WorkflowStep.status.in_(
+                            [
+                                "queued",
+                                "running",
+                                "succeeded",
+                                "failed",
+                                "needs_review",
+                                "approved",
+                                "completed",
+                            ]
+                        ),
+                    )
+                )
+            ).scalars().all()
+        )
+        for step in candidate_steps:
+            run_obj = run_index.get(step.workflow_run_id)
+            if run_obj is None:
+                continue
+            project_jobs.append(
+                await _job_from_project_candidate_step(
+                    db, run=run_obj, step=step, saved_map=saved_map
+                )
+            )
+
+    merged = sorted(
+        [*library_jobs, *project_jobs],
+        key=lambda job: job.updated_at or job.created_at,
+        reverse=True,
+    )
+    return ApparelModelLibraryJobsOut(items=merged[:limit])
+
+
+@router.post(
+    "/apparel-model-library/jobs/{workflow_run_id}/items/{image_id}/save",
+    response_model=ApparelModelLibraryItemOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def save_apparel_model_library_job_item(
+    workflow_run_id: str,
+    image_id: str,
+    body: ApparelModelLibrarySaveJobItemIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
+) -> ApparelModelLibraryItemOut:
+    """从任务中心把一张产出图收藏到模特库。
+
+    校验：workflow 属于当前用户；image_id 是该 workflow 任一 step 的产出。
+    若 auto_tag=True，触发后台 vision 识别（不阻塞响应）。
+    """
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id)
+    if run.type not in {WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE, WORKFLOW_TYPE}:
+        raise _http(
+            "invalid_workflow_type",
+            "workflow type does not produce model images",
+            400,
+        )
+    steps = await _load_steps(db, run.id)
+    produced: set[str] = set()
+    for step in steps:
+        for iid in step.image_ids or []:
+            if isinstance(iid, str):
+                produced.add(iid)
+    # 若 step.image_ids 还没刷出来（worker 还没回写），允许 image 通过 owner_generation_id
+    # 反向找：只要属于该 run 的 task_id 即可。
+    if image_id not in produced:
+        all_task_ids: list[str] = []
+        for step in steps:
+            all_task_ids.extend(step.task_ids or [])
+        if all_task_ids:
+            owned = (
+                await db.execute(
+                    select(Image.id).where(
+                        Image.id == image_id,
+                        Image.user_id == user.id,
+                        Image.owner_generation_id.in_(all_task_ids),
+                        Image.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if owned is not None:
+                produced.add(image_id)
+    if image_id not in produced:
+        raise _http("invalid_image", "image is not a product of this workflow", 404)
+
+    item = await _add_user_library_item(
+        db,
+        user_id=user.id,
+        source="generated",
+        image_id=image_id,
+        title=body.title,
+        age_segment=body.age_segment,
+        gender=body.gender,
+        appearance_direction=body.appearance_direction,
+        style_tags=body.style_tags,
+    )
+    await db.commit()
+    item_id = str(item.get("id") or "")
+    if body.auto_tag and item_id:
+        # BackgroundTasks 在响应发出后再跑，避免阻塞用户。失败 graceful。
+        background_tasks.add_task(_run_auto_tag_in_background, user.id, item_id)
+    return _model_library_item_out(item)
+
+
+def _merge_library_item_fields(
+    *,
+    existing: dict[str, Any],
+    style_tags: list[str],
+    appearance_direction: str | None,
+    age_segment: str | None,
+    gender: str | None,
+    notes: str | None,
+) -> dict[str, Any]:
+    """vision 回写策略：style_tags 覆盖（用户在收藏时不一定填），
+    其他字段仅当 existing 里为空才填（保守不覆盖用户的手动值）。"""
+    item = dict(existing)
+    if style_tags:
+        item["style_tags"] = style_tags
+    if appearance_direction and not _clean_optional_text(
+        item.get("appearance_direction"), max_len=80
+    ):
+        item["appearance_direction"] = appearance_direction
+    if age_segment:
+        existing_age = _normalize_age_segment(item.get("age_segment"))
+        if existing_age == "user_favorites":
+            item["age_segment"] = age_segment
+            item["library_folder"] = _model_library_folder_for_age(
+                age_segment, item.get("gender")
+            )
+    if gender:
+        existing_gender = _clean_optional_text(item.get("gender"), max_len=40)
+        if not existing_gender:
+            item["gender"] = gender
+            item["library_folder"] = _model_library_folder_for_age(
+                _normalize_age_segment(item.get("age_segment")), gender
+            )
+    if notes:
+        item["auto_tag_notes"] = notes
+    item["auto_tagged_at"] = _iso_now()
+    item["updated_at"] = _iso_now()
+    return item
+
+
+async def _api_call_tagging_upstream(
+    db: AsyncSession,
+    *,
+    image_id: str,
+    user_id: str,
+) -> dict[str, Any]:
+    """API 进程内同步调 vision provider 做模特库自动打标签。
+
+    [DECISION] worker 进程和 api 进程的 sys.path 隔离（docker-compose
+    `working_dir` 不同），api 不能直接 import apps.worker.* 的模块。
+    这里把"读图字节 + provider failover + httpx + JSON 解析"的精简版搬过来，
+    避免再加一个共享 package。失败 graceful，返回 {} 让调用方留默认空字段。
+    """
+    import base64
+
+    from lumen_core.providers import (
+        DEFAULT_LEGACY_PROVIDER_BASE_URL,
+        build_effective_provider_config,
+        endpoint_kind_allowed,
+        resolve_provider_proxy_url,
+        weighted_priority_order,
+    )
+    from lumen_core.runtime_settings import get_spec
+
+    from ..runtime_settings import get_setting
+
+    image = (
+        await db.execute(
+            select(Image).where(
+                Image.id == image_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if image is None:
+        return {}
+    storage_key = (image.storage_key or "").strip()
+    if not storage_key:
+        return {}
+    try:
+        path = _storage_path(storage_key)
+        raw = path.read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "model_library auto_tag api: read image failed key=%s err=%s",
+            storage_key,
+            exc,
+        )
+        return {}
+    if not raw:
+        return {}
+    mime = image.mime if isinstance(image.mime, str) and image.mime.startswith("image/") else "image/png"
+    image_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    spec_providers = get_spec("providers")
+    raw_providers = (
+        await get_setting(db, spec_providers) if spec_providers else None
+    )
+    providers, _proxies, _errors = build_effective_provider_config(
+        raw_providers=raw_providers,
+        legacy_base_url=(
+            os.environ.get("UPSTREAM_BASE_URL") or DEFAULT_LEGACY_PROVIDER_BASE_URL
+        ),
+        legacy_api_key=os.environ.get("UPSTREAM_API_KEY"),
+    )
+    providers = [p for p in providers if endpoint_kind_allowed(p, "responses")]
+    counters: dict[int, int] = {}
+    ordered = weighted_priority_order(providers, counters)
+    if not ordered:
+        return {}
+
+    instructions = (
+        "你是模特库自动打标签助手。请仔细分析这张人像/全身模特图，识别画面中模特的：\n"
+        "- appearance_direction: 用 1-2 个英文小写词表达外貌方向，例如 european / asian / "
+        "latin / middle_eastern / african（或其他更准确的描述），不能确定填空字符串。\n"
+        "- style_tags: 用 2-6 个中文/英文短词列出风格、氛围、服装类型等关键词，例如 minimal、studio、"
+        "高级感、街拍、自然光，去除冗余说明。\n"
+        "- age_segment: 必须是 toddler / child / teen / young_adult / adult / middle_aged / senior 之一。\n"
+        "- gender: 必须是 female 或 male 之一。\n"
+        "- notes: 用不超过 60 字的中文一句话备注，可选。\n\n"
+        "只输出一个合法 JSON 对象，不要 Markdown / 代码块 / 解释文字。字段必须用上述英文名。"
+    )
+    body = {
+        "model": "gpt-5.4-mini",
+        "instructions": instructions,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": instructions},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }
+        ],
+        "metadata": {"image_id": image_id, "purpose": "model_library_tagging"},
+        "stream": False,
+        "store": False,
+        "max_output_tokens": 600,
+    }
+    last_err: str | None = None
+    for provider in ordered:
+        try:
+            proxy_url = await resolve_provider_proxy_url(provider.proxy)
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10.0, read=25.0, write=25.0, pool=10.0),
+                proxy=proxy_url,
+            ) as client:
+                resp = await client.post(
+                    f"{provider.base_url.rstrip('/')}/v1/responses"
+                    if not provider.base_url.rstrip("/").endswith("/v1")
+                    else f"{provider.base_url.rstrip('/')}/responses",
+                    json=body,
+                    headers={
+                        "authorization": f"Bearer {provider.api_key}",
+                        "content-type": "application/json",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            last_err = f"network: {exc}"
+            continue
+        if resp.status_code >= 400:
+            last_err = f"http {resp.status_code}"
+            # 4xx 鉴权 / 模型不支持等：换号；5xx：换号
+            continue
+        try:
+            payload = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            last_err = "bad_json"
+            continue
+        text_chunks: list[str] = []
+        output = payload.get("output") if isinstance(payload, dict) else None
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    t = part.get("text") or part.get("output_text")
+                    if isinstance(t, str) and t:
+                        text_chunks.append(t)
+        ot = payload.get("output_text") if isinstance(payload, dict) else None
+        if isinstance(ot, str) and ot:
+            text_chunks.append(ot)
+        text = "".join(text_chunks).strip()
+        return _parse_tagging_text(text)
+    if last_err is not None:
+        logger.info("model_library auto_tag api: all providers failed err=%s", last_err)
+    return {}
+
+
+def _parse_tagging_text(text: str) -> dict[str, Any]:
+    if not text:
+        return {}
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        nl = cleaned.find("\n")
+        if nl != -1:
+            cleaned = cleaned[nl + 1 :]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+    payload: Any = None
+    try:
+        payload = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        if match:
+            try:
+                payload = json.loads(match.group(0))
+            except (json.JSONDecodeError, ValueError):
+                payload = None
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+_AGE_ALIASES_API: dict[str, str] = {
+    "young": "young_adult",
+    "youngadult": "young_adult",
+    "young-adult": "young_adult",
+    "kid": "child",
+    "kids": "child",
+    "baby": "toddler",
+    "elder": "senior",
+    "elderly": "senior",
+    "old": "senior",
+    "middleaged": "middle_aged",
+    "middle-aged": "middle_aged",
+    "teenager": "teen",
+}
+
+
+def _normalize_tagged_age(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    key = value.strip().lower().replace(" ", "_")
+    if key in MODEL_LIBRARY_AGE_SEGMENTS and key != "all":
+        return key
+    aliased = _AGE_ALIASES_API.get(key.replace("_", "")) or _AGE_ALIASES_API.get(key)
+    return aliased
+
+
+def _normalize_tagged_gender(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    aliases = {
+        "female": "female",
+        "woman": "female",
+        "girl": "female",
+        "f": "female",
+        "male": "male",
+        "man": "male",
+        "boy": "male",
+        "m": "male",
+    }
+    return aliases.get(value.strip().lower())
+
+
+async def _auto_tag_library_item(
+    *,
+    db: AsyncSession,
+    user_id: str,
+    item_id: str,
+) -> ApparelModelLibraryAutoTagOut:
+    """对 user library index 里某个 item 调 vision tagging 并写回结果。
+
+    既被 POST /items/{id}/auto-tag 同步调用，也被收藏后台任务调用。
+    """
+    index = _load_user_library_index(user_id)
+    items = [
+        dict(item) for item in (index.get("items") or []) if isinstance(item, dict)
+    ]
+    target_idx = next(
+        (
+            idx
+            for idx, item in enumerate(items)
+            if str(item.get("id") or "") == item_id
+        ),
+        None,
+    )
+    if target_idx is None:
+        raise _http("not_found", "model library item not found", 404)
+    image_id = str(items[target_idx].get("image_id") or "").strip()
+    if not image_id:
+        raise _http("invalid_item", "library item has no backing image", 422)
+    raw_payload = await _api_call_tagging_upstream(
+        db, image_id=image_id, user_id=user_id
+    )
+    raw_tags_value = (
+        raw_payload.get("style_tags")
+        or raw_payload.get("tags")
+        or raw_payload.get("styleTags")
+        or []
+    )
+    if isinstance(raw_tags_value, str):
+        raw_tags_iterable: list[str] = [raw_tags_value]
+    elif isinstance(raw_tags_value, list):
+        raw_tags_iterable = [str(t) for t in raw_tags_value if isinstance(t, (str, int, float))]
+    else:
+        raw_tags_iterable = []
+    style_tags = _clean_style_tags(raw_tags_iterable)
+    appearance_direction = _clean_optional_text(
+        raw_payload.get("appearance_direction")
+        or raw_payload.get("appearanceDirection"),
+        max_len=80,
+    )
+    age_segment = _normalize_tagged_age(
+        raw_payload.get("age_segment") or raw_payload.get("ageSegment")
+    )
+    gender = _normalize_tagged_gender(raw_payload.get("gender"))
+    notes = _clean_optional_text(raw_payload.get("notes"), max_len=200)
+    items[target_idx] = _merge_library_item_fields(
+        existing=items[target_idx],
+        style_tags=style_tags,
+        appearance_direction=appearance_direction,
+        age_segment=age_segment,
+        gender=gender,
+        notes=notes,
+    )
+    index["items"] = items
+    _save_user_library_index(user_id, index)
+    return ApparelModelLibraryAutoTagOut(
+        item_id=item_id,
+        style_tags=style_tags,
+        appearance_direction=appearance_direction,
+        age_segment=age_segment,  # type: ignore[arg-type]
+        gender=gender,
+        notes=notes,
+    )
+
+
+async def _run_auto_tag_in_background(user_id: str, item_id: str) -> None:
+    """后台触发 vision tagging 并把结果写回 user library index json。"""
+    try:
+        from app.db import SessionLocal as _Session
+
+        async with _Session() as session:
+            await _auto_tag_library_item(
+                db=session,
+                user_id=user_id,
+                item_id=item_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "model_library auto_tag background failed user=%s item=%s err=%s",
+            user_id,
+            item_id,
+            exc,
+        )
+
+
+@router.post(
+    "/apparel-model-library/items/{item_id:path}/auto-tag",
+    response_model=ApparelModelLibraryAutoTagOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def auto_tag_apparel_model_library_item(
+    item_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApparelModelLibraryAutoTagOut:
+    """同步触发 vision 自动识别，并把结果写回 library index。"""
+    return await _auto_tag_library_item(db=db, user_id=user.id, item_id=item_id)

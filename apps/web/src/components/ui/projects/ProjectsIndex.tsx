@@ -15,6 +15,7 @@ import {
   Clock3,
   FolderKanban,
   Image as ImageIcon,
+  Library,
   MoreVertical,
   Pencil,
   Plus,
@@ -23,6 +24,7 @@ import {
   Shirt,
   Sparkles,
   Trash2,
+  WandSparkles,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -163,11 +165,53 @@ export function ProjectsIndex() {
             <ProjectsGrid items={filtered} />
           )}
 
-          <TemplateBand compact />
+          <ResourceBand />
         </div>
       </main>
       <ProjectMobileTabBar />
     </div>
+  );
+}
+
+// 项目首页底部把"模特库"和"模板"并排展示。
+// 模特库入口跳到 /projects/library；模板维持原 /projects/apparel-model-showcase/new。
+function ResourceBand() {
+  return (
+    <section className="grid gap-3 md:grid-cols-2">
+      <ModelLibraryEntry />
+      <TemplateBand compact />
+    </section>
+  );
+}
+
+function ModelLibraryEntry() {
+  return (
+    <Link
+      href="/projects/library"
+      className="group grid gap-3 rounded-xl border border-[var(--border)] bg-white/[0.032] p-4 transition-[background-color,border-color,box-shadow] hover:border-[var(--border-strong)] hover:bg-white/[0.05] hover:shadow-[var(--shadow-2)] md:grid-cols-[1fr_auto] md:items-center md:rounded-md"
+    >
+      <div className="flex min-w-0 gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--amber-300)] md:rounded-md">
+          <Library className="h-5 w-5" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base font-medium text-[var(--fg-0)]">模特库</h2>
+            <span className="inline-flex items-center gap-1 rounded-full border border-[var(--border-amber)] bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] text-[var(--amber-300)]">
+              <WandSparkles className="h-3 w-3" />
+              生成 + 任务中心
+            </span>
+          </div>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
+            浏览预设 / 收藏 / 生成的模特，独立新建模特，查看任务中心。
+          </p>
+        </div>
+      </div>
+      <span className="hidden items-center gap-1.5 text-xs text-[var(--fg-2)] transition-colors group-hover:text-[var(--fg-0)] md:inline-flex">
+        打开
+        <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+      </span>
+    </Link>
   );
 }
 

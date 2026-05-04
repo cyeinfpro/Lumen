@@ -416,7 +416,7 @@ export type ModelLibraryAgeSegment =
   | "senior";
 
 export type ModelLibraryItemAgeSegment = Exclude<ModelLibraryAgeSegment, "all">;
-export type ModelLibrarySource = "preset" | "favorite" | "user_upload";
+export type ModelLibrarySource = "preset" | "favorite" | "user_upload" | "generated";
 
 export interface ApparelModelLibrarySyncState {
   last_success_at: string | null;
@@ -732,6 +732,123 @@ export function saveModelCandidateToLibrary(
       method: "POST",
       body: JSON.stringify({ style_tags: [], ...body }),
     },
+  );
+}
+
+// ——— Apparel model library: standalone library generator + tasks ———
+
+export type ApparelModelLibraryJobOrigin = "library_generate" | "project_candidate";
+export type ApparelModelLibraryJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "partial";
+export type ApparelModelLibraryGenerateCount = 1 | 2 | 4 | 16;
+
+export interface ApparelModelLibraryJobItem {
+  image_id: string;
+  image_url: string;
+  thumb_url: string | null;
+  saved_item_id: string | null;
+  style_tags: string[];
+  appearance_direction: string | null;
+}
+
+export interface ApparelModelLibraryJob {
+  job_id: string;
+  origin: ApparelModelLibraryJobOrigin;
+  workflow_run_id: string;
+  // 仅 origin=project_candidate 时返回；library_generate 永远是 null
+  project_title: string | null;
+  status: ApparelModelLibraryJobStatus;
+  requested_count: number;
+  finished_count: number;
+  age_segment: ModelLibraryItemAgeSegment | null;
+  gender: string | null;
+  appearance_direction: string | null;
+  extra_requirements: string | null;
+  items: ApparelModelLibraryJobItem[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface ApparelModelLibraryJobsList {
+  items: ApparelModelLibraryJob[];
+}
+
+export interface ApparelModelLibraryGenerateIn {
+  age_segment: ModelLibraryItemAgeSegment;
+  gender: string;
+  appearance_direction?: string | null;
+  extra_requirements?: string | null;
+  style_tags?: string[];
+  count: ApparelModelLibraryGenerateCount;
+  auto_tag: boolean;
+}
+
+export interface ApparelModelLibrarySaveJobItemIn {
+  title: string;
+  age_segment: ModelLibraryItemAgeSegment;
+  gender: string;
+  appearance_direction?: string | null;
+  style_tags?: string[];
+  auto_tag: boolean;
+}
+
+export interface ApparelModelLibraryAutoTagOut {
+  item_id: string;
+  style_tags: string[];
+  appearance_direction: string | null;
+  age_segment: ModelLibraryItemAgeSegment | null;
+  gender: string | null;
+  notes: string | null;
+}
+
+export function generateApparelModelLibrary(
+  body: ApparelModelLibraryGenerateIn,
+): Promise<ApparelModelLibraryJob> {
+  return apiFetch<ApparelModelLibraryJob>(
+    "/workflows/apparel-model-library/generate",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        style_tags: [],
+        appearance_direction: null,
+        extra_requirements: null,
+        ...body,
+      }),
+    },
+  );
+}
+
+export function getApparelModelLibraryJobs(): Promise<ApparelModelLibraryJobsList> {
+  return apiFetch<ApparelModelLibraryJobsList>(
+    "/workflows/apparel-model-library/jobs",
+  );
+}
+
+export function saveApparelModelLibraryJobItem(
+  workflowRunId: string,
+  imageId: string,
+  body: ApparelModelLibrarySaveJobItemIn,
+): Promise<ApparelModelLibraryItem> {
+  return apiFetch<ApparelModelLibraryItem>(
+    `/workflows/apparel-model-library/jobs/${encodeURIComponent(workflowRunId)}/items/${encodeURIComponent(imageId)}/save`,
+    {
+      method: "POST",
+      body: JSON.stringify({ style_tags: [], ...body }),
+    },
+  );
+}
+
+export function autoTagApparelModelLibraryItem(
+  itemId: string,
+): Promise<ApparelModelLibraryAutoTagOut> {
+  return apiFetch<ApparelModelLibraryAutoTagOut>(
+    `/workflows/apparel-model-library/items/${encodeURIComponent(itemId)}/auto-tag`,
+    { method: "POST" },
   );
 }
 

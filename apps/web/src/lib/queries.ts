@@ -18,6 +18,7 @@ import {
 
 import {
   addAllowedEmail,
+  autoTagApparelModelLibraryItem,
   createConversation,
   createInviteLink,
   createMultiShare,
@@ -29,6 +30,8 @@ import {
   deleteMyAccount,
   deleteSystemPrompt,
   deleteWorkflow,
+  generateApparelModelLibrary,
+  getApparelModelLibraryJobs,
   getMyUsage,
   getPublicInvite,
   getPublicShare,
@@ -56,6 +59,7 @@ import {
   createModelCandidates,
   createShowcaseImages,
   saveAccessorySelection,
+  saveApparelModelLibraryJobItem,
   saveModelCandidateToLibrary,
   selectApparelModelLibraryItem,
   reopenModelSelection,
@@ -83,9 +87,14 @@ import {
   updateSystemSettings,
   syncApparelModelLibraryPresets,
   uploadImage,
+  type ApparelModelLibraryAutoTagOut,
+  type ApparelModelLibraryGenerateIn,
   type ApparelModelLibraryItem,
   type ApparelModelLibraryItemCreateIn,
+  type ApparelModelLibraryJob,
+  type ApparelModelLibraryJobsList,
   type ApparelModelLibraryListResponse,
+  type ApparelModelLibrarySaveJobItemIn,
   type ConversationListResponse,
   type ConversationSummary,
   type ConversationContextStats,
@@ -175,6 +184,8 @@ export const qk = {
     source?: "all" | ModelLibrarySource;
     q?: string;
   }) => ["workflows", "apparel_model_library", params ?? {}] as const,
+  apparelModelLibraryJobs: () =>
+    ["workflows", "apparel_model_library", "jobs"] as const,
 };
 
 // ——— Queries ———
@@ -1348,5 +1359,82 @@ export function useUploadImageMutation(
   return useMutation<UploadedImage, Error, File>({
     mutationFn: uploadImage,
     ...options,
+  });
+}
+
+// ——— Apparel model library: standalone generation ———
+
+export function useGenerateApparelModelLibraryMutation(
+  options?: Omit<
+    UseMutationOptions<ApparelModelLibraryJob, Error, ApparelModelLibraryGenerateIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<ApparelModelLibraryJob, Error, ApparelModelLibraryGenerateIn>({
+    mutationFn: generateApparelModelLibrary,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useApparelModelLibraryJobsQuery(
+  options?: Omit<
+    UseQueryOptions<ApparelModelLibraryJobsList>,
+    "queryKey" | "queryFn"
+  >,
+) {
+  return useQuery<ApparelModelLibraryJobsList>({
+    queryKey: qk.apparelModelLibraryJobs(),
+    queryFn: getApparelModelLibraryJobs,
+    // 5s 轮询：进行中的 job 完成后自动 surface 新图。
+    // 无进行中也保持 5s——前端不知道后端何时完成；列表很轻可以接受。
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    staleTime: 2_000,
+    ...options,
+  });
+}
+
+export function useSaveApparelModelLibraryJobItemMutation(
+  workflowRunId: string,
+  imageId: string,
+  options?: Omit<
+    UseMutationOptions<ApparelModelLibraryItem, Error, ApparelModelLibrarySaveJobItemIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<ApparelModelLibraryItem, Error, ApparelModelLibrarySaveJobItemIn>({
+    mutationFn: (body) =>
+      saveApparelModelLibraryJobItem(workflowRunId, imageId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useAutoTagApparelModelLibraryItemMutation(
+  itemId: string,
+  options?: Omit<
+    UseMutationOptions<ApparelModelLibraryAutoTagOut, Error, void>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<ApparelModelLibraryAutoTagOut, Error, void>({
+    mutationFn: () => autoTagApparelModelLibraryItem(itemId),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
   });
 }
