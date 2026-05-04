@@ -1,15 +1,16 @@
 "use client";
 
-// /projects/library 主壳：模特库 / 任务中心 / 新建模特 三 tab。
+// /library 主壳：模特库 / 任务中心 / 新建模特 三 tab。已从 /projects/library 提到顶层。
 //
 // 提交"新建模特"后自动切到"任务中心"，给用户即时反馈"任务已派发"。
 // 顶部复用 ProjectTopBar / ProjectMobileTopBar，不破坏现有项目导航语言。
 
-import { ArrowLeft, FolderKanban, Library, ListChecks, WandSparkles } from "lucide-react";
-import Link from "next/link";
+import { motion } from "framer-motion";
+import { Library, ListChecks, WandSparkles } from "lucide-react";
 import { useState } from "react";
 
 import { toast } from "@/components/ui/primitives/Toast";
+import { SPRING } from "@/lib/motion";
 import { useGenerateApparelModelLibraryMutation } from "@/lib/queries";
 import type { ApparelModelLibraryGenerateIn } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
@@ -57,29 +58,11 @@ export function ModelLibraryPage() {
       <ProjectMobileTopBar
         title="模特库"
         subtitle="浏览 / 任务 / 新建"
-        backHref="/projects"
       />
       <ProjectTopBar />
 
       <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
-        <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 md:gap-5">
-          <nav
-            aria-label="模特库路径"
-            className="hidden items-center gap-1.5 text-sm md:flex"
-          >
-            <Link
-              href="/projects"
-              className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              项目
-            </Link>
-            <span aria-hidden className="text-[var(--fg-3)]">
-              /
-            </span>
-            <span className="text-[var(--fg-0)]">模特库</span>
-          </nav>
-
+        <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-5 md:gap-6">
           <Hero />
 
           <Tabs current={tab} onChange={setTab} />
@@ -111,29 +94,25 @@ export function ModelLibraryPage() {
 }
 
 function Hero() {
+  // 移动端 ProjectMobileTopBar 已经显示标题，hero 整块隐藏；桌面双列：左标题 + 右装饰圆
   return (
-    <section className="grid gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)] md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:rounded-md md:bg-white/[0.035] md:p-5">
+    <section className="hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-1)] p-6 shadow-[var(--shadow-1)] md:grid md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3 md:p-8">
       <div className="min-w-0">
-        <p className="flex items-center gap-2 text-[11px] font-medium tracking-[0.16em] text-[var(--fg-2)]">
+        <p className="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.16em] text-[var(--fg-2)]">
           <Library className="h-3.5 w-3.5" />
           MODEL LIBRARY
         </p>
-        <div className="mt-2 flex flex-wrap items-end gap-x-3 gap-y-1">
-          <h1 className="text-[28px] font-semibold tracking-normal text-[var(--fg-0)] md:text-[34px]">
-            模特库
-          </h1>
-        </div>
+        <h1 className="mt-3 font-display text-[40px] italic leading-tight text-[var(--fg-0)]">
+          模特库
+        </h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-          浏览全站预设、我的收藏和上传的模特图。也可以独立生成一批模特，再挑喜欢的入库——和项目里的模特候选共享一个任务中心。
+          浏览预设、收藏、上传与生成的模特，集中管理你的全部模特资源。
         </p>
       </div>
-      <Link
-        href="/projects"
-        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--border)] bg-white/[0.04] px-4 text-[15px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-white/[0.08] md:h-10 md:min-h-0 md:text-sm"
-      >
-        <FolderKanban className="h-4 w-4" />
-        返回项目
-      </Link>
+      <div
+        aria-hidden
+        className="hidden h-24 w-24 shrink-0 rounded-full bg-gradient-to-tr from-[var(--amber-400)]/40 to-[var(--amber-200)]/10 shadow-[var(--shadow-amber)] md:block"
+      />
     </section>
   );
 }
@@ -145,8 +124,16 @@ function Tabs({
   current: LibraryTab;
   onChange: (next: LibraryTab) => void;
 }) {
+  // 移动端：sticky 胶囊；桌面端：底部 layoutId 下划线（更接近主导航语言）
   return (
-    <div className="scrollbar-none -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5 md:flex-wrap md:overflow-visible md:pb-0">
+    <div
+      className={cn(
+        "scrollbar-none -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5",
+        "sticky top-0 z-10 bg-[var(--bg-0)]/85 backdrop-blur-xl",
+        "md:relative md:top-auto md:z-auto md:gap-1.5 md:overflow-visible md:bg-transparent md:px-0 md:pb-0 md:backdrop-blur-none",
+        "md:border-b md:border-[var(--border)]",
+      )}
+    >
       {TABS.map((option) => {
         const active = current === option.key;
         return (
@@ -154,16 +141,28 @@ function Tabs({
             key={option.key}
             type="button"
             onClick={() => onChange(option.key)}
-            className={cn(
-              "inline-flex min-h-10 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-3 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-9 md:min-h-0",
-              active
-                ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04]",
-            )}
             aria-pressed={active}
+            className={cn(
+              "relative inline-flex shrink-0 cursor-pointer items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+              // 移动端：胶囊
+              "min-h-10 rounded-full border px-3 text-xs",
+              // 桌面端：纯文本 + 底部下划线
+              "md:min-h-0 md:rounded-none md:border-0 md:px-4 md:py-2.5 md:text-sm",
+              active
+                ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)] md:border-0 md:bg-transparent md:text-[var(--fg-0)]"
+                : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04] md:border-0 md:bg-transparent md:text-[var(--fg-2)] md:hover:bg-transparent md:hover:text-[var(--fg-0)]",
+            )}
           >
             {option.icon}
             {option.label}
+            {active ? (
+              <motion.span
+                layoutId="library-tab-underline"
+                aria-hidden
+                className="absolute -bottom-px left-2 right-2 hidden h-0.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)] md:block"
+                transition={SPRING.snap}
+              />
+            ) : null}
           </button>
         );
       })}

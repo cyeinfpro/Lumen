@@ -106,6 +106,33 @@ def test_github_folder_metadata_ignores_thumb_files() -> None:
     assert item is None
 
 
+def test_model_library_generated_source_round_trips_and_filters() -> None:
+    raw = {
+        "id": "user:generated-1",
+        "source": "generated",
+        "title": "Generated model",
+        "age_segment": "young_adult",
+        "gender": "female",
+        "appearance_direction": "asian",
+        "style_tags": ["studio"],
+        "image_id": "img-1",
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+
+    out = workflows._model_library_item_out(raw)  # noqa: SLF001
+    assert out.source == "generated"
+
+    filtered = workflows._filter_library_items(  # noqa: SLF001
+        [raw],
+        source="generated",
+        age_segment="all",
+        appearance="all",
+        q="",
+    )
+    assert filtered == [raw]
+    assert "generated" in workflows.MODEL_LIBRARY_SOURCES
+
+
 def test_model_library_folder_helpers_support_numbered_age_dirs() -> None:
     assert workflows._normalize_age_segment("05_adult") == "adult"  # noqa: SLF001
     assert workflows._normalize_age_segment("04_young_adult") == "young_adult"  # noqa: SLF001

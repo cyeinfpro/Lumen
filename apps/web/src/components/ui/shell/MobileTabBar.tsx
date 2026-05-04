@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Camera, Compass, FolderKanban, User } from "lucide-react";
+import { Camera, Compass, FolderKanban, Library, User } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo } from "react";
 import { useHaptic } from "@/hooks/useHaptic";
@@ -10,7 +10,7 @@ import { SPRING, DURATION, EASE } from "@/lib/motion";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 
-type TabKey = "studio" | "projects" | "stream" | "me";
+type TabKey = "studio" | "library" | "projects" | "stream" | "me";
 
 interface TabDef {
   key: TabKey;
@@ -21,6 +21,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { key: "studio", label: "创作", route: "/", Icon: Camera },
+  { key: "library", label: "模特库", route: "/library", Icon: Library },
   { key: "projects", label: "项目", route: "/projects", Icon: FolderKanban },
   { key: "stream", label: "图库", route: "/stream", Icon: Compass },
   { key: "me", label: "我的", route: "/me", Icon: User },
@@ -36,9 +37,10 @@ export function MobileTabBar() {
 
   const activeIndex = useMemo(() => {
     if (pathname === "/" || pathname.startsWith("/?")) return 0;
-    if (pathname.startsWith("/projects")) return 1;
-    if (pathname.startsWith("/stream")) return 2;
-    if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return 3;
+    if (pathname.startsWith("/library")) return 1;
+    if (pathname.startsWith("/projects")) return 2;
+    if (pathname.startsWith("/stream")) return 3;
+    if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return 4;
     return 0;
   }, [pathname]);
 

@@ -78,16 +78,37 @@ _GENDER_ALIASES: dict[str, str] = {
 }
 
 _TAGGING_INSTRUCTIONS = (
-    "你是模特库自动打标签助手。请仔细分析这张人像/全身模特图，识别画面中模特的：\n"
-    "- appearance_direction: 用 1-2 个英文小写词表达外貌方向，例如 european / asian / latin / "
-    "middle_eastern / african（或其他更准确的描述），不能确定填空字符串。\n"
-    "- style_tags: 用 2-6 个中文/英文短词列出风格、氛围、服装类型等关键词，例如 minimal、studio、"
-    "高级感、街拍、自然光，去除冗余说明。\n"
-    "- age_segment: 必须是 toddler / child / teen / young_adult / adult / middle_aged / senior 之一。"
-    "无法判断填 young_adult。\n"
-    "- gender: 必须是 female 或 male 之一。无法判断填 female。\n"
-    "- notes: 用不超过 60 字的中文一句话备注，可选；不要写营销文案。\n\n"
-    "只输出一个合法 JSON 对象，不要 Markdown / 代码块 / 解释文字。字段必须用上述英文名。"
+    "你是模特库自动打标签助手。仔细分析这张人像/全身模特图，输出严格 JSON。\n\n"
+    "字段要求（**全部必填**，缺失就用空串/空数组）：\n"
+    "- appearance_direction: 必须是下列之一（小写英文，单选最贴近的一个）：\n"
+    "    asian / east_asian / southeast_asian / south_asian / european / latin / "
+    "middle_eastern / african / mixed / other\n"
+    "  无法判断填空字符串。不要写自由文本。\n"
+    "- style_tags: **4-6 个** 中文/英文短词数组，必须分别覆盖以下维度：\n"
+    "    1) 服装类型/版型（例：oversize 西装 / 修身衬衫 / 针织连衣裙）\n"
+    "    2) 拍摄场景（例：棚拍 / 街拍 / 自然光户外 / 工业风厂房）\n"
+    "    3) 光线/氛围（例：硬光 / 柔光 / 高对比 / 复古胶片 / 冷调）\n"
+    "    4) 整体气质（例：高级感 / 干净极简 / 温柔 / 酷感 / 街头）\n"
+    "  每个 tag ≤ 8 字，不要写营销文案，不要重复。\n"
+    "- age_segment: 必须是 toddler / child / teen / young_adult / adult / middle_aged / senior 之一。\n"
+    "- gender: 必须是 female 或 male 之一。\n"
+    "- notes: 不超过 60 字的中文一句话备注（可选，缺失填空串）。\n\n"
+    "只输出一个合法 JSON 对象，不要 Markdown / 代码块 / 解释文字。"
+)
+# 与 _apparel_library.MODEL_LIBRARY_APPEARANCES 对齐（去掉 "all"）；worker 不能依赖 api routes，故复制一份。
+_APPEARANCE_VALID: frozenset[str] = frozenset(
+    {
+        "asian",
+        "east_asian",
+        "southeast_asian",
+        "south_asian",
+        "european",
+        "latin",
+        "middle_eastern",
+        "african",
+        "mixed",
+        "other",
+    }
 )
 _TAGGING_HTTP_TIMEOUT_S = 25.0
 _PER_PROVIDER_RETRY_ATTEMPTS = 2
@@ -144,7 +165,7 @@ def _clean_style_tags(value: Any) -> list[str]:
             continue
         seen.add(tag)
         out.append(tag[:32])
-        if len(out) >= 12:
+        if len(out) >= 6:
             break
     return out
 
@@ -190,15 +211,21 @@ def _parse_tagging_payload(image_id: str, raw_text: str) -> AutoTagResult:
     if not isinstance(payload, dict):
         # 最后一线兜底：用 key: value 简单匹配几个常见字段
         return _regex_fallback(image_id, cleaned)
+    appearance_raw = _clean_optional_text(
+        payload.get("appearance_direction") or payload.get("appearanceDirection"),
+        max_len=80,
+    )
+    appearance = (
+        appearance_raw.strip().lower().replace(" ", "_") if appearance_raw else None
+    )
+    if appearance and appearance not in _APPEARANCE_VALID:
+        appearance = None
     return AutoTagResult(
         image_id=image_id,
         style_tags=_clean_style_tags(
             payload.get("style_tags") or payload.get("tags") or payload.get("styleTags")
         ),
-        appearance_direction=_clean_optional_text(
-            payload.get("appearance_direction") or payload.get("appearanceDirection"),
-            max_len=80,
-        ),
+        appearance_direction=appearance,
         age_segment=_normalize_age_segment(
             payload.get("age_segment") or payload.get("ageSegment")
         ),
@@ -222,12 +249,16 @@ def _regex_fallback(image_id: str, text: str) -> AutoTagResult:
         r'"?style_tags"?\s*[:=]\s*\[([^\]]*)\]', text, flags=re.IGNORECASE
     )
     style_tags = _clean_style_tags(tags_match.group(1) if tags_match else None)
+    appearance_raw = _clean_optional_text(_grab("appearance_direction"), max_len=80)
+    appearance = (
+        appearance_raw.strip().lower().replace(" ", "_") if appearance_raw else None
+    )
+    if appearance and appearance not in _APPEARANCE_VALID:
+        appearance = None
     return AutoTagResult(
         image_id=image_id,
         style_tags=style_tags,
-        appearance_direction=_clean_optional_text(
-            _grab("appearance_direction"), max_len=80
-        ),
+        appearance_direction=appearance,
         age_segment=_normalize_age_segment(_grab("age_segment")),
         gender=_normalize_gender(_grab("gender")),
         notes=_clean_optional_text(_grab("notes"), max_len=200),

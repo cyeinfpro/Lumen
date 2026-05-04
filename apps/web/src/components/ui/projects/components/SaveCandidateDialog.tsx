@@ -7,7 +7,13 @@ import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
 import { Input } from "@/components/ui/primitives/Input";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
-import type { ModelCandidate, ModelLibraryItemAgeSegment, WorkflowRun } from "@/lib/apiClient";
+import type {
+  ModelCandidate,
+  ModelLibraryAppearance,
+  ModelLibraryItemAgeSegment,
+  WorkflowRun,
+} from "@/lib/apiClient";
+import { MODEL_LIBRARY_APPEARANCE_LABEL } from "@/lib/apiClient";
 import { useSaveModelCandidateToLibraryMutation } from "@/lib/queries";
 
 const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
@@ -59,7 +65,8 @@ export function SaveCandidateDialog({
     defaultAgeSegment(workflow),
   );
   const [gender, setGender] = useState<ModelLibraryGender>("female");
-  const [appearance, setAppearance] = useState("");
+  // chip 选择：空 = 不指定
+  const [appearance, setAppearance] = useState<ModelLibraryAppearance | "">("");
   const [tagsEnabled, setTagsEnabled] = useState(false);
   const [tags, setTags] = useState("");
   const save = useSaveModelCandidateToLibraryMutation(workflow.id, candidate?.id ?? "", {
@@ -74,7 +81,7 @@ export function SaveCandidateDialog({
   });
 
   const form = (
-    <div className="mt-4 grid gap-3 text-left">
+    <div className="mt-4 flex flex-col gap-3 text-left">
       <Input
         label="名称"
         value={title}
@@ -103,27 +110,40 @@ export function SaveCandidateDialog({
           </div>
         </div>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-[var(--fg-1)]">性别</span>
-          <select
-            value={gender}
-            onChange={(event) => setGender(event.target.value as ModelLibraryGender)}
-            className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none"
-          >
-            {GENDER_OPTIONS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Input
-          label="外貌方向"
-          value={appearance}
-          onChange={(event) => setAppearance(event.target.value)}
-          placeholder="asian"
-        />
+      <label className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-[var(--fg-1)]">性别</span>
+        <select
+          value={gender}
+          onChange={(event) => setGender(event.target.value as ModelLibraryGender)}
+          className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none"
+        >
+          {GENDER_OPTIONS.map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {/* 外貌方向：chip 选择，10 + 不指定 */}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-[var(--fg-1)]">外貌方向</span>
+        <div className="flex flex-wrap gap-1.5">
+          <Chip active={appearance === ""} onClick={() => setAppearance("")}>
+            不指定
+          </Chip>
+          {(Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as [
+            Exclude<ModelLibraryAppearance, "all">,
+            string,
+          ][]).map(([value, label]) => (
+            <Chip
+              key={value}
+              active={appearance === value}
+              onClick={() => setAppearance(value)}
+            >
+              {label}
+            </Chip>
+          ))}
+        </div>
       </div>
       <label className="flex flex-col gap-1">
         <span className="text-xs font-medium text-[var(--fg-1)]">标签</span>
@@ -171,11 +191,37 @@ export function SaveCandidateDialog({
           title: finalTitle,
           age_segment: ageSegment,
           gender,
-          appearance_direction: appearance.trim() || null,
+          appearance_direction: appearance || null,
           style_tags: tagsEnabled ? splitTags(tags) : [],
         });
       }}
     />
+  );
+}
+
+// 复用：和 Generator/JobsPanel 里的 Chip 同结构
+function Chip({
+  children,
+  active,
+  onClick,
+}: {
+  children: React.ReactNode;
+  active?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex min-h-9 cursor-pointer items-center rounded-md border px-3 text-xs transition-colors",
+        active
+          ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
+          : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

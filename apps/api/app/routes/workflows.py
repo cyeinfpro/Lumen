@@ -128,6 +128,7 @@ MODEL_LIBRARY_ROOT_KEY = "apparel-model-library"
 # 仍能通过 `workflows._normalize_age_segment` 等私有路径访问。
 from app.routes._apparel_library import (  # noqa: E402, F401
     MODEL_LIBRARY_AGE_SEGMENTS,
+    MODEL_LIBRARY_APPEARANCES,
     MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS,
     MODEL_LIBRARY_FOLDER_BY_AGE,
     MODEL_LIBRARY_GENDER_SEGMENTS,
@@ -148,6 +149,7 @@ from app.routes._apparel_library import (  # noqa: E402, F401
     _library_item_url,
     _model_library_folder_for_age,
     _normalize_age_segment,
+    _normalize_appearance,
     _normalize_model_gender,
     _preset_id_from_path,
     _title_from_preset_id,
@@ -587,7 +589,7 @@ def _sync_state_out(user: User) -> ApparelModelLibrarySyncStateOut:
 def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
     item_id = str(raw.get("id") or "").strip()
     source = str(raw.get("source") or "").strip()
-    if source not in {"preset", "favorite", "user_upload"}:
+    if source not in {"preset", "favorite", "user_upload", "generated"}:
         source = "user_upload"
     image_id = _clean_optional_text(raw.get("image_id"), max_len=64)
     image_url = (
@@ -676,6 +678,7 @@ def _filter_library_items(
     *,
     source: str,
     age_segment: str,
+    appearance: str,
     q: str,
 ) -> list[dict[str, Any]]:
     query = q.strip().lower()
@@ -687,6 +690,10 @@ def _filter_library_items(
         item_age = _normalize_age_segment(item.get("age_segment"))
         if age_segment != "all" and item_age != age_segment:
             continue
+        if appearance != "all":
+            item_appearance = _normalize_appearance(item.get("appearance_direction"))
+            if item_appearance != appearance:
+                continue
         if query:
             haystack = " ".join(
                 [
@@ -699,7 +706,7 @@ def _filter_library_items(
             if query not in haystack:
                 continue
         filtered.append(item)
-    source_rank = {"preset": 0, "favorite": 1, "user_upload": 2}
+    source_rank = {"preset": 0, "favorite": 1, "user_upload": 2, "generated": 3}
     return sorted(
         filtered,
         key=lambda item: (
@@ -2879,6 +2886,7 @@ async def list_apparel_model_library(
     user: CurrentUser,
     age_segment: AgeSegment = Query(default="all"),
     source: str = Query(default="all"),
+    appearance: str = Query(default="all"),
     q: str = Query(default=""),
 ) -> ApparelModelLibraryListOut:
     source = source.strip() or "all"
@@ -2887,10 +2895,14 @@ async def list_apparel_model_library(
     age = str(age_segment)
     if age not in MODEL_LIBRARY_AGE_SEGMENTS:
         raise _http("invalid_age_segment", "invalid model library age segment", 422)
+    appearance = appearance.strip() or "all"
+    if appearance not in MODEL_LIBRARY_APPEARANCES:
+        raise _http("invalid_appearance", "invalid model library appearance", 422)
     items = _filter_library_items(
         _combined_library_items(user.id),
         source=source,
         age_segment=age,
+        appearance=appearance,
         q=q,
     )
     return ApparelModelLibraryListOut(
