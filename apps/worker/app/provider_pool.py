@@ -25,6 +25,7 @@ from lumen_core.providers import (
     ProviderProxyDefinition,
     build_effective_provider_config,
     endpoint_kind_allowed,
+    provider_supports_route,
     resolve_provider_proxy_url,
 )
 
@@ -86,6 +87,10 @@ class ProviderConfig:
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""          # empty → fall back to global image.job_base_url
     image_concurrency: int = 1             # 每 provider 同时进行的图片任务上限
+    # Capability tri-state（详见 lumen_core.providers.ProviderDefinition 注释）
+    responses_supported: bool | None = None
+    image_generations_supported: bool | None = None
+    image_responses_supported: bool | None = None
     _api_key: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self, api_key: str) -> None:
@@ -157,6 +162,9 @@ class ResolvedProvider:
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
     image_concurrency: int = 1
+    responses_supported: bool | None = None
+    image_generations_supported: bool | None = None
+    image_responses_supported: bool | None = None
     _api_key: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self, api_key: str) -> None:
@@ -240,6 +248,13 @@ class ProviderPool:
                 image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                 image_jobs_base_url=p.image_jobs_base_url,
                 image_concurrency=p.image_concurrency,
+                responses_supported=getattr(p, "responses_supported", None),
+                image_generations_supported=getattr(
+                    p, "image_generations_supported", None
+                ),
+                image_responses_supported=getattr(
+                    p, "image_responses_supported", None
+                ),
             )
             for p in provider_defs
         ], {p.name: p for p in proxy_defs}
@@ -277,6 +292,9 @@ class ProviderPool:
                             image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                             image_jobs_base_url=p.image_jobs_base_url,
                             image_concurrency=p.image_concurrency,
+                            responses_supported=p.responses_supported,
+                            image_generations_supported=p.image_generations_supported,
+                            image_responses_supported=p.image_responses_supported,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -326,6 +344,7 @@ class ProviderPool:
         self,
         *,
         endpoint_kind: str | None = None,
+        route: str = "text",
     ) -> list[ResolvedProvider]:
         from .upstream import UpstreamError
 
@@ -340,6 +359,12 @@ class ProviderPool:
         by_priority: dict[int, list[ProviderConfig]] = {}
         for p in enabled:
             if not endpoint_kind_allowed(p, endpoint_kind):
+                continue
+            # capability gate（image-stability-hardening §P2）：capability=False 显式排除；
+            # capability=None 保留现有行为（按健康度 / failover 学习）。
+            if not provider_supports_route(
+                p, route=route, endpoint_kind=endpoint_kind
+            ):
                 continue
             by_priority.setdefault(p.priority, []).append(p)
         if not by_priority:
@@ -386,6 +411,9 @@ class ProviderPool:
                         image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                         image_jobs_base_url=p.image_jobs_base_url,
                         image_concurrency=p.image_concurrency,
+                        responses_supported=p.responses_supported,
+                        image_generations_supported=p.image_generations_supported,
+                        image_responses_supported=p.image_responses_supported,
                     )
                 )
 
@@ -478,7 +506,7 @@ class ProviderPool:
             )
         if route == "text":
             endpoint_kind = endpoint_kind or "responses"
-        return self._select_ordered(endpoint_kind=endpoint_kind)
+        return self._select_ordered(endpoint_kind=endpoint_kind, route=route)
 
     async def select_one(self, *, route: str = "text") -> ResolvedProvider:
         providers = await self.select(route=route)
@@ -573,6 +601,13 @@ class ProviderPool:
             # 都不必创建，避免内存里堆积永远用不到的 health 计数。
             if not endpoint_kind_allowed(p, endpoint_kind):
                 skipped.append((p.name, f"endpoint_locked_to_{p.image_jobs_endpoint}"))
+                continue
+            # capability gate（§P2）：image_*_supported=False 的号在此显式排除，
+            # 避免每次都先尝一遍再失败、烧配额。
+            if not provider_supports_route(
+                p, route="image", endpoint_kind=endpoint_kind
+            ):
+                skipped.append((p.name, "capability_unsupported"))
                 continue
             h = self._health.setdefault(p.name, ProviderHealth())
             if p.name in avoided:
@@ -679,6 +714,9 @@ class ProviderPool:
                 image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                 image_jobs_base_url=p.image_jobs_base_url,
                 image_concurrency=p.image_concurrency,
+                responses_supported=p.responses_supported,
+                image_generations_supported=p.image_generations_supported,
+                image_responses_supported=p.image_responses_supported,
             )
             for p, _ in candidates
         ]

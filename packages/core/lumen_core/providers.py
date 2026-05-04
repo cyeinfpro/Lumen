@@ -82,6 +82,14 @@ class ProviderDefinition:
     # plans with higher rate limits, or sidecar-fronted accounts where the
     # bottleneck is server-side queue depth, not the upstream account itself).
     image_concurrency: int = 1
+    # Capability flags (image-stability-hardening-plan §P2). 三态语义：
+    #   True  — 已确认支持
+    #   False — 已确认不支持，路由时排除（避免无意义尝试 + 烧配额）
+    #   None  — 未知，按现有 endpoint_lock / 健康度 / 失败学习行为处理
+    # 字段缺失（旧配置）默认 None，保证向后兼容。
+    responses_supported: bool | None = None
+    image_generations_supported: bool | None = None
+    image_responses_supported: bool | None = None
 
 
 IMAGE_JOBS_ENDPOINT_VALUES = ("auto", "generations", "responses")
@@ -120,6 +128,62 @@ def endpoint_kind_allowed(provider: Any, endpoint_kind: str | None) -> bool:
     return configured == endpoint_kind
 
 
+def _provider_capability(provider: Any, attr: str) -> bool | None:
+    """Read a capability tri-state from either a dataclass or a dict shape."""
+    if isinstance(provider, dict):
+        value = provider.get(attr)
+    else:
+        value = getattr(provider, attr, None)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def provider_supports_route(
+    provider: Any,
+    *,
+    route: str,
+    endpoint_kind: str | None,
+) -> bool:
+    """Capability gate for provider selection (image-stability-hardening §P2).
+
+    True  → allowed; False → explicitly disabled (skip this provider entirely).
+    Unknown capability (None) → allowed, fall back to runtime health learning.
+
+    ``route`` is the high-level pool route: ``image`` for image generation /
+    edit, ``text`` for general /v1/responses traffic, ``models`` for catalog
+    fetches. ``endpoint_kind`` further narrows which upstream URL we'll hit
+    (``responses`` vs ``generations`` for the image route).
+    """
+    if route == "models":
+        # Catalog probes hit /v1/models; only honor the responses_supported flag
+        # because the catalog is served by the responses-style endpoint family.
+        return _provider_capability(provider, "responses_supported") is not False
+
+    if route != "image":
+        # Text / completion / other routes use the responses endpoint family.
+        return _provider_capability(provider, "responses_supported") is not False
+
+    # route == "image"
+    if endpoint_kind == "responses":
+        if _provider_capability(provider, "image_responses_supported") is False:
+            return False
+        if _provider_capability(provider, "responses_supported") is False:
+            return False
+        return True
+    if endpoint_kind == "generations":
+        return _provider_capability(provider, "image_generations_supported") is not False
+    # endpoint_kind unknown / "auto" → allow if neither image capability is
+    # explicitly disabled (still need at least one viable path).
+    img_resp = _provider_capability(provider, "image_responses_supported")
+    img_gen = _provider_capability(provider, "image_generations_supported")
+    if img_resp is False and img_gen is False:
+        return False
+    return True
+
+
 @dataclass
 class RoundRobinState:
     counters: dict[int, int] = field(default_factory=dict)
@@ -147,6 +211,26 @@ def _parse_optional_str(raw: Any) -> str | None:
         return None
     value = raw.strip()
     return value or None
+
+
+def _parse_optional_bool(raw: Any) -> bool | None:
+    """Parse capability tri-state. None / 缺失 / 空字符串 → None（未知）。
+
+    显式 ``"true"`` / ``"false"`` / ``true`` / ``false`` 才映射 bool；其它（含 0/1 这类
+    歧义值）一律按未知处理，避免老配置里残留的 truthy/falsy 字段被误判成显式 capability。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"true", "1", "yes", "y"}:
+            return True
+        if text in {"false", "0", "no", "n"}:
+            return False
+        return None
+    return None
 
 
 def _parse_proxy_protocol(raw: Any) -> str:
@@ -233,6 +317,13 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         image_jobs_endpoint_lock=image_jobs_endpoint_lock,
         image_jobs_base_url=image_jobs_base_url,
         image_concurrency=image_concurrency,
+        responses_supported=_parse_optional_bool(item.get("responses_supported")),
+        image_generations_supported=_parse_optional_bool(
+            item.get("image_generations_supported")
+        ),
+        image_responses_supported=_parse_optional_bool(
+            item.get("image_responses_supported")
+        ),
     )
 
 

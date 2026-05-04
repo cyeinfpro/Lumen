@@ -333,3 +333,224 @@ async def test_manual_provider_probe_reports_timeout(
 
     assert ok is False
     assert err == "timeout"
+
+
+# ---------------------------------------------------------------------------
+# image-stability-hardening §P2: capability_signal 输出
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_probe_outcome_404_signals_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    client = _StubAsyncClient(_StubResponse(404, {"error": "not found"}))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.ok is False
+    assert outcome.http_status == 404
+    assert outcome.capability_signal == "unsupported"
+
+
+@pytest.mark.asyncio
+async def test_probe_outcome_405_signals_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    client = _StubAsyncClient(_StubResponse(405, {"error": "method not allowed"}))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.capability_signal == "unsupported"
+
+
+@pytest.mark.asyncio
+async def test_probe_outcome_401_signals_auth_not_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """401/403 不能据此判定 capability=False，仅是鉴权问题。"""
+    from app.routes import providers
+
+    client = _StubAsyncClient(_StubResponse(401, {"error": "unauthorized"}))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.capability_signal == "auth"
+    assert outcome.http_status == 401
+
+
+@pytest.mark.asyncio
+async def test_probe_outcome_500_signals_transient_not_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5xx 是临时不健康，capability_signal=transient，不会写死 unsupported。"""
+    from app.routes import providers
+
+    client = _StubAsyncClient(_StubResponse(503, {"error": "service unavailable"}))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.capability_signal == "transient"
+
+
+@pytest.mark.asyncio
+async def test_probe_outcome_429_signals_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    client = _StubAsyncClient(_StubResponse(429, {"error": "rate limited"}))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.capability_signal == "transient"
+
+
+@pytest.mark.asyncio
+async def test_probe_outcome_200_correct_signals_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.ok is True
+    assert outcome.capability_signal == "supported"
+
+
+@pytest.mark.asyncio
+async def test_probe_outcome_timeout_signals_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    class _TimeoutClient:
+        async def __aenter__(self) -> "_TimeoutClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, *_args: object, **_kwargs: object) -> object:
+            raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: _TimeoutClient())
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.capability_signal == "transient"
+
+
+# ---------------------------------------------------------------------------
+# image-stability-hardening §P2: PUT /providers 持久化 capability
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_put_providers_persists_capability_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """capability=False 通过 PUT /providers 写回 system_settings 并能从 GET 读出。"""
+    from app.routes import providers
+
+    written: dict[str, str] = {}
+
+    class _Db:
+        def __init__(self) -> None:
+            self.execute_count = 0
+
+        async def execute(self, _stmt: object) -> _ScalarResult:
+            self.execute_count += 1
+            if self.execute_count == 1:
+                # _read_providers (老配置 None)
+                return _ScalarResult(None)
+            if self.execute_count == 2:
+                # SELECT existing SystemSetting → 没有
+                return _ScalarResult(None)
+            return _ScalarResult(None)
+
+        def add(self, obj: Any) -> None:
+            written["raw"] = obj.value
+
+        async def commit(self) -> None:
+            return None
+
+    async def fake_audit(*_args: Any, **_kw: Any) -> None:
+        return None
+
+    monkeypatch.setattr(providers, "write_audit", fake_audit)
+    monkeypatch.setattr(providers, "validate_providers", lambda raw: None)
+
+    # 引入 admin_models 避免 invalidate cache 报错
+    from app.routes import admin_models
+
+    monkeypatch.setattr(admin_models, "invalidate_admin_models_cache", lambda: None)
+
+    body = ProvidersUpdateIn(
+        items=[
+            {
+                "name": "p-with-cap",
+                "base_url": "https://up.example",
+                "api_key": "sk-cap",
+                "responses_supported": True,
+                "image_generations_supported": False,
+                "image_responses_supported": True,
+            },
+            {
+                "name": "p-without-cap",
+                "base_url": "https://up2.example",
+                "api_key": "sk-nocap",
+            },
+        ]
+    )
+
+    out = await providers.update_providers(
+        body,
+        _admin_request(),
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        _Db(),  # type: ignore[arg-type]
+    )
+
+    # 序列化里 capability=None 的 provider 不写字段（保持配置最小）
+    persisted = json.loads(written["raw"])
+    items = persisted["providers"]
+    p_with = next(it for it in items if it["name"] == "p-with-cap")
+    assert p_with["responses_supported"] is True
+    assert p_with["image_generations_supported"] is False
+    assert p_with["image_responses_supported"] is True
+    p_without = next(it for it in items if it["name"] == "p-without-cap")
+    assert "responses_supported" not in p_without
+    assert "image_generations_supported" not in p_without
+
+    # API 返回值里 capability 也透出
+    out_with_cap = next(it for it in out.items if it.name == "p-with-cap")
+    assert out_with_cap.responses_supported is True
+    assert out_with_cap.image_generations_supported is False
+    out_without_cap = next(it for it in out.items if it.name == "p-without-cap")
+    assert out_without_cap.responses_supported is None

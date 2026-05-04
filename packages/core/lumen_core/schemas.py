@@ -636,6 +636,10 @@ class ProviderItemOut(BaseModel):
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
     image_concurrency: int = 1
+    # Capability tri-state (image-stability-hardening §P2). null = 未知（默认）。
+    responses_supported: bool | None = None
+    image_generations_supported: bool | None = None
+    image_responses_supported: bool | None = None
 
 
 class ProviderProxyOut(BaseModel):
@@ -685,6 +689,10 @@ class ProviderItemIn(BaseModel):
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
     image_concurrency: int = 1
+    # Capability tri-state（详见 ProviderItemOut 注释）
+    responses_supported: bool | None = None
+    image_generations_supported: bool | None = None
+    image_responses_supported: bool | None = None
 
 
 class ProviderProxyIn(BaseModel):
@@ -713,6 +721,16 @@ class ProviderProbeResult(BaseModel):
     latency_ms: int | None = None
     error: str | None = None
     status: str = "unknown"  # "healthy" | "unhealthy" | "disabled" | "unknown"
+    # image-stability-hardening §P2 capability 探测信号。
+    # 取值：
+    #   None           — 探测未给出明确能力信号（默认）
+    #   "supported"    — 端点确认支持
+    #   "unsupported"  — 端点确认不支持（HTTP 404/405），可写 capability=False
+    #   "auth"         — 鉴权问题（401/403），不能据此判定能力
+    #   "transient"    — 临时不健康（429/5xx），不能据此判定能力
+    capability_signal: str | None = None
+    # 上游 HTTP status，便于 UI 直接显示
+    http_status: int | None = None
 
 
 class ProvidersProbeOut(BaseModel):
