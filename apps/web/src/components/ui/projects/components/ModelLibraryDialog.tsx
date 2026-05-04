@@ -3,7 +3,7 @@
 // 项目流程内的"选模特"弹窗：
 //  - 浏览部分（年龄 tab / 来源 filter / grid / 上传）抽到 ModelLibraryBrowser
 //  - 这里只保留 dialog 外壳、focus trap、footer（"设为当前模特"+"生成模特候选"）
-//  - 顶部加"打开完整模特库 →"链接：onClose() 后 router.push("/projects/library")
+//  - 顶部加"打开完整模特库 →"链接：onClose() 后 router.push("/library")
 //
 // 项目候选生成（onGenerateCandidates）继续走旧路径——上层用
 // useCreateModelCandidatesMutation(workflow.id) 派发，不动它。
@@ -129,7 +129,7 @@ export function ModelLibraryDialog({
 
   const openFullLibrary = () => {
     onClose();
-    router.push("/projects/library");
+    router.push("/library");
   };
 
   return (

@@ -115,6 +115,7 @@ import {
   type PatchSystemPromptIn,
   type ModelCandidatesIn,
   type ModelLibraryAgeSegment,
+  type ModelLibraryAppearance,
   type ModelLibrarySource,
   type ReviseWorkflowImageIn,
   type SystemPrompt,
@@ -182,6 +183,7 @@ export const qk = {
   apparelModelLibrary: (params?: {
     age_segment?: ModelLibraryAgeSegment;
     source?: "all" | ModelLibrarySource;
+    appearance?: ModelLibraryAppearance;
     q?: string;
   }) => ["workflows", "apparel_model_library", params ?? {}] as const,
   apparelModelLibraryJobs: () =>
@@ -1253,6 +1255,7 @@ export function useApparelModelLibraryQuery(
   params: {
     age_segment?: ModelLibraryAgeSegment;
     source?: "all" | ModelLibrarySource;
+    appearance?: ModelLibraryAppearance;
     q?: string;
   } = {},
   options?: Omit<

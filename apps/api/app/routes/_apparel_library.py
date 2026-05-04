@@ -18,7 +18,7 @@ from typing import Any
 MODEL_LIBRARY_SCHEMA_VERSION = 1
 # 模块级常量都用 frozenset / MappingProxyType 包裹，避免被调用方意外 mutate
 MODEL_LIBRARY_SOURCES: frozenset[str] = frozenset(
-    {"all", "preset", "favorite", "user_upload"}
+    {"all", "preset", "favorite", "user_upload", "generated"}
 )
 MODEL_LIBRARY_AGE_SEGMENTS: frozenset[str] = frozenset(
     {
@@ -46,6 +46,75 @@ MODEL_LIBRARY_IMAGE_SUFFIXES: frozenset[str] = frozenset(
     {".png", ".jpg", ".jpeg", ".webp"}
 )
 MODEL_LIBRARY_GENDER_SEGMENTS: frozenset[str] = frozenset({"female", "male"})
+# 外貌偏向枚举：含 "all" 用于 list 接口"不限"语义；db 列允许任一值（不含 all）。
+MODEL_LIBRARY_APPEARANCES: frozenset[str] = frozenset(
+    {
+        "all",
+        "asian",
+        "east_asian",
+        "southeast_asian",
+        "south_asian",
+        "european",
+        "latin",
+        "middle_eastern",
+        "african",
+        "mixed",
+        "other",
+    }
+)
+# 中英文 + 别名归整表。key 已 lowercase + 去空格/连字符（统一替换为下划线）。
+_APPEARANCE_ALIASES: MappingProxyType[str, str] = MappingProxyType(
+    {
+        "asian": "asian",
+        "亚洲": "asian",
+        "亚裔": "asian",
+        "east_asian": "east_asian",
+        "eastasian": "east_asian",
+        "东亚": "east_asian",
+        "东亚人": "east_asian",
+        "中国": "east_asian",
+        "日本": "east_asian",
+        "韩国": "east_asian",
+        "chinese": "east_asian",
+        "japanese": "east_asian",
+        "korean": "east_asian",
+        "southeast_asian": "southeast_asian",
+        "southeastasian": "southeast_asian",
+        "东南亚": "southeast_asian",
+        "thai": "southeast_asian",
+        "vietnamese": "southeast_asian",
+        "filipino": "southeast_asian",
+        "south_asian": "south_asian",
+        "southasian": "south_asian",
+        "南亚": "south_asian",
+        "印度": "south_asian",
+        "indian": "south_asian",
+        "european": "european",
+        "caucasian": "european",
+        "欧洲": "european",
+        "白人": "european",
+        "西方": "european",
+        "latin": "latin",
+        "hispanic": "latin",
+        "latino": "latin",
+        "latina": "latin",
+        "拉美": "latin",
+        "拉丁": "latin",
+        "middle_eastern": "middle_eastern",
+        "middleeastern": "middle_eastern",
+        "arab": "middle_eastern",
+        "中东": "middle_eastern",
+        "阿拉伯": "middle_eastern",
+        "african": "african",
+        "black": "african",
+        "非洲": "african",
+        "非裔": "african",
+        "mixed": "mixed",
+        "混血": "mixed",
+        "multiracial": "mixed",
+        "other": "other",
+    }
+)
 # 模特库独立生成允许的张数档位；前端按钮组也按此白名单。
 MODEL_LIBRARY_GENERATE_COUNTS: frozenset[int] = frozenset({1, 2, 4, 16})
 # 隐藏 workflow type：模特库独立生成任务，不出现在 ProjectsIndex 列表里。
@@ -89,6 +158,26 @@ def _age_segment_from_folder_name(value: str) -> str | None:
     if alt in MODEL_LIBRARY_AGE_SEGMENTS and alt != "all":
         return alt
     return None
+
+
+def _normalize_appearance(value: Any) -> str:
+    """把各种英文/中文/别名归整到 MODEL_LIBRARY_APPEARANCES。无法识别返回空串。"""
+    if not isinstance(value, str):
+        return ""
+    raw = value.strip()
+    if not raw:
+        return ""
+    # 不区分大小写、空格、连字符 / 下划线（中文不受 lower 影响）
+    key = re.sub(r"[\s\-_]+", "_", raw.lower()).strip("_")
+    if not key:
+        return ""
+    aliased = _APPEARANCE_ALIASES.get(key)
+    if aliased is not None:
+        return aliased
+    # 已是合法枚举值（去掉 all）则直接返回
+    if key in MODEL_LIBRARY_APPEARANCES and key != "all":
+        return key
+    return "other"
 
 
 def _normalize_model_gender(value: Any) -> str:
@@ -171,6 +260,7 @@ def _title_from_preset_id(preset_id: str) -> str:
 
 __all__ = [
     "MODEL_LIBRARY_AGE_SEGMENTS",
+    "MODEL_LIBRARY_APPEARANCES",
     "MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS",
     "MODEL_LIBRARY_FOLDER_BY_AGE",
     "MODEL_LIBRARY_GENDER_SEGMENTS",
@@ -191,6 +281,7 @@ __all__ = [
     "_library_item_url",
     "_model_library_folder_for_age",
     "_normalize_age_segment",
+    "_normalize_appearance",
     "_normalize_model_gender",
     "_preset_id_from_path",
     "_title_from_preset_id",

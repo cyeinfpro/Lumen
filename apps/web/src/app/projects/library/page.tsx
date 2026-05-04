@@ -1,7 +1,5 @@
-"use client";
-
-import { ModelLibraryPage } from "@/components/ui/projects/library";
+import { redirect } from "next/navigation";
 
 export default function Page() {
-  return <ModelLibraryPage />;
+  redirect("/library");
 }

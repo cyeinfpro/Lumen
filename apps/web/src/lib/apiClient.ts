@@ -418,6 +418,32 @@ export type ModelLibraryAgeSegment =
 export type ModelLibraryItemAgeSegment = Exclude<ModelLibraryAgeSegment, "all">;
 export type ModelLibrarySource = "preset" | "favorite" | "user_upload" | "generated";
 
+export type ModelLibraryAppearance =
+  | "all"
+  | "asian"
+  | "east_asian"
+  | "southeast_asian"
+  | "south_asian"
+  | "european"
+  | "latin"
+  | "middle_eastern"
+  | "african"
+  | "mixed"
+  | "other";
+
+export const MODEL_LIBRARY_APPEARANCE_LABEL: Record<Exclude<ModelLibraryAppearance, "all">, string> = {
+  asian: "亚洲",
+  east_asian: "东亚",
+  southeast_asian: "东南亚",
+  south_asian: "南亚",
+  european: "欧洲",
+  latin: "拉美",
+  middle_eastern: "中东",
+  african: "非洲",
+  mixed: "混血",
+  other: "其他",
+};
+
 export interface ApparelModelLibrarySyncState {
   last_success_at: string | null;
   last_error: string | null;
@@ -671,12 +697,14 @@ export function listApparelModelLibrary(
   opts: {
     age_segment?: ModelLibraryAgeSegment;
     source?: "all" | ModelLibrarySource;
+    appearance?: ModelLibraryAppearance;
     q?: string;
   } = {},
 ): Promise<ApparelModelLibraryListResponse> {
   const qs = new URLSearchParams();
   if (opts.age_segment) qs.set("age_segment", opts.age_segment);
   if (opts.source) qs.set("source", opts.source);
+  if (opts.appearance) qs.set("appearance", opts.appearance);
   if (opts.q) qs.set("q", opts.q);
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch<ApparelModelLibraryListResponse>(
