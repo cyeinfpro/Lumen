@@ -25,6 +25,36 @@ def test_backup_paths_resolve_from_settings_at_call_time(
     assert admin_backups._restore_script() == scripts_dir / "restore.sh"
 
 
+def test_chmod_tolerate_eperm_swallows_only_eperm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """CIFS mount in production pins file_mode + uid via mount options;
+
+    every chmod from any caller returns EPERM. The helper has to swallow
+    EPERM but still propagate every other OSError so genuine faults
+    (ENOSPC, EBADF, EROFS, EIO, ...) still fail fast.
+    """
+    target = tmp_path / "marker.tmp"
+    target.write_text("ok\n", encoding="utf-8")
+
+    # EPERM is swallowed.
+    def fake_chmod_eperm(path: object, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(admin_backups.os, "chmod", fake_chmod_eperm)
+    admin_backups._chmod_tolerate_eperm(target, 0o600)  # must not raise
+
+    # Other OSErrors still propagate.
+    def fake_chmod_enospc(path: object, mode: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(admin_backups.os, "chmod", fake_chmod_enospc)
+    with pytest.raises(OSError) as exc:
+        admin_backups._chmod_tolerate_eperm(target, 0o600)
+    assert exc.value.errno == 28
+
+
 def test_open_private_append_tolerates_fchmod_eperm_for_non_owner_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

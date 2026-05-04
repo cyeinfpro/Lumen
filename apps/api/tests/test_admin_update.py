@@ -225,6 +225,70 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
     assert trigger_text.startswith("2026-05-02T00:00:00")
 
 
+def test_write_marker_tolerates_chmod_eperm_on_squashed_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """In production /opt/lumendata is mounted CIFS with forceuid+file_mode;
+
+    any chmod returns EPERM regardless of who creates the file. _write_marker
+    used to bare ``os.chmod`` and crashed trigger_update with HTTP 500. After
+    the fix it must succeed even when chmod is unavailable — the marker file
+    is what _start_update_via_path_unit relies on as the "an update is in
+    progress" signal, so silently dropping it is the worst possible outcome.
+    """
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+
+    def fake_chmod_eperm(path: object, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(admin_update.os, "chmod", fake_chmod_eperm)
+
+    admin_update._write_marker(
+        12345, "2026-05-04T00:00:00+00:00", unit="lumen-update-runner.service"
+    )
+
+    marker = backup_root / ".update.running"
+    assert marker.is_file()
+    text = marker.read_text(encoding="utf-8")
+    assert "pid=12345" in text
+    assert "unit=lumen-update-runner.service" in text
+
+
+def test_start_update_via_path_unit_tolerates_chmod_eperm_for_env_and_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The trigger and env files _start_update_via_path_unit writes also live
+
+    on the squashing CIFS mount. Each of those chmod calls used to surface
+    EPERM and abort the trigger before the runner could see anything.
+    """
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
+
+    def fake_chmod_eperm(path: object, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(admin_update.os, "chmod", fake_chmod_eperm)
+
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        outcome = admin_update._start_update_via_path_unit(
+            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            log_fh=log_fh,
+            started_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
+        )
+
+    assert outcome == (0, admin_update._UPDATE_RUNNER_UNIT)
+    assert (backup_root / ".update.running").is_file()
+    assert (backup_root / ".update.env").is_file()
+    assert (backup_root / ".update.trigger").is_file()
+
+
 def test_runner_unit_available_short_circuits_in_trigger_only_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -35,7 +35,11 @@ from ._admin_common import (
     write_admin_audit_isolated,
 )
 from .admin_proxies import _load_proxies
-from .admin_backups import _discover_scripts_dir, _open_private_append
+from .admin_backups import (
+    _chmod_tolerate_eperm,
+    _discover_scripts_dir,
+    _open_private_append,
+)
 
 
 router = APIRouter(prefix="/admin/update", tags=["admin"])
@@ -286,7 +290,7 @@ def _write_marker(pid: int, started_at: str, unit: str | None = None) -> None:
     if unit:
         lines.append(f"unit={unit}")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    _chmod_tolerate_eperm(tmp, 0o600)
     tmp.replace(marker)
 
 
@@ -436,7 +440,7 @@ def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    _chmod_tolerate_eperm(tmp, 0o600)
     tmp.replace(path)
     return path
 
@@ -681,14 +685,14 @@ def _start_update_via_path_unit(
     env_text = "\n".join(_runner_env_lines(env)) + "\n"
     env_tmp = env_path.with_suffix(f"{env_path.suffix}.tmp")
     env_tmp.write_text(env_text, encoding="utf-8")
-    os.chmod(env_tmp, 0o600)
+    _chmod_tolerate_eperm(env_tmp, 0o600)
     env_tmp.replace(env_path)
 
     # 3) Trigger file. Content is the ISO timestamp; PathChanged on the path
     #    unit fires on close-after-write and starts the runner unit.
     trigger_tmp = trigger_path.with_suffix(f"{trigger_path.suffix}.tmp")
     trigger_tmp.write_text(started_at.isoformat() + "\n", encoding="utf-8")
-    os.chmod(trigger_tmp, 0o600)
+    _chmod_tolerate_eperm(trigger_tmp, 0o600)
     trigger_tmp.replace(trigger_path)
 
     # 4) Wait for the runner to come up. The path-watcher latency is normally
