@@ -52,7 +52,7 @@ export function MobileMe() {
   };
 
   return (
-    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
       <MeTopBar
         query={query}
         onQueryChange={setQuery}
@@ -67,7 +67,7 @@ export function MobileMe() {
       />
 
       <main
-        className="flex-1 overflow-y-auto overscroll-contain"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         style={{
           paddingBottom:
             "calc(56px + 12px + env(safe-area-inset-bottom, 0px))",

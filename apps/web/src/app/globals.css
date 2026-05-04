@@ -226,14 +226,14 @@
     overflow-x: hidden;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
-    height: 100%;
+    min-height: 100%;
     /* iOS PWA standalone 模式下，dvh 不一定覆盖 home indicator 安全区，
        底部会露出 webview 默认色（白条）。给 html 一个兜底背景色，
        即使页面没撑满 safe-area，露出的也是 lumen 主题色。 */
     background-color: var(--bg-0);
   }
   @supports (height: 100dvh) {
-    html { height: 100dvh; }
+    html { min-height: 100dvh; }
   }
   /* lvh = largest viewport（永远包含 safe-area），iOS standalone 下比 dvh
      更稳。两条 @supports 分开写：dvh 不支持的浏览器仍走 100%；都不支持
@@ -245,12 +245,17 @@
     background-color: var(--bg-0);
     color: var(--fg-0);
     overflow-x: hidden;
+    min-height: 100%;
     font-family: var(--font-body, "Geist", -apple-system, system-ui, sans-serif);
     font-feature-settings: "ss01", "ss03";
     font-optical-sizing: auto;
     overscroll-behavior-y: none;
     -webkit-overflow-scrolling: touch;
     position: relative;
+  }
+  #__next,
+  [data-nextjs-root] {
+    min-height: 100%;
   }
   /* iOS PWA standalone 兜底：layout.tsx 给 body 设了 min-h-[100dvh]，
      某些 webview 实现下 dvh 不含 safe-area-inset-bottom，叠加这一行

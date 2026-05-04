@@ -8,6 +8,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronLeft, ChevronRight, Download, Maximize2, Minimize2, X } from "lucide-react";
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
@@ -123,9 +124,13 @@ export function ImagePreviewModal({
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             className="relative flex max-h-[88dvh] max-w-[92vw] items-center justify-center"
           >
-            <img
+            <Image
               src={imageSrc(current)}
               alt="大图预览"
+              width={1600}
+              height={1600}
+              sizes="92vw"
+              unoptimized
               className={cn(
                 "select-none rounded-md object-contain shadow-[var(--shadow-3)]",
                 fitMode === "actual"
@@ -147,7 +152,7 @@ export function ImagePreviewModal({
               <button
                 type="button"
                 onClick={() => setFitMode((m) => (m === "contain" ? "actual" : "contain"))}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-white/15 bg-black/60 px-3 text-xs text-white transition-colors hover:bg-black/80"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-white/15 bg-black/60 px-3 text-xs text-white transition-colors hover:bg-black/80"
                 aria-label={fitMode === "contain" ? "切换原始尺寸 (Z)" : "适应屏幕 (Z)"}
               >
                 {fitMode === "contain" ? (
@@ -167,7 +172,7 @@ export function ImagePreviewModal({
                   href={downloadHref}
                   download
                   rel="noopener"
-                  className="inline-flex h-9 items-center gap-1.5 rounded-md border border-white/15 bg-black/60 px-3 text-xs text-white transition-colors hover:bg-black/80"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-white/15 bg-black/60 px-3 text-xs text-white transition-colors hover:bg-black/80"
                   aria-label="下载 (D)"
                 >
                   <Download className="h-3.5 w-3.5" />
@@ -178,7 +183,7 @@ export function ImagePreviewModal({
                 type="button"
                 onClick={onClose}
                 aria-label="关闭 (Esc)"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/15 bg-black/60 text-white transition-colors hover:bg-black/80"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-white/15 bg-black/60 text-white transition-colors hover:bg-black/80"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -218,4 +223,3 @@ export function ImagePreviewModal({
     </AnimatePresence>
   );
 }
-

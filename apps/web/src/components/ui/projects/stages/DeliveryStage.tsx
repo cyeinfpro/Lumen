@@ -7,6 +7,7 @@
 // 3) 重选模特 ConfirmDialog 兜底
 
 import { ArchiveRestore, Download, RefreshCw } from "lucide-react";
+import Image from "next/image";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
@@ -88,10 +89,13 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
               onClick={() => setPreviewIndex(index)}
               className="block w-full overflow-hidden rounded-md focus-visible:outline-none"
             >
-              <img
+              <Image
                 src={imageSrc(image)}
                 alt="最终展示图"
-                loading="lazy"
+                width={360}
+                height={450}
+                sizes="(max-width: 768px) 100vw, 360px"
+                unoptimized
                 className="aspect-[4/5] w-full object-cover transition-transform duration-[var(--dur-slow)] hover:scale-[1.02]"
               />
             </button>
@@ -99,7 +103,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
               href={canDownload(image) || "#"}
               download
               rel="noopener"
-              className="mt-2 inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-md border border-[var(--border)] text-sm text-[var(--fg-0)] transition-colors hover:bg-white/[0.04]"
+              className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-md border border-[var(--border)] text-sm text-[var(--fg-0)] transition-colors hover:bg-white/[0.04]"
             >
               <Download className="h-4 w-4" />
               下载

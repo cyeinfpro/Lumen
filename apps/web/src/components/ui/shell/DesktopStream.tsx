@@ -317,7 +317,7 @@ export function DesktopStream() {
   }, []);
 
   return (
-    <div className="relative flex h-[100dvh] w-full flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full flex-col bg-[var(--bg-0)]">
       <DesktopTopNav
         active="stream"
         right={
@@ -335,7 +335,7 @@ export function DesktopStream() {
 
       <main
         ref={scrollRef}
-        className="flex-1 overflow-y-auto"
+        className="min-h-0 flex-1 overflow-y-auto"
       >
         <div className="mx-auto max-w-[1280px] px-8 py-6">
           <StreamSearchBar

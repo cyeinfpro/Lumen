@@ -6,12 +6,13 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
 import { SystemPromptManager } from "@/components/ui/SystemPromptManager";
+import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 
 export default function PromptsPage() {
   return (
-    <main className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200">
-      <div className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-6 md:px-8 md:py-10 safe-x mobile-compact">
-        <header className="flex flex-wrap items-start justify-between gap-4">
+    <SettingsShell title="系统提示词" subtitle="PROMPTS">
+      <div className="flex flex-col gap-5">
+        <header className="hidden flex-wrap items-start justify-between gap-4 md:flex">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
               系统提示词
@@ -31,6 +32,6 @@ export default function PromptsPage() {
 
         <SystemPromptManager mode="embedded" hideTrigger />
       </div>
-    </main>
+    </SettingsShell>
   );
 }

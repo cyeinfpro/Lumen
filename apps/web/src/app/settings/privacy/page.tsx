@@ -42,6 +42,7 @@ import {
 import type { SessionOut } from "@/lib/types";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
+import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 
 const SESSION_SKELETON_KEYS = [
   "session-skeleton-current",
@@ -57,14 +58,14 @@ export default function PrivacyPage() {
   });
 
   return (
-    <motion.div
-      initial={false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, ease: "easeOut" }}
-      className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200"
-    >
-      <div className="max-w-4xl mx-auto px-4 md:px-8 py-6 md:py-10 space-y-8 safe-x mobile-compact">
-        <header className="flex items-start justify-between gap-4 flex-wrap">
+    <SettingsShell title="隐私 & 数据" subtitle="PRIVACY" maxWidth="max-w-4xl">
+      <motion.div
+        initial={false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2, ease: "easeOut" }}
+        className="space-y-8"
+      >
+        <header className="hidden items-start justify-between gap-4 flex-wrap md:flex">
           <div>
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
               隐私 & 数据
@@ -85,8 +86,8 @@ export default function PrivacyPage() {
         <ExportSection />
         <SessionsSection />
         <DangerSection email={me.data?.email ?? null} loading={me.isLoading} />
-      </div>
-    </motion.div>
+      </motion.div>
+    </SettingsShell>
   );
 }
 

@@ -41,7 +41,7 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
   const workflow = query.data;
 
   return (
-    <div className="relative flex h-[100dvh] w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -87,12 +87,12 @@ function ProjectConsole({
   }, []);
 
   return (
-    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid flex-1 overflow-hidden md:mb-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_320px]">
+    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_320px]">
       <aside className="hidden border-r border-[var(--border)] bg-white/[0.025] p-4 lg:block">
         <StepRail workflow={workflow} />
       </aside>
 
-      <section className="min-w-0 overflow-y-auto p-4 md:p-6">
+      <section className="min-h-0 min-w-0 overflow-y-auto p-4 md:p-6">
         <DetailBreadcrumb workflow={workflow} />
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
@@ -263,7 +263,7 @@ function DetailHeader({
                 type="submit"
                 aria-label="保存项目名称"
                 disabled={patch.isPending}
-                className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] disabled:opacity-50 md:h-9 md:w-9"
+                className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] disabled:opacity-50 md:h-9 md:w-9 md:min-h-11 md:min-w-11"
               >
                 {patch.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
               </button>
@@ -271,7 +271,7 @@ function DetailHeader({
                 type="button"
                 aria-label="取消重命名"
                 onClick={() => setEditing(false)}
-                className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:h-9 md:w-9"
+                className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-md text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:h-9 md:w-9 md:min-h-11 md:min-w-11"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -453,7 +453,7 @@ function DetailError({ onRetry }: { onRetry: () => void }) {
       <button
         type="button"
         onClick={onRetry}
-        className="mt-3 inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08]"
+        className="mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08]"
       >
         重试
       </button>
