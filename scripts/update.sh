@@ -684,6 +684,62 @@ fi
 emit_done preflight 0
 
 # ---------------------------------------------------------------------------
+# Phase: self_update_scripts
+# 从 GitHub 拉最新 scripts/ 替换 current release 里的对应文件，让 backup_preflight
+# 等后续阶段直接用上仓库 main 的 bash 修复，避免"修一个 scripts/ bug 必须等下次
+# update 才生效"的鸡蛋问题。
+#
+# 实现委托给 lib.sh 的 lumen_self_update_scripts（lumenctl 入口处也用同一个函数）。
+# update 阶段强制突破 TTL（LUMEN_SELF_UPDATE_FORCE=1）—— 升级时必须拿最新。
+# 只取 lib.sh / backup.sh / restore.sh / update.sh 四个（lumenctl.sh 已在 lumenctl 入口处更新过）。
+# ---------------------------------------------------------------------------
+emit_start self_update_scripts
+
+if [ "${LUMEN_UPDATE_SELF_UPDATED:-0}" = "1" ]; then
+    log_info "[self_update_scripts] 已通过 self-update re-exec 重入，跳过自身。"
+    emit_done self_update_scripts 0
+elif [ "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS:-1}" = "0" ]; then
+    log_info "[self_update_scripts] 关闭（LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0）。"
+    emit_done self_update_scripts 0
+elif [ -z "${CURRENT_RELEASE}" ] || [ ! -d "${CURRENT_RELEASE}/scripts" ]; then
+    log_info "[self_update_scripts] 不是 release 布局（CURRENT_RELEASE 为空），跳过。"
+    emit_done self_update_scripts 0
+else
+    LUMEN_SELF_UPDATE_FORCE=1 lumen_self_update_scripts \
+        "${CURRENT_RELEASE}/scripts" \
+        "${LUMEN_UPDATE_SCRIPTS_BRANCH:-main}" \
+        0 \
+        lib.sh backup.sh restore.sh update.sh
+    case "${LUMEN_SELF_UPDATE_RESULT:-}" in
+        ok)
+            if [ -n "${LUMEN_SELF_UPDATE_CHANGED:-}" ]; then
+                emit_info self_update_scripts source "${LUMEN_SELF_UPDATE_SOURCE}"
+                emit_info self_update_scripts changed "${LUMEN_SELF_UPDATE_CHANGED}"
+                emit_info self_update_scripts backup_suffix ".bak.${LUMEN_SELF_UPDATE_BACKUP_TS}"
+                # update.sh 自己变化 → re-exec 新版
+                case " ${LUMEN_SELF_UPDATE_CHANGED} " in
+                    *" update.sh "*)
+                        log_info "[self_update_scripts] update.sh 已变更，re-exec 新版（保留 OPERATION_ID）。"
+                        emit_done self_update_scripts 0
+                        export LUMEN_UPDATE_SELF_UPDATED=1
+                        export OPERATION_ID
+                        exec bash "${CURRENT_RELEASE}/scripts/update.sh" "$@"
+                        ;;
+                esac
+            fi
+            emit_done self_update_scripts 0
+            ;;
+        failed)
+            emit_warn self_update_scripts "fetch_or_validate_failed_continue_with_local"
+            emit_done self_update_scripts 0
+            ;;
+        disabled|skipped|*)
+            emit_done self_update_scripts 0
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
 # Phase: backup_preflight
 # 默认强制；只有 LUMEN_UPDATE_SKIP_BACKUP=1 才跳过。失败 abort。
 # ---------------------------------------------------------------------------
