@@ -1,7 +1,7 @@
 "use client";
 
-// Editorial stage frame：去除嵌套卡片化，改为 hairline 分隔 + 排印层级。
-// 视觉规范：mono uppercase eyebrow + serif italic title + sans subtitle。
+// Stage frame：去除嵌套卡片化，改为 hairline 分隔 + 工作台式排印层级。
+// 视觉规范：mono uppercase eyebrow + compact title + sans subtitle。
 // 子内容贴底铺，不再叠加 bg-white/[0.035] + border + shadow。
 
 import { cn } from "@/lib/utils";
@@ -27,19 +27,19 @@ export function StageFrame({
 }: StageFrameProps) {
   return (
     <section className={cn("relative", className)}>
-      <header className="border-t border-[var(--border)] pb-5 pt-6 md:pt-8">
+      <header className="pb-5 pt-1 md:pt-2">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
               {eyebrow}
             </p>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <h2 className="font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] md:text-[32px]">
+              <h2 className="text-[22px] font-semibold leading-[1.18] tracking-tight text-[var(--fg-0)] md:text-[26px]">
                 {title}
               </h2>
               {badge}
             </div>
-            <p className="mt-2 max-w-xl text-[13px] leading-6 text-[var(--fg-1)]">
+            <p className="mt-2 max-w-xl text-[13px] leading-6 text-[var(--fg-2)]">
               {subtitle}
             </p>
           </div>
@@ -69,7 +69,7 @@ export function RunningState({
         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-50" />
         <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--amber-400)]" />
       </span>
-      <p className="font-display text-[18px] italic text-[var(--fg-0)]">{label}</p>
+      <p className="text-[15px] font-semibold tracking-tight text-[var(--fg-0)]">{label}</p>
       <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
         Developing
       </p>

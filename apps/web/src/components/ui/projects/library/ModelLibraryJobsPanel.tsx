@@ -98,17 +98,17 @@ export function ModelLibraryJobsPanel() {
   }, [items]);
 
   return (
-    <div className="grid gap-8">
-      <header className="border-y border-[var(--border)] py-6 md:py-8">
+    <div className="grid gap-7">
+      <header className="border-b border-[var(--border)] pb-6">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1">
             <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              N°02 — Jobs Center
+              Jobs Center
             </p>
-            <h2 className="mt-3 font-display text-[36px] italic leading-[1] text-[var(--fg-0)] md:text-[52px]">
+            <h2 className="mt-2 font-display text-[32px] italic leading-[1] text-[var(--fg-0)] md:text-[40px]">
               任务中心
             </h2>
-            <p className="mt-3 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+            <p className="mt-3 max-w-xl text-[13px] leading-6 text-[var(--fg-2)]">
               独立生成与项目候选的统一进度跟踪
             </p>
           </div>
@@ -118,7 +118,7 @@ export function ModelLibraryJobsPanel() {
             onClick={() => jobs.refetch()}
             disabled={jobs.isFetching}
             className={cn(
-              "inline-flex h-10 items-center gap-2 self-start border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 md:self-end",
+              "inline-flex h-10 items-center gap-2 self-start rounded-full border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 md:self-end",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
             )}
           >
@@ -189,7 +189,7 @@ function Stat({
       </p>
       <p
         className={cn(
-          "mt-1 font-display text-[28px] italic leading-none tabular-nums md:text-[36px]",
+          "mt-1 text-[24px] font-semibold leading-none tabular-nums md:text-[28px]",
           accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
         )}
       >
@@ -216,7 +216,7 @@ function Section({
         <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
           {eyebrow}
         </span>
-        <h3 className="font-display text-[22px] italic leading-none text-[var(--fg-0)] md:text-[28px]">
+        <h3 className="text-[18px] font-semibold leading-tight text-[var(--fg-0)] md:text-[20px]">
           {title}
         </h3>
         <span className="font-mono text-[11px] tabular-nums text-[var(--fg-2)]">
@@ -695,7 +695,7 @@ function SaveJobItemDialog({
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               Save to library
             </p>
-            <h3 className="mt-2 font-display text-[24px] italic leading-none text-[var(--fg-0)]">
+            <h3 className="mt-2 text-[20px] font-semibold leading-tight text-[var(--fg-0)]">
               收藏入库
             </h3>
           </div>
@@ -846,14 +846,14 @@ function Chip({
 
 function EmptyJobs() {
   return (
-    <section className="border-y border-[var(--border)] py-16 md:py-20">
+    <section className="border-y border-[var(--border)] py-14 md:py-16">
       <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
             <Library className="mr-1.5 -mt-px inline-block h-3 w-3" />
             Empty queue
           </p>
-          <h4 className="mt-3 font-display text-[36px] italic leading-[1.05] text-[var(--fg-0)] md:text-[48px]">
+          <h4 className="mt-3 text-[24px] font-semibold leading-tight text-[var(--fg-0)] md:text-[28px]">
             还没有任务
           </h4>
           <p className="mt-3 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">

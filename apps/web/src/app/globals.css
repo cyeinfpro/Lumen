@@ -145,7 +145,8 @@
     --z-composer: 40;
     --z-composer-expanded: 45;
     --z-tray: 50;
-    --z-lightbox: 80;
+    /* lightbox 需要压过模态弹窗，但仍低于 toast */
+    --z-lightbox: 95;
     --z-dialog: 90;
     --z-toast: 100;
 

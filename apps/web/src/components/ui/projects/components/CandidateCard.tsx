@@ -60,7 +60,7 @@ export function CandidateCard({
       <div className="relative">
         <div
           className={cn(
-            "relative grid aspect-[4/5] gap-px overflow-hidden bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)]",
+            "relative grid aspect-[4/5] gap-px overflow-hidden rounded-lg bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)]",
             images.length > 1 ? "grid-cols-2" : "grid-cols-1",
             selected && "ring-1 ring-inset ring-[var(--border-amber)]",
           )}
@@ -125,7 +125,7 @@ export function CandidateCard({
       <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
         <p
           className={cn(
-            "font-display text-[18px] italic leading-tight transition-colors",
+            "text-[15px] font-semibold leading-tight tracking-tight transition-colors",
             selected ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
           )}
         >

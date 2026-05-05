@@ -298,16 +298,19 @@ export function ModelLibraryBrowser({
   }, [ageSegment, appearance, source]);
 
   return (
-    <div className={cn("flex min-h-0 flex-1 flex-col gap-5", className)}>
+    <div className={cn("flex min-h-0 flex-1 flex-col gap-6", className)}>
       {showHeader ? (
-        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-y border-[var(--border)] py-3">
-          <p className="min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-            {syncInfo?.last_success_at ? (
-              <>Last sync · {formatShortDate(syncInfo.last_success_at)}</>
-            ) : (
-              <>Preset · favorite · upload · generated</>
-            )}
-          </p>
+        <header className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3 border-b border-[var(--border)] pb-4">
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Browser
+            </p>
+            <p className="mt-1 min-w-0 truncate text-[12.5px] text-[var(--fg-2)]">
+              {syncInfo?.last_success_at
+                ? `Last sync · ${formatShortDate(syncInfo.last_success_at)}`
+                : "Preset · favorite · upload · generated"}
+            </p>
+          </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {syncInfo?.can_sync ? (
               <button
@@ -340,11 +343,11 @@ export function ModelLibraryBrowser({
       <div
         className={cn(
           "grid min-h-0 flex-1 gap-6",
-          showSourceSidebar ? "md:grid-cols-[152px_minmax(0,1fr)]" : "",
+          showSourceSidebar ? "md:grid-cols-[168px_minmax(0,1fr)]" : "",
         )}
       >
         {showSourceSidebar ? (
-          <aside className="hidden md:block">
+          <aside className="hidden border-r border-[var(--border)] pr-5 md:block">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               Source
             </p>
@@ -431,8 +434,8 @@ export function ModelLibraryBrowser({
               ))}
             </ChipRowGroup>
             {/* 搜索 + 来源（无 sidebar 时显示 select） */}
-            <div className="flex min-w-0 items-center gap-4">
-              <div className="relative w-full min-w-0 max-w-sm">
+            <div className="flex min-w-0 items-center gap-4 border-b border-[var(--border)] pb-4">
+              <div className="relative w-full min-w-0 max-w-md">
                 <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
                 <input
                   value={query}
@@ -686,7 +689,7 @@ function ModelLibraryCard({
         onClick={onOpenLightbox}
         aria-label={`查看 ${item.title} 大图`}
         className={cn(
-          "relative block aspect-[3/4] w-full cursor-zoom-in overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          "relative block aspect-[3/4] w-full cursor-zoom-in overflow-hidden rounded-lg bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
           highlighted ? "outline outline-2 outline-offset-2 outline-[var(--amber-400)]" : "",
         )}
       >

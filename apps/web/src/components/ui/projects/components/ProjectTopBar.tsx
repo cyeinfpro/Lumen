@@ -56,11 +56,11 @@ export function ProjectMobileTopBar({
             </Link>
           ) : null}
           <div className="min-w-0">
-            <div className="truncate font-display text-[24px] italic leading-[1.05] text-[var(--fg-0)]">
+            <div className="truncate text-[20px] font-semibold leading-[1.15] tracking-tight text-[var(--fg-0)] md:text-[22px]">
               {title}
             </div>
             {subtitle ? (
-              <div className="mt-0.5 truncate font-mono text-[10px] tracking-wider text-[var(--fg-2)]">
+              <div className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
                 {subtitle}
               </div>
             ) : null}

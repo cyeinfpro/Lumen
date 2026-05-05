@@ -1,10 +1,10 @@
 "use client";
 
-// Editorial 重构：杂志大标题 + hairline section + portrait 商品图卡 + amber CTA。
-// 1) Hero：mono eyebrow "N°00 — New Project" + font-display italic 大标题 + 极简 breadcrumb
-// 2) Upload：hairline section header + 大字 dashed dropzone + drag-active amber soft bg
+// Editorial 重构：compact header + hairline section + portrait 商品图卡 + amber CTA。
+// 1) Header：mono eyebrow + compact title + minimal breadcrumb
+// 2) Upload：hairline section header + dashed dropzone + drag-active amber soft bg
 // 3) 商品图列表：aspect 4/5 portrait + 左上 N° + 右上控件 + 底部 mono 元数据 + hairline 进度
-// 4) 字段：hairline section header (mono eyebrow + serif title) + 内容直铺
+// 4) 字段：hairline section header (mono eyebrow + compact title) + 内容直铺
 // 5) ParamSelect：mono label + 极简 select + amber focus
 // 6) CTA：amber 大圆角 hero 按钮，sticky 底部
 //
@@ -387,7 +387,7 @@ export function ApparelWorkflowNewPage() {
       <ProjectTopBar />
 
       <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[160px] pt-3 md:mb-0 md:px-10 md:py-6 md:pb-12">
-        <div className="mx-auto grid w-full max-w-[1280px] gap-6 md:gap-12">
+        <div className="mx-auto grid w-full max-w-[1280px] gap-6 md:gap-8">
           {/* Breadcrumb */}
           <nav
             aria-label="项目路径"
@@ -408,20 +408,20 @@ export function ApparelWorkflowNewPage() {
           </nav>
 
           {/* Hero */}
-          <header className="hidden gap-3 md:grid">
+          <header className="hidden border-b border-[var(--border)] pb-6 md:grid">
             <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              N°00 — New Project
+              New Project
             </p>
-            <h1 className="font-display text-[40px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] sm:text-[44px] md:text-[72px]">
+            <h1 className="mt-2 font-display text-[34px] italic leading-[1] text-[var(--fg-0)] md:text-[42px]">
               新建服饰模特图
             </h1>
-            <p className="max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+            <p className="mt-3 max-w-xl text-[13px] leading-6 text-[var(--fg-2)]">
               上传 1-3 张商品图，先确认 AI 合成的模特，再一次性生成 4 张电商展示图。
             </p>
           </header>
 
-          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-14">
-            <section className="grid gap-8 md:gap-10">
+          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-10">
+            <section className="grid gap-7 md:gap-8">
               {/* Upload */}
               <SectionHeader
                 eyebrow="N°01 — Upload"
@@ -471,7 +471,7 @@ export function ApparelWorkflowNewPage() {
                   </span>
                   <p
                     className={cn(
-                      "font-display text-[24px] italic leading-[1.1] md:text-[32px]",
+                      "text-[18px] font-semibold leading-snug md:text-[20px]",
                       dragActive ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
                     )}
                   >
@@ -708,7 +708,7 @@ export function ApparelWorkflowNewPage() {
   );
 }
 
-// hairline section header：mono eyebrow + serif italic title + 可选右侧元素
+// hairline section header：mono eyebrow + compact title + 可选右侧元素
 function SectionHeader({
   eyebrow,
   title,
@@ -725,7 +725,7 @@ function SectionHeader({
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
             {eyebrow}
           </p>
-          <h2 className="mt-2 font-display text-[26px] italic leading-[1.05] text-[var(--fg-0)] md:text-[30px]">
+          <h2 className="mt-2 text-[20px] font-semibold leading-tight text-[var(--fg-0)] md:text-[22px]">
             {title}
           </h2>
         </div>

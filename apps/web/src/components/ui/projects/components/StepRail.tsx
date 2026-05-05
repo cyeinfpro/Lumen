@@ -1,7 +1,7 @@
 "use client";
 
 // Editorial 步骤侧栏：8 步进度脉络。
-// - 顶部进度数字（mono 大数字）
+// - 顶部进度数字（紧凑 tabular）
 // - 列表：N°NN 序号 + 节点圆 + 中文标题 + 状态色
 // - 当前步：amber dot pulse + 琥珀文字
 // - 移动条：横向滚 chip + 大数字进度
@@ -23,7 +23,7 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
           Progress
         </p>
         <div className="mt-2 flex items-baseline gap-3">
-          <span className="font-display text-[40px] italic leading-none tabular-nums text-[var(--fg-0)]">
+          <span className="text-[32px] font-semibold leading-none tabular-nums text-[var(--fg-0)]">
             {Math.round(progress * 100)}
           </span>
           <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">

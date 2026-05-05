@@ -129,16 +129,16 @@ export function ModelLibraryGenerator({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
-      className="grid gap-8"
+      className="grid gap-6 md:gap-8"
     >
-      <header className="border-y border-[var(--border)] py-6 md:py-8">
-        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-          N°03 — Generator
+      <header className="border-b border-[var(--border)] pb-6 md:pb-7">
+        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          Generator
         </p>
-        <h2 className="mt-3 font-display text-[36px] italic leading-[1] text-[var(--fg-0)] md:text-[52px]">
+        <h2 className="mt-2 font-display text-[32px] italic leading-[1] text-[var(--fg-0)] md:text-[40px]">
           新建模特
         </h2>
-        <p className="mt-3 max-w-2xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+        <p className="mt-3 max-w-2xl text-[13px] leading-[1.7] text-[var(--fg-2)]">
           {`在不开项目的情况下批量生成模特图，提交后会自动进入"任务中心"。`}
           {`选了"自动识别"会在生成完跑一次风格识别打标签。`}
         </p>
@@ -328,12 +328,12 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-5 border-t border-[var(--border)] pt-6">
+    <div className="grid gap-5 border-t border-[var(--border)] pt-5 md:pt-6">
       <div className="flex items-baseline gap-3">
         <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
           {eyebrow}
         </span>
-        <h3 className="font-display text-[20px] italic leading-none text-[var(--fg-0)] md:text-[24px]">
+        <h3 className="text-[18px] font-semibold leading-none tracking-tight text-[var(--fg-0)] md:text-[20px]">
           {title}
         </h3>
       </div>
