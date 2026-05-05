@@ -129,7 +129,7 @@ export function ProjectsIndex() {
       />
       <ProjectTopBar />
       <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-6">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-8 md:gap-12">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-6 md:gap-12">
           <Crumb />
           <Hero counts={counts} />
           <ModelLibraryEntry />
@@ -149,7 +149,7 @@ export function ProjectsIndex() {
             <EmptyHero />
           ) : filtered.length === 0 ? (
             <EmptyState
-              className="border-t border-[var(--border)] py-20"
+              className="border-t border-[var(--border)] py-16 md:py-20"
               title="没有符合条件的项目"
               description={
                 deferredKeyword
@@ -200,12 +200,12 @@ function Crumb() {
 function Hero({ counts }: { counts: Record<FilterKey, number> }) {
   const active = counts.running + counts.needs_review + counts.attention;
   return (
-    <section className="grid gap-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-12">
-      <div className="min-w-0">
+    <section className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-12">
+      <div className="hidden min-w-0 md:block">
         <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
           N°01 — Apparel Studio
         </p>
-        <h1 className="mt-3 font-display text-[44px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] md:text-[72px]">
+        <h1 className="mt-3 font-display text-[40px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] sm:text-[44px] md:text-[72px]">
           服饰模特图
         </h1>
         <p className="mt-4 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
@@ -218,7 +218,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
       </div>
       <Link
         href="/projects/apparel-model-showcase/new"
-        className="group inline-flex items-center gap-3 self-start rounded-full bg-[var(--accent)] px-6 py-3 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:self-end"
+        className="group hidden items-center gap-3 self-start rounded-full bg-[var(--accent)] px-6 py-3 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:inline-flex md:self-end"
       >
         <Plus className="h-4 w-4" />
         新建项目
@@ -244,13 +244,13 @@ function Stat({
   accent?: boolean;
 }) {
   return (
-    <div className="bg-[var(--bg-0)] px-4 py-4 md:px-6 md:py-5">
+    <div className="bg-[var(--bg-0)] px-3 py-3 md:px-6 md:py-5">
       <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
         {label}
       </p>
       <p
         className={cn(
-          "mt-1 font-display text-[32px] italic leading-none tabular-nums md:text-[44px]",
+          "mt-1 font-display text-[26px] italic leading-none tabular-nums md:text-[44px]",
           accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
         )}
       >
@@ -276,9 +276,9 @@ function ModelLibraryEntry() {
     <Link
       href="/library"
       aria-label="进入模特库"
-      className="group relative block overflow-hidden border-y border-[var(--border)] py-5 transition-colors hover:bg-[var(--bg-1)]/40 md:py-7"
+      className="group relative block overflow-hidden border-y border-[var(--border)] py-4 transition-colors hover:bg-[var(--bg-1)]/40 md:py-7"
     >
-      <div className="grid items-center gap-5 md:grid-cols-[auto_minmax(0,1fr)_auto] md:gap-10">
+      <div className="grid items-center gap-4 md:grid-cols-[auto_minmax(0,1fr)_auto] md:gap-10">
         <div className="flex md:items-center">
           <div className="flex -space-x-3 md:-space-x-4">
             {hasItems ? (
@@ -308,7 +308,7 @@ function ModelLibraryEntry() {
             <Library className="mr-1.5 -mt-px inline-block h-3 w-3 text-[var(--amber-300)]" />
             Library
           </p>
-          <h2 className="mt-2 font-display text-[28px] italic leading-[1] text-[var(--fg-0)] md:text-[36px]">
+          <h2 className="mt-1.5 font-display text-[22px] italic leading-[1] text-[var(--fg-0)] md:mt-2 md:text-[36px]">
             模特库
           </h2>
           <p className="mt-1.5 max-w-md truncate text-[13px] text-[var(--fg-1)]">
@@ -322,7 +322,7 @@ function ModelLibraryEntry() {
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               Models
             </p>
-            <p className="mt-0.5 font-display text-[28px] italic leading-none tabular-nums text-[var(--fg-0)] md:text-[36px]">
+            <p className="mt-0.5 font-display text-[24px] italic leading-none tabular-nums text-[var(--fg-0)] md:text-[36px]">
               {String(total).padStart(2, "0")}
             </p>
           </div>
@@ -411,7 +411,7 @@ function Toolbar({
 }) {
   return (
     <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,280px)] lg:items-center">
-      <div className="scrollbar-none -mx-4 flex gap-1 overflow-x-auto px-4 md:mx-0 md:flex-wrap md:overflow-visible md:px-0">
+      <div className="flex min-w-0 flex-wrap gap-x-1 gap-y-1 md:gap-x-1">
         {FILTERS.map((option) => {
           const active = filter === option.key;
           const count = counts[option.key];
@@ -468,7 +468,7 @@ function Toolbar({
 
 function ProjectsGrid({ items }: { items: WorkflowRunListItem[] }) {
   return (
-    <section className="grid gap-x-5 gap-y-10 sm:grid-cols-2 md:gap-x-6 md:gap-y-12 lg:grid-cols-3 xl:grid-cols-4">
+    <section className="grid grid-cols-2 gap-x-4 gap-y-8 md:gap-x-6 md:gap-y-12 lg:grid-cols-3 xl:grid-cols-4">
       {items.map((item, index) => (
         <ProjectCard key={item.id} item={item} order={index} />
       ))}
@@ -601,7 +601,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
             aria-hidden
             className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
           />
-          <span className="absolute left-3 top-3 inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+          <span className="absolute left-3 top-3 inline-flex max-w-[calc(100%-5rem)] items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
             N°{String(order + 1).padStart(2, "0")}
           </span>
           {running ? (
@@ -643,7 +643,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         onClick={openMenu}
-        className="absolute right-1 top-1 inline-flex h-10 min-h-10 w-10 min-w-10 cursor-pointer items-center justify-center rounded-full text-white/80 opacity-0 transition-all duration-[var(--dur-base)] hover:bg-black/40 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 group-hover:opacity-100 md:h-9 md:w-9"
+        className="absolute right-1 top-1 inline-flex h-10 min-h-10 w-10 min-w-10 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-base)] hover:bg-black/50 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:bg-transparent md:text-white/80 md:opacity-0 md:group-hover:opacity-100 md:h-9 md:w-9"
       >
         <MoreHorizontal className="h-4 w-4" />
       </button>
@@ -652,7 +652,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         <div
           ref={menuRef}
           role="menu"
-          className="absolute right-2 top-12 z-10 w-[min(15rem,calc(100vw-3rem))] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
+          className="absolute right-2 top-12 z-10 w-[min(15rem,calc(100vw-3rem))] max-w-[calc(100vw-1rem)] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
         >
           {renaming ? (
             <form
@@ -877,7 +877,7 @@ function ProjectActionsSheet({
 
 function SkeletonGrid() {
   return (
-    <div className="grid gap-x-5 gap-y-10 sm:grid-cols-2 md:gap-x-6 md:gap-y-12 lg:grid-cols-3 xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-x-4 gap-y-8 md:gap-x-6 md:gap-y-12 lg:grid-cols-3 xl:grid-cols-4">
       {Array.from({ length: 8 }).map((_, index) => (
         <div key={index} className="grid gap-3">
           <Skeleton className="aspect-[3/4] w-full" />

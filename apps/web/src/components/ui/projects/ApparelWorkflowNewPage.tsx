@@ -387,7 +387,7 @@ export function ApparelWorkflowNewPage() {
       <ProjectTopBar />
 
       <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[160px] pt-3 md:mb-0 md:px-10 md:py-6 md:pb-12">
-        <div className="mx-auto grid w-full max-w-[1280px] gap-8 md:gap-12">
+        <div className="mx-auto grid w-full max-w-[1280px] gap-6 md:gap-12">
           {/* Breadcrumb */}
           <nav
             aria-label="项目路径"
@@ -408,11 +408,11 @@ export function ApparelWorkflowNewPage() {
           </nav>
 
           {/* Hero */}
-          <header className="grid gap-3">
+          <header className="hidden gap-3 md:grid">
             <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               N°00 — New Project
             </p>
-            <h1 className="font-display text-[44px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] md:text-[72px]">
+            <h1 className="font-display text-[40px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] sm:text-[44px] md:text-[72px]">
               新建服饰模特图
             </h1>
             <p className="max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
@@ -420,8 +420,8 @@ export function ApparelWorkflowNewPage() {
             </p>
           </header>
 
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-14">
-            <section className="grid gap-10">
+          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-14">
+            <section className="grid gap-8 md:gap-10">
               {/* Upload */}
               <SectionHeader
                 eyebrow="N°01 — Upload"
@@ -514,7 +514,7 @@ export function ApparelWorkflowNewPage() {
 
               {/* File preview grid: portrait cards */}
               {files.length > 0 ? (
-                <ul className="-mt-4 grid gap-x-5 gap-y-8 sm:grid-cols-2 md:grid-cols-3 md:gap-x-6">
+                <ul className="-mt-4 grid grid-cols-2 gap-x-4 gap-y-8 md:grid-cols-3 md:gap-x-6">
                   {files.map((item, index) => (
                     <FilePortrait
                       key={item.uid}
@@ -855,7 +855,7 @@ function FilePortrait({
         </div>
 
         {/* top-right controls */}
-        <div className="absolute right-2 top-2 flex flex-col gap-1.5 opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100 focus-within:opacity-100">
+        <div className="absolute right-2 top-2 flex flex-col gap-1.5 opacity-100 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100 focus-within:opacity-100 md:opacity-0">
           <div className="flex flex-col gap-1 rounded-full border border-white/15 bg-black/55 p-1 backdrop-blur">
             <IconBtn
               label="上移"

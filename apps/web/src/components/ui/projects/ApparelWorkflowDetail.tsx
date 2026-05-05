@@ -98,12 +98,12 @@ function ProjectConsole({
   }, []);
 
   return (
-    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_320px]">
-      <aside className="hidden border-r border-[var(--border)] p-6 lg:block">
+    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_300px]">
+      <aside className="hidden border-r border-[var(--border)] p-5 lg:block">
         <StepRail workflow={workflow} />
       </aside>
 
-      <section className="min-h-0 min-w-0 overflow-y-auto px-4 pb-12 pt-4 md:px-10 md:pt-6">
+      <section className="min-h-0 min-w-0 overflow-y-auto px-4 pb-12 pt-4 md:px-8 md:pt-6">
         <DetailBreadcrumb workflow={workflow} />
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
@@ -125,7 +125,7 @@ function ProjectConsole({
         <Conversation workflow={workflow} />
       </section>
 
-      <aside className="hidden overflow-y-auto border-l border-[var(--border)] px-5 py-6 xl:block">
+      <aside className="hidden overflow-y-auto border-l border-[var(--border)] px-4 py-6 xl:block">
         <ConstraintPanel workflow={workflow} />
       </aside>
 
@@ -261,7 +261,7 @@ function DetailHeader({
         <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2">
           {editing ? (
             <form
-              className="flex min-w-0 items-baseline gap-2"
+              className="flex min-w-0 flex-wrap items-baseline gap-2"
               onSubmit={(event) => {
                 event.preventDefault();
                 saveTitle();
@@ -280,7 +280,7 @@ function DetailHeader({
                 maxLength={120}
                 autoFocus
                 aria-label="项目名称"
-                className="min-w-0 max-w-[min(80vw,640px)] border-b border-[var(--border-amber)] bg-transparent px-1 font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] outline-none md:text-[40px]"
+                className="min-w-0 max-w-[min(calc(100vw_-_4rem),640px)] border-b border-[var(--border-amber)] bg-transparent px-1 font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] outline-none md:text-[40px]"
               />
               <button
                 type="submit"
@@ -342,7 +342,7 @@ function DetailHeader({
         ) : null}
       </div>
 
-      <div className="flex items-center gap-2 self-start md:self-end">
+      <div className="flex flex-wrap items-center gap-2 self-start md:self-end">
         <button
           type="button"
           onClick={onOpenDrawer}

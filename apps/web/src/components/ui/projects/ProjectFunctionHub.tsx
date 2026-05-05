@@ -46,12 +46,12 @@ export function ProjectFunctionHub() {
       <ProjectTopBar />
 
       <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-6">
-        <div className="mx-auto grid w-full max-w-[1280px] gap-10 md:gap-14">
-          <header className="grid gap-3">
+        <div className="mx-auto grid w-full max-w-[1280px] gap-5 md:gap-14">
+          <header className="hidden gap-3 md:grid">
             <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               N°00 — Project Hub
             </p>
-            <h1 className="font-display text-[44px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] md:text-[72px]">
+            <h1 className="font-display text-[40px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] sm:text-[44px] md:text-[72px]">
               项目
             </h1>
             <p className="max-w-xl text-[14px] leading-7 text-[var(--fg-1)]">
@@ -59,7 +59,7 @@ export function ProjectFunctionHub() {
             </p>
           </header>
 
-          <section className="grid gap-x-6 gap-y-10 md:grid-cols-3">
+          <section className="grid gap-x-6 gap-y-6 sm:grid-cols-2 md:grid-cols-3 md:gap-y-10">
             {FEATURES.map((feature, index) => (
               <FeatureCard key={feature.title} feature={feature} index={index} />
             ))}
@@ -85,7 +85,7 @@ function FeatureCard({
     <>
       <div
         className={cn(
-          "relative aspect-[4/5] overflow-hidden border border-[var(--border)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)]",
+          "relative h-28 overflow-hidden border border-[var(--border)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)] sm:h-40 md:h-52",
           feature.available
             ? "group-hover:border-[var(--border-amber)]/60"
             : "opacity-60",
@@ -94,7 +94,7 @@ function FeatureCard({
         <div className="absolute inset-0 flex items-center justify-center">
           <Icon
             className={cn(
-              "h-20 w-20 transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)]",
+              "h-12 w-12 transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] sm:h-20 sm:w-20",
               feature.available
                 ? "text-[var(--fg-1)] group-hover:scale-[1.08] group-hover:text-[var(--amber-300)]"
                 : "text-[var(--fg-3)]",
@@ -118,7 +118,7 @@ function FeatureCard({
           </span>
         )}
       </div>
-      <div className="mt-4">
+      <div className="mt-3 sm:mt-4">
         <p
           className={cn(
             "font-mono text-[10px] uppercase tracking-[0.22em]",
@@ -129,7 +129,7 @@ function FeatureCard({
         </p>
         <h2
           className={cn(
-            "mt-1.5 font-display text-[26px] italic leading-[1.1] transition-colors duration-[var(--dur-base)] md:text-[30px]",
+            "mt-1.5 font-display text-[24px] italic leading-[1.1] transition-colors duration-[var(--dur-base)] sm:text-[26px] md:text-[30px]",
             feature.available
               ? "text-[var(--fg-0)] group-hover:text-[var(--amber-300)]"
               : "text-[var(--fg-2)]",

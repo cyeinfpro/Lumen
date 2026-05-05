@@ -127,7 +127,7 @@ export function ModelLibraryJobsPanel() {
           </button>
         </div>
         {!jobs.isPending && items.length > 0 ? (
-          <div className="mt-6 grid grid-cols-3 gap-px overflow-hidden border border-[var(--border)] md:max-w-2xl">
+          <div className="mt-6 grid grid-cols-1 gap-px overflow-hidden border border-[var(--border)] sm:grid-cols-3 md:max-w-2xl">
             <Stat label="Total" value={items.length} />
             <Stat label="Active" value={running.length} accent={running.length > 0} />
             <Stat label="Done" value={finished.length} />
@@ -280,7 +280,7 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
       </header>
       <ProgressBar value={progress} />
       {job.items.length > 0 ? (
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 md:grid-cols-6">
           {job.items.map((item, idx) => (
             <JobThumb
               key={item.image_id}
@@ -408,7 +408,7 @@ function CandidatesGroup({
         className={cn(
           "grid gap-3",
           compact
-            ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-6"
+            ? "grid-cols-2 sm:grid-cols-4 md:grid-cols-6"
             : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5",
         )}
       >
@@ -554,7 +554,7 @@ function JobThumb({
             Saved
           </span>
         ) : null}
-        <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-0 backdrop-blur transition-opacity duration-150 group-hover:opacity-100">
+        <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-100 backdrop-blur transition-opacity duration-150 md:opacity-0 md:group-hover:opacity-100">
           <Maximize2 className="h-3.5 w-3.5" />
         </span>
       </button>

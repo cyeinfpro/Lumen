@@ -300,49 +300,39 @@ export function ModelLibraryBrowser({
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col gap-5", className)}>
       {showHeader ? (
-        <header className="border-y border-[var(--border)] py-5 md:py-6">
-          <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
-            <div className="min-w-0 flex-1">
-              <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-                Models · Library
-              </p>
-              <h2 className="mt-2 font-display text-[28px] italic leading-[1] text-[var(--fg-0)] md:text-[36px]">
-                浏览模特
-              </h2>
-              <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-                {syncInfo?.last_success_at ? (
-                  <>Last sync · {formatShortDate(syncInfo.last_success_at)}</>
-                ) : (
-                  <>Preset · favorite · upload · generated</>
-                )}
-              </p>
-            </div>
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
-              {syncInfo?.can_sync ? (
-                <button
-                  type="button"
-                  onClick={() => sync.mutate()}
-                  disabled={sync.isPending}
-                  className="inline-flex h-10 items-center gap-2 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:opacity-50"
-                >
-                  {sync.isPending ? (
-                    <Spinner size={12} />
-                  ) : (
-                    <RefreshCw className="h-3 w-3" />
-                  )}
-                  Sync
-                </button>
-              ) : null}
-              <Button
-                size="md"
-                variant="primary"
-                onClick={() => setUploadOpen(true)}
-                leftIcon={<Upload className="h-3.5 w-3.5" />}
+        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-y border-[var(--border)] py-3">
+          <p className="min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            {syncInfo?.last_success_at ? (
+              <>Last sync · {formatShortDate(syncInfo.last_success_at)}</>
+            ) : (
+              <>Preset · favorite · upload · generated</>
+            )}
+          </p>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {syncInfo?.can_sync ? (
+              <button
+                type="button"
+                onClick={() => sync.mutate()}
+                disabled={sync.isPending}
+                className="inline-flex h-9 items-center gap-2 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:opacity-50"
               >
-                上传
-              </Button>
-              {headerExtra}
-            </div>
+                {sync.isPending ? (
+                  <Spinner size={12} />
+                ) : (
+                  <RefreshCw className="h-3 w-3" />
+                )}
+                Sync
+              </button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => setUploadOpen(true)}
+              leftIcon={<Upload className="h-3.5 w-3.5" />}
+            >
+              上传
+            </Button>
+            {headerExtra}
           </div>
         </header>
       ) : null}
@@ -350,7 +340,7 @@ export function ModelLibraryBrowser({
       <div
         className={cn(
           "grid min-h-0 flex-1 gap-6",
-          showSourceSidebar ? "md:grid-cols-[160px_minmax(0,1fr)]" : "",
+          showSourceSidebar ? "md:grid-cols-[152px_minmax(0,1fr)]" : "",
         )}
       >
         {showSourceSidebar ? (
@@ -384,7 +374,7 @@ export function ModelLibraryBrowser({
           </aside>
         ) : null}
 
-        <main className="flex min-h-0 flex-col gap-5">
+        <main className="flex min-h-0 min-w-0 flex-col gap-5">
           {/* 移动端：紧凑筛选条 */}
           <div className="flex items-center gap-2 md:hidden">
             <div className="relative flex-1 min-w-0">
@@ -393,7 +383,7 @@ export function ModelLibraryBrowser({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索名称、标签"
-                className="h-11 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-2 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                className="h-11 w-full min-w-0 border-b border-[var(--border)] bg-transparent pl-7 pr-2 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
               />
             </div>
             <button
@@ -441,14 +431,15 @@ export function ModelLibraryBrowser({
               ))}
             </ChipRowGroup>
             {/* 搜索 + 来源（无 sidebar 时显示 select） */}
-            <div className="flex items-center gap-4">
-              <div className="relative w-full max-w-sm">
+            <div className="flex min-w-0 items-center gap-4">
+              <div className="relative w-full min-w-0 max-w-sm">
                 <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
                 <input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="搜索名称、标签"
-                  className="h-10 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                  className="h-10 w-full min-w-0 border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                  aria-label="搜索模特"
                 />
                 {query ? (
                   <button
@@ -465,7 +456,7 @@ export function ModelLibraryBrowser({
                 <select
                   value={source}
                   onChange={(event) => setSource(event.target.value as "all" | ModelLibrarySource)}
-                  className="h-10 border-b border-[var(--border)] bg-transparent px-1 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)] outline-none focus:border-[var(--amber-400)]"
+                  className="h-10 max-w-full border-b border-[var(--border)] bg-transparent px-1 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)] outline-none focus:border-[var(--amber-400)]"
                 >
                   {SOURCE_FILTERS.map(([value, label]) => (
                     <option key={value} value={value} className="bg-[var(--bg-0)]">
@@ -488,9 +479,9 @@ export function ModelLibraryBrowser({
             ) : (
               <motion.div
                 className={cn(
-                  "grid gap-x-4 gap-y-8 md:gap-x-5 md:gap-y-10",
+                  "grid min-w-0 gap-x-4 gap-y-8 md:gap-x-5 md:gap-y-10",
                   mode === "page"
-                    ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
+                    ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
                     : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5",
                 )}
                 initial={{ opacity: 0, y: 6 }}
@@ -557,11 +548,11 @@ function ChipRowGroup({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-2">
+    <div className="grid min-w-0 gap-2">
       <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
         {label}
       </p>
-      <div className="-mx-1 flex min-w-0 flex-1 flex-wrap gap-x-4 gap-y-1 overflow-x-auto px-1 pb-1">
+      <div className="-mx-1 flex min-w-0 flex-1 flex-wrap gap-x-3 gap-y-1 overflow-x-auto px-1 pb-1">
         {children}
       </div>
     </div>
