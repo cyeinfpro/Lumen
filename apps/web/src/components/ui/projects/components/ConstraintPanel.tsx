@@ -1,9 +1,9 @@
 "use client";
 
-// 右侧约束面板：用现有 InfoPanel 拼装。
-// - 桌面常驻（≥ xl）
-// - 中屏（md / lg）走右侧抽屉
-// - 移动（< 768px）走 BottomSheet：snapPoints ["80%", "60%"]，单手可达 + safe-area
+// 右侧约束面板（editorial）：
+// - 桌面常驻（≥ xl）：直接铺 InfoPanel，section 之间走 hairline
+// - 中屏 / 移动：抽屉/BottomSheet，header 用 mono eyebrow + serif italic title
+// - 不再叠加 bg-white/[0.035] + border + shadow 的旧卡片包裹
 //
 // SSR safe：useState false → effect 里读 matchMedia 切换；与 useMediaQuery 一致策略。
 
@@ -33,7 +33,7 @@ function ConstraintBody({ workflow }: { workflow: WorkflowRun }) {
   const qualitySummary = stepOf(workflow, "quality_review")?.output_json ?? {};
 
   return (
-    <div className="space-y-4">
+    <div>
       <InfoPanel title="商品原图">
         <ImageGrid images={workflow.product_images} compact />
       </InfoPanel>
@@ -61,7 +61,15 @@ function ConstraintBody({ workflow }: { workflow: WorkflowRun }) {
 
 export function ConstraintPanel({ workflow, className }: ConstraintPanelProps) {
   return (
-    <div className={cn("space-y-4", className)}>
+    <div className={cn("relative", className)}>
+      <header className="pb-3">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          Constraints
+        </p>
+        <h3 className="mt-1.5 font-display text-[20px] italic leading-[1.1] text-[var(--fg-0)]">
+          项目约束
+        </h3>
+      </header>
       <ConstraintBody workflow={workflow} />
     </div>
   );
@@ -70,6 +78,29 @@ export function ConstraintPanel({ workflow, className }: ConstraintPanelProps) {
 interface ConstraintDrawerProps extends ConstraintPanelProps {
   open: boolean;
   onClose: () => void;
+}
+
+function DrawerHeader({ onClose }: { onClose: () => void }) {
+  return (
+    <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
+      <div className="min-w-0">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          Constraints
+        </p>
+        <h2 className="mt-1.5 font-display text-[22px] italic leading-[1.1] text-[var(--fg-0)]">
+          项目约束
+        </h2>
+      </div>
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="关闭"
+        className="-mr-2 inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+      >
+        <X className="h-4 w-4" />
+      </button>
+    </header>
+  );
 }
 
 export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerProps) {
@@ -86,18 +117,8 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
         ariaLabel="项目约束面板"
         snapPoints={["80%", "60%"]}
       >
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2">
-          <p className="text-sm font-medium text-[var(--fg-0)]">项目约束</p>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="关闭"
-            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="px-4 py-3">
+        <DrawerHeader onClose={onClose} />
+        <div className="px-5">
           <ConstraintBody workflow={workflow} />
         </div>
       </BottomSheet>
@@ -127,22 +148,12 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
             exit={{ x: "100%" }}
             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
-              "absolute inset-y-0 right-0 flex w-[min(360px,86vw)] flex-col",
-              "max-h-[100dvh] border-l border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]",
+              "absolute inset-y-0 right-0 flex w-[min(380px,86vw)] flex-col",
+              "max-h-[100dvh] border-l border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-3)]",
             )}
           >
-            <header className="flex h-11 shrink-0 items-center justify-between border-b border-[var(--border)] px-3">
-              <p className="text-sm font-medium text-[var(--fg-0)]">项目约束</p>
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="关闭"
-                className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </header>
-            <div className="flex-1 min-h-0 overflow-y-auto p-3">
+            <DrawerHeader onClose={onClose} />
+            <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-6">
               <ConstraintBody workflow={workflow} />
             </div>
           </motion.aside>

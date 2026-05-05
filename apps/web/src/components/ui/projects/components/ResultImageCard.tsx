@@ -1,7 +1,7 @@
 "use client";
 
-// 质检结果卡：缩略图 + ScoreRing + 推荐结论 + 选择"用于返修"的复选按钮。
-// 选中态：琥珀外环 + 选择按钮高亮。
+// Editorial 质检结果卡：portrait 大图 + ScoreRing + recommendation chip + 选择按钮。
+// 选中态：amber ring + 按钮高亮，去除整卡 shadow。
 
 import { motion } from "framer-motion";
 import { CheckCheck } from "lucide-react";
@@ -15,9 +15,15 @@ import { RECOMMENDATION_LABEL } from "../types";
 import { imageSrc } from "../utils";
 
 const REC_TONE: Record<string, string> = {
-  approve: "border-[var(--success)]/30 bg-[var(--success-soft)] text-[var(--success)]",
-  revise: "border-[var(--danger)]/30 bg-[var(--danger-soft)] text-[var(--danger)]",
-  pending: "border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)]",
+  approve: "text-[var(--success)]",
+  revise: "text-[var(--danger)]",
+  pending: "text-[var(--fg-2)]",
+};
+
+const REC_DOT: Record<string, string> = {
+  approve: "bg-[var(--success)]",
+  revise: "bg-[var(--danger)]",
+  pending: "bg-[var(--fg-3)]",
 };
 
 interface ResultImageCardProps {
@@ -41,43 +47,40 @@ export function ResultImageCard({
   return (
     <motion.article
       layout
-      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      className={cn(
-        "rounded-md border bg-white/[0.035] p-2 text-left transition-shadow",
-        selected
-          ? "border-[var(--border-amber)] shadow-[var(--shadow-amber)]"
-          : "border-[var(--border)] hover:border-[var(--border-strong)]",
-      )}
+      transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+      className="group relative"
     >
       <button
         type="button"
         onClick={onPreview}
-        className="block w-full overflow-hidden rounded-md focus-visible:outline-none"
+        className={cn(
+          "relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none",
+          selected && "ring-1 ring-inset ring-[var(--border-amber)]",
+        )}
       >
         <Image
           src={imageSrc(image)}
           alt="展示图"
-          width={360}
-          height={450}
-          sizes="(max-width: 768px) 100vw, 360px"
+          fill
+          sizes="(max-width: 768px) 50vw, 360px"
           unoptimized
-          className="aspect-[4/5] w-full object-cover transition-transform duration-[var(--dur-slow)] hover:scale-[1.02]"
+          className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
         />
+        {typeof score === "number" ? (
+          <div className="absolute right-3 top-3">
+            <ScoreRing score={score} size={36} stroke={1.5} />
+          </div>
+        ) : null}
       </button>
-      <div className="mt-2 flex items-center justify-between gap-2">
-        <span
-          className={cn(
-            "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px]",
-            REC_TONE[recommendation] ?? REC_TONE.pending,
-          )}
-        >
+
+      <div className="mt-2 flex items-center justify-between gap-2 border-b border-[var(--border)] pb-2 font-mono text-[10px] uppercase tracking-[0.18em]">
+        <span className={cn("inline-flex items-center gap-1.5", REC_TONE[recommendation] ?? REC_TONE.pending)}>
+          <span aria-hidden className={cn("inline-block h-1.5 w-1.5 rounded-full", REC_DOT[recommendation] ?? REC_DOT.pending)} />
           {RECOMMENDATION_LABEL[recommendation] ?? recommendation}
         </span>
-        {typeof score === "number" ? (
-          <ScoreRing score={score} size={32} />
-        ) : (
-          <span className="text-xs tabular-nums text-[var(--fg-2)]">--</span>
-        )}
+        <span className="text-[var(--fg-2)] tabular-nums">
+          {typeof score === "number" ? `${Math.round(score)} pts` : "—"}
+        </span>
       </div>
       <Button
         className="mt-2"

@@ -497,6 +497,11 @@ class ApparelModelLibraryItemOut(BaseModel):
     appearance_direction: str | None = None
     style_tags: list[str] = Field(default_factory=list)
     image_url: str
+    # display 大图 URL —— lightbox 大图预览用。user item 走 display2048
+    # variant；preset 走 preset 原图（preset 文件通常 <2MB，无需独立 display
+    # 变体）。前端 lightbox 必须走 display_url 而非 thumb_url，否则 preset
+    # 来源的图会用真小缩略图填 lightbox 导致拉伸糊。
+    display_url: str | None = None
     thumb_url: str | None = None
     image_id: str | None = None
     preset_id: str | None = None
@@ -562,6 +567,9 @@ class ApparelModelLibraryJobItemOut(BaseModel):
 
     image_id: str
     image_url: str
+    # display2048 variant URL —— 给 lightbox 大图预览用（thumb_url 是 256 缩略图，
+    # 直接拉伸会糊）。后端按需 materialize，前端总能拿到真大图。
+    display_url: str | None = None
     thumb_url: str | None = None
     saved_item_id: str | None = None  # 已收藏入库时携带 library item id
     style_tags: list[str] = Field(default_factory=list)

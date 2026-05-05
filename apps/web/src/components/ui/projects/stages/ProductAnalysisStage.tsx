@@ -1,10 +1,10 @@
 "use client";
 
-// 商品约束阶段：
+// 商品约束阶段（editorial 重构）：
 // • 商品识别只服务最终生成提示词：商品还原点、推荐配饰、推荐背景
 // • 允许用户修正这三类内容，避免把识别阶段做成复杂商品档案
 // • dirty 检测：未修改时按钮文案改为"沿用 AI 建议"，避免空提交
-// • 失败弹 toast；运行中显示 RunningState
+// • hairline 分隔取代嵌套卡片；mono eyebrow + serif italic 标题；底部 underline 输入
 
 import { Check, Sparkles } from "lucide-react";
 import { useState } from "react";
@@ -89,6 +89,7 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
   if (step?.status === "running") {
     return (
       <StageFrame
+        eyebrow="N°02 — Product Constraints"
         title="商品约束"
         subtitle="正在从商品图提取服装还原点、推荐配饰和匹配背景。"
       >
@@ -99,53 +100,68 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
+      eyebrow="N°02 — Product Constraints"
       title="商品约束"
       subtitle="商品识别只负责三件事：锁定服装还原点、给出低存在感配饰、推荐匹配背景。"
     >
-      <div className="grid gap-3 md:grid-cols-2">
-        {CORE_FIELDS.map(([label, key]) => (
-          <div
-            key={key}
-            className="rounded-md border border-[var(--border)] bg-white/[0.03] p-3"
-          >
-            <p className="text-[11px] tracking-[0.16em] text-[var(--fg-2)]">{label}</p>
-            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-[var(--fg-0)]">
-              {jsonValue(step?.output_json?.[key])}
-            </p>
-          </div>
-        ))}
-      </div>
+      <section className="border-t border-[var(--border)] py-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          AI Reading
+        </p>
+        <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-3">
+          {CORE_FIELDS.map(([label, key]) => (
+            <div key={key} className="min-w-0">
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                {label}
+              </p>
+              <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--fg-0)]">
+                {jsonValue(step?.output_json?.[key])}
+              </p>
+            </div>
+          ))}
+        </div>
+      </section>
 
-      <div className="mt-4 grid gap-3">
-        <FieldInput
-          label="商品还原点"
-          value={mustPreserve}
-          onChange={setMustPreserveOverride}
-          placeholder="例如 颜色、版型、领口刺绣、纽扣样式"
-        />
-        <FieldInput
-          label="推荐配饰"
-          value={accessories}
-          onChange={setAccessoriesOverride}
-          placeholder="例如 简洁耳饰、浅色鞋子、小号包袋"
-        />
-        <FieldInput
-          label="推荐背景"
-          value={background}
-          onChange={setBackgroundOverride}
-          placeholder="例如 简洁明亮的城市街区或高级棚拍背景"
-        />
-      </div>
+      <section className="border-t border-[var(--border)] py-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          Editable
+        </p>
+        <div className="mt-3 grid gap-4">
+          <FieldInput
+            label="商品还原点"
+            value={mustPreserve}
+            onChange={setMustPreserveOverride}
+            placeholder="例如 颜色、版型、领口刺绣、纽扣样式"
+          />
+          <FieldInput
+            label="推荐配饰"
+            value={accessories}
+            onChange={setAccessoriesOverride}
+            placeholder="例如 简洁耳饰、浅色鞋子、小号包袋"
+          />
+          <FieldInput
+            label="推荐背景"
+            value={background}
+            onChange={setBackgroundOverride}
+            placeholder="例如 简洁明亮的城市街区或高级棚拍背景"
+          />
+        </div>
+      </section>
 
-      <details className="mt-4 rounded-md border border-[var(--border)] bg-white/[0.025] p-3">
-        <summary className="cursor-pointer text-sm text-[var(--fg-1)]">
-          查看识别摘要
+      <details className="group border-t border-[var(--border)] py-4">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]">
+          <span>查看识别摘要</span>
+          <span aria-hidden className="text-[var(--fg-3)] transition-transform group-open:rotate-180">
+            ▾
+          </span>
         </summary>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <div className="mt-4 grid gap-x-6 gap-y-4 md:grid-cols-3">
           {SUMMARY_FIELDS.map(([label, key]) => (
-            <div key={key} className="rounded-md border border-[var(--border)] bg-white/[0.03] p-3">
-              <p className="text-[11px] tracking-[0.16em] text-[var(--fg-2)]">{label}</p>
-              <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-[var(--fg-0)]">
+            <div key={key} className="min-w-0">
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                {label}
+              </p>
+              <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--fg-1)]">
                 {jsonValue(step?.output_json?.[key])}
               </p>
             </div>
@@ -153,7 +169,7 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
         </div>
       </details>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-[var(--border)] pt-5">
         <Button
           variant="primary"
           loading={approve.isPending}
@@ -170,9 +186,9 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
               setAccessoriesOverride(null);
               setBackgroundOverride(null);
             }}
-            className="text-xs text-[var(--fg-2)] underline-offset-2 hover:text-[var(--fg-0)] hover:underline"
+            className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] underline-offset-4 transition-colors hover:text-[var(--fg-0)] hover:underline"
           >
-            重置修改
+            Reset
           </button>
         ) : null}
       </div>
@@ -193,12 +209,14 @@ function FieldInput({
 }) {
   return (
     <label className="block">
-      <span className="text-sm text-[var(--fg-1)]">{label}</span>
+      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        {label}
+      </span>
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
-        className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)]"
+        className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
       />
     </label>
   );

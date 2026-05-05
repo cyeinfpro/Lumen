@@ -1,18 +1,20 @@
 "use client";
 
-// 创建新项目页：
-// 1) 真拖拽（dragenter/dragleave/dragover/drop）+ 高亮放置区
-// 2) 单文件级别进度条（XHR.upload.onprogress）+ 失败重试 + 取消
-// 3) 并发上传（Promise.allSettled，失败的可重试再上传）
-// 4) 文件大小 / 类型 / 数量校验
-// 5) 字符计数（标题 / 基础需求）
+// Editorial 重构：杂志大标题 + hairline section + portrait 商品图卡 + amber CTA。
+// 1) Hero：mono eyebrow "N°00 — New Project" + font-display italic 大标题 + 极简 breadcrumb
+// 2) Upload：hairline section header + 大字 dashed dropzone + drag-active amber soft bg
+// 3) 商品图列表：aspect 4/5 portrait + 左上 N° + 右上控件 + 底部 mono 元数据 + hairline 进度
+// 4) 字段：hairline section header (mono eyebrow + serif title) + 内容直铺
+// 5) ParamSelect：mono label + 极简 select + amber focus
+// 6) CTA：amber 大圆角 hero 按钮，sticky 底部
+//
+// 业务逻辑保持不变：uploadWithProgress / XHR / abort / progress / CSRF / API / validation / composedPrompt。
 
-import { ArrowDown, ArrowLeft, ArrowUp, Loader2, Trash2, Upload, WandSparkles, X } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, Loader2, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useCreateApparelWorkflowMutation } from "@/lib/queries";
 import { API_BASE } from "@/lib/apiClient";
@@ -369,61 +371,67 @@ export function ApparelWorkflowNewPage() {
     if (!files.length) return 0;
     return files.reduce((acc, file) => acc + file.progress, 0) / files.length;
   }, [files]);
+  const isBusy = submitting || createMutation.isPending;
+  const ctaDisabled = !files.length || isBusy;
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
         title="新建"
-        subtitle="服饰模特图"
+        subtitle="NEW APPAREL PROJECT"
         backHref="/projects/apparel-model-showcase"
         backLabel="返回服饰模特图"
       />
       <ProjectTopBar />
 
-      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
-        <div className="mx-auto grid max-w-[1120px] gap-5 lg:grid-cols-[1fr_320px]">
-          <section className="space-y-5">
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 shadow-[var(--shadow-1)] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none">
-              <nav aria-label="项目路径" className="hidden items-center gap-1.5 text-sm md:flex">
-                <Link
-                  href="/projects"
-                  className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
-                >
-                  <ArrowLeft className="h-3.5 w-3.5" />
-                  项目
-                </Link>
-                <span aria-hidden className="text-[var(--fg-3)]">/</span>
-                <Link
-                  href="/projects/apparel-model-showcase"
-                  className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
-                >
-                  服饰模特图
-                </Link>
-                <span aria-hidden className="text-[var(--fg-3)]">/</span>
-                <span className="text-[var(--fg-0)]">新建</span>
-              </nav>
-              <h1 className="mt-0 text-[26px] font-semibold tracking-normal md:mt-3 md:text-[32px]">
-                新建服饰模特图
-              </h1>
-              <p className="mt-1 text-sm text-[var(--fg-2)]">
-                上传 1-3 张商品图，先确认 AI 合成的模特，再一次性生成 4 张电商展示图。
-              </p>
-            </div>
+      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[160px] pt-3 md:mb-0 md:px-10 md:py-6 md:pb-12">
+        <div className="mx-auto grid w-full max-w-[1280px] gap-8 md:gap-12">
+          {/* Breadcrumb */}
+          <nav
+            aria-label="项目路径"
+            className="hidden items-center gap-3 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)] md:flex"
+          >
+            <Link href="/projects" className="transition-colors hover:text-[var(--fg-0)]">
+              Projects
+            </Link>
+            <span aria-hidden className="text-[var(--fg-3)]">·</span>
+            <Link
+              href="/projects/apparel-model-showcase"
+              className="transition-colors hover:text-[var(--fg-0)]"
+            >
+              Apparel
+            </Link>
+            <span aria-hidden className="text-[var(--fg-3)]">·</span>
+            <span className="text-[var(--fg-0)]">New</span>
+          </nav>
 
-            <div className="rounded-xl border border-[var(--border)] bg-white/[0.035] p-4 shadow-[var(--shadow-1)] md:rounded-md">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <h2 className="text-sm font-medium text-[var(--fg-0)]">
-                  商品图
-                  <span className="ml-2 text-[11px] text-[var(--fg-2)]">
-                    支持 PNG / JPEG / WebP，单张 ≤ {formatBytes(MAX_PRODUCT_IMAGE_BYTES)}
+          {/* Hero */}
+          <header className="grid gap-3">
+            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              N°00 — New Project
+            </p>
+            <h1 className="font-display text-[44px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] md:text-[72px]">
+              新建服饰模特图
+            </h1>
+            <p className="max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+              上传 1-3 张商品图，先确认 AI 合成的模特，再一次性生成 4 张电商展示图。
+            </p>
+          </header>
+
+          <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-14">
+            <section className="grid gap-10">
+              {/* Upload */}
+              <SectionHeader
+                eyebrow="N°01 — Upload"
+                title="商品图"
+                trailing={
+                  <span className="font-mono text-[11px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-2)]">
+                    {String(files.length).padStart(2, "0")} / {String(MAX_PRODUCT_IMAGES).padStart(2, "0")}
                   </span>
-                </h2>
-                <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                  {files.length}/{MAX_PRODUCT_IMAGES}
-                </span>
-              </div>
+                }
+              />
 
               <div
                 onDragEnter={(event) => {
@@ -435,43 +443,43 @@ export function ApparelWorkflowNewPage() {
                   if (!dragActive) setDragActive(true);
                 }}
                 onDragLeave={(event) => {
-                  // 只有真正离开容器时才取消高亮
                   if (event.currentTarget.contains(event.relatedTarget as Node)) return;
                   setDragActive(false);
                 }}
                 onDrop={onDrop}
-                className={cn(
-                  "relative",
-                )}
+                className="relative -mt-4"
               >
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   className={cn(
-                    "flex min-h-48 w-full cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed text-center transition-[background-color,border-color,box-shadow] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-44 md:rounded-md",
+                    "flex min-h-[220px] w-full cursor-pointer flex-col items-center justify-center gap-4 border border-dashed text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-[260px]",
                     dragActive
-                      ? "border-[var(--border-amber)] bg-[var(--accent-soft)] shadow-[var(--shadow-amber)]"
-                      : "border-[var(--border-strong)] bg-[var(--bg-1)] hover:bg-white/[0.04]",
+                      ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
+                      : "border-[var(--border-strong)] hover:border-[var(--border-amber)]/50 hover:bg-white/[0.02]",
                   )}
                 >
                   <span
                     className={cn(
-                      "inline-flex h-10 w-10 items-center justify-center rounded-full transition-colors",
+                      "inline-flex h-12 w-12 items-center justify-center rounded-full border transition-colors",
                       dragActive
-                        ? "bg-[var(--accent)] text-black"
-                        : "bg-white/[0.06] text-[var(--fg-2)]",
+                        ? "border-[var(--border-amber)] bg-[var(--accent)] text-black"
+                        : "border-[var(--border)] bg-transparent text-[var(--fg-1)]",
                     )}
                   >
-                    <Upload className="h-5 w-5" />
+                    <Upload className="h-5 w-5" strokeWidth={1.5} />
                   </span>
-                  <span className="text-sm text-[var(--fg-1)]">
-                    {dragActive
-                      ? "松开即可加入项目"
-                      : "拖拽图片到这里，或点击选择"}
-                  </span>
-                  <span className="text-[11px] text-[var(--fg-2)]">
-                    最多 {MAX_PRODUCT_IMAGES} 张 · 第一张作为主图
-                  </span>
+                  <p
+                    className={cn(
+                      "font-display text-[24px] italic leading-[1.1] md:text-[32px]",
+                      dragActive ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
+                    )}
+                  >
+                    {dragActive ? "松开即可加入项目" : "拖拽到这里，或点击选择"}
+                  </p>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                    PNG · JPEG · WebP &nbsp;·&nbsp; ≤ {formatBytes(MAX_PRODUCT_IMAGE_BYTES)} &nbsp;·&nbsp; Max {MAX_PRODUCT_IMAGES} files
+                  </p>
                 </button>
                 <input
                   ref={fileInputRef}
@@ -486,254 +494,480 @@ export function ApparelWorkflowNewPage() {
                 />
               </div>
 
+              {/* Aggregate progress hairline */}
+              {anyUploading ? (
+                <div className="-mt-6 grid gap-2">
+                  <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                    <span>Uploading</span>
+                    <span className="tabular-nums text-[var(--amber-300)]">
+                      {Math.round(totalProgress * 100).toString().padStart(2, "0")}%
+                    </span>
+                  </div>
+                  <div className="relative h-px w-full bg-[var(--border)]">
+                    <div
+                      className="absolute inset-y-0 left-0 bg-[var(--amber-400)] transition-[width] duration-200 ease-out"
+                      style={{ width: `${totalProgress * 100}%` }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              {/* File preview grid: portrait cards */}
               {files.length > 0 ? (
-                <ul className="mt-3 grid gap-2 sm:grid-cols-3">
+                <ul className="-mt-4 grid gap-x-5 gap-y-8 sm:grid-cols-2 md:grid-cols-3 md:gap-x-6">
                   {files.map((item, index) => (
-                    <li
+                    <FilePortrait
                       key={item.uid}
-                      className={cn(
-                        "group relative overflow-hidden rounded-xl border bg-[var(--bg-2)] md:rounded-md",
-                        item.status === "error"
-                          ? "border-[var(--danger)]/40"
-                          : item.status === "done"
-                            ? "border-[var(--success)]/30"
-                            : "border-[var(--border)]",
-                      )}
-                    >
-                      <div className="relative aspect-[4/5]">
-                        {/* Object URL previews are local blobs; keep native img to avoid Next image loader work. */}
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={item.url}
-                          alt={item.file.name}
-                          className="h-full w-full object-cover"
-                        />
-                        {item.status === "uploading" ? (
-                          <div className="absolute inset-0 flex items-center justify-center bg-black/45 text-xs text-white">
-                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                            {Math.round(item.progress * 100)}%
-                          </div>
-                        ) : null}
-                        {item.status === "error" ? (
-                          <div className="absolute inset-x-0 bottom-0 bg-[var(--danger)]/90 px-1.5 py-1 text-[10px] text-white line-clamp-2">
-                            {item.error}
-                          </div>
-                        ) : null}
-                        {index === 0 ? (
-                          <span className="absolute left-1.5 top-1.5 rounded-full bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-medium text-black">
-                            主图
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="flex items-center justify-between gap-1 px-2 py-1 text-[10px] text-[var(--fg-2)]">
-                        <span className="truncate" title={item.file.name}>
-                          {formatBytes(item.file.size)}
-                        </span>
-                        <div className="flex items-center gap-0.5">
-                          {item.status === "error" ? (
-                            <button
-                              type="button"
-                              aria-label="重新上传"
-                              onClick={() => uploadOne(item)}
-                              className="min-h-9 rounded-md px-2 py-0.5 text-[var(--amber-300)] transition-colors hover:bg-white/[0.06]"
-                            >
-                              重试
-                            </button>
-                          ) : null}
-                          {item.status === "uploading" ? (
-                            <button
-                              type="button"
-                              aria-label="取消上传"
-                              onClick={() => item.controller?.abort()}
-                              className="min-h-9 rounded-md px-2 py-0.5 transition-colors hover:bg-white/[0.06]"
-                            >
-                              取消
-                            </button>
-                          ) : null}
-                          <button
-                            type="button"
-                            aria-label="上移"
-                            disabled={index === 0}
-                            onClick={() => moveFile(item.uid, -1)}
-                            className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-white/[0.06] disabled:opacity-40"
-                          >
-                            <ArrowUp className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            aria-label="下移"
-                            disabled={index === files.length - 1}
-                            onClick={() => moveFile(item.uid, 1)}
-                            className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-white/[0.06] disabled:opacity-40"
-                          >
-                            <ArrowDown className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            aria-label="移除"
-                            onClick={() => removeFile(item.uid)}
-                            className="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-white/[0.06] hover:text-[var(--danger)]"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      </div>
-                    </li>
+                      item={item}
+                      index={index}
+                      total={files.length}
+                      onRetry={() => uploadOne(item)}
+                      onCancel={() => item.controller?.abort()}
+                      onMoveUp={() => moveFile(item.uid, -1)}
+                      onMoveDown={() => moveFile(item.uid, 1)}
+                      onRemove={() => removeFile(item.uid)}
+                    />
                   ))}
                 </ul>
               ) : null}
 
-              {anyUploading ? (
-                <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/[0.06]">
-                  <div
-                    className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200 ease-out"
-                    style={{ width: `${totalProgress * 100}%` }}
+              {/* Project title */}
+              <div className="grid gap-4">
+                <SectionHeader
+                  eyebrow="N°02 — Title"
+                  title="项目名称"
+                  trailing={
+                    <CharCount remaining={titleRemaining} max={TITLE_MAX} />
+                  }
+                />
+                <input
+                  value={projectTitle}
+                  onChange={(event) => setProjectTitle(event.target.value.slice(0, TITLE_MAX))}
+                  maxLength={TITLE_MAX}
+                  aria-label="项目名称"
+                  className="-mt-2 h-12 w-full border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                  placeholder="给这个项目起个名字"
+                />
+              </div>
+
+              {/* Settings */}
+              <div className="grid gap-5">
+                <SectionHeader
+                  eyebrow="N°03 — Settings"
+                  title="基础参数"
+                  trailing={
+                    <CharCount remaining={promptRemaining} max={PROMPT_MAX} />
+                  }
+                />
+                <div className="-mt-2 grid gap-x-8 gap-y-6 md:grid-cols-2">
+                  <ParamSelect
+                    label="Age"
+                    chineseLabel="年龄段"
+                    value={ageSegment}
+                    options={AGE_SEGMENTS}
+                    onChange={setAgeSegment}
+                  />
+                  <ParamSelect
+                    label="Gender"
+                    chineseLabel="性别"
+                    value={gender}
+                    options={GENDERS}
+                    onChange={setGender}
+                  />
+                  <ParamSelect
+                    label="Appearance"
+                    chineseLabel="外貌方向"
+                    value={appearanceDirection}
+                    options={APPEARANCE_DIRECTIONS}
+                    onChange={setAppearanceDirection}
+                  />
+                  <ParamSelect
+                    label="Style"
+                    chineseLabel="风格气质"
+                    value={styleDirection}
+                    options={STYLE_DIRECTIONS}
+                    onChange={setStyleDirection}
                   />
                 </div>
+
+                <div className="grid gap-2">
+                  <label className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                    Notes <span className="ml-1 normal-case tracking-normal text-[var(--fg-3)]">补充说明</span>
+                  </label>
+                  <textarea
+                    value={extraPrompt}
+                    onChange={(event) => setExtraPrompt(event.target.value.slice(0, 120))}
+                    maxLength={120}
+                    rows={3}
+                    aria-label="补充说明"
+                    placeholder="例如：更活泼一点，适合校园通勤"
+                    className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-2 text-[16px] leading-[1.6] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[15px]"
+                  />
+                </div>
+
+                <div className="border-t border-[var(--border)] pt-4">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                    Composed prompt
+                  </p>
+                  <p className="mt-2 text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                    {composedPrompt}
+                  </p>
+                </div>
+              </div>
+
+              {error ? (
+                <div className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5">
+                  <div className="flex items-start gap-3">
+                    <X className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
+                    <div>
+                      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--danger)]">
+                        Error
+                      </p>
+                      <p className="mt-1 text-[13px] text-[var(--fg-0)]">{error}</p>
+                    </div>
+                  </div>
+                </div>
               ) : null}
-            </div>
 
-            <FieldCard label="项目名称" remaining={titleRemaining} max={TITLE_MAX}>
-              <input
-                value={projectTitle}
-                onChange={(event) => setProjectTitle(event.target.value.slice(0, TITLE_MAX))}
-                maxLength={TITLE_MAX}
-                aria-label="项目名称"
-                className="mt-3 h-11 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)] md:h-10 md:text-sm"
-              />
-            </FieldCard>
-
-            <FieldCard label="基础参数" remaining={promptRemaining} max={PROMPT_MAX}>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <ParamSelect
-                  label="年龄段"
-                  value={ageSegment}
-                  options={AGE_SEGMENTS}
-                  onChange={setAgeSegment}
-                />
-                <ParamSelect
-                  label="性别"
-                  value={gender}
-                  options={GENDERS}
-                  onChange={setGender}
-                />
-                <ParamSelect
-                  label="外貌方向"
-                  value={appearanceDirection}
-                  options={APPEARANCE_DIRECTIONS}
-                  onChange={setAppearanceDirection}
-                />
-                <ParamSelect
-                  label="风格气质"
-                  value={styleDirection}
-                  options={STYLE_DIRECTIONS}
-                  onChange={setStyleDirection}
-                />
+              {/* Desktop CTA inline at the bottom */}
+              <div className="hidden border-t border-[var(--border)] pt-6 md:block">
+                <button
+                  type="button"
+                  onClick={onCreate}
+                  disabled={ctaDisabled}
+                  className={cn(
+                    "group inline-flex items-center gap-3 rounded-full px-7 py-3.5 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,opacity,box-shadow] duration-[var(--dur-base)]",
+                    ctaDisabled
+                      ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
+                      : "cursor-pointer bg-[var(--accent)] hover:scale-[1.02] active:scale-[0.98]",
+                  )}
+                >
+                  {isBusy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : null}
+                  <span>
+                    {isBusy
+                      ? "正在创建项目"
+                      : allDone
+                        ? "创建项目并开始分析"
+                        : "上传图片并创建项目"}
+                  </span>
+                  {!isBusy ? (
+                    <ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-enabled:group-hover:translate-x-0 group-enabled:group-hover:opacity-100" />
+                  ) : null}
+                </button>
               </div>
-              <textarea
-                value={extraPrompt}
-                onChange={(event) => setExtraPrompt(event.target.value.slice(0, 120))}
-                maxLength={120}
-                rows={3}
-                aria-label="补充说明"
-                placeholder="补充说明（可选），例如：更活泼一点，适合校园通勤"
-                className="mt-3 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2 text-[15px] leading-6 text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)] md:text-sm"
-              />
-              <div className="mt-3 rounded-lg border border-[var(--border)] bg-white/[0.025] px-3 py-2 text-xs leading-5 text-[var(--fg-2)] md:rounded-md">
-                将用于后续模特候选和最终图：{composedPrompt}
-              </div>
-            </FieldCard>
+            </section>
 
-            {error ? (
-              <div className="rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-soft)] p-3 text-sm text-[var(--fg-0)] md:rounded-md">
-                <X className="mr-1.5 inline h-4 w-4 align-text-bottom text-[var(--danger)]" />
-                {error}
-              </div>
-            ) : null}
-
-            <Button
-              variant="primary"
-              size="lg"
-              loading={submitting || createMutation.isPending}
-              disabled={!files.length}
-              onClick={onCreate}
-              leftIcon={<WandSparkles className="h-4 w-4" />}
-              className="w-full md:w-auto"
-            >
-              {allDone ? "创建项目并开始分析" : "上传图片并创建项目"}
-            </Button>
-          </section>
-
-          <aside className="space-y-3">
-            <InfoPanel title="默认闭环">
-              <p>商品约束、3 套模特候选、配饰四宫格、4 张展示图、一次文字返修。</p>
-            </InfoPanel>
-            <InfoPanel title="质量策略">
-              <p>默认高质量模式，优先模特一致性、商品还原度和高级质感。</p>
-            </InfoPanel>
-            <InfoPanel title="顺序与主图">
-              <p>第一张图作为商品主图。可用上移 / 下移调整顺序。</p>
-            </InfoPanel>
-          </aside>
+            {/* Right rail */}
+            <aside className="hidden grid-cols-1 gap-0 self-start lg:grid">
+              <InfoPanel title="Loop">
+                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                  商品约束、3 套模特候选、配饰四宫格、4 张展示图、一次文字返修。
+                </p>
+              </InfoPanel>
+              <InfoPanel title="Quality">
+                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                  默认高质量模式，优先模特一致性、商品还原度和高级质感。
+                </p>
+              </InfoPanel>
+              <InfoPanel title="Order">
+                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                  第一张图作为商品主图。可用上移 / 下移调整顺序。
+                </p>
+              </InfoPanel>
+            </aside>
+          </div>
         </div>
       </main>
+
+      {/* Mobile sticky CTA */}
+      <div className="fixed inset-x-0 bottom-[calc(56px+env(safe-area-inset-bottom,0px))] z-30 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-4 py-3 backdrop-blur md:hidden">
+        <button
+          type="button"
+          onClick={onCreate}
+          disabled={ctaDisabled}
+          className={cn(
+            "inline-flex w-full items-center justify-center gap-2 rounded-full px-6 py-3.5 text-[15px] font-medium text-black transition-[opacity,transform] duration-[var(--dur-base)]",
+            ctaDisabled
+              ? "cursor-not-allowed bg-[var(--fg-3)] opacity-60"
+              : "cursor-pointer bg-[var(--accent)] shadow-[var(--shadow-amber)] active:scale-[0.98]",
+          )}
+        >
+          {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          {isBusy
+            ? "正在创建项目"
+            : allDone
+              ? "创建项目并开始分析"
+              : "上传图片并创建项目"}
+        </button>
+      </div>
+
       <ProjectMobileTabBar />
     </div>
   );
 }
 
-function FieldCard({
-  label,
-  remaining,
-  max,
-  children,
+// hairline section header：mono eyebrow + serif italic title + 可选右侧元素
+function SectionHeader({
+  eyebrow,
+  title,
+  trailing,
 }: {
-  label: string;
-  remaining: number;
-  max: number;
-  children: React.ReactNode;
+  eyebrow: string;
+  title: string;
+  trailing?: React.ReactNode;
 }) {
+  return (
+    <header className="border-t border-[var(--border)] pt-5">
+      <div className="flex items-end justify-between gap-4">
+        <div className="min-w-0">
+          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            {eyebrow}
+          </p>
+          <h2 className="mt-2 font-display text-[26px] italic leading-[1.05] text-[var(--fg-0)] md:text-[30px]">
+            {title}
+          </h2>
+        </div>
+        {trailing ? <div className="shrink-0 self-end pb-1.5">{trailing}</div> : null}
+      </div>
+    </header>
+  );
+}
+
+function CharCount({ remaining, max }: { remaining: number; max: number }) {
   const usage = (max - remaining) / max;
   const warning = usage > 0.92;
   return (
-    <section className="block rounded-xl border border-[var(--border)] bg-white/[0.035] p-4 shadow-[var(--shadow-1)] md:rounded-md">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium text-[var(--fg-0)]">{label}</span>
-        <span
-          className={cn(
-            "text-[11px] tabular-nums",
-            warning ? "text-[var(--warning)]" : "text-[var(--fg-2)]",
-          )}
-        >
-          {Math.max(0, remaining)} / {max}
-        </span>
+    <span
+      className={cn(
+        "font-mono text-[10px] uppercase tracking-[0.22em] tabular-nums",
+        warning ? "text-[var(--warning)]" : "text-[var(--fg-2)]",
+      )}
+    >
+      {Math.max(0, remaining)} / {max}
+    </span>
+  );
+}
+
+// Portrait 商品图卡：4/5 大图 + N° 序号 + 控件 + mono 元数据
+function FilePortrait({
+  item,
+  index,
+  total,
+  onRetry,
+  onCancel,
+  onMoveUp,
+  onMoveDown,
+  onRemove,
+}: {
+  item: PendingFile;
+  index: number;
+  total: number;
+  onRetry: () => void;
+  onCancel: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onRemove: () => void;
+}) {
+  const isMain = index === 0;
+  const num = `N°${String(index + 1).padStart(2, "0")}`;
+  const statusTone =
+    item.status === "error"
+      ? "border-[var(--danger)]/40"
+      : item.status === "done"
+        ? "border-[var(--border)]"
+        : "border-[var(--border)]";
+
+  const statusLabel =
+    item.status === "uploading"
+      ? "Uploading"
+      : item.status === "done"
+        ? "Ready"
+        : item.status === "error"
+          ? "Failed"
+          : item.status === "canceled"
+            ? "Canceled"
+            : "Queued";
+
+  const statusToneText =
+    item.status === "error"
+      ? "text-[var(--danger)]"
+      : item.status === "done"
+        ? "text-[var(--success)]"
+        : item.status === "uploading"
+          ? "text-[var(--amber-300)]"
+          : "text-[var(--fg-2)]";
+
+  return (
+    <li className="group relative">
+      <div
+        className={cn(
+          "relative aspect-[4/5] overflow-hidden border bg-[var(--bg-2)] transition-colors duration-[var(--dur-base)]",
+          statusTone,
+        )}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={item.url}
+          alt={item.file.name}
+          className="h-full w-full object-cover"
+        />
+
+        {/* gradient for legibility */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-black/55 to-transparent"
+        />
+
+        {/* uploading overlay */}
+        {item.status === "uploading" ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/55 backdrop-blur-sm">
+            <Loader2 className="h-5 w-5 animate-spin text-white" />
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] tabular-nums text-white">
+              {Math.round(item.progress * 100).toString().padStart(2, "0")}%
+            </p>
+          </div>
+        ) : null}
+
+        {/* error overlay */}
+        {item.status === "error" ? (
+          <div className="absolute inset-x-0 bottom-0 bg-[var(--danger)]/90 px-3 py-2">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-white/90">
+              Failed
+            </p>
+            <p className="mt-1 line-clamp-2 text-[12px] leading-[1.4] text-white">
+              {item.error}
+            </p>
+          </div>
+        ) : null}
+
+        {/* top-left N° + main chip */}
+        <div className="absolute left-3 top-3 flex items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-white/85 mix-blend-difference">
+            {num}
+          </span>
+          {isMain ? (
+            <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.22em] text-black">
+              Selected
+            </span>
+          ) : null}
+        </div>
+
+        {/* top-right controls */}
+        <div className="absolute right-2 top-2 flex flex-col gap-1.5 opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100 focus-within:opacity-100">
+          <div className="flex flex-col gap-1 rounded-full border border-white/15 bg-black/55 p-1 backdrop-blur">
+            <IconBtn
+              label="上移"
+              onClick={onMoveUp}
+              disabled={index === 0}
+            >
+              <ArrowUp className="h-3.5 w-3.5" />
+            </IconBtn>
+            <IconBtn
+              label="下移"
+              onClick={onMoveDown}
+              disabled={index === total - 1}
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+            </IconBtn>
+            {item.status === "error" ? (
+              <IconBtn label="重试" onClick={onRetry}>
+                <RotateCcw className="h-3.5 w-3.5" />
+              </IconBtn>
+            ) : null}
+            {item.status === "uploading" ? (
+              <IconBtn label="取消" onClick={onCancel}>
+                <X className="h-3.5 w-3.5" />
+              </IconBtn>
+            ) : null}
+            <IconBtn label="移除" onClick={onRemove} danger>
+              <Trash2 className="h-3.5 w-3.5" />
+            </IconBtn>
+          </div>
+        </div>
       </div>
+
+      {/* meta row */}
+      <div className="mt-3 flex items-baseline justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <span className={cn("truncate", statusToneText)} title={item.file.name}>
+          {statusLabel}
+        </span>
+        <span className="tabular-nums">{formatBytes(item.file.size)}</span>
+      </div>
+      <p
+        className="mt-1 truncate text-[12px] text-[var(--fg-1)]"
+        title={item.file.name}
+      >
+        {item.file.name}
+      </p>
+    </li>
+  );
+}
+
+function IconBtn({
+  label,
+  onClick,
+  disabled,
+  danger,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-30",
+        danger
+          ? "text-white/85 hover:bg-[var(--danger)]/70 hover:text-white"
+          : "text-white/85 hover:bg-white/15 hover:text-white",
+      )}
+    >
       {children}
-    </section>
+    </button>
   );
 }
 
 function ParamSelect({
   label,
+  chineseLabel,
   value,
   options,
   onChange,
 }: {
   label: string;
+  chineseLabel: string;
   value: string;
   options: readonly (readonly [string, string])[];
   onChange: (value: string) => void;
 }) {
   return (
     <label className="block">
-      <span className="text-xs text-[var(--fg-2)]">{label}</span>
+      <span className="flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <span>{label}</span>
+        <span className="normal-case tracking-normal text-[var(--fg-3)]">
+          {chineseLabel}
+        </span>
+      </span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="mt-1.5 h-11 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-amber)] md:h-10 md:text-sm"
+        className="mt-2 h-11 w-full appearance-none border-b border-[var(--border)] bg-transparent bg-[length:14px_14px] bg-[right_4px_center] bg-no-repeat pl-1 pr-6 text-[16px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] md:h-10 md:text-[15px]"
+        style={{
+          backgroundImage:
+            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14' fill='none' stroke='%23999' stroke-width='1.5'%3E%3Cpath d='M3 5l4 4 4-4'/%3E%3C/svg%3E\")",
+        }}
       >
         {options.map(([text, optionValue]) => (
-          <option key={`${label}-${text}`} value={optionValue}>
+          <option key={`${label}-${text}`} value={optionValue} className="bg-[var(--bg-1)]">
             {text}
           </option>
         ))}

@@ -1,10 +1,14 @@
 "use client";
 
-import { BookmarkPlus } from "lucide-react";
+// Editorial 收藏到模特库表单：
+// - 不再用 BookmarkPlus 大图标做 prefix；改为 mono eyebrow + serif italic title
+// - input/select 走 underline 极简（h-10 + border-b），去 h-9 rounded-md bg-[var(--bg-1)]
+// - chip 去 amber-soft 填充，改为选中 amber 文字 + amber 下划线
+// - 表单 section 之间用 hairline 分隔
+
 import { useState } from "react";
 
 import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
-import { Input } from "@/components/ui/primitives/Input";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
 import type {
@@ -80,21 +84,25 @@ export function SaveCandidateDialog({
       }),
   });
 
+  const titlePlaceholder = `方案 ${candidate?.candidate_index ?? ""}`;
+
   const form = (
-    <div className="mt-4 flex flex-col gap-3 text-left">
-      <Input
-        label="名称"
-        value={title}
-        onChange={(event) => setTitle(event.target.value)}
-        placeholder={`方案 ${candidate?.candidate_index ?? ""}`}
-      />
-      <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-[var(--fg-1)]">年龄段</span>
+    <div className="-mx-1">
+      <Field eyebrow="Name" label="名称">
+        <input
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          placeholder={titlePlaceholder}
+          className={UNDERLINE_INPUT}
+        />
+      </Field>
+
+      <Field eyebrow="Segment" label="年龄段">
+        <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
           <select
             value={ageSegment}
             onChange={(event) => setAgeSegment(event.target.value as ModelLibraryItemAgeSegment)}
-            className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none"
+            className={UNDERLINE_INPUT}
           >
             {AGE_OPTIONS.map(([value, label]) => (
               <option key={value} value={value}>
@@ -102,32 +110,29 @@ export function SaveCandidateDialog({
               </option>
             ))}
           </select>
-        </label>
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-[var(--fg-1)]">目标文件夹</span>
-          <div className="flex h-9 items-center rounded-md border border-[var(--border)] bg-black/15 px-3 font-mono text-xs text-[var(--fg-1)]">
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            <span className="text-[var(--fg-3)]">→ </span>
             {AGE_FOLDER_BY_SEGMENT[ageSegment]}/{gender}
-          </div>
+          </p>
         </div>
-      </div>
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-[var(--fg-1)]">性别</span>
-        <select
-          value={gender}
-          onChange={(event) => setGender(event.target.value as ModelLibraryGender)}
-          className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none"
-        >
+      </Field>
+
+      <Field eyebrow="Gender" label="性别">
+        <div className="flex flex-wrap gap-x-5 gap-y-1.5">
           {GENDER_OPTIONS.map(([value, label]) => (
-            <option key={value} value={value}>
+            <Chip
+              key={value}
+              active={gender === value}
+              onClick={() => setGender(value)}
+            >
               {label}
-            </option>
+            </Chip>
           ))}
-        </select>
-      </label>
-      {/* 外貌方向：chip 选择，10 + 不指定 */}
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-[var(--fg-1)]">外貌方向</span>
-        <div className="flex flex-wrap gap-1.5">
+        </div>
+      </Field>
+
+      <Field eyebrow="Appearance" label="外貌方向">
+        <div className="flex flex-wrap gap-x-5 gap-y-1.5">
           <Chip active={appearance === ""} onClick={() => setAppearance("")}>
             不指定
           </Chip>
@@ -144,30 +149,26 @@ export function SaveCandidateDialog({
             </Chip>
           ))}
         </div>
-      </div>
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-[var(--fg-1)]">标签</span>
-        <button
-          type="button"
-          onClick={() => setTagsEnabled((value) => !value)}
-          className={cn(
-            "h-9 rounded-md border px-3 text-left text-sm transition-colors",
-            tagsEnabled
-              ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-              : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-          )}
-        >
-          {tagsEnabled ? "填写标签" : "不填标签"}
-        </button>
-      </label>
-      {tagsEnabled ? (
-        <Input
-          label="标签内容"
-          value={tags}
-          onChange={(event) => setTags(event.target.value)}
-          placeholder="通勤、冷淡、高级简洁"
-        />
-      ) : null}
+      </Field>
+
+      <Field eyebrow="Tags" label="标签">
+        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
+          <Chip active={!tagsEnabled} onClick={() => setTagsEnabled(false)}>
+            不填
+          </Chip>
+          <Chip active={tagsEnabled} onClick={() => setTagsEnabled(true)}>
+            填写标签
+          </Chip>
+        </div>
+        {tagsEnabled ? (
+          <input
+            value={tags}
+            onChange={(event) => setTags(event.target.value)}
+            placeholder="通勤、冷淡、高级简洁"
+            className={cn(UNDERLINE_INPUT, "mt-3")}
+          />
+        ) : null}
+      </Field>
     </div>
   );
 
@@ -176,9 +177,13 @@ export function SaveCandidateDialog({
       open={open}
       onOpenChange={onOpenChange}
       title={
-        <span className="inline-flex items-center gap-2">
-          <BookmarkPlus className="h-4 w-4" />
-          收藏到模特库
+        <span className="block">
+          <span className="block font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+            Bookmark · Model Library
+          </span>
+          <span className="mt-1 block font-display text-[22px] italic leading-[1.1] text-[var(--fg-0)]">
+            收藏到模特库
+          </span>
         </span>
       }
       description={form}
@@ -199,7 +204,35 @@ export function SaveCandidateDialog({
   );
 }
 
-// 复用：和 Generator/JobsPanel 里的 Chip 同结构
+const UNDERLINE_INPUT =
+  "h-10 w-full border-b border-[var(--border)] bg-transparent px-0 text-[14px] text-[var(--fg-0)] placeholder:text-[var(--fg-3)] " +
+  "transition-colors duration-150 focus:border-[var(--border-amber)] focus:outline-none " +
+  "max-sm:text-[16px]";
+
+// editorial Field 容器：mono uppercase eyebrow + 中文小标 + hairline 分隔
+function Field({
+  eyebrow,
+  label,
+  children,
+}: {
+  eyebrow: string;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="border-t border-[var(--border)] px-1 py-3 first:border-t-0 first:pt-1">
+      <header className="mb-2 flex items-baseline justify-between gap-3">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          {eyebrow}
+        </p>
+        <p className="text-[11px] text-[var(--fg-2)]">{label}</p>
+      </header>
+      {children}
+    </section>
+  );
+}
+
+// editorial chip：mono uppercase + dot + 选中 amber 文字 + amber 下划线
 function Chip({
   children,
   active,
@@ -214,12 +247,20 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "inline-flex min-h-9 cursor-pointer items-center rounded-md border px-3 text-xs transition-colors",
+        "group inline-flex min-h-9 cursor-pointer items-center gap-1.5 border-b py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors",
         active
-          ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-          : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
+          ? "border-[var(--border-amber)] text-[var(--amber-300)]"
+          : "border-transparent text-[var(--fg-1)] hover:text-[var(--fg-0)]",
       )}
+      aria-pressed={active || undefined}
     >
+      <span
+        aria-hidden
+        className={cn(
+          "h-1 w-1 rounded-full transition-colors",
+          active ? "bg-[var(--amber-400)]" : "bg-[var(--fg-3)] group-hover:bg-[var(--fg-1)]",
+        )}
+      />
       {children}
     </button>
   );

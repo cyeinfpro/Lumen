@@ -1,7 +1,9 @@
 "use client";
 
-// 模特设定：把 user_prompt 作为风格初值；商品约束阶段推荐的配饰进入后续配饰四宫格。
-// 失败 toast；按钮 loading 时禁用。
+// 模特设定（editorial 重构）：
+// • 把 user_prompt 作为风格初值；商品约束阶段推荐的配饰进入后续配饰四宫格。
+// • hairline 分隔取代嵌套卡；底部 underline 输入；toggle 改 mono dot 风格。
+// • 失败 toast；按钮 loading 时禁用。
 
 import { Library, Sparkles } from "lucide-react";
 import { useState } from "react";
@@ -11,6 +13,7 @@ import { toast } from "@/components/ui/primitives/Toast";
 import { useCreateModelCandidatesMutation } from "@/lib/queries";
 import type { WorkflowRun } from "@/lib/apiClient";
 import type { ModelLibraryAgeSegment } from "@/lib/apiClient";
+import { cn } from "@/lib/utils";
 import { ModelLibraryDialog } from "../components/ModelLibraryDialog";
 import { StageFrame } from "../components/StageFrame";
 import { accessorySuggestionText } from "../utils";
@@ -61,65 +64,83 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
+      eyebrow="N°03 — Model Settings"
       title="模特设定"
       subtitle="先确认模特本人。配饰会在确认模特后生成四宫格参考，不会提前试穿商品。"
     >
-      <label className="block">
-        <span className="text-sm text-[var(--fg-1)]">风格方向</span>
+      <section className="border-t border-[var(--border)] py-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          Style Direction
+        </p>
         <textarea
           value={stylePrompt}
           onChange={(event) => setStylePrompt(event.target.value)}
           rows={4}
-          className="mt-2 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2 text-sm leading-6 outline-none transition-colors focus:border-[var(--border-amber)]"
+          className="mt-3 w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-2 text-[14px] leading-7 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
           placeholder="高级通勤感，冷淡气质模特，适合独立站女装"
         />
-      </label>
-      <label className="mt-4 block">
-        <span className="text-sm text-[var(--fg-1)]">禁用项</span>
+      </section>
+
+      <section className="border-t border-[var(--border)] py-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          Avoid
+        </p>
         <input
           value={avoid}
           onChange={(event) => setAvoid(event.target.value)}
-          className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)]"
+          className="mt-3 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
           placeholder="顿号或逗号分隔，例如 网红感、夸张姿势"
         />
-      </label>
-      <label className="mt-4 block">
-        <span className="text-sm text-[var(--fg-1)]">配饰四宫格方向</span>
-        <div className="mt-2 flex gap-2">
+      </section>
+
+      <section className="border-t border-[var(--border)] py-4">
+        <div className="flex items-center justify-between gap-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            Accessory Quad
+          </p>
           <button
             type="button"
             onClick={() => setAccessoryEnabled((value) => !value)}
-            className={[
-              "h-10 rounded-md border px-3 text-sm transition-colors",
-              accessoryEnabled
-                ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-            ].join(" ")}
+            className="inline-flex cursor-pointer items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors"
           >
-            {accessoryEnabled ? "开启" : "关闭"}
+            <span
+              aria-hidden
+              className={cn(
+                "inline-block h-1.5 w-1.5 rounded-full transition-colors",
+                accessoryEnabled ? "bg-[var(--amber-400)]" : "bg-[var(--fg-3)]",
+              )}
+            />
+            <span
+              className={
+                accessoryEnabled ? "text-[var(--amber-300)]" : "text-[var(--fg-2)]"
+              }
+            >
+              {accessoryEnabled ? "Enabled" : "Disabled"}
+            </span>
           </button>
-          <input
-            value={accessories}
-            onChange={(event) => setAccessories(event.target.value)}
-            disabled={!accessoryEnabled}
-            className="h-10 min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)] disabled:opacity-50"
-            placeholder="逗号或顿号分隔，例如 白色运动鞋、小发夹"
-          />
         </div>
-      </label>
-      <div className="mt-4 rounded-md border border-[var(--border-amber)]/40 bg-[var(--accent-soft)] p-3 text-sm leading-6 text-[var(--fg-1)]">
-        模特方案图未试穿商品，仅用于确认模特形象。确认模特后，会基于该模特生成带配饰的白底四宫格参考图，最终展示图会参考你选中的配饰方案。
-      </div>
-      <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+        <input
+          value={accessories}
+          onChange={(event) => setAccessories(event.target.value)}
+          disabled={!accessoryEnabled}
+          className="mt-3 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] disabled:opacity-40"
+          placeholder="逗号或顿号分隔，例如 白色运动鞋、小发夹"
+        />
+        <p className="mt-3 max-w-2xl text-[12px] leading-6 text-[var(--fg-2)]">
+          模特方案图未试穿商品，仅用于确认模特形象。确认模特后会基于该模特生成带配饰的白底四宫格参考图，最终展示图会参考你选中的配饰方案。
+        </p>
+      </section>
+
+      <div className="flex flex-col gap-2 border-t border-[var(--border)] pt-5 sm:flex-row">
         <Button
-          variant="primary"
+          variant="outline"
           onClick={() => setLibraryOpen(true)}
           leftIcon={<Library className="h-4 w-4" />}
         >
           打开模特库
         </Button>
         <Button
-          variant="secondary"
+          variant="primary"
           loading={create.isPending}
           onClick={submit}
           leftIcon={<Sparkles className="h-4 w-4" />}
@@ -127,6 +148,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
           生成模特候选
         </Button>
       </div>
+
       <ModelLibraryDialog
         key={`${workflow.id}:${defaultAgeSegment}`}
         open={libraryOpen}

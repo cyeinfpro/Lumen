@@ -1,7 +1,8 @@
 "use client";
 
-// 阶段大卡片外框。所有 Stage 必须用它包，保证标题/副标题/边距统一。
-// AnimatePresence 由父级控制，子内容由各 Stage 自行决定结构。
+// Editorial stage frame：去除嵌套卡片化，改为 hairline 分隔 + 排印层级。
+// 视觉规范：mono uppercase eyebrow + serif italic title + sans subtitle。
+// 子内容贴底铺，不再叠加 bg-white/[0.035] + border + shadow。
 
 import { cn } from "@/lib/utils";
 
@@ -10,6 +11,7 @@ interface StageFrameProps {
   subtitle: string;
   badge?: React.ReactNode;
   actions?: React.ReactNode;
+  eyebrow?: string;
   children: React.ReactNode;
   className?: string;
 }
@@ -19,30 +21,32 @@ export function StageFrame({
   subtitle,
   badge,
   actions,
+  eyebrow = "STAGE",
   children,
   className,
 }: StageFrameProps) {
   return (
-    <section
-      className={cn(
-        "rounded-md border border-[var(--border)] bg-white/[0.035] p-4 md:p-5",
-        "shadow-[var(--shadow-1)]",
-        className,
-      )}
-    >
-      <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h2 className="text-lg font-medium tracking-normal text-[var(--fg-0)]">
-              {title}
-            </h2>
-            {badge}
+    <section className={cn("relative", className)}>
+      <header className="border-t border-[var(--border)] pb-5 pt-6 md:pt-8">
+        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
+          <div className="min-w-0 flex-1">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              {eyebrow}
+            </p>
+            <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h2 className="font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] md:text-[32px]">
+                {title}
+              </h2>
+              {badge}
+            </div>
+            <p className="mt-2 max-w-xl text-[13px] leading-6 text-[var(--fg-1)]">
+              {subtitle}
+            </p>
           </div>
-          <p className="mt-1 text-sm leading-6 text-[var(--fg-2)]">{subtitle}</p>
+          {actions ? <div className="shrink-0 self-start md:self-end">{actions}</div> : null}
         </div>
-        {actions ? <div className="shrink-0">{actions}</div> : null}
       </header>
-      {children}
+      <div className="relative">{children}</div>
     </section>
   );
 }
@@ -57,19 +61,23 @@ export function RunningState({
   return (
     <div
       className={cn(
-        "flex h-32 items-center justify-center gap-2.5 rounded-md border border-[var(--border)] bg-white/[0.03] text-sm text-[var(--fg-1)]",
+        "flex h-40 flex-col items-center justify-center gap-4 border-y border-[var(--border)] text-center",
         className,
       )}
     >
-      <span className="relative flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-60" />
+      <span aria-hidden className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-50" />
         <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--amber-400)]" />
       </span>
-      {label}
+      <p className="font-display text-[18px] italic text-[var(--fg-0)]">{label}</p>
+      <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+        Developing
+      </p>
     </div>
   );
 }
 
+// 信息面板：hairline + mono eyebrow + body 文本。无嵌套卡片化。
 export function InfoPanel({
   title,
   children,
@@ -82,17 +90,14 @@ export function InfoPanel({
   trailing?: React.ReactNode;
 }) {
   return (
-    <section
-      className={cn(
-        "rounded-md border border-[var(--border)] bg-white/[0.035] p-3",
-        className,
-      )}
-    >
+    <section className={cn("border-t border-[var(--border)] py-3", className)}>
       <header className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium text-[var(--fg-0)]">{title}</h3>
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          {title}
+        </p>
         {trailing}
       </header>
-      <div className="mt-2 text-sm leading-6 text-[var(--fg-1)]">{children}</div>
+      <div className="mt-2 text-[13px] leading-6 text-[var(--fg-1)]">{children}</div>
     </section>
   );
 }

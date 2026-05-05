@@ -1,9 +1,8 @@
 "use client";
 
-// 交付阶段：单纯的展示 + 下载页。
-// 改进：
+// 交付阶段（editorial 重构）：
 // 1) "下载全部"按钮（依次触发各图下载，避免浏览器并发拦截）
-// 2) 单图下载用 a[download]，hover 显示文件名
+// 2) 单图下载：portrait 卡 + 底部 mono underline 链接（去除嵌套圆角卡）
 // 3) 重选模特 ConfirmDialog 兜底
 
 import { ArchiveRestore, Download, RefreshCw } from "lucide-react";
@@ -53,6 +52,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
+      eyebrow="N°08 — Delivery"
       title="交付"
       subtitle="最终图已进入交付状态，可逐张或一键打包下载，也可继续返修。"
       actions={
@@ -67,56 +67,69 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
         ) : null
       }
     >
-      <div className="mb-4 flex flex-wrap gap-2">
+      <section className="flex flex-wrap items-center gap-3 border-t border-[var(--border)] py-4">
         <Button
-          variant="secondary"
+          variant="outline"
+          size="sm"
           loading={reopen.isPending}
           onClick={() => setConfirmReopen(true)}
-          leftIcon={<RefreshCw className="h-4 w-4" />}
+          leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
         >
           重选模特
         </Button>
-      </div>
+      </section>
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {images.map((image: BackendImageMeta, index) => (
-          <article
-            key={image.id}
-            className="rounded-md border border-[var(--border)] bg-white/[0.035] p-2 transition-shadow hover:shadow-[var(--shadow-2)]"
-          >
-            <button
-              type="button"
-              onClick={() => setPreviewIndex(index)}
-              className="block w-full overflow-hidden rounded-md focus-visible:outline-none"
-            >
-              <Image
-                src={imageSrc(image)}
-                alt="最终展示图"
-                width={360}
-                height={450}
-                sizes="(max-width: 768px) 100vw, 360px"
-                unoptimized
-                className="aspect-[4/5] w-full object-cover transition-transform duration-[var(--dur-slow)] hover:scale-[1.02]"
-              />
-            </button>
-            <a
-              href={canDownload(image) || "#"}
-              download
-              rel="noopener"
-              className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-md border border-[var(--border)] text-sm text-[var(--fg-0)] transition-colors hover:bg-white/[0.04]"
-            >
-              <Download className="h-4 w-4" />
-              下载
-            </a>
-          </article>
-        ))}
+      <section className="border-t border-[var(--border)] py-5">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            Final Showcases
+          </p>
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+            {String(images.length).padStart(2, "0")} shots
+          </p>
+        </div>
         {images.length === 0 ? (
-          <div className="col-span-full rounded-md border border-[var(--border)] bg-white/[0.03] p-6 text-center text-sm text-[var(--fg-2)]">
-            <ArchiveRestore className="mx-auto mb-2 h-5 w-5 text-[var(--fg-3)]" />
-            交付目录暂无图像
+          <div className="flex flex-col items-center justify-center gap-3 border border-dashed border-[var(--border)] py-12 text-center">
+            <ArchiveRestore className="h-5 w-5 text-[var(--fg-3)]" />
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              交付目录暂无图像
+            </p>
           </div>
-        ) : null}
-      </div>
+        ) : (
+          <div className="grid gap-x-4 gap-y-8 md:grid-cols-2 xl:grid-cols-4">
+            {images.map((image: BackendImageMeta, index) => (
+              <article key={image.id} className="group relative">
+                <button
+                  type="button"
+                  onClick={() => setPreviewIndex(index)}
+                  className="relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+                >
+                  <Image
+                    src={imageSrc(image)}
+                    alt="最终展示图"
+                    fill
+                    sizes="(max-width: 768px) 50vw, 360px"
+                    unoptimized
+                    className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
+                  />
+                  <span className="pointer-events-none absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] text-white/90 mix-blend-difference">
+                    N°{String(index + 1).padStart(2, "0")}
+                  </span>
+                </button>
+                <a
+                  href={canDownload(image) || "#"}
+                  download
+                  rel="noopener"
+                  className="mt-2 inline-flex h-10 w-full items-center justify-center gap-1.5 border-b border-[var(--border)] font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]"
+                >
+                  <Download className="h-3 w-3" />
+                  Download
+                </a>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <ImagePreviewModal
         images={images}
