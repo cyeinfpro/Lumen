@@ -643,6 +643,82 @@ class TelegramBinding(Base, TimestampMixin):
     tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+# ---------- Apparel Model Library（V1.x 收藏 + 自动识别） ----------
+
+class ModelLibraryItem(Base, TimestampMixin):
+    """User-owned saved/favorited/generated apparel model.
+
+    Replaces the per-user JSON index file. Each row is independent so
+    concurrent favorites and concurrent vision auto-tag writes don't
+    trample each other (the file-based design serialized everything
+    through a single read-modify-write).
+
+    Item ``id`` keeps the ``user:{uuid7}`` prefix the file index used so
+    existing client links continue to resolve. Vision auto-tagging issues
+    a single-row UPDATE per item — no whole-file rewrite.
+    """
+
+    __tablename__ = "model_library_items"
+    __table_args__ = (
+        Index("ix_model_library_items_user_age", "user_id", "age_segment"),
+        Index("ix_model_library_items_user_source", "user_id", "source"),
+        Index("ix_model_library_items_user_created", "user_id", "created_at"),
+        Index("ix_model_library_items_image", "image_id"),
+        Index(
+            "ix_model_library_items_style_tags",
+            "style_tags",
+            postgresql_using="gin",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    image_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    age_segment: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="user_favorites"
+    )
+    gender: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    appearance_direction: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    style_tags: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    library_folder: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_tagged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_tag_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+
+class ModelLibraryHiddenPreset(Base):
+    """Per-user hidden preset id list. Presets are global read-only, so a
+    user-level "delete" really means "hide from this user's library list".
+    """
+
+    __tablename__ = "model_library_hidden_presets"
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    preset_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    hidden_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 # ---------- Outbox Dead Letter（V1.0 收尾） ----------
 
 class OutboxDeadLetter(Base):
@@ -691,6 +767,8 @@ __all__ = [
     "WorkflowRun",
     "WorkflowStep",
     "ModelCandidate",
+    "ModelLibraryItem",
+    "ModelLibraryHiddenPreset",
     "QualityReport",
     "Share",
     "OutboxEvent",

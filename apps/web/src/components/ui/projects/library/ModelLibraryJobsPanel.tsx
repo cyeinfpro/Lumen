@@ -1,13 +1,9 @@
 "use client";
 
+// Editorial 重构：杂志大标题 + hairline section + portrait thumb + 去三层卡。
 // 任务中心：展示用户所有 apparel-model-library job
 // - origin=library_generate（独立生成）
 // - origin=project_candidate（项目里调 useCreateModelCandidatesMutation 派发的）
-// 上半部分：进行中（queued / running）
-// 下半部分：已完成 / 失败 / 部分成功（succeeded / failed / partial）
-//
-// 已完成 job 的图：点"收藏入库"会弹一个简表，title / age_segment / gender 等都从 job 字段继承。
-// 缩略图点击 = 打开统一 Lightbox（与项目页一致的体验，免去 JobImageOverlay）。
 
 import { motion } from "framer-motion";
 import {
@@ -18,13 +14,13 @@ import {
   Library,
   Maximize2,
   RefreshCw,
+  X,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
-import { Input } from "@/components/ui/primitives/Input";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
@@ -50,7 +46,7 @@ function jobItemToLightboxItem(item: ApparelModelLibraryJobItem): LightboxItem {
     id: item.image_id,
     url: item.image_url,
     thumbUrl: item.thumb_url ?? undefined,
-    previewUrl: item.thumb_url ?? undefined,
+    previewUrl: item.display_url ?? item.image_url,
     prompt: item.style_tags.join("、") || undefined,
   };
 }
@@ -102,53 +98,57 @@ export function ModelLibraryJobsPanel() {
   }, [items]);
 
   return (
-    <div className="grid gap-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.16em] text-[var(--fg-2)]">
-            <Library className="h-3.5 w-3.5" />
-            JOBS CENTER
-          </p>
-          <h3 className="mt-2 font-display text-[26px] italic leading-tight text-[var(--fg-0)] md:text-[28px]">
-            任务中心
-          </h3>
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-            独立生成与项目候选的统一进度跟踪
-          </p>
+    <div className="grid gap-8">
+      <header className="border-y border-[var(--border)] py-6 md:py-8">
+        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
+          <div className="min-w-0 flex-1">
+            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              N°02 — Jobs Center
+            </p>
+            <h2 className="mt-3 font-display text-[36px] italic leading-[1] text-[var(--fg-0)] md:text-[52px]">
+              任务中心
+            </h2>
+            <p className="mt-3 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+              独立生成与项目候选的统一进度跟踪
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="手动刷新"
+            onClick={() => jobs.refetch()}
+            disabled={jobs.isFetching}
+            className={cn(
+              "inline-flex h-10 items-center gap-2 self-start border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 md:self-end",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+            )}
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", jobs.isFetching && "animate-spin")} />
+            <span>Refresh</span>
+          </button>
         </div>
-        {/* 移动端 icon-only 圆按钮，桌面端带文字 */}
-        <button
-          type="button"
-          aria-label="手动刷新"
-          onClick={() => jobs.refetch()}
-          disabled={jobs.isFetching}
-          className={cn(
-            "inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60",
-            "md:h-9 md:w-auto md:rounded-md md:px-3 md:text-xs md:font-medium md:gap-1.5",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          )}
-        >
-          <RefreshCw className={cn("h-3.5 w-3.5", jobs.isFetching && "animate-spin")} />
-          <span className="hidden md:inline">手动刷新</span>
-        </button>
+        {!jobs.isPending && items.length > 0 ? (
+          <div className="mt-6 grid grid-cols-3 gap-px overflow-hidden border border-[var(--border)] md:max-w-2xl">
+            <Stat label="Total" value={items.length} />
+            <Stat label="Active" value={running.length} accent={running.length > 0} />
+            <Stat label="Done" value={finished.length} />
+          </div>
+        ) : null}
       </header>
 
       {jobs.isPending ? (
-        <div className="flex h-40 items-center justify-center gap-2 text-sm text-[var(--fg-2)]">
+        <div className="flex h-40 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           <Spinner size={20} />
-          加载任务列表
+          Loading
         </div>
       ) : items.length === 0 ? (
         <EmptyJobs />
       ) : (
         <>
-          <Section title="进行中" count={running.length}>
+          <Section title="进行中" eyebrow="Active" count={running.length}>
             {running.length === 0 ? (
-              <p className="rounded-md border border-dashed border-[var(--border)] bg-white/[0.02] px-4 py-6 text-center text-xs text-[var(--fg-2)]">
-                目前没有进行中的任务
-              </p>
+              <EmptyLine label="目前没有进行中的任务" />
             ) : (
-              <div className="grid gap-3">
+              <div className="grid gap-8">
                 {running.map((job) => (
                   <RunningJobCard key={job.job_id} job={job} />
                 ))}
@@ -156,13 +156,11 @@ export function ModelLibraryJobsPanel() {
             )}
           </Section>
 
-          <Section title="已完成 / 失败" count={finished.length}>
+          <Section title="已完成 / 失败" eyebrow="Archive" count={finished.length}>
             {finished.length === 0 ? (
-              <p className="rounded-md border border-dashed border-[var(--border)] bg-white/[0.02] px-4 py-6 text-center text-xs text-[var(--fg-2)]">
-                还没有已完成的任务
-              </p>
+              <EmptyLine label="还没有已完成的任务" />
             ) : (
-              <div className="grid gap-3">
+              <div className="grid gap-8">
                 {finished.map((job) => (
                   <FinishedJobCard key={job.job_id} job={job} />
                 ))}
@@ -175,25 +173,66 @@ export function ModelLibraryJobsPanel() {
   );
 }
 
+function Stat({
+  label,
+  value,
+  accent = false,
+}: {
+  label: string;
+  value: number;
+  accent?: boolean;
+}) {
+  return (
+    <div className="bg-[var(--bg-0)] px-4 py-4 md:px-5 md:py-5">
+      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        {label}
+      </p>
+      <p
+        className={cn(
+          "mt-1 font-display text-[28px] italic leading-none tabular-nums md:text-[36px]",
+          accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
+        )}
+      >
+        {String(value).padStart(2, "0")}
+      </p>
+    </div>
+  );
+}
+
 function Section({
   title,
+  eyebrow,
   count,
   children,
 }: {
   title: string;
+  eyebrow: string;
   count: number;
   children: React.ReactNode;
 }) {
   return (
-    <section className="grid gap-2">
-      <h4 className="flex items-center gap-2 text-sm font-medium text-[var(--fg-1)]">
-        {title}
-        <span className="rounded-full border border-[var(--border)] bg-white/[0.04] px-2 py-0.5 text-[10px] text-[var(--fg-2)]">
-          {count}
+    <section className="grid gap-5">
+      <div className="flex items-baseline gap-3 border-t border-[var(--border)] pt-5">
+        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          {eyebrow}
         </span>
-      </h4>
+        <h3 className="font-display text-[22px] italic leading-none text-[var(--fg-0)] md:text-[28px]">
+          {title}
+        </h3>
+        <span className="font-mono text-[11px] tabular-nums text-[var(--fg-2)]">
+          {String(count).padStart(2, "0")}
+        </span>
+      </div>
       {children}
     </section>
+  );
+}
+
+function EmptyLine({ label }: { label: string }) {
+  return (
+    <p className="border-y border-[var(--border)] py-8 text-center font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      {label}
+    </p>
   );
 }
 
@@ -208,25 +247,32 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
-      className="grid gap-3 rounded-xl border border-[var(--border-amber)]/60 bg-[var(--bg-1)] p-3 shadow-[var(--shadow-1)]"
+      className="grid gap-4 border-t border-[var(--border)] pt-5"
     >
-      <header className="flex flex-wrap items-start justify-between gap-2">
+      <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
             <StatusBadge status={job.status} />
-            <Badge>{ORIGIN_LABEL[job.origin]}</Badge>
+            <span aria-hidden className="text-[var(--fg-3)]">·</span>
+            <span>{ORIGIN_LABEL[job.origin]}</span>
             {job.project_title ? (
-              <Link
-                href={`/projects/${job.workflow_run_id}`}
-                className="inline-flex items-center gap-1 text-xs text-[var(--amber-300)] hover:underline"
-              >
-                {job.project_title}
-                <ExternalLink className="h-3 w-3" />
-              </Link>
+              <>
+                <span aria-hidden className="text-[var(--fg-3)]">·</span>
+                <Link
+                  href={`/projects/${job.workflow_run_id}`}
+                  className="inline-flex items-center gap-1 text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)]"
+                >
+                  {job.project_title}
+                  <ExternalLink className="h-3 w-3" />
+                </Link>
+              </>
             ) : null}
           </div>
-          <p className="mt-1 text-xs text-[var(--fg-2)]">
-            已完成 {job.finished_count} / {job.requested_count} 张 · 创建于{" "}
+          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            <span className="tabular-nums text-[var(--fg-1)]">{job.finished_count}</span>
+            <span className="mx-1 text-[var(--fg-3)]">/</span>
+            <span className="tabular-nums">{job.requested_count}</span>
+            <span aria-hidden className="mx-2 text-[var(--fg-3)]">·</span>
             {formatRelativeTime(job.created_at)}
           </p>
         </div>
@@ -235,11 +281,12 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
       <ProgressBar value={progress} />
       {job.items.length > 0 ? (
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6">
-          {job.items.map((item) => (
+          {job.items.map((item, idx) => (
             <JobThumb
               key={item.image_id}
               item={item}
               compact
+              order={idx}
               onOpenLightbox={() => openJobLightbox(job.items, item.image_id)}
             />
           ))}
@@ -253,64 +300,70 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
 }
 
 function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
-  const tone =
+  const dotTone =
     job.status === "succeeded"
-      ? "border-[var(--success)]/30"
+      ? "bg-[var(--success)]"
       : job.status === "failed"
-        ? "border-[var(--danger)]/40"
-        : "border-[var(--border-amber)]/40";
+        ? "bg-[var(--danger)]"
+        : "bg-[var(--amber-300)]";
   return (
     <motion.article
       layout
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18 }}
-      className={cn(
-        "grid gap-3 rounded-xl border bg-[var(--bg-1)] p-3 shadow-[var(--shadow-1)]",
-        tone,
-      )}
+      className="grid gap-4 border-t border-[var(--border)] pt-5"
     >
-      <header className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge status={job.status} />
-            <Badge>{ORIGIN_LABEL[job.origin]}</Badge>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <span className="inline-flex items-center gap-1.5">
+              <span aria-hidden className={cn("inline-block h-1.5 w-1.5 rounded-full", dotTone)} />
+              {STATUS_LABEL[job.status]}
+            </span>
+            <span aria-hidden className="text-[var(--fg-3)]">·</span>
+            <span>{ORIGIN_LABEL[job.origin]}</span>
             {job.project_title ? (
-              <Link
-                href={`/projects/${job.workflow_run_id}`}
-                className="inline-flex items-center gap-1 text-xs text-[var(--amber-300)] hover:underline"
-              >
-                {job.project_title}
-                <ExternalLink className="h-3 w-3" />
-              </Link>
+              <>
+                <span aria-hidden className="text-[var(--fg-3)]">·</span>
+                <Link
+                  href={`/projects/${job.workflow_run_id}`}
+                  className="inline-flex items-center gap-1 text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)]"
+                >
+                  {job.project_title}
+                  <ExternalLink className="h-3 w-3" />
+                </Link>
+              </>
             ) : null}
           </div>
-          <p className="mt-1 text-xs text-[var(--fg-2)]">
-            产出 {job.finished_count} 张 · {formatRelativeTime(job.updated_at ?? job.created_at)}
+          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            <span className="tabular-nums text-[var(--fg-1)]">{job.finished_count}</span>
+            <span className="mx-2 text-[var(--fg-3)]">·</span>
+            {formatRelativeTime(job.updated_at ?? job.created_at)}
           </p>
           {job.error_message ? (
-            <p className="mt-1 text-xs text-[var(--danger)]">{job.error_message}</p>
+            <p className="mt-2 max-w-xl text-[12px] leading-[1.6] text-[var(--danger)]">
+              {job.error_message}
+            </p>
           ) : null}
         </div>
         <BriefMeta job={job} />
       </header>
-      {/* 进度条：partial 时仍能看出"差几张" */}
       {job.requested_count > 0 && job.status !== "succeeded" ? (
         <ProgressBar
           value={Math.min(100, Math.round((job.finished_count / job.requested_count) * 100))}
         />
       ) : null}
       {job.items.length === 0 ? (
-        <p className="rounded-md border border-dashed border-[var(--border)] bg-white/[0.02] px-3 py-4 text-center text-xs text-[var(--fg-2)]">
-          没有已落地的图像
-        </p>
+        <EmptyLine label="没有已落地的图像" />
       ) : (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
-          {job.items.map((item) => (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
+          {job.items.map((item, idx) => (
             <JobThumb
               key={item.image_id}
               item={item}
               job={job}
+              order={idx}
               onOpenLightbox={() => openJobLightbox(job.items, item.image_id)}
             />
           ))}
@@ -342,29 +395,30 @@ function CandidatesGroup({
     useUiStore.getState().openLightboxFromItems(lightboxItems, initialId);
   };
   return (
-    <section className="grid gap-2 rounded-lg border border-dashed border-[var(--border)] bg-white/[0.02] p-2.5">
-      <header className="grid gap-0.5">
-        <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
-          CANDIDATES · 竞速产出
+    <section className="grid gap-3 border-t border-[var(--border)] pt-4">
+      <header className="grid gap-1">
+        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          Candidates · 竞速产出
         </p>
-        <p className="text-[11px] text-[var(--fg-2)]">
-          另一路 provider 的产出，可预览，也可收藏入库
+        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+          另一路 provider 的产出，可预览或入库
         </p>
       </header>
       <div
         className={cn(
-          "grid gap-2",
+          "grid gap-3",
           compact
             ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-6"
             : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5",
         )}
       >
-        {candidates.map((item) => (
+        {candidates.map((item, idx) => (
           <JobThumb
             key={item.image_id}
             item={item}
             job={job}
             compact={compact}
+            order={idx}
             onOpenLightbox={() => open(item.image_id)}
           />
         ))}
@@ -383,66 +437,62 @@ function BriefMeta({ job }: { job: ApparelModelLibraryJob }) {
   }
   if (tokens.length === 0) return null;
   return (
-    <div className="flex flex-wrap gap-1.5 text-[11px] text-[var(--fg-2)]">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
       {tokens.map((token, idx) => (
-        <span
-          key={`${token}-${idx}`}
-          className="rounded-full border border-[var(--border)] bg-white/[0.04] px-2 py-0.5"
-        >
-          {token}
+        <span key={`${token}-${idx}`} className="inline-flex items-center gap-2">
+          {idx > 0 ? <span aria-hidden className="text-[var(--fg-3)]">·</span> : null}
+          <span>{token}</span>
         </span>
       ))}
     </div>
   );
 }
 
-function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="rounded-full border border-[var(--border)] bg-white/[0.04] px-2 py-0.5 text-[10px] text-[var(--fg-2)]">
-      {children}
-    </span>
-  );
-}
-
-// 状态胶囊：5 种状态 5 种色调；running 自带 spinner，succeeded/failed 自带 icon
+// 状态徽标：dot + mono caption；running 自带 spinner
 function StatusBadge({ status }: { status: ApparelModelLibraryJobStatus }) {
-  const tone =
+  const dot =
     status === "queued"
-      ? "bg-white/[0.06] text-[var(--fg-2)]"
+      ? "bg-[var(--fg-3)]"
       : status === "running"
-        ? "bg-[var(--amber-400)]/10 text-[var(--amber-300)]"
+        ? "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]"
         : status === "succeeded"
-          ? "bg-[var(--success)]/15 text-[var(--success)]"
+          ? "bg-[var(--success)]"
           : status === "failed"
-            ? "bg-[var(--danger)]/15 text-[var(--danger)]"
-            : "bg-[var(--warning)]/15 text-[var(--warning)]";
+            ? "bg-[var(--danger)]"
+            : "bg-[var(--amber-300)]";
+  const tone =
+    status === "running" || status === "succeeded" || status === "failed" || status === "partial"
+      ? "text-[var(--fg-1)]"
+      : "text-[var(--fg-2)]";
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium",
-        tone,
-      )}
-    >
+    <span className={cn("inline-flex items-center gap-1.5", tone)}>
       {status === "running" ? (
         <Spinner size={12} />
       ) : status === "succeeded" ? (
-        <CheckCircle2 className="h-3 w-3" />
+        <CheckCircle2 className="h-3 w-3 text-[var(--success)]" />
       ) : status === "failed" || status === "partial" ? (
-        <AlertTriangle className="h-3 w-3" />
-      ) : null}
+        <AlertTriangle className="h-3 w-3 text-[var(--danger)]" />
+      ) : (
+        <span aria-hidden className={cn("inline-block h-1.5 w-1.5 rounded-full", dot)} />
+      )}
       {STATUS_LABEL[status]}
     </span>
   );
 }
 
-// amber 渐变进度条；用于运行中和 partial
+// amber 进度条
 function ProgressBar({ value }: { value: number }) {
   return (
-    <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-      <div
-        className="h-full rounded-full bg-gradient-to-r from-[var(--amber-400)] to-[var(--amber-200)] transition-[width] duration-300"
-        style={{ width: `${value}%` }}
-      />
+    <div className="grid gap-1.5">
+      <div className="h-px overflow-hidden bg-[var(--border)]">
+        <div
+          className="h-full bg-[var(--amber-400)] transition-[width] duration-300"
+          style={{ width: `${value}%` }}
+        />
+      </div>
+      <p className="font-mono text-[10px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-2)]">
+        {String(value).padStart(2, "0")}%
+      </p>
     </div>
   );
 }
@@ -453,19 +503,19 @@ function JobThumb({
   compact = false,
   disableSaveAction = false,
   onOpenLightbox,
+  order,
 }: {
   item: ApparelModelLibraryJobItem;
   job?: ApparelModelLibraryJob;
   compact?: boolean;
-  // dual_race loser 走候选区时关掉「收藏入库」入口
   disableSaveAction?: boolean;
   onOpenLightbox?: () => void;
+  order?: number;
 }) {
   const [saveOpen, setSaveOpen] = useState(false);
   const saved = item.saved_item_id != null;
   const allowSave = !disableSaveAction;
   const canSave = Boolean(job && allowSave);
-  // 优先取 item 的 appearance；没有就 fallback job 级
   const appearanceKey = (item.appearance_direction || job?.appearance_direction || "") as
     | AppearanceKey
     | "";
@@ -474,21 +524,14 @@ function JobThumb({
     : "";
 
   return (
-    <div
-      className={cn(
-        "group relative overflow-hidden rounded-xl border bg-[var(--bg-2)] transition-transform duration-200",
-        saved
-          ? "border-[var(--success)]/40"
-          : "border-[var(--border)] hover:border-[var(--border-strong)] group-hover:scale-[1.005]",
-      )}
-    >
+    <div className="group relative">
       <button
         type="button"
         onClick={() => onOpenLightbox?.()}
         aria-label="查看大图"
         className={cn(
-          "relative block w-full cursor-zoom-in overflow-hidden",
-          compact ? "aspect-square" : "aspect-[4/5]",
+          "relative block w-full cursor-zoom-in overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          compact ? "aspect-square" : "aspect-[3/4]",
         )}
       >
         <Image
@@ -497,19 +540,44 @@ function JobThumb({
           fill
           unoptimized
           sizes="(max-width: 768px) 50vw, 220px"
-          className="object-cover transition-transform duration-200 group-hover:scale-[1.015]"
+          className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
         />
-        {saved ? (
-          <span className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-md bg-[var(--success)]/85 px-2 py-1 text-[10px] text-white shadow-[var(--shadow-1)] backdrop-blur">
-            <Bookmark className="h-3 w-3" />
-            已入库
+        {/* N°NN 序号 */}
+        {typeof order === "number" ? (
+          <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+            N°{String(order + 1).padStart(2, "0")}
           </span>
         ) : null}
-        {/* 右下角 hover 提示：可点开大图 */}
+        {saved ? (
+          <span className="absolute right-2 top-2 inline-flex items-center gap-1 bg-[var(--success)]/90 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-white backdrop-blur">
+            <Bookmark className="h-3 w-3" />
+            Saved
+          </span>
+        ) : null}
         <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-0 backdrop-blur transition-opacity duration-150 group-hover:opacity-100">
           <Maximize2 className="h-3.5 w-3.5" />
         </span>
       </button>
+      {!compact ? (
+        <div className="mt-2.5 flex items-center justify-between gap-2">
+          <span className="truncate font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            {[appearanceLabel, item.style_tags.slice(0, 2).join("、")]
+              .filter(Boolean)
+              .join(" · ") || "未识别"}
+          </span>
+          {canSave && !saved ? (
+            <button
+              type="button"
+              aria-label="收藏入库"
+              onClick={() => setSaveOpen(true)}
+              className="inline-flex h-7 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+            >
+              <Bookmark className="h-3 w-3" />
+              Save
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {compact && canSave && !saved ? (
         <button
           type="button"
@@ -519,42 +587,6 @@ function JobThumb({
         >
           <Bookmark className="h-3.5 w-3.5" />
         </button>
-      ) : null}
-      {!compact && canSave ? (
-        <div className="flex items-center justify-between gap-2 p-2">
-          <span className="truncate text-[11px] text-[var(--fg-2)]">
-            {[appearanceLabel, item.style_tags.slice(0, 2).join("、")]
-              .filter(Boolean)
-              .join(" · ") || "未识别风格"}
-          </span>
-          {!saved ? (
-            <>
-              {/* 移动端：icon-only 圆按钮 */}
-              <button
-                type="button"
-                aria-label="收藏入库"
-                onClick={() => setSaveOpen(true)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] transition-colors hover:bg-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:hidden"
-              >
-                <Bookmark className="h-3.5 w-3.5" />
-              </button>
-              {/* 桌面端：带文字 */}
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={() => setSaveOpen(true)}
-                leftIcon={<Bookmark className="h-3.5 w-3.5" />}
-                className="hidden md:inline-flex"
-              >
-                收藏
-              </Button>
-            </>
-          ) : (
-            <span className="rounded-full border border-[var(--success)]/40 bg-[var(--success-soft)] px-2 py-0.5 text-[10px] text-[var(--success)]">
-              已入库
-            </span>
-          )}
-        </div>
       ) : null}
       {saveOpen && job && allowSave ? (
         <SaveJobItemDialog
@@ -584,9 +616,9 @@ function SaveJobItemDialog({
   );
   const [age, setAge] = useState<ModelLibraryItemAgeSegment>(defaultAge);
   const [gender, setGender] = useState(defaultGender);
-  // appearance 改 chip 选择：空 = 不指定
   const [appearance, setAppearance] = useState<ModelLibraryAppearance | "">(
-    () => (item.appearance_direction || job.appearance_direction || "") as ModelLibraryAppearance | "",
+    () =>
+      (item.appearance_direction || job.appearance_direction || "") as ModelLibraryAppearance | "",
   );
   const [styleTags, setStyleTags] = useState(item.style_tags.join("、"));
   const [autoTag, setAutoTag] = useState(true);
@@ -656,59 +688,71 @@ function SaveJobItemDialog({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.98 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="mobile-dialog-panel flex w-full flex-col overflow-hidden rounded-t-2xl border border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-2)] md:max-h-[92dvh] md:max-w-md md:rounded-xl"
+        className="mobile-dialog-panel flex w-full flex-col overflow-hidden border border-[var(--border)] bg-[var(--bg-0)] md:max-h-[92dvh] md:max-w-md"
       >
-        <header className="shrink-0 px-4 pt-4 pb-3">
-          <h3 className="font-display text-lg italic text-[var(--fg-0)]">收藏入库</h3>
-          <p className="mt-1 text-xs text-[var(--fg-2)]">
-            {`填好后会作为"生成入库"模特保存到我的模特库。`}
-          </p>
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Save to library
+            </p>
+            <h3 className="mt-2 font-display text-[24px] italic leading-none text-[var(--fg-0)]">
+              收藏入库
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭"
+            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </header>
-        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-3 overflow-y-auto px-4 pb-3">
-          <Input
-            label="名称"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="高级简洁青年女模特"
-          />
-          <div className="grid gap-2 md:grid-cols-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium text-[var(--fg-1)]">年龄段</span>
+        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 py-5">
+          <UnderlineLabeled label="名称">
+            <input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="高级简洁青年女模特"
+              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+            />
+          </UnderlineLabeled>
+          <div className="grid gap-5 md:grid-cols-2">
+            <UnderlineLabeled label="年龄段">
               <select
                 value={age}
                 onChange={(event) => setAge(event.target.value as ModelLibraryItemAgeSegment)}
-                className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
+                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] md:h-10 md:text-sm"
               >
                 {(Object.keys(AGE_LABEL) as ModelLibraryItemAgeSegment[]).map((segment) => (
-                  <option key={segment} value={segment}>
+                  <option key={segment} value={segment} className="bg-[var(--bg-0)]">
                     {AGE_LABEL[segment]}
                   </option>
                 ))}
               </select>
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium text-[var(--fg-1)]">性别</span>
+            </UnderlineLabeled>
+            <UnderlineLabeled label="性别">
               <select
                 value={gender}
                 onChange={(event) => setGender(event.target.value)}
-                className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
+                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] md:h-10 md:text-sm"
               >
-                <option value="female">女</option>
-                <option value="male">男</option>
+                <option value="female" className="bg-[var(--bg-0)]">女</option>
+                <option value="male" className="bg-[var(--bg-0)]">男</option>
               </select>
-            </label>
+            </UnderlineLabeled>
           </div>
-          {/* 外貌方向：chip 选择，10 + 不指定 */}
-          <div className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-[var(--fg-1)]">外貌方向</span>
-            <div className="flex flex-wrap gap-1.5">
+          <UnderlineLabeled label="外貌方向">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1">
               <Chip active={appearance === ""} onClick={() => setAppearance("")}>
                 不指定
               </Chip>
-              {(Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as [
-                Exclude<ModelLibraryAppearance, "all">,
-                string,
-              ][]).map(([value, label]) => (
+              {(
+                Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as [
+                  Exclude<ModelLibraryAppearance, "all">,
+                  string,
+                ][]
+              ).map(([value, label]) => (
                 <Chip
                   key={value}
                   active={appearance === value}
@@ -718,24 +762,27 @@ function SaveJobItemDialog({
                 </Chip>
               ))}
             </div>
-          </div>
-          <Input
-            label="风格标签"
-            value={styleTags}
-            onChange={(event) => setStyleTags(event.target.value)}
-            placeholder="高级简洁、棚拍"
-          />
-          <label className="flex items-center gap-2 text-xs text-[var(--fg-1)]">
+          </UnderlineLabeled>
+          <UnderlineLabeled label="风格标签">
+            <input
+              value={styleTags}
+              onChange={(event) => setStyleTags(event.target.value)}
+              placeholder="高级简洁、棚拍"
+              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+            />
+          </UnderlineLabeled>
+          <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)]">
             <input
               type="checkbox"
               checked={autoTag}
               onChange={(event) => setAutoTag(event.target.checked)}
+              className="accent-[var(--amber-400)]"
             />
             入库后再跑一次自动识别
           </label>
         </div>
-        <footer className="mobile-dialog-footer flex shrink-0 justify-end gap-2 border-t border-[var(--border)] px-4 py-3 md:pb-3">
-          <Button variant="ghost" onClick={onClose}>
+        <footer className="mobile-dialog-footer flex shrink-0 justify-end gap-2 border-t border-[var(--border)] px-5 py-4">
+          <Button variant="outline" onClick={onClose}>
             取消
           </Button>
           <Button variant="primary" loading={save.isPending} onClick={submit}>
@@ -747,7 +794,24 @@ function SaveJobItemDialog({
   );
 }
 
-// 复用：和 Generator 里的 Chip 同结构
+function UnderlineLabeled({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="grid gap-2">
+      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        {label}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+// underline-on-active chip
 function Chip({
   children,
   active,
@@ -762,35 +826,41 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "inline-flex min-h-11 cursor-pointer items-center rounded-md border px-3 text-xs transition-colors md:min-h-9",
-        active
-          ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-          : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
+        "group relative inline-flex min-h-10 cursor-pointer items-center px-1 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
+        active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
-      {children}
+      <span>{children}</span>
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
+          active
+            ? "bg-[var(--amber-400)]"
+            : "bg-transparent group-hover:bg-[var(--border-strong)]",
+        )}
+      />
     </button>
   );
 }
 
 function EmptyJobs() {
-  // 当前面板内拿不到 setTab，跳转留 TODO；先做视觉占位
   return (
-    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-6 py-14 text-center">
-      <div
-        aria-hidden
-        className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-tr from-[var(--amber-400)]/30 to-[var(--amber-200)]/10 shadow-[var(--shadow-amber)]"
-      >
-        <Library className="h-6 w-6 text-[var(--amber-300)]" />
+    <section className="border-y border-[var(--border)] py-16 md:py-20">
+      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+        <div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
+            <Library className="mr-1.5 -mt-px inline-block h-3 w-3" />
+            Empty queue
+          </p>
+          <h4 className="mt-3 font-display text-[36px] italic leading-[1.05] text-[var(--fg-0)] md:text-[48px]">
+            还没有任务
+          </h4>
+          <p className="mt-3 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+            {`从"新建模特"提交一批，或者在项目里生成模特候选，都会在这里实时聚合。`}
+          </p>
+        </div>
       </div>
-      <h4 className="font-display text-xl italic text-[var(--fg-0)]">还没有任务</h4>
-      <p className="mt-2 max-w-sm text-xs leading-5 text-[var(--fg-2)]">
-        {`从"新建模特"提交一批，或者在项目里生成模特候选，都会在这里实时聚合。`}
-      </p>
-      {/* TODO: tab 跳转需要 props 通讯，先静态展示 */}
-      <span className="mt-4 inline-flex cursor-default items-center gap-1.5 text-xs font-medium text-[var(--amber-300)]">
-        去新建模特
-      </span>
-    </div>
+    </section>
   );
 }

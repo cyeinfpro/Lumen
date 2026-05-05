@@ -1,12 +1,10 @@
 "use client";
 
-// /library 主壳：模特库 / 任务中心 / 新建模特 三 tab。已从 /projects/library 提到顶层。
-//
-// 提交"新建模特"后自动切到"任务中心"，给用户即时反馈"任务已派发"。
-// 顶部复用 ProjectTopBar / ProjectMobileTopBar，不破坏现有项目导航语言。
+// Editorial 重构：杂志大标题 + hairline tab + 去三层卡。
+// /library 主壳：模特库 / 任务中心 / 新建模特 三 tab。
+// 提交"新建模特"后自动切到"任务中心"。
 
 import { motion } from "framer-motion";
-import { Library, ListChecks, WandSparkles } from "lucide-react";
 import { useState } from "react";
 
 import { toast } from "@/components/ui/primitives/Toast";
@@ -26,10 +24,10 @@ import { ModelLibraryJobsPanel } from "./ModelLibraryJobsPanel";
 
 type LibraryTab = "browse" | "jobs" | "create";
 
-const TABS: Array<{ key: LibraryTab; label: string; icon: React.ReactNode }> = [
-  { key: "browse", label: "模特库", icon: <Library className="h-3.5 w-3.5" /> },
-  { key: "jobs", label: "任务中心", icon: <ListChecks className="h-3.5 w-3.5" /> },
-  { key: "create", label: "新建模特", icon: <WandSparkles className="h-3.5 w-3.5" /> },
+const TABS: Array<{ key: LibraryTab; label: string; eyebrow: string }> = [
+  { key: "browse", label: "模特库", eyebrow: "Browse" },
+  { key: "jobs", label: "任务中心", eyebrow: "Jobs" },
+  { key: "create", label: "新建模特", eyebrow: "Create" },
 ];
 
 export function ModelLibraryPage() {
@@ -52,26 +50,26 @@ export function ModelLibraryPage() {
   };
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
         title="模特库"
-        subtitle="浏览 / 任务 / 新建"
+        subtitle="LIBRARY · JOBS · CREATE"
       />
       <ProjectTopBar />
 
-      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
-        <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-5 md:gap-6">
+      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-6">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-8 md:gap-10">
           <Hero />
 
           <Tabs current={tab} onChange={setTab} />
 
           {tab === "browse" ? (
-            <div className="flex min-h-[60vh] flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/60 shadow-[var(--shadow-1)] md:rounded-md md:bg-white/[0.025]">
+            <div className="flex min-h-[60vh] flex-col">
               <ModelLibraryBrowser
                 mode="page"
-                showHeader={false}
+                showHeader
                 showSourceSidebar
                 defaultAgeSegment="all"
               />
@@ -94,25 +92,17 @@ export function ModelLibraryPage() {
 }
 
 function Hero() {
-  // 移动端 ProjectMobileTopBar 已显示标题，hero 整块隐藏；桌面端用克制的 mini hero。
   return (
-    <section className="hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-1)] p-4 shadow-[var(--shadow-1)] md:grid md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3 md:p-5">
-      <div className="min-w-0">
-        <p className="flex items-center gap-2 font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
-          <Library className="h-3.5 w-3.5" />
-          MODEL LIBRARY
-        </p>
-        <h1 className="mt-2 text-[20px] font-medium leading-tight text-[var(--fg-0)] md:text-[24px]">
-          模特库
-        </h1>
-        <p className="mt-1.5 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-          浏览预设、收藏、上传与生成的模特，集中管理你的全部模特资源。
-        </p>
-      </div>
-      <div
-        aria-hidden
-        className="hidden h-16 w-16 shrink-0 rounded-full bg-gradient-to-tr from-[var(--amber-400)]/40 to-[var(--amber-200)]/10 shadow-[var(--shadow-amber)] md:block"
-      />
+    <section className="hidden md:block">
+      <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        N°02 — Model Library
+      </p>
+      <h1 className="mt-3 font-display text-[44px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] md:text-[64px]">
+        模特库
+      </h1>
+      <p className="mt-4 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+        浏览预设、收藏、上传与生成的模特，集中管理你的全部模特资源。
+      </p>
     </section>
   );
 }
@@ -124,14 +114,12 @@ function Tabs({
   current: LibraryTab;
   onChange: (next: LibraryTab) => void;
 }) {
-  // 移动端：sticky 胶囊；桌面端：底部 layoutId 下划线（更接近主导航语言）
   return (
     <div
       className={cn(
-        "scrollbar-none -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5",
-        "sticky top-0 z-10 bg-[var(--bg-0)]/85 backdrop-blur-xl",
-        "md:relative md:top-auto md:z-auto md:gap-1.5 md:overflow-visible md:bg-transparent md:px-0 md:pb-0 md:backdrop-blur-none",
-        "md:border-b md:border-[var(--border)]",
+        "scrollbar-none -mx-4 flex gap-1 overflow-x-auto px-4 md:mx-0 md:overflow-visible md:px-0",
+        "sticky top-0 z-10 bg-[var(--bg-0)]/85 backdrop-blur-xl md:relative md:top-auto md:z-auto md:bg-transparent md:backdrop-blur-none",
+        "border-y border-[var(--border)]",
       )}
     >
       {TABS.map((option) => {
@@ -143,23 +131,22 @@ function Tabs({
             onClick={() => onChange(option.key)}
             aria-pressed={active}
             className={cn(
-              "relative inline-flex shrink-0 cursor-pointer items-center gap-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-              // 移动端：胶囊
-              "min-h-10 rounded-full border px-3 text-xs",
-              // 桌面端：纯文本 + 底部下划线
-              "md:min-h-0 md:rounded-none md:border-0 md:px-4 md:py-2.5 md:text-sm",
+              "group relative inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-2 px-4 py-3 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-10 md:py-2.5",
               active
-                ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)] md:border-0 md:bg-transparent md:text-[var(--fg-0)]"
-                : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04] md:border-0 md:bg-transparent md:text-[var(--fg-2)] md:hover:bg-transparent md:hover:text-[var(--fg-0)]",
+                ? "text-[var(--fg-0)]"
+                : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
             )}
           >
-            {option.icon}
-            {option.label}
+            <span aria-hidden className="opacity-60">
+              {option.eyebrow}
+            </span>
+            <span className="text-[var(--fg-0)]/80">·</span>
+            <span>{option.label}</span>
             {active ? (
               <motion.span
                 layoutId="library-tab-underline"
                 aria-hidden
-                className="absolute -bottom-px left-2 right-2 hidden h-0.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)] md:block"
+                className="absolute inset-x-3 -bottom-px h-px bg-[var(--amber-400)]"
                 transition={SPRING.snap}
               />
             ) : null}

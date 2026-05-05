@@ -461,6 +461,7 @@ export interface ApparelModelLibraryItem {
   appearance_direction: string | null;
   style_tags: string[];
   image_url: string;
+  display_url: string | null;
   thumb_url: string | null;
   image_id: string | null;
   preset_id?: string | null;
@@ -777,6 +778,7 @@ export type ApparelModelLibraryGenerateCount = 1 | 2 | 4 | 16;
 export interface ApparelModelLibraryJobItem {
   image_id: string;
   image_url: string;
+  display_url: string | null;
   thumb_url: string | null;
   saved_item_id: string | null;
   style_tags: string[];

@@ -1,21 +1,14 @@
 "use client";
 
+// Editorial 重构：杂志大标题 + hairline section + underline-on-active chip。
 // 模特库独立生成表单：放在"新建模特"tab 里。
 // 提交 → onSubmit(body)，由调用方决定后续（通常是切到"任务中心"tab）。
-//
-// 字段分组：
-//   1. 基础信息：年龄段 / 性别
-//   2. 外貌方向：地域枚举单选（appearance_direction）
-//   3. 风格 & 细节：气质风格 chip + 自由文本 / 风格标签 / 其他要求
-//   4. 输出 & 提交：张数 / 自动识别 / 提交按钮（移动端 sticky）
 
 import { motion } from "framer-motion";
-import { Sparkles, WandSparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
-import { Input } from "@/components/ui/primitives/Input";
-import { Textarea } from "@/components/ui/primitives/Textarea";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
 import {
@@ -55,7 +48,7 @@ const APPEARANCE_OPTIONS: Array<Exclude<ModelLibraryAppearance, "all">> = [
   "other",
 ];
 
-// 气质风格预设：原 8 个 + "高级感 / 街头" 让风格更全
+// 气质风格预设
 const STYLE_PRESETS = [
   "温柔",
   "酷感",
@@ -136,29 +129,26 @@ export function ModelLibraryGenerator({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
-      className="grid gap-5 rounded-2xl border border-[var(--border)] bg-[var(--bg-1)] p-4 shadow-[var(--shadow-1)] md:p-5"
+      className="grid gap-8"
     >
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="flex items-center gap-2 text-[11px] font-medium tracking-[0.16em] text-[var(--fg-2)]">
-            <WandSparkles className="h-3.5 w-3.5" />
-            LIBRARY GENERATOR
-          </p>
-          <h3 className="mt-2 font-display italic text-[22px] leading-[1.1] text-[var(--fg-0)] md:text-[26px]">
-            新建模特
-          </h3>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-            {`在不开项目的情况下批量生成模特图，提交后会自动进入"任务中心"。`}
-            {`选了"自动识别"会在生成完跑一次风格识别打标签。`}
-          </p>
-        </div>
+      <header className="border-y border-[var(--border)] py-6 md:py-8">
+        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          N°03 — Generator
+        </p>
+        <h2 className="mt-3 font-display text-[36px] italic leading-[1] text-[var(--fg-0)] md:text-[52px]">
+          新建模特
+        </h2>
+        <p className="mt-3 max-w-2xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+          {`在不开项目的情况下批量生成模特图，提交后会自动进入"任务中心"。`}
+          {`选了"自动识别"会在生成完跑一次风格识别打标签。`}
+        </p>
       </header>
 
       {/* 1. 基础信息 */}
-      <Section caption="基础信息">
-        <div className="grid gap-4 md:grid-cols-2">
+      <Section eyebrow="N°01" title="基础信息">
+        <div className="grid gap-6 md:grid-cols-2">
           <Field label="年龄段">
-            <div className="flex flex-wrap gap-2">
+            <ChipRow>
               {AGE_OPTIONS.map(([value, label]) => (
                 <Chip
                   key={value}
@@ -168,11 +158,11 @@ export function ModelLibraryGenerator({
                   {label}
                 </Chip>
               ))}
-            </div>
+            </ChipRow>
           </Field>
 
           <Field label="性别">
-            <div className="flex flex-wrap gap-2">
+            <ChipRow>
               {GENDER_OPTIONS.map(([value, label]) => (
                 <Chip
                   key={value}
@@ -182,15 +172,15 @@ export function ModelLibraryGenerator({
                   {label}
                 </Chip>
               ))}
-            </div>
+            </ChipRow>
           </Field>
         </div>
       </Section>
 
       {/* 2. 外貌方向（地域枚举单选） */}
-      <Section caption="外貌方向">
-        <Field hint="地域/外貌偏向，留空表示不指定，由模型自由发挥">
-          <div className="flex flex-wrap gap-2">
+      <Section eyebrow="N°02" title="外貌方向">
+        <Field hint="留空由模型自由发挥">
+          <ChipRow>
             <Chip active={appearance === ""} onClick={() => setAppearance("")}>
               不指定
             </Chip>
@@ -203,123 +193,115 @@ export function ModelLibraryGenerator({
                 {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
               </Chip>
             ))}
-          </div>
+          </ChipRow>
         </Field>
       </Section>
 
       {/* 3. 风格 & 细节 */}
-      <Section caption="风格 & 细节">
-        <div className="grid gap-4">
+      <Section eyebrow="N°03" title="风格 & 细节">
+        <div className="grid gap-6">
           <Field
             label="气质风格"
-            hint={`留空也能生成；点 chip 可拼接成"温柔、极简"这样的多关键词`}
+            hint={`点 chip 拼接成"温柔、极简"`}
           >
-            <Input
+            <UnderlineInput
               value={styleHint}
-              onChange={(event) => setStyleHint(event.target.value)}
-              placeholder={`温柔、极简，或者具体到"短发知性"`}
+              onChange={setStyleHint}
+              placeholder={`温柔、极简，或具体到"短发知性"`}
             />
-            <div className="mt-2 flex flex-wrap gap-2">
-              {STYLE_PRESETS.map((preset) => (
-                <Chip
-                  key={preset}
-                  active={styleHint.includes(preset)}
-                  onClick={() => toggleStylePreset(preset)}
-                >
-                  {preset}
-                </Chip>
-              ))}
+            <div className="mt-3">
+              <ChipRow>
+                {STYLE_PRESETS.map((preset) => (
+                  <Chip
+                    key={preset}
+                    active={styleHint.includes(preset)}
+                    onClick={() => toggleStylePreset(preset)}
+                  >
+                    {preset}
+                  </Chip>
+                ))}
+              </ChipRow>
             </div>
           </Field>
 
-          <Field
-            label="风格标签"
-            hint="逗号 / 顿号分隔，写在生成时附在 prompt 上"
-          >
-            <Input
+          <Field label="风格标签" hint="逗号 / 顿号分隔">
+            <UnderlineInput
               value={styleTags}
-              onChange={(event) => setStyleTags(event.target.value)}
+              onChange={setStyleTags}
               placeholder="高级简洁、棚拍"
             />
           </Field>
 
-          <Field label={`其他要求（${extra.length}/${EXTRA_MAX}）`}>
-            <Textarea
+          <Field label={`其他要求`} hint={`${extra.length}/${EXTRA_MAX}`}>
+            <UnderlineTextarea
               value={extra}
               maxLength={EXTRA_MAX}
-              onChange={(event) => setExtra(event.target.value.slice(0, EXTRA_MAX))}
+              onChange={(value) => setExtra(value.slice(0, EXTRA_MAX))}
               rows={3}
-              placeholder="例如：偏向自然光棚拍，纯白底，半身正面"
+              placeholder="例如：自然光棚拍，纯白底，半身正面"
             />
           </Field>
         </div>
       </Section>
 
       {/* 4. 输出 & 提交 */}
-      <Section caption="输出">
-        <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] md:items-end">
+      <Section eyebrow="N°04" title="输出">
+        <div className="grid gap-6 md:grid-cols-2 md:items-start">
           <Field label="生成张数">
-            <div className="flex flex-wrap gap-2">
+            <ChipRow>
               {COUNT_OPTIONS.map((option) => (
                 <Chip
                   key={option}
                   active={count === option}
                   onClick={() => setCount(option)}
-                  className="min-w-[3.25rem] justify-center"
                 >
-                  {option}
+                  <span className="tabular-nums">{String(option).padStart(2, "0")}</span>
                 </Chip>
               ))}
-            </div>
+            </ChipRow>
           </Field>
 
           <Field label="自动识别">
             <button
               type="button"
               onClick={() => setAutoTag((prev) => !prev)}
-              className={cn(
-                "h-10 w-full rounded-md border px-3 text-left text-sm transition-colors",
-                autoTag
-                  ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                  : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-              )}
+              className="group flex w-full items-center gap-3 border-b border-[var(--border)] pb-3 pt-1 text-left transition-colors hover:border-[var(--border-strong)]"
+              aria-pressed={autoTag}
             >
-              <div className="flex items-center gap-2">
+              <span
+                aria-hidden
+                className={cn(
+                  "inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors",
+                  autoTag
+                    ? "border-[var(--border-amber)] bg-[var(--accent)]"
+                    : "border-[var(--border-strong)] bg-transparent",
+                )}
+              >
                 <span
-                  aria-hidden
                   className={cn(
-                    "inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors",
-                    autoTag
-                      ? "border-[var(--border-amber)] bg-[var(--accent)]"
-                      : "border-[var(--border)] bg-white/8",
+                    "ml-0.5 h-3 w-3 rounded-full bg-white transition-transform",
+                    autoTag ? "translate-x-3" : "",
                   )}
-                >
-                  <span
-                    className={cn(
-                      "ml-0.5 h-3 w-3 rounded-full bg-white transition-transform",
-                      autoTag ? "translate-x-3" : "",
-                    )}
-                  />
-                </span>
-                <span className="truncate">
-                  {autoTag ? "生成完会自动打标签" : "不自动识别"}
-                </span>
-              </div>
+                />
+              </span>
+              <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)]">
+                {autoTag ? "Auto Tag · ON" : "Auto Tag · OFF"}
+              </span>
             </button>
           </Field>
         </div>
       </Section>
 
-      {/* 提交条：移动端 sticky 底部 + 全宽，桌面端靠右 */}
+      {/* 提交条 */}
       <div
         className={cn(
-          "sticky bottom-0 z-10 -mx-4 -mb-4 flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-1)] px-4 py-3",
-          "pb-[calc(12px+env(safe-area-inset-bottom,0px))]",
-          "md:static md:z-auto md:m-0 md:flex-row md:flex-wrap md:items-center md:justify-end md:border-0 md:bg-transparent md:p-0 md:pb-0",
+          "sticky bottom-0 z-10 -mx-4 flex flex-col gap-3 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-4 py-4 backdrop-blur",
+          "pb-[calc(16px+env(safe-area-inset-bottom,0px))]",
+          "md:static md:z-auto md:m-0 md:flex-row md:flex-wrap md:items-center md:justify-end md:bg-transparent md:px-0 md:py-6 md:backdrop-blur-none md:pb-6",
         )}
       >
-        <p className="text-xs leading-5 text-[var(--fg-2)] md:mr-auto">
-          {`张数越多耗时越久，16 张约几分钟，请耐心等待并到"任务中心"查看结果。`}
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] md:mr-auto">
+          {`${count} 张约几分钟，到任务中心查看`}
         </p>
         <Button
           variant="primary"
@@ -335,19 +317,26 @@ export function ModelLibraryGenerator({
   );
 }
 
-// 视觉分组：caption + 子内容，靠间距而非边框
+// 视觉分组：mono eyebrow + 大标题 + 子内容，hairline 分隔
 function Section({
-  caption,
+  eyebrow,
+  title,
   children,
 }: {
-  caption: string;
+  eyebrow: string;
+  title: string;
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-3">
-      <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--fg-2)]">
-        {caption}
-      </p>
+    <div className="grid gap-5 border-t border-[var(--border)] pt-6">
+      <div className="flex items-baseline gap-3">
+        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          {eyebrow}
+        </span>
+        <h3 className="font-display text-[20px] italic leading-none text-[var(--fg-0)] md:text-[24px]">
+          {title}
+        </h3>
+      </div>
       {children}
     </div>
   );
@@ -363,44 +352,101 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-1.5">
+    <div className="grid gap-2">
       {label ? (
-        <span className="text-xs font-medium text-[var(--fg-1)]">{label}</span>
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          {label}
+        </span>
       ) : null}
       {children}
       {hint ? (
-        <p className="text-xs leading-5 text-[var(--fg-2)]">{hint}</p>
+        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+          {hint}
+        </p>
       ) : null}
     </div>
   );
 }
 
+function ChipRow({ children }: { children: React.ReactNode }) {
+  return <div className="flex flex-wrap gap-x-5 gap-y-2">{children}</div>;
+}
+
+// Filter chip：去 border / bg；mono uppercase + underline-on-active
 function Chip({
   children,
   active,
   onClick,
-  className,
 }: {
   children: React.ReactNode;
   active?: boolean;
   onClick?: () => void;
-  className?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        "inline-flex min-h-10 cursor-pointer items-center rounded-md border px-3.5 text-[13px] transition-colors",
-        "md:min-h-9 md:px-3 md:text-xs",
-        active
-          ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-          : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
-        className,
+        "group relative inline-flex min-h-10 cursor-pointer items-center px-1 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
+        active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
-      {children}
+      <span>{children}</span>
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
+          active
+            ? "bg-[var(--amber-400)]"
+            : "bg-transparent group-hover:bg-[var(--border-strong)]",
+        )}
+      />
     </button>
+  );
+}
+
+// underline 输入框
+function UnderlineInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <input
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={placeholder}
+      className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+    />
+  );
+}
+
+function UnderlineTextarea({
+  value,
+  onChange,
+  placeholder,
+  rows,
+  maxLength,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  rows?: number;
+  maxLength?: number;
+}) {
+  return (
+    <textarea
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={placeholder}
+      rows={rows}
+      maxLength={maxLength}
+      className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-2 text-[15px] leading-[1.6] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-sm"
+    />
   );
 }
 

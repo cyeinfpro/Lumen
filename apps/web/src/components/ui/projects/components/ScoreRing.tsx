@@ -1,6 +1,6 @@
 "use client";
 
-// 圆环评分（0-100）。半径 18，stroke 3。颜色随分段变化。
+// Editorial 评分：mono 数字 + 细圆环。
 // 分段：>=85 success / >=70 amber / >=50 warning / 其它 danger。
 
 interface ScoreRingProps {
@@ -21,7 +21,7 @@ const TIER = (score: number): string => {
 export function ScoreRing({
   score,
   size = 40,
-  stroke = 3,
+  stroke = 1.5,
   showLabel = true,
   className,
 }: ScoreRingProps) {
@@ -57,7 +57,7 @@ export function ScoreRing({
       </svg>
       {showLabel ? (
         <span
-          className="absolute inset-0 flex items-center justify-center text-[10px] font-medium tabular-nums"
+          className="absolute inset-0 flex items-center justify-center font-mono text-[10px] tabular-nums"
           style={{ color }}
         >
           {Math.round(clamped)}

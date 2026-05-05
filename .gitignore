@@ -35,6 +35,7 @@ var/storage/
 var/test-storage-worker/
 **/scheduled_tasks*.json
 **/scheduled_tasks*.lock
+scripts/.lumen-self-update.last
 
 # Local archive (本机归档，不入库)
 .archive/

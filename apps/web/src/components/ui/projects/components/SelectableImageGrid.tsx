@@ -1,7 +1,7 @@
 "use client";
 
-// 可单选图网格（饰品方案、可选材料）。
-// 选中态：琥珀色外环 + 角标"已选"。点击图片触发预览，点击底部按钮触发选中切换。
+// Editorial 可单选图网格：去除卡片，纯图 + hairline + minimal 选择按钮。
+// 选中态：amber ring + 按钮高亮 + 角标。
 
 import { Check } from "lucide-react";
 import Image from "next/image";
@@ -31,35 +31,32 @@ export function SelectableImageGrid({
       {images.map((image, index) => {
         const selected = selectedImageId === image.id;
         return (
-          <article
-            key={image.id}
-            className={cn(
-              "overflow-hidden rounded-md border bg-white/[0.035] p-3 transition-all duration-[var(--dur-base)]",
-              selected
-                ? "border-[var(--border-amber)] shadow-[var(--shadow-amber)]"
-                : "border-[var(--border)] hover:border-[var(--border-strong)]",
-            )}
-          >
+          <article key={image.id} className="group">
             <div className="relative">
               <button
                 type="button"
                 onClick={() => onPreview(image, index)}
-                className="block w-full overflow-hidden focus-visible:outline-none"
+                className={cn(
+                  "relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                  selected && "ring-1 ring-inset ring-[var(--border-amber)]",
+                )}
               >
                 <Image
                   src={imageSrc(image)}
                   alt="饰品预览"
-                  width={360}
-                  height={450}
-                  sizes="(max-width: 768px) 100vw, 360px"
+                  fill
+                  sizes="(max-width: 768px) 50vw, 360px"
                   unoptimized
-                  className="aspect-[4/5] w-full rounded-md object-cover transition-transform duration-[var(--dur-slow)] hover:scale-[1.02]"
+                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
                 />
               </button>
+              <span className="pointer-events-none absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/90 mix-blend-difference">
+                N°{String(index + 1).padStart(2, "0")}
+              </span>
               {selected ? (
-                <span className="pointer-events-none absolute right-2 top-2 inline-flex h-6 items-center gap-1 rounded-full border border-[var(--border-amber)] bg-[var(--accent)] px-2 text-[10px] font-medium text-black shadow-[var(--shadow-amber)]">
+                <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-black shadow-[var(--shadow-amber)]">
                   <Check className="h-3 w-3" />
-                  已选
+                  Selected
                 </span>
               ) : null}
             </div>
@@ -68,14 +65,14 @@ export function SelectableImageGrid({
               onClick={() => onSelect(selected ? null : image.id)}
               disabled={saving}
               className={cn(
-                "mt-3 h-9 w-full rounded-md border px-2 text-sm transition-colors",
+                "mt-2 flex h-10 w-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                 selected
-                  ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
-                  : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04]",
+                  ? "border-b border-[var(--border-amber)] text-[var(--amber-300)]"
+                  : "border-b border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
                 "disabled:cursor-not-allowed disabled:opacity-60",
               )}
             >
-              {saving ? "正在保存…" : selected ? "取消选择" : "选择此饰品方案"}
+              {saving ? "Saving…" : selected ? "取消选择" : "选择此饰品"}
             </button>
           </article>
         );
@@ -86,7 +83,7 @@ export function SelectableImageGrid({
 
 export function SelectableImageGridLoading({
   count = 4,
-  label = "生成中…",
+  label = "Generating",
 }: {
   count?: number;
   label?: string;
@@ -94,17 +91,14 @@ export function SelectableImageGridLoading({
   return (
     <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       {Array.from({ length: count }).map((_, index) => (
-        <article
-          key={index}
-          className="overflow-hidden rounded-md border border-[var(--border)] bg-white/[0.035] p-3"
-        >
-          <div className="flex aspect-[4/5] items-center justify-center rounded-md bg-[var(--bg-2)]">
-            <div className="flex flex-col items-center gap-2 text-xs text-[var(--fg-2)]">
-              <Spinner size={20} />
-              <span>{label}</span>
-            </div>
+        <article key={index}>
+          <div className="flex aspect-[4/5] flex-col items-center justify-center gap-2 bg-[var(--bg-2)] text-[var(--fg-2)]">
+            <Spinner size={20} />
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+              {label}
+            </span>
           </div>
-          <div className="mt-3 h-9 rounded-md border border-[var(--border)] bg-white/[0.025]" />
+          <div className="mt-2 h-10 border-b border-[var(--border)]" />
         </article>
       ))}
     </div>

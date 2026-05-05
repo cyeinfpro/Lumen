@@ -1,17 +1,17 @@
 "use client";
 
-// 项目流程内的"选模特"弹窗：
-//  - 浏览部分（年龄 tab / 来源 filter / grid / 上传）抽到 ModelLibraryBrowser
-//  - 这里只保留 dialog 外壳；卡片点击 = 打开 Lightbox（统一规则）
-//  - 选模特通过 Lightbox 内 action（「设为当前模特」）触发，不在 dialog footer 上重复
-//  - footer 只剩「关闭」+ 提示文字 +「生成模特候选」（保留旧候选生成入口）
-//  - 桌面端：居中 modal；移动端：BottomSheet（snap 88%）
+// Editorial 项目流程内的"选模特"弹窗：
+//  - header 去 bg-white/[0.035] 卡片，改为 mono eyebrow + serif italic title + hairline
+//  - 不再用 Library lucide 图标做 prefix；左上角清晰排印自带气场
+//  - 桌面 modal 不再 rounded-md + shadow-lumen-pop，改为单线边 + bg-0 极简底
+//  - footer 去厚底 bg；按钮 secondary 改 outline (hairline)
+//  - 移动端：BottomSheet 仍用 88% snap，header 同款排印
 //
-// 关键链路：Dialog 打开 → Browser 渲染卡片 → 点卡片 →
-//   useUiStore.openLightboxFromItems(items, id, action) → Lightbox 打开 →
-//   按 action 按钮 → onSelectItem(item) → 这里 mutate → 成功后关闭 lightbox + dialog
+// 关键链路保持：Dialog 打开 → Browser 渲染卡片 → 点卡片 →
+//   useUiStore.openLightboxFromItems → Lightbox 打开 → 按 action →
+//   onSelectItem(item) → 这里 mutate → 成功后关闭 lightbox + dialog
 
-import { ArrowUpRight, Library, WandSparkles, X } from "lucide-react";
+import { ArrowUpRight, WandSparkles, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef } from "react";
 
@@ -147,7 +147,7 @@ export function ModelLibraryDialog({
         role="dialog"
         aria-modal="true"
         aria-label="模特库"
-        className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
+        className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
       >
         <DialogHeader
           onOpenFullLibrary={openFullLibrary}
@@ -185,13 +185,17 @@ function DialogHeader({
   hint: string;
 }) {
   return (
-    <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] bg-white/[0.035] px-4 py-3">
+    <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border)] px-5 py-5 md:px-7 md:py-6">
       <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <Library className="h-4 w-4 text-[var(--amber-300)]" />
-          <h2 className="text-base font-semibold text-[var(--fg-0)]">模特库</h2>
-        </div>
-        <p className="mt-0.5 text-xs text-[var(--fg-2)]">{hint}</p>
+        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          Model Library
+        </p>
+        <h2 className="mt-1.5 font-display text-[24px] italic leading-[1.05] text-[var(--fg-0)] md:text-[28px]">
+          模特库
+        </h2>
+        <p className="mt-2 max-w-md text-[12px] leading-5 text-[var(--fg-2)]">
+          {hint}
+        </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Button
@@ -205,7 +209,7 @@ function DialogHeader({
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer items-center justify-center rounded-md border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:bg-white/8 hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50 md:h-9 md:min-h-0 md:w-9 md:min-w-0"
+          className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50 max-sm:h-11 max-sm:w-11"
           aria-label="关闭模特库"
         >
           <X className="h-4 w-4" />
@@ -225,13 +229,13 @@ function DialogFooter({
   generatingCandidates: boolean;
 }) {
   return (
-    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)] px-4 py-3 md:flex-row md:items-center md:justify-between md:pb-3">
-      <p className="min-w-0 text-xs text-[var(--fg-2)]">
-        点击任一图片预览，「设为当前模特」按钮在大图内。
+    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] px-5 py-4 md:flex-row md:items-center md:justify-between md:px-7 md:pb-4">
+      <p className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+        Tip · 点击图片预览，「设为当前模特」按钮在大图内
       </p>
       <div className="flex gap-2">
         <Button
-          variant="secondary"
+          variant="outline"
           loading={generatingCandidates}
           onClick={onGenerateCandidates}
           leftIcon={<WandSparkles className="h-4 w-4" />}

@@ -1,7 +1,9 @@
 "use client";
 
-// 模特候选卡片：四宫格联排预览 + 选中态琥珀外环 + 序号 + 状态徽章。
-// 入选时 layout 会有微动画（Framer Motion 的 layout）。
+// Editorial 模特候选卡：portrait 大图 + 上下双联预览 + minimal 信息行 + 双按钮。
+// - 选中态：仅角标 + 序号高亮 amber，不再外环 shadow
+// - 序号 N°N 顶部 mono
+// - 主按钮 minimal，secondary 为 ghost-line
 
 import { motion } from "framer-motion";
 import { BookmarkPlus, Check, Sparkles } from "lucide-react";
@@ -12,7 +14,6 @@ import { Spinner } from "@/components/ui/primitives/Spinner";
 import type { BackendImageMeta, ModelCandidate, WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { imageById, imageSrc, stringArray } from "../utils";
-import { STATUS_LABEL } from "../types";
 
 interface CandidateCardProps {
   workflow: WorkflowRun;
@@ -53,21 +54,15 @@ export function CandidateCard({
   return (
     <motion.article
       layout
-      transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-      className={cn(
-        "rounded-md border bg-white/[0.035] p-3 transition-shadow",
-        selected
-          ? "border-[var(--border-amber)] shadow-[var(--shadow-amber)]"
-          : locallySelected
-            ? "border-[var(--border-amber)]"
-            : "border-[var(--border)] hover:border-[var(--border-strong)]",
-      )}
+      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+      className="group relative"
     >
       <div className="relative">
         <div
           className={cn(
-            "grid aspect-[4/5] gap-1 overflow-hidden rounded-md bg-[var(--bg-2)]",
+            "relative grid aspect-[4/5] gap-px overflow-hidden bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)]",
             images.length > 1 ? "grid-cols-2" : "grid-cols-1",
+            selected && "ring-1 ring-inset ring-[var(--border-amber)]",
           )}
         >
           {images.length > 0 ? (
@@ -80,63 +75,70 @@ export function CandidateCard({
                     ? onPreview(candidateImage, images, index)
                     : onChoose?.()
                 }
-                className="group h-full min-h-0 w-full overflow-hidden focus-visible:outline-none"
+                className="relative h-full min-h-0 w-full overflow-hidden focus-visible:outline-none"
               >
                 <Image
                   src={imageSrc(candidateImage)}
                   alt={`模特候选 ${candidate.candidate_index}-${index + 1}`}
                   fill
-                  sizes="(max-width: 768px) 50vw, 160px"
+                  sizes="(max-width: 768px) 50vw, 220px"
                   unoptimized
-                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] group-hover:scale-[1.02]"
+                  className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
                 />
               </button>
             ))
           ) : (
-            <div className="col-span-full flex h-full items-center justify-center text-sm text-[var(--fg-2)]">
-              {generating ? <Spinner size={20} /> : "暂无图像"}
+            <div className="col-span-full flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
+              {generating ? (
+                <>
+                  <Spinner size={20} />
+                  <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+                    Generating
+                  </span>
+                </>
+              ) : (
+                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                  No Image
+                </span>
+              )}
             </div>
           )}
         </div>
+
+        <span
+          className={cn(
+            "absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] mix-blend-difference",
+            "text-white/90",
+          )}
+        >
+          N°{String(candidate.candidate_index).padStart(2, "0")}
+        </span>
+
         {selected ? (
-          <span className="pointer-events-none absolute right-2 top-2 inline-flex h-6 items-center gap-1 rounded-full border border-[var(--border-amber)] bg-[var(--accent)] px-2 text-[10px] font-medium text-black">
+          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-black shadow-[var(--shadow-amber)]">
             <Check className="h-3 w-3" />
-            已确认
+            Selected
           </span>
         ) : null}
       </div>
 
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <p className="flex items-center gap-1.5 text-sm font-medium text-[var(--fg-0)]">
-          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--bg-2)] text-[10px] tabular-nums text-[var(--fg-1)]">
-            {candidate.candidate_index}
-          </span>
+      <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
+        <p
+          className={cn(
+            "font-display text-[18px] italic leading-tight transition-colors",
+            selected ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
+          )}
+        >
           方案 {candidate.candidate_index}
         </p>
-        <div className="flex items-center gap-1.5">
-          {images.length > 1 ? (
-            <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--fg-2)]">
-              {images.length} 张
-            </span>
-          ) : null}
-          <span
-            className={cn(
-              "rounded-full border px-2 py-0.5 text-[10px]",
-              selected
-                ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                : generating
-                  ? "border-[var(--amber-400)]/40 text-[var(--amber-300)]"
-                  : "border-[var(--border)] text-[var(--fg-2)]",
-            )}
-          >
-            {STATUS_LABEL[candidate.status] ?? candidate.status}
-          </span>
-        </div>
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          {images.length > 1 ? `${images.length} shots` : "1 shot"}
+        </span>
       </div>
-      <p className="mt-2 text-xs leading-5 text-[var(--fg-2)]">
+      <p className="mt-2 text-[12px] leading-5 text-[var(--fg-2)]">
         未试穿商品，仅用于确认模特形象。
       </p>
-      {/* 移动端 (<640px) 单列堆叠保证拇指可及；sm+ 双列横排省纵向空间 */}
+
       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
         <Button
           variant={selected || locallySelected ? "secondary" : "primary"}
@@ -152,7 +154,7 @@ export function CandidateCard({
             )
           }
         >
-          {selected ? "已确认" : generating ? "生成中…" : locallySelected ? "已选中" : "设为当前"}
+          {selected ? "已确认" : generating ? "生成中" : locallySelected ? "已选中" : "设为当前"}
         </Button>
         <Button
           variant="outline"

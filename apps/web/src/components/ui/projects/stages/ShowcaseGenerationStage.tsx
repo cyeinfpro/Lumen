@@ -1,10 +1,11 @@
 "use client";
 
-// 商品融合阶段：基于已确认模特 + 商品原图，生成 4 张电商展示图。
-// 关键改进：
+// 商品融合阶段（editorial 重构）：
+// • 基于已确认模特 + 商品原图，生成 4 张电商展示图。
 // 1) reopen / 重新生成 用 ConfirmDialog 兜底
 // 2) 展示图运行中显示带骨架的 placeholder 网格
 // 3) 模板/质量在运行态禁用
+// 4) 视觉：hairline 段落 + mono dot status badge + underline select。
 
 import { Check, Layers, RefreshCw, Shirt } from "lucide-react";
 import { useState } from "react";
@@ -99,18 +100,33 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
 
   return (
     <StageFrame
+      eyebrow="N°06 — Showcase Fusion"
       title="商品融合"
       subtitle="使用已确认模特和商品图，生成 4 张电商展示图。预计 1-3 分钟。"
       badge={
         isRunning ? (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-amber)] bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] text-[var(--amber-300)]">
-            <span className="h-1.5 w-1.5 rounded-full bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]" />
-            正在生成
+          <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-60" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]" />
+            </span>
+            Running
           </span>
         ) : null
       }
+      actions={
+        <Button
+          variant="outline"
+          size="sm"
+          loading={reopen.isPending}
+          onClick={() => setConfirmReopen(true)}
+          leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+        >
+          返回重选模特
+        </Button>
+      }
     >
-      <div className="grid gap-4 lg:grid-cols-2">
+      <section className="grid gap-x-6 gap-y-2 lg:grid-cols-2">
         <ReferenceBlock
           title="商品原图"
           images={productImages}
@@ -121,106 +137,92 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
           images={modelImages}
           onPreview={(_image, index) => openPreview(modelImages, index)}
         />
-      </div>
+      </section>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button
-          variant="secondary"
-          loading={reopen.isPending}
-          onClick={() => setConfirmReopen(true)}
-          leftIcon={<RefreshCw className="h-4 w-4" />}
-        >
-          返回重选模特
-        </Button>
-      </div>
-
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <label>
-          <span className="text-sm text-[var(--fg-1)]">输出模板</span>
-          <select
+      <section className="border-t border-[var(--border)] py-5">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          Output Setup
+        </p>
+        <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-3">
+          <SelectField
+            label="输出模板"
             value={template}
-            onChange={(event) => setTemplate(event.target.value as CreateTemplate)}
+            onChange={(value) => setTemplate(value as CreateTemplate)}
             disabled={isRunning}
-            className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
-          >
-            {TEMPLATE_LABELS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span className="text-sm text-[var(--fg-1)]">画幅比例</span>
-          <select
+            options={TEMPLATE_LABELS}
+          />
+          <SelectField
+            label="画幅比例"
             value={aspectRatio}
-            onChange={(event) => setAspectRatio(event.target.value as CreateAspectRatio)}
+            onChange={(value) => setAspectRatio(value as CreateAspectRatio)}
             disabled={isRunning}
-            className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
-          >
-            {ASPECT_RATIO_LABELS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span className="text-sm text-[var(--fg-1)]">质量模式</span>
-          <select
+            options={ASPECT_RATIO_LABELS}
+          />
+          <SelectField
+            label="质量模式"
             value={quality}
-            onChange={(event) => setQuality(event.target.value as "high" | "4k")}
+            onChange={(value) => setQuality(value as "high" | "4k")}
             disabled={isRunning}
-            className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
-          >
-            <option value="high">2K 高质量</option>
-            <option value="4k">4K 终稿</option>
-          </select>
-        </label>
-      </div>
+            options={[
+              ["high", "2K 高质量"],
+              ["4k", "4K 终稿"],
+            ]}
+          />
+        </div>
+        <p className="mt-4 inline-flex flex-wrap items-center gap-2 text-[12px] leading-6 text-[var(--fg-2)]">
+          <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
+            <Layers className="h-3 w-3" />
+            04 shots
+          </span>
+          <span aria-hidden className="text-[var(--fg-3)]">·</span>
+          <span>{aspectRatio} 画幅</span>
+          <span aria-hidden className="text-[var(--fg-3)]">·</span>
+          <span>{quality === "4k" ? "4K 终稿" : "2K 高质量"}</span>
+        </p>
+      </section>
 
-      <div className="mt-4 rounded-md border border-[var(--border)] bg-white/[0.03] p-3 text-sm leading-6 text-[var(--fg-1)]">
-        <span className="inline-flex items-center gap-1.5 text-[var(--amber-300)]">
-          <Layers className="h-3.5 w-3.5" />
-          预计生成 4 张
-        </span>
-        ，{aspectRatio} 画幅，使用 {quality === "4k" ? "4K 终稿" : "2K 高质量"} 模式，等待时间取决于队列与上游速度。
-      </div>
-
-      <Button
-        className="mt-4"
-        variant={hasTasks ? "secondary" : "primary"}
-        loading={create.isPending}
-        disabled={isRunning}
-        onClick={() => (hasTasks ? setConfirmRegenerate(true) : generateShowcase())}
-        leftIcon={hasTasks ? <RefreshCw className="h-4 w-4" /> : <Shirt className="h-4 w-4" />}
-      >
-        {hasTasks ? "按当前模板再生成一批" : "开始生成展示图"}
-      </Button>
-
-      {generated.length > 0 ? (
+      <section className="flex flex-wrap items-center gap-3 border-t border-[var(--border)] py-5">
         <Button
-          className="mt-3"
-          variant="primary"
-          loading={complete.isPending}
+          variant={hasTasks ? "outline" : "primary"}
+          loading={create.isPending}
           disabled={isRunning}
-          onClick={() => setConfirmDeliver(true)}
-          leftIcon={<Check className="h-4 w-4" />}
+          onClick={() => (hasTasks ? setConfirmRegenerate(true) : generateShowcase())}
+          leftIcon={hasTasks ? <RefreshCw className="h-4 w-4" /> : <Shirt className="h-4 w-4" />}
         >
-          确认交付
+          {hasTasks ? "按当前模板再生成一批" : "开始生成展示图"}
         </Button>
-      ) : null}
+        {generated.length > 0 ? (
+          <Button
+            variant="primary"
+            loading={complete.isPending}
+            disabled={isRunning}
+            onClick={() => setConfirmDeliver(true)}
+            leftIcon={<Check className="h-4 w-4" />}
+          >
+            确认交付
+          </Button>
+        ) : null}
+      </section>
 
       {hasTasks ? (
-        generated.length === 0 ? (
-          <RunningState className="mt-4" label="展示图正在生成…" />
-        ) : (
-          <ImageGrid
-            className="mt-4"
-            images={generated}
-            onPreview={(_image, index) => openPreview(generated, index)}
-          />
-        )
+        <section className="border-t border-[var(--border)] py-5">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              Generated
+            </p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+              {String(generated.length).padStart(2, "0")} shots
+            </p>
+          </div>
+          {generated.length === 0 ? (
+            <RunningState label="展示图正在生成…" />
+          ) : (
+            <ImageGrid
+              images={generated}
+              onPreview={(_image, index) => openPreview(generated, index)}
+            />
+          )}
+        </section>
       ) : null}
 
       <ImagePreviewModal
@@ -272,6 +274,40 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         }}
       />
     </StageFrame>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  onChange,
+  disabled,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  disabled: boolean;
+  options: ReadonlyArray<readonly [string, string]>;
+}) {
+  return (
+    <label className="block">
+      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        {label}
+      </span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+        className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
+      >
+        {options.map(([optionValue, optionLabel]) => (
+          <option key={optionValue} value={optionValue} className="bg-[var(--bg-1)]">
+            {optionLabel}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

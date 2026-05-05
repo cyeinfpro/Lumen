@@ -1,7 +1,7 @@
 "use client";
 
-// 步骤侧栏 / 移动条上用的 2px 圆点，依状态着色。
-// running 走 lumen-pulse-soft 慢呼吸（globals.css 已定义），暗示"正在显影"。
+// 步骤侧栏 / 移动条上用的圆点，依状态着色。
+// running / generating 走 lumen-pulse-soft 慢呼吸。
 
 import { cn } from "@/lib/utils";
 
@@ -20,7 +20,7 @@ const STATUS_CLASS: Record<string, string> = {
 
 export function StatusDot({
   status,
-  size = 8,
+  size = 6,
   className,
 }: {
   status?: string;

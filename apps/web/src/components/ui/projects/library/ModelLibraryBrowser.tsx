@@ -1,8 +1,7 @@
 "use client";
 
+// Editorial 重构：杂志大标题 + portrait 模特卡 + hairline toolbar + underline-on-active chip。
 // 共享浏览器：被 ModelLibraryDialog（dialog 模式）和 ModelLibraryPage（page 模式）复用。
-// 抽出原 ModelLibraryDialog 里的"浏览/筛选/搜索/上传/grid/卡片"逻辑；
-// 不含 dialog 外壳和"生成模特候选"按钮——交给调用方决定。
 //
 // 交互规则（统一）：
 //  - 点击卡片缩略图 = 打开 Lightbox 大图；左右键翻页
@@ -10,16 +9,12 @@
 //
 // 关键约束（参考 apps/web/AGENTS.md）：
 //  - 禁止 render 阶段访问 ref / 调用 Date.now()
-//  - 禁止 effect 中无依赖控制地 setState（这里依赖 mode 切换，没有循环）
-//
-// onSelectItem prop：dialog 模式下，传给 lightbox action 的 onClick；
-// page 模式下传 undefined 即可，无 action 注入。
+//  - 禁止 effect 中无依赖控制地 setState
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Bookmark,
   ImagePlus,
-  Library,
   RefreshCw,
   Search,
   SlidersHorizontal,
@@ -32,7 +27,6 @@ import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
-import { Input } from "@/components/ui/primitives/Input";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
@@ -65,7 +59,7 @@ type BrowserSource = "all" | ModelLibrarySource | "unsaved_jobs";
 
 const AGE_TABS: Array<[ModelLibraryAgeSegment, string]> = [
   ["all", "全部"],
-  ["user_favorites", "用户收藏"],
+  ["user_favorites", "收藏"],
   ["toddler", "幼儿"],
   ["child", "儿童"],
   ["teen", "青少年"],
@@ -95,14 +89,14 @@ const GENDER_OPTIONS: Array<[ModelLibraryGender, string]> = [
 
 const SOURCE_FILTERS: Array<[BrowserSource, string]> = [
   ["all", "全部"],
-  ["preset", "全站预设"],
-  ["favorite", "我的收藏"],
-  ["user_upload", "我的上传"],
-  ["generated", "生成入库"],
+  ["preset", "预设"],
+  ["favorite", "收藏"],
+  ["user_upload", "上传"],
+  ["generated", "生成"],
   ["unsaved_jobs", "待入库"],
 ];
 
-// 外貌方向 chip：第一个固定 "all=全部"，其余按 MODEL_LIBRARY_APPEARANCE_LABEL 顺序
+// 外貌方向 chip：第一个固定 "all=全部"
 const APPEARANCE_TABS: Array<[ModelLibraryAppearance, string]> = [
   ["all", "全部"],
   ...(Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as Array<
@@ -112,11 +106,18 @@ const APPEARANCE_TABS: Array<[ModelLibraryAppearance, string]> = [
 
 const AGE_LABEL = Object.fromEntries(AGE_TABS) as Record<ModelLibraryAgeSegment, string>;
 
+// 短版来源标签（卡片左下角徽标）
+const SOURCE_LABEL_SHORT: Record<ModelLibrarySource, string> = {
+  preset: "预设",
+  favorite: "收藏",
+  user_upload: "上传",
+  generated: "生成",
+};
+
 export interface ModelLibraryBrowserProps {
   /**
    * dialog 模式必须传 workflow；page 模式可不传。
-   * @deprecated 当前实现并未真正读取 workflow（选择 mutation 由父组件在 onSelectItem 内承接）；
-   *   为保留 prop 形态，函数体内仍以 `void workflow` 显式标记不使用。
+   * @deprecated 当前实现并未真正读取 workflow（选择 mutation 由父组件在 onSelectItem 内承接）
    */
   workflow?: WorkflowRun;
   /**
@@ -126,9 +127,7 @@ export interface ModelLibraryBrowserProps {
   mode: "page" | "dialog";
   defaultAgeSegment?: ModelLibraryAgeSegment;
   /**
-   * 选模特回调（dialog 模式用）：当用户在 Lightbox 内点「设为当前模特」时被调用。
-   * 卡片点击不再触发此回调；卡片只负责打开 Lightbox。
-   * 上层（Dialog）负责把这个回调接到现有 useSelectApparelModelLibraryItemMutation。
+   * 选模特回调（dialog 模式用）
    */
   onSelectItem?: (item: ApparelModelLibraryItem) => void;
   /** dialog 模式下，由父组件控制 lightbox action 的 pending 文案 */
@@ -161,7 +160,6 @@ export function ModelLibraryBrowser({
   headerExtra,
   className,
 }: ModelLibraryBrowserProps) {
-  // workflow 仅 dialog 模式语义上必传；page 模式无 selection 概念
   void workflow;
   const [ageSegment, setAgeSegment] = useState<ModelLibraryAgeSegment>(defaultAgeSegment);
   const [appearance, setAppearance] = useState<ModelLibraryAppearance>("all");
@@ -169,7 +167,6 @@ export function ModelLibraryBrowser({
   const [query, setQuery] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
-  // 上传成功后 highlight 一下，纯视觉反馈，不参与"已选"语义
   const [lastUploadedId, setLastUploadedId] = useState<string | null>(null);
 
   // 待入库视图：跳过 list API，改用 jobs API 平铺生成但未入库的图
@@ -177,7 +174,6 @@ export function ModelLibraryBrowser({
   const libraryQuery = useApparelModelLibraryQuery(
     {
       age_segment: ageSegment,
-      // 后端不认识 unsaved_jobs；loser 模式下传 "all"，反正 enabled=false 不会发请求
       source: isLoserView ? "all" : source,
       appearance,
       q: query,
@@ -190,7 +186,7 @@ export function ModelLibraryBrowser({
   const syncInfo = libraryQuery.data?.sync;
   const isLoadingItems = isLoserView ? jobsQuery.isPending : libraryQuery.isPending;
 
-  // 把待入库 items/candidates 适配成 ApparelModelLibraryItem-like 形状，复用既有卡片
+  // 把待入库 items/candidates 适配成 ApparelModelLibraryItem-like 形状
   const items = useMemo<ApparelModelLibraryItem[]>(() => {
     if (isLoserView) {
       const jobs = jobsQuery.data?.items ?? [];
@@ -198,20 +194,17 @@ export function ModelLibraryBrowser({
       for (const job of jobs) {
         if (job.status !== "succeeded" && job.status !== "partial") continue;
         for (const it of [...job.items, ...job.candidates]) {
-          if (it.saved_item_id != null) continue; // 已入库的不显示
-          // 客户端 filter：与全局 chips 一致
+          if (it.saved_item_id != null) continue;
           const itemAppearance = (it.appearance_direction || job.appearance_direction || "") as
             | ModelLibraryAppearance
             | "";
           if (appearance !== "all" && itemAppearance !== appearance) continue;
           if (ageSegment !== "all" && (job.age_segment ?? "") !== ageSegment) continue;
-          // 简单 q 匹配 style_tags / appearance / gender
           const haystack = [...it.style_tags, itemAppearance, job.gender ?? ""]
             .join(" ")
             .toLowerCase();
           const q = query.trim().toLowerCase();
           if (q && !haystack.includes(q)) continue;
-          // id 编入 workflow_run_id + image_id，保存时再 split 出来
           out.push({
             id: `loser:${job.workflow_run_id}:${it.image_id}`,
             source: "generated" as ModelLibrarySource,
@@ -224,6 +217,7 @@ export function ModelLibraryBrowser({
             appearance_direction: itemAppearance || null,
             style_tags: it.style_tags,
             image_url: it.image_url,
+            display_url: it.display_url,
             thumb_url: it.thumb_url,
             image_id: it.image_id,
             created_at: job.created_at,
@@ -242,20 +236,18 @@ export function ModelLibraryBrowser({
     query,
   ]);
 
-  // 当前可见 items 转 LightboxItem[]：lightbox 翻页用
   const visibleLightboxItems = useMemo<LightboxItem[]>(
     () =>
       items.map((item) => ({
         id: item.id,
         url: item.image_url,
         thumbUrl: item.thumb_url ?? undefined,
-        previewUrl: item.thumb_url ?? undefined,
+        previewUrl: item.display_url ?? item.image_url,
         prompt: item.title,
       })),
     [items],
   );
 
-  // 仅 dialog 模式：构造给 lightbox 的 action 工厂；卡片点击时同步注入 store
   const buildLightboxAction = useMemo<
     null | (() => LightboxAction)
   >(() => {
@@ -306,20 +298,43 @@ export function ModelLibraryBrowser({
   }, [ageSegment, appearance, source]);
 
   return (
-    <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
+    <div className={cn("flex min-h-0 flex-1 flex-col gap-5", className)}>
       {showHeader ? (
-        <header className="shrink-0 bg-transparent px-4 py-3">
-          {/* 第一行：标题 + 上传按钮 */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 min-w-0">
-              <Library className="h-4 w-4 text-[var(--amber-300)] shrink-0" />
-              <h2 className="font-display text-base font-semibold text-[var(--fg-0)] truncate">
-                模特库
+        <header className="border-y border-[var(--border)] py-5 md:py-6">
+          <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
+            <div className="min-w-0 flex-1">
+              <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                Models · Library
+              </p>
+              <h2 className="mt-2 font-display text-[28px] italic leading-[1] text-[var(--fg-0)] md:text-[36px]">
+                浏览模特
               </h2>
+              <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+                {syncInfo?.last_success_at ? (
+                  <>Last sync · {formatShortDate(syncInfo.last_success_at)}</>
+                ) : (
+                  <>Preset · favorite · upload · generated</>
+                )}
+              </p>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {syncInfo?.can_sync ? (
+                <button
+                  type="button"
+                  onClick={() => sync.mutate()}
+                  disabled={sync.isPending}
+                  className="inline-flex h-10 items-center gap-2 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:opacity-50"
+                >
+                  {sync.isPending ? (
+                    <Spinner size={12} />
+                  ) : (
+                    <RefreshCw className="h-3 w-3" />
+                  )}
+                  Sync
+                </button>
+              ) : null}
               <Button
-                size="sm"
+                size="md"
                 variant="primary"
                 onClick={() => setUploadOpen(true)}
                 leftIcon={<Upload className="h-3.5 w-3.5" />}
@@ -329,178 +344,151 @@ export function ModelLibraryBrowser({
               {headerExtra}
             </div>
           </div>
-          {/* 第二行：同步状态 + 同步按钮（次要 link 样式） */}
-          <div className="mt-1 flex items-center gap-3 text-xs text-[var(--fg-2)]">
-            {syncInfo?.last_success_at ? (
-              <span>上次同步 {formatShortDate(syncInfo.last_success_at)}</span>
-            ) : (
-              <span>全站预设、收藏、上传与生成入库合并展示</span>
-            )}
-            {syncInfo?.can_sync ? (
-              <button
-                type="button"
-                onClick={() => sync.mutate()}
-                disabled={sync.isPending}
-                className="inline-flex items-center gap-1 cursor-pointer text-[var(--amber-300)] hover:text-[var(--amber-200)] disabled:opacity-50"
-              >
-                {sync.isPending ? (
-                  <Spinner size={12} />
-                ) : (
-                  <RefreshCw className="h-3 w-3" />
-                )}
-                同步预设
-              </button>
-            ) : null}
-          </div>
         </header>
       ) : null}
 
       <div
         className={cn(
-          "grid min-h-0 flex-1",
-          showSourceSidebar ? "md:grid-cols-[192px_minmax(0,1fr)]" : "",
+          "grid min-h-0 flex-1 gap-6",
+          showSourceSidebar ? "md:grid-cols-[160px_minmax(0,1fr)]" : "",
         )}
       >
         {showSourceSidebar ? (
-          <aside className="hidden border-r border-[var(--border)] bg-white/[0.02] p-3 md:block">
-            <p className="mb-2 text-xs font-medium text-[var(--fg-2)]">来源</p>
-            <div className="space-y-1">
-              {SOURCE_FILTERS.map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setSource(value)}
-                  className={cn(
-                    "flex h-9 w-full cursor-pointer items-center justify-between rounded-md px-3 text-sm transition-colors",
-                    source === value
-                      ? "bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                      : "text-[var(--fg-1)] hover:bg-white/6 hover:text-[var(--fg-0)]",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
+          <aside className="hidden md:block">
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Source
+            </p>
+            <div className="mt-3 grid">
+              {SOURCE_FILTERS.map(([value, label]) => {
+                const active = source === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setSource(value)}
+                    className={cn(
+                      "group relative flex h-10 cursor-pointer items-center justify-between border-b border-[var(--border)] py-2 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors",
+                      active
+                        ? "text-[var(--fg-0)]"
+                        : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
+                    )}
+                  >
+                    <span>{label}</span>
+                    {active ? (
+                      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]" />
+                    ) : null}
+                  </button>
+                );
+              })}
             </div>
           </aside>
         ) : null}
 
-        <main className="flex min-h-0 flex-col">
-          {/* 移动端：sticky 1 行（搜索 + 筛选按钮）；桌面端：完整两行 chip */}
-          <div className="shrink-0 border-b border-[var(--border)] bg-[var(--bg-0)]/80 backdrop-blur-sm">
-            {/* 移动端紧凑筛选条 */}
-            <div className="flex items-center gap-2 p-3 md:hidden">
-              <Input
+        <main className="flex min-h-0 flex-col gap-5">
+          {/* 移动端：紧凑筛选条 */}
+          <div className="flex items-center gap-2 md:hidden">
+            <div className="relative flex-1 min-w-0">
+              <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
+              <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                leftIcon={<Search className="h-4 w-4" />}
                 placeholder="搜索名称、标签"
-                wrapperClassName="flex-1 min-w-0"
+                className="h-11 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-2 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
               />
-              <button
-                type="button"
-                onClick={() => setMobileFilterOpen(true)}
-                className={cn(
-                  "inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-xs transition-colors",
-                  activeFilterCount > 0
-                    ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                    : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/6",
-                )}
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5" />
-                筛选
-                {activeFilterCount > 0 ? (
-                  <span className="font-mono">({activeFilterCount})</span>
-                ) : null}
-              </button>
             </div>
+            <button
+              type="button"
+              onClick={() => setMobileFilterOpen(true)}
+              className={cn(
+                "inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 border px-3 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors",
+                activeFilterCount > 0
+                  ? "border-[var(--border-amber)] text-[var(--amber-300)]"
+                  : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)]",
+              )}
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              筛选
+              {activeFilterCount > 0 ? (
+                <span className="tabular-nums">·{activeFilterCount}</span>
+              ) : null}
+            </button>
+          </div>
 
-            {/* 桌面端完整筛选区 */}
-            <div className="hidden flex-col gap-2 p-3 md:flex">
-              {/* 年龄 chip 行 */}
-              <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto pb-1">
-                {AGE_TABS.map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => setAgeSegment(value)}
-                    className={cn(
-                      "h-8 shrink-0 cursor-pointer rounded-md border px-3 text-xs transition-colors",
-                      ageSegment === value
-                        ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                        : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/6 hover:text-[var(--fg-0)]",
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {/* 外貌 chip 行 */}
-              <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto pb-1">
-                {APPEARANCE_TABS.map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => setAppearance(value)}
-                    className={cn(
-                      "h-8 shrink-0 cursor-pointer rounded-md border px-3 text-xs transition-colors",
-                      appearance === value
-                        ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                        : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/6 hover:text-[var(--fg-0)]",
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {/* 搜索 + 来源（无 sidebar 时显示） */}
-              <div className="flex gap-2">
-                <Input
+          {/* 桌面端：完整筛选区 */}
+          <div className="hidden md:grid md:gap-4">
+            {/* 年龄 chip 行 */}
+            <ChipRowGroup label="Age">
+              {AGE_TABS.map(([value, label]) => (
+                <Chip
+                  key={value}
+                  active={ageSegment === value}
+                  onClick={() => setAgeSegment(value)}
+                >
+                  {label}
+                </Chip>
+              ))}
+            </ChipRowGroup>
+            {/* 外貌 chip 行 */}
+            <ChipRowGroup label="Appearance">
+              {APPEARANCE_TABS.map(([value, label]) => (
+                <Chip
+                  key={value}
+                  active={appearance === value}
+                  onClick={() => setAppearance(value)}
+                >
+                  {label}
+                </Chip>
+              ))}
+            </ChipRowGroup>
+            {/* 搜索 + 来源（无 sidebar 时显示 select） */}
+            <div className="flex items-center gap-4">
+              <div className="relative w-full max-w-sm">
+                <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
+                <input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  leftIcon={<Search className="h-4 w-4" />}
                   placeholder="搜索名称、标签"
-                  wrapperClassName="w-full lg:w-64"
+                  className="h-10 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
                 />
+                {query ? (
+                  <button
+                    type="button"
+                    onClick={() => setQuery("")}
+                    aria-label="清除搜索"
+                    className="absolute right-0 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </div>
+              {!showSourceSidebar ? (
                 <select
                   value={source}
-                  onChange={(event) =>
-                    setSource(event.target.value as "all" | ModelLibrarySource)
-                  }
-                  className={cn(
-                    "h-9 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none",
-                    showSourceSidebar ? "md:hidden" : "",
-                  )}
+                  onChange={(event) => setSource(event.target.value as "all" | ModelLibrarySource)}
+                  className="h-10 border-b border-[var(--border)] bg-transparent px-1 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)] outline-none focus:border-[var(--amber-400)]"
                 >
                   {SOURCE_FILTERS.map(([value, label]) => (
-                    <option key={value} value={value}>
+                    <option key={value} value={value} className="bg-[var(--bg-0)]">
                       {label}
                     </option>
                   ))}
                 </select>
-              </div>
+              ) : null}
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div className="min-h-0 flex-1">
             {isLoadingItems ? (
-              <div className="flex h-64 items-center justify-center gap-2 text-sm text-[var(--fg-2)]">
+              <div className="flex h-64 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
                 <Spinner size={20} />
-                {isLoserView ? "加载待入库图" : "加载模特库"}
+                {isLoserView ? "Loading queue" : "Loading"}
               </div>
             ) : items.length === 0 ? (
-              <div className="flex h-64 flex-col items-center justify-center rounded-md border border-dashed border-[var(--border)] bg-white/[0.02] px-4 text-center">
-                <Library className="h-8 w-8 text-[var(--fg-2)]" />
-                <p className="mt-3 text-sm font-medium text-[var(--fg-0)]">
-                  当前筛选没有模特
-                </p>
-                <p className="mt-1 text-xs text-[var(--fg-2)]">
-                  上传私有模特、生成新模特，或同步 GitHub 预设文件夹后再查看。
-                </p>
-              </div>
+              <EmptyBrowser />
             ) : (
               <motion.div
                 className={cn(
-                  "grid gap-2.5 md:gap-3",
+                  "grid gap-x-4 gap-y-8 md:gap-x-5 md:gap-y-10",
                   mode === "page"
                     ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
                     : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5",
@@ -509,10 +497,11 @@ export function ModelLibraryBrowser({
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.18 }}
               >
-                {items.map((item) => (
+                {items.map((item, index) => (
                   <ModelLibraryCard
                     key={item.id}
                     item={item}
+                    order={index}
                     highlighted={lastUploadedId === item.id}
                     onOpenLightbox={() => {
                       const action = buildLightboxAction?.() ?? null;
@@ -560,8 +549,80 @@ export function ModelLibraryBrowser({
   );
 }
 
+function ChipRowGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-2">
+      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        {label}
+      </p>
+      <div className="-mx-1 flex min-w-0 flex-1 flex-wrap gap-x-4 gap-y-1 overflow-x-auto px-1 pb-1">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// underline-on-active chip
+function Chip({
+  children,
+  active,
+  onClick,
+}: {
+  children: React.ReactNode;
+  active?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "group relative inline-flex min-h-9 shrink-0 cursor-pointer items-center px-1 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
+      )}
+    >
+      <span>{children}</span>
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
+          active
+            ? "bg-[var(--amber-400)]"
+            : "bg-transparent group-hover:bg-[var(--border-strong)]",
+        )}
+      />
+    </button>
+  );
+}
+
+function EmptyBrowser() {
+  return (
+    <div className="border-y border-[var(--border)] py-16 md:py-20">
+      <div className="grid gap-3">
+        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
+          Empty
+        </p>
+        <h4 className="font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] md:text-[36px]">
+          当前筛选没有模特
+        </h4>
+        <p className="max-w-xl text-[13px] leading-[1.7] text-[var(--fg-1)]">
+          上传私有模特、生成新模特，或同步预设文件夹后再查看。
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Portrait 模特卡：3/4 大图 + 底部 mono 元数据 + hover micro scale
 function ModelLibraryCard({
   item,
+  order,
   highlighted,
   deleting,
   onOpenLightbox,
@@ -569,12 +630,11 @@ function ModelLibraryCard({
   onSaveLoser,
 }: {
   item: ApparelModelLibraryItem;
-  /** 上传刚成功的视觉反馈（amber ring），不参与"已选"语义 */
+  order: number;
   highlighted: boolean;
   deleting: boolean;
   onOpenLightbox: () => void;
   onDelete: () => void;
-  /** 仅 loser 视图传入：未入库图的快速收藏 */
   onSaveLoser?: ApparelModelLibraryItem;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -619,7 +679,6 @@ function ModelLibraryCard({
     },
   );
 
-  // 命中 appearance label 时显示中文徽标
   const appearanceLabel =
     item.appearance_direction &&
     item.appearance_direction in MODEL_LIBRARY_APPEARANCE_LABEL
@@ -629,72 +688,76 @@ function ModelLibraryCard({
       : null;
 
   return (
-    <article
-      className={cn(
-        "group overflow-hidden rounded-xl border bg-[var(--bg-2)] transition-all",
-        highlighted
-          ? "border-[var(--border-amber)] ring-2 ring-[var(--amber-400)] ring-offset-2 ring-offset-[var(--bg-0)]"
-          : "border-[var(--border)] hover:border-[var(--border-strong)] hover:shadow-[var(--shadow-2)]",
-      )}
-    >
-      {/* 整块缩略图 = 打开 Lightbox */}
+    <article className="group relative">
+      {/* 缩略图区：portrait 大图 */}
       <button
         type="button"
         onClick={onOpenLightbox}
         aria-label={`查看 ${item.title} 大图`}
-        className="relative block aspect-[4/5] w-full cursor-zoom-in overflow-hidden bg-[var(--bg-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+        className={cn(
+          "relative block aspect-[3/4] w-full cursor-zoom-in overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          highlighted ? "outline outline-2 outline-offset-2 outline-[var(--amber-400)]" : "",
+        )}
       >
         <Image
           src={item.thumb_url || item.image_url}
           alt={item.title}
           fill
           unoptimized
-          sizes="(max-width: 768px) 48vw, 220px"
-          className="object-cover transition-transform duration-200 group-hover:scale-[1.015]"
+          sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 240px"
+          className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
         />
-        {/* 左上角小胶囊：来源（loser 视图特殊标识为"待入库"，amber 调） */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
+        />
+        {/* N°NN 序号 */}
+        <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+          N°{String(order + 1).padStart(2, "0")}
+        </span>
+        {/* 来源标识 */}
         <span
           className={cn(
-            "absolute left-2 top-2 rounded-full px-2 py-0.5 text-[10px] backdrop-blur",
-            isLoser
-              ? "bg-[var(--amber-400)]/85 text-[var(--bg-0)]"
-              : "bg-black/65 text-white",
+            "absolute right-2 top-2 inline-flex items-center font-mono text-[10px] uppercase tracking-[0.18em]",
+            isLoser ? "text-[var(--amber-300)]" : "text-white/85 mix-blend-difference",
           )}
         >
           {isLoser ? "待入库" : SOURCE_LABEL_SHORT[item.source]}
         </span>
-        {/* 右下角浮起：外貌中文徽标 */}
+        {/* 外貌徽标：底部 mono caption */}
         {appearanceLabel ? (
-          <span className="absolute bottom-2 right-2 rounded-full bg-black/65 px-2 py-0.5 text-[10px] text-[var(--amber-200)] backdrop-blur">
+          <span className="absolute bottom-2 right-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
             {appearanceLabel}
           </span>
         ) : null}
       </button>
-      <div className="p-2.5">
-        <p className="truncate text-[13px] font-medium text-[var(--fg-0)] md:text-sm">
+
+      {/* 信息区：底部 mono 元数据 */}
+      <div className="mt-2.5 grid gap-1">
+        <p className="line-clamp-1 text-[14px] font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
           {item.title}
         </p>
-        <p className="mt-0.5 text-[10px] text-[var(--fg-2)] md:text-[11px]">
-          {AGE_LABEL[item.age_segment]}
-          {item.gender ? ` · ${item.gender}` : ""}
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <span>{AGE_LABEL[item.age_segment]}</span>
+          {item.gender ? (
+            <>
+              <span aria-hidden className="mx-1.5 text-[var(--fg-3)]">·</span>
+              <span>{item.gender === "male" ? "M" : "F"}</span>
+            </>
+          ) : null}
         </p>
-        {/* 风格标签：完整 wrap */}
         {item.style_tags.length > 0 ? (
-          <div className="mt-2 flex flex-wrap gap-1">
-            {item.style_tags.map((tag) => (
-              <span
-                key={tag}
-                className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--fg-2)]"
-              >
-                {tag}
-              </span>
-            ))}
-          </div>
+          <p className="line-clamp-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            {item.style_tags.slice(0, 3).join(" · ")}
+          </p>
         ) : (
-          <p className="mt-2 text-[10px] text-[var(--fg-3)]">未识别</p>
+          <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+            Untagged
+          </p>
         )}
-        {/* icon 工具行（删除/识别），不再重复"预览"按钮——卡图本身就是预览入口 */}
-        <div className="mt-2.5 flex items-center gap-1.5">
+
+        {/* 操作行 */}
+        <div className="mt-1.5 flex items-center gap-3">
           {isLoser ? (
             <Button
               size="sm"
@@ -712,8 +775,7 @@ function ModelLibraryCard({
                 };
                 saveLoser.mutate(body);
               }}
-              leftIcon={<Bookmark className="h-3.5 w-3.5" />}
-              className="flex-1"
+              leftIcon={<Bookmark className="h-3 w-3" />}
             >
               收藏入库
             </Button>
@@ -725,13 +787,14 @@ function ModelLibraryCard({
                 disabled={autoTag.isPending}
                 title="重新识别风格标签"
                 aria-label="重新识别风格标签"
-                className="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-[var(--fg-2)] transition-colors hover:bg-white/8 hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-8 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {autoTag.isPending ? (
                   <Spinner size={12} />
                 ) : (
-                  <Sparkles className="h-4 w-4" />
+                  <Sparkles className="h-3 w-3" />
                 )}
+                Tag
               </button>
               <button
                 type="button"
@@ -752,16 +815,15 @@ function ModelLibraryCard({
                       : "删除条目"
                 }
                 className={cn(
-                  "inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                  "inline-flex h-8 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
                   confirmingDelete
-                    ? "bg-[var(--danger-soft)] text-[var(--danger)]"
-                    : "text-[var(--fg-2)] hover:bg-white/8 hover:text-[var(--danger)]",
+                    ? "text-[var(--danger)]"
+                    : "text-[var(--fg-2)] hover:text-[var(--danger)]",
                 )}
               >
-                {deleting ? <Spinner size={12} /> : <Trash2 className="h-4 w-4" />}
+                {deleting ? <Spinner size={12} /> : <Trash2 className="h-3 w-3" />}
+                {confirmingDelete ? "Confirm" : isPreset ? "Hide" : "Del"}
               </button>
-              {/* 占位让 grid 行高一致；右侧不再有"预览大图"按钮 */}
-              <span aria-hidden className="flex-1" />
             </>
           )}
         </div>
@@ -769,14 +831,6 @@ function ModelLibraryCard({
     </article>
   );
 }
-
-// 短版来源标签（卡片左上角徽标用，更紧凑）
-const SOURCE_LABEL_SHORT: Record<ModelLibrarySource, string> = {
-  preset: "预设",
-  favorite: "收藏",
-  user_upload: "上传",
-  generated: "生成",
-};
 
 function UploadDialog({
   defaultAgeSegment,
@@ -860,36 +914,39 @@ function UploadDialog({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 16, scale: 0.98 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="mobile-dialog-panel flex w-full flex-col overflow-hidden rounded-t-2xl border border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-3)] md:max-h-[92dvh] md:max-w-2xl md:rounded-xl"
+        className="mobile-dialog-panel flex w-full flex-col overflow-hidden border border-[var(--border)] bg-[var(--bg-0)] md:max-h-[92dvh] md:max-w-2xl"
       >
-        {/* 头部 */}
-        <header className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3">
-          <h3 className="font-display text-base font-semibold text-[var(--fg-0)]">
-            上传到模特库
-          </h3>
+        <header className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Upload to library
+            </p>
+            <h3 className="mt-2 font-display text-[24px] italic leading-none text-[var(--fg-0)] md:text-[28px]">
+              上传到模特库
+            </h3>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-9 w-9 min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-md text-[var(--fg-2)] hover:bg-white/8 hover:text-[var(--fg-0)] md:h-8 md:w-8 md:min-h-8 md:min-w-8"
+            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
           >
             <X className="h-4 w-4" />
           </button>
         </header>
 
-        {/* body */}
-        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-3 overflow-y-auto p-4 md:grid-cols-2">
-          <Input
-            label="名称"
-            value={form.title}
-            onChange={(event) =>
-              setForm((prev) => ({ ...prev, title: event.target.value }))
-            }
-            placeholder="我的高级简洁女模特"
-            wrapperClassName="md:col-span-2"
-          />
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-[var(--fg-1)]">年龄段</span>
+        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 py-5 md:grid-cols-2">
+          <UnderlineLabeled label="名称" wrapperClass="md:col-span-2">
+            <input
+              value={form.title}
+              onChange={(event) =>
+                setForm((prev) => ({ ...prev, title: event.target.value }))
+              }
+              placeholder="我的高级简洁女模特"
+              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+            />
+          </UnderlineLabeled>
+          <UnderlineLabeled label="年龄段">
             <select
               value={form.age_segment}
               onChange={(event) =>
@@ -898,17 +955,16 @@ function UploadDialog({
                   age_segment: event.target.value as ModelLibraryItemAgeSegment,
                 }))
               }
-              className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
+              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)] md:h-10 md:text-sm"
             >
               {AGE_TABS.filter(([value]) => value !== "all").map(([value, label]) => (
-                <option key={value} value={value}>
+                <option key={value} value={value} className="bg-[var(--bg-0)]">
                   {label}
                 </option>
               ))}
             </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-[var(--fg-1)]">性别</span>
+          </UnderlineLabeled>
+          <UnderlineLabeled label="性别">
             <select
               value={form.gender}
               onChange={(event) =>
@@ -917,93 +973,96 @@ function UploadDialog({
                   gender: event.target.value as ModelLibraryGender,
                 }))
               }
-              className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
+              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)] md:h-10 md:text-sm"
             >
               {GENDER_OPTIONS.map(([value, label]) => (
-                <option key={value} value={value}>
+                <option key={value} value={value} className="bg-[var(--bg-0)]">
                   {label}
                 </option>
               ))}
             </select>
-          </label>
-          <div className="flex flex-col gap-1 md:col-span-2">
-            <span className="text-xs font-medium text-[var(--fg-1)]">目标文件夹</span>
-            <div className="flex h-9 items-center rounded-md border border-[var(--border)] bg-white/[0.04] px-3 font-mono text-xs text-[var(--fg-1)]">
+          </UnderlineLabeled>
+          <div className="md:col-span-2">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              Target folder
+            </p>
+            <p className="mt-1.5 border-b border-[var(--border)] py-2 font-mono text-[12px] text-[var(--fg-1)]">
               {AGE_FOLDER_BY_SEGMENT[form.age_segment]}/{form.gender}
-            </div>
+            </p>
           </div>
-          {/* 外貌方向 chip 选择器 */}
-          <div className="flex flex-col gap-1.5 md:col-span-2">
-            <span className="text-xs font-medium text-[var(--fg-1)]">外貌方向（可选）</span>
-            <div className="flex flex-wrap gap-1.5">
-              <button
-                type="button"
+          <UnderlineLabeled label="外貌方向（可选）" wrapperClass="md:col-span-2">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1">
+              <Chip
+                active={form.appearance_direction === ""}
                 onClick={() =>
                   setForm((prev) => ({ ...prev, appearance_direction: "" }))
                 }
-                className={cn(
-                  "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors md:h-8 md:min-h-0",
-                  form.appearance_direction === ""
-                    ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                    : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/6",
-                )}
               >
                 未指定
-              </button>
+              </Chip>
               {(
                 Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as Array<
                   [Exclude<ModelLibraryAppearance, "all">, string]
                 >
               ).map(([value, label]) => (
-                <button
+                <Chip
                   key={value}
-                  type="button"
+                  active={form.appearance_direction === value}
                   onClick={() =>
                     setForm((prev) => ({ ...prev, appearance_direction: value }))
                   }
-                  className={cn(
-                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors md:h-8 md:min-h-0",
-                    form.appearance_direction === value
-                      ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                      : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/6",
-                  )}
                 >
                   {label}
-                </button>
+                </Chip>
               ))}
             </div>
-          </div>
-          {/* 风格标签 toggle + 内容 */}
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-[var(--fg-1)]">风格标签</span>
+          </UnderlineLabeled>
+          <UnderlineLabeled label="风格标签">
             <button
               type="button"
               onClick={() => setUploadTagsEnabled((value) => !value)}
-              className={cn(
-                "h-11 rounded-md border px-3 text-left text-sm transition-colors md:h-9",
-                uploadTagsEnabled
-                  ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                  : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-              )}
+              className="group flex h-11 w-full items-center gap-3 border-b border-[var(--border)] px-1 text-left transition-colors hover:border-[var(--border-strong)] md:h-10"
+              aria-pressed={uploadTagsEnabled}
             >
-              {uploadTagsEnabled ? "填写标签" : "不填标签"}
+              <span
+                aria-hidden
+                className={cn(
+                  "inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors",
+                  uploadTagsEnabled
+                    ? "border-[var(--border-amber)] bg-[var(--accent)]"
+                    : "border-[var(--border-strong)] bg-transparent",
+                )}
+              >
+                <span
+                  className={cn(
+                    "ml-0.5 h-3 w-3 rounded-full bg-white transition-transform",
+                    uploadTagsEnabled ? "translate-x-3" : "",
+                  )}
+                />
+              </span>
+              <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)]">
+                {uploadTagsEnabled ? "Fill tags" : "Skip tags"}
+              </span>
             </button>
-          </label>
+          </UnderlineLabeled>
           {uploadTagsEnabled ? (
-            <Input
-              label="标签内容"
-              value={form.style_tags}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, style_tags: event.target.value }))
-              }
-              placeholder="高级简洁、棚拍"
-            />
+            <UnderlineLabeled label="标签内容">
+              <input
+                value={form.style_tags}
+                onChange={(event) =>
+                  setForm((prev) => ({ ...prev, style_tags: event.target.value }))
+                }
+                placeholder="高级简洁、棚拍"
+                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              />
+            </UnderlineLabeled>
           ) : (
             <div className="hidden md:block" />
           )}
-          {/* 文件选择 */}
-          <div className="flex flex-col gap-1 md:col-span-2">
-            <span className="text-xs font-medium text-[var(--fg-1)]">模特图</span>
+          <div className="md:col-span-2">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              模特图
+            </p>
             <input
               ref={fileInputRef}
               type="file"
@@ -1011,20 +1070,21 @@ function UploadDialog({
               className="hidden"
               onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
             />
-            <Button
-              variant="secondary"
+            <button
+              type="button"
               onClick={() => fileInputRef.current?.click()}
-              leftIcon={<ImagePlus className="h-4 w-4" />}
-              fullWidth
+              className="mt-1.5 flex w-full items-center gap-3 border-b border-[var(--border)] py-3 text-left transition-colors hover:border-[var(--border-strong)]"
             >
-              {uploadFile ? uploadFile.name : "选图"}
-            </Button>
+              <ImagePlus className="h-4 w-4 text-[var(--fg-2)]" />
+              <span className="truncate text-[14px] text-[var(--fg-0)]">
+                {uploadFile ? uploadFile.name : "选图"}
+              </span>
+            </button>
           </div>
         </div>
 
-        {/* footer */}
-        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3 md:pb-3">
-          <Button variant="ghost" onClick={onClose} disabled={submitting}>
+        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border)] px-5 py-4">
+          <Button variant="outline" onClick={onClose} disabled={submitting}>
             取消
           </Button>
           <Button variant="primary" loading={submitting} onClick={submit}>
@@ -1033,6 +1093,25 @@ function UploadDialog({
         </footer>
       </motion.div>
     </div>
+  );
+}
+
+function UnderlineLabeled({
+  label,
+  children,
+  wrapperClass,
+}: {
+  label: string;
+  children: React.ReactNode;
+  wrapperClass?: string;
+}) {
+  return (
+    <label className={cn("grid gap-2", wrapperClass)}>
+      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        {label}
+      </span>
+      {children}
+    </label>
   );
 }
 
@@ -1082,87 +1161,82 @@ function MobileFilterSheet({
         animate={{ y: 0 }}
         exit={{ y: "100%" }}
         transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-        className="mobile-dialog-sheet flex w-full flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]"
+        className="mobile-dialog-sheet flex w-full flex-col overflow-hidden border-t border-[var(--border)] bg-[var(--bg-0)]"
       >
-        <header className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-3">
-          <h3 className="font-display text-sm font-semibold text-[var(--fg-0)]">筛选</h3>
+        <header className="flex items-start justify-between gap-2 border-b border-[var(--border)] px-5 pb-4 pt-5">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Filter
+            </p>
+            <h3 className="mt-2 font-display text-[22px] italic leading-none text-[var(--fg-0)]">
+              筛选
+            </h3>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-10 w-10 min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-md text-[var(--fg-2)] hover:bg-white/8"
+            className="inline-flex h-10 w-10 cursor-pointer items-center justify-center text-[var(--fg-2)] hover:text-[var(--fg-0)]"
           >
             <X className="h-4 w-4" />
           </button>
         </header>
-        <div className="mobile-dialog-scroll flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+        <div className="mobile-dialog-scroll flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto px-5 py-5">
           {/* 年龄 */}
-          <div>
-            <p className="mb-2 text-xs font-medium text-[var(--fg-2)]">年龄段</p>
-            <div className="flex flex-wrap gap-1.5">
+          <div className="grid gap-2">
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Age
+            </p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
               {AGE_TABS.map(([value, label]) => (
-                <button
+                <Chip
                   key={value}
-                  type="button"
+                  active={ageSegment === value}
                   onClick={() => onAgeChange(value)}
-                  className={cn(
-                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors",
-                    ageSegment === value
-                      ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                      : "border-[var(--border)] text-[var(--fg-1)]",
-                  )}
                 >
                   {label}
-                </button>
+                </Chip>
               ))}
             </div>
           </div>
           {/* 外貌 */}
-          <div>
-            <p className="mb-2 text-xs font-medium text-[var(--fg-2)]">外貌方向</p>
-            <div className="flex flex-wrap gap-1.5">
+          <div className="grid gap-2">
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Appearance
+            </p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
               {APPEARANCE_TABS.map(([value, label]) => (
-                <button
+                <Chip
                   key={value}
-                  type="button"
+                  active={appearance === value}
                   onClick={() => onAppearanceChange(value)}
-                  className={cn(
-                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors",
-                    appearance === value
-                      ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                      : "border-[var(--border)] text-[var(--fg-1)]",
-                  )}
                 >
                   {label}
-                </button>
+                </Chip>
               ))}
             </div>
           </div>
           {/* 来源 */}
-          <div>
-            <p className="mb-2 text-xs font-medium text-[var(--fg-2)]">来源</p>
-            <div className="flex flex-wrap gap-1.5">
+          <div className="grid gap-2">
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Source
+            </p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
               {SOURCE_FILTERS.map(([value, label]) => (
-                <button
+                <Chip
                   key={value}
-                  type="button"
+                  active={source === value}
                   onClick={() => onSourceChange(value)}
-                  className={cn(
-                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors",
-                    source === value
-                      ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-                      : "border-[var(--border)] text-[var(--fg-1)]",
-                  )}
                 >
                   {label}
-                </button>
+                </Chip>
               ))}
             </div>
           </div>
         </div>
-        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-3">
+        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-between gap-2 border-t border-[var(--border)] px-5 py-4">
           <Button
-            variant="ghost"
+            variant="outline"
             onClick={() => {
               onAgeChange("all");
               onAppearanceChange("all");

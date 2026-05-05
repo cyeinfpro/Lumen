@@ -1,6 +1,11 @@
 "use client";
 
-import { ChevronRight, Film, Image as ImageIcon, Shirt } from "lucide-react";
+// 项目功能中心：editorial hub 入口。
+// - Hero 大字 + mono eyebrow
+// - Feature 卡：portrait 上图占位 + serif 大标题 + N° 序号
+// - 不可用卡：低对比度 + Coming label，不再 amber-soft
+
+import { ArrowUpRight, Film, Image as ImageIcon, Shirt } from "lucide-react";
 import Link from "next/link";
 
 import { cn } from "@/lib/utils";
@@ -10,20 +15,23 @@ import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./compo
 const FEATURES = [
   {
     title: "服饰模特图",
-    description: "上传商品图，管理模特库、候选模特、展示图生成和交付流程。",
+    en: "Apparel Studio",
+    description: "上传商品图，管理模特库、候选模特、展示图生成与交付流程。",
     href: "/projects/apparel-model-showcase",
     icon: Shirt,
     available: true,
   },
   {
     title: "海报制作",
-    description: "为商品、活动和品牌场景生成海报版式。（后续）",
+    en: "Poster",
+    description: "为商品、活动和品牌场景生成海报版式。",
     icon: ImageIcon,
     available: false,
   },
   {
     title: "分镜制作",
-    description: "将商品卖点拆成镜头脚本和画面分镜。（后续）",
+    en: "Storyboard",
+    description: "将商品卖点拆成镜头脚本与画面分镜。",
     icon: Film,
     available: false,
   },
@@ -34,27 +42,27 @@ export function ProjectFunctionHub() {
     <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
-      <ProjectMobileTopBar title="项目" subtitle="选择要创建和管理的项目类型" />
+      <ProjectMobileTopBar title="项目" subtitle="PROJECT HUB" />
       <ProjectTopBar />
 
-      <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
-        <div className="mx-auto grid w-full max-w-[1240px] gap-4 md:gap-5">
-          <div className="grid gap-1">
-            <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
-              PROJECT HUB
+      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-6">
+        <div className="mx-auto grid w-full max-w-[1280px] gap-10 md:gap-14">
+          <header className="grid gap-3">
+            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              N°00 — Project Hub
             </p>
-            <h1 className="text-[24px] font-medium tracking-normal text-[var(--fg-0)] md:text-[28px]">
+            <h1 className="font-display text-[44px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] md:text-[72px]">
               项目
             </h1>
-            <p className="max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-              选择要创建和管理的项目类型。
+            <p className="max-w-xl text-[14px] leading-7 text-[var(--fg-1)]">
+              选择要创建和管理的项目类型。每一类工作流由 AI 串联多步生成、审稿与交付。
             </p>
-          </div>
+          </header>
 
-          <section className="grid gap-3 lg:grid-cols-3">
-            <FeatureCard feature={FEATURES[0]} className="lg:col-span-1" />
-            <FeatureCard feature={FEATURES[1]} />
-            <FeatureCard feature={FEATURES[2]} />
+          <section className="grid gap-x-6 gap-y-10 md:grid-cols-3">
+            {FEATURES.map((feature, index) => (
+              <FeatureCard key={feature.title} feature={feature} index={index} />
+            ))}
           </section>
         </div>
       </main>
@@ -66,48 +74,84 @@ export function ProjectFunctionHub() {
 
 function FeatureCard({
   feature,
-  className,
+  index,
 }: {
   feature: (typeof FEATURES)[number];
-  className?: string;
+  index: number;
 }) {
   const Icon = feature.icon;
+  const num = `N°${String(index + 1).padStart(2, "0")}`;
   const content = (
     <>
-      <div className="flex items-start justify-between gap-3">
-        <span
-          className={cn(
-            "flex h-10 w-10 items-center justify-center rounded-md border",
-            feature.available
-              ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
-              : "border-[var(--border)] bg-white/[0.04] text-[var(--fg-2)]",
-          )}
-        >
-          <Icon className="h-5 w-5" />
+      <div
+        className={cn(
+          "relative aspect-[4/5] overflow-hidden border border-[var(--border)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)]",
+          feature.available
+            ? "group-hover:border-[var(--border-amber)]/60"
+            : "opacity-60",
+        )}
+      >
+        <div className="absolute inset-0 flex items-center justify-center">
+          <Icon
+            className={cn(
+              "h-20 w-20 transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)]",
+              feature.available
+                ? "text-[var(--fg-1)] group-hover:scale-[1.08] group-hover:text-[var(--amber-300)]"
+                : "text-[var(--fg-3)]",
+            )}
+            strokeWidth={1.25}
+          />
+        </div>
+        <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          {num}
         </span>
         {feature.available ? (
-          <ChevronRight className="h-4 w-4 text-[var(--fg-2)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-[var(--fg-0)]" />
+          <span
+            aria-hidden
+            className="absolute right-3 top-3 inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-0)]/40 backdrop-blur transition-all duration-[var(--dur-base)] group-hover:border-[var(--border-amber)] group-hover:bg-[var(--accent)] group-hover:text-black"
+          >
+            <ArrowUpRight className="h-4 w-4" />
+          </span>
         ) : (
-          <span className="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
-            后续
+          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--bg-0)]/40 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] backdrop-blur">
+            Soon
           </span>
         )}
       </div>
-      <h2 className="mt-4 text-base font-medium tracking-normal text-[var(--fg-0)]">
-        {feature.title}
-      </h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-[var(--fg-2)]">
-        {feature.description}
-      </p>
+      <div className="mt-4">
+        <p
+          className={cn(
+            "font-mono text-[10px] uppercase tracking-[0.22em]",
+            feature.available ? "text-[var(--amber-300)]" : "text-[var(--fg-3)]",
+          )}
+        >
+          {feature.en}
+        </p>
+        <h2
+          className={cn(
+            "mt-1.5 font-display text-[26px] italic leading-[1.1] transition-colors duration-[var(--dur-base)] md:text-[30px]",
+            feature.available
+              ? "text-[var(--fg-0)] group-hover:text-[var(--amber-300)]"
+              : "text-[var(--fg-2)]",
+          )}
+        >
+          {feature.title}
+        </h2>
+        <p
+          className={cn(
+            "mt-2 max-w-md text-[13px] leading-6",
+            feature.available ? "text-[var(--fg-1)]" : "text-[var(--fg-2)]",
+          )}
+        >
+          {feature.description}
+        </p>
+      </div>
     </>
   );
 
   const classes = cn(
-    "min-h-40 rounded-xl border p-4 text-left transition-[background-color,border-color,opacity] md:rounded-md",
-    feature.available
-      ? "group cursor-pointer border-[var(--border-amber)]/60 bg-[var(--accent-soft)] hover:bg-[var(--accent-soft)]/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
-      : "border-[var(--border)] bg-white/[0.028] opacity-70",
-    className,
+    "block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+    feature.available ? "group cursor-pointer" : "cursor-default",
   );
 
   if (feature.available && feature.href) {

@@ -1,11 +1,12 @@
 "use client";
 
-// 模特候选 + 方案确认 阶段。
+// 模特候选 + 方案确认 阶段（editorial 重构）。
 // 关键改进：
 // 1) 确认模特后，可生成带配饰的模特四宫格参考图；这里选择饰品参考图
 // 2) 表单值持久化在 useState（页面跳转后仍保留输入）
 // 3) showcase 重生成走 ConfirmDialog 兜底（已有 task 时点击=重新生成）
 // 4) 模板/质量切换在生成中禁用
+// 5) 视觉：hairline 段落 + mono eyebrow + underline 输入 + dot toggle，去除嵌套卡。
 
 import { Shirt } from "lucide-react";
 import { useState } from "react";
@@ -181,154 +182,161 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
+      eyebrow="N°04 — Model Candidates"
       title="模特候选"
       subtitle="每套候选是同一个合成模特的四视图概念图。确认模特后继续生成并选择配饰四宫格。"
     >
-      {candidates.length === 0 ? (
-        <RunningState label="等待创建模特候选" />
-      ) : (
-        <div className="grid gap-3 xl:grid-cols-3">
-          {candidates.map((candidate) => (
-            <CandidateCard
-              key={candidate.id}
-              workflow={workflow}
-              candidate={candidate}
-              approving={approve.isPending}
-              locallySelected={
-                chosenCandidate?.id === candidate.id && candidate.status !== "selected"
-              }
-              onPreview={(image, list, index) => openPreview(image, list, index)}
-              onChoose={() => setChosenCandidateId(candidate.id)}
-              onApprove={approveChosenCandidate}
-              onSaveToLibrary={() => setSavingCandidateId(candidate.id)}
-              savingToLibrary={savingCandidateId === candidate.id}
-            />
-          ))}
+      <section className="border-t border-[var(--border)] py-5">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            Candidates
+          </p>
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+            {String(candidates.length).padStart(2, "0")} / 03
+          </p>
         </div>
-      )}
+        {candidates.length === 0 ? (
+          <RunningState label="等待创建模特候选" />
+        ) : (
+          <div className="grid gap-x-5 gap-y-8 md:grid-cols-2 xl:grid-cols-3">
+            {candidates.map((candidate) => (
+              <CandidateCard
+                key={candidate.id}
+                workflow={workflow}
+                candidate={candidate}
+                approving={approve.isPending}
+                locallySelected={
+                  chosenCandidate?.id === candidate.id && candidate.status !== "selected"
+                }
+                onPreview={(image, list, index) => openPreview(image, list, index)}
+                onChoose={() => setChosenCandidateId(candidate.id)}
+                onApprove={approveChosenCandidate}
+                onSaveToLibrary={() => setSavingCandidateId(candidate.id)}
+                savingToLibrary={savingCandidateId === candidate.id}
+              />
+            ))}
+          </div>
+        )}
+      </section>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <label className="block">
-          <span className="text-sm text-[var(--fg-1)]">一次文字微调</span>
+      <section className="border-t border-[var(--border)] py-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          Adjustments
+        </p>
+        <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
           <input
             value={adjustments}
             onChange={(event) => setAdjustments(event.target.value)}
             placeholder="发型再自然一点，保留脸和身材比例"
-            className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)]"
+            className="h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
           />
-        </label>
-        <Button
-          className="self-end"
-          variant="primary"
-          loading={approve.isPending}
-          disabled={!chosenCandidate || Boolean(selectedCandidate)}
-          onClick={approveChosenCandidate}
-        >
-          确认模特并继续
-        </Button>
-      </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        <div className="rounded-md border border-[var(--border)] bg-white/[0.03] px-3 py-2 text-sm leading-6 text-[var(--fg-1)]">
-          配饰四宫格方向：{accessoryEnabled ? accessoryItems.join("、") || "自动推荐" : "关闭"}
+          <Button
+            variant="primary"
+            loading={approve.isPending}
+            disabled={!chosenCandidate || Boolean(selectedCandidate)}
+            onClick={approveChosenCandidate}
+          >
+            确认模特并继续
+          </Button>
         </div>
-      </div>
+        <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+          配饰方向 ·{" "}
+          <span className="text-[var(--fg-1)] normal-case tracking-normal">
+            {accessoryEnabled ? accessoryItems.join("、") || "自动推荐" : "已关闭"}
+          </span>
+        </p>
+      </section>
 
       {accessoryEnabled ? (
-        <div className="mt-4">
-          <div className="mb-2 flex flex-wrap items-end gap-2">
-            <label className="min-w-0 flex-1">
-              <span className="text-sm text-[var(--fg-1)]">配饰四宫格提示词</span>
-              <input
-                value={accessoryPrompt}
-                onChange={(event) => setAccessoryPrompt(event.target.value)}
-                placeholder={accessoryItems.join("、") || "例如：简洁耳饰、浅色鞋子、小号包袋"}
-                className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none transition-colors focus:border-[var(--border-amber)]"
-              />
-            </label>
+        <section className="border-t border-[var(--border)] py-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              Accessory Quad
+            </p>
+            {accessoryImages.length > 0 ? (
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+                {String(accessoryImages.length).padStart(2, "0")} shots
+              </p>
+            ) : null}
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+            <input
+              value={accessoryPrompt}
+              onChange={(event) => setAccessoryPrompt(event.target.value)}
+              placeholder={accessoryItems.join("、") || "例如：简洁耳饰、浅色鞋子、小号包袋"}
+              className="h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+            />
             <Button
-              variant="secondary"
+              variant="outline"
               loading={createAccessoryPreviews.isPending}
               disabled={!selectedCandidate || accessoryPreviewRunning}
               onClick={generateAccessoryPreview}
             >
               {accessoryPreviewRunning
-                ? "配饰四宫格生成中"
+                ? "生成中"
                 : accessoryImages.length > 0
-                  ? "再生成配饰四宫格"
-                  : "生成配饰四宫格"}
+                  ? "再生成"
+                  : "生成四宫格"}
             </Button>
           </div>
-          {accessoryPreviewRunning ? (
-            <SelectableImageGridLoading count={1} label="配饰四宫格生成中" />
-          ) : accessoryImages.length > 0 ? (
-            <SelectableImageGrid
-              images={accessoryImages}
-              selectedImageId={selectedAccessoryImageId}
-              saving={saveAccessorySelection.isPending}
-              onSelect={(imageId) => {
-                setSelectedAccessoryImageId(imageId);
-                saveAccessorySelection.mutate({
-                  selected_accessory_image_id: imageId,
-                });
-              }}
-              onPreview={(image, index) => openPreview(image, accessoryImages, index)}
-            />
-          ) : selectedCandidate ? (
-            <RunningState label="配饰四宫格尚未生成，点击上方按钮开始生成" />
-          ) : (
-            <RunningState label="确认模特后可生成配饰四宫格" />
-          )}
-        </div>
+          <div className="mt-4">
+            {accessoryPreviewRunning ? (
+              <SelectableImageGridLoading count={1} label="配饰四宫格生成中" />
+            ) : accessoryImages.length > 0 ? (
+              <SelectableImageGrid
+                images={accessoryImages}
+                selectedImageId={selectedAccessoryImageId}
+                saving={saveAccessorySelection.isPending}
+                onSelect={(imageId) => {
+                  setSelectedAccessoryImageId(imageId);
+                  saveAccessorySelection.mutate({
+                    selected_accessory_image_id: imageId,
+                  });
+                }}
+                onPreview={(image, index) => openPreview(image, accessoryImages, index)}
+              />
+            ) : selectedCandidate ? (
+              <RunningState label="配饰四宫格尚未生成，点击上方按钮开始生成" />
+            ) : (
+              <RunningState label="确认模特后可生成配饰四宫格" />
+            )}
+          </div>
+        </section>
       ) : null}
 
       {selectedCandidate ? (
-        <div className="mt-4 rounded-md border border-[var(--border)] bg-white/[0.03] p-3">
-          <div className="grid gap-3 md:grid-cols-3">
-            <label>
-              <span className="text-sm text-[var(--fg-1)]">输出模板</span>
-              <select
-                value={template}
-                onChange={(event) => setTemplate(event.target.value as CreateTemplate)}
-                disabled={createShowcase.isPending || isShowcaseRunning}
-                className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
-              >
-                {TEMPLATE_LABELS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span className="text-sm text-[var(--fg-1)]">画幅比例</span>
-              <select
-                value={aspectRatio}
-                onChange={(event) => setAspectRatio(event.target.value as CreateAspectRatio)}
-                disabled={createShowcase.isPending || isShowcaseRunning}
-                className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
-              >
-                {ASPECT_RATIO_LABELS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span className="text-sm text-[var(--fg-1)]">质量模式</span>
-              <select
-                value={quality}
-                onChange={(event) => setQuality(event.target.value as "high" | "4k")}
-                disabled={createShowcase.isPending || isShowcaseRunning}
-                className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm outline-none disabled:opacity-60"
-              >
-                <option value="high">2K 高质量</option>
-                <option value="4k">4K 终稿</option>
-              </select>
-            </label>
+        <section className="border-t border-[var(--border)] py-5">
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            Showcase Setup
+          </p>
+          <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-3">
+            <SelectField
+              label="输出模板"
+              value={template}
+              onChange={(value) => setTemplate(value as CreateTemplate)}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+              options={TEMPLATE_LABELS}
+            />
+            <SelectField
+              label="画幅比例"
+              value={aspectRatio}
+              onChange={(value) => setAspectRatio(value as CreateAspectRatio)}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+              options={ASPECT_RATIO_LABELS}
+            />
+            <SelectField
+              label="质量模式"
+              value={quality}
+              onChange={(value) => setQuality(value as "high" | "4k")}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+              options={[
+                ["high", "2K 高质量"],
+                ["4k", "4K 终稿"],
+              ]}
+            />
           </div>
           <Button
-            className="mt-3"
+            className="mt-5"
             variant="primary"
             loading={createShowcase.isPending}
             disabled={isShowcaseRunning}
@@ -337,7 +345,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
           >
             {showcaseStep?.task_ids?.length ? "按当前方案再生成一批" : "开始生成展示图"}
           </Button>
-        </div>
+        </section>
       ) : null}
 
       <ImagePreviewModal
@@ -374,6 +382,40 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         }}
       />
     </StageFrame>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  onChange,
+  disabled,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  disabled: boolean;
+  options: ReadonlyArray<readonly [string, string]>;
+}) {
+  return (
+    <label className="block">
+      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        {label}
+      </span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+        className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
+      >
+        {options.map(([optionValue, optionLabel]) => (
+          <option key={optionValue} value={optionValue} className="bg-[var(--bg-1)]">
+            {optionLabel}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

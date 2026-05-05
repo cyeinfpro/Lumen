@@ -1,14 +1,23 @@
 "use client";
 
-// 详情页 / 控制台：
+// Editorial 详情页 / 控制台：
 // 1) 三栏（StepRail | StagePanel | ConstraintPanel），中屏改抽屉
-// 2) AnimatePresence 阶段切换淡入；StageErrorBoundary 兜底子组件 crash
-// 3) 顶部就地编辑标题；更多菜单提供删除项目
-// 4) 标题区右侧显示 last updated；refreshing 时加 spinner 提示
-// 5) keyboard：⌘/Ctrl + . 切换右侧约束面板抽屉
+// 2) Header：mono eyebrow + serif italic title + dot + mono timestamp，无嵌套卡片
+// 3) AnimatePresence 阶段切换；StageErrorBoundary 兜底
+// 4) ⌘/Ctrl + . 切换右侧约束面板抽屉
 
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeft, Check, ChevronDown, Loader2, MessageSquare, MoreVertical, PanelRightOpen, Pencil, Trash2, X } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Loader2,
+  MessageSquare,
+  MoreHorizontal,
+  PanelRightOpen,
+  Pencil,
+  Trash2,
+  X,
+} from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -29,7 +38,7 @@ import { ProductAnalysisStage } from "./stages/ProductAnalysisStage";
 import { ModelSettingsStage } from "./stages/ModelSettingsStage";
 import { ModelCandidatesStage } from "./stages/ModelCandidatesStage";
 import { ShowcaseGenerationStage } from "./stages/ShowcaseGenerationStage";
-import { STATUS_LABEL } from "./types";
+import { STATUS_LABEL, STEP_INDEX, STEPS } from "./types";
 import { formatRelativeTime } from "./utils";
 
 interface DetailProps {
@@ -45,8 +54,10 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
-        title="服饰模特图"
-        subtitle={workflow ? STATUS_LABEL[workflow.status] ?? workflow.status : "加载中"}
+        title="项目"
+        subtitle={
+          workflow ? (STATUS_LABEL[workflow.status] ?? workflow.status).toUpperCase() : "LOADING"
+        }
         backHref="/projects/apparel-model-showcase"
         backLabel="返回服饰模特图"
       />
@@ -75,7 +86,6 @@ function ProjectConsole({
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // 快捷键 ⌘/Ctrl + . 切换右侧抽屉（仅中屏以下）
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === ".") {
@@ -88,12 +98,12 @@ function ProjectConsole({
   }, []);
 
   return (
-    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_320px]">
-      <aside className="hidden border-r border-[var(--border)] bg-white/[0.025] p-4 lg:block">
+    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)_320px]">
+      <aside className="hidden border-r border-[var(--border)] p-6 lg:block">
         <StepRail workflow={workflow} />
       </aside>
 
-      <section className="min-h-0 min-w-0 overflow-y-auto p-4 md:p-6">
+      <section className="min-h-0 min-w-0 overflow-y-auto px-4 pb-12 pt-4 md:px-10 md:pt-6">
         <DetailBreadcrumb workflow={workflow} />
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
@@ -105,7 +115,7 @@ function ProjectConsole({
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
             >
               <WorkflowStagePanel workflow={workflow} />
             </motion.div>
@@ -115,7 +125,7 @@ function ProjectConsole({
         <Conversation workflow={workflow} />
       </section>
 
-      <aside className="hidden overflow-y-auto border-l border-[var(--border)] bg-white/[0.025] p-4 xl:block">
+      <aside className="hidden overflow-y-auto border-l border-[var(--border)] px-5 py-6 xl:block">
         <ConstraintPanel workflow={workflow} />
       </aside>
 
@@ -130,22 +140,24 @@ function ProjectConsole({
 
 function DetailBreadcrumb({ workflow }: { workflow: WorkflowRun }) {
   return (
-    <nav aria-label="项目路径" className="mb-4 hidden min-w-0 items-center gap-1.5 text-sm md:flex">
+    <nav
+      aria-label="项目路径"
+      className="mb-6 hidden items-center gap-3 font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)] md:flex"
+    >
       <Link
         href="/projects"
-        className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+        className="transition-colors hover:text-[var(--fg-0)]"
       >
-        <ArrowLeft className="h-3.5 w-3.5" />
-        项目
+        Projects
       </Link>
-      <span aria-hidden className="text-[var(--fg-3)]">/</span>
+      <span aria-hidden className="text-[var(--fg-3)]">·</span>
       <Link
         href="/projects/apparel-model-showcase"
-        className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+        className="transition-colors hover:text-[var(--fg-0)]"
       >
-        服饰模特图
+        Apparel
       </Link>
-      <span aria-hidden className="text-[var(--fg-3)]">/</span>
+      <span aria-hidden className="text-[var(--fg-3)]">·</span>
       <span className="min-w-0 truncate text-[var(--fg-0)]">
         {workflow.title || "服饰模特图"}
       </span>
@@ -185,9 +197,7 @@ function DetailHeader({
     },
     onError: (error) => toast.error(error.message || "删除失败"),
   });
-  // 上游 workflow.title 变化时把本地草稿同步过去；ref 替代之前 render 阶段
-  // setState 的 anti-pattern，React 19 strict mode 下会抛 warning。
-  // editing 时用户正在改，跳过覆盖，避免吞掉用户输入。
+
   useEffect(() => {
     if (editing) return;
     if (trackedWorkflowTitleRef.current === workflowTitle) return;
@@ -195,7 +205,6 @@ function DetailHeader({
     setTitle(workflowTitle);
   }, [editing, workflowTitle]);
 
-  // menu 点外面关 + Esc 关
   const menuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!menuOpen) return;
@@ -218,6 +227,7 @@ function DetailHeader({
       window.removeEventListener("keydown", onKey);
     };
   }, [menuOpen]);
+
   const saveTitle = () => {
     const next = title.trim();
     if (!next) {
@@ -230,23 +240,28 @@ function DetailHeader({
     }
     patch.mutate({ id: workflow.id, title: next });
   };
-  const statusTone = useMemo(() => {
-    if (status === "completed")
-      return "border-[var(--success)]/30 bg-[var(--success-soft)] text-[var(--success)]";
+
+  const dotTone = useMemo(() => {
+    if (status === "completed") return "bg-[var(--success)]";
     if (status === "running" || status === "needs_review")
-      return "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]";
-    if (status === "failed")
-      return "border-[var(--danger)]/30 bg-[var(--danger-soft)] text-[var(--danger)]";
-    return "border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)]";
+      return "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]";
+    if (status === "failed") return "bg-[var(--danger)]";
+    return "bg-[var(--fg-3)]";
   }, [status]);
 
+  const stepNum = String((STEP_INDEX[workflow.current_step] ?? 0) + 1).padStart(2, "0");
+  const stepTotal = STEPS.length;
+
   return (
-    <header className="mb-4 rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/70 p-3 shadow-[var(--shadow-1)] md:flex md:flex-wrap md:items-start md:justify-between md:gap-3 md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none">
+    <header className="mb-8 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
       <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
+        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          N°{stepNum} / {String(stepTotal).padStart(2, "0")} — Apparel Project
+        </p>
+        <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2">
           {editing ? (
             <form
-              className="flex min-w-0 items-center gap-1.5"
+              className="flex min-w-0 items-baseline gap-2"
               onSubmit={(event) => {
                 event.preventDefault();
                 saveTitle();
@@ -265,21 +280,25 @@ function DetailHeader({
                 maxLength={120}
                 autoFocus
                 aria-label="项目名称"
-                className="h-11 min-w-0 max-w-[min(70vw,520px)] rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[18px] font-semibold text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)] md:h-10 md:text-[20px]"
+                className="min-w-0 max-w-[min(80vw,640px)] border-b border-[var(--border-amber)] bg-transparent px-1 font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] outline-none md:text-[40px]"
               />
               <button
                 type="submit"
                 aria-label="保存项目名称"
                 disabled={patch.isPending}
-                className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] disabled:opacity-50 md:h-9 md:w-9 md:min-h-11 md:min-w-11"
+                className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-0)] transition-colors hover:bg-white/[0.06] disabled:opacity-50"
               >
-                {patch.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {patch.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
               </button>
               <button
                 type="button"
                 aria-label="取消重命名"
                 onClick={() => setEditing(false)}
-                className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-md text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:h-9 md:w-9 md:min-h-11 md:min-w-11"
+                className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -288,48 +307,50 @@ function DetailHeader({
             <button
               type="button"
               onClick={() => setEditing(true)}
-              className="group/title flex min-w-0 cursor-pointer items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+              className="group/title flex min-w-0 cursor-pointer items-baseline gap-2 text-left focus-visible:outline-none"
+              aria-label="编辑项目名称"
             >
-              <h1 className="line-clamp-2 text-[22px] font-semibold leading-[1.18] tracking-normal text-[var(--fg-0)] md:truncate">
-                {workflow.title || "服饰模特图"}
+              <h1 className="line-clamp-2 font-display text-[28px] italic leading-[1.05] tracking-tight text-[var(--fg-0)] md:line-clamp-1 md:text-[40px]">
+                {workflowTitle}
               </h1>
-              <Pencil className="h-4 w-4 shrink-0 text-[var(--fg-3)] opacity-0 transition-opacity group-hover/title:opacity-100" />
+              <Pencil className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] opacity-0 transition-opacity group-hover/title:opacity-100" />
             </button>
           )}
-          <span
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px]",
-              statusTone,
-            )}
-          >
-            {status === "running" || status === "needs_review" ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-current animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]" />
-            ) : null}
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.18em]">
+          <span className="inline-flex items-center gap-2 text-[var(--fg-1)]">
+            <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", dotTone)} />
             {STATUS_LABEL[status] ?? status}
           </span>
-        </div>
-        <p className="mt-1 line-clamp-2 max-w-2xl text-sm text-[var(--fg-2)]">
-          {workflow.user_prompt || "未填写基础需求"}
-        </p>
-        <p className="mt-1 text-xs text-[var(--fg-3)]">
-          更新于 {formatRelativeTime(workflow.updated_at)}
-        </p>
-      </div>
-      <div className="mt-3 flex items-center justify-between gap-2 md:mt-0 md:justify-start">
-        {refreshing ? (
-          <span className="inline-flex items-center gap-1.5 text-xs text-[var(--fg-2)]">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            同步中
+          <span aria-hidden className="text-[var(--fg-3)]">·</span>
+          <span className="text-[var(--fg-2)]">
+            Updated {formatRelativeTime(workflow.updated_at)}
           </span>
+          {refreshing ? (
+            <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Syncing
+            </span>
+          ) : null}
+        </div>
+
+        {workflow.user_prompt ? (
+          <p className="mt-4 line-clamp-2 max-w-2xl text-[13px] leading-6 text-[var(--fg-1)]">
+            {workflow.user_prompt}
+          </p>
         ) : null}
+      </div>
+
+      <div className="flex items-center gap-2 self-start md:self-end">
         <button
           type="button"
           onClick={onOpenDrawer}
           aria-label="查看项目约束 (⌘ .)"
-          className="inline-flex min-h-10 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08] xl:hidden"
+          className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] xl:hidden"
         >
           <PanelRightOpen className="h-3.5 w-3.5" />
-          约束
+          Constraints
         </button>
         <div className="relative" ref={menuRef}>
           <button
@@ -341,27 +362,40 @@ function DetailHeader({
               setMenuOpen((open) => !open);
               setConfirmDelete(false);
             }}
-            className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md border border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)] transition-colors hover:bg-white/[0.08] hover:text-[var(--fg-0)] md:h-9 md:w-9"
+            className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
           >
-            <MoreVertical className="h-4 w-4" />
+            <MoreHorizontal className="h-4 w-4" />
           </button>
           {menuOpen ? (
-            <div role="menu" className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] rounded-lg border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)] md:top-11 md:w-64 md:rounded-md">
+            <div
+              role="menu"
+              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-3)]"
+            >
               {confirmDelete ? (
-                <div className="grid gap-2">
-                  <p className="text-sm text-[var(--fg-0)]">确认删除这个项目？</p>
-                  <p className="text-xs leading-5 text-[var(--fg-2)]">项目会从列表移除，关联对话不会被删除。</p>
-                  <div className="flex justify-end gap-2">
+                <div className="grid gap-2 p-2">
+                  <p className="font-display text-[16px] italic text-[var(--fg-0)]">
+                    确认删除这个项目？
+                  </p>
+                  <p className="text-xs leading-5 text-[var(--fg-2)]">
+                    项目会从列表移除，关联对话不会被删除。
+                  </p>
+                  <div className="mt-1 flex justify-end gap-2">
                     <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
                       取消
                     </Button>
-                    <Button type="button" variant="danger" size="sm" loading={remove.isPending} onClick={() => remove.mutate(workflow.id)}>
+                    <Button
+                      type="button"
+                      variant="danger"
+                      size="sm"
+                      loading={remove.isPending}
+                      onClick={() => remove.mutate(workflow.id)}
+                    >
                       删除
                     </Button>
                   </div>
                 </div>
               ) : (
-                <div className="grid gap-1">
+                <div className="grid gap-0.5">
                   <button
                     type="button"
                     onClick={() => {
@@ -369,18 +403,18 @@ function DetailHeader({
                       setMenuOpen(false);
                     }}
                     role="menuitem"
-                    className="flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:min-h-9"
+                    className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
                   >
-                    <Pencil className="h-4 w-4" />
+                    <Pencil className="h-3.5 w-3.5" />
                     重命名
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmDelete(true)}
                     role="menuitem"
-                    className="flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] md:min-h-9"
+                    className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
                   >
-                    <Trash2 className="h-4 w-4" />
+                    <Trash2 className="h-3.5 w-3.5" />
                     删除
                   </button>
                 </div>
@@ -415,30 +449,32 @@ function Conversation({ workflow }: { workflow: WorkflowRun }) {
   const [open, setOpen] = useState(false);
   if (!workflow.conversation_id) return null;
   return (
-    <section className="mt-5 rounded-md border border-[var(--border)] bg-white/[0.025] p-3">
+    <section className="mt-10 border-t border-[var(--border)] pt-4">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-left text-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
+        className="flex w-full items-center justify-between gap-2 py-1 text-left transition-colors hover:text-[var(--fg-0)]"
       >
-        <span className="inline-flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-[var(--fg-2)]" />
-          对话上下文
+        <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-1)]">
+          <MessageSquare className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+          Conversation
         </span>
         <ChevronDown
-          className={cn("h-4 w-4 transition-transform", open && "rotate-180")}
+          className={cn("h-4 w-4 text-[var(--fg-2)] transition-transform", open && "rotate-180")}
           aria-hidden
         />
       </button>
       {open ? (
-        <div className="mt-2 rounded-md border border-[var(--border)] bg-[var(--bg-2)]/40 p-3 text-xs leading-6 text-[var(--fg-2)]">
+        <div className="mt-3 text-[13px] leading-6 text-[var(--fg-1)]">
           <Link
             href={`/?conversationId=${workflow.conversation_id}`}
-            className="text-[var(--amber-300)] hover:underline underline-offset-2"
+            className="font-display text-[18px] italic text-[var(--amber-300)] hover:underline underline-offset-4"
           >
-            打开关联对话
+            打开关联对话 →
           </Link>
-          <p className="mt-1">所有阶段的派发与确认都会写入这条对话的事件流，可在创作页继续追问与微调。</p>
+          <p className="mt-1 text-[var(--fg-2)]">
+            所有阶段的派发与确认都会写入这条对话的事件流，可在创作页继续追问与微调。
+          </p>
         </div>
       ) : null}
     </section>
@@ -448,20 +484,32 @@ function Conversation({ workflow }: { workflow: WorkflowRun }) {
 function DetailSkeleton() {
   return (
     <div className="flex flex-1 items-center justify-center">
-      <Spinner size={20} />
+      <div className="grid place-items-center gap-3 text-center">
+        <Spinner size={20} />
+        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          Loading
+        </p>
+      </div>
     </div>
   );
 }
 
 function DetailError({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="m-6 max-w-md rounded-md border border-[var(--danger)]/30 bg-[var(--danger-soft)] p-5 text-sm">
-      <h3 className="text-base font-medium text-[var(--fg-0)]">项目加载失败</h3>
-      <p className="mt-1 text-xs text-[var(--fg-1)]">网络错误或服务繁忙，请稍后重试。</p>
+    <div className="m-6 max-w-md border border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 p-5 text-sm">
+      <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
+        Error
+      </p>
+      <h3 className="mt-1 font-display text-[20px] italic text-[var(--fg-0)]">
+        项目加载失败
+      </h3>
+      <p className="mt-1 text-xs text-[var(--fg-1)]">
+        网络错误或服务繁忙，请稍后重试。
+      </p>
       <button
         type="button"
         onClick={onRetry}
-        className="mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08]"
+        className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-0)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
       >
         重试
       </button>

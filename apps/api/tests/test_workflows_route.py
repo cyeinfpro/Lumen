@@ -219,7 +219,7 @@ async def test_workflow_produced_model_image_ids_pulls_from_owner_generation_sub
     assert "(generations.upstream_request ->> 'parent_generation_id') IN ('task-a', 'task-b')" in rendered
     # 注意：as_boolean() 在 PostgreSQL 上编译成 CAST(text AS BOOLEAN)，
     # 这样 worker 不论写 JSON true 还是字符串 "true" 都能被 cast 命中。
-    assert "CAST((generations.upstream_request ->> 'is_dual_race_bonus') AS BOOLEAN) = true" in rendered
+    assert "CAST((generations.upstream_request ->> 'is_dual_race_bonus') AS BOOLEAN) IS true" in rendered
 
 
 @pytest.mark.asyncio

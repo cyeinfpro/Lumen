@@ -22,7 +22,8 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage
-from sqlalchemy import and_, desc, or_, select
+from sqlalchemy import desc, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import (
@@ -31,7 +32,6 @@ from lumen_core.constants import (
     ImageSource,
     ImageVisibility,
     Intent,
-    MessageStatus,
     Role,
 )
 from lumen_core.models import (
@@ -42,6 +42,8 @@ from lumen_core.models import (
     ImageVariant,
     Message,
     ModelCandidate,
+    ModelLibraryHiddenPreset,
+    ModelLibraryItem,
     new_uuid7,
     OutboxEvent,
     QualityReport,
@@ -597,6 +599,16 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
         if image_id
         else _library_item_url(item_id, "binary")
     )
+    # user item 走 display2048 variant（按需 materialize）；preset 没有独立
+    # display 变体，回落到 binary 原图。lightbox / 大图预览走这个。
+    display_url = (
+        f"/api/images/{image_id}/variants/display2048"
+        if image_id
+        else _library_item_url(item_id, "binary")
+    )
+    # 卡片小封面用：user item 复用 display2048（thumb256 variant 不一定生成
+    # 且 endpoint 不按需 materialize，回落到 display2048 较稳）；preset 自带
+    # 真小 thumb 文件。
     thumb_url = (
         f"/api/images/{image_id}/variants/display2048"
         if image_id
@@ -616,6 +628,7 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
         ),
         style_tags=_clean_style_tags(raw.get("style_tags") or raw.get("tags") or []),
         image_url=image_url,
+        display_url=display_url,
         thumb_url=thumb_url,
         image_id=image_id,
         preset_id=_clean_optional_text(raw.get("preset_id"), max_len=160),
@@ -636,6 +649,12 @@ def _load_global_library_index() -> dict[str, Any]:
 
 
 def _load_user_library_index(user_id: str) -> dict[str, Any]:
+    """Read the legacy per-user JSON index.
+
+    Kept for cutover safety: routes call ``_ensure_legacy_user_library_migrated``
+    before DB reads so users do not lose visibility of old saved models when
+    the new tables exist but the one-off backfill has not been run yet.
+    """
     return _read_json_file(_library_user_index_path(user_id), _default_user_library_index())
 
 
@@ -646,6 +665,9 @@ def _save_global_library_index(index: dict[str, Any]) -> None:
 
 
 def _save_user_library_index(user_id: str, index: dict[str, Any]) -> None:
+    """Legacy file writer kept only for migration tests. Production
+    routes write per-row through ORM (no whole-file rewrite, no race).
+    """
     index["schema_version"] = MODEL_LIBRARY_SCHEMA_VERSION
     index["updated_at"] = _iso_now()
     _write_json_atomic(_library_user_index_path(user_id), index)
@@ -656,21 +678,225 @@ def _save_sync_state(state: dict[str, Any]) -> None:
     _write_json_atomic(_library_sync_state_path(), state)
 
 
-def _combined_library_items(user_id: str) -> list[dict[str, Any]]:
+def _model_library_row_to_dict(row: ModelLibraryItem) -> dict[str, Any]:
+    """Adapter so DB rows feed ``_model_library_item_out`` unchanged."""
+    return {
+        "id": row.id,
+        "source": row.source,
+        "image_id": row.image_id,
+        "title": row.title,
+        "age_segment": row.age_segment,
+        "gender": row.gender,
+        "appearance_direction": row.appearance_direction,
+        "style_tags": list(row.style_tags or []),
+        "library_folder": row.library_folder,
+        "prompt_hint": row.prompt_hint,
+        "auto_tagged_at": row.auto_tagged_at.isoformat() if row.auto_tagged_at else None,
+        "auto_tag_notes": row.auto_tag_notes,
+        "owner_user_id": row.user_id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _legacy_library_item_insert_values(
+    *,
+    user_id: str,
+    raw: dict[str, Any],
+    valid_image_ids: set[str],
+) -> dict[str, Any] | None:
+    item_id = str(raw.get("id") or "").strip()
+    image_id = str(raw.get("image_id") or "").strip()
+    if not item_id or not image_id or image_id not in valid_image_ids:
+        return None
+    source = str(raw.get("source") or "user_upload").strip()
+    if source not in {"favorite", "user_upload", "generated"}:
+        source = "user_upload"
+    normalized_age = _normalize_age_segment(raw.get("age_segment"))
+    normalized_gender = _normalize_model_gender(raw.get("gender"))
+    created_at = (
+        _safe_datetime(raw.get("created_at") if isinstance(raw.get("created_at"), str) else None)
+        or _now()
+    )
+    updated_at = (
+        _safe_datetime(raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else None)
+        or created_at
+    )
+    known_keys = {
+        "id",
+        "user_id",
+        "owner_user_id",
+        "source",
+        "image_id",
+        "title",
+        "age_segment",
+        "gender",
+        "appearance_direction",
+        "style_tags",
+        "tags",
+        "library_folder",
+        "prompt_hint",
+        "auto_tagged_at",
+        "auto_tag_notes",
+        "created_at",
+        "updated_at",
+    }
+    return {
+        "id": item_id,
+        "user_id": user_id,
+        "source": source,
+        "image_id": image_id,
+        "title": str(raw.get("title") or "").strip()[:120],
+        "age_segment": normalized_age,
+        "gender": normalized_gender,
+        "appearance_direction": _clean_optional_text(
+            raw.get("appearance_direction"), max_len=80
+        ),
+        "style_tags": _clean_style_tags(raw.get("style_tags") or raw.get("tags") or []),
+        "library_folder": _clean_optional_text(
+            raw.get("library_folder")
+            or _model_library_folder_for_age(normalized_age, normalized_gender),
+            max_len=64,
+        ),
+        "prompt_hint": _clean_optional_text(raw.get("prompt_hint"), max_len=1000),
+        "auto_tagged_at": _safe_datetime(
+            raw.get("auto_tagged_at") if isinstance(raw.get("auto_tagged_at"), str) else None
+        ),
+        "auto_tag_notes": _clean_optional_text(raw.get("auto_tag_notes"), max_len=200),
+        "metadata_jsonb": {k: v for k, v in raw.items() if k not in known_keys},
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+async def _ensure_legacy_user_library_migrated(
+    db: AsyncSession, user_id: str
+) -> bool:
+    """Lazily backfill one user's legacy JSON index into PostgreSQL.
+
+    The schema migration creates empty tables; deployments may not run the
+    one-off script immediately. This guard keeps old saved models visible and
+    functional by migrating valid rows on first access. It flushes, but leaves
+    commit ownership to the route that called it.
+    """
+    index_path = _library_user_index_path(user_id)
+    if not index_path.is_file():
+        return False
+    index = _load_user_library_index(user_id)
+    raw_items = [
+        item for item in (index.get("items") or []) if isinstance(item, dict)
+    ]
+    raw_hidden_ids = _dedupe_nonempty(index.get("hidden_preset_ids") or [])
+    if not raw_items and not raw_hidden_ids:
+        return False
+
+    migrated = False
+    item_ids = _dedupe_nonempty(str(item.get("id") or "") for item in raw_items)
+    existing_item_ids: set[str] = set()
+    if item_ids:
+        rows = await db.execute(
+            select(ModelLibraryItem.id).where(ModelLibraryItem.id.in_(item_ids))
+        )
+        existing_item_ids = set(rows.scalars().all())
+
+    image_ids = _dedupe_nonempty(str(item.get("image_id") or "") for item in raw_items)
+    valid_image_ids: set[str] = set()
+    if image_ids:
+        rows = await db.execute(
+            select(Image.id).where(
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+                Image.id.in_(image_ids),
+            )
+        )
+        valid_image_ids = set(rows.scalars().all())
+
+    item_values = [
+        values
+        for raw in raw_items
+        if str(raw.get("id") or "").strip() not in existing_item_ids
+        if (
+            values := _legacy_library_item_insert_values(
+                user_id=user_id,
+                raw=raw,
+                valid_image_ids=valid_image_ids,
+            )
+        )
+        is not None
+    ]
+    if item_values:
+        await db.execute(
+            pg_insert(ModelLibraryItem)
+            .values(item_values)
+            .on_conflict_do_nothing(index_elements=["id"])
+        )
+        migrated = True
+
+    if raw_hidden_ids:
+        rows = await db.execute(
+            select(ModelLibraryHiddenPreset.preset_id).where(
+                ModelLibraryHiddenPreset.user_id == user_id,
+                ModelLibraryHiddenPreset.preset_id.in_(raw_hidden_ids),
+            )
+        )
+        existing_hidden = set(rows.scalars().all())
+        hidden_values = [
+            {"user_id": user_id, "preset_id": preset_id}
+            for preset_id in raw_hidden_ids
+            if preset_id not in existing_hidden
+        ]
+        if hidden_values:
+            await db.execute(
+                pg_insert(ModelLibraryHiddenPreset)
+                .values(hidden_values)
+                .on_conflict_do_nothing(index_elements=["user_id", "preset_id"])
+            )
+            migrated = True
+
+    if migrated:
+        await db.flush()
+    return migrated
+
+
+async def _load_user_library_items(
+    db: AsyncSession, user_id: str
+) -> list[dict[str, Any]]:
+    rows = (
+        await db.execute(
+            select(ModelLibraryItem)
+            .where(ModelLibraryItem.user_id == user_id)
+            .order_by(ModelLibraryItem.created_at.desc())
+        )
+    ).scalars().all()
+    return [_model_library_row_to_dict(row) for row in rows]
+
+
+async def _load_user_hidden_preset_ids(
+    db: AsyncSession, user_id: str
+) -> set[str]:
+    rows = (
+        await db.execute(
+            select(ModelLibraryHiddenPreset.preset_id).where(
+                ModelLibraryHiddenPreset.user_id == user_id
+            )
+        )
+    ).scalars().all()
+    return {pid for pid in rows if isinstance(pid, str)}
+
+
+async def _combined_library_items(
+    db: AsyncSession, user_id: str
+) -> tuple[list[dict[str, Any]], bool]:
+    migrated = await _ensure_legacy_user_library_migrated(db, user_id)
     global_index = _load_global_library_index()
-    user_index = _load_user_library_index(user_id)
-    hidden = set(_dedupe_nonempty(user_index.get("hidden_preset_ids") or []))
+    hidden = await _load_user_hidden_preset_ids(db, user_id)
     preset_items = [
         dict(item)
         for item in global_index.get("preset_items", [])
         if isinstance(item, dict) and str(item.get("id") or "") not in hidden
     ]
-    user_items = [
-        dict(item)
-        for item in user_index.get("items", [])
-        if isinstance(item, dict)
-    ]
-    return [*preset_items, *user_items]
+    user_items = await _load_user_library_items(db, user_id)
+    return [*preset_items, *user_items], migrated
 
 
 def _filter_library_items(
@@ -718,10 +944,36 @@ def _filter_library_items(
     )
 
 
-def _find_library_item(user_id: str, item_id: str) -> dict[str, Any] | None:
-    for item in _combined_library_items(user_id):
-        if str(item.get("id") or "") == item_id:
-            return item
+async def _find_library_item(
+    db: AsyncSession, *, user_id: str, item_id: str
+) -> dict[str, Any] | None:
+    """Resolve a library item by id. Presets come from the global JSON
+    file; user items come from PostgreSQL. Hidden presets resolve to
+    None for the asking user (they were "deleted" at user level).
+    """
+    await _ensure_legacy_user_library_migrated(db, user_id)
+    if item_id.startswith("preset:") or not item_id.startswith("user:"):
+        for item in _load_global_library_index().get("preset_items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("id") or "") != item_id:
+                continue
+            hidden = await _load_user_hidden_preset_ids(db, user_id)
+            if item_id in hidden:
+                return None
+            return dict(item)
+    if item_id.startswith("user:"):
+        row = (
+            await db.execute(
+                select(ModelLibraryItem).where(
+                    ModelLibraryItem.id == item_id,
+                    ModelLibraryItem.user_id == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return _model_library_row_to_dict(row)
     return None
 
 
@@ -1366,21 +1618,30 @@ async def _add_user_library_item(
     appearance_direction: str | None,
     style_tags: list[str],
 ) -> dict[str, Any]:
+    """Insert one row into ``model_library_items``. Each call is a
+    standalone INSERT — concurrent favorites no longer race a shared
+    JSON file.
+    """
     await _owned_image(db, user_id=user_id, image_id=image_id)
-    index = _load_user_library_index(user_id)
-    item = _user_index_entry_from_image(
+    normalized_age = _normalize_age_segment(age_segment)
+    normalized_gender = _normalize_model_gender(gender)
+    row = ModelLibraryItem(
+        id=f"user:{new_uuid7()}",
         user_id=user_id,
         source=source,
         image_id=image_id,
-        title=title,
-        age_segment=age_segment,
-        gender=gender,
-        appearance_direction=appearance_direction,
-        style_tags=style_tags,
+        title=title.strip()[:120],
+        age_segment=normalized_age,
+        gender=normalized_gender,
+        appearance_direction=_clean_optional_text(appearance_direction, max_len=80),
+        style_tags=_clean_style_tags(style_tags),
+        library_folder=_model_library_folder_for_age(
+            normalized_age, normalized_gender
+        ),
     )
-    index["items"] = [*index.get("items", []), item]
-    _save_user_library_index(user_id, index)
-    return item
+    db.add(row)
+    await db.flush()
+    return _model_library_row_to_dict(row)
 
 
 def _primary_candidate_image_id(candidate: ModelCandidate) -> str | None:
@@ -2166,8 +2427,9 @@ async def _sync_workflow_outputs(
                         Generation.upstream_request["parent_generation_id"].astext.in_(
                             all_candidate_task_ids
                         ),
-                        Generation.upstream_request["is_dual_race_bonus"].as_boolean()
-                        == True,  # noqa: E712
+                        Generation.upstream_request["is_dual_race_bonus"]
+                        .as_boolean()
+                        .is_(True),
                     )
                     .order_by(Generation.created_at.asc(), Generation.id.asc())
                 )
@@ -2309,8 +2571,9 @@ async def _sync_workflow_outputs(
                     Generation.upstream_request["parent_generation_id"].astext.in_(
                         approval_step.task_ids
                     ),
-                    Generation.upstream_request["is_dual_race_bonus"].as_boolean()
-                    == True,  # noqa: E712
+                    Generation.upstream_request["is_dual_race_bonus"]
+                    .as_boolean()
+                    .is_(True),
                 )
                 .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
@@ -2351,8 +2614,9 @@ async def _sync_workflow_outputs(
                     Generation.upstream_request["parent_generation_id"].astext.in_(
                         showcase_step.task_ids
                     ),
-                    Generation.upstream_request["is_dual_race_bonus"].as_boolean()
-                    == True,  # noqa: E712
+                    Generation.upstream_request["is_dual_race_bonus"]
+                    .as_boolean()
+                    .is_(True),
                 )
                 .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
@@ -2884,6 +3148,7 @@ async def create_apparel_model_showcase(
 @router.get("/apparel-model-library", response_model=ApparelModelLibraryListOut)
 async def list_apparel_model_library(
     user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
     age_segment: AgeSegment = Query(default="all"),
     source: str = Query(default="all"),
     appearance: str = Query(default="all"),
@@ -2898,13 +3163,16 @@ async def list_apparel_model_library(
     appearance = appearance.strip() or "all"
     if appearance not in MODEL_LIBRARY_APPEARANCES:
         raise _http("invalid_appearance", "invalid model library appearance", 422)
+    combined_items, migrated_legacy = await _combined_library_items(db, user.id)
     items = _filter_library_items(
-        _combined_library_items(user.id),
+        combined_items,
         source=source,
         age_segment=age,
         appearance=appearance,
         q=q,
     )
+    if migrated_legacy:
+        await db.commit()
     return ApparelModelLibraryListOut(
         items=[_model_library_item_out(item) for item in items],
         sync=_sync_state_out(user),
@@ -2930,8 +3198,9 @@ async def get_apparel_model_library_item_binary(
     item_id: str,
     request: Request,
     user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
-    item = _find_library_item(user.id, item_id)
+    item = await _find_library_item(db, user_id=user.id, item_id=item_id)
     if item is None:
         raise _http("not_found", "model library item not found", 404)
     if item.get("image_id"):
@@ -2945,8 +3214,9 @@ async def get_apparel_model_library_item_thumb(
     item_id: str,
     request: Request,
     user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
-    item = _find_library_item(user.id, item_id)
+    item = await _find_library_item(db, user_id=user.id, item_id=item_id)
     if item is None:
         raise _http("not_found", "model library item not found", 404)
     if item.get("image_id"):
@@ -2995,33 +3265,40 @@ async def patch_apparel_model_library_item(
     item_id: str,
     body: ApparelModelLibraryItemPatchIn,
     user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApparelModelLibraryItemOut:
-    index = _load_user_library_index(user.id)
-    items = [
-        dict(item)
-        for item in index.get("items", [])
-        if isinstance(item, dict)
-    ]
-    for item in items:
-        if str(item.get("id") or "") != item_id:
-            continue
-        if body.title is not None:
-            item["title"] = body.title.strip()[:120]
-        if body.age_segment is not None:
-            item["age_segment"] = body.age_segment
-        if body.gender is not None:
-            item["gender"] = _clean_optional_text(body.gender, max_len=40)
-        if body.appearance_direction is not None:
-            item["appearance_direction"] = _clean_optional_text(
-                body.appearance_direction, max_len=80
+    await _ensure_legacy_user_library_migrated(db, user.id)
+    row = (
+        await db.execute(
+            select(ModelLibraryItem).where(
+                ModelLibraryItem.id == item_id,
+                ModelLibraryItem.user_id == user.id,
             )
-        if body.style_tags is not None:
-            item["style_tags"] = _clean_style_tags(body.style_tags)
-        item["updated_at"] = _iso_now()
-        index["items"] = items
-        _save_user_library_index(user.id, index)
-        return _model_library_item_out(item)
-    raise _http("not_found", "model library item not found", 404)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise _http("not_found", "model library item not found", 404)
+    if body.title is not None:
+        row.title = body.title.strip()[:120]
+    if body.age_segment is not None:
+        row.age_segment = _normalize_age_segment(body.age_segment)
+        row.library_folder = _model_library_folder_for_age(
+            row.age_segment, row.gender
+        )
+    if body.gender is not None:
+        row.gender = _clean_optional_text(body.gender, max_len=40)
+        row.library_folder = _model_library_folder_for_age(
+            row.age_segment, row.gender
+        )
+    if body.appearance_direction is not None:
+        row.appearance_direction = _clean_optional_text(
+            body.appearance_direction, max_len=80
+        )
+    if body.style_tags is not None:
+        row.style_tags = _clean_style_tags(body.style_tags)
+    await db.commit()
+    await db.refresh(row)
+    return _model_library_item_out(_model_library_row_to_dict(row))
 
 
 @router.delete(
@@ -3031,26 +3308,47 @@ async def patch_apparel_model_library_item(
 async def delete_apparel_model_library_item(
     item_id: str,
     user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
-    index = _load_user_library_index(user.id)
-    items = [
-        dict(item)
-        for item in index.get("items", [])
-        if isinstance(item, dict)
-    ]
-    next_items = [item for item in items if str(item.get("id") or "") != item_id]
-    if len(next_items) != len(items):
-        index["items"] = next_items
-        _save_user_library_index(user.id, index)
+    migrated_legacy = await _ensure_legacy_user_library_migrated(db, user.id)
+    if item_id.startswith("user:"):
+        row = (
+            await db.execute(
+                select(ModelLibraryItem).where(
+                    ModelLibraryItem.id == item_id,
+                    ModelLibraryItem.user_id == user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            if migrated_legacy:
+                await db.commit()
+            raise _http("not_found", "model library item not found", 404)
+        await db.delete(row)
+        await db.commit()
         return {"ok": True}
-    # Presets are global; user-level delete means hide.
-    if item_id.startswith("preset:") and _find_library_item(user.id, item_id):
-        hidden = set(_dedupe_nonempty(index.get("hidden_preset_ids") or []))
-        hidden.add(item_id)
-        index["hidden_preset_ids"] = sorted(hidden)
-        _save_user_library_index(user.id, index)
-        return {"ok": True}
-    raise _http("not_found", "model library item not found", 404)
+    # Presets are global; user-level delete means hide for this user.
+    item = await _find_library_item(db, user_id=user.id, item_id=item_id)
+    if item is None or item.get("source") != "preset":
+        if migrated_legacy:
+            await db.commit()
+        raise _http("not_found", "model library item not found", 404)
+    existing = (
+        await db.execute(
+            select(ModelLibraryHiddenPreset).where(
+                ModelLibraryHiddenPreset.user_id == user.id,
+                ModelLibraryHiddenPreset.preset_id == item_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        db.add(
+            ModelLibraryHiddenPreset(user_id=user.id, preset_id=item_id)
+        )
+        await db.commit()
+    elif migrated_legacy:
+        await db.commit()
+    return {"ok": True}
 
 
 @router.get("", response_model=WorkflowRunListOut)
@@ -3319,7 +3617,7 @@ async def select_apparel_model_library_item(
     product_step = await _step(db, run.id, "product_analysis")
     if product_step.status != "approved":
         raise _http("product_not_approved", "approve product analysis first", 409)
-    item = _find_library_item(user.id, body.library_item_id)
+    item = await _find_library_item(db, user_id=user.id, item_id=body.library_item_id)
     if item is None:
         raise _http("not_found", "model library item not found", 404)
     try:
@@ -4103,19 +4401,22 @@ def _model_library_run_inputs(step: WorkflowStep) -> dict[str, Any]:
     }
 
 
-def _saved_image_id_set(user_id: str) -> dict[str, str]:
+async def _saved_image_id_set(
+    db: AsyncSession, user_id: str
+) -> dict[str, str]:
     """{ image_id -> library_item_id } map: 看哪些图已经收藏到当前用户的库。"""
-    index = _load_user_library_index(user_id)
+    rows = (
+        await db.execute(
+            select(ModelLibraryItem.image_id, ModelLibraryItem.id)
+            .where(ModelLibraryItem.user_id == user_id)
+            .order_by(ModelLibraryItem.created_at.asc())
+        )
+    ).all()
     out: dict[str, str] = {}
-    for item in index.get("items", []) or []:
-        if not isinstance(item, dict):
+    for image_id, item_id in rows:
+        if not image_id or not item_id:
             continue
-        image_id = str(item.get("image_id") or "").strip()
-        if not image_id:
-            continue
-        item_id = str(item.get("id") or "").strip()
-        if item_id:
-            out.setdefault(image_id, item_id)
+        out.setdefault(str(image_id), str(item_id))
     return out
 
 
@@ -4172,13 +4473,16 @@ def _job_item_out(
 ) -> ApparelModelLibraryJobItemOut:
     if image_out is not None:
         image_url = image_out.url
+        display_url = image_out.display_url
         thumb_url = image_out.thumb_url
     else:
         image_url = _image_url(image_id)
+        display_url = None
         thumb_url = None
     return ApparelModelLibraryJobItemOut(
         image_id=image_id,
         image_url=image_url,
+        display_url=display_url,
         thumb_url=thumb_url,
         saved_item_id=saved_item_id,
         style_tags=_clean_style_tags(style_tags),
@@ -4237,8 +4541,7 @@ async def _workflow_produced_model_image_ids(
                             ].astext.in_(all_task_ids),
                             Generation.upstream_request[
                                 "is_dual_race_bonus"
-                            ].as_boolean()
-                            == True,  # noqa: E712
+                            ].as_boolean().is_(True),
                         )
                     ),
                 ),
@@ -4543,7 +4846,8 @@ async def generate_apparel_model_library_job(
     conv.last_activity_at = _now()
     await db.commit()
     await _publish_bundles(db, user_id=user.id, conv_id=conv.id, bundles=bundles)
-    saved_map = _saved_image_id_set(user.id)
+    await _ensure_legacy_user_library_migrated(db, user.id)
+    saved_map = await _saved_image_id_set(db, user.id)
     run = await _get_run(db, user_id=user.id, run_id=run.id)
     job = await _job_from_library_run(db, run=run, saved_map=saved_map)
     await db.commit()
@@ -4560,7 +4864,8 @@ async def list_apparel_model_library_jobs(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> ApparelModelLibraryJobsOut:
     """聚合任务中心：模特库独立生成 + 项目候选 step。"""
-    saved_map = _saved_image_id_set(user.id)
+    migrated_legacy = await _ensure_legacy_user_library_migrated(db, user.id)
+    saved_map = await _saved_image_id_set(db, user.id)
     library_runs = list(
         (
             await db.execute(
@@ -4635,6 +4940,8 @@ async def list_apparel_model_library_jobs(
         key=lambda job: job.updated_at or job.created_at,
         reverse=True,
     )
+    if migrated_legacy:
+        await db.commit()
     return ApparelModelLibraryJobsOut(items=merged[:limit])
 
 
@@ -4963,25 +5270,26 @@ async def _auto_tag_library_item(
     user_id: str,
     item_id: str,
 ) -> ApparelModelLibraryAutoTagOut:
-    """对 user library index 里某个 item 调 vision tagging 并写回结果。
+    """Run vision tagging against one ``model_library_items`` row.
 
-    既被 POST /items/{id}/auto-tag 同步调用，也被收藏后台任务调用。
+    Single-row UPDATE under transaction — concurrent auto-tag calls for
+    different items don't trample each other (the JSON-file design read
+    + wrote the whole user index for every call). When vision returns
+    nothing usable we deliberately leave ``auto_tagged_at`` NULL so the
+    UI can distinguish "not yet identified" from "identified but empty".
     """
-    index = _load_user_library_index(user_id)
-    items = [
-        dict(item) for item in (index.get("items") or []) if isinstance(item, dict)
-    ]
-    target_idx = next(
-        (
-            idx
-            for idx, item in enumerate(items)
-            if str(item.get("id") or "") == item_id
-        ),
-        None,
-    )
-    if target_idx is None:
+    migrated_legacy = await _ensure_legacy_user_library_migrated(db, user_id)
+    row = (
+        await db.execute(
+            select(ModelLibraryItem).where(
+                ModelLibraryItem.id == item_id,
+                ModelLibraryItem.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
         raise _http("not_found", "model library item not found", 404)
-    image_id = str(items[target_idx].get("image_id") or "").strip()
+    image_id = (row.image_id or "").strip()
     if not image_id:
         raise _http("invalid_item", "library item has no backing image", 422)
     raw_payload = await _api_call_tagging_upstream(
@@ -4996,7 +5304,9 @@ async def _auto_tag_library_item(
     if isinstance(raw_tags_value, str):
         raw_tags_iterable: list[str] = [raw_tags_value]
     elif isinstance(raw_tags_value, list):
-        raw_tags_iterable = [str(t) for t in raw_tags_value if isinstance(t, (str, int, float))]
+        raw_tags_iterable = [
+            str(t) for t in raw_tags_value if isinstance(t, (str, int, float))
+        ]
     else:
         raw_tags_iterable = []
     style_tags = _clean_style_tags(raw_tags_iterable)
@@ -5010,16 +5320,32 @@ async def _auto_tag_library_item(
     )
     gender = _normalize_tagged_gender(raw_payload.get("gender"))
     notes = _clean_optional_text(raw_payload.get("notes"), max_len=200)
-    items[target_idx] = _merge_library_item_fields(
-        existing=items[target_idx],
-        style_tags=style_tags,
-        appearance_direction=appearance_direction,
-        age_segment=age_segment,
-        gender=gender,
-        notes=notes,
+
+    # vision 全失败/空响应：保留用户原值不动，留 auto_tagged_at NULL。
+    upstream_signal = bool(
+        raw_payload
+        and (style_tags or appearance_direction or age_segment or gender or notes)
     )
-    index["items"] = items
-    _save_user_library_index(user_id, index)
+    if upstream_signal:
+        if style_tags:
+            row.style_tags = style_tags
+        if appearance_direction and not row.appearance_direction:
+            row.appearance_direction = appearance_direction
+        if age_segment and _normalize_age_segment(row.age_segment) == "user_favorites":
+            row.age_segment = age_segment
+            row.library_folder = _model_library_folder_for_age(age_segment, row.gender)
+        if gender and not row.gender:
+            row.gender = gender
+            row.library_folder = _model_library_folder_for_age(
+                _normalize_age_segment(row.age_segment), gender
+            )
+        if notes:
+            row.auto_tag_notes = notes
+        row.auto_tagged_at = _now()
+        await db.commit()
+        await db.refresh(row)
+    elif migrated_legacy:
+        await db.commit()
     return ApparelModelLibraryAutoTagOut(
         item_id=item_id,
         style_tags=style_tags,
@@ -5031,7 +5357,9 @@ async def _auto_tag_library_item(
 
 
 async def _run_auto_tag_in_background(user_id: str, item_id: str) -> None:
-    """后台触发 vision tagging 并把结果写回 user library index json。"""
+    """Background trigger for vision tagging. Uses its own DB session
+    because it runs after the request response has been flushed.
+    """
     try:
         from app.db import SessionLocal as _Session
 
@@ -5041,8 +5369,17 @@ async def _run_auto_tag_in_background(user_id: str, item_id: str) -> None:
                 user_id=user_id,
                 item_id=item_id,
             )
-    except Exception as exc:  # noqa: BLE001
+    except HTTPException as exc:
+        # Structured 404/422 (item gone / no backing image): expected, info level.
         logger.info(
+            "model_library auto_tag background skipped user=%s item=%s status=%s",
+            user_id,
+            item_id,
+            exc.status_code,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Unexpected exceptions are real failures — surface to monitoring.
+        logger.warning(
             "model_library auto_tag background failed user=%s item=%s err=%s",
             user_id,
             item_id,

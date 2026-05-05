@@ -1,7 +1,8 @@
 "use client";
 
-// 图片网格：用于商品图、参考图等只读展示。点击触发外部 onPreview。
-// hover 浮起 + 琥珀外环（与 SelectableImageGrid 风格保持一致）。
+// Editorial 图片网格：用于商品图、参考图等只读展示。
+// - 去除卡片边框 + bg + shadow，改为纯图 + hairline 分隔
+// - hover micro scale；focus visible amber ring
 
 import { Image as ImageIcon } from "lucide-react";
 import Image from "next/image";
@@ -29,19 +30,21 @@ export function ImageGrid({
     return (
       <div
         className={cn(
-          "flex h-28 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--fg-2)]",
+          "flex h-32 flex-col items-center justify-center gap-2 border border-dashed border-[var(--border)] text-[var(--fg-2)]",
           className,
         )}
       >
         <ImageIcon className="h-4 w-4" />
-        {emptyLabel}
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+          {emptyLabel}
+        </span>
       </div>
     );
   }
   return (
     <div
       className={cn(
-        "grid gap-2",
+        "grid gap-1",
         compact ? "grid-cols-2" : "grid-cols-2 md:grid-cols-3",
         className,
       )}
@@ -52,9 +55,7 @@ export function ImageGrid({
           type="button"
           onClick={() => onPreview?.(image, index)}
           className={cn(
-            "group overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-2)] transition-all duration-[var(--dur-base)]",
-            "hover:border-[var(--border-strong)] hover:shadow-[var(--shadow-2)]",
-            "focus-visible:shadow-[var(--ring)] focus-visible:outline-none",
+            "group relative aspect-[4/5] overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
           )}
         >
           <Image
@@ -64,8 +65,11 @@ export function ImageGrid({
             height={compact ? 300 : 450}
             sizes={compact ? "240px" : "(max-width: 768px) 50vw, 320px"}
             unoptimized
-            className="aspect-[4/5] w-full object-cover transition-transform duration-[var(--dur-slow)] group-hover:scale-[1.02]"
+            className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.04]"
           />
+          <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/90 mix-blend-difference">
+            {String(index + 1).padStart(2, "0")}
+          </span>
         </button>
       ))}
     </div>
@@ -84,12 +88,14 @@ export function ReferenceBlock({
   trailing?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-md border border-[var(--border)] bg-white/[0.03] p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="text-sm font-medium text-[var(--fg-1)]">{title}</p>
+    <section className="border-t border-[var(--border)] py-3">
+      <header className="mb-2 flex items-center justify-between gap-2">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          {title}
+        </p>
         {trailing}
-      </div>
+      </header>
       <ImageGrid images={images} compact onPreview={onPreview} />
-    </div>
+    </section>
   );
 }
