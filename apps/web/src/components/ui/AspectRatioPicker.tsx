@@ -175,8 +175,8 @@ export function AspectRatioPicker() {
         className={cn(
           "inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 md:h-7 md:min-h-0 md:px-2.5",
           "text-xs font-medium text-neutral-300",
-          "bg-white/5 hover:bg-white/10 border border-white/10",
-          "hover:text-white active:scale-[0.96]",
+          "bg-white/5 hover:bg-white/10 border border-[var(--border)]",
+          "hover:text-[var(--fg-0)] active:scale-[0.96]",
           "transition-all duration-150",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         )}
@@ -211,10 +211,10 @@ export function AspectRatioPicker() {
         }}
         className={cn(
           "m-auto w-[min(22rem,calc(100vw-1.5rem))] max-h-[min(80dvh,560px)] overflow-y-auto p-3",
-          "max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:top-auto max-sm:m-0 max-sm:max-h-[85dvh] max-sm:w-full max-sm:rounded-b-none max-sm:p-4 max-sm:pb-[calc(1rem+env(safe-area-inset-bottom,0px))]",
-          "rounded-2xl bg-neutral-900/96 backdrop-blur-xl",
-          "border border-white/12 shadow-2xl shadow-black/60",
-          "text-neutral-100",
+          "mobile-dialog-scroll max-sm:fixed max-sm:inset-x-0 max-sm:bottom-[var(--mobile-dialog-bottom-gap)] max-sm:top-auto max-sm:m-0 max-sm:max-h-[var(--mobile-dialog-sheet-max-height)] max-sm:w-full max-sm:rounded-b-none max-sm:p-4 max-sm:pb-4",
+          "rounded-2xl bg-[var(--bg-1)]/96 backdrop-blur-xl",
+          "border border-[var(--border)] shadow-2xl shadow-black/25",
+          "text-[var(--fg-0)]",
           "backdrop:bg-black/40 backdrop:backdrop-blur-[2px]",
         )}
         aria-label="宽高比 / 尺寸模式"
@@ -222,7 +222,7 @@ export function AspectRatioPicker() {
         {/* 顶部：横/竖 toggle + 反转按钮 */}
         <div className="flex items-center gap-2 mb-3">
           <div
-            className="flex-1 flex p-0.5 rounded-lg bg-white/5 border border-white/10"
+            className="flex-1 flex p-0.5 rounded-lg bg-white/5 border border-[var(--border)]"
             role="radiogroup"
             aria-label="构图方向"
           >
@@ -246,7 +246,7 @@ export function AspectRatioPicker() {
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                     active
                       ? "bg-[var(--color-lumen-amber)] text-black shadow-[0_0_10px_rgba(242,169,58,0.35)]"
-                      : "text-neutral-400 hover:text-neutral-100",
+                      : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                   )}
                 >
                   {opt.label}
@@ -263,8 +263,8 @@ export function AspectRatioPicker() {
             transition={{ type: "spring", damping: 22, stiffness: 260 }}
             className={cn(
               "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md md:h-7 md:min-h-0 md:w-7 md:min-w-0",
-              "bg-white/5 border border-white/10 text-neutral-300",
-              "hover:bg-white/10 hover:text-white active:scale-[0.94]",
+              "bg-white/5 border border-[var(--border)] text-[var(--fg-1)]",
+              "hover:bg-white/10 hover:text-[var(--fg-0)] active:scale-[0.94]",
               "transition-colors duration-150",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
             )}
@@ -298,7 +298,7 @@ export function AspectRatioPicker() {
                   "active:scale-[0.96]",
                   active
                     ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/12 shadow-[0_0_12px_rgba(242,169,58,0.22)]"
-                    : "border-white/10 bg-white/5 hover:bg-white/10 hover:border-white/20",
+                    : "border-[var(--border)] bg-white/5 hover:bg-white/10 hover:border-[var(--border-strong)]",
                 )}
               >
                 <motion.span
@@ -308,7 +308,7 @@ export function AspectRatioPicker() {
                     "rounded-[3px] transition-colors",
                     active
                       ? "bg-[var(--color-lumen-amber)]"
-                      : "bg-neutral-500 group-hover:bg-neutral-300",
+                      : "bg-[var(--fg-2)] group-hover:bg-[var(--fg-1)]",
                   )}
                 />
                 <span
@@ -316,7 +316,7 @@ export function AspectRatioPicker() {
                     "text-[10px] font-medium tabular-nums transition-colors",
                     active
                       ? "text-[var(--color-lumen-amber)]"
-                      : "text-neutral-400 group-hover:text-neutral-200",
+                      : "text-[var(--fg-1)] group-hover:text-[var(--fg-0)]",
                   )}
                 >
                   {pair.label}
@@ -346,7 +346,7 @@ export function AspectRatioPicker() {
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                   active
                     ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
-                    : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10",
+                    : "border-[var(--border)] bg-white/5 text-[var(--fg-1)] hover:bg-white/10",
                 )}
               >
                 {m === "auto" ? "自动（根据参考图）" : "固定"}
@@ -375,7 +375,7 @@ export function AspectRatioPicker() {
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
               is4KLandscape
                 ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
-                : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10",
+                : "border-[var(--border)] bg-white/5 text-[var(--fg-1)] hover:bg-white/10",
             )}
           >
             4K 横 3840×2160
@@ -391,7 +391,7 @@ export function AspectRatioPicker() {
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
               is4KPortrait
                 ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
-                : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10",
+                : "border-[var(--border)] bg-white/5 text-[var(--fg-1)] hover:bg-white/10",
             )}
           >
             4K 竖 2160×3840
@@ -404,7 +404,7 @@ export function AspectRatioPicker() {
 
         <div
           className={cn(
-            "mt-3 pt-2.5 border-t border-white/10",
+            "mt-3 pt-2.5 border-t border-[var(--border)]",
             "text-[11px] leading-snug",
             resolved ? "text-neutral-400" : "text-red-300",
           )}

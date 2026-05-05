@@ -35,7 +35,7 @@ const VARIANTS: Record<Variant, string> = {
     "bg-[var(--accent)] text-black hover:bg-[#F6B755]",
   secondary:
     "bg-white/6 text-[var(--fg-0)] hover:bg-white/12 " +
-    "border border-white/10 hover:border-white/15",
+    "border border-[var(--border)] hover:border-[var(--border-strong)]",
   ghost:
     "bg-transparent text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/6",
   danger:

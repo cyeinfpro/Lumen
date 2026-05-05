@@ -20,7 +20,7 @@ export function SettingsShell({
   maxWidth = "max-w-6xl",
 }: SettingsShellProps) {
   return (
-    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-neutral-200">
+    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <div className="md:hidden">
         <MobileTopBar

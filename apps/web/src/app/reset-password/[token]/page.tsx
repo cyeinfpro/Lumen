@@ -79,13 +79,13 @@ function ResetPasswordConfirm({ token }: { token: string }) {
   };
 
   return (
-    <main className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200 flex flex-col">
+    <main className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
       <section className="flex flex-1 items-center justify-center px-4 py-10 safe-x">
         <div className="w-full max-w-md space-y-6">
           <header className="space-y-2">
             <Link
               href="/login"
-              className="inline-flex items-center gap-1.5 text-sm text-neutral-400 transition-colors hover:text-neutral-100"
+              className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
             >
               <ArrowLeft className="h-4 w-4" />
               返回登录
@@ -128,13 +128,13 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                     onChange={(event) => setPassword(event.target.value)}
                     placeholder="至少 8 位"
                     autoComplete="new-password"
-                    className="h-10 w-full rounded-xl border border-white/10 bg-[var(--bg-1)]/60 pl-3 pr-11 text-base text-neutral-100 transition-colors placeholder:text-neutral-600 focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                    className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-11 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPwd((value) => !value)}
                     aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                    className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg text-neutral-400 transition-colors hover:bg-white/5 hover:text-neutral-100 md:h-8 md:w-8"
+                    className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--fg-1)] transition-colors hover:bg-white/5 hover:text-[var(--fg-0)] md:h-8 md:w-8"
                   >
                     {showPwd ? (
                       <EyeOff className="h-4 w-4" />
@@ -149,7 +149,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                     "mt-1.5 text-[11px] " +
                     (password.length > 0 && passwordTooShort
                       ? "text-red-300"
-                      : "text-neutral-500")
+                      : "text-[var(--fg-2)]")
                   }
                 >
                   至少 8 位（{Math.min(password.length, 8)}/8）
@@ -171,10 +171,10 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                   placeholder="再输入一次"
                   autoComplete="new-password"
                   className={
-                    "h-10 w-full rounded-xl border bg-[var(--bg-1)]/60 px-3 text-base text-neutral-100 transition-colors placeholder:text-neutral-600 focus:outline-none focus:ring-2 md:text-sm " +
+                    "h-10 w-full rounded-xl border bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
                     (confirmMismatch
                       ? "border-red-500/40 focus:border-red-500/60 focus:ring-red-500/20"
-                      : "border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
+                      : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
                   }
                 />
                 {confirmMismatch && (
@@ -287,8 +287,8 @@ function PasswordStrength({
           />
         ))}
       </div>
-      <p className="text-[11px] text-neutral-500">
-        强度：<span className="text-neutral-300">{strength.label}</span>
+      <p className="text-[11px] text-[var(--fg-2)]">
+        强度：<span className="text-[var(--fg-1)]">{strength.label}</span>
       </p>
     </div>
   );

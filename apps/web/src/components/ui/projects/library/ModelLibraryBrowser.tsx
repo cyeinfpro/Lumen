@@ -172,7 +172,7 @@ export function ModelLibraryBrowser({
   // 上传成功后 highlight 一下，纯视觉反馈，不参与"已选"语义
   const [lastUploadedId, setLastUploadedId] = useState<string | null>(null);
 
-  // loser 视图：跳过 list API，改用 jobs API 平铺生成但未入库的图
+  // 待入库视图：跳过 list API，改用 jobs API 平铺生成但未入库的图
   const isLoserView = source === "unsaved_jobs";
   const libraryQuery = useApparelModelLibraryQuery(
     {
@@ -190,14 +190,14 @@ export function ModelLibraryBrowser({
   const syncInfo = libraryQuery.data?.sync;
   const isLoadingItems = isLoserView ? jobsQuery.isPending : libraryQuery.isPending;
 
-  // 把 loser items 适配成 ApparelModelLibraryItem-like 形状，复用既有卡片
+  // 把待入库 items/candidates 适配成 ApparelModelLibraryItem-like 形状，复用既有卡片
   const items = useMemo<ApparelModelLibraryItem[]>(() => {
     if (isLoserView) {
       const jobs = jobsQuery.data?.items ?? [];
       const out: ApparelModelLibraryItem[] = [];
       for (const job of jobs) {
         if (job.status !== "succeeded" && job.status !== "partial") continue;
-        for (const it of job.items) {
+        for (const it of [...job.items, ...job.candidates]) {
           if (it.saved_item_id != null) continue; // 已入库的不显示
           // 客户端 filter：与全局 chips 一致
           const itemAppearance = (it.appearance_direction || job.appearance_direction || "") as
@@ -847,7 +847,7 @@ function UploadDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md md:items-center md:p-5"
+      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md mobile-dialog-shell md:items-center md:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -860,7 +860,7 @@ function UploadDialog({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 16, scale: 0.98 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-3)] md:max-w-2xl md:rounded-xl"
+        className="mobile-dialog-panel flex w-full flex-col overflow-hidden rounded-t-2xl border border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-3)] md:max-h-[92dvh] md:max-w-2xl md:rounded-xl"
       >
         {/* 头部 */}
         <header className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3">
@@ -878,7 +878,7 @@ function UploadDialog({
         </header>
 
         {/* body */}
-        <div className="grid min-h-0 flex-1 gap-3 overflow-y-auto p-4 md:grid-cols-2">
+        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-3 overflow-y-auto p-4 md:grid-cols-2">
           <Input
             label="名称"
             value={form.title}
@@ -928,7 +928,7 @@ function UploadDialog({
           </label>
           <div className="flex flex-col gap-1 md:col-span-2">
             <span className="text-xs font-medium text-[var(--fg-1)]">目标文件夹</span>
-            <div className="flex h-9 items-center rounded-md border border-[var(--border)] bg-black/15 px-3 font-mono text-xs text-[var(--fg-1)]">
+            <div className="flex h-9 items-center rounded-md border border-[var(--border)] bg-white/[0.04] px-3 font-mono text-xs text-[var(--fg-1)]">
               {AGE_FOLDER_BY_SEGMENT[form.age_segment]}/{form.gender}
             </div>
           </div>
@@ -1023,7 +1023,7 @@ function UploadDialog({
         </div>
 
         {/* footer */}
-        <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] md:pb-3">
+        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3 md:pb-3">
           <Button variant="ghost" onClick={onClose} disabled={submitting}>
             取消
           </Button>
@@ -1069,7 +1069,7 @@ function MobileFilterSheet({
 
   return (
     <div
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-end bg-black/60 backdrop-blur-sm md:hidden"
+      className="fixed inset-0 z-[var(--z-dialog)] flex items-end bg-black/60 backdrop-blur-sm mobile-dialog-shell md:hidden"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -1082,7 +1082,7 @@ function MobileFilterSheet({
         animate={{ y: 0 }}
         exit={{ y: "100%" }}
         transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-        className="flex max-h-[85dvh] w-full flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-3)]"
+        className="mobile-dialog-sheet flex w-full flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]"
       >
         <header className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-3">
           <h3 className="font-display text-sm font-semibold text-[var(--fg-0)]">筛选</h3>
@@ -1095,7 +1095,7 @@ function MobileFilterSheet({
             <X className="h-4 w-4" />
           </button>
         </header>
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+        <div className="mobile-dialog-scroll flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
           {/* 年龄 */}
           <div>
             <p className="mb-2 text-xs font-medium text-[var(--fg-2)]">年龄段</p>
@@ -1160,7 +1160,7 @@ function MobileFilterSheet({
             </div>
           </div>
         </div>
-        <footer className="flex items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">
+        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-3">
           <Button
             variant="ghost"
             onClick={() => {

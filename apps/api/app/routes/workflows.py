@@ -4200,6 +4200,55 @@ def _extract_bonus_ids(
     return [bid for bid in raw if isinstance(bid, str) and bid not in seen]
 
 
+async def _workflow_produced_model_image_ids(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    steps: list[WorkflowStep],
+) -> set[str]:
+    """Image ids produced by a model workflow, including dual_race bonus outputs."""
+    produced = {
+        iid
+        for step in steps
+        for iid in (step.image_ids or [])
+        if isinstance(iid, str) and iid
+    }
+    for step in steps:
+        produced.update(_extract_bonus_ids(step, produced))
+
+    all_task_ids = _dedupe_nonempty(
+        task_id for step in steps for task_id in (step.task_ids or [])
+    )
+    if not all_task_ids:
+        return produced
+
+    owned = (
+        await db.execute(
+            select(Image.id).where(
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+                or_(
+                    Image.owner_generation_id.in_(all_task_ids),
+                    Image.owner_generation_id.in_(
+                        select(Generation.id).where(
+                            Generation.user_id == user_id,
+                            Generation.upstream_request[
+                                "parent_generation_id"
+                            ].astext.in_(all_task_ids),
+                            Generation.upstream_request[
+                                "is_dual_race_bonus"
+                            ].as_boolean()
+                            == True,  # noqa: E712
+                        )
+                    ),
+                ),
+            )
+        )
+    ).scalars().all()
+    produced.update(iid for iid in owned if isinstance(iid, str) and iid)
+    return produced
+
+
 async def _job_from_library_run(
     db: AsyncSession,
     *,
@@ -4250,12 +4299,12 @@ async def _job_from_library_run(
         )
         for iid in image_ids
     ]
-    # candidate（loser）不跑 tagging、不允许入库，所以 saved_item_id/style_tags/appearance 全空
+    # candidate（loser）不跑 tagging，但可沿用任务元信息手动入库。
     candidates = [
         _job_item_out(
             image_id=bid,
             image_out=image_out_map.get(bid),
-            saved_item_id=None,
+            saved_item_id=saved_map.get(bid),
             style_tags=[],
             appearance_direction=None,
         )
@@ -4322,7 +4371,7 @@ async def _job_from_project_candidate_step(
         _job_item_out(
             image_id=bid,
             image_out=image_out_map.get(bid),
-            saved_item_id=None,
+            saved_item_id=saved_map.get(bid),
             style_tags=[],
             appearance_direction=None,
         )
@@ -4615,30 +4664,11 @@ async def save_apparel_model_library_job_item(
             400,
         )
     steps = await _load_steps(db, run.id)
-    produced: set[str] = set()
-    for step in steps:
-        for iid in step.image_ids or []:
-            if isinstance(iid, str):
-                produced.add(iid)
-    # 若 step.image_ids 还没刷出来（worker 还没回写），允许 image 通过 owner_generation_id
-    # 反向找：只要属于该 run 的 task_id 即可。
-    if image_id not in produced:
-        all_task_ids: list[str] = []
-        for step in steps:
-            all_task_ids.extend(step.task_ids or [])
-        if all_task_ids:
-            owned = (
-                await db.execute(
-                    select(Image.id).where(
-                        Image.id == image_id,
-                        Image.user_id == user.id,
-                        Image.owner_generation_id.in_(all_task_ids),
-                        Image.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-            if owned is not None:
-                produced.add(image_id)
+    produced = await _workflow_produced_model_image_ids(
+        db,
+        user_id=user.id,
+        steps=steps,
+    )
     if image_id not in produced:
         raise _http("invalid_image", "image is not a product of this workflow", 404)
 

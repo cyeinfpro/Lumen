@@ -797,7 +797,7 @@ export interface ApparelModelLibraryJob {
   appearance_direction: string | null;
   extra_requirements: string | null;
   items: ApparelModelLibraryJobItem[];
-  // dual_race 模式下另一路 provider 产出的 loser 图，仅用于展示，不可保存到模特库
+  // dual_race 模式下另一路 provider 产出的图，展示在候选区，也可按需保存到模特库
   candidates: ApparelModelLibraryJobItem[];
   error_message: string | null;
   created_at: string;

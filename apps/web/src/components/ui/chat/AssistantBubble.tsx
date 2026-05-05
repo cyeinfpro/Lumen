@@ -124,7 +124,7 @@ export function AssistantBubble({
           <div
             className={cn(
               "relative px-4 py-3 md:px-5 md:py-3.5 rounded-2xl rounded-bl-md text-[0.9rem] md:text-[0.95rem] leading-relaxed",
-              "bg-[var(--bg-1)]/70 border border-white/10 text-neutral-200",
+              "bg-[var(--bg-1)]/70 border border-[var(--border)] text-[var(--fg-0)]",
               "backdrop-blur-sm shadow-sm min-w-0 break-words [overflow-wrap:anywhere]",
               "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_img]:max-w-full [&_img]:h-auto",
               isFailedText && "border-red-400/30 bg-red-500/5",
@@ -159,7 +159,7 @@ export function AssistantBubble({
                 title={copied ? "已复制" : "复制"}
                 className={cn(
                   "absolute right-2 bottom-2 p-1 rounded-md",
-                  "text-neutral-500 hover:text-neutral-200 hover:bg-white/10",
+                  "text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/10",
                   "transition-all duration-150 active:scale-[0.92]",
                 )}
               >
@@ -256,7 +256,7 @@ function ToolbarButton({
       title={label}
       className={cn(
         "inline-flex items-center justify-center w-9 h-9 rounded-md",
-        "text-neutral-400 hover:text-white hover:bg-white/10",
+        "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10",
         "active:scale-[0.92] transition-all duration-150",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
       )}

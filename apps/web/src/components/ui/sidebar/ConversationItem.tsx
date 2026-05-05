@@ -110,7 +110,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
               "focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
               active
                 ? "bg-[var(--accent)]/12 text-[var(--fg-0)] shadow-[inset_2px_0_0_var(--accent)]"
-                : "text-neutral-300 hover:bg-white/[0.04] hover:text-white",
+                : "text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
             )}
           >
             <MessageSquare
@@ -136,7 +136,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             aria-haspopup="menu"
             aria-expanded={view !== "closed"}
             className={cn(
-              "absolute right-1 top-1/2 -translate-y-1/2 w-9 h-9 md:w-7 md:h-7 inline-flex items-center justify-center rounded-md text-neutral-400 hover:text-white hover:bg-white/10 transition-all",
+              "absolute right-1 top-1/2 -translate-y-1/2 w-9 h-9 md:w-7 md:h-7 inline-flex items-center justify-center rounded-md text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 transition-all",
               "focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
               // 移动端常显（<md 触控设备没有 hover），桌面端 hover 才显
               view !== "closed"
@@ -157,7 +157,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             <div
               role="menu"
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full mt-1 z-50 w-40 rounded-lg border border-white/10 bg-[var(--bg-2)]/95 backdrop-blur-xl shadow-lumen-card py-1"
+              className="absolute right-0 top-full mt-1 z-50 w-40 rounded-lg border border-[var(--border)] bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card py-1"
             >
               <MenuButton
                 icon={<Pencil className="w-3.5 h-3.5" />}
@@ -184,7 +184,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
               >
                 {conv.archived ? "取消归档" : "归档"}
               </MenuButton>
-              <div className="my-1 border-t border-white/5" />
+              <div className="my-1 border-t border-[var(--border-subtle)]" />
               <MenuButton
                 icon={<Trash2 className="w-3.5 h-3.5" />}
                 danger
@@ -212,7 +212,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 }
                 setView("closed");
               }}
-              className="absolute right-0 top-full mt-1 z-50 w-64 p-2 rounded-lg border border-white/10 bg-[var(--bg-2)]/95 backdrop-blur-xl shadow-lumen-card"
+              className="absolute right-0 top-full mt-1 z-50 w-64 p-2 rounded-lg border border-[var(--border)] bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card"
             >
               <input
                 ref={renameInputRef}
@@ -227,7 +227,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 }}
                 onClick={(e) => e.stopPropagation()}
                 maxLength={120}
-                className="w-full h-8 px-2 text-sm bg-white/5 border border-white/10 rounded-md outline-none focus:border-[var(--accent)]/60 text-neutral-100 placeholder:text-neutral-500"
+                className="w-full h-8 px-2 text-sm bg-white/5 border border-[var(--border)] rounded-md outline-none focus:border-[var(--accent)]/60 text-[var(--fg-0)] placeholder:text-[var(--fg-2)]"
                 placeholder="会话标题"
               />
               <div className="flex gap-1.5 mt-1.5 justify-end">
@@ -237,7 +237,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                     e.stopPropagation();
                     setView("closed");
                   }}
-                  className="px-2 h-7 text-xs rounded-md text-neutral-400 hover:text-white hover:bg-white/5 transition-colors"
+                  className="px-2 h-7 text-xs rounded-md text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
                 >
                   取消
                 </button>
@@ -258,11 +258,11 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             <div
               role="dialog"
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full mt-1 z-50 w-64 p-2.5 rounded-lg border border-red-500/20 bg-[var(--bg-2)]/95 backdrop-blur-xl shadow-lumen-card"
+              className="absolute right-0 top-full mt-1 z-50 w-64 p-2.5 rounded-lg border border-red-500/20 bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card"
             >
-              <p className="text-xs text-neutral-300 leading-snug px-0.5 mb-2">
+              <p className="text-xs text-[var(--fg-1)] leading-snug px-0.5 mb-2">
                 确认删除会话
-                <span className="text-neutral-100 font-medium mx-1">
+                <span className="text-[var(--fg-0)] font-medium mx-1">
                   「{titleOf(conv)}」
                 </span>
                 ？此操作不可恢复。
@@ -274,7 +274,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                     e.stopPropagation();
                     setView("closed");
                   }}
-                  className="inline-flex items-center gap-1 px-2 h-7 text-xs rounded-md text-neutral-400 hover:text-white hover:bg-white/5 transition-colors"
+                  className="inline-flex items-center gap-1 px-2 h-7 text-xs rounded-md text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
                 >
                   <X className="w-3 h-3" />
                   取消
@@ -321,7 +321,7 @@ function MenuButton({
         "active:scale-[0.98]",
         danger
           ? "text-red-300 hover:bg-red-500/10 hover:text-red-200"
-          : "text-neutral-300 hover:bg-white/5 hover:text-white",
+          : "text-[var(--fg-1)] hover:bg-white/5 hover:text-[var(--fg-0)]",
       )}
     >
       <span className="shrink-0">{icon}</span>

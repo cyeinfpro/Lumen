@@ -93,9 +93,19 @@ export function BottomSheet({
   );
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const onResize = () => setViewportH(window.innerHeight);
+    const viewport = window.visualViewport;
+    const readHeight = () => viewport?.height ?? window.innerHeight;
+    const onResize = () => setViewportH(readHeight());
+    const raf = window.requestAnimationFrame(onResize);
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    viewport?.addEventListener("resize", onResize);
+    viewport?.addEventListener("scroll", onResize);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", onResize);
+      viewport?.removeEventListener("resize", onResize);
+      viewport?.removeEventListener("scroll", onResize);
+    };
   }, []);
 
   const clampedInitial = useMemo(
@@ -232,7 +242,7 @@ export function BottomSheet({
       {open && (
         <motion.div
           key="bs-root"
-          className="fixed inset-0 flex items-end justify-center"
+          className="fixed inset-0 flex items-end justify-center mobile-dialog-shell"
           style={{ zIndex: "var(--z-dialog, 90)" as unknown as number }}
           initial="hidden"
           animate="visible"
@@ -275,8 +285,7 @@ export function BottomSheet({
               "shadow-[0_-24px_64px_-12px_rgba(0,0,0,0.8)]",
               "mobile-perf-surface",
               "flex flex-col",
-              currentHeightPx == null ? "max-h-[88vh]" : "",
-              "pb-[env(safe-area-inset-bottom)]",
+              currentHeightPx == null ? "mobile-dialog-sheet" : "max-h-[var(--mobile-dialog-max-height)]",
               "safe-x",
               "focus:outline-none",
               className,
@@ -313,7 +322,7 @@ export function BottomSheet({
                 onPointerDown={onContentPointerDown}
                 onPointerUp={onContentPointerUp}
                 onPointerCancel={onContentPointerUp}
-                className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin"
+                className="mobile-dialog-scroll flex-1 overflow-y-auto overscroll-contain scrollbar-thin"
                 style={{ overscrollBehaviorY: "contain" }}
               >
                 <span id={labelId} className="sr-only">

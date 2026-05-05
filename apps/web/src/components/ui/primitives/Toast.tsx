@@ -130,7 +130,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         // 移动端撑满可用宽度（已扣掉 viewport 两侧 padding）
         "max-sm:w-full",
         "flex items-start gap-3 px-3 py-2.5 rounded-xl",
-        "bg-neutral-900/95 backdrop-blur-xl border text-[var(--fg-0)]",
+        "bg-[var(--bg-1)]/95 backdrop-blur-xl border text-[var(--fg-0)]",
         "shadow-lumen-pop",
         tone.border,
       )}

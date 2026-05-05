@@ -316,8 +316,8 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               "fixed left-[calc(50%+var(--sidebar-w)/2)] -translate-x-1/2 z-[60]",
               "bottom-[calc(var(--composer-bottom,9rem)+env(safe-area-inset-bottom))]",
               "px-3.5 py-1.5 rounded-full text-xs font-medium",
-              "bg-neutral-900/95 border border-white/15 text-neutral-100",
-              "shadow-lg shadow-black/40 backdrop-blur-md",
+              "bg-[var(--bg-1)]/95 border border-[var(--border)] text-[var(--fg-0)]",
+              "shadow-lg shadow-black/25 backdrop-blur-md",
             )}
           >
             {toast}
@@ -347,8 +347,8 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           "border transition-[border-color,background-color,box-shadow] duration-300",
           // focus 不再改描边/背景 —— 避免"点进去冒出一个亮框"。
           // amber 只保留给拖拽态（用户正在往里拖图）。
-          isDragging ? "border-[var(--color-lumen-amber)]/70" : "border-white/10",
-          "bg-neutral-950/70 backdrop-blur-2xl supports-[backdrop-filter]:bg-neutral-950/62",
+          isDragging ? "border-[var(--color-lumen-amber)]/70" : "border-[var(--border)]",
+          "bg-[var(--bg-1)]/78 backdrop-blur-2xl supports-[backdrop-filter]:bg-[var(--bg-1)]/72",
           // 注意：不要加 overflow-hidden —— 会裁掉 AspectRatioPicker / ModeSwitcher 的 popover
         )}
       >
@@ -406,7 +406,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
                   aria-label="关闭错误提示"
                   title="关闭"
                   onClick={() => setComposerError(null)}
-                  className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md text-red-300 hover:text-white hover:bg-red-500/30 transition-colors"
+                  className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md text-red-300 hover:text-red-100 hover:bg-red-500/30 transition-colors"
                 >
                   <X className="w-3 h-3" />
                 </button>
@@ -438,7 +438,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
                 <button
                   type="button"
                   onClick={handleUndoEnhance}
-                  className="inline-flex items-center gap-1 text-[11px] underline decoration-dotted hover:text-white transition-colors"
+                  className="inline-flex items-center gap-1 text-[11px] underline decoration-dotted hover:text-[var(--fg-0)] transition-colors"
                 >
                   <Undo2 className="w-3 h-3" />
                   撤销
@@ -467,7 +467,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               aria-label="输入提示词"
               className={cn(
                 "w-full bg-transparent resize-none outline-none",
-                "text-[15px] leading-6 text-neutral-50 placeholder:text-neutral-500",
+                "text-[15px] leading-6 text-[var(--fg-0)] placeholder:text-neutral-500",
                 "py-1 min-h-[56px]",
               )}
               rows={2}
@@ -606,7 +606,7 @@ function IconButton({
       transition={{ type: "spring", stiffness: 400, damping: 25 }}
       className={cn(
         "inline-flex items-center justify-center w-9 h-9 rounded-full",
-        "text-neutral-300 hover:text-white hover:bg-white/8",
+        "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/8",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         "aria-disabled:pointer-events-none disabled:opacity-40 disabled:cursor-not-allowed",
       )}
@@ -634,7 +634,7 @@ function FastToggle() {
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         fast
           ? "bg-emerald-500/12 border-emerald-500/40 text-emerald-400"
-          : "bg-white/5 border-white/10 text-neutral-300 hover:bg-white/10 hover:text-white",
+          : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10 hover:text-[var(--fg-0)]",
       )}
     >
       <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -663,7 +663,7 @@ function WebSearchToggle() {
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         webSearch
           ? "bg-sky-500/12 border-sky-500/40 text-sky-300"
-          : "bg-white/5 border-white/10 text-neutral-300 hover:bg-white/10 hover:text-white",
+          : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10 hover:text-[var(--fg-0)]",
       )}
     >
       <Globe2 className="w-3.5 h-3.5" aria-hidden />

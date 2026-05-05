@@ -587,7 +587,7 @@ class ApparelModelLibraryJobOut(BaseModel):
     appearance_direction: str | None = None
     extra_requirements: str | None = None
     items: list[ApparelModelLibraryJobItemOut] = Field(default_factory=list)
-    # dual_race 模式下另一路 provider 的产出（loser）。前端展示在「候选区」，不可入库、不参与 finished_count。
+    # dual_race 模式下另一路 provider 的产出。前端展示在「候选区」，不参与 finished_count，可按需入库。
     candidates: list[ApparelModelLibraryJobItemOut] = Field(default_factory=list)
     error_message: str | None = None
     created_at: datetime

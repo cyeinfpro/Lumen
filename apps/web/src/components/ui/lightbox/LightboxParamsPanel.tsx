@@ -71,8 +71,8 @@ export function LightboxParamsPanel({
             "fixed inset-x-0 bottom-0 z-[var(--z-dialog,90)]",
             "rounded-t-2xl bg-[var(--bg-1)]/96 backdrop-blur-2xl",
             "border-t border-[var(--border-subtle)]",
-            "pb-[max(1rem,env(safe-area-inset-bottom))]",
-            "max-h-[70vh] overflow-y-auto",
+            "mobile-dialog-scroll pb-[var(--mobile-dialog-footer-pad-bottom)]",
+            "max-h-[min(70dvh,var(--mobile-dialog-max-height))] overflow-y-auto",
           )}
           initial={reducedMotion ? { opacity: 0 } : { y: "100%" }}
           animate={reducedMotion ? { opacity: 1 } : { y: 0 }}

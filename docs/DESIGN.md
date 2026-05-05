@@ -1119,17 +1119,22 @@ useUiStore = {
 
 ### 15.2 Tokens（CSS Variables）
 
+`apps/web/src/app/globals.css` 是主题 token 的实现真源；文档里的数值只用于设计讨论，代码必须优先引用变量。
+
 ```
---bg-0:   #FAFAF9 / #0B0B0C
---bg-1:   #F4F3F0 / #141416
---bg-2:   #EDECE8 / #1B1C1F
---fg-0:   #121212 / #F6F5F2
---fg-1:   #4A4A49 / #A8A7A2
+--bg-0: #F8F4EA / #08080A
+--bg-1: #FFFDF8 / #0F0F12
+--bg-2: #ECE4D5 / #17181C
+--bg-3: #DED3C0 / #1F2025
+--fg-0: #211F1A / #F5F1EA
+--fg-1: #5D574C / #B8B1A4
+--fg-2: #8B8375 / #6B675F
+--fg-3: #BDB3A3 / #3E3B36
 --accent: #F2A93A
 --danger: #E5484D
---ok:     #30A46C
---radius: 12px (cards), 8px (inputs), 999 (pills)
---shadow-card: 0 1px 0 rgba(0,0,0,.04), 0 6px 24px -12px rgba(0,0,0,.18)
+--success: #30A46C
+--border: rgba(33,31,26,.12) / rgba(245,241,234,.10)
+--shadow-2 / --shadow-3: 用于卡片、popover、dialog，不在普通 UI 手写 shadow-black
 ```
 
 ### 15.3 Type
@@ -1146,6 +1151,16 @@ useUiStore = {
 - 时长：进入 180ms，退出 120ms，emphasize 260ms
 - 曲线：`cubic-bezier(.2,.8,.2,1)`（iOS 风）
 - 图像就绪：从 blurhash 10px 模糊 → 0px，时长 300ms
+
+### 15.6 Theme & Dialog Standards
+
+完整执行清单见 `docs/frontend-theme-dialog-standards.md`。后续新功能默认遵守以下硬性标准：
+
+- 普通 UI 不允许写死暗色。页面根、表单、卡片、弹窗、popover、toast、tooltip、设置页、后台页、分享页必须使用 `--bg-*`、`--fg-*`、`--border*`、`--shadow-*` 等语义变量。
+- `bg-neutral-900/950`、`bg-black/*`、`text-white`、`hover:text-white`、`border-white/*` 只能出现在明确的例外场景：图片/视频/灯箱覆盖层、深色 code/pre、scrim/backdrop、危险按钮、成功勾选、彩色徽标。
+- 移动端弹窗和 bottom sheet 必须使用 `mobile-dialog-shell`、`mobile-dialog-panel` 或 `mobile-dialog-sheet`、`mobile-dialog-scroll`、`mobile-dialog-footer`，不能自行写一套 `100dvh` 和 safe-area 计算。
+- 全局浅色兼容层只是旧代码兜底，不是新代码模式。新组件必须直接用语义变量。
+- 交付前必须扫描硬编码深色 class，并说明剩余命中属于哪类例外。
 
 ---
 

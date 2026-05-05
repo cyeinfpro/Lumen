@@ -171,7 +171,7 @@ export function MobileEmptyStudio({
           </span>
           <span className="min-w-0">
             <span className="block text-body-sm font-medium text-[var(--fg-0)]">
-              服饰模特展示图
+              服饰模特图
             </span>
             <span className="mt-0.5 block truncate text-caption text-[var(--fg-2)]">
               先确认模特，再生成电商图

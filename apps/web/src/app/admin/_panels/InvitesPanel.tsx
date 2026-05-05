@@ -215,7 +215,7 @@ export function InvitesPanel() {
                 </button>
               </div>
               <div className="flex items-stretch gap-2">
-                <code className="flex-1 px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-xs font-mono text-neutral-200 break-all">
+                <code className="flex-1 px-3 py-2 rounded-lg bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all">
                   {created.url}
                 </code>
                 <button
@@ -289,7 +289,7 @@ export function InvitesPanel() {
                   className="p-3 border border-white/10 rounded-lg space-y-3"
                 >
                   <div className="flex flex-col gap-2">
-                    <code className="w-full min-w-0 px-2 py-2 rounded-md bg-black/30 border border-white/10 text-xs font-mono text-neutral-200 break-all leading-relaxed">
+                    <code className="w-full min-w-0 px-2 py-2 rounded-md bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all leading-relaxed">
                       {row.url}
                     </code>
                     <button

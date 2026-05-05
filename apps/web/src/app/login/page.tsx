@@ -86,7 +86,7 @@ function LoginInner() {
   };
 
   return (
-    <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200 flex flex-col">
+    <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
       <main className="flex-1 grid grid-cols-1 md:grid-cols-2 min-h-0">
         {/* —— 左：品牌区（仅桌面） —— */}
         <BrandPanel />
@@ -125,7 +125,7 @@ function LoginInner() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@example.com"
                     autoComplete="email"
-                    className="w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border border-white/10 text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors"
+                    className="w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
                   />
                 </Field>
 
@@ -143,13 +143,13 @@ function LoginInner() {
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="输入密码"
                       autoComplete="current-password"
-                      className="w-full h-10 pl-3 pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-white/10 text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors"
+                      className="w-full h-10 pl-3 pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
                     />
                     <button
                       type="button"
                       onClick={() => setShowPwd((v) => !v)}
                       aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-neutral-400 hover:text-neutral-100 hover:bg-white/5 flex items-center justify-center transition-colors"
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 flex items-center justify-center transition-colors"
                     >
                       {showPwd ? (
                         <EyeOff className="w-4 h-4" />
@@ -205,18 +205,18 @@ function LoginInner() {
 
               <div className="relative py-1">
                 <div className="absolute inset-0 flex items-center">
-                  <div className="w-full h-px bg-white/8" />
+                  <div className="w-full h-px bg-[var(--border)]" />
                 </div>
                 <div className="relative flex justify-center">
-                  <span className="px-3 bg-[var(--bg-0)] text-[11px] uppercase tracking-wider text-neutral-500">
+                  <span className="px-3 bg-[var(--bg-0)] text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                     还没有账号?
                   </span>
                 </div>
               </div>
 
-              <p className="text-xs text-neutral-500 text-center leading-relaxed">
+              <p className="text-xs text-[var(--fg-2)] text-center leading-relaxed">
                 需要邀请链接才能注册。也可以打开收到的{" "}
-                <span className="text-neutral-400">/invite/*</span>{" "}
+                <span className="text-[var(--fg-1)]">/invite/*</span>{" "}
                 链接完成注册。
               </p>
             </div>
@@ -224,8 +224,8 @@ function LoginInner() {
         </section>
       </main>
 
-      <footer className="py-4 px-4 text-center text-xs text-neutral-500 safe-bottom">
-        <Link href="/" className="hover:text-neutral-300 transition-colors">
+      <footer className="py-4 px-4 text-center text-xs text-[var(--fg-2)] safe-bottom">
+        <Link href="/" className="hover:text-[var(--fg-0)] transition-colors">
           返回首页
         </Link>
       </footer>
@@ -370,8 +370,8 @@ function Feature({
         {icon}
       </span>
       <div>
-        <p className="text-sm text-neutral-100 font-medium">{title}</p>
-        <p className="text-xs text-neutral-500 mt-0.5">{desc}</p>
+        <p className="text-sm text-[var(--fg-0)] font-medium">{title}</p>
+        <p className="text-xs text-[var(--fg-2)] mt-0.5">{desc}</p>
       </div>
     </motion.li>
   );

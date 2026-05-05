@@ -45,7 +45,7 @@ export default function InvitePage({
   const q = usePublicInviteQuery(token);
 
   return (
-    <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200 flex flex-col">
+    <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
       <main className="flex-1 flex flex-col items-center justify-center px-4 py-10 md:py-16 safe-x">
         <motion.div
           initial={false}
@@ -59,7 +59,7 @@ export default function InvitePage({
               <p className="text-lg font-medium tracking-tight leading-none">
                 Lumen
               </p>
-              <p className="text-[11px] uppercase tracking-wider text-neutral-500 mt-0.5">
+              <p className="text-[11px] uppercase tracking-wider text-[var(--fg-2)] mt-0.5">
                 邀请注册
               </p>
             </div>
@@ -79,10 +79,10 @@ export default function InvitePage({
         </motion.div>
       </main>
 
-      <footer className="py-4 px-4 text-center text-xs text-neutral-500 safe-bottom">
+      <footer className="py-4 px-4 text-center text-xs text-[var(--fg-2)] safe-bottom">
         <Link
           href="/login"
-          className="hover:text-neutral-300 transition-colors"
+          className="hover:text-[var(--fg-0)] transition-colors"
         >
           已有账号？直接登录
         </Link>
@@ -208,11 +208,11 @@ function SignupForm({
         </InfoLine>
         {invite.email && (
           <InfoLine label="绑定邮箱" icon={<Mail className="w-3 h-3" />}>
-            <span className="text-neutral-200">{invite.email}</span>
+            <span className="text-[var(--fg-0)]">{invite.email}</span>
           </InfoLine>
         )}
         <InfoLine label="过期" icon={<Clock className="w-3 h-3" />}>
-          <span className="text-neutral-200 font-mono tabular-nums text-xs">
+          <span className="text-[var(--fg-0)] font-mono tabular-nums text-xs">
             {expiresLabel}
           </span>
         </InfoLine>
@@ -233,12 +233,12 @@ function SignupForm({
             placeholder="you@example.com"
             autoComplete="email"
             className={
-              "w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border border-white/10 text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors " +
+              "w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors " +
               (lockedEmail ? "opacity-70 cursor-not-allowed" : "")
             }
           />
           {lockedEmail && (
-            <p className="text-[11px] text-neutral-500 mt-1">
+            <p className="text-[11px] text-[var(--fg-2)] mt-1">
               该邀请已绑定此邮箱，不能修改。
             </p>
           )}
@@ -259,13 +259,13 @@ function SignupForm({
               onChange={(e) => setPassword(e.target.value)}
               placeholder="至少 8 位"
               autoComplete="new-password"
-              className="w-full h-10 pl-3 pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-white/10 text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors"
+              className="w-full h-10 pl-3 pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
             />
             <button
               type="button"
               onClick={() => setShowPwd((v) => !v)}
               aria-label={showPwd ? "隐藏密码" : "显示密码"}
-              className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-neutral-400 hover:text-neutral-100 hover:bg-white/5 flex items-center justify-center transition-colors"
+              className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 flex items-center justify-center transition-colors"
             >
               {showPwd ? (
                 <EyeOff className="w-4 h-4" />
@@ -280,7 +280,7 @@ function SignupForm({
               "mt-1.5 text-[11px] " +
               (password.length > 0 && passwordTooShort
                 ? "text-red-300"
-                : "text-neutral-500")
+                : "text-[var(--fg-2)]")
             }
           >
             至少 8 位（{Math.min(password.length, 8)}/8）
@@ -302,10 +302,10 @@ function SignupForm({
             placeholder="再输入一次"
             autoComplete="new-password"
             className={
-              "w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border text-base md:text-sm focus:outline-none focus:ring-2 placeholder:text-neutral-600 transition-colors " +
+              "w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border text-base md:text-sm focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors " +
               (confirmMismatch
                 ? "border-red-500/40 focus:border-red-500/60 focus:ring-red-500/20"
-                : "border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
+                : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
             }
           />
           {confirmMismatch && (
@@ -346,7 +346,7 @@ function SignupForm({
         </button>
       </form>
 
-      <p className="text-xs text-neutral-500 text-center">
+      <p className="text-xs text-[var(--fg-2)] text-center">
         已有账号？{" "}
         <Link
           href="/login"
@@ -393,26 +393,26 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center">
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
+        <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
           {icon}
         </div>
         <h1 className="text-xl font-semibold tracking-tight">邀请不可用</h1>
         <p className="text-sm text-[var(--fg-1)]">{text}</p>
-        <p className="text-xs text-neutral-500">
+        <p className="text-xs text-[var(--fg-2)]">
           如果你认为这是错误，请联系邀请你的人重新生成邀请。
         </p>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <Link
           href="/login"
-          className="h-10 inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm transition-colors"
+          className="h-10 inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm transition-colors"
         >
           去登录
         </Link>
         <Link
           href="/"
-          className="h-10 inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm transition-colors"
+          className="h-10 inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm transition-colors"
         >
           返回首页
         </Link>
@@ -426,8 +426,8 @@ function ErrorView({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : "未知错误";
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center">
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
+        <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
           <FileX className="w-6 h-6 text-neutral-400" />
         </div>
         <h1 className="text-xl font-semibold tracking-tight">
@@ -441,7 +441,7 @@ function ErrorView({ error }: { error: unknown }) {
       </div>
       <Link
         href="/"
-        className="h-10 w-full inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm transition-colors"
+        className="h-10 w-full inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm transition-colors"
       >
         返回首页
       </Link>
@@ -485,7 +485,7 @@ function InfoLine({
 }) {
   return (
     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between text-[11px] sm:text-xs">
-      <span className="inline-flex items-center gap-1.5 uppercase tracking-wider text-neutral-500">
+      <span className="inline-flex items-center gap-1.5 uppercase tracking-wider text-[var(--fg-2)]">
         {icon}
         {label}
       </span>
@@ -504,7 +504,7 @@ function RoleBadge({ role }: { role: "admin" | "member" }) {
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-neutral-400 border border-white/10">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-[var(--fg-1)] border border-[var(--border)]">
       <UsersIcon className="w-3 h-3" />
       member
     </span>
@@ -560,8 +560,8 @@ function PasswordStrength({
           />
         ))}
       </div>
-      <p className="text-[11px] text-neutral-500">
-        强度：<span className="text-neutral-300">{strength.label}</span>
+      <p className="text-[11px] text-[var(--fg-2)]">
+        强度：<span className="text-[var(--fg-1)]">{strength.label}</span>
       </p>
     </div>
   );

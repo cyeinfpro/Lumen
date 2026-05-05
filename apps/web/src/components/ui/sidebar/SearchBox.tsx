@@ -59,7 +59,7 @@ export function SearchBox({
   return (
     <div
       className={cn(
-        "relative flex items-center h-10 md:h-9 rounded-lg bg-white/[0.04] border border-white/10 focus-within:border-[var(--accent)]/60 focus-within:bg-white/[0.06] transition-colors",
+        "relative flex items-center h-10 md:h-9 rounded-lg bg-white/[0.04] border border-[var(--border)] focus-within:border-[var(--accent)]/60 focus-within:bg-white/[0.06] transition-colors",
         className,
       )}
     >
@@ -81,7 +81,7 @@ export function SearchBox({
           }
         }}
         // 移动端 font-size 16px 防 iOS Safari 聚焦缩放；桌面端回到 14px
-        className="w-full h-full bg-transparent pl-8 pr-10 text-base md:text-sm text-neutral-100 placeholder:text-neutral-500 outline-none"
+        className="w-full h-full bg-transparent pl-8 pr-10 text-base md:text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-2)] outline-none"
       />
       {local && (
         <button
@@ -92,7 +92,7 @@ export function SearchBox({
             inputRef.current?.focus();
           }}
           aria-label="清除搜索"
-          className="absolute right-1 w-8 h-8 inline-flex items-center justify-center rounded text-neutral-500 hover:text-neutral-200 hover:bg-white/5 transition-colors"
+          className="absolute right-1 w-8 h-8 inline-flex items-center justify-center rounded text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
         >
           <X className="w-4 h-4" />
         </button>
@@ -100,7 +100,7 @@ export function SearchBox({
       <kbd
         aria-hidden
         className={cn(
-          "absolute right-2 px-1.5 py-0.5 rounded text-[10px] font-mono text-neutral-500 bg-white/5 border border-white/10 pointer-events-none transition-opacity",
+          "absolute right-2 px-1.5 py-0.5 rounded text-[10px] font-mono text-[var(--fg-2)] bg-white/5 border border-[var(--border)] pointer-events-none transition-opacity",
           local ? "opacity-0" : "opacity-100",
         )}
       >

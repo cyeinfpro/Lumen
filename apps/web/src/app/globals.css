@@ -148,6 +148,14 @@
     --z-lightbox: 80;
     --z-dialog: 90;
     --z-toast: 100;
+
+    /* 移动端弹窗避让：给底部 home indicator / 浏览器工具栏 / 浮层留出稳定空间。 */
+    --mobile-dialog-margin-x: 0px;
+    --mobile-dialog-margin-top: max(0.75rem, env(safe-area-inset-top, 0px));
+    --mobile-dialog-bottom-gap: max(1rem, env(safe-area-inset-bottom, 0px));
+    --mobile-dialog-footer-pad-bottom: calc(0.875rem + var(--mobile-dialog-bottom-gap));
+    --mobile-dialog-max-height: calc(100dvh - var(--mobile-dialog-margin-top) - var(--mobile-dialog-bottom-gap));
+    --mobile-dialog-sheet-max-height: min(88dvh, var(--mobile-dialog-max-height));
   }
 
   /* .dark 保留作 opt-in：与 :root 等价，便于 <html class="dark"> 现有写法继续 work */
@@ -220,7 +228,7 @@
 
 @layer base {
   * {
-    @apply border-white/10;
+    border-color: var(--border);
   }
   html {
     overflow-x: hidden;
@@ -334,12 +342,62 @@
   .theme-light .bg-white\/5 {
     background-color: rgba(33, 31, 26, 0.04) !important;
   }
+  .theme-light .bg-white\/4,
+  .theme-light .bg-white\/6,
+  .theme-light .bg-white\/8,
+  .theme-light .bg-white\/\[0\.02\],
+  .theme-light .bg-white\/\[0\.025\],
+  .theme-light .bg-white\/\[0\.03\],
+  .theme-light .bg-white\/\[0\.035\],
+  .theme-light .bg-white\/\[0\.04\],
+  .theme-light .bg-white\/\[0\.05\],
+  .theme-light .bg-white\/\[0\.06\] {
+    background-color: rgba(33, 31, 26, 0.05) !important;
+  }
   .theme-light .bg-white\/10 {
     background-color: rgba(33, 31, 26, 0.08) !important;
   }
-  .theme-light .bg-black\/30,
-  .theme-light .bg-black\/40 {
-    background-color: rgba(255, 253, 248, 0.72) !important;
+  .theme-light .bg-white\/12,
+  .theme-light .bg-white\/15,
+  .theme-light .bg-white\/\[0\.08\],
+  .theme-light .bg-white\/\[0\.1\],
+  .theme-light .bg-white\/\[0\.10\],
+  .theme-light .bg-white\/\[0\.12\],
+  .theme-light .bg-white\/\[0\.15\] {
+    background-color: rgba(33, 31, 26, 0.09) !important;
+  }
+  .theme-light .hover\:bg-white\/4:hover,
+  .theme-light .hover\:bg-white\/5:hover,
+  .theme-light .hover\:bg-white\/6:hover,
+  .theme-light .hover\:bg-white\/8:hover,
+  .theme-light .hover\:bg-white\/10:hover,
+  .theme-light .hover\:bg-white\/12:hover,
+  .theme-light .hover\:bg-white\/15:hover,
+  .theme-light .hover\:bg-white\/\[0\.02\]:hover,
+  .theme-light .hover\:bg-white\/\[0\.03\]:hover,
+  .theme-light .hover\:bg-white\/\[0\.04\]:hover,
+  .theme-light .hover\:bg-white\/\[0\.05\]:hover,
+  .theme-light .hover\:bg-white\/\[0\.06\]:hover,
+  .theme-light .hover\:bg-white\/\[0\.08\]:hover,
+  .theme-light .hover\:bg-white\/\[0\.1\]:hover,
+  .theme-light .hover\:bg-white\/\[0\.10\]:hover {
+    background-color: rgba(33, 31, 26, 0.10) !important;
+  }
+  .theme-light .bg-neutral-800,
+  .theme-light .bg-neutral-900,
+  .theme-light .bg-neutral-900\/40,
+  .theme-light .bg-neutral-900\/95,
+  .theme-light .bg-neutral-900\/96,
+  .theme-light .bg-neutral-900\/98,
+  .theme-light .bg-neutral-950,
+  .theme-light .bg-neutral-950\/70,
+  .theme-light .bg-neutral-950\/95 {
+    background-color: rgba(255, 253, 248, 0.94) !important;
+  }
+  .theme-light .placeholder\:text-neutral-500::placeholder,
+  .theme-light .placeholder\:text-neutral-600::placeholder,
+  .theme-light .placeholder\:text-neutral-700::placeholder {
+    color: var(--fg-2) !important;
   }
 
   @media (prefers-color-scheme: light) {
@@ -366,12 +424,62 @@
     :root:not(.theme-dark):not(.dark) .bg-white\/5 {
       background-color: rgba(33, 31, 26, 0.04) !important;
     }
+    :root:not(.theme-dark):not(.dark) .bg-white\/4,
+    :root:not(.theme-dark):not(.dark) .bg-white\/6,
+    :root:not(.theme-dark):not(.dark) .bg-white\/8,
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.02\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.025\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.03\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.035\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.04\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.05\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.06\] {
+      background-color: rgba(33, 31, 26, 0.05) !important;
+    }
     :root:not(.theme-dark):not(.dark) .bg-white\/10 {
       background-color: rgba(33, 31, 26, 0.08) !important;
     }
-    :root:not(.theme-dark):not(.dark) .bg-black\/30,
-    :root:not(.theme-dark):not(.dark) .bg-black\/40 {
-      background-color: rgba(255, 253, 248, 0.72) !important;
+    :root:not(.theme-dark):not(.dark) .bg-white\/12,
+    :root:not(.theme-dark):not(.dark) .bg-white\/15,
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.08\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.1\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.10\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.12\],
+    :root:not(.theme-dark):not(.dark) .bg-white\/\[0\.15\] {
+      background-color: rgba(33, 31, 26, 0.09) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/4:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/5:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/6:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/8:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/10:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/12:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/15:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.02\]:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.03\]:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.04\]:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.05\]:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.06\]:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.08\]:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.1\]:hover,
+    :root:not(.theme-dark):not(.dark) .hover\:bg-white\/\[0\.10\]:hover {
+      background-color: rgba(33, 31, 26, 0.10) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .bg-neutral-800,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-900,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-900\/40,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-900\/95,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-900\/96,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-900\/98,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-950,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-950\/70,
+    :root:not(.theme-dark):not(.dark) .bg-neutral-950\/95 {
+      background-color: rgba(255, 253, 248, 0.94) !important;
+    }
+    :root:not(.theme-dark):not(.dark) .placeholder\:text-neutral-500::placeholder,
+    :root:not(.theme-dark):not(.dark) .placeholder\:text-neutral-600::placeholder,
+    :root:not(.theme-dark):not(.dark) .placeholder\:text-neutral-700::placeholder {
+      color: var(--fg-2) !important;
     }
   }
 
@@ -464,6 +572,38 @@
     margin-top: -4rem;
     background: linear-gradient(to top, var(--bg-0), transparent);
     z-index: 20;
+  }
+
+  .mobile-dialog-shell {
+    padding-top: var(--mobile-dialog-margin-top);
+    padding-right: var(--mobile-dialog-margin-x);
+    padding-bottom: var(--mobile-dialog-bottom-gap);
+    padding-left: var(--mobile-dialog-margin-x);
+  }
+  .mobile-dialog-panel {
+    max-height: var(--mobile-dialog-max-height);
+  }
+  .mobile-dialog-sheet {
+    max-height: var(--mobile-dialog-sheet-max-height);
+  }
+  .mobile-dialog-footer {
+    padding-bottom: var(--mobile-dialog-footer-pad-bottom);
+  }
+  .mobile-dialog-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  @media (min-width: 640px) {
+    .mobile-dialog-shell {
+      padding: 1rem;
+    }
+    .mobile-dialog-panel,
+    .mobile-dialog-sheet {
+      max-height: calc(100dvh - 2rem);
+    }
+    .mobile-dialog-footer {
+      padding-bottom: 0.75rem;
+    }
   }
 
   .animate-pulse-soft {

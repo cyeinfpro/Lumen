@@ -67,7 +67,7 @@ export function ErrorState({
         </p>
       ) : null}
       {detail ? (
-        <p className="mt-3 text-[11px] font-mono text-[var(--fg-1)] break-words max-w-md px-3 py-1.5 rounded-md bg-black/20 border border-white/5">
+        <p className="mt-3 text-[11px] font-mono text-[var(--fg-1)] break-words max-w-md px-3 py-1.5 rounded-md bg-[var(--bg-1)]/70 border border-[var(--border)]">
           {detail}
         </p>
       ) : null}

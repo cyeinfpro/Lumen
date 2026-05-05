@@ -115,7 +115,7 @@ export function ConfirmDialog({
             "fixed inset-0 bg-black/55 backdrop-blur-sm z-[var(--z-dialog)]",
             // 桌面居中；移动端贴底（拇指可及 + 避开顶部刘海/浏览器 UI）
             "flex items-end justify-center p-0",
-            "sm:items-center sm:justify-center sm:p-4",
+            "mobile-dialog-shell sm:items-center sm:justify-center",
           )}
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) handleCancel();
@@ -133,33 +133,36 @@ export function ConfirmDialog({
             transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
               "w-full max-w-sm",
-              "bg-neutral-900/95 border border-white/10 backdrop-blur-xl",
+              "mobile-dialog-panel overflow-hidden",
+              "bg-[var(--bg-1)]/95 border border-[var(--border)] backdrop-blur-xl",
               "shadow-lumen-pop",
-              "p-5 focus-visible:outline-none",
+              "flex flex-col p-5 focus-visible:outline-none",
               // 移动端：底部 sheet，仅顶部圆角；safe-area 下补底 padding
               "max-sm:max-w-none max-sm:rounded-t-2xl max-sm:rounded-b-none",
-              "max-sm:border-b-0 max-sm:pb-[max(1.25rem,env(safe-area-inset-bottom))]",
+              "max-sm:border-b-0",
               // 桌面：四角圆角
               "sm:rounded-2xl",
             )}
           >
-            <h2
-              id="confirm-dialog-title"
-              className={cn(
-                "text-base font-semibold tracking-tight text-[var(--fg-0)] text-balance",
-                tone === "danger" && "text-[var(--danger)]",
-              )}
-            >
-              {title}
-            </h2>
-            {description ? (
-              <div className="mt-1.5 text-xs text-[var(--fg-1)] leading-relaxed text-pretty">
-                {description}
-              </div>
-            ) : null}
+            <div className="mobile-dialog-scroll min-h-0 overflow-y-auto pr-0.5">
+              <h2
+                id="confirm-dialog-title"
+                className={cn(
+                  "text-base font-semibold tracking-tight text-[var(--fg-0)] text-balance",
+                  tone === "danger" && "text-[var(--danger)]",
+                )}
+              >
+                {title}
+              </h2>
+              {description ? (
+                <div className="mt-1.5 text-xs text-[var(--fg-1)] leading-relaxed text-pretty">
+                  {description}
+                </div>
+              ) : null}
+            </div>
             <div
               className={cn(
-                "mt-5 flex gap-2",
+                "mobile-dialog-footer mt-5 flex shrink-0 gap-2 max-sm:-mx-5 max-sm:border-t max-sm:border-[var(--border)] max-sm:px-5 max-sm:pt-3",
                 // 移动端纵向堆叠避免按钮被挤压；桌面横向右对齐
                 "flex-col sm:flex-row sm:items-center sm:justify-end",
                 "aria-disabled:pointer-events-none",

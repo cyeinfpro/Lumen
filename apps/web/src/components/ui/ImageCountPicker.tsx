@@ -16,12 +16,12 @@ export function ImageCountPicker() {
       role="radiogroup"
       aria-label="选择生成张数"
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-0.5",
+        "inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-white/5 p-0.5",
         "shadow-[0_1px_0_rgba(255,255,255,0.04)_inset]",
       )}
     >
       <span
-        className="hidden sm:inline-flex items-center gap-1 px-2 text-[11px] font-medium text-neutral-400"
+        className="hidden sm:inline-flex items-center gap-1 px-2 text-[11px] font-medium text-[var(--fg-1)]"
         aria-hidden
       >
         <Images className="h-3.5 w-3.5" />
@@ -44,7 +44,7 @@ export function ImageCountPicker() {
               "inline-flex items-center justify-center rounded-full px-2 text-xs font-medium tabular-nums",
               "transition-colors duration-150 active:scale-[0.96]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
-              active ? "text-black" : "text-neutral-400 hover:text-white",
+              active ? "text-black" : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
             )}
           >
             {active && (

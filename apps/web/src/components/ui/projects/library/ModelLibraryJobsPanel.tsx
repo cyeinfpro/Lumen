@@ -246,7 +246,7 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
         </div>
       ) : null}
       {job.candidates.length > 0 ? (
-        <CandidatesGroup candidates={job.candidates} compact />
+        <CandidatesGroup job={job} candidates={job.candidates} compact />
       ) : null}
     </motion.article>
   );
@@ -317,18 +317,19 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
         </div>
       )}
       {job.candidates.length > 0 ? (
-        <CandidatesGroup candidates={job.candidates} />
+        <CandidatesGroup job={job} candidates={job.candidates} />
       ) : null}
     </motion.article>
   );
 }
 
-// 候选区：dual_race 另一路 provider 的产出。语义最弱（不可入库、不参与 finished_count），
-// 视觉上跟 unsaved/saved 拉开差距：dashed border + 一行小字说明 + 用 mini label 标头。
+// 候选区：dual_race 另一路 provider 的产出，不参与 finished_count，但可按需收藏入库。
 function CandidatesGroup({
+  job,
   candidates,
   compact = false,
 }: {
+  job: ApparelModelLibraryJob;
   candidates: ApparelModelLibraryJobItem[];
   compact?: boolean;
 }) {
@@ -347,7 +348,7 @@ function CandidatesGroup({
           CANDIDATES · 竞速产出
         </p>
         <p className="text-[11px] text-[var(--fg-2)]">
-          另一路 provider 的产出，可点击预览
+          另一路 provider 的产出，可预览，也可收藏入库
         </p>
       </header>
       <div
@@ -362,8 +363,8 @@ function CandidatesGroup({
           <JobThumb
             key={item.image_id}
             item={item}
+            job={job}
             compact={compact}
-            disableSaveAction
             onOpenLightbox={() => open(item.image_id)}
           />
         ))}
@@ -463,6 +464,7 @@ function JobThumb({
   const [saveOpen, setSaveOpen] = useState(false);
   const saved = item.saved_item_id != null;
   const allowSave = !disableSaveAction;
+  const canSave = Boolean(job && allowSave);
   // 优先取 item 的 appearance；没有就 fallback job 级
   const appearanceKey = (item.appearance_direction || job?.appearance_direction || "") as
     | AppearanceKey
@@ -508,7 +510,17 @@ function JobThumb({
           <Maximize2 className="h-3.5 w-3.5" />
         </span>
       </button>
-      {!compact && job && allowSave ? (
+      {compact && canSave && !saved ? (
+        <button
+          type="button"
+          aria-label="收藏入库"
+          onClick={() => setSaveOpen(true)}
+          className="absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] shadow-[var(--shadow-1)] transition-opacity hover:bg-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:opacity-0 md:group-hover:opacity-100"
+        >
+          <Bookmark className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {!compact && canSave ? (
         <div className="flex items-center justify-between gap-2 p-2">
           <span className="truncate text-[11px] text-[var(--fg-2)]">
             {[appearanceLabel, item.style_tags.slice(0, 2).join("、")]
@@ -631,7 +643,7 @@ function SaveJobItemDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md md:items-center md:p-5"
+      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md mobile-dialog-shell md:items-center md:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -644,7 +656,7 @@ function SaveJobItemDialog({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.98 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)] md:max-w-md md:rounded-xl"
+        className="mobile-dialog-panel flex w-full flex-col overflow-hidden rounded-t-2xl border border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-2)] md:max-h-[92dvh] md:max-w-md md:rounded-xl"
       >
         <header className="shrink-0 px-4 pt-4 pb-3">
           <h3 className="font-display text-lg italic text-[var(--fg-0)]">收藏入库</h3>
@@ -652,7 +664,7 @@ function SaveJobItemDialog({
             {`填好后会作为"生成入库"模特保存到我的模特库。`}
           </p>
         </header>
-        <div className="grid min-h-0 flex-1 gap-3 overflow-y-auto px-4 pb-3">
+        <div className="mobile-dialog-scroll grid min-h-0 flex-1 gap-3 overflow-y-auto px-4 pb-3">
           <Input
             label="名称"
             value={title}
@@ -722,7 +734,7 @@ function SaveJobItemDialog({
             入库后再跑一次自动识别
           </label>
         </div>
-        <footer className="flex shrink-0 justify-end gap-2 border-t border-[var(--border)] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] md:pb-3">
+        <footer className="mobile-dialog-footer flex shrink-0 justify-end gap-2 border-t border-[var(--border)] px-4 py-3 md:pb-3">
           <Button variant="ghost" onClick={onClose}>
             取消
           </Button>

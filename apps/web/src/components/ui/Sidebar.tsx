@@ -324,7 +324,7 @@ export function Sidebar() {
             onClick={toggleSidebar}
             aria-label="收起侧栏"
             title="收起侧栏"
-            className="md:hidden w-7 h-7 inline-flex items-center justify-center rounded-md text-neutral-500 hover:text-white hover:bg-white/5 active:scale-[0.95] transition-all"
+            className="md:hidden w-7 h-7 inline-flex items-center justify-center rounded-md text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/5 active:scale-[0.95] transition-all"
           >
             <PanelLeftClose className="w-4 h-4" />
           </button>
@@ -409,7 +409,7 @@ export function Sidebar() {
                   "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
                   studioView === "chat" && tab === "archived"
                     ? "bg-white/10 text-[var(--fg-0)] shadow-sm"
-                    : "text-neutral-400 hover:text-neutral-200",
+                    : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                 )}
               >
                 <MoreHorizontal className="h-4 w-4" aria-hidden />
@@ -569,7 +569,7 @@ export function Sidebar() {
                   type="button"
                   onClick={() => list.fetchNextPage()}
                   disabled={list.isFetchingNextPage}
-                  className="w-full h-8 text-xs text-neutral-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+                  className="w-full h-8 text-xs text-[var(--fg-1)] hover:text-[var(--fg-0)] rounded-lg hover:bg-white/5 transition-colors disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
                 >
                   {list.isFetchingNextPage && (
                     <Loader2 className="w-3 h-3 animate-spin" />
@@ -789,7 +789,7 @@ function TabButton({
         "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
         active
           ? "bg-white/10 text-[var(--fg-0)] shadow-sm"
-          : "text-neutral-400 hover:text-neutral-200",
+          : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
       )}
     >
       {label}

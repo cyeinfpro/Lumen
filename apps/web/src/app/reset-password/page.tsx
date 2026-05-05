@@ -64,13 +64,13 @@ function ResetPasswordInner() {
   };
 
   return (
-    <main className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200 flex flex-col">
+    <main className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
       <section className="flex flex-1 items-center justify-center px-4 py-10 safe-x">
         <div className="w-full max-w-md space-y-6">
           <header className="space-y-2">
             <Link
               href="/login"
-              className="inline-flex items-center gap-1.5 text-sm text-neutral-400 transition-colors hover:text-neutral-100"
+              className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
             >
               <ArrowLeft className="h-4 w-4" />
               返回登录
@@ -95,7 +95,7 @@ function ResetPasswordInner() {
                 onChange={(event) => setEmail(event.target.value)}
                 placeholder="you@example.com"
                 autoComplete="email"
-                className="h-10 w-full rounded-xl border border-white/10 bg-[var(--bg-1)]/60 px-3 text-base text-neutral-100 transition-colors placeholder:text-neutral-600 focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
               />
             </Field>
 

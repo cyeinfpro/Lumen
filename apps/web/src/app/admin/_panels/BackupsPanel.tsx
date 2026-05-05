@@ -340,7 +340,7 @@ function RestoreModal({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[80] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-sm mobile-dialog-shell sm:items-center"
       onClick={onCancel}
     >
       <motion.div
@@ -348,7 +348,7 @@ function RestoreModal({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.97 }}
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-md rounded-t-2xl sm:rounded-2xl bg-neutral-900/98 backdrop-blur-xl border border-white/12 border-b-0 sm:border-b shadow-2xl p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] sm:pb-5"
+        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-2xl bg-[var(--bg-1)]/98 p-5 backdrop-blur-xl sm:rounded-2xl border border-[var(--border)] border-b-0 sm:border-b shadow-2xl sm:pb-5"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="restore-title"
@@ -358,12 +358,12 @@ function RestoreModal({
             <AlertTriangle className="w-4 h-4 text-red-300" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 id="restore-title" className="text-base font-semibold text-neutral-50">
+            <h3 id="restore-title" className="text-base font-semibold text-[var(--fg-0)]">
               恢复备份？
             </h3>
             <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
               将把 Postgres 与 Redis 还原到{" "}
-              <span className="text-neutral-200 font-mono">
+              <span className="text-[var(--fg-0)] font-mono">
                 {formatTs(target.timestamp, target.created_at)}
               </span>{" "}
               的快照。
@@ -375,9 +375,9 @@ function RestoreModal({
             <div className="mt-4 space-y-2">
               <label
                 htmlFor="restore-confirm"
-                className="block text-xs text-neutral-400"
+                className="block text-xs text-[var(--fg-1)]"
               >
-                输入 <span className="font-semibold text-neutral-200">&ldquo;恢复&rdquo;</span> 二字后点击确认
+                输入 <span className="font-semibold text-[var(--fg-0)]">&ldquo;恢复&rdquo;</span> 二字后点击确认
               </label>
               <input
                 id="restore-confirm"
@@ -386,7 +386,7 @@ function RestoreModal({
                 onChange={(e) => setConfirmText(e.target.value)}
                 disabled={pending}
                 autoFocus
-                className="w-full h-9 px-3 rounded-lg bg-[var(--bg-0)]/60 border border-white/10 focus:outline-none focus:border-red-500/40 focus:ring-2 focus:ring-red-500/20 text-sm disabled:opacity-50"
+                className="w-full h-9 px-3 rounded-lg bg-[var(--bg-0)]/60 border border-[var(--border)] focus:outline-none focus:border-red-500/40 focus:ring-2 focus:ring-red-500/20 text-sm text-[var(--fg-0)] disabled:opacity-50"
                 placeholder="恢复"
               />
             </div>
@@ -395,7 +395,7 @@ function RestoreModal({
                 type="button"
                 onClick={onCancel}
                 disabled={pending}
-                className="min-h-[44px] sm:h-9 px-4 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm text-neutral-200 disabled:opacity-50 transition-colors"
+                className="min-h-[44px] sm:h-9 px-4 rounded-lg bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm text-[var(--fg-0)] disabled:opacity-50 transition-colors"
               >
                 取消
               </button>

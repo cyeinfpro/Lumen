@@ -87,7 +87,7 @@ export function ReasoningEffortPicker() {
           "cursor-pointer active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
           active
             ? "bg-[var(--color-lumen-amber)]/12 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
-            : "bg-white/5 border-white/10 text-neutral-300 hover:bg-white/10 hover:text-white",
+            : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10 hover:text-[var(--fg-0)]",
         )}
       >
         <Brain className="h-3.5 w-3.5" aria-hidden />
@@ -110,10 +110,10 @@ export function ReasoningEffortPicker() {
         }}
         className={cn(
           "m-auto w-[min(18rem,calc(100vw-1.5rem))] max-h-[min(80dvh,420px)] overflow-y-auto p-1.5",
-          "max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:top-auto max-sm:m-0 max-sm:max-h-[80dvh] max-sm:w-full max-sm:rounded-b-none max-sm:p-2 max-sm:pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))]",
-          "rounded-2xl bg-neutral-900/96 backdrop-blur-xl",
-          "border border-white/12 shadow-2xl shadow-black/60",
-          "text-neutral-100",
+          "mobile-dialog-scroll max-sm:fixed max-sm:inset-x-0 max-sm:bottom-[var(--mobile-dialog-bottom-gap)] max-sm:top-auto max-sm:m-0 max-sm:max-h-[var(--mobile-dialog-sheet-max-height)] max-sm:w-full max-sm:rounded-b-none max-sm:p-2",
+          "rounded-2xl bg-[var(--bg-1)]/96 backdrop-blur-xl",
+          "border border-[var(--border)] shadow-2xl shadow-black/25",
+          "text-[var(--fg-0)]",
           // dialog 默认有 margin:auto 居中；backdrop 通过 CSS 自定义
           "backdrop:bg-black/40 backdrop:backdrop-blur-[2px]",
         )}
@@ -136,7 +136,7 @@ export function ReasoningEffortPicker() {
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                 isActive
                   ? "bg-[var(--color-lumen-amber)]/12 text-[var(--color-lumen-amber)]"
-                  : "text-neutral-200 hover:bg-white/8",
+                  : "text-[var(--fg-0)] hover:bg-white/8",
               )}
             >
               <div className="flex flex-col">

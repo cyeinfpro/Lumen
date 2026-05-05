@@ -53,7 +53,7 @@ export function UserBubble({ msg }: UserBubbleProps) {
                 }}
                 className={cn(
                   "relative w-16 h-16 rounded-xl overflow-hidden",
-                  "border border-white/10 bg-white/5",
+                  "border border-[var(--border)] bg-white/5",
                   idx === 0 && "ring-1 ring-[var(--color-lumen-amber)]/60",
                 )}
                 title={idx === 0 ? "Primary reference" : "Reference"}
@@ -80,7 +80,7 @@ export function UserBubble({ msg }: UserBubbleProps) {
             className={cn(
               "relative px-4 py-3 md:px-5 md:py-3.5 rounded-2xl rounded-br-md text-[0.9rem] md:text-[0.95rem] whitespace-pre-wrap leading-relaxed",
               "bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25",
-              "text-neutral-100 shadow-sm break-words [overflow-wrap:anywhere]",
+              "text-[var(--fg-0)] shadow-sm break-words [overflow-wrap:anywhere]",
             )}
           >
             {msg.text}
@@ -91,7 +91,7 @@ export function UserBubble({ msg }: UserBubbleProps) {
               title={copied ? "已复制" : "复制"}
               className={cn(
                 "absolute right-2 bottom-2 p-1 rounded-md",
-                "text-neutral-400 hover:text-neutral-100 hover:bg-white/10",
+                "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10",
                 "transition-all duration-150 active:scale-[0.92]",
               )}
             >

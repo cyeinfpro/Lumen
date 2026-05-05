@@ -96,7 +96,7 @@ export function Onboarding({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.08 }}
-        className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] font-medium text-[var(--accent)] backdrop-blur-md"
+        className="mb-2 inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-[11px] font-medium text-[var(--accent)] backdrop-blur-md"
       >
         Lumen Studio
       </motion.p>
@@ -141,7 +141,7 @@ export function Onboarding({
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-[var(--fg-0)]">
-                服饰模特展示图
+                服饰模特图
               </span>
               <span className="mt-0.5 block text-xs text-[var(--fg-2)]">
                 上传商品图，先确认模特，再生成电商展示图
@@ -170,7 +170,7 @@ export function Onboarding({
             transition={{ duration: 0.35, delay: 0.18 + index * 0.04 }}
             whileHover={loading ? undefined : { y: -2 }}
             className={cn(
-              "group relative min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035] p-3.5 text-left",
+              "group relative min-w-0 overflow-hidden rounded-2xl border border-[var(--border)] bg-white/[0.035] p-3.5 text-left",
               "shadow-[0_12px_40px_-20px_rgba(0,0,0,0.8)] backdrop-blur-md",
               "transition-[border-color,background-color,box-shadow] duration-200 hover:border-[var(--accent)]/35 hover:bg-white/[0.06]",
               "cursor-pointer",
@@ -186,7 +186,7 @@ export function Onboarding({
               )}
             />
             <div className="relative flex items-start gap-3">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-black/20 text-neutral-300 transition-colors group-hover:text-[var(--accent)]">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-white/5 text-[var(--fg-1)] transition-colors group-hover:text-[var(--accent)]">
                 {preset.icon}
               </span>
               <span className="min-w-0 flex-1">
@@ -226,7 +226,7 @@ export function Onboarding({
           aria-live="polite"
           className="absolute inset-0 flex items-center justify-center rounded-xl bg-[var(--bg-0)]/50 backdrop-blur-[2px]"
         >
-          <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-neutral-300">
+          <span className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/5 px-3 py-1.5 text-sm text-[var(--fg-1)]">
             <Sparkles className="h-4 w-4 animate-spin text-[var(--accent)]" />
             处理中…
           </span>
@@ -238,7 +238,7 @@ export function Onboarding({
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-neutral-300">
+    <kbd className="rounded border border-[var(--border)] bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-1)]">
       {children}
     </kbd>
   );

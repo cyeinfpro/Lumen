@@ -78,7 +78,7 @@ export const TaskItem = memo(function TaskItem({
         "active:scale-[0.98] active:bg-white/5",
         failed
           ? "bg-red-500/5 border-red-500/30"
-          : "bg-white/[0.03] border-white/10",
+          : "bg-white/[0.03] border-[var(--border)]",
       )}
     >
       {/* 缩略图 / 骨架：窄屏缩小到 40，桌面保持 44 */}
@@ -88,7 +88,7 @@ export const TaskItem = memo(function TaskItem({
         disabled={!onView || !succeeded}
         aria-label={succeeded ? "查看结果" : "缩略图"}
         className={cn(
-          "relative w-10 h-10 sm:w-11 sm:h-11 shrink-0 rounded-lg overflow-hidden bg-neutral-900 border border-white/5",
+          "relative w-10 h-10 sm:w-11 sm:h-11 shrink-0 rounded-lg overflow-hidden bg-[var(--bg-2)] border border-[var(--border-subtle)]",
           "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
           succeeded && onView
             ? "cursor-pointer hover:opacity-90 active:scale-[0.92]"
@@ -130,7 +130,7 @@ export const TaskItem = memo(function TaskItem({
       </button>
 
       <div className="flex-1 min-w-0">
-        <p className="text-[13px] font-medium text-neutral-200 truncate leading-tight">
+        <p className="text-[13px] font-medium text-[var(--fg-0)] truncate leading-tight">
           {truncate(gen.prompt || "图像生成", 40)}
         </p>
         <p
@@ -192,7 +192,7 @@ function IconBtn({
       {...rest}
       className={cn(
         // 移动端 44px 命中区；桌面端保持紧凑 28px
-        "w-11 h-11 sm:w-7 sm:h-7 inline-flex items-center justify-center rounded-md text-neutral-400 hover:text-white hover:bg-white/10 active:scale-[0.95] transition-all",
+        "w-11 h-11 sm:w-7 sm:h-7 inline-flex items-center justify-center rounded-md text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 active:scale-[0.95] transition-all",
         "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
         className,
       )}

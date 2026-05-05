@@ -225,7 +225,7 @@ function DialogFooter({
   generatingCandidates: boolean;
 }) {
   return (
-    <footer className="flex shrink-0 flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] md:flex-row md:items-center md:justify-between md:pb-3">
+    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)] px-4 py-3 md:flex-row md:items-center md:justify-between md:pb-3">
       <p className="min-w-0 text-xs text-[var(--fg-2)]">
         点击任一图片预览，「设为当前模特」按钮在大图内。
       </p>

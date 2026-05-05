@@ -1393,7 +1393,7 @@ export function MobileLightbox() {
         transition={{ duration: DURATION.normal, ease: EASE.shutter }}
         className={cn(
           "absolute inset-x-0 bottom-0 px-3 pt-6",
-          "pb-[max(env(safe-area-inset-bottom),0.75rem)]",
+          "pb-[var(--mobile-dialog-footer-pad-bottom)]",
           "bg-gradient-to-t from-black/65 via-black/30 to-transparent",
           "pointer-events-none",
           !chromeVisible && "pointer-events-none",
