@@ -4773,15 +4773,19 @@ async def _api_call_tagging_upstream(
         return {}
 
     instructions = (
-        "你是模特库自动打标签助手。请仔细分析这张人像/全身模特图，识别画面中模特的：\n"
-        "- appearance_direction: 用 1-2 个英文小写词表达外貌方向，例如 european / asian / "
-        "latin / middle_eastern / african（或其他更准确的描述），不能确定填空字符串。\n"
-        "- style_tags: 用 2-6 个中文/英文短词列出风格、氛围、服装类型等关键词，例如 minimal、studio、"
-        "高级感、街拍、自然光，去除冗余说明。\n"
-        "- age_segment: 必须是 toddler / child / teen / young_adult / adult / middle_aged / senior 之一。\n"
-        "- gender: 必须是 female 或 male 之一。\n"
-        "- notes: 用不超过 60 字的中文一句话备注，可选。\n\n"
-        "只输出一个合法 JSON 对象，不要 Markdown / 代码块 / 解释文字。字段必须用上述英文名。"
+        "你是模特库自动打标签助手。仔细分析这张模特图，输出严格 JSON。\n\n"
+        "字段（全部必填，无法判断填空串/空数组）：\n"
+        "- appearance_direction：英文小写之一：asian / east_asian / southeast_asian / "
+        "south_asian / european / latin / middle_eastern / african / mixed / other。\n"
+        "- style_tags：3-6 个中文短词，每个 ≤ 8 字，只写两类：\n"
+        "    1) 相貌气质 — 五官 / 脸型 / 肤色 / 发型 / 骨相 / 整体观感"
+        "（例：清冷、高颅顶、英气、邻家感、奶油感、骨相清秀、温柔、酷感）\n"
+        "    2) 适合风格定位（例：少女感、高级感、知性、御姐感、复古、运动、文艺、街头）\n"
+        "  禁止描述衣服 / 单品 / 拍摄场景 / 光线 / 品牌 / 营销词；禁止英文。\n"
+        "- age_segment：toddler / child / teen / young_adult / adult / middle_aged / senior 之一。\n"
+        "- gender：female 或 male 之一。\n"
+        "- notes：≤ 60 字中文一句话，聚焦相貌与风格定位，不评价衣服。\n\n"
+        "只输出 JSON 对象，不要 Markdown / 代码块 / 解释。字段必须用上述英文名。"
     )
     body = {
         "model": "gpt-5.4-mini",

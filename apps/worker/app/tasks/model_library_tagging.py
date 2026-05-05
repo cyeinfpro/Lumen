@@ -78,22 +78,19 @@ _GENDER_ALIASES: dict[str, str] = {
 }
 
 _TAGGING_INSTRUCTIONS = (
-    "你是模特库自动打标签助手。仔细分析这张人像/全身模特图，输出严格 JSON。\n\n"
-    "字段要求（**全部必填**，缺失就用空串/空数组）：\n"
-    "- appearance_direction: 必须是下列之一（小写英文，单选最贴近的一个）：\n"
-    "    asian / east_asian / southeast_asian / south_asian / european / latin / "
-    "middle_eastern / african / mixed / other\n"
-    "  无法判断填空字符串。不要写自由文本。\n"
-    "- style_tags: **4-6 个** 中文/英文短词数组，必须分别覆盖以下维度：\n"
-    "    1) 服装类型/版型（例：oversize 西装 / 修身衬衫 / 针织连衣裙）\n"
-    "    2) 拍摄场景（例：棚拍 / 街拍 / 自然光户外 / 工业风厂房）\n"
-    "    3) 光线/氛围（例：硬光 / 柔光 / 高对比 / 复古胶片 / 冷调）\n"
-    "    4) 整体气质（例：高级感 / 干净极简 / 温柔 / 酷感 / 街头）\n"
-    "  每个 tag ≤ 8 字，不要写营销文案，不要重复。\n"
-    "- age_segment: 必须是 toddler / child / teen / young_adult / adult / middle_aged / senior 之一。\n"
-    "- gender: 必须是 female 或 male 之一。\n"
-    "- notes: 不超过 60 字的中文一句话备注（可选，缺失填空串）。\n\n"
-    "只输出一个合法 JSON 对象，不要 Markdown / 代码块 / 解释文字。"
+    "你是模特库自动打标签助手。仔细分析这张模特图，输出严格 JSON。\n\n"
+    "字段（全部必填，无法判断填空串/空数组）：\n"
+    "- appearance_direction：英文小写之一：asian / east_asian / southeast_asian / "
+    "south_asian / european / latin / middle_eastern / african / mixed / other。\n"
+    "- style_tags：3-6 个中文短词，每个 ≤ 8 字，只写两类：\n"
+    "    1) 相貌气质 — 五官 / 脸型 / 肤色 / 发型 / 骨相 / 整体观感"
+    "（例：清冷、高颅顶、英气、邻家感、奶油感、骨相清秀、温柔、酷感）\n"
+    "    2) 适合风格定位（例：少女感、高级感、知性、御姐感、复古、运动、文艺、街头）\n"
+    "  禁止描述衣服 / 单品 / 拍摄场景 / 光线 / 品牌 / 营销词；禁止英文。\n"
+    "- age_segment：toddler / child / teen / young_adult / adult / middle_aged / senior 之一。\n"
+    "- gender：female 或 male 之一。\n"
+    "- notes：≤ 60 字中文一句话，聚焦相貌与风格定位，不评价衣服。\n\n"
+    "只输出 JSON 对象，不要 Markdown / 代码块 / 解释。"
 )
 # 与 _apparel_library.MODEL_LIBRARY_APPEARANCES 对齐（去掉 "all"）；worker 不能依赖 api routes，故复制一份。
 _APPEARANCE_VALID: frozenset[str] = frozenset(
