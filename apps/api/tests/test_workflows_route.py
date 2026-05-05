@@ -93,6 +93,11 @@ def test_github_folder_metadata_accepts_jpg_and_webp() -> None:
         assert item["library_folder"] == "05_adult/male"
 
 
+def test_preset_title_uses_updated_age_labels() -> None:
+    assert workflows._title_from_preset_id("adult-female-001").startswith("熟龄 女性")
+    assert workflows._title_from_preset_id("middle-aged-male-001").startswith("中年 男性")
+
+
 def test_github_folder_metadata_ignores_thumb_files() -> None:
     item = workflows._metadata_from_github_file(  # noqa: SLF001
         {
@@ -704,7 +709,7 @@ def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None
 def test_daily_snapshot_template_uses_phone_realistic_scene() -> None:
     candidate = SimpleNamespace(
         id="cand-1",
-        model_brief_json={"summary": "成年女性，欧美，自然日常"},
+        model_brief_json={"summary": "熟龄女性，欧美，自然日常"},
     )
 
     prompt = workflows._showcase_prompt(  # noqa: SLF001
@@ -807,6 +812,15 @@ def test_model_library_run_title_includes_age_gender_and_appearance() -> None:
     assert "asian" in title
 
 
+def test_model_library_run_title_labels_multi_gender() -> None:
+    title = workflows._model_library_run_title(  # noqa: SLF001
+        age_segment="young_adult",
+        genders=["female", "male"],
+        appearance_direction="east_asian",
+    )
+    assert "青年男女" in title
+
+
 def test_model_library_run_title_handles_missing_appearance() -> None:
     title = workflows._model_library_run_title(  # noqa: SLF001
         age_segment="adult",
@@ -814,7 +828,7 @@ def test_model_library_run_title_handles_missing_appearance() -> None:
         appearance_direction=None,
     )
     assert "模特库生成" in title
-    assert "成年男性" in title
+    assert "熟龄男性" in title
     # 没有 appearance 不应留尾随 ·
     assert not title.endswith("·")
 
@@ -925,7 +939,42 @@ def test_model_library_run_inputs_normalizes_input_json() -> None:
     assert out["auto_tag"] is True
 
 
-def test_merge_library_item_fields_overwrites_style_tags_only() -> None:
+def test_model_library_run_inputs_accepts_multi_gender_snapshot() -> None:
+    step = SimpleNamespace(
+        input_json={
+            "age_segment": "young_adult",
+            "genders": ["female", "male"],
+            "count": 4,
+        },
+        task_ids=["t1"] * 8,
+    )
+    out = workflows._model_library_run_inputs(step)  # noqa: SLF001
+    assert out["gender"] == "female/male"
+    assert out["genders"] == ["female", "male"]
+
+
+def test_job_item_out_uses_image_gender_and_download_filename() -> None:
+    item = workflows._job_item_out(  # noqa: SLF001
+        image_id="image-abcdef123456",
+        image_out=SimpleNamespace(
+            url="/api/images/image-abcdef123456/binary",
+            display_url="/api/images/image-abcdef123456/variants/display2048",
+            thumb_url="/api/images/image-abcdef123456/variants/thumb256",
+            mime="image/png",
+        ),
+        saved_item_id=None,
+        age_segment="adult",
+        gender="female/male",
+        style_tags=["温柔亲和"],
+        appearance_direction="east_asian",
+        image_meta={"gender": "male"},
+    )
+    assert item.gender == "male"
+    assert item.download_filename is not None
+    assert "male" in item.download_filename
+
+
+def test_merge_library_item_fields_appends_style_tags_only() -> None:
     existing = {
         "id": "user:1",
         "title": "preset",
@@ -942,8 +991,8 @@ def test_merge_library_item_fields_overwrites_style_tags_only() -> None:
         gender="female",
         notes="auto tagged",
     )
-    # style_tags overwrites unconditionally
-    assert merged["style_tags"] == ["new", "tag"]
+    # style_tags appends without losing tags the user selected in advance.
+    assert merged["style_tags"] == ["old", "new", "tag"]
     # appearance_direction empty before -> filled
     assert merged["appearance_direction"] == "european"
     # age_segment user_favorites -> upgraded
@@ -974,7 +1023,7 @@ def test_merge_library_item_fields_preserves_user_filled_appearance() -> None:
     assert merged["appearance_direction"] == "european"
     assert merged["age_segment"] == "adult"
     assert merged["gender"] == "male"
-    # 仅 style_tags 被覆盖
+    # style_tags 会追加；其他用户已填字段保守不被覆盖
     assert merged["style_tags"] == ["minimal"]
 
 

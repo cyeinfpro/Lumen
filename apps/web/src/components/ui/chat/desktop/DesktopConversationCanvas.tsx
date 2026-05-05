@@ -846,6 +846,8 @@ const FinalImage = memo(function FinalImage({
       aspect_ratio: gen.aspect_ratio,
       size_actual: image.size_actual || `${image.width}x${image.height}`,
       mime: image.mime,
+      filename: image.filename,
+      metadata: image.metadata_jsonb ?? undefined,
     };
     openLightbox([item], image.id);
   };

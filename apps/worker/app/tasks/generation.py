@@ -78,6 +78,11 @@ from lumen_core.models import (
     WorkflowStep,
     new_uuid7,
 )
+from lumen_core.model_image_metadata import (
+    build_model_image_metadata,
+    model_image_filename,
+    save_image_with_model_metadata,
+)
 from lumen_core.sizing import resolve_size
 
 from ..config import settings
@@ -980,6 +985,88 @@ def _make_thumb(orig: PILImage.Image, max_side: int = 256) -> tuple[bytes, tuple
         return buf.getvalue(), im.size
 
 
+def _clean_model_style_tags(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        tag = raw.strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag[:32])
+        if len(out) >= 12:
+            break
+    return out
+
+
+def _model_image_metadata_from_request(
+    *,
+    image_id: str,
+    mime: str,
+    request: dict[str, Any] | None,
+    prompt: str | None = None,
+) -> dict[str, Any]:
+    req = request if isinstance(request, dict) else {}
+    if req.get("workflow_action") != "model_library_generate":
+        return {}
+    age_segment = req.get("workflow_model_library_age_segment")
+    gender = req.get("workflow_model_library_gender")
+    appearance_direction = req.get("workflow_model_library_appearance_direction")
+    style_tags = _clean_model_style_tags(
+        req.get("workflow_model_library_style_tags") or []
+    )
+    payload = build_model_image_metadata(
+        age_segment=age_segment if isinstance(age_segment, str) else None,
+        gender=gender if isinstance(gender, str) else None,
+        appearance_direction=(
+            appearance_direction if isinstance(appearance_direction, str) else None
+        ),
+        style_tags=style_tags,
+        source="model_library_generate",
+        prompt_hint=prompt,
+    )
+    if not payload:
+        return {}
+    ext = "png"
+    if isinstance(mime, str) and mime.startswith("image/"):
+        ext = "jpg" if mime == "image/jpeg" else mime.removeprefix("image/")
+    return {
+        "model_library": payload,
+        "suggested_filename": model_image_filename(
+            image_id=image_id,
+            ext=ext,
+            age_segment=payload.get("age_segment"),
+            gender=payload.get("gender"),
+            appearance_direction=payload.get("appearance_direction"),
+            style_tags=style_tags,
+        ),
+    }
+
+
+def _maybe_embed_model_image_metadata_bytes(
+    *,
+    image: PILImage.Image,
+    fmt: str,
+    raw_image: bytes,
+    metadata: dict[str, Any],
+) -> bytes:
+    payload = metadata.get("model_library") if isinstance(metadata, dict) else None
+    if fmt.upper() != "PNG" or not isinstance(payload, dict) or not payload:
+        return raw_image
+    out = io.BytesIO()
+    save_image_with_model_metadata(
+        image,
+        out,
+        fmt="PNG",
+        metadata=payload,
+    )
+    return out.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Upstream body assembly
 # ---------------------------------------------------------------------------
@@ -1236,6 +1323,25 @@ async def _maybe_enqueue_workflow_quality_review(
     _ = redis
 
 
+def _model_library_requested_count_from_step(step: WorkflowStep) -> int:
+    task_ids = [task_id for task_id in (step.task_ids or []) if task_id]
+    if task_ids:
+        return len(task_ids)
+
+    input_json = step.input_json if isinstance(step.input_json, dict) else {}
+    try:
+        count = int(input_json.get("count_per_gender") or input_json.get("count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    genders = input_json.get("genders")
+    gender_count = (
+        len([gender for gender in genders if gender in {"female", "male"}])
+        if isinstance(genders, list)
+        else 1
+    )
+    return count * max(1, gender_count)
+
+
 async def _maybe_record_model_library_generate_image(
     *,
     session: Any,
@@ -1293,7 +1399,7 @@ async def _maybe_record_model_library_generate_image(
 
     input_json = step.input_json if isinstance(step.input_json, dict) else {}
     auto_tag = bool(input_json.get("auto_tag", False))
-    requested = int(input_json.get("count") or 0) or len(step.task_ids or [])
+    requested = _model_library_requested_count_from_step(step)
 
     output_json = dict(step.output_json or {})
     if auto_tag:
@@ -1974,6 +2080,29 @@ async def _handle_dual_race_bonus_image(
     }
     orig_ext = orig_ext_by_format[orig_format]
     orig_mime = orig_mime_by_format[orig_format]
+    model_metadata = _model_image_metadata_from_request(
+        image_id=image_id,
+        mime=orig_mime,
+        request=parent_upstream_request,
+        prompt=prompt,
+    )
+    if model_metadata:
+        try:
+            with PILImage.open(io.BytesIO(raw_image)) as im:
+                im.load()
+                raw_image = _maybe_embed_model_image_metadata_bytes(
+                    image=im,
+                    fmt=orig_format,
+                    raw_image=raw_image,
+                    metadata=model_metadata,
+                )
+            sha = _sha256(raw_image)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "dual_race bonus model metadata embed skipped parent=%s err=%s",
+                parent_task_id,
+                exc,
+            )
     key_orig = f"u/{user_id}/g/{bonus_gen_id}/orig.{orig_ext}"
     key_display = f"u/{user_id}/g/{bonus_gen_id}/display2048.webp"
     key_preview = f"u/{user_id}/g/{bonus_gen_id}/preview1024.webp"
@@ -2056,7 +2185,7 @@ async def _handle_dual_race_bonus_image(
                     id=image_id,
                     user_id=user_id,
                     owner_generation_id=bonus_gen_id,
-                    source=ImageSource.GENERATED,
+                    source=ImageSource.GENERATED.value,
                     parent_image_id=(
                         primary_input_image_id
                         if action == GenerationAction.EDIT.value
@@ -2070,6 +2199,7 @@ async def _handle_dual_race_bonus_image(
                     sha256=sha,
                     blurhash=blurhash_str,
                     visibility="private",
+                    metadata_jsonb=model_metadata,
                 )
                 session.add(img)
                 session.add(
@@ -2116,6 +2246,7 @@ async def _handle_dual_race_bonus_image(
                             "display_url": f"/api/images/{image_id}/variants/display2048",
                             "preview_url": f"/api/images/{image_id}/variants/preview1024",
                             "thumb_url": f"/api/images/{image_id}/variants/thumb256",
+                            "filename": model_metadata.get("suggested_filename"),
                         }
                     )
                     content["images"] = images_list
@@ -3057,6 +3188,29 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         }
         orig_ext = orig_ext_by_format[orig_format]
         orig_mime = orig_mime_by_format[orig_format]
+        model_metadata = _model_image_metadata_from_request(
+            image_id=image_id,
+            mime=orig_mime,
+            request=gen_upstream_request_snapshot,
+            prompt=prompt,
+        )
+        if model_metadata:
+            try:
+                with PILImage.open(io.BytesIO(raw_image)) as im:
+                    im.load()
+                    raw_image = _maybe_embed_model_image_metadata_bytes(
+                        image=im,
+                        fmt=orig_format,
+                        raw_image=raw_image,
+                        metadata=model_metadata,
+                    )
+                sha = _sha256(raw_image)
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "model_library image metadata embed skipped task=%s err=%s",
+                    task_id,
+                    exc,
+                )
         key_orig = f"u/{user_id}/g/{task_id}/orig.{orig_ext}"
         key_display = f"u/{user_id}/g/{task_id}/display2048.webp"
         key_preview = f"u/{user_id}/g/{task_id}/preview1024.webp"
@@ -3101,7 +3255,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     id=image_id,
                     user_id=user_id,
                     owner_generation_id=task_id,
-                    source=ImageSource.GENERATED,
+                    source=ImageSource.GENERATED.value,
                     parent_image_id=(
                         primary_input_image_id if action == GenerationAction.EDIT else None
                     ),
@@ -3113,6 +3267,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     sha256=sha,
                     blurhash=blurhash_str,
                     visibility="private",
+                    metadata_jsonb=model_metadata,
                 )
                 session.add(img)
                 session.add(
@@ -3210,6 +3365,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             "display_url": f"/api/images/{image_id}/variants/display2048",
                             "preview_url": f"/api/images/{image_id}/variants/preview1024",
                             "thumb_url": f"/api/images/{image_id}/variants/thumb256",
+                            "filename": model_metadata.get("suggested_filename"),
                         }
                     )
                     content["images"] = images_list
@@ -3263,6 +3419,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         "display_url": f"/api/images/{image_id}/variants/display2048",
                         "preview_url": f"/api/images/{image_id}/variants/preview1024",
                         "thumb_url": f"/api/images/{image_id}/variants/thumb256",
+                        "filename": model_metadata.get("suggested_filename"),
                     }
                 ],
                 "final_size": f"{width}x{height}",

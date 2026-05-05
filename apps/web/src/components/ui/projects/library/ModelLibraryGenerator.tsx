@@ -17,6 +17,7 @@ import {
   type ModelLibraryAppearance,
   type ModelLibraryItemAgeSegment,
   MODEL_LIBRARY_APPEARANCE_LABEL,
+  MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
 
 const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
@@ -24,8 +25,8 @@ const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
   ["child", "儿童"],
   ["teen", "青少年"],
   ["young_adult", "青年"],
-  ["adult", "成年"],
-  ["middle_aged", "中老年"],
+  ["adult", "熟龄"],
+  ["middle_aged", "中年"],
   ["senior", "老年"],
 ];
 
@@ -35,31 +36,19 @@ const GENDER_OPTIONS: Array<["female" | "male", string]> = [
 ];
 
 // 外貌方向枚举顺序：和 MODEL_LIBRARY_APPEARANCE_LABEL 对齐
-const APPEARANCE_OPTIONS: Array<Exclude<ModelLibraryAppearance, "all">> = [
-  "asian",
-  "east_asian",
-  "southeast_asian",
-  "south_asian",
-  "european",
-  "latin",
-  "middle_eastern",
-  "african",
-  "mixed",
-  "other",
-];
+const APPEARANCE_OPTIONS: Array<Exclude<ModelLibraryAppearance, "all" | "asian" | "other">> =
+  MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS;
 
-// 气质风格预设
 const STYLE_PRESETS = [
-  "温柔",
-  "酷感",
-  "甜美",
-  "复古",
-  "极简",
-  "高冷",
-  "都市",
-  "运动",
-  "高级感",
-  "街头",
+  "温柔亲和",
+  "清冷高级",
+  "甜美活力",
+  "酷感街头",
+  "知性通勤",
+  "极简中性",
+  "运动阳光",
+  "复古文艺",
+  "成熟稳重",
 ];
 
 const COUNT_OPTIONS: ApparelModelLibraryGenerateCount[] = [1, 2, 4, 16];
@@ -78,27 +67,22 @@ export function ModelLibraryGenerator({
   defaultAgeSegment = "young_adult",
 }: ModelLibraryGeneratorProps) {
   const [ageSegment, setAgeSegment] = useState<ModelLibraryItemAgeSegment>(defaultAgeSegment);
-  const [gender, setGender] = useState<"female" | "male">("female");
+  const [genders, setGenders] = useState<Array<"female" | "male">>(["female"]);
   // 外貌方向：枚举单选，"" 表示不指定
   const [appearance, setAppearance] = useState<ModelLibraryAppearance | "">("");
-  // 气质风格：自由文本（chip 点击会拼接到这里）
-  const [styleHint, setStyleHint] = useState("");
+  const [styleTags, setStyleTags] = useState<string[]>([]);
   const [extra, setExtra] = useState("");
-  const [styleTags, setStyleTags] = useState("");
   const [count, setCount] = useState<ApparelModelLibraryGenerateCount>(4);
   const [autoTag, setAutoTag] = useState(true);
 
   const submit = async () => {
-    // styleHint 直接拼进 extra_requirements，前端字段只是输入辅助
-    const composedExtra = [extra.trim(), styleHint.trim()]
-      .filter(Boolean)
-      .join("；");
     const body: ApparelModelLibraryGenerateIn = {
       age_segment: ageSegment,
-      gender,
+      genders,
+      gender: genders[0] ?? "female",
       appearance_direction: appearance || null,
-      extra_requirements: composedExtra || null,
-      style_tags: splitTags(styleTags),
+      extra_requirements: extra.trim() || null,
+      style_tags: styleTags,
       count,
       auto_tag: autoTag,
     };
@@ -111,16 +95,25 @@ export function ModelLibraryGenerator({
     }
   };
 
-  // 气质风格 chip：点击切换 token 拼接（保留多关键词的拼接体验）
-  const toggleStylePreset = (preset: string) => {
-    setStyleHint((prev) => {
-      const trimmed = prev.trim();
-      if (!trimmed) return preset;
-      const tokens = trimmed.split(/[、,，\s]+/).filter(Boolean);
-      if (tokens.includes(preset)) {
-        return tokens.filter((token) => token !== preset).join("、");
+  const toggleGender = (value: "female" | "male") => {
+    setGenders((prev) => {
+      if (prev.includes(value)) {
+        const next = prev.filter((item) => item !== value);
+        return next.length > 0 ? next : prev;
       }
-      return [...tokens, preset].join("、");
+      return [...prev, value].sort((a, b) => {
+        const order = { female: 0, male: 1 };
+        return order[a] - order[b];
+      });
+    });
+  };
+
+  const toggleStylePreset = (preset: string) => {
+    setStyleTags((prev) => {
+      if (prev.includes(preset)) {
+        return prev.filter((token) => token !== preset);
+      }
+      return [...prev, preset].slice(0, 2);
     });
   };
 
@@ -166,8 +159,8 @@ export function ModelLibraryGenerator({
               {GENDER_OPTIONS.map(([value, label]) => (
                 <Chip
                   key={value}
-                  active={gender === value}
-                  onClick={() => setGender(value)}
+                  active={genders.includes(value)}
+                  onClick={() => toggleGender(value)}
                 >
                   {label}
                 </Chip>
@@ -197,39 +190,24 @@ export function ModelLibraryGenerator({
         </Field>
       </Section>
 
-      {/* 3. 风格 & 细节 */}
-      <Section eyebrow="N°03" title="风格 & 细节">
+      {/* 3. 气质 & 细节 */}
+      <Section eyebrow="N°03" title="气质 & 细节">
         <div className="grid gap-6">
           <Field
-            label="气质风格"
-            hint={`点 chip 拼接成"温柔、极简"`}
+            label="气质方向"
+            hint="最多选择 2 个；自动识别只会追加标签，不会覆盖这里的选择"
           >
-            <UnderlineInput
-              value={styleHint}
-              onChange={setStyleHint}
-              placeholder={`温柔、极简，或具体到"短发知性"`}
-            />
-            <div className="mt-3">
-              <ChipRow>
-                {STYLE_PRESETS.map((preset) => (
-                  <Chip
-                    key={preset}
-                    active={styleHint.includes(preset)}
-                    onClick={() => toggleStylePreset(preset)}
-                  >
-                    {preset}
-                  </Chip>
-                ))}
-              </ChipRow>
-            </div>
-          </Field>
-
-          <Field label="风格标签" hint="逗号 / 顿号分隔">
-            <UnderlineInput
-              value={styleTags}
-              onChange={setStyleTags}
-              placeholder="高级简洁、棚拍"
-            />
+            <ChipRow>
+              {STYLE_PRESETS.map((preset) => (
+                <Chip
+                  key={preset}
+                  active={styleTags.includes(preset)}
+                  onClick={() => toggleStylePreset(preset)}
+                >
+                  {preset}
+                </Chip>
+              ))}
+            </ChipRow>
           </Field>
 
           <Field label={`其他要求`} hint={`${extra.length}/${EXTRA_MAX}`}>
@@ -301,7 +279,7 @@ export function ModelLibraryGenerator({
         )}
       >
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] md:mr-auto">
-          {`${count} 张约几分钟，到任务中心查看`}
+          {`${count * genders.length} 张（每个性别 ${count} 张），到任务中心查看`}
         </p>
         <Button
           variant="primary"
@@ -405,26 +383,6 @@ function Chip({
   );
 }
 
-// underline 输入框
-function UnderlineInput({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <input
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      placeholder={placeholder}
-      className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
-    />
-  );
-}
-
 function UnderlineTextarea({
   value,
   onChange,
@@ -448,12 +406,4 @@ function UnderlineTextarea({
       className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-2 text-[15px] leading-[1.6] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-sm"
     />
   );
-}
-
-function splitTags(value: string): string[] {
-  return value
-    .split(/[,，、]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .slice(0, 12);
 }

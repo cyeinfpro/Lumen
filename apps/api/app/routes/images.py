@@ -32,6 +32,13 @@ from lumen_core.image_signing import (
     verify_image_sig,
 )
 from lumen_core.models import Image, ImageVariant, Share
+from lumen_core.model_image_metadata import (
+    build_model_image_metadata,
+    model_image_filename,
+    parse_model_image_filename,
+    read_model_image_metadata,
+    save_image_with_model_metadata,
+)
 from lumen_core.schemas import ImageOut
 
 from ..audit import hash_email, request_ip_hash, write_audit
@@ -107,6 +114,33 @@ def _open_image_bytes(data: bytes, *, verify: bool = False) -> PILImage.Image:
         raise _http("invalid_image", "unreadable image", 400) from exc
     except Exception as exc:
         raise _http("invalid_image", "unreadable image", 400) from exc
+
+
+def _model_metadata_json_from_upload(
+    im: PILImage.Image,
+    filename: str | None,
+) -> dict[str, Any]:
+    parsed = read_model_image_metadata(im)
+    metadata_source = "embedded"
+    if parsed is None and filename:
+        parsed = parse_model_image_filename(filename)
+        metadata_source = "filename"
+    if parsed is None:
+        return {}
+    payload = build_model_image_metadata(
+        age_segment=parsed.age_segment,
+        gender=parsed.gender,
+        appearance_direction=parsed.appearance_direction,
+        style_tags=list(parsed.style_tags or []),
+        source=parsed.source or metadata_source,
+        prompt_hint=parsed.prompt_hint,
+    )
+    if not payload:
+        return {}
+    return {
+        "model_library": payload,
+        "model_library_metadata_source": metadata_source,
+    }
 
 
 def _key_for_upload(user_id: str, image_id: str, ext: str) -> str:
@@ -520,6 +554,7 @@ async def upload_image(
     if mime not in ALLOWED_MIME:
         raise _http("unsupported_mime", f"mime not allowed: {mime}", 400)
 
+    uploaded_model_metadata = _model_metadata_json_from_upload(im, file.filename)
     width, height = im.size
     _enforce_pixel_limit((width, height))
     if max(width, height) > MAX_LONG_SIDE:
@@ -534,7 +569,17 @@ async def upload_image(
             save_kw["quality"] = 92
         elif fmt == "WEBP":
             save_kw["quality"] = 90
-        im.save(out, format=fmt, **save_kw)
+        payload = uploaded_model_metadata.get("model_library")
+        if fmt == "PNG" and isinstance(payload, dict):
+            save_image_with_model_metadata(
+                im,
+                out,
+                fmt=fmt,
+                metadata=payload,
+                **save_kw,
+            )
+        else:
+            im.save(out, format=fmt, **save_kw)
         buf = bytearray(out.getvalue())
 
     # hash
@@ -560,6 +605,17 @@ async def upload_image(
     await db.flush()
 
     ext = EXT_BY_MIME[mime]
+    model_payload = uploaded_model_metadata.get("model_library")
+    if isinstance(model_payload, dict):
+        uploaded_model_metadata["suggested_filename"] = model_image_filename(
+            image_id=img.id,
+            ext=ext,
+            age_segment=model_payload.get("age_segment"),
+            gender=model_payload.get("gender"),
+            appearance_direction=model_payload.get("appearance_direction"),
+            style_tags=model_payload.get("style_tags") or [],
+        )
+        img.metadata_jsonb = uploaded_model_metadata
     key = _key_for_upload(user.id, img.id, ext)
     img.storage_key = key
 

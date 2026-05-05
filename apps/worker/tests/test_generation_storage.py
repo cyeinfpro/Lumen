@@ -600,6 +600,95 @@ async def test_cleanup_storage_on_error_deletes_created_keys(
     assert set(fake_storage.deleted) == {"orig", "display"}
 
 
+class _ScalarResult:
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _ModelLibraryHookSession:
+    def __init__(self, run, step) -> None:
+        self.run = run
+        self.step = step
+        self.calls = 0
+
+    async def execute(self, _statement):
+        self.calls += 1
+        return _ScalarResult(self.run if self.calls == 1 else self.step)
+
+
+def _model_library_generation(task_id: str = "task-2") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=task_id,
+        upstream_request={
+            "workflow_action": "model_library_generate",
+            "workflow_step_key": "model_library_generate",
+            "workflow_run_id": "run-1",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_library_generate_hook_waits_for_all_multi_gender_tasks() -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=["img-1"],
+        input_json={
+            "count": 2,
+            "count_per_gender": 2,
+            "genders": ["female", "male"],
+            "auto_tag": False,
+        },
+        output_json={},
+        task_ids=["task-1", "task-2", "task-3", "task-4"],
+        status="running",
+    )
+    session = _ModelLibraryHookSession(run, step)
+
+    await generation._maybe_record_model_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=_model_library_generation(),
+        image_id="img-2",
+    )
+
+    assert step.image_ids == ["img-1", "img-2"]
+    assert step.status == "running"
+    assert run.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_model_library_generate_hook_completes_after_all_tasks() -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=["img-1", "img-2", "img-3"],
+        input_json={
+            "count": 2,
+            "count_per_gender": 2,
+            "genders": ["female", "male"],
+            "auto_tag": False,
+        },
+        output_json={},
+        task_ids=["task-1", "task-2", "task-3", "task-4"],
+        status="running",
+    )
+    session = _ModelLibraryHookSession(run, step)
+
+    await generation._maybe_record_model_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=_model_library_generation("task-4"),
+        image_id="img-4",
+    )
+
+    assert step.image_ids == ["img-1", "img-2", "img-3", "img-4"]
+    assert step.status == "succeeded"
+    assert run.status == "completed"
+    assert run.current_step == "model_library_generate"
+
+
 @pytest.mark.asyncio
 async def test_await_with_lease_guard_aborts_work() -> None:
     lease_lost = asyncio.Event()

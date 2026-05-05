@@ -5,6 +5,8 @@
 // 提交"新建模特"后自动切到"任务中心"。
 
 import { motion } from "framer-motion";
+import { ArrowLeft } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 
 import { toast } from "@/components/ui/primitives/Toast";
@@ -56,6 +58,8 @@ export function ModelLibraryPage() {
       <ProjectMobileTopBar
         title="模特库"
         subtitle="LIBRARY · JOBS · CREATE"
+        backHref="/projects"
+        backLabel="返回项目"
       />
       <ProjectTopBar />
 
@@ -72,6 +76,15 @@ export function ModelLibraryPage() {
                 showHeader
                 showSourceSidebar
                 defaultAgeSegment="all"
+                headerExtra={
+                  <Link
+                    href="/projects"
+                    className="inline-flex h-9 items-center gap-2 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" />
+                    返回项目
+                  </Link>
+                }
               />
             </div>
           ) : null}

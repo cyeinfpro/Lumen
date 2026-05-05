@@ -176,9 +176,9 @@ function defaultLibraryAgeSegment(workflow: WorkflowRun): ModelLibraryAgeSegment
   if (["儿童", "童装", "小朋友", "孩子"].some((word) => text.includes(word))) return "child";
   if (text.includes("青少年")) return "teen";
   if (text.includes("青年")) return "young_adult";
-  if (text.includes("中老年")) return "middle_aged";
+  if (text.includes("中年") || text.includes("中老年")) return "middle_aged";
   if (text.includes("老年")) return "senior";
-  if (text.includes("成年")) return "adult";
+  if (text.includes("熟龄") || text.includes("成年")) return "adult";
   return "all";
 }
 

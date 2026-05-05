@@ -508,6 +508,7 @@ class ApparelModelLibraryItemOut(BaseModel):
     version: int | None = None
     library_folder: str | None = None
     prompt_hint: str | None = None
+    download_filename: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
 
@@ -540,6 +541,16 @@ class ApparelModelLibraryItemPatchIn(BaseModel):
     style_tags: list[str] | None = Field(default=None, max_length=12)
 
 
+class ApparelModelLibraryBatchDeleteIn(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class ApparelModelLibraryBatchDeleteOut(BaseModel):
+    ok: bool = True
+    deleted: int = 0
+    not_found: list[str] = Field(default_factory=list)
+
+
 class ApparelModelLibrarySelectIn(BaseModel):
     library_item_id: str
     mode: Literal["use_directly"] = "use_directly"
@@ -553,7 +564,8 @@ class ApparelModelLibraryGenerateIn(BaseModel):
     """
 
     age_segment: ModelAgeSegment
-    gender: Literal["female", "male"] = "female"
+    gender: Literal["female", "male"] | None = None
+    genders: list[Literal["female", "male"]] | None = Field(default=None, max_length=2)
     appearance_direction: str | None = Field(default=None, max_length=80)
     extra_requirements: str | None = Field(default=None, max_length=400)
     style_tags: list[str] = Field(default_factory=list, max_length=12)
@@ -574,6 +586,8 @@ class ApparelModelLibraryJobItemOut(BaseModel):
     saved_item_id: str | None = None  # 已收藏入库时携带 library item id
     style_tags: list[str] = Field(default_factory=list)
     appearance_direction: str | None = None
+    gender: str | None = None
+    download_filename: str | None = None
 
 
 class ApparelModelLibraryJobOut(BaseModel):
@@ -604,6 +618,11 @@ class ApparelModelLibraryJobOut(BaseModel):
 
 class ApparelModelLibraryJobsOut(BaseModel):
     items: list[ApparelModelLibraryJobOut]
+
+
+class ApparelModelLibraryJobsClearOut(BaseModel):
+    ok: bool = True
+    deleted: int = 0
 
 
 class ApparelModelLibrarySaveJobItemIn(BaseModel):

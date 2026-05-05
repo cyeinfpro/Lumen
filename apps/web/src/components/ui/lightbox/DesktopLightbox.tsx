@@ -85,6 +85,7 @@ type DesktopGalleryItem = {
     quality?: string;
     fast?: boolean;
     created_at?: string;
+    filename?: string;
   };
   prompt: string;
   started_at?: number;
@@ -129,6 +130,7 @@ function toDesktopGalleryItem(item: LightboxItem): DesktopGalleryItem {
       quality: item.quality,
       fast: item.fast,
       created_at: item.created_at,
+      filename: item.filename ?? item.file_name,
     },
     prompt: item.prompt ?? "",
   };
@@ -159,7 +161,13 @@ function extensionFromSrc(src: string): string | null {
   }
 }
 
-function downloadFilename(id: string | null, src: string, mime?: string): string {
+function downloadFilename(
+  id: string | null,
+  src: string,
+  mime?: string,
+  preferred?: string,
+): string {
+  if (preferred?.trim()) return preferred.trim();
   const ext = extensionFromMime(mime) ?? extensionFromSrc(src) ?? "png";
   return `lumen-${id ?? "image"}.${ext}`;
 }
@@ -288,6 +296,7 @@ function formatImageDate(value: string | undefined): string | null {
 export function DesktopLightbox() {
   const lightbox = useUiStore((s) => s.lightbox);
   const openLightbox = useUiStore((s) => s.openLightbox);
+  const openLightboxFromItems = useUiStore((s) => s.openLightboxFromItems);
   const closeLightbox = useUiStore((s) => s.closeLightbox);
   const createShareMutation = useCreateShareMutation();
   const lightboxOpen = lightbox.open;
@@ -526,7 +535,12 @@ export function DesktopLightbox() {
         const blob = await fetchImageBlob(src);
         const objectUrl = URL.createObjectURL(blob);
         a.href = objectUrl;
-        a.download = downloadFilename(id, src, blob.type || currentImageMeta?.mime);
+        a.download = downloadFilename(
+          id,
+          src,
+          blob.type || currentImageMeta?.mime,
+          currentImageMeta?.filename,
+        );
         a.click();
         window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
         setDownloadStatus("success");
@@ -716,15 +730,19 @@ export function DesktopLightbox() {
         }
         setSlideDir(direction);
         setPendingImageId(null);
-        openLightbox(
-          target.image.id,
-          target.image.data_url,
-          target.prompt,
-          target.image.preview_url ?? target.image.thumb_url,
-        );
+        if (storeEventItems && lightbox.action) {
+          openLightboxFromItems(storeEventItems, target.image.id, lightbox.action);
+        } else {
+          openLightbox(
+            target.image.id,
+            target.image.data_url,
+            target.prompt,
+            target.image.preview_url ?? target.image.thumb_url,
+          );
+        }
       })();
     },
-    [openLightbox],
+    [lightbox.action, openLightbox, openLightboxFromItems, storeEventItems],
   );
 
   const gotoDelta = useCallback(

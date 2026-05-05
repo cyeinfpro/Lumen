@@ -80,6 +80,8 @@ export interface GeneratedImage {
   // 网关请求与实际返回的尺寸字符串，展示在角标
   size_requested: string;
   size_actual: string;
+  filename?: string;
+  metadata_jsonb?: Record<string, unknown> | null;
 }
 
 export type GenerationStatus =

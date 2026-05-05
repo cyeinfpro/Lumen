@@ -17,7 +17,10 @@ import type {
   ModelLibraryItemAgeSegment,
   WorkflowRun,
 } from "@/lib/apiClient";
-import { MODEL_LIBRARY_APPEARANCE_LABEL } from "@/lib/apiClient";
+import {
+  MODEL_LIBRARY_APPEARANCE_LABEL,
+  MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
+} from "@/lib/apiClient";
 import { useSaveModelCandidateToLibraryMutation } from "@/lib/queries";
 
 const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
@@ -26,8 +29,8 @@ const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
   ["child", "儿童"],
   ["teen", "青少年"],
   ["young_adult", "青年"],
-  ["adult", "成年"],
-  ["middle_aged", "中老年"],
+  ["adult", "熟龄"],
+  ["middle_aged", "中年"],
   ["senior", "老年"],
 ];
 
@@ -136,35 +139,32 @@ export function SaveCandidateDialog({
           <Chip active={appearance === ""} onClick={() => setAppearance("")}>
             不指定
           </Chip>
-          {(Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as [
-            Exclude<ModelLibraryAppearance, "all">,
-            string,
-          ][]).map(([value, label]) => (
+          {MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS.map((value) => (
             <Chip
               key={value}
               active={appearance === value}
               onClick={() => setAppearance(value)}
             >
-              {label}
+              {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
             </Chip>
           ))}
         </div>
       </Field>
 
-      <Field eyebrow="Tags" label="标签">
+      <Field eyebrow="Tags" label="气质方向">
         <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
           <Chip active={!tagsEnabled} onClick={() => setTagsEnabled(false)}>
             不填
           </Chip>
           <Chip active={tagsEnabled} onClick={() => setTagsEnabled(true)}>
-            填写标签
+            填写气质
           </Chip>
         </div>
         {tagsEnabled ? (
           <input
             value={tags}
             onChange={(event) => setTags(event.target.value)}
-            placeholder="通勤、冷淡、高级简洁"
+            placeholder="知性通勤、清冷高级"
             className={cn(UNDERLINE_INPUT, "mt-3")}
           />
         ) : null}
@@ -282,9 +282,9 @@ function defaultAgeSegment(workflow: WorkflowRun): ModelLibraryItemAgeSegment {
   if (["儿童", "童装", "小朋友", "孩子"].some((word) => text.includes(word))) return "child";
   if (text.includes("青少年")) return "teen";
   if (text.includes("青年")) return "young_adult";
-  if (text.includes("中老年")) return "middle_aged";
+  if (text.includes("中年") || text.includes("中老年")) return "middle_aged";
   if (text.includes("老年")) return "senior";
-  if (text.includes("成年")) return "adult";
+  if (text.includes("熟龄") || text.includes("成年")) return "adult";
   return "user_favorites";
 }
 
