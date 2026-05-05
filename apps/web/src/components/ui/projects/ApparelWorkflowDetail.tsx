@@ -98,12 +98,12 @@ function ProjectConsole({
   }, []);
 
   return (
-    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_300px]">
-      <aside className="hidden border-r border-[var(--border)] p-5 lg:block">
+    <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] grid min-h-0 flex-1 overflow-hidden md:mb-0 lg:grid-cols-[232px_minmax(0,1fr)] xl:grid-cols-[232px_minmax(0,1fr)_300px]">
+      <aside className="hidden border-r border-[var(--border)] px-5 py-6 lg:block">
         <StepRail workflow={workflow} />
       </aside>
 
-      <section className="min-h-0 min-w-0 overflow-y-auto px-4 pb-12 pt-4 md:px-8 md:pt-6">
+      <section className="min-h-0 min-w-0 overflow-y-auto px-4 pb-12 pt-4 md:px-8 md:pt-6 xl:px-10">
         <DetailBreadcrumb workflow={workflow} />
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
@@ -125,7 +125,7 @@ function ProjectConsole({
         <Conversation workflow={workflow} />
       </section>
 
-      <aside className="hidden overflow-y-auto border-l border-[var(--border)] px-4 py-6 xl:block">
+      <aside className="hidden overflow-y-auto border-l border-[var(--border)] px-5 py-6 xl:block">
         <ConstraintPanel workflow={workflow} />
       </aside>
 
@@ -253,10 +253,10 @@ function DetailHeader({
   const stepTotal = STEPS.length;
 
   return (
-    <header className="mb-8 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
+    <header className="mb-7 grid gap-4 border-b border-[var(--border)] pb-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
       <div className="min-w-0">
-        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-          N°{stepNum} / {String(stepTotal).padStart(2, "0")} — Apparel Project
+        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          Step {stepNum} / {String(stepTotal).padStart(2, "0")} · Apparel Project
         </p>
         <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2">
           {editing ? (
@@ -280,7 +280,7 @@ function DetailHeader({
                 maxLength={120}
                 autoFocus
                 aria-label="项目名称"
-                className="min-w-0 max-w-[min(calc(100vw_-_4rem),640px)] border-b border-[var(--border-amber)] bg-transparent px-1 font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] outline-none md:text-[40px]"
+                className="min-w-0 max-w-[min(calc(100vw_-_4rem),640px)] border-b border-[var(--border-amber)] bg-transparent px-1 text-[24px] font-semibold leading-[1.15] tracking-tight text-[var(--fg-0)] outline-none md:text-[34px]"
               />
               <button
                 type="submit"
@@ -310,7 +310,7 @@ function DetailHeader({
               className="group/title flex min-w-0 cursor-pointer items-baseline gap-2 text-left focus-visible:outline-none"
               aria-label="编辑项目名称"
             >
-              <h1 className="line-clamp-2 font-display text-[28px] italic leading-[1.05] tracking-tight text-[var(--fg-0)] md:line-clamp-1 md:text-[40px]">
+              <h1 className="line-clamp-2 text-[24px] font-semibold leading-[1.15] tracking-tight text-[var(--fg-0)] md:line-clamp-1 md:text-[34px]">
                 {workflowTitle}
               </h1>
               <Pencil className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] opacity-0 transition-opacity group-hover/title:opacity-100" />
@@ -369,11 +369,11 @@ function DetailHeader({
           {menuOpen ? (
             <div
               role="menu"
-              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-3)]"
+              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] rounded-lg border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
             >
               {confirmDelete ? (
                 <div className="grid gap-2 p-2">
-                  <p className="font-display text-[16px] italic text-[var(--fg-0)]">
+                  <p className="text-[15px] font-semibold tracking-tight text-[var(--fg-0)]">
                     确认删除这个项目？
                   </p>
                   <p className="text-xs leading-5 text-[var(--fg-2)]">
@@ -496,11 +496,11 @@ function DetailSkeleton() {
 
 function DetailError({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="m-6 max-w-md border border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 p-5 text-sm">
+    <div className="m-6 max-w-md rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-soft)]/20 p-5 text-sm">
       <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
         Error
       </p>
-      <h3 className="mt-1 font-display text-[20px] italic text-[var(--fg-0)]">
+      <h3 className="mt-1 text-[18px] font-semibold tracking-tight text-[var(--fg-0)]">
         项目加载失败
       </h3>
       <p className="mt-1 text-xs text-[var(--fg-1)]">

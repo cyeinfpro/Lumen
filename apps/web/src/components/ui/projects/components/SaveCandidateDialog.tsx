@@ -181,7 +181,7 @@ export function SaveCandidateDialog({
           <span className="block font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
             Bookmark · Model Library
           </span>
-          <span className="mt-1 block font-display text-[22px] italic leading-[1.1] text-[var(--fg-0)]">
+          <span className="mt-1 block text-[20px] font-semibold leading-[1.2] tracking-tight text-[var(--fg-0)]">
             收藏到模特库
           </span>
         </span>
@@ -220,7 +220,7 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <section className="border-t border-[var(--border)] px-1 py-3 first:border-t-0 first:pt-1">
+    <section className="border-t border-[var(--border)] px-1 py-3.5 first:border-t-0 first:pt-1">
       <header className="mb-2 flex items-baseline justify-between gap-3">
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           {eyebrow}

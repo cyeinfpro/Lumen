@@ -329,6 +329,96 @@ def _accessory_strength_direction(strength: str) -> str:
     return "低存在感，近看可辨认，远看不抢主体"
 
 
+_FACE_ARCHETYPES_FEMALE: tuple[str, ...] = (
+    "oval face, almond eyes, straight nose, full lips, long straight hair, slim build",
+    "round face, narrow long eyes, small upturned nose, subtle lips, short bob, soft standard build",
+    "heart-shaped face, wide round eyes, petite nose, plump lips, medium wavy hair, tall slim build",
+    "long oval face, sharp upturned eyes, high-bridge nose, balanced lips, long straight hair with highlights, tall lean build",
+    "square face with strong jaw, deep-set eyes, straight nose, fuller lips, short curly hair, athletic build",
+    "soft round face, relaxed almond eyes, rounded nose, subtle lips, long straight side-part hair, softly curvy build",
+    "diamond face, monolid sharp eyes, narrow nose, thin lips, low ponytail, lean dancer-like build",
+    "oblong face, double-eyelid almond eyes, medium straight nose, natural lips, shoulder-length wavy hair, willowy build",
+)
+
+
+_FACE_ARCHETYPES_MALE: tuple[str, ...] = (
+    "oval face, calm double-eyelid eyes, straight nose, balanced lips, short side-part hair, lean tall build",
+    "square face with strong jaw, sharp focused eyes, high-bridge nose, firm lips, short crew cut, broad athletic build",
+    "long oval face, deep-set eyes, slim straight nose, neutral lips, medium-length wavy hair, tall slender build",
+    "round face, friendly bright eyes, rounded nose, fuller lips, short messy textured hair, standard build",
+    "diamond face, monolid eyes, narrow nose, thin lips, slicked-back hair, lean editorial build",
+    "rectangular face, focused upturned eyes, defined nose, balanced lips, short undercut, fit toned build",
+    "heart-shaped face, almond eyes, petite nose, soft lips, ear-length tousled hair, slim build",
+    "oblong face, deep almond eyes, medium straight nose, natural lips, short side-part hair, tall lean build",
+)
+
+
+def _infer_candidate_gender(style_prompt: str, product_analysis: dict[str, Any]) -> str:
+    """从风格描述 + 商品分类粗判性别；找不到信号就默认 female。
+
+    英文只匹配独立词，避免 female 之类的词误触发 male。
+    """
+    text = " ".join(
+        [style_prompt or "", str(product_analysis.get("category") or "")]
+    ).lower()
+    if any(
+        token in text
+        for token in ("女装", "女性", "女士", "女生", "女童")
+    ) or any(
+        re.search(pattern, text)
+        for pattern in (
+            r"\bfemale\b",
+            r"\bwomen\b",
+            r"\bwoman\b",
+            r"\bgirl\b",
+            r"\bwomenswear\b",
+        )
+    ):
+        return "female"
+    if any(
+        token in text for token in ("男装", "男性", "男士", "男生", "男童")
+    ) or any(
+        re.search(pattern, text)
+        for pattern in (
+            r"\bmale\b",
+            r"\bmen\b",
+            r"\bman\b",
+            r"\bboy\b",
+            r"\bmenswear\b",
+        )
+    ):
+        return "male"
+    return "female"
+
+
+def _model_diversity_anchor(
+    *,
+    candidate_index: int,
+    gender: str | None,
+    age_segment: str | None = None,
+) -> str:
+    """按 candidate_index 取一组差异化外貌锚点，避免多张候选收敛到同一张 AI 通用脸。
+
+    toddler / child 用引导句，避免成人 archetype（如 ponytail、dancer build）套小孩的违和感。
+    """
+    if age_segment in {"toddler", "child"}:
+        return (
+            "Make this candidate visibly different from other candidates "
+            "in face shape, hair length, and body type."
+        )
+    pool = (
+        _FACE_ARCHETYPES_MALE
+        if (gender or "").lower() == "male"
+        else _FACE_ARCHETYPES_FEMALE
+    )
+    archetype = pool[(max(candidate_index, 1) - 1) % len(pool)]
+    return (
+        f"Look anchor for this candidate: {archetype}. "
+        "Stay visibly distinct from other candidates; "
+        "hair color and skin tone should follow the appearance direction."
+    )
+
+
 def _style_region_from_text(text: str) -> str:
     for region in ("欧美", "亚洲", "拉美", "中东", "非洲"):
         if region in text:
@@ -1849,36 +1939,44 @@ def _candidate_prompt(
     avoid: list[str],
 ) -> str:
     product_category = str(product_analysis.get("category") or "adult apparel")
-    base_styling = "uniform warm ivory sleeveless top and warm ivory shorts, barefoot"
+    base_styling = "warm ivory sleeveless top and warm ivory shorts, barefoot"
     style = style_prompt.strip() or "clean premium ecommerce model, refined, natural"
     age_requirement = _age_direction(style)
     height_requirement = _height_requirement(style)
-    avoid_text = ", ".join(avoid) if avoid else "celebrity likeness, influencer likeness, dramatic makeup"
-    return (
-        "Create one clean 2x2 ecommerce model reference contact sheet with exactly four panels in this order: "
-        "top-left front full body, top-right left 90-degree profile full body, "
-        "bottom-left straight back full body, bottom-right close-up headshot. "
-        "Each panel should have a clear crop and consistent framing, with the three full-body views "
-        "shot from the same camera height and distance. The side-view panel must be a true left profile, "
-        "not a three-quarter pose: only one eye visible, nose and chin in profile, shoulders, hips, knees, "
-        "and feet all pointing sideways in the same direction, arms relaxed and not hiding the body outline. "
-        "The back-view panel must be a straight rear view with the face not visible. "
-        "The headshot panel must be a straight frontal face, looking directly at the camera with both eyes fully visible. "
-        "Use a plain seamless white or light gray studio background, soft even lighting, no scene, no props, "
-        "no furniture, no text labels, and no panel captions. "
-        "Use the same synthetic model in every view, keeping face, hairstyle, body proportion, "
-        "skin tone, age impression, limb length, posture language, and lighting consistent. "
-        "Make the model look like a real commercially photographed person rather than an AI beauty render: "
-        "natural facial asymmetry, individual facial structure, believable skin texture, normal pores, "
-        "subtle expression, realistic hairline, and ordinary human proportions. Avoid generic influencer face, "
-        "plastic skin, doll-like eyes, over-smoothed beauty retouching, exaggerated symmetry, and runway glamour. "
-        "The model is not wearing the user's product yet. "
-        f"Use simple neutral base clothing: {base_styling}. Do not add any product-specific garment details. "
-        f"{age_requirement} {height_requirement} "
-        "No text labels, no height labels, no watermark, no logo, no celebrity or real-person likeness. "
-        f"Style direction: {style}. Product category context: {product_category}. "
-        f"Candidate variation number: {candidate_index}. Avoid: {avoid_text}."
+    avoid_text = ", ".join(item.strip() for item in avoid if item and item.strip())
+    avoid_line = f"Avoid: {avoid_text}." if avoid_text else ""
+    diversity = _model_diversity_anchor(
+        candidate_index=candidate_index,
+        gender=_infer_candidate_gender(style_prompt, product_analysis),
     )
+    return " ".join(
+        part
+        for part in [
+            "Create one clean 2x2 ecommerce model reference contact sheet, exactly four panels: "
+            "top-left front full body, top-right left 90-degree profile full body, "
+            "bottom-left straight back full body, bottom-right close-up headshot.",
+            "Same model in all four panels, consistent framing, "
+            "same camera height and distance for the three full-body views.",
+            "Side panel must be a true left profile (only one eye visible, "
+            "body fully sideways, not a three-quarter pose).",
+            "Back panel must hide the face. Headshot must be straight frontal with both eyes visible.",
+            "Plain seamless white or light gray studio background, soft even lighting, "
+            "no props, no text labels.",
+            "Real commercially photographed person, not an AI beauty render.",
+            "The model is not wearing the user's product yet.",
+            f"Use simple neutral base clothing: {base_styling}.",
+            "Every candidate must wear this exact same outfit; "
+            "only face, hair, and body type may differ between candidates.",
+            f"{age_requirement} {height_requirement}".strip(),
+            diversity,
+            "No text labels, no height labels, no watermark, no logo, no celebrity likeness.",
+            f"Style direction: {style}.",
+            f"Product category context: {product_category}.",
+            f"Candidate variation number: {candidate_index}.",
+            avoid_line,
+        ]
+        if part
+    ).strip()
 
 
 def _showcase_prompt(
@@ -2336,7 +2434,12 @@ def _image_params(
 
 
 def _candidate_image_params() -> ImageParamsIn:
-    params = _image_params(aspect_ratio="4:5", count=1, render_quality="high")
+    params = _image_params(
+        aspect_ratio="4:5",
+        count=1,
+        render_quality="high",
+        fast=False,
+    )
     return params.model_copy(update={"output_format": "png", "output_compression": None})
 
 
@@ -4316,8 +4419,6 @@ def _model_library_generate_prompt(
     这样库里的条目可以直接被 select_apparel_model_library_item 顶替项目候选使用。
     每次按 count 并行生成 N 张独立模特的 contact sheet，candidate_index 用来引导差异化。
     """
-    age_label = _MODEL_LIBRARY_TITLE_AGE_LABELS.get(age_segment, "")
-    _ = age_label
     gender_label = "female" if gender == "female" else "male"
     appearance = (appearance_direction or "").strip()
     extras = (extra_requirements or "").strip()
@@ -4337,40 +4438,39 @@ def _model_library_generate_prompt(
         age_directive = "around 45-55 years old middle aged proportions"
     elif age_segment == "senior":
         age_directive = "around 65-75 years old senior proportions"
-    base_styling = "uniform warm ivory sleeveless top and warm ivory shorts, barefoot"
+    base_styling = "warm ivory sleeveless top and warm ivory shorts, barefoot"
     appearance_directive = (
         f"Appearance direction: {appearance}." if appearance else ""
     )
     style_directive = f"Style references: {tag_text}." if tag_text else ""
     extras_directive = f"User notes: {extras}." if extras else ""
+    diversity = _model_diversity_anchor(
+        candidate_index=candidate_index,
+        gender=gender,
+        age_segment=age_segment,
+    )
     return " ".join(
         part
         for part in [
-            "Create one clean 2x2 ecommerce model reference contact sheet with exactly four panels in this order: "
+            "Create one clean 2x2 ecommerce model reference contact sheet, exactly four panels: "
             "top-left front full body, top-right left 90-degree profile full body, "
             "bottom-left straight back full body, bottom-right close-up headshot.",
-            "Each panel should have a clear crop and consistent framing, with the three full-body views "
-            "shot from the same camera height and distance.",
-            "The side-view panel must be a true left profile, not a three-quarter pose: only one eye visible, "
-            "nose and chin in profile, shoulders, hips, knees, and feet all pointing sideways in the same direction, "
-            "arms relaxed and not hiding the body outline.",
-            "The back-view panel must be a straight rear view with the face not visible.",
-            "The headshot panel must be a straight frontal face, looking directly at the camera with both eyes fully visible.",
-            "Use a plain seamless white or light gray studio background, soft even lighting, no scene, no props, "
-            "no furniture, no text labels, and no panel captions.",
-            "Use the same synthetic model in every view, keeping face, hairstyle, body proportion, "
-            "skin tone, age impression, limb length, posture language, and lighting consistent.",
-            "Make the model look like a real commercially photographed person rather than an AI beauty render: "
-            "natural facial asymmetry, individual facial structure, believable skin texture, normal pores, "
-            "subtle expression, realistic hairline, and ordinary human proportions.",
-            "Avoid generic influencer face, plastic skin, doll-like eyes, over-smoothed beauty retouching, "
-            "exaggerated symmetry, and runway glamour.",
-            f"Use simple neutral base clothing: {base_styling}. Do not add any product-specific garment details.",
-            "No text labels, no height labels, no watermark, no logo, no celebrity or real-person likeness.",
+            "Same model in all four panels, consistent framing, "
+            "same camera height and distance for the three full-body views.",
+            "Side panel must be a true left profile (only one eye visible, "
+            "body fully sideways, not a three-quarter pose).",
+            "Back panel must hide the face. Headshot must be straight frontal with both eyes visible.",
+            "Plain seamless white or light gray studio background, soft even lighting, "
+            "no props, no text labels.",
+            "Real commercially photographed person, not an AI beauty render.",
+            f"Use simple neutral base clothing: {base_styling}.",
+            "Every candidate must wear this exact same outfit; "
+            "only face, hair, and body type may differ between candidates.",
             f"Gender: {gender_label}. {age_directive}".strip(),
             appearance_directive,
             style_directive,
             extras_directive,
+            diversity,
             f"Variation index: {candidate_index}.",
         ]
         if part
@@ -4379,7 +4479,12 @@ def _model_library_generate_prompt(
 
 def _model_library_generate_image_params() -> ImageParamsIn:
     """模特库独立生成 2x2 contact sheet：4:5 跟项目候选一致，PNG 高质量。"""
-    params = _image_params(aspect_ratio="4:5", count=1, render_quality="high")
+    params = _image_params(
+        aspect_ratio="4:5",
+        count=1,
+        render_quality="high",
+        fast=False,
+    )
     return params.model_copy(update={"output_format": "png", "output_compression": None})
 
 

@@ -419,6 +419,7 @@ def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -
 
     assert "warm ivory sleeveless top" in prompt
     assert "warm ivory shorts" in prompt
+    assert "Every candidate must wear this exact same outfit" in prompt
     assert "2x2 ecommerce model reference contact sheet" in prompt
     assert "exactly four panels" in prompt
     assert "front full body" in prompt
@@ -428,15 +429,13 @@ def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -
     assert "same camera height and distance" in prompt
     assert "only one eye visible" in prompt
     assert "not a three-quarter pose" in prompt
-    assert "face not visible" in prompt
-    assert "plain seamless white or light gray studio background" in prompt
-    assert "real commercially photographed person" in prompt
-    assert "natural facial asymmetry" in prompt
-    assert "believable skin texture" in prompt
-    assert "generic influencer face" in prompt
-    assert "plastic skin" in prompt
+    assert "Back panel must hide the face" in prompt
+    assert "Plain seamless white or light gray studio background" in prompt
+    assert "Real commercially photographed person" in prompt
     assert "No text labels" in prompt
     assert "no height labels" in prompt
+    # diversity anchor 注入：不同 candidate_index 拿到不同 archetype
+    assert "Look anchor for this candidate" in prompt
 
 
 def test_candidate_image_params_use_lossless_png_reference() -> None:
@@ -835,6 +834,58 @@ def test_model_library_generate_prompt_embeds_age_gender_appearance() -> None:
     assert "natural studio" in prompt
     assert "minimal" in prompt
     assert "Variation index: 2." in prompt
+    assert "Look anchor for this candidate" in prompt
+    assert "warm ivory sleeveless top" in prompt
+    assert "Every candidate must wear this exact same outfit" in prompt
+
+
+def test_model_diversity_anchor_rotates_by_candidate_index_and_gender() -> None:
+    anchor = workflows._model_diversity_anchor  # noqa: SLF001
+
+    # 同 gender 不同 index → 不同 archetype
+    a1 = anchor(candidate_index=1, gender="female")
+    a2 = anchor(candidate_index=2, gender="female")
+    assert a1 != a2
+    assert "Look anchor for this candidate" in a1
+    assert "Look anchor for this candidate" in a2
+
+    # 池子大小 8：第 9 个绕回第 1 个
+    assert anchor(candidate_index=9, gender="female") == anchor(candidate_index=1, gender="female")
+
+    # gender 切换 → 不同池子
+    male_a1 = anchor(candidate_index=1, gender="male")
+    assert male_a1 != a1
+    assert "short side-part hair" in male_a1  # 男性池子第 1 条
+
+    # toddler/child 走引导句，不套成人 archetype
+    child_anchor = anchor(candidate_index=1, gender="female", age_segment="child")
+    assert "Look anchor for this candidate" not in child_anchor
+    assert "visibly different" in child_anchor
+
+
+def test_model_library_generate_image_params_use_lossless_png_with_fast_off() -> None:
+    params = workflows._model_library_generate_image_params()  # noqa: SLF001
+
+    assert params.aspect_ratio == "4:5"
+    assert params.count == 1
+    assert params.render_quality == "high"
+    assert params.fast is False
+    assert params.output_format == "png"
+    assert params.output_compression is None
+
+
+def test_infer_candidate_gender_detects_male_signal_and_defaults_to_female() -> None:
+    f = workflows._infer_candidate_gender  # noqa: SLF001
+
+    assert f("男装通勤", {"category": "衬衫"}) == "male"
+    assert f("menswear smart casual", {"category": "shirt"}) == "male"
+    assert f("男童运动套装", {"category": "童装"}) == "male"
+    assert f("male casual wear", {"category": "shirt"}) == "male"
+    assert f("female premium ecommerce model", {"category": "apparel"}) == "female"
+    assert f("womenswear studio", {"category": "shirt"}) == "female"
+    assert f("女装连衣裙", {"category": "连衣裙"}) == "female"
+    # 没有性别信号时默认 female
+    assert f("clean premium ecommerce model", {"category": "apparel"}) == "female"
 
 
 def test_model_library_job_status_combines_step_status_and_count() -> None:

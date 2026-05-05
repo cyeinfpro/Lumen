@@ -1,6 +1,6 @@
 "use client";
 
-// 右侧约束面板（editorial）：
+// 右侧约束面板：
 // - 桌面常驻（≥ xl）：直接铺 InfoPanel，section 之间走 hairline
 // - 中屏 / 移动：抽屉/BottomSheet，header 用 mono eyebrow + serif italic title
 // - 不再叠加 bg-white/[0.035] + border + shadow 的旧卡片包裹
@@ -62,11 +62,11 @@ function ConstraintBody({ workflow }: { workflow: WorkflowRun }) {
 export function ConstraintPanel({ workflow, className }: ConstraintPanelProps) {
   return (
     <div className={cn("relative", className)}>
-      <header className="pb-3">
+      <header className="border-b border-[var(--border)] pb-4">
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           Constraints
         </p>
-        <h3 className="mt-1.5 font-display text-[20px] italic leading-[1.1] text-[var(--fg-0)]">
+        <h3 className="mt-1.5 text-[18px] font-semibold leading-[1.2] tracking-tight text-[var(--fg-0)]">
           项目约束
         </h3>
       </header>
@@ -87,7 +87,7 @@ function DrawerHeader({ onClose }: { onClose: () => void }) {
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           Constraints
         </p>
-        <h2 className="mt-1.5 font-display text-[22px] italic leading-[1.1] text-[var(--fg-0)]">
+        <h2 className="mt-1.5 text-[20px] font-semibold leading-[1.2] tracking-tight text-[var(--fg-0)]">
           项目约束
         </h2>
       </div>
@@ -149,7 +149,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
               "absolute inset-y-0 right-0 flex w-[min(380px,86vw)] flex-col",
-              "max-h-[100dvh] border-l border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-3)]",
+              "max-h-[100dvh] border-l border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]",
             )}
           >
             <DrawerHeader onClose={onClose} />

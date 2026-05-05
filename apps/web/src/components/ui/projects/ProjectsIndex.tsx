@@ -1,11 +1,10 @@
 "use client";
 
-// Editorial 重构：杂志大标题 + portrait 项目卡 + hairline toolbar。
-// 1) ModelLibraryEntry：堆叠 portrait avatars + 右侧 N°/总数 + 编辑入口
-// 2) Hero：font-display italic + mono eyebrow + 大数字三栏
-// 3) Toolbar：filter 改 underline-on-active；search 极简
-// 4) ProjectCard：portrait 大图 + 信息悬浮 + hover micro scale
-// 5) Empty / Error / Skeleton：editorial placeholder
+// 项目列表页：与「创作 / 图库 / 我的」对齐的编辑室式版式。
+// - 顶部信息带 + 数据条
+// - 模特库入口改为整行带状链接
+// - 筛选 / 搜索 / 项目卡片统一 hairline 节奏
+// - 空态 / 错误态 / 骨架保持克制，避免再叠多层卡片
 
 import { motion, useReducedMotion } from "framer-motion";
 import Image from "next/image";
@@ -13,7 +12,6 @@ import {
   AlertTriangle,
   ArrowRight,
   ChevronRight,
-  Library,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -128,8 +126,8 @@ export function ProjectsIndex() {
         }
       />
       <ProjectTopBar />
-      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-6">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-6 md:gap-12">
+      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-8">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-6 md:gap-8">
           <Crumb />
           <Hero counts={counts} />
           <ModelLibraryEntry />
@@ -180,55 +178,53 @@ export function ProjectsIndex() {
 
 function Crumb() {
   return (
-    <nav
-      aria-label="项目路径"
-      className="hidden items-center gap-3 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)] md:flex"
-    >
+    <nav aria-label="项目路径" className="hidden md:block">
       <Link
         href="/projects"
-        className="transition-colors hover:text-[var(--fg-0)]"
+        className="inline-flex items-center gap-1 text-[12px] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
       >
-        Projects
+        <ChevronRight aria-hidden className="h-3 w-3 rotate-180" />
+        项目
       </Link>
-      <span aria-hidden className="text-[var(--fg-3)]">·</span>
-      <span className="text-[var(--fg-0)]">Apparel</span>
     </nav>
   );
 }
 
-// Hero：杂志大标题 + 三栏数字
+// Hero：22px 标题 + 描述 + 紧凑数据栏
 function Hero({ counts }: { counts: Record<FilterKey, number> }) {
   const active = counts.running + counts.needs_review + counts.attention;
   return (
-    <section className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-12">
-      <div className="hidden min-w-0 md:block">
-        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-          N°01 — Apparel Studio
-        </p>
-        <h1 className="mt-3 font-display text-[40px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] sm:text-[44px] md:text-[72px]">
-          服饰模特图
-        </h1>
-        <p className="mt-4 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
-          {counts.all > 0
-            ? active > 0
-              ? `${active} 个项目正在路上，${counts.completed} 个已交付。`
-              : "所有项目都已收束，可以开启下一组棚拍。"
-            : "管理模特库、商品图分析、模特候选、展示图生成与交付。"}
-        </p>
+    <section className="grid gap-5 border-b border-[var(--border)] pb-5 md:gap-6 md:pb-6">
+      <div className="hidden items-end justify-between gap-6 md:flex">
+        <div className="min-w-0">
+          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            Project Index
+          </p>
+          <h1 className="mt-2 font-display text-[36px] italic leading-[1] text-[var(--fg-0)] md:text-[44px]">
+            服饰模特图
+          </h1>
+          <p className="mt-3 max-w-2xl text-[13px] leading-[1.7] text-[var(--fg-2)]">
+            {counts.all > 0
+              ? active > 0
+                ? `${active} 个项目正在路上，${counts.completed} 个已交付。`
+                : "所有项目都已收束，可以开启下一组棚拍。"
+              : "管理模特库、商品图分析、模特候选、展示图生成与交付。"}
+          </p>
+        </div>
+        <Link
+          href="/projects/apparel-model-showcase/new"
+          className="group inline-flex shrink-0 items-center gap-2 rounded-full bg-[var(--accent)] px-4 py-2 text-[13px] font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          新建项目
+          <ArrowRight className="h-3.5 w-3.5 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-hover:translate-x-0 group-hover:opacity-100" />
+        </Link>
       </div>
-      <Link
-        href="/projects/apparel-model-showcase/new"
-        className="group hidden items-center gap-3 self-start rounded-full bg-[var(--accent)] px-6 py-3 font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:inline-flex md:self-end"
-      >
-        <Plus className="h-4 w-4" />
-        新建项目
-        <ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-hover:translate-x-0 group-hover:opacity-100" />
-      </Link>
 
-      <div className="col-span-full grid grid-cols-3 gap-px overflow-hidden border border-[var(--border)] md:max-w-3xl md:gap-px">
-        <Stat label="Total" value={counts.all} />
-        <Stat label="Active" value={active} accent={active > 0} />
-        <Stat label="Delivered" value={counts.completed} />
+      <div className="grid grid-cols-1 gap-px overflow-hidden border border-[var(--border-subtle)] sm:grid-cols-3 md:max-w-2xl">
+        <Stat label="全部" value={counts.all} />
+        <Stat label="进行中" value={active} accent={active > 0} />
+        <Stat label="已交付" value={counts.completed} />
       </div>
     </section>
   );
@@ -244,18 +240,16 @@ function Stat({
   accent?: boolean;
 }) {
   return (
-    <div className="bg-[var(--bg-0)] px-3 py-3 md:px-6 md:py-5">
-      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-        {label}
-      </p>
-      <p
+    <div className="flex items-baseline gap-2 bg-[var(--bg-1)] px-4 py-3.5 md:px-5 md:py-4">
+      <span
         className={cn(
-          "mt-1 font-display text-[26px] italic leading-none tabular-nums md:text-[44px]",
+          "text-[22px] font-semibold tabular-nums leading-none md:text-[24px]",
           accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
         )}
       >
         {String(value).padStart(2, "0")}
-      </p>
+      </span>
+      <span className="text-[12px] text-[var(--fg-2)]">{label}</span>
     </div>
   );
 }
@@ -276,11 +270,11 @@ function ModelLibraryEntry() {
     <Link
       href="/library"
       aria-label="进入模特库"
-      className="group relative block overflow-hidden border-y border-[var(--border)] py-4 transition-colors hover:bg-[var(--bg-1)]/40 md:py-7"
+      className="group block border-y border-[var(--border)] py-4 transition-colors hover:bg-[var(--bg-1)]/45 md:py-5"
     >
-      <div className="grid items-center gap-4 md:grid-cols-[auto_minmax(0,1fr)_auto] md:gap-10">
-        <div className="flex md:items-center">
-          <div className="flex -space-x-3 md:-space-x-4">
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="flex min-w-0 items-center gap-3 md:gap-4">
+          <div className="flex shrink-0 -space-x-2.5 md:-space-x-3">
             {hasItems ? (
               <>
                 <span className="hidden md:contents">
@@ -302,33 +296,32 @@ function ModelLibraryEntry() {
               </>
             )}
           </div>
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+              Model Library
+            </p>
+            <h2 className="mt-1 text-[18px] font-semibold tracking-tight text-[var(--fg-0)] md:text-[20px]">
+              模特库
+            </h2>
+            <p className="mt-1 max-w-md text-[12.5px] leading-[1.65] text-[var(--fg-2)]">
+              {hasItems
+                ? "浏览预设、收藏与生成的模特"
+                : "进入并新建你的第一个模特"}
+            </p>
+          </div>
         </div>
-        <div className="min-w-0">
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-            <Library className="mr-1.5 -mt-px inline-block h-3 w-3 text-[var(--amber-300)]" />
-            Library
-          </p>
-          <h2 className="mt-1.5 font-display text-[22px] italic leading-[1] text-[var(--fg-0)] md:mt-2 md:text-[36px]">
-            模特库
-          </h2>
-          <p className="mt-1.5 max-w-md truncate text-[13px] text-[var(--fg-1)]">
-            {hasItems
-              ? "浏览预设、收藏与生成的模特"
-              : "进入并新建你的第一个模特"}
-          </p>
-        </div>
-        <div className="flex items-center justify-between gap-4 md:justify-end md:gap-6">
+        <div className="flex items-center gap-3 self-start md:self-center">
           <div className="text-right">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               Models
             </p>
-            <p className="mt-0.5 font-display text-[24px] italic leading-none tabular-nums text-[var(--fg-0)] md:text-[36px]">
+            <p className="font-display text-[24px] italic leading-none text-[var(--fg-0)] md:text-[28px]">
               {String(total).padStart(2, "0")}
             </p>
           </div>
           <span
             aria-hidden
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] text-[var(--fg-1)] transition-all duration-[var(--dur-base)] group-hover:border-[var(--border-amber)] group-hover:bg-[var(--accent-soft)] group-hover:text-[var(--amber-300)] md:h-12 md:w-12"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-subtle)] text-[var(--fg-2)] transition-all duration-[var(--dur-base)] group-hover:border-[var(--border-amber)] group-hover:bg-[var(--accent-soft)] group-hover:text-[var(--amber-300)]"
           >
             <ChevronRight className="h-4 w-4 transition-transform duration-[var(--dur-base)] group-hover:translate-x-0.5" />
           </span>
@@ -347,11 +340,11 @@ function ModelAvatar({
   size: "sm" | "md";
   zIndex: number;
 }) {
-  const dimension = size === "md" ? 56 : 44;
+  const dimension = size === "md" ? 40 : 32;
   const cls =
     size === "md"
-      ? "h-14 w-14 ring-2 ring-[var(--bg-0)]"
-      : "h-11 w-11 ring-2 ring-[var(--bg-0)]";
+      ? "h-10 w-10 ring-2 ring-[var(--bg-0)]"
+      : "h-8 w-8 ring-2 ring-[var(--bg-0)]";
   const src = item.thumb_url || item.image_url;
   return (
     <span
@@ -371,7 +364,7 @@ function ModelAvatar({
           className="h-full w-full object-cover"
         />
       ) : (
-        <Users className="absolute inset-0 m-auto h-4 w-4 text-[var(--fg-2)]" />
+        <Users className="absolute inset-0 m-auto h-3.5 w-3.5 text-[var(--fg-2)]" />
       )}
     </span>
   );
@@ -380,8 +373,8 @@ function ModelAvatar({
 function PlaceholderAvatar({ size }: { size: "sm" | "md" }) {
   const cls =
     size === "md"
-      ? "h-14 w-14 ring-2 ring-[var(--bg-0)]"
-      : "h-11 w-11 ring-2 ring-[var(--bg-0)]";
+      ? "h-10 w-10 ring-2 ring-[var(--bg-0)]"
+      : "h-8 w-8 ring-2 ring-[var(--bg-0)]";
   return (
     <span
       aria-hidden
@@ -390,7 +383,7 @@ function PlaceholderAvatar({ size }: { size: "sm" | "md" }) {
         cls,
       )}
     >
-      <Users className="h-4 w-4 text-[var(--fg-3)]" />
+      <Users className="h-3.5 w-3.5 text-[var(--fg-3)]" />
     </span>
   );
 }
@@ -410,7 +403,7 @@ function Toolbar({
   onKeywordChange: (value: string) => void;
 }) {
   return (
-    <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,280px)] lg:items-center">
+    <section className="grid gap-4 border-b border-[var(--border)] pb-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)] lg:items-end">
       <div className="flex min-w-0 flex-wrap gap-x-1 gap-y-1 md:gap-x-1">
         {FILTERS.map((option) => {
           const active = filter === option.key;
@@ -421,13 +414,13 @@ function Toolbar({
               type="button"
               onClick={() => onFilterChange(option.key)}
               className={cn(
-                "group relative inline-flex min-h-10 shrink-0 cursor-pointer items-baseline gap-2 px-3 py-2 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
+                "group relative inline-flex min-h-10 shrink-0 cursor-pointer items-baseline gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
                 active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
               )}
             >
               <span>{option.label}</span>
-              <span className="tabular-nums opacity-70">
-                {String(count).padStart(2, "0")}
+              <span className="text-[11px] tabular-nums opacity-60">
+                {count}
               </span>
               <span
                 aria-hidden
@@ -581,8 +574,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         className="block focus-visible:outline-none"
         aria-label={item.title || "服饰模特图"}
       >
-        {/* 缩略图区 */}
-        <div className="relative aspect-[3/4] overflow-hidden bg-[var(--bg-2)]">
+        <div className="relative aspect-[3/4] overflow-hidden rounded-lg bg-[var(--bg-2)]">
           {thumb ? (
             <Image
               src={thumb}
@@ -615,7 +607,6 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
           ) : null}
         </div>
 
-        {/* 信息区 */}
         <div className="mt-3 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <p className="line-clamp-2 text-[15px] font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
@@ -787,10 +778,10 @@ function ProjectActionsSheet({
   return (
     <div className="grid gap-4 px-5 pb-5 pt-3">
       <div className="border-b border-[var(--border)] pb-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
-          Project
+        <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          项目
         </p>
-        <p className="mt-1 truncate font-display text-[20px] italic leading-[1.1] text-[var(--fg-0)]">
+        <p className="mt-1 truncate text-[16px] font-semibold tracking-tight text-[var(--fg-0)]">
           {itemTitle || "服饰模特图"}
         </p>
       </div>
@@ -880,7 +871,7 @@ function SkeletonGrid() {
     <div className="grid grid-cols-2 gap-x-4 gap-y-8 md:gap-x-6 md:gap-y-12 lg:grid-cols-3 xl:grid-cols-4">
       {Array.from({ length: 8 }).map((_, index) => (
         <div key={index} className="grid gap-3">
-          <Skeleton className="aspect-[3/4] w-full" />
+          <Skeleton className="aspect-[3/4] w-full rounded-lg" />
           <div className="space-y-2">
             <Skeleton className="h-4 w-3/4" />
             <Skeleton className="h-3 w-1/2" />
@@ -893,26 +884,24 @@ function SkeletonGrid() {
 
 function ErrorPanel({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-8 md:px-6 md:py-10">
-      <div className="flex items-start gap-4">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--danger)]/40 text-[var(--danger)]">
+    <div className="border-y border-[var(--danger)]/25 bg-[var(--danger-soft)]/20 px-5 py-6 md:px-6 md:py-7">
+      <div className="flex items-start gap-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--danger)]/40 text-[var(--danger)]">
           <AlertTriangle className="h-4 w-4" />
         </span>
         <div className="flex-1">
-          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
-            Error
-          </p>
-          <h3 className="mt-1 font-display text-[20px] italic text-[var(--fg-0)]">
+          <h3 className="text-[15px] font-semibold tracking-tight text-[var(--fg-0)]">
             项目加载失败
           </h3>
-          <p className="mt-1 text-[13px] text-[var(--fg-1)]">
+          <p className="mt-0.5 text-[12.5px] text-[var(--fg-2)]">
             网络错误或服务繁忙，请稍后重试。
           </p>
           <Button
-            className="mt-4"
+            className="mt-3"
             variant="secondary"
+            size="sm"
             onClick={onRetry}
-            leftIcon={<RefreshCw className="h-4 w-4" />}
+            leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
           >
             重试
           </Button>
@@ -924,36 +913,35 @@ function ErrorPanel({ onRetry }: { onRetry: () => void }) {
 
 function EmptyHero() {
   return (
-    <section className="border-y border-[var(--border)] py-12 md:py-20">
-      <div className="grid gap-8 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+    <section className="border-y border-[var(--border)] py-12 md:py-16">
+      <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
         <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
-            服饰电商工作流
+          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
+            Apparel Workflow
           </p>
-          <h2 className="mt-3 font-display text-[36px] italic leading-[1.05] text-[var(--fg-0)] md:text-[56px]">
-            从一张商品图，<br />到 4 张高级棚拍展示图
+          <h2 className="mt-2 max-w-2xl text-[24px] font-semibold tracking-tight leading-[1.25] text-[var(--fg-0)] md:text-[28px]">
+            从一张商品图，到一条完整的模特图工作流
           </h2>
-          <p className="mt-4 max-w-xl text-[14px] leading-7 text-[var(--fg-1)]">
-            上传 1-3 张商品图，先确认 AI 合成的模特，再批量生成展示图并进入质检循环。
-            八阶段闭环，可随时返修与交付。
+          <p className="mt-3 max-w-2xl text-[13px] leading-[1.7] text-[var(--fg-2)]">
+            上传商品图，确认模特候选，再进入展示图生成、质检和交付。每一步都可以继续编辑和回看。
           </p>
         </div>
         <Link
           href="/projects/apparel-model-showcase/new"
-          className="group inline-flex items-center gap-3 self-start rounded-full bg-[var(--accent)] px-6 py-3 font-medium text-black shadow-[var(--shadow-amber)] transition-transform duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:self-end"
+          className="group inline-flex shrink-0 items-center gap-2 self-start rounded-full bg-[var(--accent)] px-5 py-2.5 text-[13px] font-medium text-black shadow-[var(--shadow-amber)] transition-transform duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:self-end"
         >
-          <Plus className="h-4 w-4" />
+          <Plus className="h-3.5 w-3.5" />
           创建第一个项目
-          <ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-hover:translate-x-0 group-hover:opacity-100" />
+          <ArrowRight className="h-3.5 w-3.5 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-hover:translate-x-0 group-hover:opacity-100" />
         </Link>
       </div>
-      <div className="mt-10 grid grid-cols-3 gap-px overflow-hidden border border-[var(--border)] md:max-w-3xl">
+      <div className="mt-6 grid grid-cols-3 gap-px overflow-hidden border border-[var(--border-subtle)] md:max-w-2xl">
         {["商品约束", "模特候选", "展示交付"].map((label, index) => (
-          <div key={label} className="bg-[var(--bg-0)] px-4 py-5 md:px-6">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          <div key={label} className="bg-[var(--bg-0)] px-3 py-3 md:px-4 md:py-3.5">
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
               N°{String(index + 1).padStart(2, "0")}
             </p>
-            <p className="mt-1.5 font-display text-[18px] italic leading-tight text-[var(--fg-0)] md:text-[22px]">
+            <p className="mt-1 text-[13px] font-semibold tracking-tight text-[var(--fg-0)] md:text-[14px]">
               {label}
             </p>
           </div>

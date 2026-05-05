@@ -1,9 +1,9 @@
 "use client";
 
 // Editorial 项目流程内的"选模特"弹窗：
-//  - header 去 bg-white/[0.035] 卡片，改为 mono eyebrow + serif italic title + hairline
+//  - header 去 bg-white/[0.035] 卡片，改为 mono eyebrow + compact title + hairline
 //  - 不再用 Library lucide 图标做 prefix；左上角清晰排印自带气场
-//  - 桌面 modal 不再 rounded-md + shadow-lumen-pop，改为单线边 + bg-0 极简底
+//  - 桌面 modal 改为轻圆角 + hairline + bg-0 极简底
 //  - footer 去厚底 bg；按钮 secondary 改 outline (hairline)
 //  - 移动端：BottomSheet 仍用 88% snap，header 同款排印
 //
@@ -147,7 +147,7 @@ export function ModelLibraryDialog({
         role="dialog"
         aria-modal="true"
         aria-label="模特库"
-        className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
+        className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
       >
         <DialogHeader
           onOpenFullLibrary={openFullLibrary}
@@ -185,12 +185,12 @@ function DialogHeader({
   hint: string;
 }) {
   return (
-    <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border)] px-5 py-5 md:px-7 md:py-6">
+    <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border)] px-5 py-4 md:px-6 md:py-5">
       <div className="min-w-0">
         <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
           Model Library
         </p>
-        <h2 className="mt-1.5 font-display text-[24px] italic leading-[1.05] text-[var(--fg-0)] md:text-[28px]">
+        <h2 className="mt-1.5 text-[22px] font-semibold leading-[1.18] tracking-tight text-[var(--fg-0)] md:text-[24px]">
           模特库
         </h2>
         <p className="mt-2 max-w-md text-[12px] leading-5 text-[var(--fg-2)]">
@@ -203,6 +203,7 @@ function DialogHeader({
           variant="outline"
           onClick={onOpenFullLibrary}
           rightIcon={<ArrowUpRight className="h-3.5 w-3.5" />}
+          className="max-sm:hidden"
         >
           打开完整模特库
         </Button>
@@ -229,11 +230,11 @@ function DialogFooter({
   generatingCandidates: boolean;
 }) {
   return (
-    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] px-5 py-4 md:flex-row md:items-center md:justify-between md:px-7 md:pb-4">
+    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] px-5 py-4 md:flex-row md:items-center md:justify-between md:px-6">
       <p className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
         Tip · 点击图片预览，「设为当前模特」按钮在大图内
       </p>
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <Button
           variant="outline"
           loading={generatingCandidates}
