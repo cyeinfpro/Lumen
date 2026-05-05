@@ -97,7 +97,7 @@ export function Tooltip({
             className={cn(
               "pointer-events-none absolute z-[60]",
               "px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap",
-              "bg-neutral-900/95 text-neutral-100 border border-white/10",
+              "bg-[var(--bg-1)]/95 text-[var(--fg-0)] border border-[var(--border)]",
               "shadow-lumen-pop backdrop-blur-md",
               SIDE_POS[side],
               className,

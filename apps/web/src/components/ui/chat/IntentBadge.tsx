@@ -126,8 +126,8 @@ export function IntentBadge({
           "border backdrop-blur-md transition-all duration-150",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
           disabled || busy
-            ? "border-white/10 bg-black/40 text-neutral-400 cursor-not-allowed opacity-70"
-            : "border-white/15 bg-black/60 text-neutral-200 hover:border-[var(--color-lumen-amber)]/60 hover:text-white active:scale-[0.97] cursor-pointer",
+            ? "border-[var(--border)] bg-[var(--bg-1)]/72 text-[var(--fg-1)] cursor-not-allowed opacity-70"
+            : "border-[var(--border)] bg-[var(--bg-1)]/86 text-[var(--fg-0)] hover:border-[var(--color-lumen-amber)]/60 hover:text-[var(--color-lumen-amber)] active:scale-[0.97] cursor-pointer",
         )}
       >
         {busy ? (
@@ -149,14 +149,14 @@ export function IntentBadge({
             aria-label="切换意图"
             className={cn(
               "absolute right-0 top-[calc(100%+6px)] z-50 min-w-[220px]",
-              "rounded-xl border border-white/12 bg-neutral-900/95 backdrop-blur-xl",
-              "shadow-2xl shadow-black/60 overflow-hidden",
+              "rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/95 backdrop-blur-xl",
+              "shadow-[var(--shadow-3)] overflow-hidden",
             )}
             style={{ transformOrigin: "top right" }}
           >
             {pendingIntent && (
-              <div className="px-3 py-2.5 border-b border-white/10 space-y-2">
-                <p className="text-xs text-neutral-200 leading-relaxed">
+              <div className="px-3 py-2.5 border-b border-[var(--border)] space-y-2">
+                <p className="text-xs text-[var(--fg-0)] leading-relaxed">
                   以{" "}
                   <span className="text-[var(--color-lumen-amber)] font-medium">
                     {INTENT_META[pendingIntent].label}
@@ -197,7 +197,7 @@ export function IntentBadge({
                     disabled={busy}
                     className={cn(
                       "flex-1 px-2.5 py-1 rounded-md text-xs",
-                      "bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-200",
+                      "bg-white/5 hover:bg-white/10 border border-[var(--border)] text-[var(--fg-0)]",
                       "active:scale-[0.97] transition-all duration-150 disabled:opacity-50",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30",
                     )}
@@ -226,8 +226,8 @@ export function IntentBadge({
                       isCurrent
                         ? "text-[var(--color-lumen-amber)] cursor-default"
                         : isPending
-                          ? "text-neutral-100 bg-white/5"
-                          : "text-neutral-200 hover:bg-white/5 cursor-pointer",
+                          ? "text-[var(--fg-0)] bg-white/5"
+                          : "text-[var(--fg-1)] hover:bg-white/5 hover:text-[var(--fg-0)] cursor-pointer",
                       busy && !isCurrent && "opacity-50 cursor-wait",
                     )}
                   >

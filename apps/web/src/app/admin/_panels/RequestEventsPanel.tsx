@@ -1084,7 +1084,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
   const outputCount = outputImageCount(event);
 
   return (
-    <div className="space-y-4 rounded-xl border border-white/10 bg-black/20 p-4">
+    <div className="space-y-4 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/8 pb-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-neutral-100">

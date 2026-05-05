@@ -33,7 +33,7 @@ const VARIANTS: Record<Variant, string> = {
     "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_rgba(242,169,58,0.55)]",
   secondary:
     "bg-white/8 text-[var(--fg-0)] hover:bg-white/12 " +
-    "border border-white/10 hover:border-white/15 backdrop-blur-sm",
+    "border border-[var(--border)] hover:border-[var(--border-strong)] backdrop-blur-sm",
   ghost:
     "bg-transparent text-[var(--fg-0)] hover:bg-white/6 " +
     "border border-transparent",

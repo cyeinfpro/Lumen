@@ -33,7 +33,7 @@ export function ModeSwitcher() {
       aria-label="生成模式"
       className={cn(
         "relative inline-flex items-center p-0.5 rounded-full",
-        "bg-white/5 border border-white/10",
+        "bg-white/5 border border-[var(--border)]",
       )}
     >
       {MODES.map((m) => {
@@ -58,8 +58,8 @@ export function ModeSwitcher() {
               active
                 ? isImageActive
                   ? "text-black"
-                  : "text-white"
-                : "text-neutral-400 hover:text-white",
+                  : "text-[var(--fg-0)]"
+                : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
             )}
           >
             {active && (

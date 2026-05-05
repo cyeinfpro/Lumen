@@ -1,6 +1,6 @@
 "use client";
 
-// 项目列表页：
+// 服饰模特图工作区：
 // 1) 顶部「模特库」入口按钮：横向缩略图 + 标题副标题 + 进入箭头，醒目但克制。
 // 2) Hero 缩小版：font-mono mini-label + 24-28px 主标题，对齐模特库设计语言。
 // 3) ProjectCard 信息密度降低：删 user_prompt，aspect 改 3/4，进入动画用 EASE.develop。
@@ -12,6 +12,7 @@ import Image from "next/image";
 import {
   AlertTriangle,
   CheckCircle2,
+  ArrowLeft,
   ChevronRight,
   Clock3,
   Image as ImageIcon,
@@ -110,18 +111,20 @@ export function ProjectsIndex() {
   const mobileSubtitle =
     counts.all > 0
       ? `${counts.all} 个项目 · ${activeCount} 个待推进`
-      : "服饰展示工作流";
+      : "模特库 / 列表 / 新建";
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
-        title="项目"
+        title="服饰模特图"
         subtitle={mobileSubtitle}
+        backHref="/projects"
+        backLabel="返回项目功能中心"
         right={
           <Link
-            href="/projects/new"
+            href="/projects/apparel-model-showcase/new"
             aria-label="新建项目"
             className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-[var(--accent)] text-black shadow-[var(--shadow-amber)] active:scale-[0.96]"
           >
@@ -132,6 +135,18 @@ export function ProjectsIndex() {
       <ProjectTopBar />
       <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
         <div className="mx-auto grid w-full max-w-[1400px] gap-4 md:gap-5">
+          <nav aria-label="项目路径" className="hidden items-center gap-1.5 text-sm md:flex">
+            <Link
+              href="/projects"
+              className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              项目
+            </Link>
+            <span aria-hidden className="text-[var(--fg-3)]">/</span>
+            <span className="text-[var(--fg-0)]">服饰模特图</span>
+          </nav>
+
           <ModelLibraryEntry />
 
           <Hero counts={counts} />
@@ -355,11 +370,11 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
     <section className="grid gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)] md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:rounded-md md:bg-white/[0.035] md:p-5">
       <div className="min-w-0">
         <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
-          PROJECTS · 服饰展示
+          PROJECTS · 服饰模特图
         </p>
         <div className="mt-2 flex flex-wrap items-end gap-x-3 gap-y-1">
           <h1 className="text-[20px] font-medium tracking-normal text-[var(--fg-0)] md:text-[24px]">
-            项目
+            服饰模特图
           </h1>
           {counts.all > 0 ? (
             <span className="pb-0.5 font-mono text-[11px] tracking-wider text-[var(--fg-2)]">
@@ -372,7 +387,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
             ? active > 0
               ? `${active} 个项目等待推进，${counts.completed} 个已交付。`
               : "所有项目都已收束，可以直接创建下一组展示图。"
-            : "从商品图、模特候选到质检交付，集中管理服饰展示图工作流。"}
+            : "管理模特库、商品图分析、模特候选、展示图生成和交付流程。"}
         </p>
         <div className="mt-3 grid grid-cols-3 gap-2 md:max-w-xl">
           <StatPill
@@ -395,7 +410,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
         </div>
       </div>
       <Link
-        href="/projects/new"
+        href="/projects/apparel-model-showcase/new"
         className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-[var(--accent)] px-4 text-[15px] font-medium text-black shadow-[var(--shadow-amber)] transition-[background-color,box-shadow,opacity] duration-150 hover:bg-[#F6B755] active:opacity-90 md:h-10 md:min-h-0 md:text-sm"
       >
         <Plus className="h-4 w-4" />
@@ -530,7 +545,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [title, setTitle] = useState(item.title || "服饰模特展示图");
+  const [title, setTitle] = useState(item.title || "服饰模特图");
   const menuRef = useRef<HTMLDivElement | null>(null);
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
   const patch = usePatchWorkflowMutation({
@@ -588,7 +603,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
     setMenuOpen((open) => !open);
     setConfirmingDelete(false);
     setRenaming(false);
-    setTitle(item.title || "服饰模特展示图");
+    setTitle(item.title || "服饰模特图");
   };
 
   // 单一 step chip 信息（合并 step + count 选 step；count 偏次要 → 删）
@@ -649,7 +664,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         <div className="flex min-w-0 flex-col">
           <div className="flex items-start justify-between gap-2 pr-8">
             <p className="line-clamp-2 text-[15px] font-medium leading-5 text-[var(--fg-0)] md:truncate md:text-sm">
-              {item.title || "服饰模特展示图"}
+              {item.title || "服饰模特图"}
             </p>
             <span className="hidden shrink-0 pt-0.5 md:inline-flex">
               <ChevronRight className="h-4 w-4 shrink-0 text-[var(--fg-2)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-[var(--fg-0)]" />
@@ -815,7 +830,7 @@ function ProjectActionsSheet({
       <div className="border-b border-[var(--border)] pb-3">
         <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">PROJECT</p>
         <p className="mt-1 truncate text-[15px] font-medium text-[var(--fg-0)]">
-          {itemTitle || "服饰模特展示图"}
+          {itemTitle || "服饰模特图"}
         </p>
       </div>
       {renaming ? (
@@ -1031,7 +1046,7 @@ function TemplateBand({ compact = false }: { compact?: boolean }) {
         </span>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-medium text-[var(--fg-0)]">服饰模特展示图</h2>
+            <h2 className="text-base font-medium text-[var(--fg-0)]">服饰模特图</h2>
             <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--fg-2)]">
               当前模板
             </span>

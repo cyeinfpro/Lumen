@@ -175,7 +175,7 @@ export function GlobalTaskTray() {
                 // 移动端：底部 sheet，宽度铺满，圆角仅顶部，顶部把手
                 "w-full rounded-t-2xl sm:rounded-2xl",
                 "sm:w-80 sm:mb-3",
-                "border border-white/10 bg-[var(--surface)] backdrop-blur-xl shadow-lumen-card",
+                "border border-[var(--border)] bg-[var(--surface)] backdrop-blur-xl shadow-lumen-card",
                 "overflow-hidden",
                 "pb-[env(safe-area-inset-bottom)] sm:pb-0",
               )}
@@ -186,7 +186,7 @@ export function GlobalTaskTray() {
               <div className="sm:hidden flex justify-center pt-2 pb-1" aria-hidden>
                 <span className="block w-10 h-1 rounded-full bg-white/20" />
               </div>
-              <header className="flex items-center gap-2 px-3 py-2.5 border-b border-white/5">
+              <header className="flex items-center gap-2 px-3 py-2.5 border-b border-[var(--border-subtle)]">
                 <span
                   className={cn(
                     "w-2 h-2 rounded-full shrink-0",
@@ -195,7 +195,7 @@ export function GlobalTaskTray() {
                       : "bg-[var(--ok)]",
                   )}
                 />
-                <h4 className="text-xs font-medium text-neutral-200 flex-1">
+                <h4 className="text-xs font-medium text-[var(--fg-0)] flex-1">
                   {hasActive ? `进行中的任务 (${activeCount})` : "全部完成"}
                 </h4>
                 {/* 移动端关闭按钮 */}
@@ -203,14 +203,14 @@ export function GlobalTaskTray() {
                   icon={<X className="w-4 h-4" />}
                   label="关闭任务面板"
                   onPress={() => setTaskTrayMinimized(true)}
-                  className="sm:hidden text-neutral-400 hover:text-white hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 rounded-md"
+                  className="sm:hidden text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 rounded-md"
                 />
                 {/* 桌面端折叠按钮 */}
                 <button
                   type="button"
                   onClick={() => setTaskTrayMinimized(true)}
                   aria-label="折叠任务面板"
-                  className="hidden sm:inline-flex w-6 h-6 items-center justify-center rounded-md text-neutral-400 hover:text-white hover:bg-white/10 active:scale-[0.95] transition-all outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60"
+                  className="hidden sm:inline-flex w-6 h-6 items-center justify-center rounded-md text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 active:scale-[0.95] transition-all outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60"
                 >
                   <ChevronDown className="w-3.5 h-3.5" />
                 </button>

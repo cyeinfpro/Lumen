@@ -994,7 +994,7 @@ function AutoProbeSettings({
             value={interval}
             onChange={(e) => onChangeInterval(Number(e.target.value))}
             disabled={saving}
-            className="min-h-[36px] sm:h-8 px-2.5 pr-7 rounded-lg bg-black/30 border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-[var(--color-lumen-amber)]/50 disabled:opacity-50 transition-colors appearance-none cursor-pointer"
+            className="min-h-[36px] sm:h-8 px-2.5 pr-7 rounded-lg bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs text-[var(--fg-0)] focus:outline-none focus:border-[var(--color-lumen-amber)]/50 disabled:opacity-50 transition-colors appearance-none cursor-pointer"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
               backgroundRepeat: "no-repeat",
@@ -1915,7 +1915,7 @@ const DraftCard = forwardRef<
 
 function fieldCls(hasError: boolean): string {
   const base =
-    "w-full min-h-[44px] sm:h-9 px-3 rounded-xl bg-black/30 border text-sm font-mono text-neutral-100 focus:outline-none focus:ring-2 placeholder:text-neutral-600 transition-colors";
+    "w-full min-h-[44px] sm:h-9 px-3 rounded-xl bg-[var(--bg-0)]/70 border text-sm font-mono text-[var(--fg-0)] focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors";
   if (hasError) {
     return `${base} border-red-500/50 focus:border-red-500/50 focus:ring-red-500/25`;
   }

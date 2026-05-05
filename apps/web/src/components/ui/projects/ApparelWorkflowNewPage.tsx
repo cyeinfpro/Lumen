@@ -160,7 +160,7 @@ export function ApparelWorkflowNewPage() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [files, setFiles] = useState<PendingFile[]>([]);
-  const [projectTitle, setProjectTitle] = useState("服饰模特展示图");
+  const [projectTitle, setProjectTitle] = useState("服饰模特图");
   const [ageSegment, setAgeSegment] = useState("成年");
   const [gender, setGender] = useState("女性");
   const [appearanceDirection, setAppearanceDirection] = useState("");
@@ -354,7 +354,7 @@ export function ApparelWorkflowNewPage() {
         product_image_ids: ids,
         user_prompt: composedPrompt,
         quality_mode: "premium",
-        title: projectTitle.trim() || "服饰模特展示图",
+        title: projectTitle.trim() || "服饰模特图",
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建项目失败");
@@ -376,9 +376,9 @@ export function ApparelWorkflowNewPage() {
       <OnlineBanner />
       <ProjectMobileTopBar
         title="新建"
-        subtitle="服饰模特展示图"
-        backHref="/projects/new"
-        backLabel="返回项目模板"
+        subtitle="服饰模特图"
+        backHref="/projects/apparel-model-showcase"
+        backLabel="返回服饰模特图"
       />
       <ProjectTopBar />
 
@@ -395,10 +395,17 @@ export function ApparelWorkflowNewPage() {
                   项目
                 </Link>
                 <span aria-hidden className="text-[var(--fg-3)]">/</span>
+                <Link
+                  href="/projects/apparel-model-showcase"
+                  className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+                >
+                  服饰模特图
+                </Link>
+                <span aria-hidden className="text-[var(--fg-3)]">/</span>
                 <span className="text-[var(--fg-0)]">新建</span>
               </nav>
               <h1 className="mt-0 text-[26px] font-semibold tracking-normal md:mt-3 md:text-[32px]">
-                新建服饰模特展示图
+                新建服饰模特图
               </h1>
               <p className="mt-1 text-sm text-[var(--fg-2)]">
                 上传 1-3 张商品图，先确认 AI 合成的模特，再一次性生成 4 张电商展示图。

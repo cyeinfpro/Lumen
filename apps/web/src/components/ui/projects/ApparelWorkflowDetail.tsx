@@ -45,9 +45,10 @@ export function ApparelWorkflowDetail({ projectId }: DetailProps) {
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
-        title="项目"
+        title="服饰模特图"
         subtitle={workflow ? STATUS_LABEL[workflow.status] ?? workflow.status : "加载中"}
-        backHref="/projects"
+        backHref="/projects/apparel-model-showcase"
+        backLabel="返回服饰模特图"
       />
       <ProjectTopBar />
 
@@ -138,8 +139,15 @@ function DetailBreadcrumb({ workflow }: { workflow: WorkflowRun }) {
         项目
       </Link>
       <span aria-hidden className="text-[var(--fg-3)]">/</span>
+      <Link
+        href="/projects/apparel-model-showcase"
+        className="inline-flex items-center gap-1.5 text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+      >
+        服饰模特图
+      </Link>
+      <span aria-hidden className="text-[var(--fg-3)]">/</span>
       <span className="min-w-0 truncate text-[var(--fg-0)]">
-        {workflow.title || "服饰模特展示图"}
+        {workflow.title || "服饰模特图"}
       </span>
     </nav>
   );
@@ -156,7 +164,7 @@ function DetailHeader({
 }) {
   const status = workflow.status;
   const router = useRouter();
-  const workflowTitle = workflow.title || "服饰模特展示图";
+  const workflowTitle = workflow.title || "服饰模特图";
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(workflowTitle);
   const trackedWorkflowTitleRef = useRef(workflowTitle);
@@ -164,7 +172,7 @@ function DetailHeader({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const patch = usePatchWorkflowMutation({
     onSuccess: (data) => {
-      setTitle(data.title || "服饰模特展示图");
+      setTitle(data.title || "服饰模特图");
       setEditing(false);
       toast.success("项目已重命名");
     },
@@ -173,7 +181,7 @@ function DetailHeader({
   const remove = useDeleteWorkflowMutation({
     onSuccess: () => {
       toast.success("项目已删除");
-      router.push("/projects");
+      router.push("/projects/apparel-model-showcase");
     },
     onError: (error) => toast.error(error.message || "删除失败"),
   });
@@ -283,7 +291,7 @@ function DetailHeader({
               className="group/title flex min-w-0 cursor-pointer items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
             >
               <h1 className="line-clamp-2 text-[22px] font-semibold leading-[1.18] tracking-normal text-[var(--fg-0)] md:truncate">
-                {workflow.title || "服饰模特展示图"}
+                {workflow.title || "服饰模特图"}
               </h1>
               <Pencil className="h-4 w-4 shrink-0 text-[var(--fg-3)] opacity-0 transition-opacity group-hover/title:opacity-100" />
             </button>

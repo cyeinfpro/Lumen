@@ -219,28 +219,28 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
     <div className="mx-auto flex w-full max-w-[min(94vw,1320px)] flex-col items-center gap-5 pb-4 md:gap-7">
       <section className="grid w-full gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div className="min-w-0 space-y-2">
-          <p className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-neutral-400">
+          <p className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-xs text-[var(--fg-1)]">
             <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
             Lumen Share
           </p>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono tabular-nums text-neutral-500">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono tabular-nums text-[var(--fg-2)]">
             <span className="inline-flex items-center gap-1.5">
               <Images className="h-3.5 w-3.5" />
               {images.length} 张图片
             </span>
-            <span className="h-1 w-1 rounded-full bg-neutral-700" />
+            <span className="h-1 w-1 rounded-full bg-[var(--fg-3)]" />
             <span>{shareSizeLabel(images)}</span>
-            <span className="h-1 w-1 rounded-full bg-neutral-700" />
+            <span className="h-1 w-1 rounded-full bg-[var(--fg-3)]" />
             <span>{createdLabel}</span>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 md:justify-end">
           {expiresLabel && (
-            <p className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs text-neutral-400">
+            <p className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)]">
               <Clock className="h-3.5 w-3.5" />
               <span>过期</span>
-              <span className="font-mono tabular-nums text-neutral-300">
+              <span className="font-mono tabular-nums text-[var(--fg-0)]">
                 {expiresLabel}
               </span>
             </p>
@@ -250,7 +250,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
             onClick={() => {
               void handleShareLink();
             }}
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs text-neutral-300 transition-colors hover:border-white/20 hover:bg-white/[0.08] hover:text-white active:scale-[0.98]"
+            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-white/[0.08] hover:text-[var(--fg-0)] active:scale-[0.98]"
           >
             {linkShared ? (
               <Check className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
@@ -304,15 +304,15 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
 
       <div className="grid w-full max-w-4xl gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
         {data.show_prompt && prompts.length > 0 ? (
-          <details className="group overflow-hidden rounded-lg border border-white/10 bg-white/[0.04] backdrop-blur-sm transition-colors hover:border-white/20">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-xs uppercase text-[var(--fg-1)] transition-colors hover:text-neutral-100">
+          <details className="group overflow-hidden rounded-lg border border-[var(--border)] bg-white/[0.04] backdrop-blur-sm transition-colors hover:border-[var(--border-strong)]">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-xs uppercase text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]">
               <span className="inline-flex items-center gap-2">
                 <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
                 Prompt
               </span>
-              <ArrowRight className="h-3.5 w-3.5 text-neutral-500 transition-transform group-open:rotate-90" />
+              <ArrowRight className="h-3.5 w-3.5 text-[var(--fg-2)] transition-transform group-open:rotate-90" />
             </summary>
-            <div className="space-y-3 border-t border-white/8 px-4 pb-4 pt-3 text-sm leading-relaxed text-neutral-200">
+            <div className="space-y-3 border-t border-[var(--border)] px-4 pb-4 pt-3 text-sm leading-relaxed text-[var(--fg-0)]">
               {prompts.map((prompt, index) => (
                 <p
                   key={`${index}-${prompt.slice(0, 24)}`}
@@ -607,7 +607,7 @@ function ShareLightbox({
     <div
       ref={dialogRootRef}
       tabIndex={-1}
-      className="fixed inset-0 z-50 flex bg-black text-white share-dialog-in outline-none"
+      className="fixed inset-0 z-[var(--z-lightbox,80)] flex bg-black text-white share-dialog-in outline-none"
       role="dialog"
       aria-modal="true"
       aria-labelledby={dialogTitleId}
@@ -680,7 +680,7 @@ function ShareLightbox({
       )}
 
       <div
-        className="relative z-10 flex min-h-0 w-full flex-1 touch-pan-y select-none items-center justify-center px-3 pb-[calc(env(safe-area-inset-bottom,0px)+9.8rem)] pt-[calc(env(safe-area-inset-top,0px)+5rem)] sm:px-16 sm:pb-28 sm:pt-24"
+        className="relative z-10 flex min-h-0 w-full flex-1 touch-pan-y select-none items-center justify-center px-3 pb-[calc(var(--mobile-dialog-bottom-gap)+10.25rem)] pt-[calc(env(safe-area-inset-top,0px)+5rem)] sm:px-16 sm:pb-28 sm:pt-24"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -714,7 +714,7 @@ function ShareLightbox({
         <ShareFilmstrip images={images} activeIndex={index} onSelect={onSelect} />
       )}
 
-      <div className="absolute inset-x-0 bottom-0 z-20 border-t border-white/10 bg-black/[0.72] px-3 pb-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] pt-3 backdrop-blur-xl mobile-perf-surface">
+      <div className="absolute inset-x-0 bottom-0 z-20 border-t border-white/10 bg-black/[0.72] px-3 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-3 backdrop-blur-xl mobile-perf-surface sm:pb-[calc(env(safe-area-inset-bottom,0px)+0.75rem)]">
         <div className="mx-auto flex w-full max-w-4xl items-center gap-2">
           <button
             type="button"
@@ -766,7 +766,7 @@ function ShareFilmstrip({
   onSelect: (index: number) => void;
 }) {
   return (
-    <div className="absolute inset-x-0 bottom-[calc(env(safe-area-inset-bottom,0px)+5.8rem)] z-20">
+    <div className="absolute inset-x-0 bottom-[calc(var(--mobile-dialog-bottom-gap)+6.4rem)] z-20 sm:bottom-[calc(env(safe-area-inset-bottom,0px)+5.8rem)]">
       <div className="mx-auto flex max-w-4xl gap-2 overflow-x-auto px-3 py-2 no-scrollbar">
         {images.map((image, index) => (
           <button

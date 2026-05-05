@@ -25,7 +25,7 @@ export function QualityPicker() {
     <div
       className={cn(
         "inline-flex items-center h-7 rounded-full border",
-        "bg-white/5 border-white/10",
+        "bg-white/5 border-[var(--border)]",
       )}
       role="radiogroup"
       aria-label="尺寸选择"
@@ -48,7 +48,7 @@ export function QualityPicker() {
               "transition-colors duration-150",
               active
                 ? "bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
-                : "text-neutral-400 hover:text-white",
+                : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
             )}
           >
             {label}
@@ -70,7 +70,7 @@ export function RenderQualityPicker() {
     <div
       className={cn(
         "inline-flex items-center h-7 rounded-full border",
-        "bg-white/5 border-white/10",
+        "bg-white/5 border-[var(--border)]",
       )}
       role="radiogroup"
       aria-label="渲染质量"
@@ -93,7 +93,7 @@ export function RenderQualityPicker() {
               "transition-colors duration-150",
               active
                 ? "bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
-                : "text-neutral-400 hover:text-white",
+                : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
             )}
           >
             {label}

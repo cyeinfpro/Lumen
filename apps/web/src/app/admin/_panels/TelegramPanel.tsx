@@ -396,7 +396,7 @@ function RestartConfirmModal({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:items-center sm:p-4"
+      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-sm mobile-dialog-shell sm:items-center"
       onClick={pending ? undefined : onCancel}
     >
       <motion.div
@@ -408,14 +408,14 @@ function RestartConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="restart-telegram-title"
-        className="w-full max-w-md rounded-t-2xl border border-b-0 border-white/10 bg-[var(--bg-1)] p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom,0px))] shadow-[0_30px_60px_-20px_rgba(0,0,0,0.6)] sm:rounded-2xl sm:border-b sm:pb-5"
+        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-2xl border border-b-0 border-[var(--border)] bg-[var(--bg-1)] p-5 shadow-[var(--shadow-3)] sm:rounded-2xl sm:border-b sm:pb-5"
       >
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0">
             <AlertTriangle className="w-5 h-5 text-amber-300" />
           </div>
           <div className="min-w-0 flex-1">
-            <h3 id="restart-telegram-title" className="text-base font-medium text-neutral-100">设置已保存，是否立即重启机器人？</h3>
+            <h3 id="restart-telegram-title" className="text-base font-medium text-[var(--fg-0)]">设置已保存，是否立即重启机器人？</h3>
             <p className="text-sm text-neutral-400 mt-1.5 leading-relaxed">
               重启大约需要 3 秒。期间机器人会暂时无响应；进行中的任务可在重启后通过任务列表查看。
             </p>
@@ -426,7 +426,7 @@ function RestartConfirmModal({
             type="button"
             onClick={onCancel}
             disabled={pending}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.06] px-4 text-sm transition-colors hover:bg-white/[0.1] disabled:opacity-50 sm:h-9 sm:min-h-0"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-[var(--border)] bg-white/[0.06] px-4 text-sm transition-colors hover:bg-white/[0.1] disabled:opacity-50 sm:h-9 sm:min-h-0"
           >
             <X className="w-3.5 h-3.5" /> 暂不重启
           </button>

@@ -165,6 +165,78 @@ def test_primary_candidate_image_prefers_contact_sheet_then_candidate_ids() -> N
     )
 
 
+@pytest.mark.asyncio
+async def test_workflow_produced_model_image_ids_includes_dual_race_bonus_ids() -> None:
+    step = SimpleNamespace(
+        image_ids=["winner-img"],
+        task_ids=[],
+        output_json={"dual_race_bonus_image_ids": ["bonus-img", "winner-img"]},
+    )
+
+    produced = await workflows._workflow_produced_model_image_ids(  # noqa: SLF001
+        _Db([]),  # type: ignore[arg-type]
+        user_id="user-1",
+        steps=[step],  # type: ignore[list-item]
+    )
+
+    assert produced == {"winner-img", "bonus-img"}
+
+
+@pytest.mark.asyncio
+async def test_workflow_produced_model_image_ids_pulls_from_owner_generation_subquery() -> None:
+    # task_ids 非空 → 触发反向 SQL 查询：把 worker 还没回写到 step.image_ids
+    # 但 owner_generation_id 已经指向 task_ids 或 dual_race bonus generation 的图也算「produced」。
+    from sqlalchemy.dialects import postgresql
+
+    step = SimpleNamespace(
+        image_ids=[],
+        task_ids=["task-a", "task-b"],
+        output_json={},
+    )
+    db = _Db(["bonus-img-from-sql", "winner-img-from-sql"])
+
+    produced = await workflows._workflow_produced_model_image_ids(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        steps=[step],  # type: ignore[list-item]
+    )
+
+    assert produced == {"bonus-img-from-sql", "winner-img-from-sql"}
+    assert len(db.statements) == 1
+    rendered = str(
+        db.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    # 主查询：images 受 user_id / deleted_at / owner_generation_id 限定。
+    assert "images.user_id = 'user-1'" in rendered
+    assert "images.deleted_at IS NULL" in rendered
+    assert "images.owner_generation_id IN ('task-a', 'task-b')" in rendered
+    # 子查询：通过 generations.upstream_request 反查 dual_race bonus generation 产出的图。
+    assert "FROM generations" in rendered
+    assert "generations.user_id = 'user-1'" in rendered
+    assert "(generations.upstream_request ->> 'parent_generation_id') IN ('task-a', 'task-b')" in rendered
+    # 注意：as_boolean() 在 PostgreSQL 上编译成 CAST(text AS BOOLEAN)，
+    # 这样 worker 不论写 JSON true 还是字符串 "true" 都能被 cast 命中。
+    assert "CAST((generations.upstream_request ->> 'is_dual_race_bonus') AS BOOLEAN) = true" in rendered
+
+
+@pytest.mark.asyncio
+async def test_workflow_produced_model_image_ids_skips_sql_when_no_task_ids() -> None:
+    step = SimpleNamespace(image_ids=["only-img"], task_ids=[], output_json={})
+    db = _Db(["should-not-appear"])
+
+    produced = await workflows._workflow_produced_model_image_ids(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        steps=[step],  # type: ignore[list-item]
+    )
+
+    assert produced == {"only-img"}
+    assert db.statements == []
+
+
 def test_default_github_contents_url_points_to_user_repo_folder() -> None:
     assert workflows._github_contents_url().startswith(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/assets/apparel-model-presets"

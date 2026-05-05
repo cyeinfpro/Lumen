@@ -206,8 +206,8 @@ export function DevelopingCard({
               onClick={() => onCancel(gen.id)}
               className={cn(
                 "inline-flex items-center gap-1.5 px-3.5 h-8 rounded-full",
-                "bg-black/30 backdrop-blur-sm border border-white/10",
-                "text-[12px] text-white/70 hover:text-white",
+                "bg-[var(--bg-1)]/70 backdrop-blur-sm border border-[var(--border)]",
+                "text-[12px] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                 "active:scale-[0.95] transition-all",
               )}
               aria-label="取消生成"

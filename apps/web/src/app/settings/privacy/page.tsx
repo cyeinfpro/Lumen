@@ -462,8 +462,8 @@ function DangerSection({
             <AlertTriangle className="w-4 h-4" />
           </div>
           <div>
-            <p className="text-sm text-neutral-100">删除我的账号</p>
-            <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
+            <p className="text-sm text-[var(--fg-0)]">删除我的账号</p>
+            <p className="text-xs text-[var(--fg-1)] mt-1 leading-relaxed">
               软删账号；所有登录会话立即失效，对话与图像会被标记为删除。保留期内可申请恢复，超过后将被永久清除。
             </p>
           </div>
@@ -476,7 +476,7 @@ function DangerSection({
           >
             输入你的邮箱以确认
             {email && (
-              <span className="ml-1 font-mono text-neutral-400 normal-case tracking-normal">
+              <span className="ml-1 font-mono text-[var(--fg-1)] normal-case tracking-normal">
                 ({email})
               </span>
             )}
@@ -492,10 +492,10 @@ function DangerSection({
             placeholder={email ?? (loading ? "加载中…" : "请先登录")}
             disabled={!email || del.isPending}
             autoComplete="off"
-            className="w-full h-9 px-3 rounded-xl bg-black/30 border border-white/10 text-sm focus:outline-none focus:border-red-400/60 focus:ring-2 focus:ring-red-400/20 placeholder:text-neutral-600 disabled:opacity-50 transition-colors"
+            className="w-full h-9 px-3 rounded-xl bg-[var(--bg-1)]/72 border border-[var(--border)] text-sm focus:outline-none focus:border-red-400/60 focus:ring-2 focus:ring-red-400/20 placeholder:text-[var(--fg-2)] disabled:opacity-50 transition-colors"
           />
           {confirmEmail && !matches && (
-            <p className="text-xs text-neutral-500 mt-1.5">
+            <p className="text-xs text-[var(--fg-2)] mt-1.5">
               邮箱与当前账号不匹配
             </p>
           )}
@@ -527,7 +527,7 @@ function DangerSection({
               type="button"
               onClick={() => setArmed(false)}
               disabled={del.isPending}
-              className="h-10 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm disabled:opacity-50 transition-colors"
+              className="h-10 rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm disabled:opacity-50 transition-colors"
             >
               取消
             </button>

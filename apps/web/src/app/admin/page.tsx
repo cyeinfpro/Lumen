@@ -127,7 +127,7 @@ export default function AdminPage() {
 
   if (isLoadingMe) {
     return (
-      <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200">
+      <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)]">
         <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10 space-y-5">
           <div className="h-8 w-48 bg-white/5 rounded-lg animate-pulse" />
           <div className="h-4 w-64 bg-white/5 rounded animate-pulse" />
@@ -140,9 +140,9 @@ export default function AdminPage() {
 
   if (role !== "admin") {
     return (
-      <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-300 flex items-center justify-center px-4">
+      <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-1)] flex items-center justify-center px-4">
         <div className="text-center space-y-3">
-          <div className="mx-auto w-12 h-12 rounded-full bg-white/5 border border-white/10 flex items-center justify-center">
+          <div className="mx-auto w-12 h-12 rounded-full bg-white/5 border border-[var(--border)] flex items-center justify-center">
             <ShieldCheck className="w-5 h-5 text-neutral-400" />
           </div>
           <p className="text-lg">仅管理员可访问</p>
@@ -168,7 +168,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
       initial={false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
-      className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-neutral-200"
+      className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)]"
     >
       <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10">
         <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
@@ -182,9 +182,9 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
           </div>
           <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
             {me?.email && (
-              <div className="flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs min-h-[32px]">
+              <div className="flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-full bg-white/5 border border-[var(--border)] text-xs min-h-[32px]">
                 <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[0_0_8px_var(--color-lumen-amber)]" />
-                <span className="text-neutral-300 truncate max-w-[140px] sm:max-w-[180px]">
+                <span className="text-[var(--fg-1)] truncate max-w-[140px] sm:max-w-[180px]">
                   {me.email}
                 </span>
                 <span className="px-1.5 py-0.5 rounded-md bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/25 text-[10px] font-medium">
@@ -194,7 +194,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
             )}
             <Link
               href="/"
-              className="inline-flex items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors min-h-[44px] sm:min-h-0 px-2 sm:px-0"
+              className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors min-h-[44px] sm:min-h-0 px-2 sm:px-0"
             >
               <ArrowLeft className="w-4 h-4" />
               返回工作台
@@ -245,7 +245,7 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
     <div className="overflow-x-auto scrollbar-thin -mx-4 px-4 md:mx-0 md:px-0 [-webkit-overflow-scrolling:touch]">
       <nav
         role="tablist"
-        className="inline-flex items-center gap-1 p-1 rounded-full bg-white/[0.04] border border-white/10 backdrop-blur-sm"
+        className="inline-flex items-center gap-1 p-1 rounded-full bg-white/[0.04] border border-[var(--border)] backdrop-blur-sm"
       >
         {TABS.map((t) => {
           const active = tab === t.key;
@@ -270,7 +270,7 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
                   "relative z-10 whitespace-nowrap " +
                   (active
                     ? "text-black font-medium"
-                    : "text-neutral-300 hover:text-neutral-100")
+                    : "text-[var(--fg-1)] hover:text-[var(--fg-0)]")
                 }
               >
                 {t.label}

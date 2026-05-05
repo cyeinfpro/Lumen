@@ -205,22 +205,22 @@ function errorMessageFromPayload(payload: unknown, fallback: string): string {
 
 function ShareShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[linear-gradient(180deg,var(--bg-0)_0%,#0b0b0d_44%,var(--bg-0)_100%)] text-neutral-200">
-      <header className="sticky top-0 z-10 border-b border-white/8 bg-[var(--bg-0)]/88 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[linear-gradient(180deg,var(--bg-0)_0%,var(--bg-1)_52%,var(--bg-0)_100%)] text-[var(--fg-0)]">
+      <header className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg-0)]/88 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
         <div className="max-w-6xl mx-auto px-4 md:px-8 h-14 flex items-center justify-between safe-x">
           <Link
             href="/"
-            className="inline-flex items-center gap-2 text-sm text-neutral-300 hover:text-neutral-100 transition-colors"
+            className="inline-flex items-center gap-2 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors"
           >
             <span className="w-6 h-6 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_16px_-4px_var(--color-lumen-amber)]" />
             <span className="font-medium tracking-tight">Lumen</span>
-            <span className="hidden sm:inline text-xs text-neutral-500">
+            <span className="hidden sm:inline text-xs text-[var(--fg-2)]">
               · 分享
             </span>
           </Link>
           <Link
             href="/"
-            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300 hover:text-neutral-100 transition-colors"
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-white/5 hover:bg-white/10 border border-[var(--border)] text-xs text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors"
           >
             <Sparkles className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">打开 Lumen</span>
@@ -233,11 +233,11 @@ function ShareShell({ children }: { children: React.ReactNode }) {
         {children}
       </main>
 
-      <footer className="border-t border-white/8 px-4 py-6 text-center text-xs text-neutral-500 safe-bottom safe-x">
+      <footer className="border-t border-[var(--border)] px-4 py-6 text-center text-xs text-[var(--fg-2)] safe-bottom safe-x">
         <p>
           <Link
             href="/"
-            className="text-neutral-300 hover:text-[var(--color-lumen-amber)] transition-colors"
+            className="text-[var(--fg-1)] hover:text-[var(--color-lumen-amber)] transition-colors"
           >
             Lumen Studio
           </Link>
@@ -254,8 +254,8 @@ function ShareError({ error }: { error: ShareLoadError }) {
 
   return (
     <div className="w-full max-w-md">
-      <div className="rounded-lg border border-white/10 bg-[var(--bg-1)]/60 backdrop-blur-sm p-8 text-center space-y-4">
-        <div className="mx-auto w-14 h-14 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center">
+      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-1)]/72 backdrop-blur-sm p-8 text-center space-y-4 shadow-[var(--shadow-2)]">
+        <div className="mx-auto w-14 h-14 rounded-lg bg-white/5 border border-[var(--border)] flex items-center justify-center">
           {isNotFound ? (
             <FileX className="w-6 h-6 text-neutral-400" />
           ) : isGone ? (
@@ -265,7 +265,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
           )}
         </div>
         <div className="space-y-1.5">
-          <p className="text-lg text-neutral-100 font-medium">
+          <p className="text-lg text-[var(--fg-0)] font-medium">
             {isNotFound
               ? "分享不存在"
               : isGone
@@ -273,12 +273,12 @@ function ShareError({ error }: { error: ShareLoadError }) {
                 : "加载失败"}
           </p>
           {isNotFound && (
-            <p className="text-xs text-neutral-500">
+            <p className="text-xs text-[var(--fg-2)]">
               链接可能被删除，或从未存在。
             </p>
           )}
           {isGone && (
-            <p className="text-xs text-neutral-500">
+            <p className="text-xs text-[var(--fg-2)]">
               可以联系分享者重新生成一条链接。
             </p>
           )}
