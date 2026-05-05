@@ -60,7 +60,7 @@ export function ModelLibraryPage() {
       <ProjectTopBar />
 
       <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-6">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-8 md:gap-10">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-5 md:gap-10">
           <Hero />
 
           <Tabs current={tab} onChange={setTab} />
@@ -97,7 +97,7 @@ function Hero() {
       <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
         N°02 — Model Library
       </p>
-      <h1 className="mt-3 font-display text-[44px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] md:text-[64px]">
+      <h1 className="mt-3 font-display text-[40px] italic leading-[0.95] tracking-tight text-[var(--fg-0)] sm:text-[44px] md:text-[64px]">
         模特库
       </h1>
       <p className="mt-4 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
@@ -117,7 +117,7 @@ function Tabs({
   return (
     <div
       className={cn(
-        "scrollbar-none -mx-4 flex gap-1 overflow-x-auto px-4 md:mx-0 md:overflow-visible md:px-0",
+        "flex min-w-0 flex-wrap gap-x-1 gap-y-1",
         "sticky top-0 z-10 bg-[var(--bg-0)]/85 backdrop-blur-xl md:relative md:top-auto md:z-auto md:bg-transparent md:backdrop-blur-none",
         "border-y border-[var(--border)]",
       )}
@@ -131,7 +131,7 @@ function Tabs({
             onClick={() => onChange(option.key)}
             aria-pressed={active}
             className={cn(
-              "group relative inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-2 px-4 py-3 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-10 md:py-2.5",
+              "group relative inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-2 px-3 py-3 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-10 md:px-4 md:py-2.5",
               active
                 ? "text-[var(--fg-0)]"
                 : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
