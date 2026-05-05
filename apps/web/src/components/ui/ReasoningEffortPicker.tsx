@@ -82,7 +82,7 @@ export function ReasoningEffortPicker() {
         aria-label="选择推理强度"
         title={`推理强度：${currentLabel(effort)}`}
         className={cn(
-          "inline-flex items-center gap-1.5 px-2.5 h-7 rounded-full",
+          "inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 md:h-7 md:min-h-0 md:px-2.5",
           "text-xs font-medium border transition-all duration-150",
           "cursor-pointer active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
           active
@@ -109,7 +109,8 @@ export function ReasoningEffortPicker() {
           if (e.target === dialogRef.current) closeDialog();
         }}
         className={cn(
-          "p-1.5 w-[min(18rem,calc(100vw-1.5rem))] max-h-[min(80vh,420px)] overflow-y-auto",
+          "m-auto w-[min(18rem,calc(100vw-1.5rem))] max-h-[min(80dvh,420px)] overflow-y-auto p-1.5",
+          "max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:top-auto max-sm:m-0 max-sm:max-h-[80dvh] max-sm:w-full max-sm:rounded-b-none max-sm:p-2 max-sm:pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))]",
           "rounded-2xl bg-neutral-900/96 backdrop-blur-xl",
           "border border-white/12 shadow-2xl shadow-black/60",
           "text-neutral-100",
@@ -130,6 +131,7 @@ export function ReasoningEffortPicker() {
               onClick={() => select(opt.id)}
               className={cn(
                 "w-full flex items-center justify-between gap-3 px-2.5 py-2 rounded-xl",
+                "min-h-11",
                 "text-left transition-colors duration-150 cursor-pointer",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                 isActive

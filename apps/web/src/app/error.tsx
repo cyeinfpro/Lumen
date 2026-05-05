@@ -41,10 +41,8 @@ export default function GlobalError({
       try {
         window.location.reload();
       } catch {
-        // 沙箱（iframe / 部分嵌入式 webview）会阻止脚本调用 reload；提示用户手动刷新
-        if (typeof window !== "undefined" && typeof window.alert === "function") {
-          window.alert("当前环境不允许自动刷新，请手动刷新页面");
-        }
+        // 沙箱（iframe / 部分嵌入式 webview）会阻止脚本调用 reload；
+        // 保持当前可恢复界面，不再弹系统 alert 阻塞移动端触控流。
       }
     }
   };

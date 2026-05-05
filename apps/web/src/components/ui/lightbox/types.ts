@@ -40,6 +40,12 @@ export interface OpenLightboxDetail {
   items: LightboxItem[];
   initialId: string;
   fromRect?: DOMRect;
+  /**
+   * 派发来源标记。`store` 表示由 `useUiStore.openLightboxFromItems` 在写入 store
+   * 后镜像派发（仅供 MobileLightbox 监听）；DesktopLightbox 收到此 flag 时应跳过
+   * 二次写库以保留 action / eventItems。
+   */
+  source?: "store" | "external";
 }
 
 export const OPEN_EVENT = "lumen:open-lightbox";

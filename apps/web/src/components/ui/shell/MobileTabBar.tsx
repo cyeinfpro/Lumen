@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Camera, Compass, FolderKanban, Library, User } from "lucide-react";
+import { Camera, Compass, FolderKanban, User } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo } from "react";
 import { useHaptic } from "@/hooks/useHaptic";
@@ -10,7 +10,7 @@ import { SPRING, DURATION, EASE } from "@/lib/motion";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 
-type TabKey = "studio" | "library" | "projects" | "stream" | "me";
+type TabKey = "studio" | "projects" | "stream" | "me";
 
 interface TabDef {
   key: TabKey;
@@ -21,7 +21,6 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { key: "studio", label: "创作", route: "/", Icon: Camera },
-  { key: "library", label: "模特库", route: "/library", Icon: Library },
   { key: "projects", label: "项目", route: "/projects", Icon: FolderKanban },
   { key: "stream", label: "图库", route: "/stream", Icon: Compass },
   { key: "me", label: "我的", route: "/me", Icon: User },
@@ -37,21 +36,21 @@ export function MobileTabBar() {
 
   const activeIndex = useMemo(() => {
     if (pathname === "/" || pathname.startsWith("/?")) return 0;
+    // 模特库不再是顶级 tab，停留在 /library 时高亮「项目」（新数组里 index 1）
     if (pathname.startsWith("/library")) return 1;
-    if (pathname.startsWith("/projects")) return 2;
-    if (pathname.startsWith("/stream")) return 3;
-    if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return 4;
+    if (pathname.startsWith("/projects")) return 1;
+    if (pathname.startsWith("/stream")) return 2;
+    if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return 3;
     return 0;
   }, [pathname]);
 
   const onTap = useCallback(
     (tab: TabDef) => {
       haptic("light");
-      const current = TABS[activeIndex]?.route;
-      if (current === tab.route) {
-        // 重复点 → 滚到顶
+      const onExactRoute =
+        tab.route === "/" ? pathname === "/" || pathname.startsWith("/?") : pathname === tab.route || pathname.startsWith(tab.route + "/");
+      if (onExactRoute) {
         window.scrollTo({ top: 0, behavior: "smooth" });
-        // 同时清除可能的 scrollTo query
         if (typeof window !== "undefined" && window.location.search) {
           router.replace(tab.route);
         }
@@ -59,7 +58,7 @@ export function MobileTabBar() {
       }
       router.push(tab.route);
     },
-    [activeIndex, haptic, router],
+    [haptic, pathname, router],
   );
 
   return (

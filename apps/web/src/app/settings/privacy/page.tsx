@@ -605,6 +605,7 @@ function clearLocalAccountState(queryClient: QueryClient) {
       imageAlt: null,
       gallery: [],
       eventItems: null,
+      action: null,
     },
     taskTray: {
       minimized: true,

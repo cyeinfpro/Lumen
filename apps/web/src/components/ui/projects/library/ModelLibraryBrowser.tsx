@@ -4,17 +4,20 @@
 // 抽出原 ModelLibraryDialog 里的"浏览/筛选/搜索/上传/grid/卡片"逻辑；
 // 不含 dialog 外壳和"生成模特候选"按钮——交给调用方决定。
 //
+// 交互规则（统一）：
+//  - 点击卡片缩略图 = 打开 Lightbox 大图；左右键翻页
+//  - 选择模特只能通过 Lightbox 内 action（dialog 模式注入）完成；卡片本身不持有 selected 状态
+//
 // 关键约束（参考 apps/web/AGENTS.md）：
 //  - 禁止 render 阶段访问 ref / 调用 Date.now()
 //  - 禁止 effect 中无依赖控制地 setState（这里依赖 mode 切换，没有循环）
 //
-// onSelectItem prop：dialog 模式下负责把 selectedId 通知外面（用于 footer 按钮）；
-// page 模式下传 undefined 即可，本组件内不强制选择行为。
+// onSelectItem prop：dialog 模式下，传给 lightbox action 的 onClick；
+// page 模式下传 undefined 即可，无 action 注入。
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Bookmark,
-  Eye,
   ImagePlus,
   Library,
   RefreshCw,
@@ -33,6 +36,7 @@ import { Input } from "@/components/ui/primitives/Input";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
+import type { LightboxItem } from "@/components/ui/lightbox/types";
 import type {
   ApparelModelLibraryItem,
   ApparelModelLibrarySaveJobItemIn,
@@ -53,6 +57,7 @@ import {
   useSyncApparelModelLibraryPresetsMutation,
   useUploadImageMutation,
 } from "@/lib/queries";
+import { useUiStore, type LightboxAction } from "@/store/useUiStore";
 import { formatShortDate } from "../utils";
 
 // 浏览器内部 source 联合：在标准 source 之外加 unsaved_jobs（前端伪 source）
@@ -108,7 +113,11 @@ const APPEARANCE_TABS: Array<[ModelLibraryAppearance, string]> = [
 const AGE_LABEL = Object.fromEntries(AGE_TABS) as Record<ModelLibraryAgeSegment, string>;
 
 export interface ModelLibraryBrowserProps {
-  /** dialog 模式必须传 workflow（footer 选模特用）；page 模式可不传 */
+  /**
+   * dialog 模式必须传 workflow；page 模式可不传。
+   * @deprecated 当前实现并未真正读取 workflow（选择 mutation 由父组件在 onSelectItem 内承接）；
+   *   为保留 prop 形态，函数体内仍以 `void workflow` 显式标记不使用。
+   */
   workflow?: WorkflowRun;
   /**
    * page  : 独立页中央，没有 dialog 外壳
@@ -116,9 +125,15 @@ export interface ModelLibraryBrowserProps {
    */
   mode: "page" | "dialog";
   defaultAgeSegment?: ModelLibraryAgeSegment;
-  /** 选中后回调（dialog 模式用来同步 footer 按钮 disabled 状态） */
-  onSelectItem?: (item: ApparelModelLibraryItem | null) => void;
-  /** 是否显示左侧 sourceFilter 列；dialog 模式可能想隐藏（footer 已经够了） */
+  /**
+   * 选模特回调（dialog 模式用）：当用户在 Lightbox 内点「设为当前模特」时被调用。
+   * 卡片点击不再触发此回调；卡片只负责打开 Lightbox。
+   * 上层（Dialog）负责把这个回调接到现有 useSelectApparelModelLibraryItemMutation。
+   */
+  onSelectItem?: (item: ApparelModelLibraryItem) => void;
+  /** dialog 模式下，由父组件控制 lightbox action 的 pending 文案 */
+  selectActionLabel?: string;
+  /** 是否显示左侧 sourceFilter 列；dialog 模式可能想隐藏 */
   showSourceSidebar?: boolean;
   /** 父级想显示头部信息（同步状态、上传按钮）；page 模式渲染 */
   showHeader?: boolean;
@@ -140,19 +155,22 @@ export function ModelLibraryBrowser({
   mode,
   defaultAgeSegment = "all",
   onSelectItem,
+  selectActionLabel = "设为当前模特",
   showSourceSidebar = true,
   showHeader = true,
   headerExtra,
   className,
 }: ModelLibraryBrowserProps) {
+  // workflow 仅 dialog 模式语义上必传；page 模式无 selection 概念
+  void workflow;
   const [ageSegment, setAgeSegment] = useState<ModelLibraryAgeSegment>(defaultAgeSegment);
   const [appearance, setAppearance] = useState<ModelLibraryAppearance>("all");
   const [source, setSource] = useState<BrowserSource>("all");
   const [query, setQuery] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [previewItem, setPreviewItem] = useState<ApparelModelLibraryItem | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
+  // 上传成功后 highlight 一下，纯视觉反馈，不参与"已选"语义
+  const [lastUploadedId, setLastUploadedId] = useState<string | null>(null);
 
   // loser 视图：跳过 list API，改用 jobs API 平铺生成但未入库的图
   const isLoserView = source === "unsaved_jobs";
@@ -224,16 +242,36 @@ export function ModelLibraryBrowser({
     query,
   ]);
 
-  const selectedItem = useMemo(
-    () => items.find((item) => item.id === selectedId) ?? null,
-    [items, selectedId],
+  // 当前可见 items 转 LightboxItem[]：lightbox 翻页用
+  const visibleLightboxItems = useMemo<LightboxItem[]>(
+    () =>
+      items.map((item) => ({
+        id: item.id,
+        url: item.image_url,
+        thumbUrl: item.thumb_url ?? undefined,
+        previewUrl: item.thumb_url ?? undefined,
+        prompt: item.title,
+      })),
+    [items],
   );
 
-  // 把选中变化通知给上层（dialog 模式用）
-  useEffect(() => {
-    if (!onSelectItem) return;
-    onSelectItem(selectedItem);
-  }, [onSelectItem, selectedItem]);
+  // 仅 dialog 模式：构造给 lightbox 的 action 工厂；卡片点击时同步注入 store
+  const buildLightboxAction = useMemo<
+    null | (() => LightboxAction)
+  >(() => {
+    if (mode !== "dialog" || !onSelectItem) return null;
+    const itemMap = new Map<string, ApparelModelLibraryItem>(
+      items.map((it) => [it.id, it]),
+    );
+    return () => ({
+      label: selectActionLabel,
+      pending: false,
+      onClick: (lightboxItem) => {
+        const libraryItem = itemMap.get(lightboxItem.id);
+        if (libraryItem) onSelectItem(libraryItem);
+      },
+    });
+  }, [items, mode, onSelectItem, selectActionLabel]);
 
   const sync = useSyncApparelModelLibraryPresetsMutation({
     onSuccess: (result) => {
@@ -475,14 +513,13 @@ export function ModelLibraryBrowser({
                   <ModelLibraryCard
                     key={item.id}
                     item={item}
-                    selected={selectedId === item.id}
-                    onSelect={() => {
-                      const next = selectedId === item.id ? null : item.id;
-                      setSelectedId(next);
-                      // 若是 dialog 模式，外层会把 selectedItem 同步给 footer
-                      if (workflow == null && mode === "dialog") return;
+                    highlighted={lastUploadedId === item.id}
+                    onOpenLightbox={() => {
+                      const action = buildLightboxAction?.() ?? null;
+                      useUiStore
+                        .getState()
+                        .openLightboxFromItems(visibleLightboxItems, item.id, action);
                     }}
-                    onPreview={() => setPreviewItem(item)}
                     onDelete={() => deleteItem.mutate(item.id)}
                     deleting={deleteItem.isPending}
                     onSaveLoser={isLoserView ? item : undefined}
@@ -494,17 +531,13 @@ export function ModelLibraryBrowser({
         </main>
       </div>
 
-      {previewItem ? (
-        <ImagePreviewOverlay item={previewItem} onClose={() => setPreviewItem(null)} />
-      ) : null}
-
       <AnimatePresence>
         {uploadOpen ? (
           <UploadDialog
             key="upload-dialog"
             defaultAgeSegment={defaultAgeSegment}
             onClose={() => setUploadOpen(false)}
-            onCreated={(id) => setSelectedId(id)}
+            onCreated={(id) => setLastUploadedId(id)}
           />
         ) : null}
       </AnimatePresence>
@@ -527,56 +560,19 @@ export function ModelLibraryBrowser({
   );
 }
 
-function ImagePreviewOverlay({
-  item,
-  onClose,
-}: {
-  item: ApparelModelLibraryItem;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-[calc(var(--z-dialog)+1)] flex items-center justify-center bg-black/80 p-2 md:p-4"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="relative h-[92dvh] w-full max-w-3xl overflow-hidden rounded-md border border-[var(--border)] bg-black mx-2 md:mx-0 md:h-[82vh]">
-        <Image
-          src={item.image_url}
-          alt={item.title}
-          fill
-          unoptimized
-          className="object-contain"
-          sizes="90vw"
-        />
-        <button
-          type="button"
-          onClick={onClose}
-          className="absolute right-3 top-3 inline-flex h-10 w-10 min-h-11 min-w-11 items-center justify-center rounded-md bg-black/70 text-white md:h-9 md:w-9 md:min-h-9 md:min-w-9"
-          aria-label="关闭大图"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function ModelLibraryCard({
   item,
-  selected,
+  highlighted,
   deleting,
-  onSelect,
-  onPreview,
+  onOpenLightbox,
   onDelete,
   onSaveLoser,
 }: {
   item: ApparelModelLibraryItem;
-  selected: boolean;
+  /** 上传刚成功的视觉反馈（amber ring），不参与"已选"语义 */
+  highlighted: boolean;
   deleting: boolean;
-  onSelect: () => void;
-  onPreview: () => void;
+  onOpenLightbox: () => void;
   onDelete: () => void;
   /** 仅 loser 视图传入：未入库图的快速收藏 */
   onSaveLoser?: ApparelModelLibraryItem;
@@ -636,15 +632,17 @@ function ModelLibraryCard({
     <article
       className={cn(
         "group overflow-hidden rounded-xl border bg-[var(--bg-2)] transition-all",
-        selected
+        highlighted
           ? "border-[var(--border-amber)] ring-2 ring-[var(--amber-400)] ring-offset-2 ring-offset-[var(--bg-0)]"
           : "border-[var(--border)] hover:border-[var(--border-strong)] hover:shadow-[var(--shadow-2)]",
       )}
     >
+      {/* 整块缩略图 = 打开 Lightbox */}
       <button
         type="button"
-        onClick={onSelect}
-        className="relative block aspect-[4/5] w-full cursor-pointer overflow-hidden bg-[var(--bg-3)]"
+        onClick={onOpenLightbox}
+        aria-label={`查看 ${item.title} 大图`}
+        className="relative block aspect-[4/5] w-full cursor-zoom-in overflow-hidden bg-[var(--bg-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
       >
         <Image
           src={item.thumb_url || item.image_url}
@@ -671,12 +669,6 @@ function ModelLibraryCard({
             {appearanceLabel}
           </span>
         ) : null}
-        {/* 右上角：选中勾选 */}
-        {selected ? (
-          <span className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-black">
-            <span className="text-[12px]">✓</span>
-          </span>
-        ) : null}
       </button>
       <div className="p-2.5">
         <p className="truncate text-[13px] font-medium text-[var(--fg-0)] md:text-sm">
@@ -701,41 +693,30 @@ function ModelLibraryCard({
         ) : (
           <p className="mt-2 text-[10px] text-[var(--fg-3)]">未识别</p>
         )}
-        {/* icon 工具行 + 主操作 */}
+        {/* icon 工具行（删除/识别），不再重复"预览"按钮——卡图本身就是预览入口 */}
         <div className="mt-2.5 flex items-center gap-1.5">
           {isLoser ? (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onPreview}
-                leftIcon={<Eye className="h-3.5 w-3.5" />}
-                className="shrink-0"
-              >
-                预览
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                loading={saveLoser.isPending}
-                onClick={() => {
-                  if (!loserWorkflowRunId || !loserImageId) return;
-                  const body: ApparelModelLibrarySaveJobItemIn = {
-                    title: item.title,
-                    age_segment: item.age_segment,
-                    gender: item.gender === "male" ? "male" : "female",
-                    appearance_direction: item.appearance_direction,
-                    style_tags: item.style_tags,
-                    auto_tag: true,
-                  };
-                  saveLoser.mutate(body);
-                }}
-                leftIcon={<Bookmark className="h-3.5 w-3.5" />}
-                className="flex-1"
-              >
-                收藏入库
-              </Button>
-            </>
+            <Button
+              size="sm"
+              variant="primary"
+              loading={saveLoser.isPending}
+              onClick={() => {
+                if (!loserWorkflowRunId || !loserImageId) return;
+                const body: ApparelModelLibrarySaveJobItemIn = {
+                  title: item.title,
+                  age_segment: item.age_segment,
+                  gender: item.gender === "male" ? "male" : "female",
+                  appearance_direction: item.appearance_direction,
+                  style_tags: item.style_tags,
+                  auto_tag: true,
+                };
+                saveLoser.mutate(body);
+              }}
+              leftIcon={<Bookmark className="h-3.5 w-3.5" />}
+              className="flex-1"
+            >
+              收藏入库
+            </Button>
           ) : (
             <>
               <button
@@ -779,15 +760,8 @@ function ModelLibraryCard({
               >
                 {deleting ? <Spinner size={12} /> : <Trash2 className="h-4 w-4" />}
               </button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onPreview}
-                leftIcon={<Eye className="h-3.5 w-3.5" />}
-                className="flex-1"
-              >
-                预览大图
-              </Button>
+              {/* 占位让 grid 行高一致；右侧不再有"预览大图"按钮 */}
+              <span aria-hidden className="flex-1" />
             </>
           )}
         </div>
@@ -968,7 +942,7 @@ function UploadDialog({
                   setForm((prev) => ({ ...prev, appearance_direction: "" }))
                 }
                 className={cn(
-                  "h-8 cursor-pointer rounded-md border px-3 text-xs transition-colors",
+                  "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors md:h-8 md:min-h-0",
                   form.appearance_direction === ""
                     ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                     : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/6",
@@ -988,7 +962,7 @@ function UploadDialog({
                     setForm((prev) => ({ ...prev, appearance_direction: value }))
                   }
                   className={cn(
-                    "h-8 cursor-pointer rounded-md border px-3 text-xs transition-colors",
+                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors md:h-8 md:min-h-0",
                     form.appearance_direction === value
                       ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                       : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/6",
@@ -1049,7 +1023,7 @@ function UploadDialog({
         </div>
 
         {/* footer */}
-        <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
+        <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] md:pb-3">
           <Button variant="ghost" onClick={onClose} disabled={submitting}>
             取消
           </Button>
@@ -1132,7 +1106,7 @@ function MobileFilterSheet({
                   type="button"
                   onClick={() => onAgeChange(value)}
                   className={cn(
-                    "h-9 cursor-pointer rounded-md border px-3 text-xs transition-colors",
+                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors",
                     ageSegment === value
                       ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                       : "border-[var(--border)] text-[var(--fg-1)]",
@@ -1153,7 +1127,7 @@ function MobileFilterSheet({
                   type="button"
                   onClick={() => onAppearanceChange(value)}
                   className={cn(
-                    "h-9 cursor-pointer rounded-md border px-3 text-xs transition-colors",
+                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors",
                     appearance === value
                       ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                       : "border-[var(--border)] text-[var(--fg-1)]",
@@ -1174,7 +1148,7 @@ function MobileFilterSheet({
                   type="button"
                   onClick={() => onSourceChange(value)}
                   className={cn(
-                    "h-9 cursor-pointer rounded-md border px-3 text-xs transition-colors",
+                    "min-h-11 cursor-pointer rounded-md border px-3 text-xs transition-colors",
                     source === value
                       ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                       : "border-[var(--border)] text-[var(--fg-1)]",
@@ -1186,7 +1160,7 @@ function MobileFilterSheet({
             </div>
           </div>
         </div>
-        <footer className="flex items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-3">
+        <footer className="flex items-center justify-between gap-2 border-t border-[var(--border)] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">
           <Button
             variant="ghost"
             onClick={() => {

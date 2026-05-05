@@ -39,9 +39,7 @@ export default function GlobalError({
       try {
         window.location.reload();
       } catch {
-        if (typeof window.alert === "function") {
-          window.alert("当前环境不允许自动刷新，请手动刷新页面");
-        }
+        // Root layout 已崩溃时不能依赖 toast；保持当前错误界面即可。
       }
     }
   };
@@ -117,6 +115,8 @@ export default function GlobalError({
               type="button"
               onClick={handleRetry}
               style={{
+                minHeight: 44,
+                minWidth: 44,
                 padding: "0.5rem 1.25rem",
                 borderRadius: 8,
                 border: "1px solid rgba(242,169,58,0.3)",
@@ -132,6 +132,11 @@ export default function GlobalError({
             <Link
               href="/"
               style={{
+                minHeight: 44,
+                minWidth: 44,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
                 padding: "0.5rem 1.25rem",
                 borderRadius: 8,
                 border: "1px solid rgba(255,255,255,0.1)",

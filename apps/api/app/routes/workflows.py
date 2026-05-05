@@ -4186,6 +4186,20 @@ def _job_item_out(
     )
 
 
+def _extract_bonus_ids(
+    step: WorkflowStep | None, image_ids: Iterable[str]
+) -> list[str]:
+    """从 step.output_json 提取 dual_race_bonus 图片 ids，去除已在 image_ids 里的重叠"""
+    if step is None:
+        return []
+    output = step.output_json or {}
+    raw = output.get("dual_race_bonus_image_ids") or []
+    if not isinstance(raw, list):
+        return []
+    seen = set(image_ids)
+    return [bid for bid in raw if isinstance(bid, str) and bid not in seen]
+
+
 async def _job_from_library_run(
     db: AsyncSession,
     *,
@@ -4214,8 +4228,11 @@ async def _job_from_library_run(
         )
         step_status = step.status
     finished = len(image_ids)
+    # dual_race loser 写回的 bonus image_ids（与 winner image_ids 物理隔离）
+    bonus_ids = _extract_bonus_ids(step, image_ids)
+    # 一次查询拿到 winner + bonus 全部 image meta，省一次 DB roundtrip
     image_out_map = await _gather_job_image_outs(
-        db, user_id=run.user_id, image_ids=image_ids
+        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
     )
     tagging_results = (step.output_json or {}).get("tagging_results") if step else None
     tagging_map: dict[str, dict[str, Any]] = (
@@ -4232,6 +4249,17 @@ async def _job_from_library_run(
             ),
         )
         for iid in image_ids
+    ]
+    # candidate（loser）不跑 tagging、不允许入库，所以 saved_item_id/style_tags/appearance 全空
+    candidates = [
+        _job_item_out(
+            image_id=bid,
+            image_out=image_out_map.get(bid),
+            saved_item_id=None,
+            style_tags=[],
+            appearance_direction=None,
+        )
+        for bid in bonus_ids
     ]
     error_message = None
     if step is not None and step.status == "failed":
@@ -4255,6 +4283,7 @@ async def _job_from_library_run(
         appearance_direction=inputs.get("appearance_direction"),
         extra_requirements=inputs.get("extra_requirements"),
         items=items,
+        candidates=candidates,
         error_message=error_message,
         created_at=run.created_at,
         updated_at=run.updated_at,
@@ -4274,8 +4303,10 @@ async def _job_from_project_candidate_step(
     candidate_count = raw_input.get("candidate_count")
     if isinstance(candidate_count, int) and candidate_count > 0:
         requested_count = candidate_count
+    # dual_race loser 写回的 bonus image_ids（如该 origin 也走 dual_race）
+    bonus_ids = _extract_bonus_ids(step, image_ids)
     image_out_map = await _gather_job_image_outs(
-        db, user_id=run.user_id, image_ids=image_ids
+        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
     )
     items = [
         _job_item_out(
@@ -4286,6 +4317,16 @@ async def _job_from_project_candidate_step(
             appearance_direction=None,
         )
         for iid in image_ids
+    ]
+    candidates = [
+        _job_item_out(
+            image_id=bid,
+            image_out=image_out_map.get(bid),
+            saved_item_id=None,
+            style_tags=[],
+            appearance_direction=None,
+        )
+        for bid in bonus_ids
     ]
     job_status = _model_library_job_status(
         step_status=step.status,
@@ -4315,6 +4356,7 @@ async def _job_from_project_candidate_step(
         ),
         extra_requirements=None,
         items=items,
+        candidates=candidates,
         error_message=None,
         created_at=run.created_at,
         updated_at=run.updated_at,

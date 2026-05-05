@@ -1336,6 +1336,57 @@ async def _maybe_record_model_library_generate_image(
     step.output_json = output_json
 
 
+async def _maybe_record_model_library_candidate_image(
+    *,
+    session: Any,
+    user_id: str,
+    parent_upstream_request: dict[str, Any],
+    bonus_image_id: str,
+) -> None:
+    """dual_race bonus（loser）写回模特库 step.output_json.dual_race_bonus_image_ids。
+
+    parent_upstream_request 是赢家的 upstream_request，如果它带 model_library_generate
+    标记，就把 bonus image_id 追加到对应 step。candidate 不进 step.image_ids（image_ids
+    语义是"用户已确认产出"，loser 不参与 finished_count 计算）。
+    """
+    if parent_upstream_request.get("workflow_action") != "model_library_generate":
+        return
+    if parent_upstream_request.get("workflow_step_key") != "model_library_generate":
+        return
+    run_id = parent_upstream_request.get("workflow_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+
+    run = (
+        await session.execute(
+            select(WorkflowRun).where(
+                WorkflowRun.id == run_id,
+                WorkflowRun.user_id == user_id,
+                WorkflowRun.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        return
+    step = (
+        await session.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run.id,
+                WorkflowStep.step_key == "model_library_generate",
+            )
+        )
+    ).scalar_one_or_none()
+    if step is None:
+        return
+
+    output_json = dict(step.output_json or {})
+    bonus_ids = list(output_json.get("dual_race_bonus_image_ids") or [])
+    if bonus_image_id not in bonus_ids:
+        bonus_ids.append(bonus_image_id)
+    output_json["dual_race_bonus_image_ids"] = bonus_ids
+    step.output_json = output_json
+
+
 def _primary_input_image_id_valid(
     primary_input_image_id: str | None, input_image_ids: list[str]
 ) -> bool:
@@ -2070,6 +2121,24 @@ async def _handle_dual_race_bonus_image(
                     content["images"] = images_list
                     msg.content = content
                     # bonus 不动 msg.status——winner 已置 SUCCEEDED
+
+                # 模特库聚合视图需要看到 loser 候选图：把 bonus image_id 写回
+                # 同一 step 的 output_json.dual_race_bonus_image_ids（与 winner
+                # step.image_ids 物理隔离），共用同一 session 同一 commit。
+                try:
+                    await _maybe_record_model_library_candidate_image(
+                        session=session,
+                        user_id=user_id,
+                        parent_upstream_request=parent_upstream_request or {},
+                        bonus_image_id=image_id,
+                    )
+                except (TimeoutError, asyncio.CancelledError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "model_library candidate hook failed parent=%s err=%s",
+                        parent_task_id, exc,
+                    )
 
                 await session.commit()
     except Exception as exc:  # noqa: BLE001
@@ -3167,7 +3236,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     raise
                 except Exception as exc:  # noqa: BLE001
                     # 模特库 hook 任何异常都不能让主生成任务从 succeeded 翻成 failed
-                    logger.info(
+                    logger.warning(
                         "model_library_generate post-success hook failed task=%s err=%s",
                         task_id,
                         exc,
