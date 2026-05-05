@@ -7,6 +7,7 @@
 // 下半部分：已完成 / 失败 / 部分成功（succeeded / failed / partial）
 //
 // 已完成 job 的图：点"收藏入库"会弹一个简表，title / age_segment / gender 等都从 job 字段继承。
+// 缩略图点击 = 打开统一 Lightbox（与项目页一致的体验，免去 JobImageOverlay）。
 
 import { motion } from "framer-motion";
 import {
@@ -17,7 +18,6 @@ import {
   Library,
   Maximize2,
   RefreshCw,
-  X,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/primitives/Input";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
+import type { LightboxItem } from "@/components/ui/lightbox/types";
 import type {
   ApparelModelLibraryJob,
   ApparelModelLibraryJobItem,
@@ -41,7 +42,24 @@ import {
   useApparelModelLibraryJobsQuery,
   useSaveApparelModelLibraryJobItemMutation,
 } from "@/lib/queries";
+import { useUiStore } from "@/store/useUiStore";
 import { formatRelativeTime } from "../utils";
+
+function jobItemToLightboxItem(item: ApparelModelLibraryJobItem): LightboxItem {
+  return {
+    id: item.image_id,
+    url: item.image_url,
+    thumbUrl: item.thumb_url ?? undefined,
+    previewUrl: item.thumb_url ?? undefined,
+    prompt: item.style_tags.join("、") || undefined,
+  };
+}
+
+function openJobLightbox(items: ApparelModelLibraryJobItem[], initialId: string) {
+  if (items.length === 0) return;
+  const lightboxItems = items.map(jobItemToLightboxItem);
+  useUiStore.getState().openLightboxFromItems(lightboxItems, initialId);
+}
 
 type AppearanceKey = keyof typeof MODEL_LIBRARY_APPEARANCE_LABEL;
 
@@ -180,8 +198,6 @@ function Section({
 }
 
 function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
-  // 当前 job 卡片自管 preview 状态：点缩略图开大图
-  const [previewItem, setPreviewItem] = useState<ApparelModelLibraryJobItem | null>(null);
   const progress =
     job.requested_count > 0
       ? Math.min(100, Math.round((job.finished_count / job.requested_count) * 100))
@@ -224,19 +240,19 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
               key={item.image_id}
               item={item}
               compact
-              onPreview={setPreviewItem}
+              onOpenLightbox={() => openJobLightbox(job.items, item.image_id)}
             />
           ))}
         </div>
       ) : null}
-      <JobImageOverlay item={previewItem} onClose={() => setPreviewItem(null)} />
+      {job.candidates.length > 0 ? (
+        <CandidatesGroup candidates={job.candidates} compact />
+      ) : null}
     </motion.article>
   );
 }
 
 function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
-  // 当前 job 卡片自管 preview 状态
-  const [previewItem, setPreviewItem] = useState<ApparelModelLibraryJobItem | null>(null);
   const tone =
     job.status === "succeeded"
       ? "border-[var(--success)]/30"
@@ -295,13 +311,64 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
               key={item.image_id}
               item={item}
               job={job}
-              onPreview={setPreviewItem}
+              onOpenLightbox={() => openJobLightbox(job.items, item.image_id)}
             />
           ))}
         </div>
       )}
-      <JobImageOverlay item={previewItem} onClose={() => setPreviewItem(null)} />
+      {job.candidates.length > 0 ? (
+        <CandidatesGroup candidates={job.candidates} />
+      ) : null}
     </motion.article>
+  );
+}
+
+// 候选区：dual_race 另一路 provider 的产出。语义最弱（不可入库、不参与 finished_count），
+// 视觉上跟 unsaved/saved 拉开差距：dashed border + 一行小字说明 + 用 mini label 标头。
+function CandidatesGroup({
+  candidates,
+  compact = false,
+}: {
+  candidates: ApparelModelLibraryJobItem[];
+  compact?: boolean;
+}) {
+  const lightboxItems = useMemo(
+    () => candidates.map(jobItemToLightboxItem),
+    [candidates],
+  );
+  const open = (initialId: string) => {
+    if (lightboxItems.length === 0) return;
+    useUiStore.getState().openLightboxFromItems(lightboxItems, initialId);
+  };
+  return (
+    <section className="grid gap-2 rounded-lg border border-dashed border-[var(--border)] bg-white/[0.02] p-2.5">
+      <header className="grid gap-0.5">
+        <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
+          CANDIDATES · 竞速产出
+        </p>
+        <p className="text-[11px] text-[var(--fg-2)]">
+          另一路 provider 的产出，可点击预览
+        </p>
+      </header>
+      <div
+        className={cn(
+          "grid gap-2",
+          compact
+            ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-6"
+            : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5",
+        )}
+      >
+        {candidates.map((item) => (
+          <JobThumb
+            key={item.image_id}
+            item={item}
+            compact={compact}
+            disableSaveAction
+            onOpenLightbox={() => open(item.image_id)}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -383,15 +450,19 @@ function JobThumb({
   item,
   job,
   compact = false,
-  onPreview,
+  disableSaveAction = false,
+  onOpenLightbox,
 }: {
   item: ApparelModelLibraryJobItem;
   job?: ApparelModelLibraryJob;
   compact?: boolean;
-  onPreview?: (item: ApparelModelLibraryJobItem) => void;
+  // dual_race loser 走候选区时关掉「收藏入库」入口
+  disableSaveAction?: boolean;
+  onOpenLightbox?: () => void;
 }) {
   const [saveOpen, setSaveOpen] = useState(false);
   const saved = item.saved_item_id != null;
+  const allowSave = !disableSaveAction;
   // 优先取 item 的 appearance；没有就 fallback job 级
   const appearanceKey = (item.appearance_direction || job?.appearance_direction || "") as
     | AppearanceKey
@@ -411,7 +482,7 @@ function JobThumb({
     >
       <button
         type="button"
-        onClick={() => onPreview?.(item)}
+        onClick={() => onOpenLightbox?.()}
         aria-label="查看大图"
         className={cn(
           "relative block w-full cursor-zoom-in overflow-hidden",
@@ -437,7 +508,7 @@ function JobThumb({
           <Maximize2 className="h-3.5 w-3.5" />
         </span>
       </button>
-      {!compact && job ? (
+      {!compact && job && allowSave ? (
         <div className="flex items-center justify-between gap-2 p-2">
           <span className="truncate text-[11px] text-[var(--fg-2)]">
             {[appearanceLabel, item.style_tags.slice(0, 2).join("、")]
@@ -473,7 +544,7 @@ function JobThumb({
           )}
         </div>
       ) : null}
-      {saveOpen && job ? (
+      {saveOpen && job && allowSave ? (
         <SaveJobItemDialog
           item={item}
           job={job}
@@ -573,7 +644,7 @@ function SaveJobItemDialog({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.98 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="grid w-full gap-3 rounded-t-2xl border border-[var(--border)] bg-[var(--bg-0)] p-4 shadow-[var(--shadow-2)] md:max-w-md md:rounded-xl"
+        className="grid max-h-[92dvh] w-full gap-3 overflow-y-auto rounded-t-2xl border border-[var(--border)] bg-[var(--bg-0)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-[var(--shadow-2)] md:max-w-md md:rounded-xl md:pb-4"
       >
         <header>
           <h3 className="font-display text-lg italic text-[var(--fg-0)]">收藏入库</h3>
@@ -593,7 +664,7 @@ function SaveJobItemDialog({
             <select
               value={age}
               onChange={(event) => setAge(event.target.value as ModelLibraryItemAgeSegment)}
-              className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none"
+              className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
             >
               {(Object.keys(AGE_LABEL) as ModelLibraryItemAgeSegment[]).map((segment) => (
                 <option key={segment} value={segment}>
@@ -607,7 +678,7 @@ function SaveJobItemDialog({
             <select
               value={gender}
               onChange={(event) => setGender(event.target.value)}
-              className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none"
+              className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
             >
               <option value="female">女</option>
               <option value="male">男</option>
@@ -677,7 +748,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "inline-flex min-h-9 cursor-pointer items-center rounded-md border px-3 text-xs transition-colors",
+        "inline-flex min-h-11 cursor-pointer items-center rounded-md border px-3 text-xs transition-colors md:min-h-9",
         active
           ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
           : "border-[var(--border)] text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
@@ -685,57 +756,6 @@ function Chip({
     >
       {children}
     </button>
-  );
-}
-
-// 生成图大图预览：点缩略图后整屏 overlay；ESC 或点遮罩关闭，body lock 防滚动
-function JobImageOverlay({
-  item,
-  onClose,
-}: {
-  item: ApparelModelLibraryJobItem | null;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    if (!item) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
-    };
-  }, [item, onClose]);
-  if (!item) return null;
-  return (
-    <div
-      className="fixed inset-0 z-[calc(var(--z-dialog)+1)] flex items-center justify-center bg-black/85 p-2 md:p-6"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="relative h-[92dvh] w-full max-w-3xl overflow-hidden rounded-xl border border-[var(--border)] bg-black md:h-[88vh]">
-        <Image
-          src={item.image_url}
-          alt="生成模特"
-          fill
-          unoptimized
-          className="object-contain"
-          sizes="92vw"
-        />
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="关闭大图"
-          className="absolute right-3 top-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white hover:bg-black/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-    </div>
   );
 }
 

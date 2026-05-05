@@ -175,10 +175,28 @@ async function fetchImageBlob(src: string): Promise<Blob> {
 }
 
 async function writeClipboardText(text: string): Promise<void> {
-  if (!navigator.clipboard?.writeText) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  if (typeof document === "undefined") {
     throw new Error("clipboard unavailable");
   }
-  await navigator.clipboard.writeText(text);
+  // 兜底：textarea + execCommand("copy")，与 lib/shareLink.ts 一致。
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    const ok = document.execCommand("copy");
+    if (!ok) throw new Error("copy command failed");
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function preloadImage(
@@ -399,6 +417,9 @@ export function DesktopLightbox() {
     const onOpen = (e: Event) => {
       const detail = (e as CustomEvent<OpenLightboxDetail>).detail;
       if (!detail?.items?.length) return;
+      // 若 detail.source === "store"，说明 useUiStore.openLightboxFromItems
+      // 已写好 lightbox.open / eventItems / action，再次调用 openLightbox 会清空
+      // action（legacy 重置语义）。本端只需感知事件存在并复位本地动画态。
       const nextGallery = detail.items.map(toDesktopGalleryItem);
       const target =
         nextGallery.find((entry) => entry.image.id === detail.initialId) ??
@@ -411,6 +432,10 @@ export function DesktopLightbox() {
       setSlideDir(1);
       setEdgeHint(null);
       setPendingImageId(null);
+      if (detail.source === "store") {
+        // store 已是单一真相源，跳过 openLightbox 二次写入
+        return;
+      }
       openLightbox(
         target.image.id,
         target.image.data_url,
@@ -644,7 +669,6 @@ export function DesktopLightbox() {
         setShareStatus("success");
       } catch {
         setShareStatus("error");
-        window.prompt("复制分享链接", link);
       } finally {
         resetShareStatusSoon();
       }
@@ -1696,6 +1720,38 @@ export function DesktopLightbox() {
                 </motion.div>
               )}
             </AnimatePresence>
+
+            {/* 调用方注入的 action（如「设为当前模特」），优先级高于缩略图条。 */}
+            {lightbox.action && lightbox.imageId ? (
+              <button
+                type="button"
+                disabled={lightbox.action.pending}
+                onClick={() => {
+                  const action = lightbox.action;
+                  if (!action) return;
+                  const items = lightbox.eventItems ?? [];
+                  const current =
+                    items.find((it) => it.id === lightbox.imageId) ?? null;
+                  if (!current) return;
+                  action.onClick(current);
+                }}
+                className={cn(
+                  "pointer-events-auto inline-flex items-center gap-2 rounded-full px-5 py-2.5",
+                  "bg-[var(--color-lumen-amber)] text-black text-sm font-medium",
+                  "shadow-[0_8px_24px_rgba(242,169,58,0.4)]",
+                  "hover:bg-[var(--amber-200)] active:scale-[0.97] transition-all duration-150",
+                  "disabled:cursor-not-allowed disabled:opacity-70",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
+                )}
+              >
+                {lightbox.action.pending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : (
+                  <Check className="h-4 w-4" aria-hidden />
+                )}
+                {lightbox.action.label}
+              </button>
+            ) : null}
 
             {/* 缩略图条（多图时才显示） */}
             {gallery.length > 1 && (

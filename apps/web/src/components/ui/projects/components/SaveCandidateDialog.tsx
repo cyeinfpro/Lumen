@@ -88,7 +88,7 @@ export function SaveCandidateDialog({
         onChange={(event) => setTitle(event.target.value)}
         placeholder={`方案 ${candidate?.candidate_index ?? ""}`}
       />
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
         <label className="flex flex-col gap-1">
           <span className="text-xs font-medium text-[var(--fg-1)]">年龄段</span>
           <select

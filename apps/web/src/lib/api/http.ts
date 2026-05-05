@@ -1,3 +1,5 @@
+import { isPublicPath } from "@/lib/auth/publicPaths";
+
 // Lumen 前端统一 API 客户端（DESIGN §3.1 / §5.x）
 //
 // API_BASE 解析（优先级从高到低）：
@@ -42,9 +44,12 @@ export type ApiFetchInit = RequestInit & {
 
 // 只在客户端、且一个 tick 内只做一次跳转，防止多并发 401 风暴。
 let _redirecting = false;
+// 已经在公开页（/login、/reset-password、/invite/*）就不要再跳 /login，
+// 否则 RuntimeDefaultsBootstrap 自动 getMe → 401 → assign("/login") → 重载 → 再 401，会死循环刷新。
 export function handle401() {
   if (typeof window === "undefined") return;
   if (_redirecting) return;
+  if (isPublicPath(window.location.pathname)) return;
   _redirecting = true;
   // 使用 location.assign 而非 replace，保留 back 返回能力
   try {

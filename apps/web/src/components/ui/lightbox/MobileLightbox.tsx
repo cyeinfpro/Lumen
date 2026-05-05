@@ -51,6 +51,7 @@ import { DURATION, EASE, SPRING } from "@/lib/motion";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
 import { useChatStore } from "@/store/useChatStore";
+import { useUiStore } from "@/store/useUiStore";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { useCreateShareMutation } from "@/lib/queries";
 import { LightboxParamsPanel } from "./LightboxParamsPanel";
@@ -284,6 +285,9 @@ async function writeClipboardText(text: string): Promise<void> {
 export function MobileLightbox() {
   const searchParams = useSearchParams();
   const createShareMutation = useCreateShareMutation();
+  // 订阅 useUiStore.lightbox.action：dialog 模式下「设为当前模特」等附加按钮。
+  // MobileLightbox 自身仍以本地 OpenState 作为 source of truth，因此这里只读 action。
+  const lightboxAction = useUiStore((s) => s.lightbox.action);
 
   const [state, setState] = useState<OpenState | null>(null);
   const [paramsOpen, setParamsOpen] = useState(false);
@@ -688,6 +692,10 @@ export function MobileLightbox() {
     setActionNotice(null);
     setBoundaryHint(null);
     replaceRef.current(null);
+    // 同步清空 store：openLightboxFromItems 写入了 open=true / action，
+    // 仅清本地 state 会让 MobileTabBar（订阅 lightbox.open）持续隐藏，
+    // 下次开 lightbox 还会带出旧 action。store setState 幂等，无回环风险。
+    useUiStore.getState().closeLightbox();
   }, [clearChromeTimer, resetMotion, stopSwipeAnimation]);
 
   // —— 键盘：Esc 关 / ←→ 切 / Tab 焦点循环 ——
@@ -927,7 +935,6 @@ export function MobileLightbox() {
         showNotice({ kind: "success", text: "分享链接已复制" });
       } catch {
         showNotice({ kind: "error", text: "复制失败，请手动复制" });
-        window.prompt("复制分享链接", link);
       }
     })();
   }, [createShareMutation, showNotice, state]);
@@ -1468,6 +1475,32 @@ export function MobileLightbox() {
             重画
           </button>
         </div>
+
+        {/* 调用方注入的 action（如「设为当前模特」），fixed 在辅助行上方一行。 */}
+        {lightboxAction ? (
+          <div className="mx-auto mt-2 flex max-w-[34rem] justify-center">
+            <button
+              type="button"
+              disabled={lightboxAction.pending}
+              onClick={() => lightboxAction.onClick(current)}
+              tabIndex={chromeVisible ? undefined : -1}
+              className={cn(
+                "pointer-events-auto inline-flex items-center gap-2 h-11 px-5 rounded-full",
+                "bg-[var(--color-lumen-amber)] text-black text-[14px] font-semibold",
+                "shadow-[0_8px_24px_rgba(242,169,58,0.4)]",
+                "active:scale-95 transition-transform",
+                "disabled:cursor-not-allowed disabled:opacity-70",
+              )}
+            >
+              {lightboxAction.pending ? (
+                <Spinner size={16} className="text-black" />
+              ) : (
+                <Check className="w-3.5 h-3.5" aria-hidden />
+              )}
+              {lightboxAction.label}
+            </button>
+          </div>
+        ) : null}
 
         {/* 辅助操作行：Prompt / 分享 / 参数 */}
         <div className="mx-auto mt-2 flex max-w-[34rem] justify-center gap-2.5">

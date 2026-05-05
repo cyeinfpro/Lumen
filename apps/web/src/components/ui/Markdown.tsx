@@ -8,7 +8,7 @@
 // 增强：
 //  - 代码块右上角显示语言标签 + 复制按钮（复制后 2s 显示 Check 已复制）
 //  - 外链自动 target=_blank rel=noopener；仅 URL 作为文本的链接截断显示
-//  - 图片点击打开新标签页放大（不依赖 Lightbox 的 imageId）
+//  - 图片点击统一打开全局 Lightbox（移动端保留手势缩放 / 下拉关闭 / safe-area）
 //  - components 对象 useMemo 缓存，避免每次渲染重建引用
 
 import { useCallback, useMemo, useState } from "react";
@@ -18,6 +18,7 @@ import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logWarn } from "@/lib/logger";
+import { useUiStore } from "@/store/useUiStore";
 
 export interface MarkdownProps {
   children: string;
@@ -189,33 +190,57 @@ function buildComponents(): Components {
     pre: ({ children, ...props }) => (
       <CodeBlock {...props}>{children}</CodeBlock>
     ),
-    img: ({ src, alt, ...props }) => {
-      const url = sanitizeUrl(typeof src === "string" ? src : undefined, ALLOWED_IMAGE_PROTOCOLS);
-      if (!url) return null;
-      // 点击图片新标签打开放大（不经过 Lightbox，避免依赖图片 ID）
-      return (
-        <a
-          {...EXTERNAL_LINK_PROPS}
-          href={url}
-          aria-label={alt || "查看原图"}
-          className="inline-block"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            {...props}
-            src={url}
-            alt={alt ?? ""}
-            className="cursor-zoom-in hover:opacity-90 transition-opacity"
-          />
-        </a>
-      );
-    },
   };
 }
 
 export function Markdown({ children, className }: MarkdownProps) {
   const cls = className ? `lumen-md ${className}` : "lumen-md";
-  const components = useMemo(() => buildComponents(), []);
+  const openLightbox = useUiStore((s) => s.openLightboxFromItems);
+  const components = useMemo(() => {
+    return {
+      ...buildComponents(),
+      img: ({ src, alt, ...props }) => {
+        const url = sanitizeUrl(
+          typeof src === "string" ? src : undefined,
+          ALLOWED_IMAGE_PROTOCOLS,
+        );
+        if (!url) return null;
+        const handleOpen = (event: React.MouseEvent<HTMLAnchorElement>) => {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+          event.preventDefault();
+          openLightbox(
+            [
+              {
+                id: url,
+                url,
+                previewUrl: url,
+                thumbUrl: url,
+                prompt: alt || undefined,
+              },
+            ],
+            url,
+          );
+        };
+        return (
+          <a
+            {...EXTERNAL_LINK_PROPS}
+            href={url}
+            aria-label={alt || "查看原图"}
+            className="inline-block cursor-zoom-in"
+            onClick={handleOpen}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              {...props}
+              src={url}
+              alt={alt ?? ""}
+              className="hover:opacity-90 transition-opacity"
+            />
+          </a>
+        );
+      },
+    } satisfies Components;
+  }, [openLightbox]);
   const rehypePlugins = useMemo(
     () =>
       [[rehypeHighlight, { detect: true, ignoreMissing: true }]] as const,

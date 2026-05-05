@@ -1,8 +1,9 @@
 "use client";
 
 // 桌面端顶部主导航：复用在 DesktopStudio / DesktopStream / DesktopMe。
-// 五 Tab 横向导航 + 左侧 Logo + 可配置右侧 slot。
-// 与 MobileTabBar 的路由契约保持一致：/ → 创作；/library → 模特库；/projects → 项目；/stream → 图库；/me、/settings → 我的。
+// 四 Tab 横向导航 + 左侧 Logo + 可配置右侧 slot。
+// 与 MobileTabBar 的路由契约保持一致：/ → 创作；/projects → 项目；/stream → 图库；/me、/settings → 我的。
+// 模特库 /library 不再是顶级入口，由项目页内入口跳入；停留在 /library 时高亮「项目」。
 
 import { motion } from "framer-motion";
 import { Menu } from "lucide-react";
@@ -12,7 +13,7 @@ import { useCallback, useMemo, type ReactNode } from "react";
 
 import { SPRING } from "@/lib/motion";
 
-export type DesktopNavTab = "studio" | "library" | "projects" | "stream" | "me";
+export type DesktopNavTab = "studio" | "projects" | "stream" | "me";
 
 interface TabDef {
   key: DesktopNavTab;
@@ -22,7 +23,6 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { key: "studio", label: "创作", route: "/" },
-  { key: "library", label: "模特库", route: "/library" },
   { key: "projects", label: "项目", route: "/projects" },
   { key: "stream", label: "图库", route: "/stream" },
   { key: "me", label: "我的", route: "/me" },
@@ -40,7 +40,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
 
   const currentActive: DesktopNavTab = useMemo(() => {
     if (pathname === "/" || pathname === "") return "studio";
-    if (pathname.startsWith("/library")) return "library";
+    if (pathname.startsWith("/library")) return "projects";
     if (pathname.startsWith("/projects")) return "projects";
     if (pathname.startsWith("/stream")) return "stream";
     if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return "me";
@@ -49,10 +49,12 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
 
   const onTap = useCallback(
     (tab: TabDef) => {
-      if (tab.key === currentActive) return;
+      const onExactRoute =
+        tab.route === "/" ? pathname === "/" : pathname === tab.route || pathname.startsWith(tab.route + "/");
+      if (onExactRoute) return;
       router.push(tab.route);
     },
-    [currentActive, router],
+    [pathname, router],
   );
 
   return (

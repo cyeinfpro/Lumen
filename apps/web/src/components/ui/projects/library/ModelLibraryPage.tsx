@@ -94,24 +94,24 @@ export function ModelLibraryPage() {
 }
 
 function Hero() {
-  // 移动端 ProjectMobileTopBar 已经显示标题，hero 整块隐藏；桌面双列：左标题 + 右装饰圆
+  // 移动端 ProjectMobileTopBar 已显示标题，hero 整块隐藏；桌面端用克制的 mini hero。
   return (
-    <section className="hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-1)] p-6 shadow-[var(--shadow-1)] md:grid md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3 md:p-8">
+    <section className="hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-1)] p-4 shadow-[var(--shadow-1)] md:grid md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3 md:p-5">
       <div className="min-w-0">
-        <p className="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.16em] text-[var(--fg-2)]">
+        <p className="flex items-center gap-2 font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
           <Library className="h-3.5 w-3.5" />
           MODEL LIBRARY
         </p>
-        <h1 className="mt-3 font-display text-[40px] italic leading-tight text-[var(--fg-0)]">
+        <h1 className="mt-2 text-[20px] font-medium leading-tight text-[var(--fg-0)] md:text-[24px]">
           模特库
         </h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
+        <p className="mt-1.5 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
           浏览预设、收藏、上传与生成的模特，集中管理你的全部模特资源。
         </p>
       </div>
       <div
         aria-hidden
-        className="hidden h-24 w-24 shrink-0 rounded-full bg-gradient-to-tr from-[var(--amber-400)]/40 to-[var(--amber-200)]/10 shadow-[var(--shadow-amber)] md:block"
+        className="hidden h-16 w-16 shrink-0 rounded-full bg-gradient-to-tr from-[var(--amber-400)]/40 to-[var(--amber-200)]/10 shadow-[var(--shadow-amber)] md:block"
       />
     </section>
   );

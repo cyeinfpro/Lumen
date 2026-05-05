@@ -382,7 +382,7 @@ function RestartConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  // 简单 modal：fixed 全屏遮罩 + 中央卡片。点遮罩取消、ESC 取消。
+  // 点遮罩取消、ESC 取消。移动端贴底，避免系统弹窗式居中卡片压缩可触控区域。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !pending) onCancel();
@@ -396,7 +396,7 @@ function RestartConfirmModal({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center px-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:items-center sm:p-4"
       onClick={pending ? undefined : onCancel}
     >
       <motion.div
@@ -405,25 +405,28 @@ function RestartConfirmModal({
         exit={{ opacity: 0, scale: 0.96, y: 8 }}
         transition={{ duration: 0.18 }}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md rounded-2xl bg-[var(--bg-1)] border border-white/10 p-5 shadow-[0_30px_60px_-20px_rgba(0,0,0,0.6)]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="restart-telegram-title"
+        className="w-full max-w-md rounded-t-2xl border border-b-0 border-white/10 bg-[var(--bg-1)] p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom,0px))] shadow-[0_30px_60px_-20px_rgba(0,0,0,0.6)] sm:rounded-2xl sm:border-b sm:pb-5"
       >
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0">
             <AlertTriangle className="w-5 h-5 text-amber-300" />
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="text-base font-medium text-neutral-100">设置已保存，是否立即重启机器人？</h3>
+            <h3 id="restart-telegram-title" className="text-base font-medium text-neutral-100">设置已保存，是否立即重启机器人？</h3>
             <p className="text-sm text-neutral-400 mt-1.5 leading-relaxed">
               重启大约需要 3 秒。期间机器人会暂时无响应；进行中的任务可在重启后通过任务列表查看。
             </p>
           </div>
         </div>
-        <div className="flex justify-end gap-2 mt-5">
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button
             type="button"
             onClick={onCancel}
             disabled={pending}
-            className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.06] px-4 text-sm transition-colors hover:bg-white/[0.1] disabled:opacity-50 sm:h-9 sm:min-h-0"
           >
             <X className="w-3.5 h-3.5" /> 暂不重启
           </button>
@@ -431,7 +434,7 @@ function RestartConfirmModal({
             type="button"
             onClick={onConfirm}
             disabled={pending}
-            className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium disabled:opacity-50 transition-all"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 disabled:opacity-50 sm:h-9 sm:min-h-0"
           >
             {pending ? (
               <>

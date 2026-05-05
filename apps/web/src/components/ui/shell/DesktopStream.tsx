@@ -273,7 +273,9 @@ export function DesktopStream() {
         imageIds: selectedImageIds,
       });
       const result = await shareOrCopyLink(share.url, "Lumen 图片分享");
-      if (result !== "cancelled") {
+      if (result === "failed") {
+        pushMobileToast("分享链接复制失败", "danger");
+      } else if (result !== "cancelled") {
         pushMobileToast(result === "shared" ? "已打开分享菜单" : "分享链接已复制", "success");
         clearSelection();
       }

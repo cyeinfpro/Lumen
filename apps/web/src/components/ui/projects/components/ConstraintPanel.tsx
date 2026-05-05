@@ -1,13 +1,19 @@
 "use client";
 
 // 右侧约束面板：用现有 InfoPanel 拼装。
-// 中等屏幕走 Drawer 模式（受控 open / onOpenChange），桌面级常驻。
+// - 桌面常驻（≥ xl）
+// - 中屏（md / lg）走右侧抽屉
+// - 移动（< 768px）走 BottomSheet：snapPoints ["80%", "60%"]，单手可达 + safe-area
+//
+// SSR safe：useState false → effect 里读 matchMedia 切换；与 useMediaQuery 一致策略。
 
 import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
 
+import { useIsMobile } from "@/hooks/useMediaQuery";
 import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
+import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { ImageGrid } from "./ImageGrid";
 import { InfoPanel } from "./StageFrame";
 import { jsonValue, stepOf } from "../utils";
@@ -67,6 +73,37 @@ interface ConstraintDrawerProps extends ConstraintPanelProps {
 }
 
 export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerProps) {
+  // SSR safe 桌面/移动判定：useIsMobile 首屏返回 null（视为桌面，隐藏 BottomSheet 体感），
+  // 客户端挂载后由 matchMedia 修正；避免 hydration 抖动也避免移动端首屏就跑全屏 motion。
+  const isMobile = useIsMobile();
+  const isDesktop = isMobile !== true;
+
+  if (!isDesktop) {
+    return (
+      <BottomSheet
+        open={open}
+        onClose={onClose}
+        ariaLabel="项目约束面板"
+        snapPoints={["80%", "60%"]}
+      >
+        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2">
+          <p className="text-sm font-medium text-[var(--fg-0)]">项目约束</p>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="px-4 py-3">
+          <ConstraintBody workflow={workflow} />
+        </div>
+      </BottomSheet>
+    );
+  }
+
   return (
     <AnimatePresence>
       {open ? (
@@ -89,20 +126,23 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
-            className="absolute inset-y-0 right-0 flex w-[min(360px,86vw)] flex-col border-l border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]"
+            className={cn(
+              "absolute inset-y-0 right-0 flex w-[min(360px,86vw)] flex-col",
+              "max-h-[100dvh] border-l border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]",
+            )}
           >
-            <header className="flex h-11 items-center justify-between border-b border-[var(--border)] px-3">
+            <header className="flex h-11 shrink-0 items-center justify-between border-b border-[var(--border)] px-3">
               <p className="text-sm font-medium text-[var(--fg-0)]">项目约束</p>
               <button
                 type="button"
                 onClick={onClose}
                 aria-label="关闭"
-                className="inline-flex h-11 w-11 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
               >
                 <X className="h-4 w-4" />
               </button>
             </header>
-            <div className="flex-1 overflow-y-auto p-3">
+            <div className="flex-1 min-h-0 overflow-y-auto p-3">
               <ConstraintBody workflow={workflow} />
             </div>
           </motion.aside>

@@ -108,6 +108,7 @@ export function SystemPromptManager({
             "cursor-pointer active:scale-[0.97] transition-all duration-150",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
             compact ? "h-8 px-2.5 text-xs" : "h-9 px-3 text-sm",
+            "max-sm:min-h-11 max-sm:px-3",
           )}
           aria-label="管理系统提示词"
           title="系统提示词"
@@ -163,7 +164,9 @@ function SystemPromptDialog({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedPrompt =
-    selectedId === "new" ? null : prompts.find((prompt) => prompt.id === selectedId) ?? null;
+    selectedId === "new"
+      ? null
+      : (prompts.find((prompt) => prompt.id === selectedId) ?? null);
 
   const createMutation = useCreateSystemPromptMutation({
     onSuccess: (prompt) => {
@@ -283,14 +286,15 @@ function SystemPromptDialog({
     ? selectedPrompt.id === defaultId || selectedPrompt.is_default
     : false;
   const isAppliedToCurrent =
-    selectedPrompt && currentConversation?.default_system_prompt_id === selectedPrompt.id;
+    selectedPrompt &&
+    currentConversation?.default_system_prompt_id === selectedPrompt.id;
 
   return (
     <div
       className={
         embedded
           ? "w-full"
-          : "fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-6"
+          : "fixed inset-0 z-[80] flex items-end justify-center p-0 sm:items-center sm:p-6"
       }
     >
       {!embedded && (
@@ -315,8 +319,8 @@ function SystemPromptDialog({
         className={cn(
           "relative grid w-full overflow-hidden",
           embedded
-            ? "min-h-[620px] h-[calc(100dvh-14rem)] rounded-2xl"
-            : "h-[760px] max-h-[calc(100dvh-1.5rem)] max-w-5xl rounded-3xl",
+            ? "min-h-[620px] h-[calc(100dvh-14rem)] rounded-2xl max-sm:min-h-0 max-sm:h-[calc(100dvh-10rem)]"
+            : "h-[760px] max-h-[calc(100dvh-1.5rem)] max-w-5xl rounded-t-3xl sm:rounded-3xl max-sm:h-[calc(100dvh-1rem)] max-sm:border-b-0",
           "grid-rows-[minmax(180px,240px)_minmax(0,1fr)] md:grid-rows-1",
           "border border-white/10 bg-neutral-950/95 backdrop-blur-2xl",
           !embedded && "shadow-[0_32px_120px_-40px_rgba(0,0,0,0.9)]",
@@ -326,7 +330,10 @@ function SystemPromptDialog({
         <div className="flex min-h-0 flex-col border-b border-white/10 bg-white/[0.025] md:border-b-0 md:border-r">
           <div className="flex items-center justify-between px-4 py-4">
             <div>
-              <h2 id="system-prompt-title" className="text-sm font-semibold text-white">
+              <h2
+                id="system-prompt-title"
+                className="text-sm font-semibold text-white"
+              >
                 系统提示词
               </h2>
               <p className="mt-0.5 text-xs text-neutral-500">
@@ -338,7 +345,7 @@ function SystemPromptDialog({
               <button
                 type="button"
                 onClick={onClose}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-white/8 hover:text-white md:hidden"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-full text-neutral-400 hover:bg-white/8 hover:text-white md:hidden"
                 aria-label="关闭"
               >
                 <X className="h-4 w-4" />
@@ -356,7 +363,7 @@ function SystemPromptDialog({
                 setLocalError(null);
               }}
               className={cn(
-                "mb-2 flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm transition-colors",
+                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm transition-colors",
                 selectedId === "new"
                   ? "border-[var(--accent)]/45 bg-[var(--accent)]/10 text-white"
                   : "border-white/10 bg-white/[0.03] text-neutral-300 hover:bg-white/[0.06] hover:text-white",
@@ -387,7 +394,10 @@ function SystemPromptDialog({
                     prompt={prompt}
                     active={selectedId === prompt.id}
                     isDefault={prompt.id === defaultId || prompt.is_default}
-                    current={currentConversation?.default_system_prompt_id === prompt.id}
+                    current={
+                      currentConversation?.default_system_prompt_id ===
+                      prompt.id
+                    }
                     onClick={() => {
                       setSelectedId(prompt.id);
                       setName(prompt.name);
@@ -421,17 +431,21 @@ function SystemPromptDialog({
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5 scrollbar-thin">
-            <label className="block text-xs font-medium text-neutral-400">名称</label>
+            <label className="block text-xs font-medium text-neutral-400">
+              名称
+            </label>
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
               maxLength={120}
-              className="mt-1.5 h-10 w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 text-sm text-white placeholder:text-neutral-600 focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+              className="mt-1.5 h-11 w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 text-base text-white placeholder:text-neutral-600 focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20 md:h-10 md:text-sm"
               placeholder="例如：图片导演"
             />
 
             <div className="mt-4 flex items-center justify-between gap-3">
-              <label className="text-xs font-medium text-neutral-400">内容</label>
+              <label className="text-xs font-medium text-neutral-400">
+                内容
+              </label>
               <div className="text-[11px] tabular-nums text-neutral-500">
                 {content.length}/10000
               </div>
@@ -472,12 +486,12 @@ function SystemPromptDialog({
             />
           </div>
 
-          <div className="flex flex-col gap-2 border-t border-white/10 bg-black/20 p-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+          <div className="flex flex-col gap-2 border-t border-white/10 bg-black/20 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:pb-3">
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-xs text-neutral-200 hover:bg-white/8"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-xs text-neutral-200 hover:bg-white/8 sm:h-9 sm:min-h-0"
               >
                 <Upload className="h-3.5 w-3.5" />
                 导入 MD
@@ -487,7 +501,7 @@ function SystemPromptDialog({
                   type="button"
                   onClick={() => deleteMutation.mutate(selectedPrompt.id)}
                   disabled={busy}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-red-500/20 bg-red-500/10 px-3 text-xs text-red-200 hover:bg-red-500/15 disabled:opacity-50"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-red-500/20 bg-red-500/10 px-3 text-xs text-red-200 hover:bg-red-500/15 disabled:opacity-50 sm:h-9 sm:min-h-0"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   删除
@@ -502,7 +516,7 @@ function SystemPromptDialog({
                   type="button"
                   onClick={applyToCurrentConversation}
                   disabled={busy || Boolean(isAppliedToCurrent)}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-xs text-neutral-200 hover:bg-white/8 disabled:opacity-50"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-xs text-neutral-200 hover:bg-white/8 disabled:opacity-50 sm:h-9 sm:min-h-0"
                 >
                   <CheckCircle2 className="h-3.5 w-3.5" />
                   {isAppliedToCurrent ? "已应用当前会话" : "应用当前会话"}
@@ -512,15 +526,22 @@ function SystemPromptDialog({
                 type="button"
                 onClick={setSelectedAsDefault}
                 disabled={busy || Boolean(isDefault && selectedPrompt)}
-                aria-disabled={busy || Boolean(isDefault && selectedPrompt) || undefined}
+                aria-disabled={
+                  busy || Boolean(isDefault && selectedPrompt) || undefined
+                }
                 aria-busy={setDefaultMutation.isPending || undefined}
                 className={cn(
                   "inline-flex h-9 items-center gap-1.5 rounded-full border border-[var(--accent)]/35 bg-[var(--accent)]/10 px-3 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/15 disabled:opacity-50",
+                  "max-sm:min-h-11",
                   busy && "pointer-events-none",
                 )}
               >
                 <Star className="h-3.5 w-3.5" />
-                {isDefault ? "全局默认" : selectedPrompt ? "设为默认" : "保存并设默认"}
+                {isDefault
+                  ? "全局默认"
+                  : selectedPrompt
+                    ? "设为默认"
+                    : "保存并设默认"}
               </button>
               <button
                 type="button"
@@ -530,10 +551,15 @@ function SystemPromptDialog({
                 aria-busy={busy || undefined}
                 className={cn(
                   "inline-flex h-9 items-center gap-1.5 rounded-full bg-[var(--accent)] px-4 text-xs font-medium text-black hover:brightness-110 disabled:opacity-50",
+                  "max-sm:min-h-11",
                   busy && "pointer-events-none",
                 )}
               >
-                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                {busy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" />
+                )}
                 保存
               </button>
             </div>
@@ -563,7 +589,7 @@ function PromptRow({
       onClick={onClick}
       aria-current={active ? "true" : undefined}
       className={cn(
-        "group w-full rounded-xl border px-3 py-2 text-left transition-colors",
+        "group min-h-11 w-full rounded-xl border px-3 py-2 text-left transition-colors",
         active
           ? "border-[var(--accent)]/50 bg-[var(--accent)]/10"
           : "border-white/8 bg-white/[0.025] hover:border-white/15 hover:bg-white/[0.05]",

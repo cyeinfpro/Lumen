@@ -173,7 +173,7 @@ export function AspectRatioPicker() {
         aria-haspopup="dialog"
         aria-label="选择宽高比与尺寸模式"
         className={cn(
-          "inline-flex items-center gap-1.5 px-2.5 h-7 rounded-full",
+          "inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 md:h-7 md:min-h-0 md:px-2.5",
           "text-xs font-medium text-neutral-300",
           "bg-white/5 hover:bg-white/10 border border-white/10",
           "hover:text-white active:scale-[0.96]",
@@ -210,7 +210,8 @@ export function AspectRatioPicker() {
           if (e.target === dialogRef.current) closeDialog();
         }}
         className={cn(
-          "p-3 w-[min(22rem,calc(100vw-1.5rem))] max-h-[min(80vh,560px)] overflow-y-auto",
+          "m-auto w-[min(22rem,calc(100vw-1.5rem))] max-h-[min(80dvh,560px)] overflow-y-auto p-3",
+          "max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:top-auto max-sm:m-0 max-sm:max-h-[85dvh] max-sm:w-full max-sm:rounded-b-none max-sm:p-4 max-sm:pb-[calc(1rem+env(safe-area-inset-bottom,0px))]",
           "rounded-2xl bg-neutral-900/96 backdrop-blur-xl",
           "border border-white/12 shadow-2xl shadow-black/60",
           "text-neutral-100",
@@ -261,7 +262,7 @@ export function AspectRatioPicker() {
             animate={{ rotate: orientation === "vertical" ? 180 : 0 }}
             transition={{ type: "spring", damping: 22, stiffness: 260 }}
             className={cn(
-              "inline-flex items-center justify-center w-7 h-7 rounded-md",
+              "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md md:h-7 md:min-h-0 md:w-7 md:min-w-0",
               "bg-white/5 border border-white/10 text-neutral-300",
               "hover:bg-white/10 hover:text-white active:scale-[0.94]",
               "transition-colors duration-150",
@@ -292,7 +293,7 @@ export function AspectRatioPicker() {
                 aria-pressed={active}
                 className={cn(
                   "group flex flex-col items-center justify-center gap-1.5",
-                  "h-16 rounded-lg border transition-all duration-150",
+                  "min-h-[4.25rem] rounded-lg border transition-all duration-150 md:h-16 md:min-h-0",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                   "active:scale-[0.96]",
                   active
@@ -340,6 +341,7 @@ export function AspectRatioPicker() {
                 aria-pressed={active}
                 className={cn(
                   "px-2 py-1.5 rounded-lg text-xs font-medium border",
+                  "min-h-11 md:min-h-0",
                   "transition-all duration-150 active:scale-[0.97]",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                   active
@@ -368,6 +370,7 @@ export function AspectRatioPicker() {
             aria-pressed={is4KLandscape}
             className={cn(
               "px-2 py-1.5 rounded-lg text-xs font-medium border",
+              "min-h-11 md:min-h-0",
               "transition-all duration-150 active:scale-[0.97]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
               is4KLandscape
@@ -383,6 +386,7 @@ export function AspectRatioPicker() {
             aria-pressed={is4KPortrait}
             className={cn(
               "px-2 py-1.5 rounded-lg text-xs font-medium border",
+              "min-h-11 md:min-h-0",
               "transition-all duration-150 active:scale-[0.97]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
               is4KPortrait

@@ -1,10 +1,11 @@
 "use client";
 
 // 项目列表页：
-// 1) 搜索（标题 / user_prompt 模糊匹配，本地过滤即可）
-// 2) 状态筛选 chips（全部 / 进行中 / 待确认 / 已完成 / 需要处理）+ 计数
-// 3) ProjectCard 加 layout/staggered 进入动画 + amber-glow on running
-// 4) 错误态可重试；空态升级为带占位渐变的 hero
+// 1) 顶部「模特库」入口按钮：横向缩略图 + 标题副标题 + 进入箭头，醒目但克制。
+// 2) Hero 缩小版：font-mono mini-label + 24-28px 主标题，对齐模特库设计语言。
+// 3) ProjectCard 信息密度降低：删 user_prompt，aspect 改 3/4，进入动画用 EASE.develop。
+// 4) 移动端「重命名/删除」走 BottomSheet；桌面保留 popover（width 收紧到不出框）。
+// 5) 搜索 / 筛选 chips / 空态保留。
 
 import { motion, useReducedMotion } from "framer-motion";
 import Image from "next/image";
@@ -13,8 +14,8 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock3,
-  FolderKanban,
   Image as ImageIcon,
+  Library,
   MoreVertical,
   Pencil,
   Plus,
@@ -23,17 +24,26 @@ import {
   Shirt,
   Sparkles,
   Trash2,
+  Users,
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { EmptyState } from "@/components/ui/primitives/EmptyState";
 import { Skeleton } from "@/components/ui/primitives/Skeleton";
 import { toast } from "@/components/ui/primitives/Toast";
-import { useDeleteWorkflowMutation, usePatchWorkflowMutation, useWorkflowsQuery } from "@/lib/queries";
-import type { WorkflowRunListItem } from "@/lib/apiClient";
+import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
+import { useIsMobile } from "@/hooks/useMediaQuery";
+import { EASE } from "@/lib/motion";
+import {
+  useApparelModelLibraryQuery,
+  useDeleteWorkflowMutation,
+  usePatchWorkflowMutation,
+  useWorkflowsQuery,
+} from "@/lib/queries";
+import type { ApparelModelLibraryItem, WorkflowRunListItem } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
 import { OnlineBanner } from "./components/OnlineBanner";
@@ -122,6 +132,8 @@ export function ProjectsIndex() {
       <ProjectTopBar />
       <main className="mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3 md:mb-0 md:px-8 md:py-5">
         <div className="mx-auto grid w-full max-w-[1400px] gap-4 md:gap-5">
+          <ModelLibraryEntry />
+
           <Hero counts={counts} />
 
           <Toolbar
@@ -180,21 +192,177 @@ function ResourceBand() {
   );
 }
 
+// 顶部「模特库」入口按钮：移动单行 88px / 桌面 110-130px，左侧最近模特缩略图，
+// 右侧「N 个模特」+ ChevronRight 箭头。点击整体跳 /library。
+function ModelLibraryEntry() {
+  // TODO: 后端加 limit 后改成 limit:6 减少 payload（仅用前 6 个 avatar + total）
+  const libraryQuery = useApparelModelLibraryQuery({ source: "all" });
+  const items: ApparelModelLibraryItem[] = useMemo(
+    () => libraryQuery.data?.items ?? [],
+    [libraryQuery.data?.items],
+  );
+  const total = items.length;
+  // 桌面 6 张缩略图，移动 3 张
+  const desktopThumbs = items.slice(0, 6);
+  const mobileThumbs = items.slice(0, 3);
+  const hasItems = total > 0;
+  const remainingDesktop = Math.max(0, total - desktopThumbs.length);
+
+  return (
+    <Link
+      href="/library"
+      aria-label="进入模特库"
+      className={cn(
+        "group block rounded-xl border bg-[var(--bg-1)]/72 transition-all duration-[var(--dur-base)] md:rounded-md md:bg-white/[0.035]",
+        "border-[var(--border)] hover:border-[var(--border-amber)] hover:bg-white/[0.055] hover:shadow-[var(--shadow-amber)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "active:scale-[0.98] md:active:scale-100",
+      )}
+    >
+      {/* 移动端：单行 88px */}
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 p-3 md:hidden">
+        <div className="flex items-center -space-x-2.5">
+          {hasItems ? (
+            mobileThumbs.map((item) => (
+              <ModelAvatar key={item.id} item={item} size="sm" />
+            ))
+          ) : (
+            <PlaceholderAvatar size="sm" />
+          )}
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-[15px] font-medium text-[var(--fg-0)]">模特库</p>
+          <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
+            {hasItems
+              ? `${total} 个模特 · 浏览预设、收藏与生成`
+              : "点击进入并新建你的第一个模特"}
+          </p>
+        </div>
+        <ChevronRight className="h-4 w-4 shrink-0 text-[var(--fg-2)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-[var(--fg-0)]" />
+      </div>
+
+      {/* 桌面端：高 110-130px 三列 */}
+      <div className="hidden md:grid md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-center md:gap-4 md:p-5">
+        <div className="flex items-center -space-x-3">
+          {hasItems ? (
+            <>
+              {desktopThumbs.map((item) => (
+                <ModelAvatar key={item.id} item={item} size="md" />
+              ))}
+              {remainingDesktop > 0 ? (
+                <span
+                  aria-hidden
+                  className="relative inline-flex h-12 w-12 items-center justify-center rounded-full bg-[var(--bg-2)] text-[11px] font-medium text-[var(--fg-1)] ring-2 ring-[var(--bg-0)]"
+                >
+                  +{remainingDesktop}
+                </span>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <PlaceholderAvatar size="md" />
+              <PlaceholderAvatar size="md" />
+              <PlaceholderAvatar size="md" />
+            </>
+          )}
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Library className="h-4 w-4 text-[var(--amber-300)]" />
+            <h2 className="text-[20px] font-medium text-[var(--fg-0)] md:text-[22px]">
+              模特库
+            </h2>
+          </div>
+          <p className="mt-1 max-w-2xl truncate text-sm text-[var(--fg-1)]">
+            {hasItems
+              ? "浏览预设、收藏与生成的模特"
+              : "点击进入并新建你的第一个模特"}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-right">
+            <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
+              MODELS
+            </p>
+            <p className="mt-0.5 font-mono text-lg leading-none tabular-nums text-[var(--fg-0)]">
+              {total}
+            </p>
+          </div>
+          <ChevronRight className="h-5 w-5 shrink-0 text-[var(--fg-2)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-[var(--fg-0)]" />
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+function ModelAvatar({
+  item,
+  size,
+}: {
+  item: ApparelModelLibraryItem;
+  size: "sm" | "md";
+}) {
+  const dimension = size === "md" ? 48 : 40;
+  const cls =
+    size === "md"
+      ? "h-12 w-12 ring-2 ring-[var(--bg-0)]"
+      : "h-10 w-10 ring-2 ring-[var(--bg-0)]";
+  const src = item.thumb_url || item.image_url;
+  return (
+    <span
+      className={cn(
+        "relative inline-block overflow-hidden rounded-full bg-[var(--bg-2)]",
+        cls,
+      )}
+    >
+      {src ? (
+        <Image
+          src={src}
+          alt={item.title || "模特"}
+          width={dimension}
+          height={dimension}
+          unoptimized
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <Users className="absolute inset-0 m-auto h-4 w-4 text-[var(--fg-2)]" />
+      )}
+    </span>
+  );
+}
+
+function PlaceholderAvatar({ size }: { size: "sm" | "md" }) {
+  const cls =
+    size === "md"
+      ? "h-12 w-12 ring-2 ring-[var(--bg-0)]"
+      : "h-10 w-10 ring-2 ring-[var(--bg-0)]";
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "relative inline-flex items-center justify-center rounded-full bg-[var(--bg-2)]",
+        cls,
+      )}
+    >
+      <Users className="h-4 w-4 text-[var(--fg-2)]" />
+    </span>
+  );
+}
+
 function Hero({ counts }: { counts: Record<FilterKey, number> }) {
   const active = counts.running + counts.needs_review + counts.attention;
   return (
     <section className="grid gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)] md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:rounded-md md:bg-white/[0.035] md:p-5">
       <div className="min-w-0">
-        <p className="flex items-center gap-2 text-[11px] font-medium tracking-[0.16em] text-[var(--fg-2)]">
-          <FolderKanban className="h-3.5 w-3.5" />
-          STRUCTURED WORKFLOW
+        <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">
+          PROJECTS · 服饰展示
         </p>
         <div className="mt-2 flex flex-wrap items-end gap-x-3 gap-y-1">
-          <h1 className="text-[28px] font-semibold tracking-normal text-[var(--fg-0)] md:text-[34px]">
+          <h1 className="text-[20px] font-medium tracking-normal text-[var(--fg-0)] md:text-[24px]">
             项目
           </h1>
           {counts.all > 0 ? (
-            <span className="pb-1 font-mono text-[11px] tracking-wider text-[var(--fg-2)]">
+            <span className="pb-0.5 font-mono text-[11px] tracking-wider text-[var(--fg-2)]">
               {counts.all} TOTAL
             </span>
           ) : null}
@@ -206,7 +374,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
               : "所有项目都已收束，可以直接创建下一组展示图。"
             : "从商品图、模特候选到质检交付，集中管理服饰展示图工作流。"}
         </p>
-        <div className="mt-4 grid grid-cols-3 gap-2 md:max-w-xl">
+        <div className="mt-3 grid grid-cols-3 gap-2 md:max-w-xl">
           <StatPill
             icon={<Clock3 className="h-3.5 w-3.5" />}
             label="进行中"
@@ -251,7 +419,7 @@ function StatPill({
   return (
     <div
       className={cn(
-        "min-w-0 rounded-lg border px-3 py-2 md:rounded-md",
+        "min-w-0 rounded-lg border px-2 py-1.5 md:rounded-md",
         active
           ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
           : "border-[var(--border)] bg-white/[0.035]",
@@ -266,7 +434,7 @@ function StatPill({
         {icon}
         <span className="truncate">{label}</span>
       </div>
-      <div className="mt-1 font-mono text-lg leading-none text-[var(--fg-0)]">
+      <div className="mt-0.5 font-mono text-base leading-none text-[var(--fg-0)]">
         {value}
       </div>
     </div>
@@ -358,6 +526,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
   const failed = item.status === "failed";
   const thumb = productThumbSrc(item);
   const reduceMotion = useReducedMotion();
+  const isMobile = useIsMobile();
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -389,21 +558,23 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
     patch.mutate({ id: item.id, title: next });
   };
 
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false);
+    setConfirmingDelete(false);
+    setRenaming(false);
+  }, []);
+
+  // 桌面 popover：点击外部 / Esc 关闭。移动 BottomSheet 自带这两个行为。
   useEffect(() => {
     if (!menuOpen) return;
+    if (isMobile) return;
     const onPointerDown = (event: PointerEvent) => {
       if (menuRef.current?.contains(event.target as Node)) return;
       if (actionButtonRef.current?.contains(event.target as Node)) return;
-      setMenuOpen(false);
-      setConfirmingDelete(false);
-      setRenaming(false);
+      closeMenu();
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setMenuOpen(false);
-        setConfirmingDelete(false);
-        setRenaming(false);
-      }
+      if (event.key === "Escape") closeMenu();
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("keydown", onKeyDown);
@@ -411,8 +582,16 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
       document.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [menuOpen]);
+  }, [menuOpen, isMobile, closeMenu]);
 
+  const openMenu = () => {
+    setMenuOpen((open) => !open);
+    setConfirmingDelete(false);
+    setRenaming(false);
+    setTitle(item.title || "服饰模特展示图");
+  };
+
+  // 单一 step chip 信息（合并 step + count 选 step；count 偏次要 → 删）
   return (
     <motion.div
       className="relative"
@@ -424,7 +603,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
           ? undefined
           : {
               duration: 0.24,
-              ease: [0.22, 1, 0.36, 1],
+              ease: EASE.develop,
               delay: Math.min(order * 0.035, 0.24),
             }
       }
@@ -432,7 +611,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
       <Link
         href={`/projects/${item.id}`}
         className={cn(
-          "group grid min-h-[160px] grid-cols-[112px_minmax(0,1fr)] gap-3 rounded-xl border bg-[var(--bg-1)]/72 p-2.5 pr-3 transition-[background-color,border-color,box-shadow] duration-[var(--dur-base)] md:min-h-[150px] md:grid-cols-[112px_minmax(0,1fr)] md:rounded-md md:bg-white/[0.035] md:p-3",
+          "group grid min-h-[148px] grid-cols-[96px_minmax(0,1fr)] gap-3 rounded-xl border bg-[var(--bg-1)]/72 p-2.5 pr-3 transition-[background-color,border-color,box-shadow] duration-[var(--dur-base)] md:min-h-[140px] md:grid-cols-[104px_minmax(0,1fr)] md:rounded-md md:bg-white/[0.035] md:p-3",
           "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
           "hover:border-[var(--border-strong)] hover:bg-white/[0.055] hover:shadow-[var(--shadow-2)]",
           running
@@ -444,13 +623,13 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 : "border-[var(--border)]",
         )}
       >
-        <div className="relative flex aspect-[4/5] items-center justify-center overflow-hidden rounded-lg bg-[var(--bg-2)] md:rounded-md">
+        <div className="relative flex aspect-[3/4] items-center justify-center overflow-hidden rounded-lg bg-[var(--bg-2)] md:rounded-md">
           {thumb ? (
             <Image
               src={thumb}
               alt={item.title || "商品图"}
               fill
-              sizes="112px"
+              sizes="104px"
               unoptimized
               className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] group-hover:scale-[1.025]"
             />
@@ -476,13 +655,9 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
               <ChevronRight className="h-4 w-4 shrink-0 text-[var(--fg-2)] transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-[var(--fg-0)]" />
             </span>
           </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--fg-2)] md:line-clamp-2">
-            {item.user_prompt || "未填写基础需求"}
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <StatusBadge status={item.status} needsReview={needsReview} completed={completed} />
             <Chip>{item.current_step}</Chip>
-            <Chip>{item.output_count} 张产出</Chip>
           </div>
           <div className="mt-auto flex items-end justify-between gap-2 pt-3">
             <p className="line-clamp-1 text-xs text-[var(--amber-300)]">{item.next_action}</p>
@@ -498,21 +673,18 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         aria-label="项目操作"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        onClick={() => {
-          setMenuOpen((open) => !open);
-          setConfirmingDelete(false);
-          setRenaming(false);
-          setTitle(item.title || "服饰模特展示图");
-        }}
-        className="absolute right-2.5 top-2.5 inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full border border-transparent text-[var(--fg-2)] transition-colors hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:right-3 md:top-3 md:h-8 md:w-8 md:rounded-md"
+        onClick={openMenu}
+        className="absolute right-2.5 top-2.5 inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer items-center justify-center rounded-full border border-transparent text-[var(--fg-2)] transition-colors hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:right-3 md:top-3 md:h-8 md:min-h-0 md:w-8 md:min-w-0 md:rounded-md"
       >
         <MoreVertical className="h-4 w-4" />
       </button>
-      {menuOpen ? (
+
+      {/* 桌面 popover：仅当 isMobile === false 时挂载，避免 SSR / 移动端误显 */}
+      {menuOpen && isMobile === false ? (
         <div
           ref={menuRef}
           role="menu"
-          className="absolute right-2.5 top-14 z-10 w-[min(18rem,calc(100vw-2rem))] rounded-lg border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)] md:right-3 md:top-12 md:w-64 md:rounded-md"
+          className="absolute right-3 top-12 z-10 w-[min(16rem,calc(100vw-3rem))] rounded-md border border-[var(--border)] bg-[var(--bg-1)] p-2 shadow-[var(--shadow-2)]"
         >
           {renaming ? (
             <form
@@ -527,7 +699,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 onChange={(event) => setTitle(event.target.value)}
                 maxLength={120}
                 autoFocus
-                className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)] md:h-9 md:text-sm"
+                className="h-9 rounded-md border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)]"
               />
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="ghost" size="sm" onClick={() => setRenaming(false)}>
@@ -557,7 +729,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 type="button"
                 onClick={() => setRenaming(true)}
                 role="menuitem"
-                className="flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] md:min-h-9"
+                className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
               >
                 <Pencil className="h-4 w-4" />
                 重命名
@@ -566,7 +738,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 type="button"
                 onClick={() => setConfirmingDelete(true)}
                 role="menuitem"
-                className="flex min-h-11 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] md:min-h-9"
+                className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
               >
                 <Trash2 className="h-4 w-4" />
                 删除
@@ -575,7 +747,153 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
           )}
         </div>
       ) : null}
+
+      {/* 移动 BottomSheet：仅当 isMobile === true 时挂载（null 时不挂，避免 SSR mismatch） */}
+      {isMobile === true ? (
+        <BottomSheet
+          open={menuOpen}
+          onClose={closeMenu}
+          ariaLabel="项目操作"
+          snapPoints={["auto", "40%"]}
+        >
+          <ProjectActionsSheet
+            title={title}
+            itemTitle={item.title}
+            renaming={renaming}
+            confirmingDelete={confirmingDelete}
+            onTitleChange={setTitle}
+            onStartRename={() => setRenaming(true)}
+            onCancelRename={() => setRenaming(false)}
+            onSaveRename={saveTitle}
+            onStartDelete={() => setConfirmingDelete(true)}
+            onCancelDelete={() => setConfirmingDelete(false)}
+            onConfirmDelete={() => remove.mutate(item.id)}
+            onClose={closeMenu}
+            patchPending={patch.isPending}
+            removePending={remove.isPending}
+          />
+        </BottomSheet>
+      ) : null}
     </motion.div>
+  );
+}
+
+// 移动端 BottomSheet 内容：重命名输入框 / 删除确认 / 默认列表三种状态。
+function ProjectActionsSheet({
+  title,
+  itemTitle,
+  renaming,
+  confirmingDelete,
+  onTitleChange,
+  onStartRename,
+  onCancelRename,
+  onSaveRename,
+  onStartDelete,
+  onCancelDelete,
+  onConfirmDelete,
+  onClose,
+  patchPending,
+  removePending,
+}: {
+  title: string;
+  itemTitle: string;
+  renaming: boolean;
+  confirmingDelete: boolean;
+  onTitleChange: (value: string) => void;
+  onStartRename: () => void;
+  onCancelRename: () => void;
+  onSaveRename: () => void;
+  onStartDelete: () => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
+  onClose: () => void;
+  patchPending: boolean;
+  removePending: boolean;
+}) {
+  return (
+    <div className="grid gap-3 px-4 pb-4 pt-2">
+      <div className="border-b border-[var(--border)] pb-3">
+        <p className="font-mono text-[11px] tracking-[0.16em] text-[var(--fg-2)]">PROJECT</p>
+        <p className="mt-1 truncate text-[15px] font-medium text-[var(--fg-0)]">
+          {itemTitle || "服饰模特展示图"}
+        </p>
+      </div>
+      {renaming ? (
+        <form
+          className="grid gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSaveRename();
+          }}
+        >
+          <label className="grid gap-1.5">
+            <span className="text-xs text-[var(--fg-2)]">项目名称</span>
+            <input
+              value={title}
+              onChange={(event) => onTitleChange(event.target.value)}
+              maxLength={120}
+              autoFocus
+              className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--border-amber)]"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <Button type="button" variant="ghost" onClick={onCancelRename} className="min-h-11">
+              取消
+            </Button>
+            <Button type="submit" disabled={patchPending} className="min-h-11">
+              保存
+            </Button>
+          </div>
+        </form>
+      ) : confirmingDelete ? (
+        <div className="grid gap-3">
+          <p className="text-[15px] text-[var(--fg-0)]">确认删除这个项目？</p>
+          <p className="text-xs leading-5 text-[var(--fg-2)]">
+            项目会从列表移除，关联对话不会被删除。
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <Button type="button" variant="ghost" onClick={onCancelDelete} className="min-h-11">
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              disabled={removePending}
+              onClick={onConfirmDelete}
+              className="min-h-11"
+            >
+              删除
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="grid gap-1.5">
+          <button
+            type="button"
+            onClick={onStartRename}
+            className="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-md px-3 text-left text-[15px] text-[var(--fg-0)] transition-colors hover:bg-white/[0.06] active:bg-white/[0.08]"
+          >
+            <Pencil className="h-4 w-4 text-[var(--fg-1)]" />
+            重命名
+          </button>
+          <button
+            type="button"
+            onClick={onStartDelete}
+            className="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-md px-3 text-left text-[15px] text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] active:bg-[var(--danger-soft)]"
+          >
+            <Trash2 className="h-4 w-4" />
+            删除
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="mt-2 flex min-h-11 min-w-11 w-full cursor-pointer items-center justify-center rounded-md border border-[var(--border)] px-3 text-[15px] text-[var(--fg-1)] transition-colors hover:bg-white/[0.04]"
+          >
+            取消
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -621,18 +939,16 @@ function SkeletonGrid() {
       {Array.from({ length: 6 }).map((_, index) => (
         <div
           key={index}
-          className="grid min-h-[160px] grid-cols-[112px_minmax(0,1fr)] gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/60 p-2.5 md:min-h-[150px] md:rounded-md md:bg-white/[0.025] md:p-3"
+          className="grid min-h-[148px] grid-cols-[96px_minmax(0,1fr)] gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/60 p-2.5 md:min-h-[140px] md:grid-cols-[104px_minmax(0,1fr)] md:rounded-md md:bg-white/[0.025] md:p-3"
         >
-          <Skeleton className="aspect-[4/5] w-full rounded-lg md:rounded-md" />
+          <Skeleton className="aspect-[3/4] w-full rounded-lg md:rounded-md" />
           <div className="space-y-2">
             <Skeleton className="h-4 w-2/3" />
-            <Skeleton className="h-3 w-full" />
-            <Skeleton className="h-3 w-3/4" />
             <div className="mt-2 flex gap-1.5">
               <Skeleton className="h-5 w-12" />
               <Skeleton className="h-5 w-16" />
-              <Skeleton className="h-5 w-14" />
             </div>
+            <Skeleton className="h-3 w-1/2" />
           </div>
         </div>
       ))}
@@ -666,7 +982,7 @@ function ErrorPanel({ onRetry }: { onRetry: () => void }) {
 
 function EmptyHero() {
   return (
-    <section className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/78 p-5 shadow-[var(--shadow-1)] md:rounded-md md:p-8">
+    <section className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)] md:rounded-md md:p-5">
       <div className="grid gap-5 md:grid-cols-[1fr_auto] md:items-center">
         <div>
           <p className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-amber)] bg-[var(--accent-soft)] px-2.5 py-1 text-[10px] text-[var(--amber-300)]">
