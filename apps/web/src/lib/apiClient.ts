@@ -436,13 +436,26 @@ export const MODEL_LIBRARY_APPEARANCE_LABEL: Record<Exclude<ModelLibraryAppearan
   east_asian: "东亚",
   southeast_asian: "东南亚",
   south_asian: "南亚",
-  european: "欧洲",
-  latin: "拉美",
+  european: "欧洲/欧美",
+  latin: "拉美/拉丁裔",
   middle_eastern: "中东",
-  african: "非洲",
-  mixed: "混血",
+  african: "非洲/非裔",
+  mixed: "混血/多族裔",
   other: "其他",
 };
+
+export const MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS: Array<
+  Exclude<ModelLibraryAppearance, "all" | "asian" | "other">
+> = [
+  "east_asian",
+  "southeast_asian",
+  "south_asian",
+  "european",
+  "latin",
+  "middle_eastern",
+  "african",
+  "mixed",
+];
 
 export interface ApparelModelLibrarySyncState {
   last_success_at: string | null;
@@ -468,6 +481,7 @@ export interface ApparelModelLibraryItem {
   version?: number | null;
   library_folder?: string | null;
   prompt_hint?: string | null;
+  download_filename?: string | null;
   created_at: string;
   updated_at?: string | null;
 }
@@ -488,7 +502,7 @@ export interface ApparelModelLibrarySyncResponse {
 }
 
 export interface ApparelModelLibraryItemCreateIn {
-  source: "favorite" | "user_upload";
+  source: "favorite" | "user_upload" | "generated";
   visibility_scope?: "user_private";
   image_id: string;
   title: string;
@@ -496,6 +510,13 @@ export interface ApparelModelLibraryItemCreateIn {
   gender?: string | null;
   appearance_direction?: string | null;
   style_tags?: string[];
+  auto_tag?: boolean;
+}
+
+export interface ApparelModelLibraryBatchDeleteOut {
+  ok: boolean;
+  deleted: number;
+  not_found: string[];
 }
 
 export interface ApparelModelLibrarySelectIn {
@@ -740,6 +761,18 @@ export function deleteApparelModelLibraryItem(itemId: string): Promise<{ ok: boo
   );
 }
 
+export function deleteApparelModelLibraryItems(
+  itemIds: string[],
+): Promise<ApparelModelLibraryBatchDeleteOut> {
+  return apiFetch<ApparelModelLibraryBatchDeleteOut>(
+    "/workflows/apparel-model-library/items/batch-delete",
+    {
+      method: "POST",
+      body: JSON.stringify({ item_ids: itemIds }),
+    },
+  );
+}
+
 export function selectApparelModelLibraryItem(
   workflowId: string,
   body: ApparelModelLibrarySelectIn,
@@ -783,6 +816,8 @@ export interface ApparelModelLibraryJobItem {
   saved_item_id: string | null;
   style_tags: string[];
   appearance_direction: string | null;
+  gender: string | null;
+  download_filename: string | null;
 }
 
 export interface ApparelModelLibraryJob {
@@ -812,7 +847,8 @@ export interface ApparelModelLibraryJobsList {
 
 export interface ApparelModelLibraryGenerateIn {
   age_segment: ModelLibraryItemAgeSegment;
-  gender: string;
+  gender?: string | null;
+  genders?: Array<"female" | "male">;
   appearance_direction?: string | null;
   extra_requirements?: string | null;
   style_tags?: string[];
@@ -858,6 +894,25 @@ export function generateApparelModelLibrary(
 export function getApparelModelLibraryJobs(): Promise<ApparelModelLibraryJobsList> {
   return apiFetch<ApparelModelLibraryJobsList>(
     "/workflows/apparel-model-library/jobs",
+  );
+}
+
+export function deleteApparelModelLibraryJob(
+  workflowRunId: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/workflows/apparel-model-library/jobs/${encodeURIComponent(workflowRunId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function clearApparelModelLibraryJobs(): Promise<{
+  ok: boolean;
+  deleted: number;
+}> {
+  return apiFetch<{ ok: boolean; deleted: number }>(
+    "/workflows/apparel-model-library/jobs",
+    { method: "DELETE" },
   );
 }
 
@@ -1182,6 +1237,7 @@ export interface UploadedImage {
   height: number;
   url: string;
   mime?: string;
+  metadata_jsonb?: Record<string, unknown> | null;
 }
 
 export function uploadImage(file: File): Promise<UploadedImage> {

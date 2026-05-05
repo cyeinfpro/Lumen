@@ -245,8 +245,8 @@ def _title_from_preset_id(preset_id: str) -> str:
         "child": "儿童",
         "teen": "青少年",
         "young": "青年",
-        "adult": "成年",
-        "middle": "中老年",
+        "adult": "熟龄",
+        "middle": "中年",
         "aged": "",
         "senior": "老年",
     }

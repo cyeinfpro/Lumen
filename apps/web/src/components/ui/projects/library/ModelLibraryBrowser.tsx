@@ -14,11 +14,14 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Bookmark,
+  Check,
+  CheckSquare,
   ImagePlus,
   RefreshCw,
   Search,
   SlidersHorizontal,
   Sparkles,
+  Square,
   Trash2,
   Upload,
   X,
@@ -40,13 +43,17 @@ import type {
   ModelLibrarySource,
   WorkflowRun,
 } from "@/lib/apiClient";
-import { MODEL_LIBRARY_APPEARANCE_LABEL } from "@/lib/apiClient";
+import {
+  MODEL_LIBRARY_APPEARANCE_LABEL,
+  MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
+} from "@/lib/apiClient";
 import {
   useApparelModelLibraryJobsQuery,
   useApparelModelLibraryQuery,
   useAutoTagApparelModelLibraryItemMutation,
   useCreateApparelModelLibraryItemMutation,
   useDeleteApparelModelLibraryItemMutation,
+  useDeleteApparelModelLibraryItemsMutation,
   useSaveApparelModelLibraryJobItemMutation,
   useSyncApparelModelLibraryPresetsMutation,
   useUploadImageMutation,
@@ -64,8 +71,8 @@ const AGE_TABS: Array<[ModelLibraryAgeSegment, string]> = [
   ["child", "儿童"],
   ["teen", "青少年"],
   ["young_adult", "青年"],
-  ["adult", "成年"],
-  ["middle_aged", "中老年"],
+  ["adult", "熟龄"],
+  ["middle_aged", "中年"],
   ["senior", "老年"],
 ];
 
@@ -99,9 +106,13 @@ const SOURCE_FILTERS: Array<[BrowserSource, string]> = [
 // 外貌方向 chip：第一个固定 "all=全部"
 const APPEARANCE_TABS: Array<[ModelLibraryAppearance, string]> = [
   ["all", "全部"],
-  ...(Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as Array<
-    [Exclude<ModelLibraryAppearance, "all">, string]
-  >),
+  ...MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS.map(
+    (value) =>
+      [value, MODEL_LIBRARY_APPEARANCE_LABEL[value]] as [
+        Exclude<ModelLibraryAppearance, "all" | "asian" | "other">,
+        string,
+      ],
+  ),
 ];
 
 const AGE_LABEL = Object.fromEntries(AGE_TABS) as Record<ModelLibraryAgeSegment, string>;
@@ -113,6 +124,50 @@ const SOURCE_LABEL_SHORT: Record<ModelLibrarySource, string> = {
   user_upload: "上传",
   generated: "生成",
 };
+
+interface EmbeddedModelLibraryMetadata {
+  age_segment?: unknown;
+  gender?: unknown;
+  appearance_direction?: unknown;
+  style_tags?: unknown;
+}
+
+function embeddedModelLibraryMetadata(
+  image: { metadata_jsonb?: Record<string, unknown> | null },
+): EmbeddedModelLibraryMetadata | null {
+  const raw = image.metadata_jsonb?.model_library;
+  return raw && typeof raw === "object"
+    ? (raw as EmbeddedModelLibraryMetadata)
+    : null;
+}
+
+function isModelLibraryItemAgeSegment(
+  value: unknown,
+): value is ModelLibraryItemAgeSegment {
+  return (
+    typeof value === "string" &&
+    AGE_TABS.some(([option]) => option !== "all" && option === value)
+  );
+}
+
+function isModelLibraryGender(value: unknown): value is ModelLibraryGender {
+  return value === "female" || value === "male";
+}
+
+function isSelectableAppearance(
+  value: unknown,
+): value is Exclude<ModelLibraryAppearance, "all"> {
+  return (
+    typeof value === "string" &&
+    value !== "all" &&
+    (value in MODEL_LIBRARY_APPEARANCE_LABEL)
+  );
+}
+
+function styleTagsFromMetadata(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((tag): tag is string => typeof tag === "string").slice(0, 12);
+}
 
 export interface ModelLibraryBrowserProps {
   /**
@@ -168,6 +223,7 @@ export function ModelLibraryBrowser({
   const [uploadOpen, setUploadOpen] = useState(false);
   const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
   const [lastUploadedId, setLastUploadedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   // 待入库视图：跳过 list API，改用 jobs API 平铺生成但未入库的图
   const isLoserView = source === "unsaved_jobs";
@@ -198,9 +254,15 @@ export function ModelLibraryBrowser({
           const itemAppearance = (it.appearance_direction || job.appearance_direction || "") as
             | ModelLibraryAppearance
             | "";
+          const itemGender =
+            it.gender === "female" || it.gender === "male"
+              ? it.gender
+              : job.gender === "female" || job.gender === "male"
+                ? job.gender
+                : null;
           if (appearance !== "all" && itemAppearance !== appearance) continue;
           if (ageSegment !== "all" && (job.age_segment ?? "") !== ageSegment) continue;
-          const haystack = [...it.style_tags, itemAppearance, job.gender ?? ""]
+          const haystack = [...it.style_tags, itemAppearance, itemGender ?? ""]
             .join(" ")
             .toLowerCase();
           const q = query.trim().toLowerCase();
@@ -209,17 +271,18 @@ export function ModelLibraryBrowser({
             id: `loser:${job.workflow_run_id}:${it.image_id}`,
             source: "generated" as ModelLibrarySource,
             visibility_scope: "user_private",
-            title: `${job.gender || "未知"} · ${
+            title: `${itemGender || "未知"} · ${
               job.age_segment ? AGE_LABEL[job.age_segment] ?? job.age_segment : "—"
             }`,
             age_segment: (job.age_segment ?? "young_adult") as ModelLibraryItemAgeSegment,
-            gender: job.gender,
+            gender: itemGender,
             appearance_direction: itemAppearance || null,
             style_tags: it.style_tags,
             image_url: it.image_url,
             display_url: it.display_url,
             thumb_url: it.thumb_url,
             image_id: it.image_id,
+            download_filename: it.download_filename,
             created_at: job.created_at,
           });
         }
@@ -244,9 +307,24 @@ export function ModelLibraryBrowser({
         thumbUrl: item.thumb_url ?? undefined,
         previewUrl: item.display_url ?? item.image_url,
         prompt: item.title,
+        filename: item.download_filename ?? undefined,
       })),
     [items],
   );
+  const deletableIds = useMemo(
+    () => items.filter((item) => !item.id.startsWith("loser:")).map((item) => item.id),
+    [items],
+  );
+  const selectedDeletableIds = useMemo(
+    () => selectedIds.filter((id) => deletableIds.includes(id)),
+    [selectedIds, deletableIds],
+  );
+  const selectedSet = useMemo(
+    () => new Set(selectedDeletableIds),
+    [selectedDeletableIds],
+  );
+  const allVisibleSelected =
+    deletableIds.length > 0 && deletableIds.every((id) => selectedSet.has(id));
 
   const buildLightboxAction = useMemo<
     null | (() => LightboxAction)
@@ -284,6 +362,18 @@ export function ModelLibraryBrowser({
     onSuccess: () => toast.success("已从当前视图移除"),
     onError: (err) =>
       toast.error("移除失败", {
+        description: err instanceof Error ? err.message : "请稍后重试",
+      }),
+  });
+  const batchDelete = useDeleteApparelModelLibraryItemsMutation({
+    onSuccess: (result) => {
+      setSelectedIds([]);
+      toast.success("已批量删除", {
+        description: `删除 ${result.deleted} 个${result.not_found.length ? `，${result.not_found.length} 个未找到` : ""}`,
+      });
+    },
+    onError: (err) =>
+      toast.error("批量删除失败", {
         description: err instanceof Error ? err.message : "请稍后重试",
       }),
   });
@@ -458,7 +548,7 @@ export function ModelLibraryBrowser({
               {!showSourceSidebar ? (
                 <select
                   value={source}
-                  onChange={(event) => setSource(event.target.value as "all" | ModelLibrarySource)}
+                  onChange={(event) => setSource(event.target.value as BrowserSource)}
                   className="h-10 max-w-full border-b border-[var(--border)] bg-transparent px-1 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)] outline-none focus:border-[var(--amber-400)]"
                 >
                   {SOURCE_FILTERS.map(([value, label]) => (
@@ -480,35 +570,92 @@ export function ModelLibraryBrowser({
             ) : items.length === 0 ? (
               <EmptyBrowser />
             ) : (
-              <motion.div
-                className={cn(
-                  "grid min-w-0 gap-x-4 gap-y-8 md:gap-x-5 md:gap-y-10",
-                  mode === "page"
-                    ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
-                    : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5",
-                )}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.18 }}
-              >
-                {items.map((item, index) => (
-                  <ModelLibraryCard
-                    key={item.id}
-                    item={item}
-                    order={index}
-                    highlighted={lastUploadedId === item.id}
-                    onOpenLightbox={() => {
-                      const action = buildLightboxAction?.() ?? null;
-                      useUiStore
-                        .getState()
-                        .openLightboxFromItems(visibleLightboxItems, item.id, action);
-                    }}
-                    onDelete={() => deleteItem.mutate(item.id)}
-                    deleting={deleteItem.isPending}
-                    onSaveLoser={isLoserView ? item : undefined}
-                  />
-                ))}
-              </motion.div>
+              <div className="grid gap-4">
+                {!isLoserView && deletableIds.length > 0 ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-y border-[var(--border)] py-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedIds(allVisibleSelected ? [] : deletableIds)
+                      }
+                      className="inline-flex h-8 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
+                    >
+                      {allVisibleSelected ? (
+                        <CheckSquare className="h-3.5 w-3.5 text-[var(--amber-300)]" />
+                      ) : (
+                        <Square className="h-3.5 w-3.5" />
+                      )}
+                      {selectedDeletableIds.length > 0
+                        ? `${selectedDeletableIds.length} Selected`
+                        : "Select"}
+                    </button>
+                    {selectedDeletableIds.length > 0 ? (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedIds([])}
+                          className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+                        >
+                          Cancel
+                        </button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          loading={batchDelete.isPending}
+                          onClick={() => batchDelete.mutate(selectedDeletableIds)}
+                          leftIcon={<Trash2 className="h-3 w-3" />}
+                        >
+                          批量删除
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                <motion.div
+                  className={cn(
+                    "grid min-w-0 gap-x-4 gap-y-8 md:gap-x-5 md:gap-y-10",
+                    mode === "page"
+                      ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
+                      : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5",
+                  )}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.18 }}
+                >
+                  {items.map((item, index) => (
+                    <ModelLibraryCard
+                      key={item.id}
+                      item={item}
+                      order={index}
+                      highlighted={lastUploadedId === item.id}
+                      selected={selectedSet.has(item.id)}
+                      onToggleSelected={
+                        !item.id.startsWith("loser:")
+                          ? () =>
+                              setSelectedIds((prev) =>
+                                prev.includes(item.id)
+                                  ? prev.filter((id) => id !== item.id)
+                                  : [...prev, item.id],
+                              )
+                          : undefined
+                      }
+                      onOpenLightbox={() => {
+                        const action = buildLightboxAction?.() ?? null;
+                        useUiStore
+                          .getState()
+                          .openLightboxFromItems(visibleLightboxItems, item.id, action);
+                      }}
+                      onDelete={() => deleteItem.mutate(item.id)}
+                      deleting={deleteItem.isPending || batchDelete.isPending}
+                      onSaveLoser={isLoserView ? item : undefined}
+                      onSelect={
+                        mode === "dialog" && !isLoserView ? onSelectItem : undefined
+                      }
+                      selectLabel={selectActionLabel}
+                    />
+                  ))}
+                </motion.div>
+              </div>
             )}
           </div>
         </main>
@@ -618,18 +765,26 @@ function ModelLibraryCard({
   item,
   order,
   highlighted,
+  selected,
   deleting,
   onOpenLightbox,
   onDelete,
+  onToggleSelected,
   onSaveLoser,
+  onSelect,
+  selectLabel,
 }: {
   item: ApparelModelLibraryItem;
   order: number;
   highlighted: boolean;
+  selected: boolean;
   deleting: boolean;
   onOpenLightbox: () => void;
   onDelete: () => void;
+  onToggleSelected?: () => void;
   onSaveLoser?: ApparelModelLibraryItem;
+  onSelect?: (item: ApparelModelLibraryItem) => void;
+  selectLabel?: string;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const isPreset = item.source === "preset";
@@ -652,9 +807,9 @@ function ModelLibraryCard({
   };
   const autoTag = useAutoTagApparelModelLibraryItemMutation(item.id, {
     onSuccess: (data) =>
-      toast.success("已识别风格", {
+      toast.success("已识别气质方向", {
         description:
-          data.style_tags.length > 0 ? data.style_tags.join("、") : "未识别到明显风格",
+          data.style_tags.length > 0 ? data.style_tags.join("、") : "未识别到明显气质方向",
       }),
     onError: (err) =>
       toast.error("识别失败", {
@@ -683,6 +838,21 @@ function ModelLibraryCard({
 
   return (
     <article className="group relative">
+      {onToggleSelected ? (
+        <button
+          type="button"
+          onClick={onToggleSelected}
+          aria-label={selected ? "取消选择" : "选择模特"}
+          className={cn(
+            "absolute left-2 top-2 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full border backdrop-blur transition-colors",
+            selected
+              ? "border-[var(--border-amber)] bg-[var(--accent)] text-[var(--bg-0)]"
+              : "border-white/40 bg-black/35 text-white hover:bg-black/55",
+          )}
+        >
+          {selected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+        </button>
+      ) : null}
       {/* 缩略图区：portrait 大图 */}
       <button
         type="button"
@@ -706,7 +876,12 @@ function ModelLibraryCard({
           className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
         />
         {/* N°NN 序号 */}
-        <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+        <span
+          className={cn(
+            "absolute top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference",
+            onToggleSelected ? "left-11" : "left-2",
+          )}
+        >
           N°{String(order + 1).padStart(2, "0")}
         </span>
         {/* 来源标识 */}
@@ -751,7 +926,17 @@ function ModelLibraryCard({
         )}
 
         {/* 操作行 */}
-        <div className="mt-1.5 flex items-center gap-3">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-2">
+          {onSelect ? (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => onSelect(item)}
+              leftIcon={<Check className="h-3 w-3" />}
+            >
+              {selectLabel ?? "设为当前模特"}
+            </Button>
+          ) : null}
           {isLoser ? (
             <Button
               size="sm"
@@ -779,8 +964,8 @@ function ModelLibraryCard({
                 type="button"
                 onClick={() => autoTag.mutate()}
                 disabled={autoTag.isPending}
-                title="重新识别风格标签"
-                aria-label="重新识别风格标签"
+                title="重新识别气质方向"
+                aria-label="重新识别气质方向"
                 className="inline-flex h-8 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {autoTag.isPending ? (
@@ -880,14 +1065,27 @@ function UploadDialog({
     }
     const title = form.title.trim() || uploadFile.name.replace(/\.[^.]+$/, "");
     const uploaded = await uploadImage.mutateAsync(uploadFile);
+    const embedded = embeddedModelLibraryMetadata(uploaded);
+    const embeddedTags = styleTagsFromMetadata(embedded?.style_tags);
+    const ageSegment =
+      embedded && isModelLibraryItemAgeSegment(embedded.age_segment)
+        ? embedded.age_segment
+        : form.age_segment;
+    const gender =
+      embedded && isModelLibraryGender(embedded.gender)
+        ? embedded.gender
+        : form.gender;
+    const appearanceDirection = embedded && isSelectableAppearance(embedded.appearance_direction)
+      ? embedded.appearance_direction
+      : form.appearance_direction || null;
     createItem.mutate({
       source: "user_upload",
       image_id: uploaded.id,
       title,
-      age_segment: form.age_segment,
-      gender: form.gender,
-      appearance_direction: form.appearance_direction || null,
-      style_tags: uploadTagsEnabled ? splitTags(form.style_tags) : [],
+      age_segment: ageSegment,
+      gender,
+      appearance_direction: appearanceDirection,
+      style_tags: uploadTagsEnabled ? splitTags(form.style_tags) : embeddedTags,
     });
   };
 
@@ -994,11 +1192,7 @@ function UploadDialog({
               >
                 未指定
               </Chip>
-              {(
-                Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as Array<
-                  [Exclude<ModelLibraryAppearance, "all">, string]
-                >
-              ).map(([value, label]) => (
+              {MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS.map((value) => (
                 <Chip
                   key={value}
                   active={form.appearance_direction === value}
@@ -1006,12 +1200,12 @@ function UploadDialog({
                     setForm((prev) => ({ ...prev, appearance_direction: value }))
                   }
                 >
-                  {label}
+                  {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
                 </Chip>
               ))}
             </div>
           </UnderlineLabeled>
-          <UnderlineLabeled label="风格标签">
+          <UnderlineLabeled label="气质方向">
             <button
               type="button"
               onClick={() => setUploadTagsEnabled((value) => !value)}
@@ -1035,18 +1229,18 @@ function UploadDialog({
                 />
               </span>
               <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)]">
-                {uploadTagsEnabled ? "Fill tags" : "Skip tags"}
+                {uploadTagsEnabled ? "手动填写" : "自动识别"}
               </span>
             </button>
           </UnderlineLabeled>
           {uploadTagsEnabled ? (
-            <UnderlineLabeled label="标签内容">
+            <UnderlineLabeled label="气质标签">
               <input
                 value={form.style_tags}
                 onChange={(event) =>
                   setForm((prev) => ({ ...prev, style_tags: event.target.value }))
                 }
-                placeholder="高级简洁、棚拍"
+                placeholder="清冷高级、知性通勤"
                 className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
               />
             </UnderlineLabeled>

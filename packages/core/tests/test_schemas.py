@@ -72,3 +72,16 @@ def test_post_message_prompt_limit_uses_shared_constant():
         pass
     else:  # pragma: no cover
         raise AssertionError("expected attachment count validation error")
+
+
+def test_model_library_generate_accepts_multiple_genders():
+    from lumen_core.schemas import ApparelModelLibraryGenerateIn
+
+    body = ApparelModelLibraryGenerateIn(
+        age_segment="young_adult",
+        genders=["female", "male"],
+        count=4,
+    )
+
+    assert body.gender is None
+    assert body.genders == ["female", "male"]

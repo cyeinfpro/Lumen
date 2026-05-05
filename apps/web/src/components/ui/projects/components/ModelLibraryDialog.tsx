@@ -91,7 +91,7 @@ export function ModelLibraryDialog({
     router.push("/library");
   };
 
-  const headerHint = "点击图片预览，并在大图内选择模特";
+  const headerHint = "可直接在卡片下方选择模特，也可以点图片预览后在大图内选择";
 
   if (isMobile === null) {
     // SSR / hydration 第一帧：不渲染外壳避免 flash
@@ -232,7 +232,7 @@ function DialogFooter({
   return (
     <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] px-5 py-4 md:flex-row md:items-center md:justify-between md:px-6">
       <p className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
-        Tip · 点击图片预览，「设为当前模特」按钮在大图内
+        Tip · 卡片下方和大图内都可以设为当前模特
       </p>
       <div className="flex flex-col gap-2 sm:flex-row">
         <Button

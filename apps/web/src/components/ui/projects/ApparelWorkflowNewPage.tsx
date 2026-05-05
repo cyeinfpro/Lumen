@@ -36,8 +36,8 @@ const AGE_SEGMENTS = [
   ["儿童", "儿童"],
   ["青少年", "青少年"],
   ["青年", "青年"],
-  ["成年", "成年"],
-  ["中老年", "中老年"],
+  ["熟龄", "熟龄"],
+  ["中年", "中年"],
   ["老年", "老年"],
 ] as const;
 
@@ -163,7 +163,7 @@ export function ApparelWorkflowNewPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [files, setFiles] = useState<PendingFile[]>([]);
   const [projectTitle, setProjectTitle] = useState("服饰模特图");
-  const [ageSegment, setAgeSegment] = useState("成年");
+  const [ageSegment, setAgeSegment] = useState("熟龄");
   const [gender, setGender] = useState("女性");
   const [appearanceDirection, setAppearanceDirection] = useState("");
   const [styleDirection, setStyleDirection] = useState("高级简洁");

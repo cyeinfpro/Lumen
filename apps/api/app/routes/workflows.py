@@ -51,18 +51,26 @@ from lumen_core.models import (
     WorkflowRun,
     WorkflowStep,
 )
+from lumen_core.model_image_metadata import (
+    build_model_image_metadata,
+    model_image_filename,
+    parse_model_image_metadata,
+)
 from lumen_core.schemas import (
     AccessoryPlanIn,
     AccessoryPreviewCreateIn,
     AccessorySelectionIn,
     AgeSegment,
     ApparelModelLibraryAutoTagOut,
+    ApparelModelLibraryBatchDeleteIn,
+    ApparelModelLibraryBatchDeleteOut,
     ApparelModelLibraryGenerateIn,
     ApparelModelLibraryItemCreateIn,
     ApparelModelLibraryItemOut,
     ApparelModelLibraryItemPatchIn,
     ApparelModelLibraryJobItemOut,
     ApparelModelLibraryJobOut,
+    ApparelModelLibraryJobsClearOut,
     ApparelModelLibraryJobsOut,
     ApparelModelLibraryListOut,
     ApparelModelLibrarySaveJobItemIn,
@@ -706,17 +714,33 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
     )
     created_at = _safe_datetime(raw.get("created_at")) or _safe_datetime(raw.get("updated_at")) or _now()
     visibility_scope = "global_preset" if source == "preset" else "user_private"
+    style_tags = _clean_style_tags(raw.get("style_tags") or raw.get("tags") or [])
+    gender = _clean_optional_text(raw.get("gender"), max_len=40)
+    age_segment = _normalize_age_segment(raw.get("age_segment"))
+    appearance_direction = _clean_optional_text(
+        raw.get("appearance_direction"), max_len=80
+    )
+    metadata_filename = None
+    metadata = raw.get("metadata_jsonb")
+    if isinstance(metadata, dict):
+        metadata_filename = _clean_optional_text(
+            metadata.get("suggested_filename"), max_len=160
+        )
+    if not metadata_filename and image_id:
+        image_metadata = raw.get("image_metadata_jsonb")
+        if isinstance(image_metadata, dict):
+            metadata_filename = _clean_optional_text(
+                image_metadata.get("suggested_filename"), max_len=160
+            )
     return ApparelModelLibraryItemOut(
         id=item_id,
         source=source,  # type: ignore[arg-type]
         visibility_scope=visibility_scope,  # type: ignore[arg-type]
         title=str(raw.get("title") or "未命名模特").strip()[:120],
-        age_segment=_normalize_age_segment(raw.get("age_segment")),  # type: ignore[arg-type]
-        gender=_clean_optional_text(raw.get("gender"), max_len=40),
-        appearance_direction=_clean_optional_text(
-            raw.get("appearance_direction"), max_len=80
-        ),
-        style_tags=_clean_style_tags(raw.get("style_tags") or raw.get("tags") or []),
+        age_segment=age_segment,  # type: ignore[arg-type]
+        gender=gender,
+        appearance_direction=appearance_direction,
+        style_tags=style_tags,
         image_url=image_url,
         display_url=display_url,
         thumb_url=thumb_url,
@@ -729,6 +753,15 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
             max_len=40,
         ),
         prompt_hint=_clean_optional_text(raw.get("prompt_hint"), max_len=300),
+        download_filename=metadata_filename
+        or _model_library_download_filename(
+            image_id=image_id or item_id,
+            mime=None,
+            age_segment=age_segment,
+            gender=gender,
+            appearance_direction=appearance_direction,
+            style_tags=style_tags,
+        ),
         created_at=created_at,
         updated_at=_safe_datetime(raw.get("updated_at")),
     )
@@ -755,12 +788,52 @@ def _save_global_library_index(index: dict[str, Any]) -> None:
 
 
 def _save_user_library_index(user_id: str, index: dict[str, Any]) -> None:
-    """Legacy file writer kept only for migration tests. Production
-    routes write per-row through ORM (no whole-file rewrite, no race).
+    """Legacy file writer kept for migration tests and deletion tombstoning.
+
+    Creation/update routes write through ORM; delete still updates this file
+    so lazy migration cannot re-create rows the user already removed.
     """
     index["schema_version"] = MODEL_LIBRARY_SCHEMA_VERSION
     index["updated_at"] = _iso_now()
     _write_json_atomic(_library_user_index_path(user_id), index)
+
+
+def _remove_user_library_item_from_legacy_index(user_id: str, item_id: str) -> bool:
+    """Keep lazy JSON migration from resurrecting a DB-deleted user item."""
+    index_path = _library_user_index_path(user_id)
+    if not index_path.is_file():
+        return False
+    index = _load_user_library_index(user_id)
+    raw_items = index.get("items")
+    if not isinstance(raw_items, list):
+        return False
+    next_items: list[Any] = []
+    removed = False
+    for raw in raw_items:
+        raw_id = str(raw.get("id") or "").strip() if isinstance(raw, dict) else ""
+        if raw_id == item_id:
+            removed = True
+            continue
+        next_items.append(raw)
+    if not removed:
+        return False
+    index["items"] = next_items
+    _save_user_library_index(user_id, index)
+    return True
+
+
+def _hide_preset_in_legacy_user_library_index(user_id: str, preset_id: str) -> bool:
+    """Mirror preset hides into the legacy index while lazy migration exists."""
+    index_path = _library_user_index_path(user_id)
+    if not index_path.is_file():
+        return False
+    index = _load_user_library_index(user_id)
+    hidden_ids = _dedupe_nonempty(index.get("hidden_preset_ids") or [])
+    if preset_id in hidden_ids:
+        return False
+    index["hidden_preset_ids"] = [*hidden_ids, preset_id]
+    _save_user_library_index(user_id, index)
+    return True
 
 
 def _save_sync_state(state: dict[str, Any]) -> None:
@@ -783,6 +856,7 @@ def _model_library_row_to_dict(row: ModelLibraryItem) -> dict[str, Any]:
         "prompt_hint": row.prompt_hint,
         "auto_tagged_at": row.auto_tagged_at.isoformat() if row.auto_tagged_at else None,
         "auto_tag_notes": row.auto_tag_notes,
+        "metadata_jsonb": dict(row.metadata_jsonb or {}),
         "owner_user_id": row.user_id,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -953,12 +1027,23 @@ async def _load_user_library_items(
 ) -> list[dict[str, Any]]:
     rows = (
         await db.execute(
-            select(ModelLibraryItem)
-            .where(ModelLibraryItem.user_id == user_id)
+            select(ModelLibraryItem, Image.metadata_jsonb)
+            .join(Image, Image.id == ModelLibraryItem.image_id)
+            .where(
+                ModelLibraryItem.user_id == user_id,
+                Image.deleted_at.is_(None),
+            )
             .order_by(ModelLibraryItem.created_at.desc())
         )
-    ).scalars().all()
-    return [_model_library_row_to_dict(row) for row in rows]
+    ).all()
+    out: list[dict[str, Any]] = []
+    for row, image_metadata_jsonb in rows:
+        raw = _model_library_row_to_dict(row)
+        raw["image_metadata_jsonb"] = (
+            dict(image_metadata_jsonb) if isinstance(image_metadata_jsonb, dict) else {}
+        )
+        out.append(raw)
+    return out
 
 
 async def _load_user_hidden_preset_ids(
@@ -1573,6 +1658,60 @@ def _image_variant_url(image_id: str, kind: str = "display2048") -> str:
     return f"/api/images/{image_id}/variants/{kind}"
 
 
+def _model_library_download_filename(
+    *,
+    image_id: str,
+    mime: str | None,
+    age_segment: str | None,
+    gender: str | None,
+    appearance_direction: str | None,
+    style_tags: list[str],
+) -> str:
+    ext = "png"
+    if isinstance(mime, str) and mime.startswith("image/"):
+        ext = "jpg" if mime == "image/jpeg" else mime.removeprefix("image/")
+    return model_image_filename(
+        image_id=image_id,
+        ext=ext,
+        age_segment=age_segment,
+        gender=gender,
+        appearance_direction=appearance_direction,
+        style_tags=style_tags,
+    )
+
+
+def _model_library_image_metadata_from_fields(
+    *,
+    image_id: str,
+    age_segment: str | None,
+    gender: str | None,
+    appearance_direction: str | None,
+    style_tags: list[str],
+    prompt_hint: str | None = None,
+    source: str = "model_library",
+    mime: str | None = None,
+) -> dict[str, Any]:
+    payload = build_model_image_metadata(
+        age_segment=age_segment,
+        gender=gender,
+        appearance_direction=appearance_direction,
+        style_tags=style_tags,
+        source=source,
+        prompt_hint=prompt_hint,
+    )
+    return {
+        "model_library": payload,
+        "suggested_filename": _model_library_download_filename(
+            image_id=image_id,
+            mime=mime,
+            age_segment=age_segment,
+            gender=gender,
+            appearance_direction=appearance_direction,
+            style_tags=style_tags,
+        ),
+    }
+
+
 async def _create_user_image_from_preset(
     db: AsyncSession,
     *,
@@ -1712,9 +1851,21 @@ async def _add_user_library_item(
     standalone INSERT — concurrent favorites no longer race a shared
     JSON file.
     """
-    await _owned_image(db, user_id=user_id, image_id=image_id)
+    image = await _owned_image(db, user_id=user_id, image_id=image_id)
     normalized_age = _normalize_age_segment(age_segment)
     normalized_gender = _normalize_model_gender(gender)
+    cleaned_appearance = _clean_optional_text(appearance_direction, max_len=80)
+    cleaned_tags = _clean_style_tags(style_tags)
+    metadata_jsonb = _model_library_image_metadata_from_fields(
+        image_id=image_id,
+        age_segment=normalized_age,
+        gender=normalized_gender,
+        appearance_direction=cleaned_appearance,
+        style_tags=cleaned_tags,
+        prompt_hint=title,
+        source=source,
+        mime=getattr(image, "mime", None),
+    )
     row = ModelLibraryItem(
         id=f"user:{new_uuid7()}",
         user_id=user_id,
@@ -1723,12 +1874,16 @@ async def _add_user_library_item(
         title=title.strip()[:120],
         age_segment=normalized_age,
         gender=normalized_gender,
-        appearance_direction=_clean_optional_text(appearance_direction, max_len=80),
-        style_tags=_clean_style_tags(style_tags),
+        appearance_direction=cleaned_appearance,
+        style_tags=cleaned_tags,
         library_folder=_model_library_folder_for_age(
             normalized_age, normalized_gender
         ),
+        metadata_jsonb=metadata_jsonb,
     )
+    image_metadata = dict(getattr(image, "metadata_jsonb", None) or {})
+    image_metadata.update(metadata_jsonb)
+    image.metadata_jsonb = image_metadata
     db.add(row)
     await db.flush()
     return _model_library_row_to_dict(row)
@@ -1789,11 +1944,11 @@ def _infer_age_segment_from_text(text: str) -> str:
         return "teen"
     if "青年" in text:
         return "young_adult"
-    if "中老年" in text:
+    if "中年" in text or "中老年" in text:
         return "middle_aged"
     if "老年" in text:
         return "senior"
-    if "成年" in text:
+    if "熟龄" in text or "成年" in text:
         return "adult"
     return "user_favorites"
 
@@ -3404,6 +3559,45 @@ async def patch_apparel_model_library_item(
     return _model_library_item_out(_model_library_row_to_dict(row))
 
 
+async def _delete_apparel_model_library_item_for_user(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    item_id: str,
+) -> bool:
+    """Delete a private item or hide a global preset for one user."""
+    if item_id.startswith("user:"):
+        removed_legacy = _remove_user_library_item_from_legacy_index(user_id, item_id)
+        row = (
+            await db.execute(
+                select(ModelLibraryItem).where(
+                    ModelLibraryItem.id == item_id,
+                    ModelLibraryItem.user_id == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return removed_legacy
+        await db.delete(row)
+        return True
+
+    item = await _find_library_item(db, user_id=user_id, item_id=item_id)
+    if item is None or item.get("source") != "preset":
+        return False
+    existing = (
+        await db.execute(
+            select(ModelLibraryHiddenPreset).where(
+                ModelLibraryHiddenPreset.user_id == user_id,
+                ModelLibraryHiddenPreset.preset_id == item_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        db.add(ModelLibraryHiddenPreset(user_id=user_id, preset_id=item_id))
+    _hide_preset_in_legacy_user_library_index(user_id, item_id)
+    return True
+
+
 @router.delete(
     "/apparel-model-library/items/{item_id:path}",
     dependencies=[Depends(verify_csrf)],
@@ -3413,45 +3607,43 @@ async def delete_apparel_model_library_item(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
-    migrated_legacy = await _ensure_legacy_user_library_migrated(db, user.id)
-    if item_id.startswith("user:"):
-        row = (
-            await db.execute(
-                select(ModelLibraryItem).where(
-                    ModelLibraryItem.id == item_id,
-                    ModelLibraryItem.user_id == user.id,
-                )
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            if migrated_legacy:
-                await db.commit()
-            raise _http("not_found", "model library item not found", 404)
-        await db.delete(row)
-        await db.commit()
-        return {"ok": True}
-    # Presets are global; user-level delete means hide for this user.
-    item = await _find_library_item(db, user_id=user.id, item_id=item_id)
-    if item is None or item.get("source") != "preset":
-        if migrated_legacy:
-            await db.commit()
+    await _ensure_legacy_user_library_migrated(db, user.id)
+    deleted = await _delete_apparel_model_library_item_for_user(
+        db,
+        user_id=user.id,
+        item_id=item_id,
+    )
+    if not deleted:
         raise _http("not_found", "model library item not found", 404)
-    existing = (
-        await db.execute(
-            select(ModelLibraryHiddenPreset).where(
-                ModelLibraryHiddenPreset.user_id == user.id,
-                ModelLibraryHiddenPreset.preset_id == item_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if existing is None:
-        db.add(
-            ModelLibraryHiddenPreset(user_id=user.id, preset_id=item_id)
-        )
-        await db.commit()
-    elif migrated_legacy:
-        await db.commit()
+    await db.commit()
     return {"ok": True}
+
+
+@router.post(
+    "/apparel-model-library/items/batch-delete",
+    response_model=ApparelModelLibraryBatchDeleteOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def batch_delete_apparel_model_library_items(
+    body: ApparelModelLibraryBatchDeleteIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApparelModelLibraryBatchDeleteOut:
+    await _ensure_legacy_user_library_migrated(db, user.id)
+    item_ids = _dedupe_nonempty(body.item_ids)
+    deleted = 0
+    not_found: list[str] = []
+    for item_id in item_ids:
+        if await _delete_apparel_model_library_item_for_user(
+            db,
+            user_id=user.id,
+            item_id=item_id,
+        ):
+            deleted += 1
+        else:
+            not_found.append(item_id)
+    await db.commit()
+    return ApparelModelLibraryBatchDeleteOut(deleted=deleted, not_found=not_found)
 
 
 @router.get("", response_model=WorkflowRunListOut)
@@ -4382,20 +4574,38 @@ _MODEL_LIBRARY_TITLE_AGE_LABELS: dict[str, str] = {
     "child": "儿童",
     "teen": "青少年",
     "young_adult": "青年",
-    "adult": "成年",
-    "middle_aged": "中老年",
+    "adult": "熟龄",
+    "middle_aged": "中年",
     "senior": "老年",
 }
+
+
+def _model_library_generate_genders(body: ApparelModelLibraryGenerateIn) -> list[str]:
+    raw = getattr(body, "genders", None)
+    genders = _dedupe_nonempty(raw or [])
+    if not genders and body.gender:
+        genders = [body.gender]
+    genders = [gender for gender in genders if gender in {"female", "male"}]
+    return genders or ["female"]
+
+
+def _model_library_gender_label(genders: list[str]) -> str:
+    if set(genders) == {"female", "male"}:
+        return "男女"
+    if not genders:
+        return "女性"
+    return "女性" if genders[0] == "female" else "男性"
 
 
 def _model_library_run_title(
     *,
     age_segment: str,
-    gender: str,
+    gender: str | None = None,
+    genders: list[str] | None = None,
     appearance_direction: str | None,
 ) -> str:
     age_label = _MODEL_LIBRARY_TITLE_AGE_LABELS.get(age_segment, age_segment)
-    gender_label = "女性" if gender == "female" else "男性"
+    gender_label = _model_library_gender_label(genders or ([gender] if gender else []))
     appearance = (appearance_direction or "").strip()
     parts = [f"{age_label}{gender_label}"]
     if appearance:
@@ -4425,19 +4635,19 @@ def _model_library_generate_prompt(
     tag_text = ", ".join(_clean_style_tags(style_tags)) if style_tags else ""
     age_directive = ""
     if age_segment == "toddler":
-        age_directive = "around 2-3 years old toddler proportions"
+        age_directive = "age 2-4, toddler proportions"
     elif age_segment == "child":
-        age_directive = "around 8-10 years old child proportions"
+        age_directive = "age 5-12, child proportions"
     elif age_segment == "teen":
-        age_directive = "around 14-17 years old teen proportions"
+        age_directive = "age 13-17, teen proportions"
     elif age_segment == "young_adult":
-        age_directive = "around 20-28 years old young adult proportions"
+        age_directive = "age 18-29, young adult proportions"
     elif age_segment == "adult":
-        age_directive = "around 30-40 years old adult proportions"
+        age_directive = "age 30-44, mature adult proportions"
     elif age_segment == "middle_aged":
-        age_directive = "around 45-55 years old middle aged proportions"
+        age_directive = "age 45-59, middle-aged adult proportions"
     elif age_segment == "senior":
-        age_directive = "around 65-75 years old senior proportions"
+        age_directive = "age 60 or older, senior adult proportions"
     base_styling = "warm ivory sleeveless top and warm ivory shorts, barefoot"
     appearance_directive = (
         f"Appearance direction: {appearance}." if appearance else ""
@@ -4491,9 +4701,17 @@ def _model_library_generate_image_params() -> ImageParamsIn:
 def _model_library_run_inputs(step: WorkflowStep) -> dict[str, Any]:
     """从 step.input_json 拿生成请求快照（age_segment / gender 等）。"""
     raw = step.input_json if isinstance(step.input_json, dict) else {}
+    genders = _dedupe_nonempty(raw.get("genders") or [])
+    genders = [gender for gender in genders if gender in {"female", "male"}]
+    gender = (
+        "/".join(genders)
+        if len(genders) > 1
+        else _normalize_model_gender(genders[0] if genders else raw.get("gender"))
+    )
     return {
         "age_segment": _normalize_age_segment(raw.get("age_segment")),
-        "gender": _normalize_model_gender(raw.get("gender")),
+        "gender": gender,
+        "genders": genders,
         "appearance_direction": _clean_optional_text(
             raw.get("appearance_direction"), max_len=80
         ),
@@ -4568,13 +4786,101 @@ async def _gather_job_image_outs(
     return await _image_out_map(db, images)
 
 
+async def _model_library_image_meta_by_id(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    image_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    ids = _dedupe_nonempty(image_ids)
+    if not ids:
+        return {}
+    images = list(
+        (
+            await db.execute(
+                select(Image)
+                .where(
+                    Image.id.in_(ids),
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+    )
+    gen_ids = _dedupe_nonempty(
+        image.owner_generation_id or "" for image in images
+    )
+    generation_req: dict[str, dict[str, Any]] = {}
+    if gen_ids:
+        generations = list(
+            (
+                await db.execute(
+                    select(Generation)
+                    .where(
+                        Generation.id.in_(gen_ids),
+                        Generation.user_id == user_id,
+                    )
+                )
+            ).scalars().all()
+        )
+        generation_req = {
+            generation.id: dict(generation.upstream_request or {})
+            for generation in generations
+            if isinstance(generation.upstream_request, dict)
+        }
+
+    out: dict[str, dict[str, Any]] = {}
+    for image in images:
+        meta: dict[str, Any] = {"mime": image.mime}
+        stored = image.metadata_jsonb if isinstance(image.metadata_jsonb, dict) else {}
+        parsed = parse_model_image_metadata(stored.get("model_library"))
+        if parsed is not None:
+            meta.update(
+                {
+                    "age_segment": parsed.age_segment,
+                    "gender": parsed.gender,
+                    "appearance_direction": parsed.appearance_direction,
+                    "style_tags": list(parsed.style_tags or []),
+                    "prompt_hint": parsed.prompt_hint,
+                }
+            )
+        filename = _clean_optional_text(stored.get("suggested_filename"), max_len=160)
+        if filename:
+            meta["download_filename"] = filename
+
+        req = generation_req.get(image.owner_generation_id or "", {})
+        if req:
+            if not meta.get("age_segment"):
+                meta["age_segment"] = _clean_optional_text(
+                    req.get("workflow_model_library_age_segment"), max_len=32
+                )
+            if not meta.get("gender"):
+                meta["gender"] = _clean_optional_text(
+                    req.get("workflow_model_library_gender"), max_len=16
+                )
+            if not meta.get("appearance_direction"):
+                meta["appearance_direction"] = _clean_optional_text(
+                    req.get("workflow_model_library_appearance_direction"),
+                    max_len=80,
+                )
+            if not meta.get("style_tags"):
+                meta["style_tags"] = _clean_style_tags(
+                    req.get("workflow_model_library_style_tags") or []
+                )
+        out[image.id] = meta
+    return out
+
+
 def _job_item_out(
     *,
     image_id: str,
     image_out: ImageOut | None,
     saved_item_id: str | None,
+    age_segment: str | None,
+    gender: str | None,
     style_tags: list[str],
     appearance_direction: str | None,
+    image_meta: dict[str, Any] | None = None,
 ) -> ApparelModelLibraryJobItemOut:
     if image_out is not None:
         image_url = image_out.url
@@ -4584,14 +4890,40 @@ def _job_item_out(
         image_url = _image_url(image_id)
         display_url = None
         thumb_url = None
+    meta = image_meta or {}
+    resolved_tags = _clean_style_tags(
+        [*(meta.get("style_tags") or []), *style_tags]
+    )
+    resolved_age = _normalize_age_segment(meta.get("age_segment") or age_segment)
+    if resolved_age == "user_favorites" and age_segment:
+        resolved_age = _normalize_age_segment(age_segment)
+    resolved_gender = _clean_optional_text(
+        meta.get("gender") or gender, max_len=40
+    )
+    resolved_appearance = _clean_optional_text(
+        meta.get("appearance_direction") or appearance_direction,
+        max_len=80,
+    )
+    filename = _clean_optional_text(meta.get("download_filename"), max_len=160)
+    if not filename:
+        filename = _model_library_download_filename(
+            image_id=image_id,
+            mime=(image_out.mime if image_out is not None else meta.get("mime")),
+            age_segment=resolved_age,
+            gender=resolved_gender,
+            appearance_direction=resolved_appearance,
+            style_tags=resolved_tags,
+        )
     return ApparelModelLibraryJobItemOut(
         image_id=image_id,
         image_url=image_url,
         display_url=display_url,
         thumb_url=thumb_url,
         saved_item_id=saved_item_id,
-        style_tags=_clean_style_tags(style_tags),
-        appearance_direction=_clean_optional_text(appearance_direction, max_len=80),
+        style_tags=resolved_tags,
+        appearance_direction=resolved_appearance,
+        gender=resolved_gender,
+        download_filename=filename,
     )
 
 
@@ -4691,6 +5023,9 @@ async def _job_from_library_run(
     image_out_map = await _gather_job_image_outs(
         db, user_id=run.user_id, image_ids=image_ids + bonus_ids
     )
+    image_meta_map = await _model_library_image_meta_by_id(
+        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
+    )
     tagging_results = (step.output_json or {}).get("tagging_results") if step else None
     tagging_map: dict[str, dict[str, Any]] = (
         tagging_results if isinstance(tagging_results, dict) else {}
@@ -4700,10 +5035,20 @@ async def _job_from_library_run(
             image_id=iid,
             image_out=image_out_map.get(iid),
             saved_item_id=saved_map.get(iid),
-            style_tags=(tagging_map.get(iid) or {}).get("style_tags") or [],
+            age_segment=inputs.get("age_segment"),
+            gender=(image_meta_map.get(iid) or {}).get("gender")
+            or (tagging_map.get(iid) or {}).get("gender")
+            or inputs.get("gender"),
+            style_tags=_clean_style_tags(
+                [
+                    *(inputs.get("style_tags") or []),
+                    *((tagging_map.get(iid) or {}).get("style_tags") or []),
+                ]
+            ),
             appearance_direction=(tagging_map.get(iid) or {}).get(
                 "appearance_direction"
             ),
+            image_meta=image_meta_map.get(iid),
         )
         for iid in image_ids
     ]
@@ -4713,8 +5058,11 @@ async def _job_from_library_run(
             image_id=bid,
             image_out=image_out_map.get(bid),
             saved_item_id=saved_map.get(bid),
-            style_tags=[],
-            appearance_direction=None,
+            age_segment=inputs.get("age_segment"),
+            gender=(image_meta_map.get(bid) or {}).get("gender") or inputs.get("gender"),
+            style_tags=inputs.get("style_tags") or [],
+            appearance_direction=inputs.get("appearance_direction"),
+            image_meta=image_meta_map.get(bid),
         )
         for bid in bonus_ids
     ]
@@ -4765,13 +5113,31 @@ async def _job_from_project_candidate_step(
     image_out_map = await _gather_job_image_outs(
         db, user_id=run.user_id, image_ids=image_ids + bonus_ids
     )
+    image_meta_map = await _model_library_image_meta_by_id(
+        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
+    )
+    profile = (run.metadata_jsonb or {}).get("model_profile") or {}
+    age_segment = (
+        _normalize_age_segment(profile.get("age_segment"))
+        if isinstance(profile, dict)
+        else None
+    )
+    gender = profile.get("gender") if isinstance(profile, dict) else None
+    appearance_direction = (
+        profile.get("appearance_direction")
+        if isinstance(profile, dict)
+        else None
+    )
     items = [
         _job_item_out(
             image_id=iid,
             image_out=image_out_map.get(iid),
             saved_item_id=saved_map.get(iid),
+            age_segment=age_segment,
+            gender=gender,
             style_tags=[],
-            appearance_direction=None,
+            appearance_direction=appearance_direction,
+            image_meta=image_meta_map.get(iid),
         )
         for iid in image_ids
     ]
@@ -4780,8 +5146,11 @@ async def _job_from_project_candidate_step(
             image_id=bid,
             image_out=image_out_map.get(bid),
             saved_item_id=saved_map.get(bid),
+            age_segment=age_segment,
+            gender=gender,
             style_tags=[],
-            appearance_direction=None,
+            appearance_direction=appearance_direction,
+            image_meta=image_meta_map.get(bid),
         )
         for bid in bonus_ids
     ]
@@ -4789,12 +5158,6 @@ async def _job_from_project_candidate_step(
         step_status=step.status,
         requested_count=requested_count,
         finished_count=len(image_ids),
-    )
-    profile = (run.metadata_jsonb or {}).get("model_profile") or {}
-    age_segment = (
-        _normalize_age_segment(profile.get("age_segment"))
-        if isinstance(profile, dict)
-        else None
     )
     return ApparelModelLibraryJobOut(
         job_id=f"{run.id}:model_candidates",
@@ -4805,12 +5168,8 @@ async def _job_from_project_candidate_step(
         requested_count=requested_count,
         finished_count=len(image_ids),
         age_segment=age_segment,
-        gender=profile.get("gender") if isinstance(profile, dict) else None,
-        appearance_direction=(
-            profile.get("appearance_direction")
-            if isinstance(profile, dict)
-            else None
-        ),
+        gender=gender,
+        appearance_direction=appearance_direction,
         extra_requirements=None,
         items=items,
         candidates=candidates,
@@ -4831,39 +5190,46 @@ async def _enqueue_model_library_generate_tasks(
 ) -> tuple[list[_PublishBundle], list[str]]:
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
-    for idx in range(1, int(body.count) + 1):
-        prompt = _model_library_generate_prompt(
-            age_segment=body.age_segment,
-            gender=body.gender,
-            appearance_direction=body.appearance_direction,
-            extra_requirements=body.extra_requirements,
-            style_tags=body.style_tags,
-            candidate_index=idx,
-        )
-        bundle, _, gen_ids = await _create_workflow_task(
-            db=db,
-            user=user,
-            conv=conv,
-            intent=Intent.TEXT_TO_IMAGE,
-            text=prompt,
-            attachment_ids=[],
-            idempotency_key=f"mlib:{run.id[:24]}:{idx}",
-            workflow_run_id=run.id,
-            workflow_step_key=MODEL_LIBRARY_GENERATE_STEP_KEY,
-            image_params=_model_library_generate_image_params(),
-            workflow_meta={
-                "workflow_action": MODEL_LIBRARY_GENERATE_WORKER_ACTION,
-                "workflow_candidate_index": idx,
-                "workflow_model_library_age_segment": body.age_segment,
-                "workflow_model_library_gender": body.gender,
-                "workflow_model_library_appearance_direction": (
-                    body.appearance_direction or ""
-                ),
-                "workflow_model_library_auto_tag": bool(body.auto_tag),
-            },
-        )
-        task_ids.extend(gen_ids)
-        bundles.append(bundle)
+    genders = _model_library_generate_genders(body)
+    task_index = 0
+    for gender in genders:
+        for idx in range(1, int(body.count) + 1):
+            task_index += 1
+            prompt = _model_library_generate_prompt(
+                age_segment=body.age_segment,
+                gender=gender,
+                appearance_direction=body.appearance_direction,
+                extra_requirements=body.extra_requirements,
+                style_tags=body.style_tags,
+                candidate_index=idx,
+            )
+            bundle, _, gen_ids = await _create_workflow_task(
+                db=db,
+                user=user,
+                conv=conv,
+                intent=Intent.TEXT_TO_IMAGE,
+                text=prompt,
+                attachment_ids=[],
+                idempotency_key=f"mlib:{run.id[:24]}:{gender}:{idx}",
+                workflow_run_id=run.id,
+                workflow_step_key=MODEL_LIBRARY_GENERATE_STEP_KEY,
+                image_params=_model_library_generate_image_params(),
+                workflow_meta={
+                    "workflow_action": MODEL_LIBRARY_GENERATE_WORKER_ACTION,
+                    "workflow_candidate_index": task_index,
+                    "workflow_model_library_age_segment": body.age_segment,
+                    "workflow_model_library_gender": gender,
+                    "workflow_model_library_appearance_direction": (
+                        body.appearance_direction or ""
+                    ),
+                    "workflow_model_library_style_tags": _clean_style_tags(
+                        body.style_tags
+                    ),
+                    "workflow_model_library_auto_tag": bool(body.auto_tag),
+                },
+            )
+            task_ids.extend(gen_ids)
+            bundles.append(bundle)
     step.task_ids = task_ids
     return bundles, task_ids
 
@@ -4889,9 +5255,11 @@ async def generate_apparel_model_library_job(
             f"count must be one of {sorted(MODEL_LIBRARY_GENERATE_COUNTS)}",
             422,
         )
+    genders = _model_library_generate_genders(body)
     title = _model_library_run_title(
         age_segment=body.age_segment,
         gender=body.gender,
+        genders=genders,
         appearance_direction=body.appearance_direction,
     )
     conv = await _get_or_create_workflow_conversation(
@@ -4916,7 +5284,8 @@ async def generate_apparel_model_library_job(
             "template": "apparel_model_library_generate",
             "model_profile": {
                 "age_segment": body.age_segment,
-                "gender": body.gender,
+                "gender": genders[0],
+                "genders": genders,
                 "appearance_direction": body.appearance_direction,
             },
         },
@@ -4929,11 +5298,13 @@ async def generate_apparel_model_library_job(
         status="running",
         input_json={
             "age_segment": body.age_segment,
-            "gender": body.gender,
+            "gender": genders[0],
+            "genders": genders,
             "appearance_direction": body.appearance_direction,
             "extra_requirements": body.extra_requirements,
             "style_tags": _clean_style_tags(body.style_tags),
             "count": int(body.count),
+            "count_per_gender": int(body.count),
             "auto_tag": bool(body.auto_tag),
         },
         output_json={},
@@ -5050,6 +5421,55 @@ async def list_apparel_model_library_jobs(
     return ApparelModelLibraryJobsOut(items=merged[:limit])
 
 
+@router.delete(
+    "/apparel-model-library/jobs/{workflow_run_id}",
+    dependencies=[Depends(verify_csrf)],
+)
+async def delete_apparel_model_library_job(
+    workflow_run_id: str,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
+    if run.type != WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE:
+        raise _http(
+            "invalid_workflow_type",
+            "only standalone model-library jobs can be cleaned here",
+            400,
+        )
+    run.deleted_at = _now()
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete(
+    "/apparel-model-library/jobs",
+    response_model=ApparelModelLibraryJobsClearOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def clear_apparel_model_library_jobs(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApparelModelLibraryJobsClearOut:
+    rows = list(
+        (
+            await db.execute(
+                select(WorkflowRun).where(
+                    WorkflowRun.user_id == user.id,
+                    WorkflowRun.deleted_at.is_(None),
+                    WorkflowRun.type == WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
+                    WorkflowRun.status.in_(["completed", "failed", "canceled"]),
+                )
+            )
+        ).scalars().all()
+    )
+    now = _now()
+    for run in rows:
+        run.deleted_at = now
+    await db.commit()
+    return ApparelModelLibraryJobsClearOut(deleted=len(rows))
+
+
 @router.post(
     "/apparel-model-library/jobs/{workflow_run_id}/items/{image_id}/save",
     response_model=ApparelModelLibraryItemOut,
@@ -5112,11 +5532,13 @@ def _merge_library_item_fields(
     gender: str | None,
     notes: str | None,
 ) -> dict[str, Any]:
-    """vision 回写策略：style_tags 覆盖（用户在收藏时不一定填），
+    """vision 回写策略：style_tags 只追加去重，不覆盖用户手动选择；
     其他字段仅当 existing 里为空才填（保守不覆盖用户的手动值）。"""
     item = dict(existing)
     if style_tags:
-        item["style_tags"] = style_tags
+        item["style_tags"] = _clean_style_tags(
+            [*(item.get("style_tags") or []), *style_tags]
+        )
     if appearance_direction and not _clean_optional_text(
         item.get("appearance_direction"), max_len=80
     ):
@@ -5433,7 +5855,7 @@ async def _auto_tag_library_item(
     )
     if upstream_signal:
         if style_tags:
-            row.style_tags = style_tags
+            row.style_tags = _clean_style_tags([*(row.style_tags or []), *style_tags])
         if appearance_direction and not row.appearance_direction:
             row.appearance_direction = appearance_direction
         if age_segment and _normalize_age_segment(row.age_segment) == "user_favorites":

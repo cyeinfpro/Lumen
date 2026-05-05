@@ -224,6 +224,69 @@ async def test_legacy_user_library_skips_items_without_valid_image(
     )
 
 
+def test_delete_user_item_removes_legacy_index_entry(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"id": "user:keep", "image_id": "img-keep"},
+                    {"id": "user:delete-me", "image_id": "img-delete"},
+                ],
+                "hidden_preset_ids": [],
+            }
+        ),
+        "utf-8",
+    )
+    monkeypatch.setattr(
+        workflows,
+        "_library_user_index_path",
+        lambda _user_id: index_path,
+    )
+
+    removed = workflows._remove_user_library_item_from_legacy_index(  # noqa: SLF001
+        "user-1",
+        "user:delete-me",
+    )
+
+    assert removed is True
+    updated = json.loads(index_path.read_text("utf-8"))
+    assert [item["id"] for item in updated["items"]] == ["user:keep"]
+
+
+def test_hide_preset_updates_legacy_hidden_index(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "items": [],
+                "hidden_preset_ids": ["preset:existing"],
+            }
+        ),
+        "utf-8",
+    )
+    monkeypatch.setattr(
+        workflows,
+        "_library_user_index_path",
+        lambda _user_id: index_path,
+    )
+
+    hidden = workflows._hide_preset_in_legacy_user_library_index(  # noqa: SLF001
+        "user-1",
+        "preset:new",
+    )
+
+    assert hidden is True
+    updated = json.loads(index_path.read_text("utf-8"))
+    assert updated["hidden_preset_ids"] == ["preset:existing", "preset:new"]
+
+
 class _SingleRowDb:
     """Stub that returns one preloaded row for SELECT queries."""
 
@@ -347,4 +410,24 @@ async def test_auto_tag_preserves_user_filled_appearance(
     )
 
     assert row.appearance_direction == "european"
-    assert row.style_tags == ["editorial"], "style_tags is the override field by design"
+    assert row.style_tags == ["editorial"]
+
+
+@pytest.mark.asyncio
+async def test_auto_tag_appends_existing_style_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _empty_item()
+    row.style_tags = ["温柔亲和"]
+    db = _SingleRowDb(row)
+
+    async def _vision_upstream(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
+        return {"style_tags": ["温柔亲和", "清冷高级"]}
+
+    monkeypatch.setattr(workflows, "_api_call_tagging_upstream", _vision_upstream)
+
+    await workflows._auto_tag_library_item(  # noqa: SLF001
+        db=db, user_id="user-1", item_id="user:test-1"
+    )
+
+    assert row.style_tags == ["温柔亲和", "清冷高级"]

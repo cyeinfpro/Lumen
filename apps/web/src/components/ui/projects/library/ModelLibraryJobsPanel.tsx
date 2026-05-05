@@ -10,10 +10,12 @@ import {
   AlertTriangle,
   Bookmark,
   CheckCircle2,
+  Eraser,
   ExternalLink,
   Library,
   Maximize2,
   RefreshCw,
+  Trash2,
   X,
 } from "lucide-react";
 import Image from "next/image";
@@ -33,9 +35,14 @@ import type {
   ModelLibraryAppearance,
   ModelLibraryItemAgeSegment,
 } from "@/lib/apiClient";
-import { MODEL_LIBRARY_APPEARANCE_LABEL } from "@/lib/apiClient";
+import {
+  MODEL_LIBRARY_APPEARANCE_LABEL,
+  MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
+} from "@/lib/apiClient";
 import {
   useApparelModelLibraryJobsQuery,
+  useClearApparelModelLibraryJobsMutation,
+  useDeleteApparelModelLibraryJobMutation,
   useSaveApparelModelLibraryJobItemMutation,
 } from "@/lib/queries";
 import { useUiStore } from "@/store/useUiStore";
@@ -48,6 +55,7 @@ function jobItemToLightboxItem(item: ApparelModelLibraryJobItem): LightboxItem {
     thumbUrl: item.thumb_url ?? undefined,
     previewUrl: item.display_url ?? item.image_url,
     prompt: item.style_tags.join("、") || undefined,
+    filename: item.download_filename ?? undefined,
   };
 }
 
@@ -78,14 +86,24 @@ const AGE_LABEL: Record<ModelLibraryItemAgeSegment, string> = {
   child: "儿童",
   teen: "青少年",
   young_adult: "青年",
-  adult: "成年",
-  middle_aged: "中老年",
+  adult: "熟龄",
+  middle_aged: "中年",
   senior: "老年",
 };
 
 export function ModelLibraryJobsPanel() {
   const jobs = useApparelModelLibraryJobsQuery();
   const items = useMemo(() => jobs.data?.items ?? [], [jobs.data?.items]);
+  const clearJobs = useClearApparelModelLibraryJobsMutation({
+    onSuccess: (result) =>
+      toast.success("已清理生成任务", {
+        description: `清理 ${result.deleted} 条历史任务`,
+      }),
+    onError: (err) =>
+      toast.error("清理失败", {
+        description: err instanceof Error ? err.message : "请稍后重试",
+      }),
+  });
 
   const { running, finished } = useMemo(() => {
     const r: ApparelModelLibraryJob[] = [];
@@ -112,19 +130,38 @@ export function ModelLibraryJobsPanel() {
               独立生成与项目候选的统一进度跟踪
             </p>
           </div>
-          <button
-            type="button"
-            aria-label="手动刷新"
-            onClick={() => jobs.refetch()}
-            disabled={jobs.isFetching}
-            className={cn(
-              "inline-flex h-10 items-center gap-2 self-start rounded-full border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 md:self-end",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-            )}
-          >
-            <RefreshCw className={cn("h-3.5 w-3.5", jobs.isFetching && "animate-spin")} />
-            <span>Refresh</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 self-start md:self-end">
+            <button
+              type="button"
+              aria-label="清理已完成任务"
+              onClick={() => clearJobs.mutate()}
+              disabled={clearJobs.isPending || finished.length === 0}
+              className={cn(
+                "inline-flex h-10 items-center gap-2 rounded-full border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+              )}
+            >
+              {clearJobs.isPending ? (
+                <Spinner size={12} />
+              ) : (
+                <Eraser className="h-3.5 w-3.5" />
+              )}
+              <span>Clear Done</span>
+            </button>
+            <button
+              type="button"
+              aria-label="手动刷新"
+              onClick={() => jobs.refetch()}
+              disabled={jobs.isFetching}
+              className={cn(
+                "inline-flex h-10 items-center gap-2 rounded-full border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+              )}
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", jobs.isFetching && "animate-spin")} />
+              <span>Refresh</span>
+            </button>
+          </div>
         </div>
         {!jobs.isPending && items.length > 0 ? (
           <div className="mt-6 grid grid-cols-1 gap-px overflow-hidden border border-[var(--border)] sm:grid-cols-3 md:max-w-2xl">
@@ -300,6 +337,14 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
 }
 
 function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const deleteJob = useDeleteApparelModelLibraryJobMutation({
+    onSuccess: () => toast.success("任务已清理"),
+    onError: (err) =>
+      toast.error("清理失败", {
+        description: err instanceof Error ? err.message : "请稍后重试",
+      }),
+  });
   const dotTone =
     job.status === "succeeded"
       ? "bg-[var(--success)]"
@@ -347,7 +392,36 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
             </p>
           ) : null}
         </div>
-        <BriefMeta job={job} />
+        <div className="flex max-w-full flex-wrap items-start justify-end gap-2">
+          <BriefMeta job={job} />
+          {job.origin === "library_generate" ? (
+            <button
+              type="button"
+              onClick={() => {
+                if (!confirmDelete) {
+                  setConfirmDelete(true);
+                  window.setTimeout(() => setConfirmDelete(false), 3000);
+                  return;
+                }
+                deleteJob.mutate(job.workflow_run_id);
+              }}
+              disabled={deleteJob.isPending}
+              className={cn(
+                "inline-flex h-8 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                confirmDelete
+                  ? "text-[var(--danger)]"
+                  : "text-[var(--fg-2)] hover:text-[var(--danger)]",
+              )}
+            >
+              {deleteJob.isPending ? (
+                <Spinner size={12} />
+              ) : (
+                <Trash2 className="h-3 w-3" />
+              )}
+              {confirmDelete ? "Confirm" : "Del"}
+            </button>
+          ) : null}
+        </div>
       </header>
       {job.requested_count > 0 && job.status !== "succeeded" ? (
         <ProgressBar
@@ -609,7 +683,8 @@ function SaveJobItemDialog({
   onClose: () => void;
 }) {
   const defaultAge: ModelLibraryItemAgeSegment = job.age_segment ?? "young_adult";
-  const defaultGender = job.gender || "female";
+  const rawDefaultGender = item.gender || job.gender || "female";
+  const defaultGender = rawDefaultGender === "male" ? "male" : "female";
   const [title, setTitle] = useState(
     () =>
       `${ORIGIN_LABEL[job.origin]} · ${AGE_LABEL[defaultAge] ?? defaultAge}`,
@@ -747,27 +822,22 @@ function SaveJobItemDialog({
               <Chip active={appearance === ""} onClick={() => setAppearance("")}>
                 不指定
               </Chip>
-              {(
-                Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as [
-                  Exclude<ModelLibraryAppearance, "all">,
-                  string,
-                ][]
-              ).map(([value, label]) => (
+              {MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS.map((value) => (
                 <Chip
                   key={value}
                   active={appearance === value}
                   onClick={() => setAppearance(value)}
                 >
-                  {label}
+                  {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
                 </Chip>
               ))}
             </div>
           </UnderlineLabeled>
-          <UnderlineLabeled label="风格标签">
+          <UnderlineLabeled label="气质方向">
             <input
               value={styleTags}
               onChange={(event) => setStyleTags(event.target.value)}
-              placeholder="高级简洁、棚拍"
+              placeholder="知性通勤、清冷高级"
               className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
             />
           </UnderlineLabeled>

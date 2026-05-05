@@ -1229,6 +1229,12 @@ function buildMessageListState(
           preview_url: existingImage.preview_url ?? i.preview_url ?? undefined,
           thumb_url: existingImage.thumb_url ?? i.thumb_url ?? undefined,
           mime: existingImage.mime ?? i.mime ?? undefined,
+          filename:
+            existingImage.filename ??
+            (typeof meta.metadata_jsonb?.suggested_filename === "string"
+              ? meta.metadata_jsonb.suggested_filename
+              : undefined),
+          metadata_jsonb: existingImage.metadata_jsonb ?? meta.metadata_jsonb ?? null,
         };
       } else {
         newImagesById[i.id] = {
@@ -1244,6 +1250,11 @@ function buildMessageListState(
           from_generation_id: fromGenId,
           size_requested: sizeActual,
           size_actual: sizeActual,
+          filename:
+            typeof meta.metadata_jsonb?.suggested_filename === "string"
+              ? meta.metadata_jsonb.suggested_filename
+              : undefined,
+          metadata_jsonb: meta.metadata_jsonb ?? null,
         };
       }
       setBounded(_imageConvIds, i.id, convId);
@@ -2676,6 +2687,8 @@ function createChatStore() {
                   thumb_url?: string;
                   mime?: string;
                   parent_image_id?: string | null;
+                  filename?: string;
+                  metadata_jsonb?: Record<string, unknown> | null;
                 }>
               | undefined;
             const first = Array.isArray(images) ? images[0] : undefined;
@@ -2715,6 +2728,8 @@ function createChatStore() {
               from_generation_id: id,
               size_requested: "auto",
               size_actual: first.actual_size ?? "unknown",
+              filename: first.filename,
+              metadata_jsonb: first.metadata_jsonb ?? null,
             };
           }
           set((s) => {
@@ -3006,6 +3021,8 @@ function createChatStore() {
                   preview_url?: string;
                   thumb_url?: string;
                   mime?: string;
+                  filename?: string;
+                  metadata_jsonb?: Record<string, unknown> | null;
                 }>
               | undefined;
             const first = Array.isArray(images) ? images[0] : undefined;
@@ -3040,6 +3057,8 @@ function createChatStore() {
               from_generation_id: genId,
               size_requested: first.actual_size ?? "auto",
               size_actual: first.actual_size ?? "unknown",
+              filename: first.filename,
+              metadata_jsonb: first.metadata_jsonb ?? null,
             };
             set((s) => {
               const existingGen = s.generations[genId];

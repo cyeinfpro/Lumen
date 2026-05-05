@@ -159,7 +159,13 @@ function extensionFromSrc(src: string): string | null {
   }
 }
 
-function downloadFilename(id: string, src: string, mime?: string): string {
+function downloadFilename(
+  id: string,
+  src: string,
+  mime?: string,
+  preferred?: string,
+): string {
+  if (preferred?.trim()) return preferred.trim();
   const ext = extensionFromMime(mime) ?? extensionFromSrc(src) ?? "png";
   return `lumen-${id}.${ext}`;
 }
@@ -825,6 +831,7 @@ export function MobileLightbox() {
           currentItem.id,
           currentItem.url,
           blob.type || fallbackMime,
+          currentItem.filename ?? currentItem.file_name,
         );
 
         if (isIosLike() && typeof File !== "undefined") {
@@ -862,6 +869,7 @@ export function MobileLightbox() {
             currentItem.id,
             currentItem.url,
             currentItem.mime ?? currentItem.mime_type ?? currentItem.content_type,
+            currentItem.filename ?? currentItem.file_name,
           ),
         );
         setDownloadStatus("error");

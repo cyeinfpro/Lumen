@@ -19,6 +19,7 @@ import {
 import {
   addAllowedEmail,
   autoTagApparelModelLibraryItem,
+  clearApparelModelLibraryJobs,
   createConversation,
   createInviteLink,
   createMultiShare,
@@ -26,6 +27,8 @@ import {
   createSystemPrompt,
   createApparelModelLibraryItem,
   deleteConversation,
+  deleteApparelModelLibraryItems,
+  deleteApparelModelLibraryJob,
   deleteApparelModelLibraryItem,
   deleteMyAccount,
   deleteSystemPrompt,
@@ -88,6 +91,7 @@ import {
   syncApparelModelLibraryPresets,
   uploadImage,
   type ApparelModelLibraryAutoTagOut,
+  type ApparelModelLibraryBatchDeleteOut,
   type ApparelModelLibraryGenerateIn,
   type ApparelModelLibraryItem,
   type ApparelModelLibraryItemCreateIn,
@@ -1319,6 +1323,23 @@ export function useDeleteApparelModelLibraryItemMutation(
   });
 }
 
+export function useDeleteApparelModelLibraryItemsMutation(
+  options?: Omit<
+    UseMutationOptions<ApparelModelLibraryBatchDeleteOut, Error, string[]>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<ApparelModelLibraryBatchDeleteOut, Error, string[]>({
+    mutationFn: deleteApparelModelLibraryItems,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
 export function useSelectApparelModelLibraryItemMutation(
   workflowId: string,
   options?: Omit<UseMutationOptions<WorkflowRun, Error, string>, "mutationFn">,
@@ -1419,6 +1440,37 @@ export function useSaveApparelModelLibraryJobItemMutation(
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
       qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useDeleteApparelModelLibraryJobMutation(
+  options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: deleteApparelModelLibraryJob,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useClearApparelModelLibraryJobsMutation(
+  options?: Omit<
+    UseMutationOptions<{ ok: boolean; deleted: number }, Error, void>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean; deleted: number }, Error, void>({
+    mutationFn: () => clearApparelModelLibraryJobs(),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.apparelModelLibraryJobs() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });

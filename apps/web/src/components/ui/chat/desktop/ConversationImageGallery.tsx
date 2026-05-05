@@ -165,12 +165,14 @@ function collectConversationImages(
           aspect_ratio: gen.aspect_ratio,
           size_actual: label ?? undefined,
           mime: image.mime,
+          filename: image.filename,
           type: "generated-image",
           created_at: isoFromMs(gen.finished_at ?? gen.started_at ?? msg.created_at),
           metadata: {
             source: "generated",
             message_id: msg.id,
             generation_id: gen.id,
+            ...(image.metadata_jsonb ?? {}),
           },
         },
       });
