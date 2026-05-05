@@ -644,90 +644,92 @@ function SaveJobItemDialog({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.98 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className="grid max-h-[92dvh] w-full gap-3 overflow-y-auto rounded-t-2xl border border-[var(--border)] bg-[var(--bg-0)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-[var(--shadow-2)] md:max-w-md md:rounded-xl md:pb-4"
+        className="flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)] md:max-w-md md:rounded-xl"
       >
-        <header>
+        <header className="shrink-0 px-4 pt-4 pb-3">
           <h3 className="font-display text-lg italic text-[var(--fg-0)]">收藏入库</h3>
           <p className="mt-1 text-xs text-[var(--fg-2)]">
             {`填好后会作为"生成入库"模特保存到我的模特库。`}
           </p>
         </header>
-        <Input
-          label="名称"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="高级简洁青年女模特"
-        />
-        <div className="grid gap-2 md:grid-cols-2">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-[var(--fg-1)]">年龄段</span>
-            <select
-              value={age}
-              onChange={(event) => setAge(event.target.value as ModelLibraryItemAgeSegment)}
-              className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
-            >
-              {(Object.keys(AGE_LABEL) as ModelLibraryItemAgeSegment[]).map((segment) => (
-                <option key={segment} value={segment}>
-                  {AGE_LABEL[segment]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-[var(--fg-1)]">性别</span>
-            <select
-              value={gender}
-              onChange={(event) => setGender(event.target.value)}
-              className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
-            >
-              <option value="female">女</option>
-              <option value="male">男</option>
-            </select>
-          </label>
-        </div>
-        {/* 外貌方向：chip 选择，10 + 不指定 */}
-        <div className="flex flex-col gap-1.5">
-          <span className="text-xs font-medium text-[var(--fg-1)]">外貌方向</span>
-          <div className="flex flex-wrap gap-1.5">
-            <Chip active={appearance === ""} onClick={() => setAppearance("")}>
-              不指定
-            </Chip>
-            {(Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as [
-              Exclude<ModelLibraryAppearance, "all">,
-              string,
-            ][]).map(([value, label]) => (
-              <Chip
-                key={value}
-                active={appearance === value}
-                onClick={() => setAppearance(value)}
-              >
-                {label}
-              </Chip>
-            ))}
-          </div>
-        </div>
-        <Input
-          label="风格标签"
-          value={styleTags}
-          onChange={(event) => setStyleTags(event.target.value)}
-          placeholder="高级简洁、棚拍"
-        />
-        <label className="flex items-center gap-2 text-xs text-[var(--fg-1)]">
-          <input
-            type="checkbox"
-            checked={autoTag}
-            onChange={(event) => setAutoTag(event.target.checked)}
+        <div className="grid min-h-0 flex-1 gap-3 overflow-y-auto px-4 pb-3">
+          <Input
+            label="名称"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="高级简洁青年女模特"
           />
-          入库后再跑一次自动识别
-        </label>
-        <div className="flex justify-end gap-2 pt-1">
+          <div className="grid gap-2 md:grid-cols-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-[var(--fg-1)]">年龄段</span>
+              <select
+                value={age}
+                onChange={(event) => setAge(event.target.value as ModelLibraryItemAgeSegment)}
+                className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
+              >
+                {(Object.keys(AGE_LABEL) as ModelLibraryItemAgeSegment[]).map((segment) => (
+                  <option key={segment} value={segment}>
+                    {AGE_LABEL[segment]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-[var(--fg-1)]">性别</span>
+              <select
+                value={gender}
+                onChange={(event) => setGender(event.target.value)}
+                className="h-11 rounded-md border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm text-[var(--fg-0)] outline-none md:h-9"
+              >
+                <option value="female">女</option>
+                <option value="male">男</option>
+              </select>
+            </label>
+          </div>
+          {/* 外貌方向：chip 选择，10 + 不指定 */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-[var(--fg-1)]">外貌方向</span>
+            <div className="flex flex-wrap gap-1.5">
+              <Chip active={appearance === ""} onClick={() => setAppearance("")}>
+                不指定
+              </Chip>
+              {(Object.entries(MODEL_LIBRARY_APPEARANCE_LABEL) as [
+                Exclude<ModelLibraryAppearance, "all">,
+                string,
+              ][]).map(([value, label]) => (
+                <Chip
+                  key={value}
+                  active={appearance === value}
+                  onClick={() => setAppearance(value)}
+                >
+                  {label}
+                </Chip>
+              ))}
+            </div>
+          </div>
+          <Input
+            label="风格标签"
+            value={styleTags}
+            onChange={(event) => setStyleTags(event.target.value)}
+            placeholder="高级简洁、棚拍"
+          />
+          <label className="flex items-center gap-2 text-xs text-[var(--fg-1)]">
+            <input
+              type="checkbox"
+              checked={autoTag}
+              onChange={(event) => setAutoTag(event.target.checked)}
+            />
+            入库后再跑一次自动识别
+          </label>
+        </div>
+        <footer className="flex shrink-0 justify-end gap-2 border-t border-[var(--border)] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] md:pb-3">
           <Button variant="ghost" onClick={onClose}>
             取消
           </Button>
           <Button variant="primary" loading={save.isPending} onClick={submit}>
             保存
           </Button>
-        </div>
+        </footer>
       </motion.div>
     </div>
   );
