@@ -74,6 +74,7 @@ export const TEMPLATE_VALUE_LABEL: Record<string, string> = {
   urban_commute: "质感街拍",
   lifestyle: "精品空间",
   daily_snapshot: "日常随拍",
+  natural_phone_snapshot: "自然手机摄影",
   social_seed: "自然种草",
 };
 
@@ -114,6 +115,7 @@ export const TEMPLATE_LABELS = [
   ["premium_studio", "高级棚拍"],
   ["urban_commute", "质感街拍"],
   ["lifestyle", "精品空间"],
+  ["natural_phone_snapshot", "自然手机摄影"],
   ["daily_snapshot", "日常随拍"],
   ["social_seed", "自然种草"],
   ["white_ecommerce", "白底主图"],
@@ -127,15 +129,25 @@ export const ASPECT_RATIO_LABELS = [
   ["16:9", "16:9 横图"],
 ] as const;
 
+export const OUTPUT_COUNT_LABELS = [
+  [1, "1 张"],
+  [2, "2 张"],
+  [4, "4 张"],
+  [8, "8 张"],
+  [16, "16 张"],
+] as const;
+
 export type CreateTemplate =
   | "white_ecommerce"
   | "premium_studio"
   | "urban_commute"
   | "lifestyle"
   | "daily_snapshot"
+  | "natural_phone_snapshot"
   | "social_seed";
 
 export type CreateAspectRatio = (typeof ASPECT_RATIO_LABELS)[number][0];
+export type CreateOutputCount = (typeof OUTPUT_COUNT_LABELS)[number][0];
 
 export const MAX_PRODUCT_IMAGES = 3;
 export const MAX_PRODUCT_IMAGE_BYTES = 12 * 1024 * 1024;

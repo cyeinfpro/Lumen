@@ -667,6 +667,7 @@ class ShowcaseImagesCreateIn(BaseModel):
         "urban_commute",
         "lifestyle",
         "daily_snapshot",
+        "natural_phone_snapshot",
         "social_seed",
     ] = "premium_studio"
     shot_plan: list[
@@ -688,7 +689,7 @@ class ShowcaseImagesCreateIn(BaseModel):
     )
     aspect_ratio: AspectRatioLiteral = "4:5"
     final_quality: Literal["standard", "high", "4k"] = "high"
-    output_count: int = Field(default=4, ge=1, le=4)
+    output_count: Literal[1, 2, 4, 8, 16] = 4
 
 
 class ImageRevisionIn(BaseModel):
