@@ -68,6 +68,7 @@ type SettingGroupId =
   | "image"
   | "upstream"
   | "providers"
+  | "library"
   | "update"
   | "context_auto"
   | "context_caption"
@@ -137,6 +138,8 @@ type UpdateProxyOption = {
 
 const UPDATE_USE_PROXY_POOL_KEY = "update.use_proxy_pool";
 const UPDATE_PROXY_NAME_KEY = "update.proxy_name";
+const MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY = "model_library.sync_use_proxy_pool";
+const MODEL_LIBRARY_SYNC_PROXY_NAME_KEY = "model_library.sync_proxy_name";
 const GENERATION_FAST_DEFAULT_KEY = "generation.fast_default";
 const IMAGE_ENGINE_KEY = "image.engine";
 const IMAGE_CHANNEL_KEY = "image.channel";
@@ -418,6 +421,27 @@ const SETTING_META: Record<string, SettingMeta> = {
     recommended: "优先选择已测试成功、延迟稳定的代理。",
     keywords: ["update", "proxy", "name", "更新代理"],
   },
+  [MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY]: {
+    group: "library",
+    title: "模特库同步使用代理池",
+    summary: "同步模特库预设时，让 GitHub 文件列表和图片下载走代理池。",
+    detail: "关闭时直连 GitHub；开启后使用下面选中的代理。这个设置只影响模特库里的同步按钮。",
+    kind: "toggle",
+    icon: ImageIcon,
+    defaultValue: "0",
+    recommended: "国内服务器同步 GitHub 预设失败时开启。",
+    keywords: ["model", "library", "sync", "proxy", "模特库", "同步", "代理池"],
+  },
+  [MODEL_LIBRARY_SYNC_PROXY_NAME_KEY]: {
+    group: "library",
+    title: "模特库同步代理",
+    summary: "选择模特库同步时使用代理池里的哪一个代理。",
+    detail: "留空时后端会使用代理池中第一个启用代理。代理列表在“代理池”标签页维护。",
+    kind: "text",
+    icon: ImageIcon,
+    recommended: "优先选择能稳定访问 GitHub 的代理。",
+    keywords: ["model", "library", "sync", "proxy", "name", "模特库同步代理"],
+  },
   "context.compression_enabled": {
     group: "context_auto",
     title: "自动压缩长对话",
@@ -618,6 +642,12 @@ const GROUPS: {
     label: "供应商探活",
     description: "自动检测账号可用性",
     icon: Activity,
+  },
+  {
+    id: "library",
+    label: "模特库",
+    description: "预设同步和拉取代理",
+    icon: ImageIcon,
   },
   {
     id: "update",
@@ -1590,7 +1620,10 @@ function SettingControl({
     );
   }
 
-  if (item.key === UPDATE_PROXY_NAME_KEY) {
+  if (
+    item.key === UPDATE_PROXY_NAME_KEY ||
+    item.key === MODEL_LIBRARY_SYNC_PROXY_NAME_KEY
+  ) {
     return (
       <UpdateProxySelectControl
         item={item}
@@ -1862,6 +1895,10 @@ function UpdateProxySelectControl({
     op?.kind === "clear" ? "" : op?.kind === "set" ? op.value : item.value ?? "";
   const enabledProxies = proxies.filter((proxy) => proxy.enabled);
   const selectedExists = !value || enabledProxies.some((proxy) => proxy.name === value);
+  const proxyFeatureLabel =
+    item.key === MODEL_LIBRARY_SYNC_PROXY_NAME_KEY
+      ? "模特库同步使用代理池"
+      : "更新时使用代理池";
 
   return (
     <div className="space-y-2">
@@ -1900,7 +1937,7 @@ function UpdateProxySelectControl({
       </div>
       {enabledProxies.length === 0 ? (
         <p className="text-xs text-amber-200">
-          代理池没有启用代理；开启“更新时使用代理池”后，一键更新会被后端拒绝。
+          代理池没有启用代理；开启“{proxyFeatureLabel}”后，请求会被后端拒绝。
         </p>
       ) : (
         <p className="text-xs text-neutral-500">
@@ -3031,6 +3068,7 @@ function countByGroup(items: SystemSettingItem[]): Record<SettingGroupId, number
     image: 0,
     upstream: 0,
     providers: 0,
+    library: 0,
     update: 0,
     context_auto: 0,
     context_caption: 0,
@@ -3067,21 +3105,16 @@ function getSettingMeta(key: string, fallbackDescription?: string): SettingMeta 
   const meta = SETTING_META[key];
   if (meta) return meta;
   const prefix = key.includes(".") ? key.split(".")[0] : key;
+  let group: SettingGroupId = "advanced";
+  if (prefix === "site") group = "site";
+  else if (prefix === "image") group = "image";
+  else if (prefix === "upstream") group = "upstream";
+  else if (prefix === "providers") group = "providers";
+  else if (prefix === "model_library") group = "library";
+  else if (prefix === "update") group = "update";
+  else if (prefix === "context") group = "context_auto";
   return {
-    group:
-      prefix === "site"
-        ? "site"
-        : prefix === "image"
-        ? "image"
-        : prefix === "upstream"
-          ? "upstream"
-          : prefix === "providers"
-            ? "providers"
-            : prefix === "update"
-              ? "update"
-            : prefix === "context"
-              ? "context_auto"
-              : "advanced",
+    group,
     title: humanizeKey(key),
     summary: fallbackDescription || "未归类设置。修改前先确认影响范围。",
     kind: "text",

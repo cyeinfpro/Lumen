@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -281,6 +282,49 @@ def test_default_github_contents_url_points_to_user_repo_folder() -> None:
     assert workflows._github_contents_url().startswith(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/assets/apparel-model-presets"
     )
+
+
+def test_model_library_http_client_kwargs_includes_proxy_when_configured() -> None:
+    kwargs = workflows._model_library_http_client_kwargs("socks5h://127.0.0.1:1080")  # noqa: SLF001
+
+    assert kwargs["proxy"] == "socks5h://127.0.0.1:1080"
+    assert "timeout" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_resolve_model_library_sync_proxy_uses_enabled_proxy() -> None:
+    provider_config = {
+        "proxies": [
+            {
+                "name": "s5-us",
+                "type": "socks5",
+                "host": "127.0.0.1",
+                "port": 1080,
+                "enabled": True,
+            }
+        ],
+        "providers": [
+            {
+                "name": "default",
+                "base_url": "https://api.example.com",
+                "api_key": "sk-test",
+            }
+        ],
+    }
+    db = _Db(
+        [],
+        responses=[
+            ["1"],
+            [json.dumps(provider_config)],
+            [""],
+        ],
+    )
+
+    proxy, proxy_url = await workflows._resolve_model_library_sync_proxy(db)  # noqa: SLF001
+
+    assert proxy is not None
+    assert proxy.name == "s5-us"
+    assert proxy_url == "socks5h://127.0.0.1:1080"
 
 
 @pytest.mark.asyncio
