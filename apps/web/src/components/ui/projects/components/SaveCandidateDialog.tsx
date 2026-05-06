@@ -91,7 +91,7 @@ export function SaveCandidateDialog({
 
   const form = (
     <div className="-mx-1">
-      <Field eyebrow="Name" label="名称">
+      <Field eyebrow="名称" label="名称">
         <input
           value={title}
           onChange={(event) => setTitle(event.target.value)}
@@ -100,7 +100,7 @@ export function SaveCandidateDialog({
         />
       </Field>
 
-      <Field eyebrow="Segment" label="年龄段">
+      <Field eyebrow="年龄段" label="年龄段">
         <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
           <select
             value={ageSegment}
@@ -120,7 +120,7 @@ export function SaveCandidateDialog({
         </div>
       </Field>
 
-      <Field eyebrow="Gender" label="性别">
+      <Field eyebrow="性别" label="性别">
         <div className="flex flex-wrap gap-x-5 gap-y-1.5">
           {GENDER_OPTIONS.map(([value, label]) => (
             <Chip
@@ -134,7 +134,7 @@ export function SaveCandidateDialog({
         </div>
       </Field>
 
-      <Field eyebrow="Appearance" label="外貌方向">
+      <Field eyebrow="外貌方向" label="外貌方向">
         <div className="flex flex-wrap gap-x-5 gap-y-1.5">
           <Chip active={appearance === ""} onClick={() => setAppearance("")}>
             不指定
@@ -151,7 +151,7 @@ export function SaveCandidateDialog({
         </div>
       </Field>
 
-      <Field eyebrow="Tags" label="气质方向">
+      <Field eyebrow="气质方向" label="气质方向">
         <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
           <Chip active={!tagsEnabled} onClick={() => setTagsEnabled(false)}>
             不填
@@ -179,7 +179,7 @@ export function SaveCandidateDialog({
       title={
         <span className="block">
           <span className="block font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
-            Bookmark · Model Library
+            收藏 · 模特库
           </span>
           <span className="mt-1 block text-[20px] font-semibold leading-[1.2] tracking-tight text-[var(--fg-0)]">
             收藏到模特库

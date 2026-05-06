@@ -1,7 +1,7 @@
-"""接收 prompt → 调 API → 注册 tracker。
+"""接收提示词 → 调 API → 注册 tracker。
 
 两条入口：
-- GenFlow.awaiting_prompt：用户发完 prompt 文本后落点。
+- GenFlow.awaiting_prompt：用户发完提示词文本后落点。
   - params.enhance=False → 直接 submit
   - params.enhance=True  → 调 enhance，进入 confirming_enhanced，让用户在「优化版/原文」
     之间选；选择后由下面的 callback_query handler 落点 submit。
@@ -33,7 +33,7 @@ async def _submit_generation(
     api: LumenApi,
     answer,  # callable(text: str) -> Awaitable[Message]
 ) -> None:
-    """把 (prompt, params) 提交到 API 并注册 tracker。
+    """把 (提示词, params) 提交到 API 并注册 tracker。
 
     count==1：一条状态消息，listener 走单图编辑流。
     count>1：一条 placeholder 罗列所有 #短ID，所有 gens 共享同一 status_message_id +
@@ -94,10 +94,10 @@ async def _submit_generation(
 async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
     prompt = (message.text or "").strip()
     if not prompt:
-        await message.answer("prompt 不能为空，请重新发送。")
+        await message.answer("提示词不能为空，请重新发送。")
         return
     if len(prompt) > 5000:
-        await message.answer("prompt 太长（>5000 字），请精简后重发。")
+        await message.answer("提示词太长（>5000 字），请精简后重发。")
         return
 
     data = await state.get_data()
@@ -110,7 +110,7 @@ async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
         except ApiError as exc:
             logger.warning("enhance failed user=%s err=%s", message.chat.id, exc)
             await notice.delete()
-            await message.answer(f"⚠️ 优化失败（{exc.message}），已用原 prompt 继续。")
+            await message.answer(f"⚠️ 优化失败（{exc.message}），已用原提示词继续。")
             await _submit_generation(message.chat.id, prompt, params, api, message.answer)
             await state.clear()
             return
@@ -161,7 +161,7 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
         if enhanced:
             await msg.answer(enhanced)
         await msg.answer(
-            "✏️ 把改好的 prompt 发回来。\n（直接发送一条新消息即可；/cancel 放弃）"
+            "✏️ 把改好的提示词发回来。\n（直接发送一条新消息即可；/cancel 放弃）"
         )
         await cb.answer()
         return
@@ -193,10 +193,10 @@ async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -
         await message.answer("已放弃。/new 重新开始。")
         return
     if not text:
-        await message.answer("prompt 不能为空，重新发送一条；/cancel 放弃。")
+        await message.answer("提示词不能为空，重新发送一条；/cancel 放弃。")
         return
     if len(text) > 5000:
-        await message.answer("prompt 太长（>5000 字），请精简后重发。")
+        await message.answer("提示词太长（>5000 字），请精简后重发。")
         return
     data = await state.get_data()
     params = dict(data.get("params") or DEFAULT_PARAMS)

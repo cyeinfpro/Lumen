@@ -188,7 +188,7 @@ function DialogHeader({
     <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border)] px-5 py-4 md:px-6 md:py-5">
       <div className="min-w-0">
         <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
-          Model Library
+          模特库
         </p>
         <h2 className="mt-1.5 text-[22px] font-semibold leading-[1.18] tracking-tight text-[var(--fg-0)] md:text-[24px]">
           模特库
@@ -230,20 +230,21 @@ function DialogFooter({
   generatingCandidates: boolean;
 }) {
   return (
-    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] px-5 py-4 md:flex-row md:items-center md:justify-between md:px-6">
+    <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6 md:py-4">
       <p className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
         Tip · 卡片下方和大图内都可以设为当前模特
       </p>
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 md:flex md:flex-row">
         <Button
           variant="outline"
           loading={generatingCandidates}
           onClick={onGenerateCandidates}
           leftIcon={<WandSparkles className="h-4 w-4" />}
+          className="w-full md:w-auto"
         >
           生成模特候选
         </Button>
-        <Button variant="ghost" onClick={onClose}>
+        <Button variant="ghost" onClick={onClose} className="w-full md:w-auto">
           关闭
         </Button>
       </div>

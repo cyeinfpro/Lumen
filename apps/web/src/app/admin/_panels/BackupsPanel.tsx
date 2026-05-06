@@ -125,11 +125,11 @@ export function BackupsPanel() {
                 备份与恢复
               </p>
               <p className="text-xs text-neutral-500 mt-1 leading-relaxed break-words">
-                系统每 4 小时自动备份 Postgres + Redis 到
+                系统每 4 小时自动备份数据库和缓存到
                 <code className="mx-1 px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[11px] break-all">
                   /opt/lumendata/backup
                 </code>
-                ，最多保留 40 份。恢复会成对还原 PG 和 Redis。
+                ，最多保留 40 份。恢复会成对还原数据库和缓存。
               </p>
             </div>
           </div>
@@ -206,10 +206,10 @@ export function BackupsPanel() {
                     <th className="text-left py-3 px-4 font-medium">相对</th>
                     <th className="text-right py-3 px-4 font-medium">
                       <span className="inline-flex items-center gap-1">
-                        <Database className="w-3 h-3" /> PG
+                        <Database className="w-3 h-3" /> 数据库
                       </span>
                     </th>
-                    <th className="text-right py-3 px-4 font-medium">Redis</th>
+                    <th className="text-right py-3 px-4 font-medium">缓存</th>
                     <th className="text-right py-3 px-4 font-medium">操作</th>
                   </tr>
                 </thead>
@@ -282,7 +282,7 @@ export function BackupsPanel() {
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div className="rounded-md bg-white/[0.03] border border-white/5 px-2 py-1.5">
                       <div className="text-[11px] uppercase tracking-wider text-neutral-500 inline-flex items-center gap-1">
-                        <Database className="w-2.5 h-2.5" /> PG
+                        <Database className="w-2.5 h-2.5" /> 数据库
                       </div>
                       <div className="text-sm text-neutral-200 font-mono tabular-nums break-all">
                         {formatBytes(b.pg_size)}
@@ -290,7 +290,7 @@ export function BackupsPanel() {
                     </div>
                     <div className="rounded-md bg-white/[0.03] border border-white/5 px-2 py-1.5">
                       <div className="text-[11px] uppercase tracking-wider text-neutral-500">
-                        Redis
+                        缓存
                       </div>
                       <div className="text-sm text-neutral-200 font-mono tabular-nums break-all">
                         {formatBytes(b.redis_size)}
@@ -362,7 +362,7 @@ function RestoreModal({
               恢复备份？
             </h3>
             <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
-              将把 Postgres 与 Redis 还原到{" "}
+              将把数据库与缓存还原到{" "}
               <span className="text-[var(--fg-0)] font-mono">
                 {formatTs(target.timestamp, target.created_at)}
               </span>{" "}

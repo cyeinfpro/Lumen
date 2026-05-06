@@ -263,7 +263,7 @@ export function ProxiesPanel() {
           <div className="min-w-0">
             <h2 className="text-sm font-medium text-neutral-100">代理池</h2>
             <p className="text-xs text-neutral-500 mt-0.5">
-              Provider 和 Telegram 机器人共用这套代理。可以在这里增加、修改或删除代理；
+              供应商和 Telegram 机器人共用这套代理。可以在这里增加、修改或删除代理；
               连续失败后会暂停一段时间。
             </p>
           </div>
@@ -533,7 +533,7 @@ function ProxyEditRow({
             label="代理名"
             value={draft.name}
             onChange={(v) => onChange({ name: v })}
-            placeholder="比如 RFC"
+            placeholder="比如：备用代理"
             mono
           />
           <FieldSelect
@@ -546,14 +546,14 @@ function ProxyEditRow({
             ]}
           />
           <FieldInline
-            label="Host"
+            label="主机"
             value={draft.host}
             onChange={(v) => onChange({ host: v })}
             placeholder="ip 或域名"
             mono
           />
           <FieldInline
-            label="Port"
+            label="端口"
             value={String(draft.port)}
             onChange={(v) => onChange({ port: Number(v.replace(/[^\d]/g, "")) || 0 })}
             placeholder="1080"

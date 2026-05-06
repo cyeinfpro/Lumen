@@ -52,11 +52,11 @@ export async function generateMetadata({
   const images = result.data ? normalizeMetadataImages(result.data) : [];
   const first = images[0];
   const title = result.data
-    ? `Lumen 图片分享 · ${images.length} 张`
-    : "Lumen 分享";
+    ? `图片分享 · ${images.length} 张`
+    : "图片分享";
   const description = first
-    ? `查看一张 ${first.width} x ${first.height} 的 Lumen 图片。`
-    : "查看 Lumen 分享图片。";
+    ? `查看一张 ${first.width} x ${first.height} 的图片。`
+    : "查看分享图片。";
   const imageUrl = first ? absoluteUrl(first.url, base) : undefined;
 
   return {
@@ -76,7 +76,7 @@ export async function generateMetadata({
               url: imageUrl,
               width: first?.width,
               height: first?.height,
-              alt: "Lumen 分享图片",
+              alt: "分享图片",
             },
           ]
         : undefined,
@@ -223,7 +223,7 @@ function ShareShell({ children }: { children: React.ReactNode }) {
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-white/5 hover:bg-white/10 border border-[var(--border)] text-xs text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">打开 Lumen</span>
+            <span className="hidden sm:inline">打开主页</span>
             <span className="sm:hidden">打开</span>
           </Link>
         </div>
@@ -239,7 +239,7 @@ function ShareShell({ children }: { children: React.ReactNode }) {
             href="/"
             className="text-[var(--fg-1)] hover:text-[var(--color-lumen-amber)] transition-colors"
           >
-            Lumen Studio
+            主页
           </Link>
           {" "}分享
         </p>
@@ -293,7 +293,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
           href="/"
           className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-lg bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium transition-all"
         >
-          <Sparkles className="w-3.5 h-3.5" /> 打开 Lumen
+          <Sparkles className="w-3.5 h-3.5" /> 打开主页
         </Link>
       </div>
     </div>

@@ -57,7 +57,7 @@ export function StreamSearchBar({
               value={value}
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={handleKey}
-              placeholder="搜索 prompt…"
+              placeholder="搜索提示词…"
               aria-label="搜索已加载作品"
               className={[
                 "flex-1 bg-transparent border-none outline-none",

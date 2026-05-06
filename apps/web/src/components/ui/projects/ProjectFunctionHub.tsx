@@ -42,11 +42,11 @@ export function ProjectFunctionHub() {
     <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
-      <ProjectMobileTopBar title="项目" subtitle="PROJECT HUB" />
+      <ProjectMobileTopBar title="项目" subtitle="项目中心" />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-8">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-6 md:gap-8">
+      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-3 md:mb-0 md:px-10 md:py-8">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-5 md:gap-8">
           <header className="hidden md:block">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               Project Hub
@@ -59,7 +59,7 @@ export function ProjectFunctionHub() {
             </p>
           </header>
 
-          <section className="grid gap-x-5 gap-y-7 sm:grid-cols-2 md:grid-cols-3 md:gap-x-6 md:gap-y-8">
+          <section className="grid gap-x-5 gap-y-6 sm:grid-cols-2 md:grid-cols-3 md:gap-x-6 md:gap-y-8">
             {FEATURES.map((feature, index) => (
               <FeatureCard key={feature.title} feature={feature} index={index} />
             ))}
@@ -85,7 +85,7 @@ function FeatureCard({
     <>
       <div
         className={cn(
-          "relative h-28 overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)] sm:h-36 md:h-44",
+          "relative h-24 overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)] sm:h-36 md:h-44",
           feature.available
             ? "group-hover:border-[var(--border-amber)]/60"
             : "opacity-60",

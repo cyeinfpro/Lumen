@@ -52,7 +52,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
-      eyebrow="N°08 — Delivery"
+      eyebrow="N°08 — 交付"
       title="交付"
       subtitle="最终图已进入交付状态，可逐张或一键打包下载，也可继续返修。"
       actions={
@@ -61,6 +61,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
             variant="primary"
             onClick={downloadAll}
             leftIcon={<Download className="h-4 w-4" />}
+            className="w-full sm:w-auto"
           >
             下载全部
           </Button>
@@ -74,6 +75,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
           loading={reopen.isPending}
           onClick={() => setConfirmReopen(true)}
           leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+          className="w-full sm:w-auto"
         >
           重选模特
         </Button>
@@ -85,7 +87,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
             Final Showcases
           </p>
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
-            {String(images.length).padStart(2, "0")} shots
+            {String(images.length).padStart(2, "0")} 张
           </p>
         </div>
         {images.length === 0 ? (

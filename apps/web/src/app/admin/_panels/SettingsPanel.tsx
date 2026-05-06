@@ -153,18 +153,18 @@ const HIDDEN_KEYS = new Set<string>([
 const IMAGE_ENGINE_OPTIONS: readonly SettingChoice[] = [
   {
     value: "responses",
-    label: "Codex 原生",
-    description: "默认路径。走 Codex 原生生图链路，适合日常文生图和图生图。",
+    label: "原生通道",
+    description: "默认路径。走平台原生生图链路，适合日常文生图和图生图。",
   },
   {
     value: "image2",
-    label: "image2 直连",
+    label: "直连通道",
     description: "直接调用图像接口，简单任务更快；4K 图生图失败会自动回到稳定路径。",
   },
   {
     value: "dual_race",
-    label: "双并发",
-    description: "Codex 原生和 image2 直连同时跑，先完成的结果返回。速度更激进，但会消耗双倍配额。",
+    label: "双路竞速",
+    description: "原生通道和直连通道同时跑，先完成的结果返回。速度更激进，但会消耗双倍配额。",
     badge: "配额翻倍",
   },
 ];
@@ -173,17 +173,17 @@ const IMAGE_CHANNEL_OPTIONS: readonly SettingChoice[] = [
   {
     value: "auto",
     label: "自动混合",
-    description: "按选中的 Provider 能力分发：支持异步任务走 image-job，不支持则走流式。",
+    description: "按选中的供应商能力分发：支持异步任务走任务通道，不支持则走流式。",
   },
   {
     value: "stream_only",
     label: "强制流式",
-    description: "所有 Provider 都走 responses 或 image2 直连，不使用异步任务服务。",
+    description: "所有供应商都走流式直连，不使用异步任务服务。",
   },
   {
     value: "image_jobs_only",
     label: "强制异步",
-    description: "只允许支持 image-job 的 Provider；选中不支持的 Provider 会直接返回 503。",
+    description: "只允许支持异步任务的供应商；选中不支持的供应商会直接返回 503。",
     badge: "严格",
   },
 ];
@@ -191,12 +191,12 @@ const IMAGE_CHANNEL_OPTIONS: readonly SettingChoice[] = [
 const IMAGE_OUTPUT_FORMAT_OPTIONS: readonly SettingChoice[] = [
   {
     value: "jpeg",
-    label: "JPEG",
+    label: "JPG 格式",
     description: "默认选项。文件小，适合分享。",
   },
   {
     value: "png",
-    label: "PNG",
+    label: "PNG 格式",
     description: "文件更大，适合保存透明背景或继续编辑。",
   },
 ];
@@ -230,20 +230,20 @@ const SETTING_META: Record<string, SettingMeta> = {
   "image.engine": {
     group: "image",
     title: "生图引擎",
-    summary: "决定图片生成使用 Codex 原生、image2 直连还是双路竞速。",
-    detail: "不确定时选“Codex 原生”。双并发会同时消耗两条路径的配额，默认收起。",
+    summary: "决定图片生成使用原生通道、直连通道还是双路竞速。",
+    detail: "不确定时选“原生通道”。双路竞速会同时消耗两条路径的配额，默认收起。",
     kind: "enum",
     icon: ImageIcon,
     defaultValue: "responses",
-    recommended: "默认：Codex 原生",
+    recommended: "默认：原生通道",
     choices: IMAGE_ENGINE_OPTIONS,
     keywords: ["image", "engine", "responses", "image2", "dual"],
   },
   "image.channel": {
     group: "image",
     title: "异步通道",
-    summary: "控制是否把支持 image-job 的 Provider 分发到异步任务通道。",
-    detail: "auto 会按 Provider 能力混合分发；stream_only 完全关闭异步任务；image_jobs_only 会严格要求 Provider 支持异步任务。",
+    summary: "控制是否把支持异步任务的供应商分发到任务通道。",
+    detail: "自动混合会按供应商能力分发；强制流式会完全关闭异步任务；强制异步会严格要求供应商支持异步任务。",
     kind: "enum",
     icon: Activity,
     defaultValue: "auto",
@@ -254,9 +254,9 @@ const SETTING_META: Record<string, SettingMeta> = {
   [IMAGE_OUTPUT_FORMAT_KEY]: {
     group: "image",
     title: "输出格式",
-    summary: "设置新生成图片默认使用 JPEG 还是 PNG。",
+    summary: "设置新生成图片默认使用 JPG 格式还是 PNG 格式。",
     detail:
-      "JPEG 体积更小；PNG 更接近无损画质但文件更大。透明背景请求始终使用 PNG，不受这里影响。",
+      "JPG 格式体积更小；PNG 格式更接近无损画质但文件更大。透明背景请求始终使用 PNG，不受这里影响。",
     kind: "enum",
     icon: ImageIcon,
     defaultValue: "jpeg",
@@ -301,10 +301,10 @@ const SETTING_META: Record<string, SettingMeta> = {
   },
   [GENERATION_FAST_DEFAULT_KEY]: {
     group: "upstream",
-    title: "Fast 默认开启",
-    summary: "控制全站新对话和新生图的 Fast 初始状态。",
+    title: "快速模式默认开启",
+    summary: "控制全站新对话和新生图的快速模式初始状态。",
     detail:
-      "开启后，普通用户进入对话框时 Fast 默认打开；关闭后默认关闭。用户仍可在当前对话框里临时切换。",
+      "开启后，普通用户进入对话框时快速模式默认打开；关闭后默认关闭。用户仍可在当前对话框里临时切换。",
     kind: "toggle",
     icon: Zap,
     defaultValue: "1",
@@ -371,7 +371,7 @@ const SETTING_META: Record<string, SettingMeta> = {
   "providers.auto_probe_interval": {
     group: "providers",
     title: "文字探活间隔",
-    summary: "定时用一道简单算术题检查 Provider 是否可用。",
+    summary: "定时用一道简单算术题检查供应商是否可用。",
     detail: "设为 0 表示关闭自动探活，只保留手动探活。",
     kind: "integer",
     icon: Activity,
@@ -615,7 +615,7 @@ const GROUPS: {
   },
   {
     id: "providers",
-    label: "Provider 探活",
+    label: "供应商探活",
     description: "自动检测账号可用性",
     icon: Activity,
   },
@@ -792,10 +792,10 @@ export function SettingsPanel() {
       label: providersQ.isLoading
         ? "读取中"
         : total > 0
-          ? `${jobs} / ${total} 个 Provider 已启用异步任务`
-          : "未配置 Provider",
+          ? `${jobs} / ${total} 个供应商已启用异步任务`
+          : "未配置供应商",
       compact:
-        providersQ.isLoading || total === 0 ? "auto" : `auto · ${jobs}/${total} 启用`,
+        providersQ.isLoading || total === 0 ? "自动" : `自动 · ${jobs}/${total} 启用`,
     };
   }, [providersQ.data, providersQ.isLoading]);
   const dirtyCount = Object.keys(ops).length;
@@ -3145,7 +3145,7 @@ function engineChoiceLabel(value: string | null | undefined) {
   const normalized = normalizeImageEngine(value);
   return (
     IMAGE_ENGINE_OPTIONS.find((option) => option.value === normalized)?.label ??
-    "Codex 原生"
+    "原生通道"
   );
 }
 
@@ -3161,7 +3161,7 @@ function outputFormatChoiceLabel(value: string | null | undefined) {
   const normalized = value === "png" ? "png" : "jpeg";
   return (
     IMAGE_OUTPUT_FORMAT_OPTIONS.find((option) => option.value === normalized)?.label ??
-    "JPEG"
+    "JPG 格式"
   );
 }
 

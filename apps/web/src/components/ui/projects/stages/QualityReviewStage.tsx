@@ -80,7 +80,7 @@ export function QualityReviewStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
-      eyebrow="N°07 — Quality Review"
+      eyebrow="N°07 — 质量复核"
       title="质检返修"
       subtitle="每张展示图都有质检结论。可发起一次文字返修，或全部通过后进入交付。"
       actions={

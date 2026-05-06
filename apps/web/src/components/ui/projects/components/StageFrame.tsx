@@ -43,7 +43,7 @@ export function StageFrame({
               {subtitle}
             </p>
           </div>
-          {actions ? <div className="shrink-0 self-start md:self-end">{actions}</div> : null}
+          {actions ? <div className="w-full shrink-0 self-start sm:w-auto md:self-end">{actions}</div> : null}
         </div>
       </header>
       <div className="relative">{children}</div>

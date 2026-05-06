@@ -103,7 +103,7 @@ function ProjectConsole({
         <StepRail workflow={workflow} />
       </aside>
 
-      <section className="min-h-0 min-w-0 overflow-y-auto px-4 pb-12 pt-4 md:px-8 md:pt-6 xl:px-10">
+      <section className="project-mobile-scroll min-h-0 min-w-0 overflow-y-auto px-4 pt-4 md:px-8 md:pb-12 md:pt-6 xl:px-10">
         <DetailBreadcrumb workflow={workflow} />
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
@@ -457,7 +457,7 @@ function Conversation({ workflow }: { workflow: WorkflowRun }) {
       >
         <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-1)]">
           <MessageSquare className="h-3.5 w-3.5 text-[var(--fg-2)]" />
-          Conversation
+          关联对话
         </span>
         <ChevronDown
           className={cn("h-4 w-4 text-[var(--fg-2)] transition-transform", open && "rotate-180")}
@@ -487,7 +487,7 @@ function DetailSkeleton() {
       <div className="grid place-items-center gap-3 text-center">
         <Spinner size={20} />
         <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
-          Loading
+          加载中
         </p>
       </div>
     </div>
@@ -498,7 +498,7 @@ function DetailError({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="m-6 max-w-md rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-soft)]/20 p-5 text-sm">
       <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
-        Error
+        错误
       </p>
       <h3 className="mt-1 text-[18px] font-semibold tracking-tight text-[var(--fg-0)]">
         项目加载失败

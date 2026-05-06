@@ -19,8 +19,8 @@ const MODES: ReadonlyArray<{
   label: string;
   icon: typeof ImageIcon;
 }> = [
-  { id: "chat", label: "Chat", icon: MessageSquare },
-  { id: "image", label: "Image", icon: ImageIcon },
+  { id: "chat", label: "对话", icon: MessageSquare },
+  { id: "image", label: "图片", icon: ImageIcon },
 ];
 
 export function ModeSwitcher() {

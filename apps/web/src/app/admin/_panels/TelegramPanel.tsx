@@ -203,7 +203,7 @@ export function TelegramPanel() {
         />
 
         <Field
-          label="Bot Token"
+          label="机器人令牌"
           hint="@BotFather 申请机器人时给的密钥，形如 123456789:REPLACE_WITH_BOT_TOKEN。留空时回退到部署 .env 里的旧值。"
           value={form.bot_token}
           onChange={(v) => setForm((f) => ({ ...f, bot_token: v }))}
@@ -228,15 +228,15 @@ export function TelegramPanel() {
                 className="inline-flex items-center gap-1 text-[11px] px-2 h-7 rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 border border-white/10 transition-colors"
                 title={deepLink + "<code>"}
               >
-                <Copy className="w-3 h-3" /> 复制 deep link
+                <Copy className="w-3 h-3" /> 复制绑定链接
               </button>
             ) : null
           }
         />
 
         <Field
-          label="允许使用的 TG 账号 ID"
-          hint="只允许这些 Telegram 账号 ID 使用，多个用英文逗号分开。留空表示不限制。"
+          label="允许使用的 Telegram 账号编号"
+          hint="只允许这些 Telegram 账号编号使用，多个用半角逗号分开。留空表示不限制。"
           value={form.allowed_user_ids}
           onChange={(v) => setForm((f) => ({ ...f, allowed_user_ids: v }))}
           mono
@@ -259,7 +259,7 @@ export function TelegramPanel() {
             勾选要用的代理；一个都不勾表示用所有「启用」的代理。
           </p>
           {allProxies.length === 0 ? (
-            <p className="text-xs text-neutral-500">代理池为空，请先到 Provider 标签页添加代理。</p>
+            <p className="text-xs text-neutral-500">代理池为空，请先到供应商标签页添加代理。</p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {allProxies.map((p) => {

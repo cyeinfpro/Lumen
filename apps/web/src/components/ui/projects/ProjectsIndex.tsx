@@ -126,8 +126,8 @@ export function ProjectsIndex() {
         }
       />
       <ProjectTopBar />
-      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-12 pt-3 md:mb-0 md:px-10 md:py-8">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-6 md:gap-8">
+      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-3 md:mb-0 md:px-10 md:py-8">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-5 md:gap-8">
           <Crumb />
           <Hero counts={counts} />
           <ModelLibraryEntry />
@@ -194,7 +194,7 @@ function Crumb() {
 function Hero({ counts }: { counts: Record<FilterKey, number> }) {
   const active = counts.running + counts.needs_review + counts.attention;
   return (
-    <section className="grid gap-5 border-b border-[var(--border)] pb-5 md:gap-6 md:pb-6">
+    <section className="grid gap-4 border-b border-[var(--border)] pb-4 md:gap-6 md:pb-6">
       <div className="hidden items-end justify-between gap-6 md:flex">
         <div className="min-w-0">
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
@@ -221,7 +221,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
         </Link>
       </div>
 
-      <div className="grid grid-cols-1 gap-px overflow-hidden border border-[var(--border-subtle)] sm:grid-cols-3 md:max-w-2xl">
+      <div className="grid grid-cols-1 gap-px overflow-hidden border border-[var(--border-subtle)] min-[430px]:grid-cols-3 md:max-w-2xl">
         <Stat label="全部" value={counts.all} />
         <Stat label="进行中" value={active} accent={active > 0} />
         <Stat label="已交付" value={counts.completed} />
@@ -298,7 +298,7 @@ function ModelLibraryEntry() {
           </div>
           <div className="min-w-0">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Model Library
+              模特库
             </p>
             <h2 className="mt-1 text-[18px] font-semibold tracking-tight text-[var(--fg-0)] md:text-[20px]">
               模特库
@@ -586,7 +586,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
             />
           ) : (
             <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">
-              No Image
+              暂无图片
             </div>
           )}
           <div

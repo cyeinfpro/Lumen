@@ -33,10 +33,11 @@ import { useChatStore } from "@/store/useChatStore";
 import {
   useCreateConversationMutation,
   useConversationContextQuery,
-  useListConversationsQuery,
+  useListConversationsInfiniteQuery,
 } from "@/lib/queries";
 import { getMe, type AuthUser } from "@/lib/apiClient";
 import { SPRING } from "@/lib/motion";
+import { useConversationRouteSync } from "./useConversationRouteSync";
 
 declare global {
   interface WindowEventMap {
@@ -84,20 +85,47 @@ export function DesktopStudio() {
     setSidebarOpen(false);
   }, [setSidebarOpen]);
 
-  const convsQuery = useListConversationsQuery({ limit: 30 });
+  const convsQuery = useListConversationsInfiniteQuery({ limit: 30 });
   const {
     data: contextStats,
     refetch: refetchContextStats,
   } = useConversationContextQuery(currentConvId, { refetchInterval: 30_000 });
+  const urlConversationId = useConversationRouteSync({
+    currentConvId,
+    loadHistoricalMessages,
+    setCurrentConv,
+  });
 
   useEffect(() => {
     if (currentConvId) return;
-    const items = convsQuery.data?.items ?? [];
+    if (urlConversationId) return;
+    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
     const first = items.find((c) => !c.archived);
     if (!first) return;
     setCurrentConv(first.id);
     void loadHistoricalMessages(first.id).catch(() => {});
-  }, [currentConvId, convsQuery.data, setCurrentConv, loadHistoricalMessages]);
+  }, [
+    currentConvId,
+    convsQuery.data,
+    loadHistoricalMessages,
+    setCurrentConv,
+    urlConversationId,
+  ]);
+
+  useEffect(() => {
+    if (currentConvId || urlConversationId) return;
+    if (!convsQuery.hasNextPage || convsQuery.isFetchingNextPage) return;
+    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
+    if (items.some((c) => !c.archived)) return;
+    void convsQuery.fetchNextPage();
+  }, [
+    currentConvId,
+    convsQuery,
+    convsQuery.data,
+    convsQuery.hasNextPage,
+    convsQuery.isFetchingNextPage,
+    urlConversationId,
+  ]);
 
   useEffect(() => {
     if (!currentConvId) return;
@@ -185,8 +213,8 @@ export function DesktopStudio() {
       <button
         type="button"
         onClick={() => setFast(!fast)}
-        aria-label={fast ? "关闭 Fast 模式" : "开启 Fast 模式"}
-        title={fast ? "Fast 模式 · 已开启" : "Fast 模式 · 点击开启"}
+        aria-label={fast ? "关闭快速模式" : "开启快速模式"}
+        title={fast ? "快速模式 · 已开启" : "快速模式 · 点击开启"}
         className="inline-flex items-center justify-center w-7 h-7 rounded-full hover:bg-white/8 cursor-pointer transition-colors"
       >
         <FastLamp on={fast} />

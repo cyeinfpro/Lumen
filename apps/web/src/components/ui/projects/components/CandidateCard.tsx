@@ -93,12 +93,12 @@ export function CandidateCard({
                 <>
                   <Spinner size={20} />
                   <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
-                    Generating
+                    生成中
                   </span>
                 </>
               ) : (
                 <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-                  No Image
+                  暂无图片
                 </span>
               )}
             </div>
@@ -117,7 +117,7 @@ export function CandidateCard({
         {selected ? (
           <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-black shadow-[var(--shadow-amber)]">
             <Check className="h-3 w-3" />
-            Selected
+            已选中
           </span>
         ) : null}
       </div>
@@ -132,7 +132,7 @@ export function CandidateCard({
           方案 {candidate.candidate_index}
         </p>
         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-          {images.length > 1 ? `${images.length} shots` : "1 shot"}
+          {images.length > 1 ? `${images.length} 张` : "1 张"}
         </span>
       </div>
       <p className="mt-2 text-[12px] leading-5 text-[var(--fg-2)]">

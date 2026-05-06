@@ -50,7 +50,7 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
 
     prompt = gen.get("prompt") or ""
     if not prompt:
-        await cb.answer("原任务没有 prompt，无法重试。", show_alert=True)
+        await cb.answer("原任务没有提示词，无法重试。", show_alert=True)
         return
 
     payload = {

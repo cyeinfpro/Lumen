@@ -9,8 +9,9 @@ import { MobileConversationCanvas } from "@/components/ui/chat/mobile/MobileConv
 import { MobileComposerPill } from "@/components/ui/composer/mobile/MobileComposerPill";
 import { MobileEmptyStudio } from "@/components/ui/chat/mobile/MobileEmptyStudio";
 import { useChatStore } from "@/store/useChatStore";
-import { useListConversationsQuery } from "@/lib/queries";
+import { useListConversationsInfiniteQuery } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { useConversationRouteSync } from "./useConversationRouteSync";
 
 export function MobileStudio() {
   const messages = useChatStore((s) => s.messages);
@@ -59,15 +60,43 @@ export function MobileStudio() {
   }, [messages]);
 
   // 首次进入自动挂到最近一条活跃会话，与 DesktopStudio 对齐。
-  const convsQuery = useListConversationsQuery({ limit: 30 });
+  const convsQuery = useListConversationsInfiniteQuery({ limit: 30 });
+  const urlConversationId = useConversationRouteSync({
+    currentConvId,
+    loadHistoricalMessages,
+    setCurrentConv,
+  });
+
   useEffect(() => {
     if (currentConvId) return;
-    const items = convsQuery.data?.items ?? [];
+    if (urlConversationId) return;
+    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
     const first = items.find((c) => !c.archived);
     if (!first) return;
     setCurrentConv(first.id);
     void loadHistoricalMessages(first.id).catch(() => {});
-  }, [currentConvId, convsQuery.data, setCurrentConv, loadHistoricalMessages]);
+  }, [
+    currentConvId,
+    convsQuery.data,
+    loadHistoricalMessages,
+    setCurrentConv,
+    urlConversationId,
+  ]);
+
+  useEffect(() => {
+    if (currentConvId || urlConversationId) return;
+    if (!convsQuery.hasNextPage || convsQuery.isFetchingNextPage) return;
+    const items = convsQuery.data?.pages.flatMap((p) => p.items) ?? [];
+    if (items.some((c) => !c.archived)) return;
+    void convsQuery.fetchNextPage();
+  }, [
+    currentConvId,
+    convsQuery,
+    convsQuery.data,
+    convsQuery.hasNextPage,
+    convsQuery.isFetchingNextPage,
+    urlConversationId,
+  ]);
 
   // 若来自图库 "在对话中定位"，滚到目标 message
   useEffect(() => {

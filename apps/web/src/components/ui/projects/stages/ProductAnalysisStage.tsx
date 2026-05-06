@@ -89,7 +89,7 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
   if (step?.status === "running") {
     return (
       <StageFrame
-        eyebrow="N°02 — Product Constraints"
+        eyebrow="N°02 — 商品约束"
         title="商品约束"
         subtitle="正在从商品图提取服装还原点、推荐配饰和匹配背景。"
       >
@@ -100,7 +100,7 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
-      eyebrow="N°02 — Product Constraints"
+      eyebrow="N°02 — 商品约束"
       title="商品约束"
       subtitle="商品识别只负责三件事：锁定服装还原点、给出低存在感配饰、推荐匹配背景。"
     >

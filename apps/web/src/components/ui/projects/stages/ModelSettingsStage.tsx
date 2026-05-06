@@ -64,7 +64,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
-      eyebrow="N°03 — Model Settings"
+      eyebrow="N°03 — 模特设置"
       title="模特设定"
       subtitle="先确认模特本人。配饰会在确认模特后生成四宫格参考，不会提前试穿商品。"
     >
@@ -131,11 +131,12 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
         </p>
       </section>
 
-      <div className="flex flex-col gap-2 border-t border-[var(--border)] pt-5 sm:flex-row">
+      <div className="grid grid-cols-1 gap-2 border-t border-[var(--border)] pt-5 min-[420px]:grid-cols-2 sm:flex sm:flex-row">
         <Button
           variant="outline"
           onClick={() => setLibraryOpen(true)}
           leftIcon={<Library className="h-4 w-4" />}
+          className="w-full sm:w-auto"
         >
           打开模特库
         </Button>
@@ -144,6 +145,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
           loading={create.isPending}
           onClick={submit}
           leftIcon={<Sparkles className="h-4 w-4" />}
+          className="w-full sm:w-auto"
         >
           生成模特候选
         </Button>

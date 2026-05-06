@@ -843,6 +843,14 @@ export interface ApparelModelLibraryJob {
 
 export interface ApparelModelLibraryJobsList {
   items: ApparelModelLibraryJob[];
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface ApparelModelLibraryJobsOpts {
+  limit?: number;
+  offset?: number;
 }
 
 export interface ApparelModelLibraryGenerateIn {
@@ -891,9 +899,15 @@ export function generateApparelModelLibrary(
   );
 }
 
-export function getApparelModelLibraryJobs(): Promise<ApparelModelLibraryJobsList> {
+export function getApparelModelLibraryJobs(
+  opts: ApparelModelLibraryJobsOpts = {},
+): Promise<ApparelModelLibraryJobsList> {
+  const qs = new URLSearchParams();
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  if (opts.offset != null) qs.set("offset", String(opts.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch<ApparelModelLibraryJobsList>(
-    "/workflows/apparel-model-library/jobs",
+    `/workflows/apparel-model-library/jobs${suffix}`,
   );
 }
 

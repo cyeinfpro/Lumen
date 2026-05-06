@@ -256,7 +256,7 @@ function GenerationTileComponent({
   const onCopyPrompt = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(item.prompt);
-      pushMobileToast("已复制 prompt", "success");
+      pushMobileToast("已复制提示词", "success");
     } catch {
       pushMobileToast("复制失败", "danger");
     }
@@ -399,7 +399,7 @@ function GenerationTileComponent({
               {item.fast && (
                 <span className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] border border-[rgba(242,169,58,0.18)] bg-[rgba(242,169,58,0.12)] px-1.5 py-px text-[10px] font-medium text-[var(--amber-300)]">
                   <Zap className="h-2.5 w-2.5" />
-                  Fast
+                  快速
                 </span>
               )}
               {item.has_ref && (
@@ -418,7 +418,7 @@ function GenerationTileComponent({
           <TileAction label="做参考图" onClick={onMakeRef}>
             <ImageIcon className="h-3.5 w-3.5" />
           </TileAction>
-          <TileAction label="复制 prompt" onClick={onCopyPrompt}>
+          <TileAction label="复制提示词" onClick={onCopyPrompt}>
             <Copy className="h-3.5 w-3.5" />
           </TileAction>
           <TileAction label="保存原图" onClick={onSave}>
@@ -450,7 +450,7 @@ function GenerationTileComponent({
           },
           {
             key: "copy",
-            label: "复制 prompt",
+            label: "复制提示词",
             icon: <Copy className="w-4 h-4" />,
             onSelect: onCopyPrompt,
           },

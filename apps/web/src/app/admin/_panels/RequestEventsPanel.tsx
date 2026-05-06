@@ -981,8 +981,8 @@ function LiveLaneRow({ lane }: { lane: AdminRequestEventLiveLane }) {
   }
   const tip = [
     `${labelText}: ${providerText}`,
-    lane.route ? `route=${lane.route}` : null,
-    lane.endpoint ? `endpoint=${lane.endpoint}` : null,
+    lane.route ? `路由=${lane.route}` : null,
+    lane.endpoint ? `接口=${lane.endpoint}` : null,
   ]
     .filter(Boolean)
     .join(" • ");
@@ -1109,8 +1109,8 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
       </div>
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Detail label="请求 ID" value={event.id} mono />
-        <Detail label="消息 ID" value={event.message_id} mono />
+        <Detail label="请求编号" value={event.id} mono />
+        <Detail label="消息编号" value={event.message_id} mono />
         <Detail label="会话" value={conversationLabel} />
         <Detail label="阶段" value={displayValue(event.progress_stage)} />
         <Detail label="创建时间" value={formatDateTime(event.created_at)} mono />
@@ -1130,10 +1130,10 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
         />
         <Detail label="尝试次数" value={String(event.attempt)} mono />
         {event.tokens_in != null && (
-          <Detail label="输入 tokens" value={String(event.tokens_in)} mono />
+          <Detail label="输入令牌数" value={String(event.tokens_in)} mono />
         )}
         {event.tokens_out != null && (
-          <Detail label="输出 tokens" value={String(event.tokens_out)} mono />
+          <Detail label="输出令牌数" value={String(event.tokens_out)} mono />
         )}
         {event.error_code && (
           <Detail label="错误码" value={event.error_code} />
@@ -1144,7 +1144,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
         <div>
           <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
             <Activity className="w-3.5 h-3.5" />
-            实时 provider（worker 心跳）
+            实时供应商（任务心跳）
           </div>
           <div className="flex flex-col gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] p-3">
             {liveLanes(event).map((lane, idx) => (

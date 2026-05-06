@@ -100,7 +100,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
 
   return (
     <StageFrame
-      eyebrow="N°06 — Showcase Fusion"
+      eyebrow="N°06 — 展示融合"
       title="商品融合"
       subtitle="使用已确认模特和商品图，生成 4 张电商展示图。预计 1-3 分钟。"
       badge={
@@ -121,6 +121,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
           loading={reopen.isPending}
           onClick={() => setConfirmReopen(true)}
           leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+          className="w-full sm:w-auto"
         >
           返回重选模特
         </Button>
@@ -172,7 +173,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         <p className="mt-4 inline-flex flex-wrap items-center gap-2 text-[12px] leading-6 text-[var(--fg-2)]">
           <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
             <Layers className="h-3 w-3" />
-            04 shots
+            04 张
           </span>
           <span aria-hidden className="text-[var(--fg-3)]">·</span>
           <span>{aspectRatio} 画幅</span>
@@ -181,13 +182,14 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         </p>
       </section>
 
-      <section className="flex flex-wrap items-center gap-3 border-t border-[var(--border)] py-5">
+      <section className="grid grid-cols-1 gap-3 border-t border-[var(--border)] py-5 min-[420px]:grid-cols-2 sm:flex sm:flex-wrap sm:items-center">
         <Button
           variant={hasTasks ? "outline" : "primary"}
           loading={create.isPending}
           disabled={isRunning}
           onClick={() => (hasTasks ? setConfirmRegenerate(true) : generateShowcase())}
           leftIcon={hasTasks ? <RefreshCw className="h-4 w-4" /> : <Shirt className="h-4 w-4" />}
+          className="w-full sm:w-auto"
         >
           {hasTasks ? "按当前模板再生成一批" : "开始生成展示图"}
         </Button>
@@ -198,6 +200,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
             disabled={isRunning}
             onClick={() => setConfirmDeliver(true)}
             leftIcon={<Check className="h-4 w-4" />}
+            className="w-full sm:w-auto"
           >
             确认交付
           </Button>
@@ -211,7 +214,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
               Generated
             </p>
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
-              {String(generated.length).padStart(2, "0")} shots
+              {String(generated.length).padStart(2, "0")} 张
             </p>
           </div>
           {generated.length === 0 ? (

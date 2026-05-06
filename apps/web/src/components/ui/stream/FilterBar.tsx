@@ -78,7 +78,7 @@ export function FilterBar({ open, filters, onChange, onClear }: FilterBarProps) 
               icon={<Gauge className="h-3.5 w-3.5" />}
               onClick={() => onChange({ ...filters, fast: !filters.fast })}
             >
-              Fast
+              快速
             </Chip>
             {active && (
               <Chip

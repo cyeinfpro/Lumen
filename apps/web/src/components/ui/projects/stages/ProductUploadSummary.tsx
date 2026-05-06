@@ -15,7 +15,7 @@ export function ProductUploadSummary({ workflow }: { workflow: WorkflowRun }) {
   const images: BackendImageMeta[] = workflow.product_images;
   return (
     <StageFrame
-      eyebrow="N°01 — Product Upload"
+      eyebrow="N°01 — 商品上传"
       title="上传商品"
       subtitle="商品图已绑定到项目，后续阶段可恢复使用。"
     >

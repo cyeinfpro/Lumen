@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 _STAGE_LABELS = {
     "queued": "排队中",
-    "understanding": "理解 prompt",
+    "understanding": "理解提示词",
     "rendering": "绘制中",
     "finalizing": "收尾",
 }
@@ -446,7 +446,7 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
         else:
             caption = f"✅ #{gen_id[:8]}"
     elif track.is_bonus:
-        caption = f"🎁 双引擎副本（同 prompt 第二张）\n\n📝 {_truncate(track.prompt, 800)}"
+        caption = f"🎁 双引擎副本（同提示词的第二张）\n\n📝 {_truncate(track.prompt, 800)}"
     else:
         caption = f"✅ 生成完成\n\n📝 {_truncate(track.prompt, 800)}"
 

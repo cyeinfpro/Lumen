@@ -75,7 +75,7 @@ export function StreamOverview({
           </span>
           <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
             <Layers3 className="h-3.5 w-3.5" />
-            <span className="tabular-nums">{promptCount} prompt</span>
+            <span className="tabular-nums">{promptCount} 提示词</span>
           </span>
           {total > loaded && (
             <span className="text-[11px] tabular-nums text-[var(--fg-2)]">
@@ -175,7 +175,7 @@ export function StreamOverview({
               className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-[rgba(242,169,58,0.22)] bg-[rgba(242,169,58,0.10)] px-2 text-[11px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none"
             >
               <Gauge className="h-3 w-3" />
-              Fast
+              快速
             </button>
           )}
           {hasSearch && (
