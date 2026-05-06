@@ -2,7 +2,7 @@
 
 // Editorial 详情页 / 控制台：
 // 1) 三栏（StepRail | StagePanel | ConstraintPanel），中屏改抽屉
-// 2) Header：mono eyebrow + serif italic title + dot + mono timestamp，无嵌套卡片
+// 2) Header：mono eyebrow + unified title + dot + mono timestamp，无嵌套卡片
 // 3) AnimatePresence 阶段切换；StageErrorBoundary 兜底
 // 4) ⌘/Ctrl + . 切换右侧约束面板抽屉
 
@@ -103,8 +103,7 @@ function ProjectConsole({
         <StepRail workflow={workflow} />
       </aside>
 
-      <section className="project-mobile-scroll min-h-0 min-w-0 overflow-y-auto px-4 pt-4 md:px-8 md:pb-12 md:pt-6 xl:px-10">
-        <DetailBreadcrumb workflow={workflow} />
+      <section className="project-mobile-scroll min-h-0 min-w-0 overflow-y-auto px-4 pt-3 md:px-6 md:pb-8 md:pt-3 xl:px-6">
         <DetailHeader workflow={workflow} refreshing={refreshing} onOpenDrawer={() => setDrawerOpen(true)} />
         <MobileStageStrip workflow={workflow} />
 
@@ -135,33 +134,6 @@ function ProjectConsole({
         onClose={() => setDrawerOpen(false)}
       />
     </main>
-  );
-}
-
-function DetailBreadcrumb({ workflow }: { workflow: WorkflowRun }) {
-  return (
-    <nav
-      aria-label="项目路径"
-      className="mb-6 hidden items-center gap-3 font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)] md:flex"
-    >
-      <Link
-        href="/projects"
-        className="transition-colors hover:text-[var(--fg-0)]"
-      >
-        Projects
-      </Link>
-      <span aria-hidden className="text-[var(--fg-3)]">·</span>
-      <Link
-        href="/projects/apparel-model-showcase"
-        className="transition-colors hover:text-[var(--fg-0)]"
-      >
-        Apparel
-      </Link>
-      <span aria-hidden className="text-[var(--fg-3)]">·</span>
-      <span className="min-w-0 truncate text-[var(--fg-0)]">
-        {workflow.title || "服饰模特图"}
-      </span>
-    </nav>
   );
 }
 
@@ -253,12 +225,12 @@ function DetailHeader({
   const stepTotal = STEPS.length;
 
   return (
-    <header className="mb-7 grid gap-4 border-b border-[var(--border)] pb-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
+    <header className="mb-4 grid gap-2 border-b border-[var(--border)] pb-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3">
       <div className="min-w-0">
         <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
           Step {stepNum} / {String(stepTotal).padStart(2, "0")} · Apparel Project
         </p>
-        <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-2">
+        <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
           {editing ? (
             <form
               className="flex min-w-0 flex-wrap items-baseline gap-2"
@@ -280,13 +252,13 @@ function DetailHeader({
                 maxLength={120}
                 autoFocus
                 aria-label="项目名称"
-                className="min-w-0 max-w-[min(calc(100vw_-_4rem),640px)] border-b border-[var(--border-amber)] bg-transparent px-1 text-[24px] font-semibold leading-[1.15] tracking-tight text-[var(--fg-0)] outline-none md:text-[34px]"
+                className="type-page-title min-w-0 max-w-[min(calc(100vw_-_4rem),640px)] border-b border-[var(--border-amber)] bg-transparent px-1 outline-none"
               />
               <button
                 type="submit"
                 aria-label="保存项目名称"
                 disabled={patch.isPending}
-                className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-0)] transition-colors hover:bg-white/[0.06] disabled:opacity-50"
+                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full text-[var(--fg-0)] transition-colors hover:bg-white/[0.06] disabled:opacity-50"
               >
                 {patch.isPending ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -298,7 +270,7 @@ function DetailHeader({
                 type="button"
                 aria-label="取消重命名"
                 onClick={() => setEditing(false)}
-                className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full text-[var(--fg-2)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -310,7 +282,7 @@ function DetailHeader({
               className="group/title flex min-w-0 cursor-pointer items-baseline gap-2 text-left focus-visible:outline-none"
               aria-label="编辑项目名称"
             >
-              <h1 className="line-clamp-2 text-[24px] font-semibold leading-[1.15] tracking-tight text-[var(--fg-0)] md:line-clamp-1 md:text-[34px]">
+              <h1 className="type-page-title line-clamp-2 md:line-clamp-1">
                 {workflowTitle}
               </h1>
               <Pencil className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] opacity-0 transition-opacity group-hover/title:opacity-100" />
@@ -318,7 +290,7 @@ function DetailHeader({
           )}
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.18em]">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.18em]">
           <span className="inline-flex items-center gap-2 text-[var(--fg-1)]">
             <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", dotTone)} />
             {STATUS_LABEL[status] ?? status}
@@ -336,18 +308,18 @@ function DetailHeader({
         </div>
 
         {workflow.user_prompt ? (
-          <p className="mt-4 line-clamp-2 max-w-2xl text-[13px] leading-6 text-[var(--fg-1)]">
+          <p className="type-page-subtitle mt-1.5 line-clamp-1 max-w-2xl text-[var(--fg-1)]">
             {workflow.user_prompt}
           </p>
         ) : null}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 self-start md:self-end">
+      <div className="flex flex-wrap items-center gap-2 self-start md:self-center">
         <button
           type="button"
           onClick={onOpenDrawer}
           aria-label="查看项目约束 (⌘ .)"
-          className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] xl:hidden"
+          className="inline-flex min-h-8 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] xl:hidden"
         >
           <PanelRightOpen className="h-3.5 w-3.5" />
           Constraints
@@ -362,7 +334,7 @@ function DetailHeader({
               setMenuOpen((open) => !open);
               setConfirmDelete(false);
             }}
-            className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
+            className="inline-flex h-8 w-8 cursor-pointer items-center justify-center border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
           >
             <MoreHorizontal className="h-4 w-4" />
           </button>
@@ -468,7 +440,7 @@ function Conversation({ workflow }: { workflow: WorkflowRun }) {
         <div className="mt-3 text-[13px] leading-6 text-[var(--fg-1)]">
           <Link
             href={`/?conversationId=${workflow.conversation_id}`}
-            className="font-display text-[18px] italic text-[var(--amber-300)] hover:underline underline-offset-4"
+            className="text-[16px] font-semibold text-[var(--amber-300)] hover:underline underline-offset-4"
           >
             打开关联对话 →
           </Link>
@@ -500,7 +472,7 @@ function DetailError({ onRetry }: { onRetry: () => void }) {
       <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
         错误
       </p>
-      <h3 className="mt-1 text-[18px] font-semibold tracking-tight text-[var(--fg-0)]">
+      <h3 className="type-card-title mt-1">
         项目加载失败
       </h3>
       <p className="mt-1 text-xs text-[var(--fg-1)]">

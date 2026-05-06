@@ -67,10 +67,10 @@ export default function PrivacyPage() {
       >
         <header className="hidden items-start justify-between gap-4 flex-wrap md:flex">
           <div>
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+            <h1 className="type-page-title">
               隐私 & 数据
             </h1>
-            <p className="text-sm text-[var(--fg-1)] mt-1.5">
+            <p className="type-body mt-1.5">
               查看数据、登录会话和账号删除选项。
             </p>
           </div>

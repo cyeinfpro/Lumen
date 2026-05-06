@@ -4,7 +4,7 @@
 // • 商品识别只服务最终生成提示词：商品还原点、推荐配饰、推荐背景
 // • 允许用户修正这三类内容，避免把识别阶段做成复杂商品档案
 // • dirty 检测：未修改时按钮文案改为"沿用 AI 建议"，避免空提交
-// • hairline 分隔取代嵌套卡片；mono eyebrow + serif italic 标题；底部 underline 输入
+// • hairline 分隔取代嵌套卡片；mono eyebrow + unified 标题；底部 underline 输入
 
 import { Check, Sparkles } from "lucide-react";
 import { useState } from "react";

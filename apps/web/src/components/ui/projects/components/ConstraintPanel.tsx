@@ -2,7 +2,7 @@
 
 // 右侧约束面板：
 // - 桌面常驻（≥ xl）：直接铺 InfoPanel，section 之间走 hairline
-// - 中屏 / 移动：抽屉/BottomSheet，header 用 mono eyebrow + serif italic title
+// - 中屏 / 移动：抽屉/BottomSheet，header 用 mono eyebrow + unified title
 // - 不再叠加 bg-white/[0.035] + border + shadow 的旧卡片包裹
 //
 // SSR safe：useState false → effect 里读 matchMedia 切换；与 useMediaQuery 一致策略。
@@ -63,10 +63,10 @@ export function ConstraintPanel({ workflow, className }: ConstraintPanelProps) {
   return (
     <div className={cn("relative", className)}>
       <header className="border-b border-[var(--border)] pb-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-page-kicker">
           Constraints
         </p>
-        <h3 className="mt-1.5 text-[18px] font-semibold leading-[1.2] tracking-tight text-[var(--fg-0)]">
+        <h3 className="type-section-title mt-1.5">
           项目约束
         </h3>
       </header>
@@ -84,10 +84,10 @@ function DrawerHeader({ onClose }: { onClose: () => void }) {
   return (
     <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
       <div className="min-w-0">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-page-kicker">
           Constraints
         </p>
-        <h2 className="mt-1.5 text-[20px] font-semibold leading-[1.2] tracking-tight text-[var(--fg-0)]">
+        <h2 className="type-section-title mt-1.5">
           项目约束
         </h2>
       </div>

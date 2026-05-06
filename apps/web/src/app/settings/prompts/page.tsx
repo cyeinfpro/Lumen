@@ -14,10 +14,10 @@ export default function PromptsPage() {
       <div className="flex flex-col gap-5">
         <header className="hidden flex-wrap items-start justify-between gap-4 md:flex">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
+            <h1 className="type-page-title">
               系统提示词
             </h1>
-            <p className="mt-1.5 text-sm text-[var(--fg-1)]">
+            <p className="type-body mt-1.5">
               管理可复用的系统提示词。
             </p>
           </div>

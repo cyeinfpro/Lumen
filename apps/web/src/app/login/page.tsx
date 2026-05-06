@@ -107,10 +107,10 @@ function LoginInner() {
 
             <div className="space-y-6">
               <div>
-                <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+                <h1 className="type-page-title">
                   登录 Lumen
                 </h1>
-                <p className="text-sm text-[var(--fg-1)] mt-1.5">
+                <p className="type-body mt-1.5">
                   继续你的对话和图片。
                 </p>
               </div>
@@ -314,7 +314,7 @@ function BrandPanel() {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.35, delay: 0.05 }}
-            className="text-3xl lg:text-4xl font-semibold tracking-tight leading-tight"
+            className="text-[28px] font-semibold leading-tight tracking-normal lg:text-[32px]"
           >
             把想法
             <br />

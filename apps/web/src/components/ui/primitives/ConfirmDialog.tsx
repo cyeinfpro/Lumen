@@ -134,28 +134,27 @@ export function ConfirmDialog({
             className={cn(
               "w-full max-w-sm",
               "mobile-dialog-panel overflow-hidden",
-              "bg-[var(--bg-1)]/95 border border-[var(--border)] backdrop-blur-xl",
-              "shadow-lumen-pop",
+              "surface-dialog",
               "flex flex-col p-5 focus-visible:outline-none",
               // 移动端：底部 sheet，仅顶部圆角；safe-area 下补底 padding
-              "max-sm:max-w-none max-sm:rounded-t-2xl max-sm:rounded-b-none",
+              "max-sm:max-w-none max-sm:rounded-t-[var(--radius-sheet)] max-sm:rounded-b-none",
               "max-sm:border-b-0",
               // 桌面：四角圆角
-              "sm:rounded-2xl",
+              "sm:rounded-[var(--radius-dialog)]",
             )}
           >
             <div className="mobile-dialog-scroll min-h-0 overflow-y-auto pr-0.5">
               <h2
                 id="confirm-dialog-title"
                 className={cn(
-                  "text-base font-semibold tracking-tight text-[var(--fg-0)] text-balance",
+                  "type-card-title text-balance",
                   tone === "danger" && "text-[var(--danger)]",
                 )}
               >
                 {title}
               </h2>
               {description ? (
-                <div className="mt-1.5 text-xs text-[var(--fg-1)] leading-relaxed text-pretty">
+                <div className="type-body-sm mt-1.5 text-pretty text-[var(--fg-1)]">
                   {description}
                 </div>
               ) : null}

@@ -33,16 +33,10 @@ export function StreamEmptyState({ kind, onClearFilters }: StreamEmptyStateProps
 
   return (
     <div className="flex flex-col items-center justify-center text-center px-6 py-20">
-      <div
-        className="font-display italic text-[var(--fg-0)]"
-        style={{ fontSize: 36, lineHeight: 1.05 }}
-      >
+      <div className="type-page-title">
         还没有作品
       </div>
-      <div
-        className="mt-2 text-[15px] text-[var(--fg-1)]"
-        style={{ fontFamily: "var(--font-zh-body)" }}
-      >
+      <div className="type-body mt-2">
         生成后的图片会放在这里
       </div>
       <button

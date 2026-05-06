@@ -26,7 +26,7 @@ export function EmptyState({
     <div
       ref={ref}
       className={cn(
-        "flex flex-col items-center justify-center text-center px-6 py-10",
+        "flex flex-col items-center justify-center px-6 py-10 text-center",
         "text-[var(--fg-0)]",
         className,
       )}
@@ -34,17 +34,17 @@ export function EmptyState({
     >
       <div
         className={cn(
-          "flex items-center justify-center w-12 h-12 rounded-full mb-3",
+          "mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-card)]",
           "bg-white/[0.04] border border-white/[0.06] text-[var(--fg-1)]",
         )}
       >
         {icon ?? <Inbox className="w-5 h-5" aria-hidden="true" />}
       </div>
-      <h3 className="text-[15px] font-medium tracking-tight mb-1 text-balance">
+      <h3 className="type-card-title mb-1 text-balance">
         {title}
       </h3>
       {description ? (
-        <p className="text-xs text-[var(--fg-1)] leading-relaxed max-w-sm text-pretty">
+        <p className="type-body-sm max-w-sm text-pretty text-[var(--fg-1)]">
           {description}
         </p>
       ) : null}

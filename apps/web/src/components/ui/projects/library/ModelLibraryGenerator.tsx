@@ -120,14 +120,14 @@ export function ModelLibraryGenerator({
     <section className="grid gap-4 md:gap-5">
       <header className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2 border-b border-[var(--border)] pb-3 max-[360px]:sr-only">
         <div className="min-w-0">
-          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          <p className="type-page-kicker">
             生成器
           </p>
-          <h2 className="mt-1 font-display text-[24px] italic leading-[1] text-[var(--fg-0)] md:text-[30px]">
+          <h2 className="type-page-title mt-1 md:text-[28px]">
             新建模特
           </h2>
         </div>
-        <p className="max-w-2xl text-[12.5px] leading-5 text-[var(--fg-2)] md:max-w-xl md:text-right">
+        <p className="type-page-subtitle max-w-2xl md:max-w-xl md:text-right">
           {`在不开项目的情况下批量生成模特图，提交后会自动进入"任务中心"。`}
           {`选了"自动识别"会在生成完跑一次风格识别打标签。`}
         </p>

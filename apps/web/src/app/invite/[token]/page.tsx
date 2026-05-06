@@ -190,10 +190,10 @@ function SignupForm({
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+        <h1 className="type-page-title">
           加入 Lumen
         </h1>
-        <p className="text-sm text-[var(--fg-1)] mt-1.5">
+        <p className="type-body mt-1.5">
           使用邀请链接创建你的账号。
         </p>
       </div>
@@ -397,7 +397,7 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
         <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
           {icon}
         </div>
-        <h1 className="text-xl font-semibold tracking-tight">邀请不可用</h1>
+        <h1 className="type-section-title">邀请不可用</h1>
         <p className="text-sm text-[var(--fg-1)]">{text}</p>
         <p className="text-xs text-[var(--fg-2)]">
           如果你认为这是错误，请联系邀请你的人重新生成邀请。
@@ -430,7 +430,7 @@ function ErrorView({ error }: { error: unknown }) {
         <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
           <FileX className="w-6 h-6 text-neutral-400" />
         </div>
-        <h1 className="text-xl font-semibold tracking-tight">
+        <h1 className="type-section-title">
           {isNotFound ? "邀请不存在" : "加载邀请失败"}
         </h1>
         {!isNotFound && (

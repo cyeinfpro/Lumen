@@ -11,7 +11,7 @@ export default function NotFound() {
       <div className="w-full max-w-md">
         <p
           aria-hidden="true"
-          className="mb-2 text-center text-4xl md:text-6xl font-mono tracking-[-0.04em] text-[var(--accent)]/70 select-none"
+          className="mb-2 text-center font-mono text-[40px] leading-none tracking-normal text-[var(--accent)]/70 select-none md:text-[48px]"
         >
           404
         </p>

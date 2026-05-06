@@ -126,9 +126,8 @@ export function ProjectsIndex() {
         }
       />
       <ProjectTopBar />
-      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-3 md:mb-0 md:px-10 md:py-8">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-5 md:gap-8">
-          <Crumb />
+      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-6 md:pt-3">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-3">
           <Hero counts={counts} />
           <ModelLibraryEntry />
           <Toolbar
@@ -176,61 +175,49 @@ export function ProjectsIndex() {
   );
 }
 
-function Crumb() {
-  return (
-    <nav aria-label="项目路径" className="hidden md:block">
-      <Link
-        href="/projects"
-        className="inline-flex items-center gap-1 text-[12px] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
-      >
-        <ChevronRight aria-hidden className="h-3 w-3 rotate-180" />
-        项目
-      </Link>
-    </nav>
-  );
-}
-
-// Hero：22px 标题 + 描述 + 紧凑数据栏
+// 与模特库页一致的桌面信息带：标题、摘要、统计和动作收进一行。
 function Hero({ counts }: { counts: Record<FilterKey, number> }) {
   const active = counts.running + counts.needs_review + counts.attention;
+  const summary =
+    counts.all > 0
+      ? active > 0
+        ? `${active} 个项目正在路上，${counts.completed} 个已交付。`
+        : "所有项目都已收束，可以开启下一组棚拍。"
+      : "管理模特库、商品图分析、模特候选、展示图生成与交付。";
   return (
-    <section className="grid gap-4 border-b border-[var(--border)] pb-4 md:gap-6 md:pb-6">
-      <div className="hidden items-end justify-between gap-6 md:flex">
-        <div className="min-w-0">
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-            Project Index
-          </p>
-          <h1 className="mt-2 font-display text-[36px] italic leading-[1] text-[var(--fg-0)] md:text-[44px]">
-            服饰模特图
-          </h1>
-          <p className="mt-3 max-w-2xl text-[13px] leading-[1.7] text-[var(--fg-2)]">
-            {counts.all > 0
-              ? active > 0
-                ? `${active} 个项目正在路上，${counts.completed} 个已交付。`
-                : "所有项目都已收束，可以开启下一组棚拍。"
-              : "管理模特库、商品图分析、模特候选、展示图生成与交付。"}
-          </p>
+    <section className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
+      <div className="flex min-w-0 items-baseline gap-2.5">
+        <p className="type-page-kicker shrink-0">
+          Project Index
+        </p>
+        <h1 className="type-page-title shrink-0">
+          服饰模特图
+        </h1>
+        <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
+          {summary}
+        </p>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-2">
+        <div className="hidden items-center gap-1.5 lg:flex">
+          <CompactStat label="全部" value={counts.all} />
+          <CompactStat label="进行中" value={active} accent={active > 0} />
+          <CompactStat label="已交付" value={counts.completed} />
         </div>
         <Link
           href="/projects/apparel-model-showcase/new"
-          className="group inline-flex shrink-0 items-center gap-2 rounded-full bg-[var(--accent)] px-4 py-2 text-[13px] font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
+          className="group inline-flex h-7 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-2.5 text-[12px] font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
         >
           <Plus className="h-3.5 w-3.5" />
           新建项目
           <ArrowRight className="h-3.5 w-3.5 -translate-x-1 opacity-0 transition-all duration-[var(--dur-base)] group-hover:translate-x-0 group-hover:opacity-100" />
         </Link>
       </div>
-
-      <div className="grid grid-cols-1 gap-px overflow-hidden border border-[var(--border-subtle)] min-[430px]:grid-cols-3 md:max-w-2xl">
-        <Stat label="全部" value={counts.all} />
-        <Stat label="进行中" value={active} accent={active > 0} />
-        <Stat label="已交付" value={counts.completed} />
-      </div>
     </section>
   );
 }
 
-function Stat({
+function CompactStat({
   label,
   value,
   accent = false,
@@ -240,17 +227,17 @@ function Stat({
   accent?: boolean;
 }) {
   return (
-    <div className="flex items-baseline gap-2 bg-[var(--bg-1)] px-4 py-3.5 md:px-5 md:py-4">
+    <span className="inline-flex h-7 items-baseline gap-1.5 border border-[var(--border-subtle)] px-2">
       <span
         className={cn(
-          "text-[22px] font-semibold tabular-nums leading-none md:text-[24px]",
+          "text-[13px] font-semibold tabular-nums leading-[1.9]",
           accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
         )}
       >
         {String(value).padStart(2, "0")}
       </span>
-      <span className="text-[12px] text-[var(--fg-2)]">{label}</span>
-    </div>
+      <span className="text-[10px] text-[var(--fg-2)]">{label}</span>
+    </span>
   );
 }
 
@@ -263,16 +250,16 @@ function ModelLibraryEntry() {
   );
   const total = items.length;
   const desktopThumbs = items.slice(0, 5);
-  const mobileThumbs = items.slice(0, 4);
+  const mobileThumbs = items.slice(0, 3);
   const hasItems = total > 0;
 
   return (
     <Link
       href="/library"
       aria-label="进入模特库"
-      className="group block border-y border-[var(--border)] py-4 transition-colors hover:bg-[var(--bg-1)]/45 md:py-5"
+      className="group block border-y border-[var(--border)] py-3 transition-colors hover:bg-[var(--bg-1)]/45 md:py-3.5"
     >
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3 md:gap-4">
           <div className="flex shrink-0 -space-x-2.5 md:-space-x-3">
             {hasItems ? (
@@ -300,22 +287,22 @@ function ModelLibraryEntry() {
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
               模特库
             </p>
-            <h2 className="mt-1 text-[18px] font-semibold tracking-tight text-[var(--fg-0)] md:text-[20px]">
+            <h2 className="type-card-title mt-0.5 md:text-[18px]">
               模特库
             </h2>
-            <p className="mt-1 max-w-md text-[12.5px] leading-[1.65] text-[var(--fg-2)]">
+            <p className="type-page-subtitle mt-0.5 hidden max-w-md truncate sm:block">
               {hasItems
                 ? "浏览预设、收藏与生成的模特"
                 : "进入并新建你的第一个模特"}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-3 self-start md:self-center">
+        <div className="flex shrink-0 items-center gap-2">
           <div className="text-right">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="hidden font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)] sm:block">
               Models
             </p>
-            <p className="font-display text-[24px] italic leading-none text-[var(--fg-0)] md:text-[28px]">
+            <p className="type-metric md:text-[24px]">
               {String(total).padStart(2, "0")}
             </p>
           </div>
@@ -403,7 +390,7 @@ function Toolbar({
   onKeywordChange: (value: string) => void;
 }) {
   return (
-    <section className="grid gap-4 border-b border-[var(--border)] pb-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)] lg:items-end">
+    <section className="grid gap-2 border-b border-[var(--border)] pb-2.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,300px)] lg:items-end">
       <div className="flex min-w-0 flex-wrap gap-x-1 gap-y-1 md:gap-x-1">
         {FILTERS.map((option) => {
           const active = filter === option.key;
@@ -414,7 +401,7 @@ function Toolbar({
               type="button"
               onClick={() => onFilterChange(option.key)}
               className={cn(
-                "group relative inline-flex min-h-10 shrink-0 cursor-pointer items-baseline gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
+                "group relative inline-flex min-h-9 shrink-0 cursor-pointer items-baseline gap-1.5 px-2.5 py-1.5 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                 active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
               )}
             >
@@ -441,7 +428,7 @@ function Toolbar({
           value={keyword}
           onChange={(event) => onKeywordChange(event.target.value)}
           placeholder="搜索标题或基础需求"
-          className="h-11 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+          className="h-10 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--amber-400)] md:h-9 md:text-sm"
           aria-label="搜索项目"
         />
         {keyword ? (
@@ -461,7 +448,7 @@ function Toolbar({
 
 function ProjectsGrid({ items }: { items: WorkflowRunListItem[] }) {
   return (
-    <section className="grid grid-cols-2 gap-x-4 gap-y-8 md:gap-x-6 md:gap-y-12 lg:grid-cols-3 xl:grid-cols-4">
+    <section className="grid grid-cols-2 gap-x-4 gap-y-7 md:gap-x-5 md:gap-y-9 lg:grid-cols-3 xl:grid-cols-4">
       {items.map((item, index) => (
         <ProjectCard key={item.id} item={item} order={index} />
       ))}
@@ -890,10 +877,10 @@ function ErrorPanel({ onRetry }: { onRetry: () => void }) {
           <AlertTriangle className="h-4 w-4" />
         </span>
         <div className="flex-1">
-          <h3 className="text-[15px] font-semibold tracking-tight text-[var(--fg-0)]">
+          <h3 className="type-card-title">
             项目加载失败
           </h3>
-          <p className="mt-0.5 text-[12.5px] text-[var(--fg-2)]">
+          <p className="type-body-sm mt-0.5">
             网络错误或服务繁忙，请稍后重试。
           </p>
           <Button
@@ -913,16 +900,16 @@ function ErrorPanel({ onRetry }: { onRetry: () => void }) {
 
 function EmptyHero() {
   return (
-    <section className="border-y border-[var(--border)] py-12 md:py-16">
+    <section className="border-y border-[var(--border)] py-8 md:py-10">
       <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
             Apparel Workflow
           </p>
-          <h2 className="mt-2 max-w-2xl text-[24px] font-semibold tracking-tight leading-[1.25] text-[var(--fg-0)] md:text-[28px]">
+          <h2 className="type-page-title mt-2 max-w-2xl md:text-[28px]">
             从一张商品图，到一条完整的模特图工作流
           </h2>
-          <p className="mt-3 max-w-2xl text-[13px] leading-[1.7] text-[var(--fg-2)]">
+          <p className="type-body-sm mt-3 max-w-2xl">
             上传商品图，确认模特候选，再进入展示图生成、质检和交付。每一步都可以继续编辑和回看。
           </p>
         </div>

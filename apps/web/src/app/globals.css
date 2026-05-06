@@ -10,6 +10,18 @@
   --color-lumen-amber-border: rgba(242, 169, 58, 0.28);
   --color-lumen-dark: #08080A;
   --color-lumen-surface: rgba(24, 24, 24, 0.6);
+
+  /* Tailwind v4 utility source of truth.
+     4px rhythm stays default-equivalent; radius scale is intentionally restrained:
+     controls/cards sit at 6-8px, panels/dialogs at 10-16px, pills remain full. */
+  --spacing: 4px;
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
+  --radius-3xl: 16px;
 }
 
 @layer base {
@@ -70,34 +82,46 @@
     --surface:       rgba(24, 24, 24, 0.6);
 
     /* 字体家族（spec §4.2）
-       --font-display / --font-body / --font-mono 由 next/font 在 body class
-       上覆盖写入 —— 下面的定义作为 next/font 未载入（SSR 首屏 / 降级）时的
-       fallback 链，避免 body 掉回浏览器默认。 */
-    --font-display:    "Instrument Serif", "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+       --font-body / --font-mono / --font-serif 由 next/font 在 body class
+       上覆盖写入。产品 UI 统一使用 Geist；serif 仅作为内容装饰备用。 */
+    --font-display:    "Geist", "SourceHanSans-VF", -apple-system, system-ui, sans-serif;
     --font-body:       "Geist", "SourceHanSans-VF", -apple-system, system-ui, sans-serif;
     --font-mono:       "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-    --font-zh-display: "LXGW WenKai Screen", "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+    --font-serif:      "Instrument Serif", "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+    --font-zh-display: "SourceHanSans-VF", "PingFang SC", "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
     --font-zh-body:    "SourceHanSans-VF", "PingFang SC", "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
 
-    /* 排版阶梯（移动端特化） */
-    --text-display-xl: 36px;
+    /* 排版阶梯：全站只从这组 token 取页面级字号。 */
+    --text-page-title: 24px;
+    --text-page-title-sm: 22px;
+    --text-section-title: 20px;
+    --text-card-title: 16px;
+    --text-body-lg: 16px;
+    --text-body-md: 15px;
+    --text-body-sm: 13px;
+    --text-caption: 12px;
+    --text-overline: 10px;
+    --text-metric: 22px;
+    --text-display-xl: 32px;
     --text-display-lg: 28px;
-    --text-title-md:   18px;
-    --text-body-lg:    17px;
-    --text-body-md:    15px;
-    --text-body-sm:    13px;
-    --text-caption:    11px;
-    --text-mono-sm:    12px;
-    --text-mono-xs:    10px;
+    --text-title-md: var(--text-section-title);
+    --text-mono-sm: 12px;
+    --text-mono-xs: 10px;
 
     /* 间距（4px 基） */
     --space-1: 4px;  --space-2: 8px;   --space-3: 12px; --space-4: 16px;
     --space-5: 20px; --space-6: 24px;  --space-8: 32px; --space-10: 40px;
     --space-12: 48px; --space-16: 64px; --space-20: 80px;
 
-    /* 圆角 */
-    --radius-xs: 4px; --radius-sm: 8px; --radius-md: 12px;
-    --radius-lg: 16px; --radius-xl: 20px; --radius-2xl: 24px;
+    /* 圆角：克制的全站半径比例。Tailwind rounded-* 与这些值同源。 */
+    --radius-xs: 3px; --radius-sm: 4px; --radius-md: 6px;
+    --radius-lg: 8px; --radius-xl: 10px; --radius-2xl: 12px;
+    --radius-3xl: 16px;
+    --radius-control: var(--radius-md);
+    --radius-card: var(--radius-lg);
+    --radius-panel: var(--radius-xl);
+    --radius-dialog: var(--radius-2xl);
+    --radius-sheet: var(--radius-3xl);
     --radius-pill: 999px;
 
     /* 阴影（暗房浓度） */
@@ -316,9 +340,9 @@
     color: inherit;
   }
 
-  h1 { @apply text-3xl font-semibold tracking-tight; line-height: 1.2; }
-  h2 { @apply text-2xl font-semibold tracking-tight; line-height: 1.25; }
-  h3 { @apply text-lg font-medium tracking-tight; line-height: 1.35; }
+  h1 { font-size: var(--text-page-title); font-weight: 600; line-height: 1.15; letter-spacing: 0; }
+  h2 { font-size: var(--text-section-title); font-weight: 600; line-height: 1.22; letter-spacing: 0; }
+  h3 { font-size: var(--text-card-title); font-weight: 600; line-height: 1.28; letter-spacing: 0; }
 }
 
 @layer utilities {
@@ -490,21 +514,83 @@
   .text-pretty  { text-wrap: pretty; }
 
   /* Darkroom 字体 utility —— 业务层面按语义引用 */
-  .font-display { font-family: var(--font-display, "Instrument Serif", serif); }
+  .font-display { font-family: var(--font-display, "Geist", system-ui, sans-serif); }
   .font-body    { font-family: var(--font-body, "Geist", system-ui, sans-serif); }
   .font-mono    { font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, Menlo, monospace); }
+  .font-serif   { font-family: var(--font-serif, "Instrument Serif", serif); }
   .font-zh-display { font-family: var(--font-zh-display); }
   .font-zh-body    { font-family: var(--font-zh-body); }
 
-  .text-display-xl { font-size: var(--text-display-xl); line-height: 40px; letter-spacing: -0.02em; }
-  .text-display-lg { font-size: var(--text-display-lg); line-height: 34px; letter-spacing: -0.015em; }
-  .text-title-md   { font-size: var(--text-title-md);   line-height: 26px; letter-spacing: -0.005em; }
+  .type-page-kicker { font-family: var(--font-mono); font-size: var(--text-overline); line-height: 14px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-2); }
+  .type-page-title { font-family: var(--font-display); font-size: var(--text-page-title); font-weight: 600; line-height: 1.1; letter-spacing: 0; color: var(--fg-0); }
+  .type-page-title-sm { font-family: var(--font-display); font-size: var(--text-page-title-sm); font-weight: 600; line-height: 1.12; letter-spacing: 0; color: var(--fg-0); }
+  .type-page-subtitle { font-size: var(--text-caption); line-height: 20px; color: var(--fg-2); }
+  .type-section-title { font-family: var(--font-display); font-size: var(--text-section-title); font-weight: 600; line-height: 1.2; letter-spacing: 0; color: var(--fg-0); }
+  .type-card-title { font-size: var(--text-card-title); font-weight: 600; line-height: 1.25; letter-spacing: 0; color: var(--fg-0); }
+  .type-body { font-size: var(--text-body-md); line-height: 22px; color: var(--fg-1); }
+  .type-body-sm { font-size: var(--text-body-sm); line-height: 20px; color: var(--fg-2); }
+  .type-caption { font-size: var(--text-caption); line-height: 18px; color: var(--fg-2); }
+  .type-metric { font-family: var(--font-display); font-size: var(--text-metric); font-weight: 600; line-height: 1; letter-spacing: 0; font-variant-numeric: tabular-nums; color: var(--fg-0); }
+  .type-mono-meta { font-family: var(--font-mono); font-size: var(--text-overline); line-height: 14px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-2); }
+
+  .text-display-xl { font-size: var(--text-display-xl); line-height: 40px; letter-spacing: 0; }
+  .text-display-lg { font-size: var(--text-display-lg); line-height: 34px; letter-spacing: 0; }
+  .text-title-md   { font-size: var(--text-title-md);   line-height: 26px; letter-spacing: 0; }
   .text-body-lg    { font-size: var(--text-body-lg);    line-height: 24px; }
   .text-body-md    { font-size: var(--text-body-md);    line-height: 22px; }
   .text-body-sm    { font-size: var(--text-body-sm);    line-height: 20px; }
   .text-caption    { font-size: var(--text-caption);    line-height: 16px; letter-spacing: 0.02em; }
   .text-mono-sm    { font-size: var(--text-mono-sm);    line-height: 18px; }
   .text-mono-xs    { font-size: var(--text-mono-xs);    line-height: 14px; letter-spacing: 0.04em; }
+
+  /* Surface primitives: one visual grammar for cards, panels, dialogs and fields. */
+  .surface-card {
+    border-radius: var(--radius-card);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-1) 72%, transparent);
+    box-shadow: var(--shadow-1);
+    backdrop-filter: blur(12px);
+  }
+  .surface-card-hover {
+    transition:
+      border-color var(--dur-base) var(--ease-develop),
+      background-color var(--dur-base) var(--ease-develop),
+      box-shadow var(--dur-base) var(--ease-develop);
+  }
+  .surface-card-hover:hover {
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--bg-1) 84%, transparent);
+    box-shadow: var(--shadow-2);
+  }
+  .surface-panel {
+    border-radius: var(--radius-panel);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-1) 82%, transparent);
+    box-shadow: var(--shadow-2);
+    backdrop-filter: blur(16px);
+  }
+  .surface-dialog {
+    border-radius: var(--radius-dialog);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-1) 94%, transparent);
+    box-shadow: var(--shadow-3);
+    backdrop-filter: blur(20px);
+  }
+  .control-shell {
+    border-radius: var(--radius-control);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-1) 66%, transparent);
+  }
+  @supports not (background: color-mix(in srgb, white 50%, transparent)) {
+    .surface-card,
+    .control-shell {
+      background: var(--bg-1);
+    }
+    .surface-panel,
+    .surface-dialog {
+      background: var(--bg-1);
+    }
+  }
 
   /* 细滚动条 */
   .scrollbar-thin {

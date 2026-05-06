@@ -45,21 +45,37 @@ export function ProjectFunctionHub() {
       <ProjectMobileTopBar title="项目" subtitle="项目中心" />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-3 md:mb-0 md:px-10 md:py-8">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-5 md:gap-8">
-          <header className="hidden md:block">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Project Hub
-            </p>
-            <h1 className="mt-2 font-display text-[34px] italic leading-[1] text-[var(--fg-0)] md:text-[42px]">
-              项目
-            </h1>
-            <p className="mt-3 max-w-xl text-[13px] leading-[1.7] text-[var(--fg-2)]">
-              选择要创建和管理的项目类型。每一类工作流由 AI 串联多步生成、审稿与交付。
-            </p>
+      <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-6 md:pt-3">
+        <div className="mx-auto grid w-full max-w-[1440px] gap-3">
+          <header className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
+            <div className="flex min-w-0 items-baseline gap-2.5">
+              <p className="type-page-kicker shrink-0">
+                Project Hub
+              </p>
+              <h1 className="type-page-title shrink-0">
+                项目
+              </h1>
+              <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
+                选择要创建和管理的项目类型。每一类工作流由 AI 串联多步生成、审稿与交付。
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <span className="inline-flex h-7 items-baseline gap-1.5 border border-[var(--border-subtle)] px-2">
+                <span className="text-[13px] font-semibold tabular-nums leading-[1.9] text-[var(--fg-0)]">
+                  {String(FEATURES.filter((feature) => feature.available).length).padStart(2, "0")}
+                </span>
+                <span className="text-[10px] text-[var(--fg-2)]">可用</span>
+              </span>
+              <span className="inline-flex h-7 items-baseline gap-1.5 border border-[var(--border-subtle)] px-2">
+                <span className="text-[13px] font-semibold tabular-nums leading-[1.9] text-[var(--fg-0)]">
+                  {String(FEATURES.length).padStart(2, "0")}
+                </span>
+                <span className="text-[10px] text-[var(--fg-2)]">全部</span>
+              </span>
+            </div>
           </header>
 
-          <section className="grid gap-x-5 gap-y-6 sm:grid-cols-2 md:grid-cols-3 md:gap-x-6 md:gap-y-8">
+          <section className="grid gap-x-5 gap-y-6 sm:grid-cols-2 md:grid-cols-3 md:gap-x-5 md:gap-y-7">
             {FEATURES.map((feature, index) => (
               <FeatureCard key={feature.title} feature={feature} index={index} />
             ))}
@@ -85,7 +101,7 @@ function FeatureCard({
     <>
       <div
         className={cn(
-          "relative h-24 overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)] sm:h-36 md:h-44",
+          "relative h-24 overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)] sm:h-36 md:h-40",
           feature.available
             ? "group-hover:border-[var(--border-amber)]/60"
             : "opacity-60",
@@ -122,7 +138,7 @@ function FeatureCard({
         <div className="flex items-baseline gap-2">
           <h2
             className={cn(
-              "text-[17px] font-semibold tracking-tight leading-[1.25] transition-colors duration-[var(--dur-base)] sm:text-[18px] md:text-[19px]",
+              "type-card-title transition-colors duration-[var(--dur-base)] sm:text-[18px] md:text-[19px]",
               feature.available
                 ? "text-[var(--fg-0)] group-hover:text-[var(--amber-300)]"
                 : "text-[var(--fg-2)]",

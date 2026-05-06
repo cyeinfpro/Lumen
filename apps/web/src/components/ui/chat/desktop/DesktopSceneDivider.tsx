@@ -1,6 +1,6 @@
 "use client";
 
-// Scene NN 分隔条（桌面版）：Instrument Serif italic 13px，两侧 1px 细线。
+// Scene NN 分隔条（桌面版）：mono meta label + 两侧 1px 细线。
 // 跟 mobile 视觉一致，仅字号略大、上下间距更舒朗。
 
 import { cn } from "@/lib/utils";
@@ -32,10 +32,9 @@ export function DesktopSceneDivider({
       <span
         aria-hidden="true"
         className={cn(
-          "italic tracking-[0.02em] leading-none",
-          "text-[12px] text-[var(--fg-3)]",
+          "font-mono text-[10px] uppercase tracking-[0.14em] leading-none",
+          "text-[var(--fg-3)]",
         )}
-        style={{ fontFamily: "var(--font-display)" }}
       >
         {label}
         {collapsed ? " · 折叠" : ""}

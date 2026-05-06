@@ -86,8 +86,8 @@ export function Onboarding({
         transition={{ duration: 0.5, delay: 0.05, ease: "easeOut" }}
         className="relative mb-4 md:mb-5"
       >
-        <div className="relative flex h-14 w-14 items-center justify-center rounded-[1.2rem] border border-white/15 bg-white/[0.06] shadow-[0_16px_48px_-14px_rgba(242,169,58,0.7)] backdrop-blur-xl md:h-16 md:w-16 md:rounded-[1.35rem]">
-          <div className="absolute inset-1 rounded-[0.95rem] bg-gradient-to-br from-[var(--accent)] to-orange-200 md:rounded-[1.1rem]" />
+        <div className="relative flex h-14 w-14 items-center justify-center rounded-[var(--radius-2xl)] border border-white/15 bg-white/[0.06] shadow-[0_16px_48px_-14px_rgba(242,169,58,0.7)] backdrop-blur-xl md:h-16 md:w-16">
+          <div className="absolute inset-1 rounded-[var(--radius-xl)] bg-gradient-to-br from-[var(--accent)] to-orange-200" />
           <Sparkles className="relative z-10 h-6 w-6 text-black/75 md:h-7 md:w-7" strokeWidth={2.2} />
         </div>
       </motion.div>
@@ -105,7 +105,7 @@ export function Onboarding({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.12 }}
-        className="max-w-[20rem] break-words text-balance text-xl font-semibold leading-[1.12] tracking-tight text-[var(--fg-0)] sm:max-w-2xl sm:text-2xl md:text-[clamp(2rem,5vw,2.75rem)]"
+        className="type-page-title max-w-[20rem] break-words text-balance sm:max-w-2xl md:text-[28px]"
       >
         从一句话开始，
         <span className="text-[var(--accent)]">
@@ -117,7 +117,7 @@ export function Onboarding({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.16 }}
-        className="mt-3 max-w-lg text-pretty px-1 text-[13px] leading-6 text-[var(--fg-1)] md:text-sm md:leading-7"
+        className="type-body mt-3 max-w-lg text-pretty px-1"
       >
         选一个起点，或直接写下你想要的画面。
       </motion.p>
@@ -170,7 +170,7 @@ export function Onboarding({
             transition={{ duration: 0.35, delay: 0.18 + index * 0.04 }}
             whileHover={loading ? undefined : { y: -2 }}
             className={cn(
-              "group relative min-w-0 overflow-hidden rounded-2xl border border-[var(--border)] bg-white/[0.035] p-3.5 text-left",
+              "group relative min-w-0 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.035] p-3.5 text-left",
               "shadow-[0_12px_40px_-20px_rgba(0,0,0,0.8)] backdrop-blur-md",
               "transition-[border-color,background-color,box-shadow] duration-200 hover:border-[var(--accent)]/35 hover:bg-white/[0.06]",
               "cursor-pointer",

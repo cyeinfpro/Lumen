@@ -57,10 +57,10 @@ export default function UsagePage() {
       >
         <header className="mb-5 flex items-start justify-between gap-4 flex-wrap md:mb-8">
           <div className="hidden min-w-0 md:block">
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+            <h1 className="type-page-title">
               用量统计
             </h1>
-            <p className="text-sm text-[var(--fg-1)] mt-1.5">
+            <p className="type-body mt-1.5">
               过去 {selectedPeriod.label} 的使用记录
             </p>
             {q.data && (
@@ -210,14 +210,14 @@ function UsageView({ data }: { data: UsageOut }) {
         >
           <div className="flex flex-col md:flex-row md:items-baseline gap-4 md:gap-8">
             <div>
-              <div className="text-2xl md:text-3xl font-semibold font-mono tabular-nums text-neutral-100">
+              <div className="type-metric text-[24px] md:text-[28px]">
                 {formatThousands(data.total_tokens_in)}
               </div>
               <div className="text-xs text-neutral-500 mt-0.5">输入</div>
             </div>
             <div className="h-px w-full md:h-8 md:w-px bg-white/8" />
             <div>
-              <div className="text-2xl md:text-3xl font-semibold font-mono tabular-nums text-neutral-100">
+              <div className="type-metric text-[24px] md:text-[28px]">
                 {formatThousands(data.total_tokens_out)}
               </div>
               <div className="text-xs text-neutral-500 mt-0.5">输出</div>
@@ -230,7 +230,7 @@ function UsageView({ data }: { data: UsageOut }) {
           icon={<Database className="w-4 h-4" />}
           delay={0.2}
         >
-          <div className="text-2xl md:text-3xl font-semibold font-mono tabular-nums text-neutral-100">
+          <div className="type-metric text-[24px] md:text-[28px]">
             {formatBytes(data.storage_bytes)}
           </div>
           <div className="text-xs text-neutral-500 mt-0.5 font-mono tabular-nums">
@@ -274,7 +274,7 @@ function StatCard({
           </span>
         )}
       </div>
-      <div className="text-2xl md:text-3xl font-semibold font-mono tabular-nums text-neutral-100 mt-3 whitespace-nowrap overflow-hidden text-ellipsis">
+      <div className="type-metric mt-3 overflow-hidden text-ellipsis whitespace-nowrap text-[24px] md:text-[28px]">
         {value}
       </div>
       {sublabel && (

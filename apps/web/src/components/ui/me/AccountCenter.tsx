@@ -78,7 +78,7 @@ export function AccountCenter() {
   return (
     <div className="flex flex-col">
       <SectionLabel>设置</SectionLabel>
-      <div className="mx-4 rounded-2xl border border-[var(--border-subtle)] overflow-hidden">
+      <div className="mx-4 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
         <AccountRow
           href="/settings/usage"
           icon={<BarChart3 className="w-4 h-4" />}
@@ -119,7 +119,7 @@ export function AccountCenter() {
       {isAdmin && (
         <>
           <SectionLabel>管理</SectionLabel>
-          <div className="mx-4 rounded-2xl border border-[var(--border-subtle)] overflow-hidden">
+          <div className="mx-4 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
             <AccountRow
               href="/admin"
               icon={<Shield className="w-4 h-4" />}
@@ -131,7 +131,7 @@ export function AccountCenter() {
         </>
       )}
 
-      <div className="mt-5 mx-4 rounded-2xl border border-[var(--border-subtle)] overflow-hidden">
+      <div className="mx-4 mt-5 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
         <AccountRow
           icon={<LogOut className="w-4 h-4" />}
           label="退出登录"

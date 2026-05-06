@@ -23,7 +23,7 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
           Progress
         </p>
         <div className="mt-2 flex items-baseline gap-3">
-          <span className="text-[32px] font-semibold leading-none tabular-nums text-[var(--fg-0)]">
+          <span className="type-metric text-[28px]">
             {Math.round(progress * 100)}
           </span>
           <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
@@ -129,7 +129,7 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
           </p>
         </div>
         <div className="flex items-baseline gap-1">
-          <span className="font-display text-[28px] italic leading-none tabular-nums text-[var(--amber-300)]">
+          <span className="type-metric text-[28px] text-[var(--amber-300)]">
             {Math.round(progress * 100)}
           </span>
           <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">

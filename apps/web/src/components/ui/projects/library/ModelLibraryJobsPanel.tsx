@@ -123,13 +123,13 @@ export function ModelLibraryJobsPanel() {
       <header className="border-b border-[var(--border)] pb-3">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1">
-            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-page-kicker">
               任务中心
             </p>
-            <h2 className="mt-1.5 font-display text-[24px] italic leading-[1] text-[var(--fg-0)] md:text-[30px]">
+            <h2 className="type-page-title mt-1.5 md:text-[28px]">
               任务中心
             </h2>
-            <p className="mt-2 max-w-xl text-[12px] leading-5 text-[var(--fg-2)]">
+            <p className="type-page-subtitle mt-2 max-w-xl">
               独立生成与项目候选的统一进度跟踪
             </p>
           </div>
@@ -243,7 +243,7 @@ function Stat({
       </p>
       <p
         className={cn(
-          "mt-1 text-[20px] font-semibold leading-none tabular-nums md:text-[22px]",
+          "type-metric mt-1 md:text-[22px]",
           accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
         )}
       >
@@ -784,10 +784,10 @@ function SaveJobItemDialog({
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-page-kicker">
               收藏入库
             </p>
-            <h3 className="mt-2 text-[20px] font-semibold leading-tight text-[var(--fg-0)]">
+            <h3 className="type-section-title mt-2">
               收藏入库
             </h3>
           </div>
@@ -940,10 +940,10 @@ function EmptyJobs() {
             <Library className="mr-1.5 -mt-px inline-block h-3 w-3" />
             空队列
           </p>
-          <h4 className="mt-3 text-[24px] font-semibold leading-tight text-[var(--fg-0)] md:text-[28px]">
+          <h4 className="type-page-title mt-3 md:text-[28px]">
             还没有任务
           </h4>
-          <p className="mt-3 max-w-xl text-[14px] leading-[1.7] text-[var(--fg-1)]">
+          <p className="type-body mt-3 max-w-xl">
             {`从"新建模特"提交一批，或者在项目里生成模特候选，都会在这里实时聚合。`}
           </p>
         </div>

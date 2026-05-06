@@ -343,7 +343,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           "fixed left-[calc(50%+var(--sidebar-w)/2)] -translate-x-1/2 z-50",
           "w-[min(calc(100vw-var(--sidebar-w)-1rem),48rem)] lg:w-[min(calc(100vw-var(--sidebar-w)-2rem),56rem)]",
           "bottom-[calc(0.75rem+env(safe-area-inset-bottom)+var(--keyboard-offset,0px))] sm:bottom-[calc(1.5rem+env(safe-area-inset-bottom)+var(--keyboard-offset,0px))]",
-          "rounded-[1.7rem] shadow-[0_24px_80px_-26px_rgba(0,0,0,0.75),0_0_0_1px_rgba(255,255,255,0.04)]",
+          "rounded-[var(--radius-sheet)] shadow-[0_24px_80px_-26px_rgba(0,0,0,0.75),0_0_0_1px_rgba(255,255,255,0.04)]",
           "border transition-[border-color,background-color,box-shadow] duration-300",
           // focus 不再改描边/背景 —— 避免"点进去冒出一个亮框"。
           // amber 只保留给拖拽态（用户正在往里拖图）。
@@ -554,7 +554,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.14 }}
               className={cn(
-                "pointer-events-none absolute inset-0 rounded-3xl",
+                "pointer-events-none absolute inset-0 rounded-[var(--radius-sheet)]",
                 "border-2 border-dashed border-[var(--color-lumen-amber)]",
                 "bg-[var(--color-lumen-amber)]/8",
                 "flex items-center justify-center",

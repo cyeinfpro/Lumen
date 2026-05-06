@@ -758,13 +758,13 @@ function EmptyBrowser() {
   return (
     <div className="border-y border-[var(--border)] py-16 md:py-20">
       <div className="grid gap-3">
-        <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
+        <p className="type-page-kicker text-[var(--amber-300)]">
           空
         </p>
-        <h4 className="font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] md:text-[36px]">
+        <h4 className="type-page-title md:text-[28px]">
           当前筛选没有模特
         </h4>
-        <p className="max-w-xl text-[13px] leading-[1.7] text-[var(--fg-1)]">
+        <p className="type-body-sm max-w-xl text-[var(--fg-1)]">
           上传私有模特、生成新模特，或同步预设文件夹后再查看。
         </p>
       </div>
@@ -1122,10 +1122,10 @@ function UploadDialog({
       >
         <header className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-page-kicker">
               上传到模特库
             </p>
-            <h3 className="mt-2 font-display text-[24px] italic leading-none text-[var(--fg-0)] md:text-[28px]">
+            <h3 className="type-page-title mt-2 md:text-[28px]">
               上传到模特库
             </h3>
           </div>
@@ -1365,10 +1365,10 @@ function MobileFilterSheet({
       >
         <header className="flex items-start justify-between gap-2 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-page-kicker">
               筛选
             </p>
-            <h3 className="mt-2 font-display text-[22px] italic leading-none text-[var(--fg-0)]">
+            <h3 className="type-page-title-sm mt-2">
               筛选
             </h3>
           </div>

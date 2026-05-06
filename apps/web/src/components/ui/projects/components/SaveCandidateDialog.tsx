@@ -1,7 +1,7 @@
 "use client";
 
 // Editorial 收藏到模特库表单：
-// - 不再用 BookmarkPlus 大图标做 prefix；改为 mono eyebrow + serif italic title
+// - 不再用 BookmarkPlus 大图标做 prefix；改为 mono eyebrow + unified title
 // - input/select 走 underline 极简（h-10 + border-b），去 h-9 rounded-md bg-[var(--bg-1)]
 // - chip 去 amber-soft 填充，改为选中 amber 文字 + amber 下划线
 // - 表单 section 之间用 hairline 分隔
@@ -178,10 +178,10 @@ export function SaveCandidateDialog({
       onOpenChange={onOpenChange}
       title={
         <span className="block">
-          <span className="block font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          <span className="type-page-kicker block">
             收藏 · 模特库
           </span>
-          <span className="mt-1 block text-[20px] font-semibold leading-[1.2] tracking-tight text-[var(--fg-0)]">
+          <span className="type-section-title mt-1 block">
             收藏到模特库
           </span>
         </span>
