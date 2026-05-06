@@ -207,6 +207,24 @@ def test_primary_candidate_image_prefers_contact_sheet_then_candidate_ids() -> N
     )
 
 
+def test_candidate_reference_image_ids_dedupes_all_known_fields() -> None:
+    candidate = SimpleNamespace(
+        model_brief_json={"candidate_image_ids": ["brief-1", "sheet", "", 123]},
+        contact_sheet_image_id="sheet",
+        portrait_image_id="portrait",
+        front_image_id=None,
+        side_image_id="side",
+        back_image_id="brief-1",
+    )
+
+    assert workflows._candidate_reference_image_ids(candidate) == [  # noqa: SLF001
+        "brief-1",
+        "sheet",
+        "portrait",
+        "side",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_workflow_produced_model_image_ids_includes_dual_race_bonus_ids() -> None:
     step = SimpleNamespace(
@@ -878,6 +896,106 @@ async def test_sync_showcase_completion_advances_to_quality_review() -> None:
     assert quality_step.output_json["overall"] == "pending"
     assert run.current_step == "quality_review"
     assert run.status == "needs_review"
+
+
+@pytest.mark.asyncio
+async def test_build_run_out_includes_model_library_reference_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    run = SimpleNamespace(
+        id="run-1",
+        conversation_id=None,
+        user_id="user-1",
+        type="apparel_model_showcase",
+        status="needs_review",
+        title="服饰模特展示图",
+        user_prompt="clean studio",
+        product_image_ids=["product-1"],
+        current_step="model_candidates",
+        quality_mode="premium",
+        metadata_jsonb={},
+        created_at=now,
+        updated_at=now,
+    )
+    step = SimpleNamespace(
+        id="step-1",
+        workflow_run_id="run-1",
+        step_key="model_candidates",
+        status="needs_review",
+        input_json={},
+        output_json={},
+        task_ids=[],
+        image_ids=[],
+        approved_at=None,
+        approved_by=None,
+        created_at=now,
+        updated_at=now,
+    )
+    candidate = SimpleNamespace(
+        id="cand-1",
+        workflow_run_id="run-1",
+        candidate_index=1,
+        portrait_image_id="lib-img",
+        front_image_id=None,
+        side_image_id=None,
+        back_image_id=None,
+        contact_sheet_image_id="lib-img",
+        model_brief_json={"candidate_image_ids": ["lib-img"]},
+        task_ids=[],
+        status="ready",
+        selected_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+    product_image = SimpleNamespace(id="product-1", source="uploaded")
+    library_image = SimpleNamespace(id="lib-img", source="uploaded")
+
+    async def fake_sync(_db: Any, _run: Any) -> None:
+        return None
+
+    async def fake_load_steps(_db: Any, _run_id: str) -> list[Any]:
+        return [step]
+
+    async def fake_load_quality_reports(_db: Any, _run_id: str) -> list[Any]:
+        return []
+
+    async def fake_image_out_map(_db: Any, images: list[Any]) -> dict[str, Any]:
+        return {
+            image.id: workflows.ImageOut(
+                id=image.id,
+                source=image.source,
+                parent_image_id=None,
+                owner_generation_id=None,
+                width=1024,
+                height=1280,
+                mime="image/jpeg",
+                blurhash=None,
+                url=f"/api/images/{image.id}/binary",
+                display_url=f"/api/images/{image.id}/variants/display2048",
+                preview_url=None,
+                thumb_url=None,
+                metadata_jsonb={},
+            )
+            for image in images
+        }
+
+    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(workflows, "_load_quality_reports", fake_load_quality_reports)
+    monkeypatch.setattr(workflows, "_image_out_map", fake_image_out_map)
+
+    db = _Db([], responses=[[candidate], [product_image, library_image]])
+
+    async def fake_refresh(_row: Any) -> None:
+        return None
+
+    db.refresh = fake_refresh  # type: ignore[attr-defined]
+
+    out = await workflows._build_run_out(db, run)  # noqa: SLF001
+
+    assert [image.id for image in out.product_images] == ["product-1"]
+    assert [image.id for image in out.generated_images] == ["lib-img"]
 
 
 @pytest.mark.asyncio

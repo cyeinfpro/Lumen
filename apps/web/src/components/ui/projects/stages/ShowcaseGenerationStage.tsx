@@ -29,7 +29,7 @@ import {
   type CreateAspectRatio,
   type CreateTemplate,
 } from "../types";
-import { imageById, showcaseImages, stepOf, stringValue } from "../utils";
+import { candidateImages, showcaseImages, stepOf, stringValue } from "../utils";
 
 export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun }) {
   const step = stepOf(workflow, "showcase_generation");
@@ -81,8 +81,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const productImages = workflow.product_images;
   const modelImages = workflow.model_candidates
     .filter((candidate) => candidate.status === "selected")
-    .map((candidate) => imageById(workflow, candidate.contact_sheet_image_id))
-    .filter((image): image is BackendImageMeta => Boolean(image));
+    .flatMap((candidate) => candidateImages(workflow, candidate).slice(0, 1));
 
   const openPreview = (list: BackendImageMeta[], index: number) => {
     setPreviewList(list);

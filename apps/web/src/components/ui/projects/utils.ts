@@ -4,6 +4,7 @@
 import {
   imageVariantUrl,
   type BackendImageMeta,
+  type ModelCandidate,
   type ModelLibraryAgeSegment,
   type WorkflowRun,
   type WorkflowRunListItem,
@@ -44,10 +45,41 @@ export function imageById(
   );
 }
 
+export function candidateReferenceImageIds(candidate: ModelCandidate): string[] {
+  return dedupeStrings([
+    ...stringArray(candidate.model_brief_json.candidate_image_ids),
+    candidate.contact_sheet_image_id,
+    candidate.portrait_image_id,
+    candidate.front_image_id,
+    candidate.side_image_id,
+    candidate.back_image_id,
+  ]);
+}
+
+export function candidateImages(
+  workflow: WorkflowRun,
+  candidate: ModelCandidate,
+): BackendImageMeta[] {
+  return candidateReferenceImageIds(candidate)
+    .map((imageId) => imageById(workflow, imageId))
+    .filter((image): image is BackendImageMeta => Boolean(image));
+}
+
 export function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
     : [];
+}
+
+function dedupeStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
 }
 
 export function stringValue(value: unknown): string | null {

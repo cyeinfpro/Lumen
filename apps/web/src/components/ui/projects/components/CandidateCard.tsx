@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/primitives/Button";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import type { BackendImageMeta, ModelCandidate, WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
-import { imageById, imageSrc, stringArray } from "../utils";
+import { candidateImages, imageSrc } from "../utils";
 
 interface CandidateCardProps {
   workflow: WorkflowRun;
@@ -38,15 +38,7 @@ export function CandidateCard({
   onSaveToLibrary,
   savingToLibrary = false,
 }: CandidateCardProps) {
-  const candidateImageIds = stringArray(candidate.model_brief_json.candidate_image_ids);
-  const imageIds = candidateImageIds.length
-    ? candidateImageIds
-    : candidate.contact_sheet_image_id
-      ? [candidate.contact_sheet_image_id]
-      : [];
-  const images = imageIds
-    .map((id) => imageById(workflow, id))
-    .filter((image): image is BackendImageMeta => Boolean(image));
+  const images = candidateImages(workflow, candidate);
   const firstImage = images[0];
   const selected = candidate.status === "selected";
   const generating = candidate.status === "generating";

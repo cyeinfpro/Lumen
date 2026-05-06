@@ -2176,21 +2176,30 @@ def _workflow_direct_image_ids(
     steps: Iterable[WorkflowStep],
     candidates: Iterable[ModelCandidate],
 ) -> list[str]:
-    candidate_image_fields = (
-        "contact_sheet_image_id",
-        "portrait_image_id",
-        "front_image_id",
-        "side_image_id",
-        "back_image_id",
-    )
     return _dedupe_nonempty(
         [
             *(image_id for step in steps for image_id in (step.image_ids or [])),
             *(
-                getattr(candidate, field, None)
+                image_id
                 for candidate in candidates
-                for field in candidate_image_fields
+                for image_id in _candidate_reference_image_ids(candidate)
             ),
+        ]
+    )
+
+
+def _candidate_reference_image_ids(candidate: ModelCandidate) -> list[str]:
+    brief = getattr(candidate, "model_brief_json", None) or {}
+    raw_candidate_ids = brief.get("candidate_image_ids")
+    candidate_image_ids = raw_candidate_ids if isinstance(raw_candidate_ids, list) else []
+    return _dedupe_nonempty(
+        [
+            *(image_id for image_id in candidate_image_ids if isinstance(image_id, str)),
+            candidate.contact_sheet_image_id,
+            candidate.portrait_image_id,
+            candidate.front_image_id,
+            candidate.side_image_id,
+            candidate.back_image_id,
         ]
     )
 
@@ -3616,20 +3625,7 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
         image_ids.update(step.image_ids or [])
     for candidate in candidates:
         all_task_ids.update(candidate.task_ids or [])
-        candidate_image_ids = (candidate.model_brief_json or {}).get("candidate_image_ids")
-        if isinstance(candidate_image_ids, list):
-            image_ids.update(
-                image_id for image_id in candidate_image_ids if isinstance(image_id, str)
-            )
-        for iid in (
-            candidate.contact_sheet_image_id,
-            candidate.front_image_id,
-            candidate.side_image_id,
-            candidate.back_image_id,
-            candidate.portrait_image_id,
-        ):
-            if iid:
-                image_ids.add(iid)
+        image_ids.update(_candidate_reference_image_ids(candidate))
     for report in reports:
         image_ids.add(report.image_id)
 
@@ -3681,11 +3677,16 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
         await db.refresh(row)
 
     image_map = await _image_out_map(db, owned_images)
-    product_images = [image_map[iid] for iid in (run.product_image_ids or []) if iid in image_map]
+    product_image_ids = set(run.product_image_ids or [])
+    product_images = [
+        image_map[iid] for iid in (run.product_image_ids or []) if iid in image_map
+    ]
     generated_images = [
         image_map[image.id]
         for image in owned_images
-        if image.source == "generated" and image.id in image_map
+        # 项目内的“非商品图”要都能被前端按 id 找到：
+        # 包括候选图、展示图，以及从模特库选入并 materialize 到当前用户空间的参考图。
+        if image.id not in product_image_ids and image.id in image_map
     ]
 
     return WorkflowRunOut(
@@ -4428,6 +4429,9 @@ async def select_apparel_model_library_item(
     }
     candidate_step = await _step(db, run.id, "model_candidates")
     candidate_step.status = "needs_review"
+    candidate_step.image_ids = _dedupe_nonempty(
+        [*(candidate_step.image_ids or []), image.id]
+    )
     candidate_step.input_json = {
         **(candidate_step.input_json or {}),
         "source": "model_library",
@@ -4438,6 +4442,7 @@ async def select_apparel_model_library_item(
     candidate_step.output_json = {
         **(candidate_step.output_json or {}),
         "library_candidate_id": candidate.id,
+        "library_candidate_image_id": image.id,
     }
     approval = await _step(db, run.id, "model_approval")
     if approval.status == "waiting_input":
