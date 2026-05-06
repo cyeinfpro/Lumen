@@ -542,7 +542,7 @@ class ApparelModelLibraryItemPatchIn(BaseModel):
 
 
 class ApparelModelLibraryBatchDeleteIn(BaseModel):
-    item_ids: list[str] = Field(min_length=1, max_length=100)
+    item_ids: list[str] = Field(min_length=1, max_length=1000)
 
 
 class ApparelModelLibraryBatchDeleteOut(BaseModel):
