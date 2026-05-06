@@ -25,6 +25,12 @@ from PIL import Image as PILImage
 from sqlalchemy import desc, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from lumen_core.providers import (
+    ProviderProxyDefinition,
+    parse_proxy_json,
+    resolve_provider_proxy_url,
+)
+from lumen_core.runtime_settings import get_spec
 
 from lumen_core.constants import (
     CompletionStatus,
@@ -102,6 +108,7 @@ from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..config import settings
 from ..redis_client import get_redis
+from ..runtime_settings import get_setting
 from .messages import (
     _create_assistant_task,
     _publish_assistant_task,
@@ -125,6 +132,8 @@ WORKFLOW_STEPS = [
     "delivery",
 ]
 MODEL_CANDIDATE_COUNT = 3
+MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY = "model_library.sync_use_proxy_pool"
+MODEL_LIBRARY_SYNC_PROXY_NAME_KEY = "model_library.sync_proxy_name"
 DEFAULT_SHOT_PLAN = [
     "front_full_body",
     "natural_pose",
@@ -665,6 +674,63 @@ def _github_contents_url() -> str:
 def _sync_mode() -> str:
     mode = settings.apparel_model_library_sync_mode.strip().lower()
     return mode if mode in MODEL_LIBRARY_SYNC_MODES else "admin_only"
+
+
+def _model_library_http_client_kwargs(proxy_url: str | None = None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "timeout": httpx.Timeout(MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS),
+    }
+    if proxy_url:
+        kwargs["proxy"] = proxy_url
+    return kwargs
+
+
+async def _resolve_model_library_sync_proxy(
+    db: AsyncSession,
+) -> tuple[ProviderProxyDefinition | None, str | None]:
+    use_spec = get_spec(MODEL_LIBRARY_SYNC_USE_PROXY_POOL_KEY)
+    use_raw = await get_setting(db, use_spec) if use_spec is not None else None
+    if str(use_raw or "0").strip() != "1":
+        return None, None
+
+    providers_spec = get_spec("providers")
+    raw_providers = (
+        await get_setting(db, providers_spec) if providers_spec is not None else None
+    )
+    proxies, errors = parse_proxy_json(raw_providers)
+    for err in errors:
+        logger.warning("model library sync proxy config warning: %s", err)
+
+    enabled = [proxy for proxy in proxies if proxy.enabled]
+    if not enabled:
+        raise _http(
+            "proxy_unavailable",
+            "model library sync proxy pool is enabled but has no enabled proxies",
+            409,
+        )
+
+    name_spec = get_spec(MODEL_LIBRARY_SYNC_PROXY_NAME_KEY)
+    name_raw = await get_setting(db, name_spec) if name_spec is not None else None
+    target_name = str(name_raw or "").strip()
+    if target_name:
+        proxy = next((p for p in enabled if p.name == target_name), None)
+        if proxy is None:
+            raise _http(
+                "proxy_not_found",
+                f"model library sync proxy '{target_name}' not found or disabled",
+                409,
+            )
+    else:
+        proxy = enabled[0]
+
+    proxy_url = await resolve_provider_proxy_url(proxy)
+    if not proxy_url:
+        raise _http(
+            "proxy_resolve_failed",
+            f"model library sync proxy '{proxy.name}' could not be resolved",
+            409,
+        )
+    return proxy, proxy_url
 
 
 def _can_sync_library(user: User) -> bool:
@@ -1375,6 +1441,8 @@ def _cached_sync_response(state: dict[str, Any]) -> ApparelModelLibrarySyncOut:
 
 async def _sync_library_presets_from_github_folder(
     contents_url: str,
+    *,
+    proxy_url: str | None = None,
 ) -> ApparelModelLibrarySyncOut:
     if not contents_url:
         raise _http("sync_not_configured", "preset GitHub folder url is not configured", 503)
@@ -1392,12 +1460,14 @@ async def _sync_library_presets_from_github_folder(
             attempt_age = (_now() - last_attempt).total_seconds()
             if attempt_age < MODEL_LIBRARY_SYNC_RETRY_COOLDOWN_SECONDS:
                 return _cached_sync_response(state)
-        return await _do_sync_library_presets(contents_url, state)
+        return await _do_sync_library_presets(contents_url, state, proxy_url=proxy_url)
 
 
 async def _do_sync_library_presets(
     contents_url: str,
     state: dict[str, Any],
+    *,
+    proxy_url: str | None = None,
 ) -> ApparelModelLibrarySyncOut:
     now = _now()
     state["last_attempt_at"] = now.isoformat().replace("+00:00", "Z")
@@ -1409,7 +1479,7 @@ async def _do_sync_library_presets(
     errors: list[str] = []
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS)
+            **_model_library_http_client_kwargs(proxy_url)
         ) as client:
             files = await _walk_github_contents(client, contents_url)
             parsed_items = [
@@ -3455,11 +3525,16 @@ async def list_apparel_model_library(
 )
 async def sync_apparel_model_library_presets(
     user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApparelModelLibrarySyncOut:
     if not _can_sync_library(user):
         raise _http("forbidden", "model library preset sync is not allowed", 403)
+    _, proxy_url = await _resolve_model_library_sync_proxy(db)
     # cooldown / 并发控制全部在 _sync_library_presets_from_github_folder 内部处理
-    return await _sync_library_presets_from_github_folder(_github_contents_url())
+    return await _sync_library_presets_from_github_folder(
+        _github_contents_url(),
+        proxy_url=proxy_url,
+    )
 
 
 @router.get("/apparel-model-library/items/{item_id:path}/binary")

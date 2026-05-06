@@ -411,6 +411,31 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         env_fallback="LUMEN_UPDATE_PROXY_NAME",
     ),
 
+    # ----- 模特库同步 -----
+    SettingSpec(
+        key="model_library.sync_use_proxy_pool",
+        description=(
+            "同步模特库预设时是否使用代理池拉取 GitHub 文件。0=直连，1=使用代理池。"
+            "只影响“模特库 -> 同步”按钮触发的 GitHub Contents API 和图片下载请求。"
+        ),
+        sensitive=False,
+        parser=int,
+        env_fallback="APPAREL_MODEL_LIBRARY_SYNC_USE_PROXY_POOL",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="model_library.sync_proxy_name",
+        description=(
+            "模特库同步使用的代理名称。需要和代理池里的名称一致；"
+            "留空时使用代理池中第一个启用代理。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="APPAREL_MODEL_LIBRARY_SYNC_PROXY_NAME",
+    ),
+
     # ----- Telegram 机器人 -----
     SettingSpec(
         key="telegram.bot_enabled",
