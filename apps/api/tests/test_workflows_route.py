@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.routes import workflows
-from lumen_core.schemas import ModelCandidatesCreateIn
+from lumen_core.schemas import ApparelModelLibraryBatchDeleteIn, ModelCandidatesCreateIn
 
 
 class _Result:
@@ -64,6 +64,14 @@ def test_model_candidates_mvp_requires_three_candidates() -> None:
 
     with pytest.raises(ValidationError):
         ModelCandidatesCreateIn(candidate_count=2, style_prompt="premium")
+
+
+def test_model_library_batch_delete_accepts_export_sized_batches() -> None:
+    body = ApparelModelLibraryBatchDeleteIn(
+        item_ids=[f"user:item-{index}" for index in range(549)]
+    )
+
+    assert len(body.item_ids) == 549
 
 
 def test_github_folder_metadata_uses_directory_and_filename() -> None:
