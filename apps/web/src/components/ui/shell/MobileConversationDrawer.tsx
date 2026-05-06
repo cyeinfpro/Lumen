@@ -338,7 +338,7 @@ export function MobileConversationDrawer({
                 onClick={handleCreate}
                 disabled={createMut.isPending}
                 className={cn(
-                  "w-full inline-flex items-center justify-center gap-2 h-12 rounded-2xl",
+                  "inline-flex h-12 w-full items-center justify-center gap-2 rounded-[var(--radius-card)]",
                   "bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)]",
                   "text-black text-[15px] font-medium",
                   "shadow-[0_8px_22px_-8px_var(--amber-glow-strong)]",

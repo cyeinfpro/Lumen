@@ -187,13 +187,13 @@ function DialogHeader({
   return (
     <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--border)] px-5 py-4 md:px-6 md:py-5">
       <div className="min-w-0">
-        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+        <p className="type-page-kicker">
           模特库
         </p>
-        <h2 className="mt-1.5 text-[22px] font-semibold leading-[1.18] tracking-tight text-[var(--fg-0)] md:text-[24px]">
+        <h2 className="type-page-title-sm mt-1.5 md:text-[24px]">
           模特库
         </h2>
-        <p className="mt-2 max-w-md text-[12px] leading-5 text-[var(--fg-2)]">
+        <p className="type-page-subtitle mt-2 max-w-md">
           {hint}
         </p>
       </div>

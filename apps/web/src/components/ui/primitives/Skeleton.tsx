@@ -1,6 +1,6 @@
 "use client";
 
-// 骨架占位。配合 .animate-shimmer（globals.css）做光扫。默认 rounded-md。
+// 骨架占位。配合 .animate-shimmer（globals.css）做光扫。默认使用控件半径。
 
 import { cn } from "@/lib/utils";
 
@@ -20,7 +20,7 @@ export function Skeleton({
       ref={ref}
       aria-hidden="true"
       className={cn(
-        "block bg-white/[0.06] rounded-md",
+        "block rounded-[var(--radius-control)] bg-white/[0.06]",
         !isStatic && "animate-shimmer",
         className,
       )}

@@ -30,16 +30,16 @@ export function StageFrame({
       <header className="pb-5 pt-1 md:pt-2">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <p className="type-page-kicker">
               {eyebrow}
             </p>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <h2 className="text-[22px] font-semibold leading-[1.18] tracking-tight text-[var(--fg-0)] md:text-[26px]">
+              <h2 className="type-page-title-sm md:text-[24px]">
                 {title}
               </h2>
               {badge}
             </div>
-            <p className="mt-2 max-w-xl text-[13px] leading-6 text-[var(--fg-2)]">
+            <p className="type-body-sm mt-2 max-w-xl">
               {subtitle}
             </p>
           </div>
@@ -69,7 +69,7 @@ export function RunningState({
         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-50" />
         <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--amber-400)]" />
       </span>
-      <p className="text-[15px] font-semibold tracking-tight text-[var(--fg-0)]">{label}</p>
+      <p className="type-card-title">{label}</p>
       <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
         Developing
       </p>

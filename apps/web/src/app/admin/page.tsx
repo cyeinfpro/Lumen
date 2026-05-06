@@ -173,10 +173,10 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
       <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10">
         <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
           <div className="min-w-0">
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+            <h1 className="type-page-title">
               管理后台
             </h1>
-            <p className="text-sm text-[var(--fg-1)] mt-1.5">
+            <p className="type-body mt-1.5">
               管理用户、权限、系统配置
             </p>
           </div>

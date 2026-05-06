@@ -131,13 +131,10 @@ export function StreamNeverState() {
       <div className="flex h-14 w-14 items-center justify-center rounded-full border border-[var(--border-amber)] bg-[rgba(242,169,58,0.1)] text-[var(--amber-300)] shadow-amber">
         <WandSparkles className="h-6 w-6" />
       </div>
-      <div
-        className="mt-6 font-display italic text-[var(--fg-0)]"
-        style={{ fontSize: 36, lineHeight: 1.05 }}
-      >
+      <div className="type-page-title mt-6">
         还没有作品
       </div>
-      <div className="mt-3 max-w-[26rem] text-[15px] leading-7 text-[var(--fg-2)]">
+      <div className="type-body-sm mt-3 max-w-[26rem]">
         生成后的图片会放在这里。
       </div>
       <button

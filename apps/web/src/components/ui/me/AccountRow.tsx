@@ -41,7 +41,7 @@ export function AccountRow({
       <span
         aria-hidden
         className={cn(
-          "inline-flex items-center justify-center w-8 h-8 rounded-[10px] shrink-0",
+          "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-card)]",
           "bg-[var(--bg-2)]",
           destructive ? "text-[var(--danger)]" : "text-[var(--fg-1)]",
         )}

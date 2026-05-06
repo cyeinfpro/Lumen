@@ -52,7 +52,7 @@ export class StageErrorBoundary extends Component<Props, State> {
             <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
               错误
             </p>
-            <h3 className="mt-1 font-display text-[20px] italic text-[var(--fg-0)]">
+            <h3 className="type-section-title mt-1">
               阶段渲染异常
             </h3>
             <p className="mt-1 break-words text-[12px] text-[var(--fg-1)]">

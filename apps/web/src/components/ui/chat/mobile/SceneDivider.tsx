@@ -1,6 +1,6 @@
 "use client";
 
-// Scene NN 分隔条：Instrument Serif italic 11px，两侧 1px 细线。
+// Scene NN 分隔条：mono meta label + 两侧 1px 细线。
 // 双击切换折叠态（回调上浮）。
 
 import { cn } from "@/lib/utils";
@@ -28,10 +28,9 @@ export function SceneDivider({ index, collapsed, onToggle }: SceneDividerProps) 
       <span
         aria-hidden="true"
         className={cn(
-          "italic text-[11px] tracking-[0.04em] leading-none px-0.5",
+          "px-0.5 font-mono text-[10px] uppercase tracking-[0.14em] leading-none",
           collapsed ? "text-[var(--fg-3)]" : "text-[var(--fg-3)]",
         )}
-        style={{ fontFamily: "var(--font-display)" }}
       >
         {label}
         {collapsed ? " ▸" : ""}

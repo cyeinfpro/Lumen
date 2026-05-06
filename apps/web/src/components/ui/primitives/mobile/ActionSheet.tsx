@@ -36,12 +36,12 @@ export function ActionSheet({
         {(title || description) && (
           <div className="text-center py-3 border-b border-[var(--border-subtle)]">
             {title && (
-              <div className="text-[15px] font-medium text-[var(--fg-0)]">
+              <div className="type-card-title">
                 {title}
               </div>
             )}
             {description && (
-              <div className="mt-1 text-xs text-[var(--fg-2)]">
+              <div className="type-body-sm mt-1">
                 {description}
               </div>
             )}
@@ -86,7 +86,7 @@ export function ActionSheet({
           haptic="light"
           minHit={true}
           onPress={onClose}
-          className="w-full h-14 rounded-2xl bg-[var(--bg-2)] border border-[var(--border-subtle)] text-[15px] font-medium text-[var(--fg-0)]"
+          className="h-14 w-full rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[15px] font-medium text-[var(--fg-0)]"
         >
           {cancelLabel}
         </Pressable>

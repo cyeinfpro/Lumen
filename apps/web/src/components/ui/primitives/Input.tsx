@@ -20,7 +20,7 @@ interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "
 // iOS Safari 在 focus 到 font-size<16px 的 input 时会强制 zoom。
 // 故移动端文字升到 16px；同时 min-h-11 兜底 44px 可点区域。
 const FIELD =
-  "h-9 w-full rounded-md px-3 text-sm " +
+  "h-9 w-full rounded-[var(--radius-control)] px-3 text-sm " +
   "max-sm:text-base max-sm:min-h-11 " +
   "bg-[var(--bg-1)]/60 text-[var(--fg-0)] placeholder:text-[var(--fg-1)]/70 " +
   "border border-[var(--border)] " +

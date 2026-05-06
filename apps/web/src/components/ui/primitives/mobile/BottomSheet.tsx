@@ -281,7 +281,7 @@ export function BottomSheet({
             }
             className={[
               "relative w-full max-w-[640px] mx-auto",
-              "rounded-t-[24px] bg-[var(--bg-1)] border-t border-[var(--border-subtle)]",
+              "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)] border-t border-[var(--border-subtle)]",
               "shadow-[0_-24px_64px_-12px_rgba(0,0,0,0.8)]",
               "mobile-perf-surface",
               "flex flex-col",

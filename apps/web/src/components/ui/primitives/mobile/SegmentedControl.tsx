@@ -36,7 +36,7 @@ export function SegmentedControl<V extends string = string>({
       role="tablist"
       aria-label={ariaLabel}
       className={[
-        "relative flex items-center h-10 p-px rounded-full",
+        "relative flex h-10 items-center rounded-[var(--radius-card)] p-px",
         "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
         className,
       ].join(" ")}
@@ -54,7 +54,7 @@ export function SegmentedControl<V extends string = string>({
             haptic="light"
             onPress={() => onChange(item.value)}
             className={[
-              "relative z-[1] flex-1 h-9 px-3 rounded-full gap-1.5",
+              "relative z-[1] h-9 flex-1 rounded-[var(--radius-md)] px-3 gap-1.5",
               "text-[13px] font-medium transition-colors",
               active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
             ].join(" ")}
@@ -62,7 +62,7 @@ export function SegmentedControl<V extends string = string>({
             {active && (
               <motion.span
                 layoutId={layoutId}
-                className="absolute inset-0 rounded-full bg-[var(--bg-0)] shadow-[var(--shadow-1)] border border-[var(--border)]"
+                className="absolute inset-0 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-1)]"
                 transition={SPRING.snap}
                 aria-hidden
               />

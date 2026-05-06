@@ -37,7 +37,7 @@ export function DesktopMe() {
           {/* 左列：会话列表 */}
           <section aria-label="会话" className="min-w-0">
             <div className="flex items-center justify-between gap-4 mb-5">
-              <h1 className="text-[22px] font-semibold text-[var(--fg-0)] tracking-tight">
+              <h1 className="type-page-title-sm">
                 会话
               </h1>
             </div>

@@ -10,7 +10,7 @@
 //
 // 业务逻辑保持不变：uploadWithProgress / XHR / abort / progress / CSRF / API / validation / composedPrompt。
 
-import { ArrowDown, ArrowRight, ArrowUp, Loader2, RotateCcw, Trash2, Upload, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Loader2, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -386,42 +386,31 @@ export function ApparelWorkflowNewPage() {
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-3 md:mb-0 md:px-10 md:py-6 md:pb-12">
-        <div className="mx-auto grid w-full max-w-[1280px] gap-5 md:gap-8">
-          {/* Breadcrumb */}
-          <nav
-            aria-label="项目路径"
-            className="hidden items-center gap-3 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)] md:flex"
-          >
-            <Link href="/projects" className="transition-colors hover:text-[var(--fg-0)]">
-              Projects
-            </Link>
-            <span aria-hidden className="text-[var(--fg-3)]">·</span>
+      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-8 md:pt-3">
+        <div className="mx-auto grid w-full max-w-[1280px] gap-3">
+          <header className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
+            <div className="flex min-w-0 items-baseline gap-2.5">
+              <p className="type-page-kicker shrink-0">
+                新建项目
+              </p>
+              <h1 className="type-page-title shrink-0">
+                新建服饰模特图
+              </h1>
+              <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
+                上传 1-3 张商品图，确认模特候选后生成 4 张电商展示图。
+              </p>
+            </div>
             <Link
               href="/projects/apparel-model-showcase"
-              className="transition-colors hover:text-[var(--fg-0)]"
+              className="inline-flex h-7 shrink-0 items-center gap-1.5 border border-[var(--border)] px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
             >
-              Apparel
+              <ArrowLeft className="h-3.5 w-3.5" />
+              返回服饰模特图
             </Link>
-            <span aria-hidden className="text-[var(--fg-3)]">·</span>
-            <span className="text-[var(--fg-0)]">新建</span>
-          </nav>
-
-          {/* Hero */}
-          <header className="hidden border-b border-[var(--border)] pb-6 md:grid">
-            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              新建项目
-            </p>
-            <h1 className="mt-2 font-display text-[34px] italic leading-[1] text-[var(--fg-0)] md:text-[42px]">
-              新建服饰模特图
-            </h1>
-            <p className="mt-3 max-w-xl text-[13px] leading-6 text-[var(--fg-2)]">
-              上传 1-3 张商品图，先确认 AI 合成的模特，再一次性生成 4 张电商展示图。
-            </p>
           </header>
 
-          <div className="grid gap-7 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-10">
-            <section className="grid gap-6 md:gap-8">
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">
+            <section className="grid gap-5 md:gap-6">
               {/* Upload */}
               <SectionHeader
                 eyebrow="N°01 — 上传"
@@ -471,7 +460,7 @@ export function ApparelWorkflowNewPage() {
                   </span>
                   <p
                     className={cn(
-                      "text-[16px] font-semibold leading-snug md:text-[20px]",
+                      "type-section-title md:text-[20px]",
                       dragActive ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
                     )}
                   >
@@ -722,10 +711,10 @@ function SectionHeader({
     <header className="border-t border-[var(--border)] pt-5">
       <div className="flex items-end justify-between gap-4">
         <div className="min-w-0">
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          <p className="type-page-kicker">
             {eyebrow}
           </p>
-          <h2 className="mt-2 text-[20px] font-semibold leading-tight text-[var(--fg-0)] md:text-[22px]">
+          <h2 className="type-section-title mt-2 md:text-[22px]">
             {title}
           </h2>
         </div>

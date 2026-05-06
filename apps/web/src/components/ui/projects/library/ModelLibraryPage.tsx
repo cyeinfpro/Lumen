@@ -112,13 +112,13 @@ function LibraryHeader({
   return (
     <section className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
       <div className="flex min-w-0 items-baseline gap-2.5">
-        <p className="shrink-0 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <p className="type-page-kicker shrink-0">
           模特库
         </p>
-        <h1 className="shrink-0 font-display text-[24px] italic leading-[1] text-[var(--fg-0)]">
+        <h1 className="type-page-title shrink-0">
           模特库
         </h1>
-        <p className="hidden min-w-0 truncate text-[12px] leading-5 text-[var(--fg-2)] lg:block">
+        <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
           浏览预设、收藏、上传与生成的模特，集中管理你的全部模特资源。
         </p>
       </div>

@@ -91,10 +91,10 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               返回登录
             </Link>
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
+              <h1 className="type-page-title">
                 设置新密码
               </h1>
-              <p className="mt-1.5 text-sm text-[var(--fg-1)]">
+              <p className="type-body mt-1.5">
                 新密码至少 8 位。
               </p>
             </div>

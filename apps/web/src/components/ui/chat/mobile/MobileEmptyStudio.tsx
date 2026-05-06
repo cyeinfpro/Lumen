@@ -112,17 +112,11 @@ export function MobileEmptyStudio({
           >
             <Sparkles className="w-[18px] h-[18px] text-[var(--amber-400)]" />
           </span>
-          <h1
-            className="text-display-xl leading-[1.05] tracking-[-0.025em] text-[var(--fg-0)]"
-            style={{ fontFamily: "var(--font-display)" }}
-          >
+          <h1 className="type-page-title text-[28px]">
             Lumen
           </h1>
         </div>
-        <p
-          className="text-body-lg leading-[1.5] text-[var(--fg-1)] max-w-[280px]"
-          style={{ fontFamily: "var(--font-zh-display)" }}
-        >
+        <p className="type-body max-w-[280px]">
           先写一句话。
         </p>
       </div>

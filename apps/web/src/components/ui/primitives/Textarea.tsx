@@ -15,7 +15,7 @@ interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement
 
 // iOS Safari focus 缩放规避：移动端字号升到 16px。
 const FIELD =
-  "w-full rounded-md px-3 py-2 text-sm leading-relaxed " +
+  "w-full rounded-[var(--radius-control)] px-3 py-2 text-sm leading-relaxed " +
   "max-sm:text-base " +
   "bg-[var(--bg-1)]/60 text-[var(--fg-0)] placeholder:text-[var(--fg-1)]/70 " +
   "border border-[var(--border)] resize-y " +

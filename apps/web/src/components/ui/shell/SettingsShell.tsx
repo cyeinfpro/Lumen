@@ -27,7 +27,7 @@ export function SettingsShell({
           glassOnScroll={false}
           left={
             <div className="min-w-0">
-              <div className="truncate font-display text-[24px] italic leading-[1.05] text-[var(--fg-0)]">
+              <div className="type-page-title truncate">
                 {title}
               </div>
               {subtitle ? (

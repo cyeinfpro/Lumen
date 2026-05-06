@@ -20,7 +20,7 @@ import { RuntimeDefaultsBootstrap } from "@/components/RuntimeDefaultsBootstrap"
 // removes the network dependency entirely.
 const instrumentSerif = localFont({
   src: "./fonts/InstrumentSerif-Regular.woff2",
-  variable: "--font-display",
+  variable: "--font-serif",
   weight: "400",
   display: "swap",
   preload: true,
