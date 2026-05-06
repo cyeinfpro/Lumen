@@ -522,6 +522,8 @@ export interface ApparelModelLibraryBatchDeleteOut {
 export interface ApparelModelLibrarySelectIn {
   library_item_id: string;
   mode?: "use_directly";
+  style_prompt?: string;
+  accessory_plan?: AccessoryPlan;
 }
 
 export interface ModelCandidateSaveToLibraryIn {

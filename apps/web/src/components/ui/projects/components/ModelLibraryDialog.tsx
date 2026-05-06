@@ -20,6 +20,7 @@ import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import type {
+  AccessoryPlan,
   ApparelModelLibraryItem,
   ModelLibraryAgeSegment,
   WorkflowRun,
@@ -35,6 +36,8 @@ interface ModelLibraryDialogProps {
   onClose: () => void;
   onGenerateCandidates: () => void;
   generatingCandidates?: boolean;
+  selectionAccessoryPlan?: AccessoryPlan;
+  selectionStylePrompt?: string;
 }
 
 export function ModelLibraryDialog({
@@ -44,6 +47,8 @@ export function ModelLibraryDialog({
   onClose,
   onGenerateCandidates,
   generatingCandidates = false,
+  selectionAccessoryPlan,
+  selectionStylePrompt,
 }: ModelLibraryDialogProps) {
   const isMobile = useIsMobile();
   const router = useRouter();
@@ -81,9 +86,13 @@ export function ModelLibraryDialog({
   const handleSelect = useCallback(
     (item: ApparelModelLibraryItem) => {
       setLightboxActionPending(true);
-      selectItem.mutate(item.id);
+      selectItem.mutate({
+        library_item_id: item.id,
+        accessory_plan: selectionAccessoryPlan,
+        style_prompt: selectionStylePrompt,
+      });
     },
-    [selectItem, setLightboxActionPending],
+    [selectItem, selectionAccessoryPlan, selectionStylePrompt, setLightboxActionPending],
   );
 
   const openFullLibrary = () => {

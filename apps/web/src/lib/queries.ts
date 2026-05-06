@@ -100,6 +100,7 @@ import {
   type ApparelModelLibraryJobsList,
   type ApparelModelLibraryListResponse,
   type ApparelModelLibrarySaveJobItemIn,
+  type ApparelModelLibrarySelectIn,
   type ConversationListResponse,
   type ConversationSummary,
   type ConversationContextStats,
@@ -1343,12 +1344,14 @@ export function useDeleteApparelModelLibraryItemsMutation(
 
 export function useSelectApparelModelLibraryItemMutation(
   workflowId: string,
-  options?: Omit<UseMutationOptions<WorkflowRun, Error, string>, "mutationFn">,
+  options?: Omit<
+    UseMutationOptions<WorkflowRun, Error, ApparelModelLibrarySelectIn>,
+    "mutationFn"
+  >,
 ) {
   const qc = useQueryClient();
-  return useMutation<WorkflowRun, Error, string>({
-    mutationFn: (library_item_id) =>
-      selectApparelModelLibraryItem(workflowId, { library_item_id }),
+  return useMutation<WorkflowRun, Error, ApparelModelLibrarySelectIn>({
+    mutationFn: (body) => selectApparelModelLibraryItem(workflowId, body),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.setQueryData(qk.workflow(workflowId), data);

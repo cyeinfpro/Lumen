@@ -4,6 +4,7 @@
 import {
   imageVariantUrl,
   type BackendImageMeta,
+  type ModelLibraryAgeSegment,
   type WorkflowRun,
   type WorkflowRunListItem,
   type WorkflowStep,
@@ -66,12 +67,43 @@ export function accessorySuggestionText(workflow: WorkflowRun): string {
   return typeof recommendations === "string" ? recommendations : "";
 }
 
+export function defaultLibraryAgeSegment(workflow: WorkflowRun): ModelLibraryAgeSegment {
+  const profile = workflow.metadata_jsonb?.model_profile;
+  if (profile && typeof profile === "object" && "age_segment" in profile) {
+    const value = (profile as { age_segment?: unknown }).age_segment;
+    if (typeof value === "string" && isLibraryAgeSegment(value)) return value;
+  }
+  const text = workflow.user_prompt;
+  if (text.includes("幼儿")) return "toddler";
+  if (["儿童", "童装", "小朋友", "孩子"].some((word) => text.includes(word))) return "child";
+  if (text.includes("青少年")) return "teen";
+  if (text.includes("青年")) return "young_adult";
+  if (text.includes("中年") || text.includes("中老年")) return "middle_aged";
+  if (text.includes("老年")) return "senior";
+  if (text.includes("熟龄") || text.includes("成年")) return "adult";
+  return "all";
+}
+
 export function showcaseImages(workflow: WorkflowRun): BackendImageMeta[] {
   const showcaseStep = stepOf(workflow, "showcase_generation");
   const ids = showcaseStep?.image_ids ?? [];
   return ids
     .map((imageId) => imageById(workflow, imageId))
     .filter((image): image is BackendImageMeta => Boolean(image));
+}
+
+function isLibraryAgeSegment(value: string): value is ModelLibraryAgeSegment {
+  return [
+    "all",
+    "user_favorites",
+    "toddler",
+    "child",
+    "teen",
+    "young_adult",
+    "adult",
+    "middle_aged",
+    "senior",
+  ].includes(value);
 }
 
 export function jsonValue(value: unknown): string {
