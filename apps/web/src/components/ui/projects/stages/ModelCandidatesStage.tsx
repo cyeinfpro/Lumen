@@ -8,7 +8,7 @@
 // 4) 模板/质量切换在生成中禁用
 // 5) 视觉：hairline 段落 + mono eyebrow + underline 输入 + dot toggle，去除嵌套卡。
 
-import { Shirt } from "lucide-react";
+import { Library, Shirt, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
@@ -17,12 +17,14 @@ import { toast } from "@/components/ui/primitives/Toast";
 import {
   useApproveModelCandidateMutation,
   useCreateAccessoryPreviewsMutation,
+  useCreateModelCandidatesMutation,
   useCreateShowcaseImagesMutation,
   useSaveAccessorySelectionMutation,
 } from "@/lib/queries";
-import type { BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
+import type { AccessoryPlan, BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
 import { CandidateCard } from "../components/CandidateCard";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
+import { ModelLibraryDialog } from "../components/ModelLibraryDialog";
 import { SaveCandidateDialog } from "../components/SaveCandidateDialog";
 import {
   SelectableImageGrid,
@@ -36,7 +38,14 @@ import {
   type CreateAspectRatio,
   type CreateTemplate,
 } from "../types";
-import { imageById, stepOf, stringArray, stringValue } from "../utils";
+import {
+  accessorySuggestionText,
+  defaultLibraryAgeSegment,
+  imageById,
+  stepOf,
+  stringArray,
+  stringValue,
+} from "../utils";
 
 export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const approve = useApproveModelCandidateMutation(workflow.id, {
@@ -44,6 +53,13 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       toast.error("确认模特失败", {
         description: err instanceof Error ? err.message : "请稍后重试",
       }),
+  });
+  const createCandidates = useCreateModelCandidatesMutation(workflow.id, {
+    onError: (err) =>
+      toast.error("生成模特候选失败", {
+        description: err instanceof Error ? err.message : "请稍后重试",
+      }),
+    onSuccess: () => toast.success("已派发 3 套模特候选生成"),
   });
   const saveAccessorySelection = useSaveAccessorySelectionMutation(workflow.id, {
     onError: (err) =>
@@ -67,9 +83,29 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   });
 
   const showcaseStep = stepOf(workflow, "showcase_generation");
+  const candidateStep = stepOf(workflow, "model_candidates");
+  const modelSettingsStep = stepOf(workflow, "model_settings");
+  const approvalStep = stepOf(workflow, "model_approval");
   const initialTemplate = coerceTemplate(showcaseStep?.input_json?.template);
   const initialAspectRatio = coerceAspectRatio(showcaseStep?.input_json?.aspect_ratio);
   const initialQuality = coerceQuality(showcaseStep?.input_json?.final_quality);
+  const modelStylePrompt =
+    stringValue(approvalStep?.input_json?.style_prompt) ??
+    stringValue(candidateStep?.input_json?.style_prompt) ??
+    stringValue(modelSettingsStep?.output_json?.style_prompt) ??
+    workflow.user_prompt;
+  const avoidItems = nonEmptyArray(candidateStep?.input_json?.avoid)
+    ? stringArray(candidateStep?.input_json?.avoid)
+    : stringArray(modelSettingsStep?.output_json?.avoid);
+  const normalizedAccessoryPlan = normalizeAccessoryPlan(
+    approvalStep?.input_json?.accessory_plan ??
+      candidateStep?.input_json?.accessory_plan ??
+      modelSettingsStep?.output_json?.accessory_plan,
+    accessorySuggestionText(workflow),
+  );
+  const accessoryEnabled = normalizedAccessoryPlan.enabled;
+  const accessoryItems = normalizedAccessoryPlan.items;
+  const suggestedAccessoryPrompt = accessoryItems.join("、");
 
   const [adjustments, setAdjustments] = useState("");
   const [template, setTemplate] = useState<CreateTemplate>(initialTemplate);
@@ -77,15 +113,16 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const [quality, setQuality] = useState<"high" | "4k">(initialQuality);
   const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}`;
   const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
-  const [accessoryPrompt, setAccessoryPrompt] = useState("");
+  const [accessoryPrompt, setAccessoryPrompt] = useState(suggestedAccessoryPrompt);
+  const [trackedAccessoryPrompt, setTrackedAccessoryPrompt] = useState(suggestedAccessoryPrompt);
   const [previewList, setPreviewList] = useState<BackendImageMeta[]>([]);
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [chosenCandidateId, setChosenCandidateId] = useState<string | null>(null);
   const [savingCandidateId, setSavingCandidateId] = useState<string | null>(null);
 
   const candidates = workflow.model_candidates;
-  const approvalStep = stepOf(workflow, "model_approval");
   const selectedCandidate = candidates.find((candidate) => candidate.status === "selected");
   const chosenCandidate =
     selectedCandidate ?? candidates.find((candidate) => candidate.id === chosenCandidateId);
@@ -96,18 +133,14 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     setAspectRatio(initialAspectRatio);
     setQuality(initialQuality);
   }
-  const accessoryPlan = approvalStep?.input_json?.accessory_plan;
-  const accessoryEnabled =
-    typeof accessoryPlan === "object" &&
-    accessoryPlan !== null &&
-    "enabled" in accessoryPlan &&
-    accessoryPlan.enabled === false
-      ? false
-      : true;
-  const accessoryItems =
-    typeof accessoryPlan === "object" && accessoryPlan !== null && "items" in accessoryPlan
-      ? stringArray(accessoryPlan.items)
-      : [];
+  if (trackedAccessoryPrompt !== suggestedAccessoryPrompt) {
+    const previousPrompt = trackedAccessoryPrompt;
+    setTrackedAccessoryPrompt(suggestedAccessoryPrompt);
+    setAccessoryPrompt((current) => {
+      if (!current.trim() || current === previousPrompt) return suggestedAccessoryPrompt;
+      return current;
+    });
+  }
 
   const persistedAccessoryId =
     stringValue(approvalStep?.input_json?.selected_accessory_image_id) ??
@@ -129,6 +162,8 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const accessoryPreviewRunning =
     createAccessoryPreviews.isPending ||
     (approvalStep?.status === "running" && (approvalStep.task_ids?.length ?? 0) > 0);
+  const candidateGenerationRunning =
+    createCandidates.isPending || candidateStep?.status === "running";
 
   const openPreview = (image: BackendImageMeta, list: BackendImageMeta[], index: number) => {
     setPreviewList(list);
@@ -157,12 +192,8 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     if (!selectedCandidate) return;
     createAccessoryPreviews.mutate({
       candidate_id: selectedCandidate.id,
-      accessory_plan: {
-        enabled: accessoryEnabled,
-        items: accessoryItems,
-        strength: "subtle",
-      },
-      style_prompt: accessoryPrompt,
+      accessory_plan: normalizedAccessoryPlan,
+      style_prompt: accessoryPrompt || suggestedAccessoryPrompt,
     });
   };
 
@@ -171,12 +202,21 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     approve.mutate({
       candidate_id: chosenCandidate.id,
       adjustments,
-      accessory_plan: {
-        enabled: accessoryEnabled,
-        items: accessoryItems,
-        strength: "subtle",
-      },
+      accessory_plan: normalizedAccessoryPlan,
       selected_accessory_image_id: selectedAccessoryImageId,
+    });
+  };
+
+  const regenerateCandidates = () => {
+    if (!modelStylePrompt.trim()) {
+      toast.warning("请先填写模特风格方向");
+      return;
+    }
+    createCandidates.mutate({
+      candidate_count: 3,
+      style_prompt: modelStylePrompt,
+      avoid: avoidItems,
+      accessory_plan: normalizedAccessoryPlan,
     });
   };
 
@@ -185,6 +225,31 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       eyebrow="N°04 — 模特候选"
       title="模特候选"
       subtitle="每套候选是同一个合成模特的四视图概念图。确认模特后继续生成并选择配饰四宫格。"
+      actions={
+        <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:flex sm:flex-row">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={Boolean(selectedCandidate)}
+            onClick={() => setLibraryOpen(true)}
+            leftIcon={<Library className="h-3.5 w-3.5" />}
+            className="w-full sm:w-auto"
+          >
+            打开模特库
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            loading={createCandidates.isPending}
+            disabled={Boolean(selectedCandidate) || candidateGenerationRunning}
+            onClick={regenerateCandidates}
+            leftIcon={<Sparkles className="h-3.5 w-3.5" />}
+            className="w-full sm:w-auto"
+          >
+            再生成候选
+          </Button>
+        </div>
+      }
     >
       <section className="border-t border-[var(--border)] py-5">
         <div className="mb-3 flex items-center justify-between gap-3">
@@ -192,7 +257,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             候选方案
           </p>
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
-            {String(candidates.length).padStart(2, "0")} / 03
+            {String(candidates.length).padStart(2, "0")} 张
           </p>
         </div>
         {candidates.length === 0 ? (
@@ -356,6 +421,20 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         onIndexChange={setPreviewIndex}
         onClose={() => setPreviewIndex(-1)}
       />
+      <ModelLibraryDialog
+        key={`${workflow.id}:${defaultLibraryAgeSegment(workflow)}:candidate-stage`}
+        open={libraryOpen}
+        workflow={workflow}
+        defaultAgeSegment={defaultLibraryAgeSegment(workflow)}
+        onClose={() => setLibraryOpen(false)}
+        generatingCandidates={createCandidates.isPending}
+        selectionAccessoryPlan={normalizedAccessoryPlan}
+        selectionStylePrompt={modelStylePrompt}
+        onGenerateCandidates={() => {
+          setLibraryOpen(false);
+          regenerateCandidates();
+        }}
+      />
       {/* key 让 dialog 在 open / candidate 变化时 re-mount，state 自动重置；
           这是 React 19 推荐的派生 state 做法（替代 effect 中 setState）。 */}
       <SaveCandidateDialog
@@ -419,6 +498,37 @@ function SelectField({
       </select>
     </label>
   );
+}
+
+function normalizeAccessoryPlan(value: unknown, fallbackText: string): AccessoryPlan {
+  const fallbackItems = splitPromptList(fallbackText).slice(0, 3);
+  if (!value || typeof value !== "object") {
+    return {
+      enabled: true,
+      items: fallbackItems,
+      strength: "subtle",
+    };
+  }
+  const raw = value as { enabled?: unknown; items?: unknown; strength?: unknown };
+  const strength =
+    raw.strength === "medium" || raw.strength === "strong" ? raw.strength : "subtle";
+  const items = stringArray(raw.items);
+  return {
+    enabled: raw.enabled === false ? false : true,
+    items: items.length ? items : fallbackItems,
+    strength,
+  };
+}
+
+function splitPromptList(value: string): string[] {
+  return value
+    .split(/[,，、;\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function nonEmptyArray(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => typeof item === "string" && item.length > 0);
 }
 
 function coerceTemplate(value: unknown): CreateTemplate {

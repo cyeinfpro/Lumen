@@ -554,6 +554,8 @@ class ApparelModelLibraryBatchDeleteOut(BaseModel):
 class ApparelModelLibrarySelectIn(BaseModel):
     library_item_id: str
     mode: Literal["use_directly"] = "use_directly"
+    style_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
+    accessory_plan: AccessoryPlanIn | None = None
 
 
 class ApparelModelLibraryGenerateIn(BaseModel):

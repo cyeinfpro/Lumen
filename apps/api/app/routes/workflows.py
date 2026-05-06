@@ -2318,6 +2318,35 @@ def _accessory_preview_prompt(
     )
 
 
+def _accessory_plan_from_product_analysis(product_analysis: dict[str, Any] | None) -> dict[str, Any]:
+    raw_items = (product_analysis or {}).get("styling_recommendations")
+    items = _clean_string_list(_coerce_string_list(raw_items), max_items=3, max_len=80)
+    return {
+        "enabled": True,
+        "items": items,
+        "strength": "subtle",
+    }
+
+
+def _coerce_accessory_plan_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    enabled = bool(value.get("enabled", True))
+    strength = str(value.get("strength") or "subtle")
+    if strength not in {"subtle", "medium", "strong"}:
+        strength = "subtle"
+    items = value.get("items")
+    return {
+        "enabled": enabled,
+        "items": _clean_string_list(
+            (str(item) for item in items) if isinstance(items, list) else [],
+            max_items=12,
+            max_len=80,
+        ),
+        "strength": strength,
+    }
+
+
 def _quality_review_prompt(
     *,
     product_analysis: dict[str, Any],
@@ -3891,15 +3920,24 @@ async def create_model_candidates(
     product_step = await _step(db, run.id, "product_analysis")
     if product_step.status != "approved":
         raise _http("product_not_approved", "approve product analysis first", 409)
-    existing = (
+    existing_candidates = (
         await db.execute(
-            select(ModelCandidate.id).where(ModelCandidate.workflow_run_id == run.id).limit(1)
+            select(ModelCandidate)
+            .where(ModelCandidate.workflow_run_id == run.id)
+            .order_by(ModelCandidate.candidate_index.asc())
         )
-    ).scalar_one_or_none()
-    if existing is not None:
-        raise _http("already_created", "model candidates already exist for this workflow", 409)
+    ).scalars().all()
 
     model_settings = await _step(db, run.id, "model_settings")
+    candidate_step = await _step(db, run.id, "model_candidates")
+    if candidate_step.status == "running":
+        raise _http("already_running", "model candidates are already being generated", 409)
+    if any(candidate.status == "selected" for candidate in existing_candidates):
+        raise _http(
+            "model_already_selected",
+            "reopen model selection before generating new candidates",
+            409,
+        )
     model_settings.status = "approved"
     model_settings.approved_at = _now()
     model_settings.approved_by = user.id
@@ -3909,7 +3947,6 @@ async def create_model_candidates(
         "candidate_count": body.candidate_count,
         "accessory_plan": body.accessory_plan.model_dump(),
     }
-    candidate_step = await _step(db, run.id, "model_candidates")
     candidate_step.status = "running"
     candidate_step.input_json = model_settings.output_json
     run.current_step = "model_candidates"
@@ -3921,14 +3958,16 @@ async def create_model_candidates(
     model_direction = body.style_prompt or run.user_prompt or "premium ecommerce synthetic model"
     height_cm = _infer_model_height_cm(model_direction)
     height_requirement = _height_requirement(model_direction)
+    existing_count = len(existing_candidates)
     for idx in range(1, body.candidate_count + 1):
+        candidate_index = existing_count + idx
         candidate = ModelCandidate(
             workflow_run_id=run.id,
-            candidate_index=idx,
+            candidate_index=candidate_index,
             status="generating",
             model_brief_json={
                 "summary": model_direction,
-                "candidate_index": idx,
+                "candidate_index": candidate_index,
                 "height_cm": height_cm,
                 "height_label": f"身高 {height_cm}cm",
                 "height_requirement": height_requirement,
@@ -3946,18 +3985,18 @@ async def create_model_candidates(
             text=_candidate_prompt(
                 style_prompt=body.style_prompt or run.user_prompt,
                 product_analysis=product_step.output_json or {},
-                candidate_index=idx,
+                candidate_index=candidate_index,
                 avoid=body.avoid,
             ),
             attachment_ids=[],
-            idempotency_key=f"wf:{run.id[:24]}:cand:{idx}",
+            idempotency_key=f"wf:{run.id[:24]}:cand:{candidate_index}",
             workflow_run_id=run.id,
             workflow_step_key="model_candidates",
             image_params=_candidate_image_params(),
             workflow_meta={
                 "workflow_action": "model_candidate",
                 "workflow_candidate_id": candidate.id,
-                "workflow_candidate_index": idx,
+                "workflow_candidate_index": candidate_index,
                 "workflow_candidate_view": "concept_sheet",
             },
         )
@@ -4022,6 +4061,23 @@ async def select_apparel_model_library_item(
 
     model_settings = await _step(db, run.id, "model_settings")
     now = _now()
+    requested_accessory_plan = (
+        body.accessory_plan.model_dump() if body.accessory_plan is not None else None
+    )
+    existing_accessory_plan = _coerce_accessory_plan_payload(
+        (model_settings.output_json or {}).get("accessory_plan")
+    ) or _coerce_accessory_plan_payload((model_settings.input_json or {}).get("accessory_plan"))
+    accessory_plan = (
+        requested_accessory_plan
+        or existing_accessory_plan
+        or _accessory_plan_from_product_analysis(product_step.output_json or {})
+    )
+    style_prompt = (
+        body.style_prompt.strip()
+        or str((model_settings.output_json or {}).get("style_prompt") or "").strip()
+        or str((model_settings.input_json or {}).get("style_prompt") or "").strip()
+        or run.user_prompt
+    )
     existing_count = (
         await db.execute(
             select(ModelCandidate.id).where(ModelCandidate.workflow_run_id == run.id)
@@ -4054,7 +4110,8 @@ async def select_apparel_model_library_item(
     model_settings.approved_by = user.id
     model_settings.output_json = {
         **(model_settings.output_json or {}),
-        "style_prompt": (model_settings.output_json or {}).get("style_prompt") or run.user_prompt,
+        "style_prompt": style_prompt,
+        "accessory_plan": accessory_plan,
         "selected_library_item_id": body.library_item_id,
         "selected_library_image_id": image.id,
     }
@@ -4064,6 +4121,8 @@ async def select_apparel_model_library_item(
         **(candidate_step.input_json or {}),
         "source": "model_library",
         "library_item_id": body.library_item_id,
+        "style_prompt": style_prompt,
+        "accessory_plan": accessory_plan,
     }
     candidate_step.output_json = {
         **(candidate_step.output_json or {}),
@@ -4076,6 +4135,8 @@ async def select_apparel_model_library_item(
         **(approval.input_json or {}),
         "source": "model_library",
         "library_item_id": body.library_item_id,
+        "style_prompt": style_prompt,
+        "accessory_plan": accessory_plan,
     }
     run.current_step = "model_candidates"
     run.status = "needs_review"
@@ -4249,11 +4310,33 @@ async def reopen_model_selection(
             candidate.status = "ready" if candidate.contact_sheet_image_id else "generating"
             candidate.selected_at = None
     approval = await _step(db, run.id, "model_approval")
+    previous_approval_input = dict(approval.input_json or {})
+    candidate_step = await _step(db, run.id, "model_candidates")
+    model_settings = await _step(db, run.id, "model_settings")
+    product_step = await _step(db, run.id, "product_analysis")
+    preserved_accessory_plan = (
+        _coerce_accessory_plan_payload(previous_approval_input.get("accessory_plan"))
+        or _coerce_accessory_plan_payload((candidate_step.input_json or {}).get("accessory_plan"))
+        or _coerce_accessory_plan_payload((model_settings.output_json or {}).get("accessory_plan"))
+        or _accessory_plan_from_product_analysis(product_step.output_json or {})
+    )
+    preserved_style_prompt = (
+        str(previous_approval_input.get("style_prompt") or "").strip()
+        or str((candidate_step.input_json or {}).get("style_prompt") or "").strip()
+        or str((model_settings.output_json or {}).get("style_prompt") or "").strip()
+    )
+    if candidate_step.status != "running":
+        candidate_step.status = "needs_review"
     approval.status = "needs_review"
     approval.approved_at = None
     approval.approved_by = None
-    approval.input_json = {}
+    approval.input_json = {
+        **({"accessory_plan": preserved_accessory_plan} if preserved_accessory_plan else {}),
+        **({"style_prompt": preserved_style_prompt} if preserved_style_prompt else {}),
+    }
     approval.output_json = {}
+    approval.task_ids = []
+    approval.image_ids = []
     showcase = await _step(db, run.id, "showcase_generation")
     showcase.status = "waiting_input"
     showcase.input_json = {}
@@ -4272,7 +4355,7 @@ async def reopen_model_selection(
     delivery.output_json = {}
     delivery.task_ids = []
     delivery.image_ids = []
-    run.current_step = "model_approval"
+    run.current_step = "model_candidates"
     run.status = "needs_review"
     out = await _build_run_out(db, run)
     await db.commit()
