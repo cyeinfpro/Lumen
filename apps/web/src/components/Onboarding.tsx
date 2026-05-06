@@ -1,13 +1,11 @@
 "use client";
 
 import { motion } from "framer-motion";
-import Link from "next/link";
 import {
   Aperture,
   ImageDown,
   Keyboard,
   Layers3,
-  Shirt,
   Sparkles,
   Upload,
   Wand2,
@@ -23,7 +21,6 @@ interface Preset {
   hint: string;
   text: string;
   mode: ComposerMode;
-  accent: string;
 }
 
 const PRESETS: Preset[] = [
@@ -33,7 +30,6 @@ const PRESETS: Preset[] = [
     hint: "文生图 · 16:9 · 夜景",
     text: "雨夜东京街角，霓虹倒影，35mm 胶片质感，浅景深，暖橙与青蓝色调，画面留出呼吸感",
     mode: "image",
-    accent: "from-cyan-300/20 to-[var(--accent)]/20",
   },
   {
     icon: <Layers3 className="w-4 h-4" />,
@@ -41,7 +37,6 @@ const PRESETS: Preset[] = [
     hint: "多图 · 可选 4/6/8 张",
     text: "黑色极简咖啡杯，暗色背景，柔和边缘光，留白充足，做成一组安静的产品海报",
     mode: "image",
-    accent: "from-white/10 to-[var(--accent)]/20",
   },
   {
     icon: <ImageDown className="w-4 h-4" />,
@@ -49,7 +44,6 @@ const PRESETS: Preset[] = [
     hint: "视觉理解 · 上传图片后发送",
     text: "看一下这张图的构图、光线和色彩，指出最值得调整的地方",
     mode: "chat",
-    accent: "from-emerald-300/15 to-white/10",
   },
   {
     icon: <Wand2 className="w-4 h-4" />,
@@ -57,7 +51,6 @@ const PRESETS: Preset[] = [
     hint: "图生图 · 拖入参考图后使用",
     text: "保留主体轮廓和姿态，整理成干净的角色设定图，材质清楚，细节不过度堆满",
     mode: "image",
-    accent: "from-purple-300/15 to-[var(--accent)]/20",
   },
 ];
 
@@ -75,29 +68,13 @@ export function Onboarding({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, ease: "easeOut" }}
     >
-      <div
-        aria-hidden
-        className="absolute top-0 h-48 w-48 rounded-full bg-[var(--accent)]/8 blur-3xl md:h-64 md:w-64"
-      />
-
-      <motion.div
-        initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.5, delay: 0.05, ease: "easeOut" }}
-        className="relative mb-4 md:mb-5"
-      >
-        <div className="relative flex h-14 w-14 items-center justify-center rounded-[var(--radius-2xl)] border border-white/15 bg-white/[0.06] shadow-[0_16px_48px_-14px_rgba(242,169,58,0.7)] backdrop-blur-xl md:h-16 md:w-16">
-          <div className="absolute inset-1 rounded-[var(--radius-xl)] bg-gradient-to-br from-[var(--accent)] to-orange-200" />
-          <Sparkles className="relative z-10 h-6 w-6 text-black/75 md:h-7 md:w-7" strokeWidth={2.2} />
-        </div>
-      </motion.div>
-
       <motion.p
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.08 }}
-        className="mb-2 inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-[11px] font-medium text-[var(--accent)] backdrop-blur-md"
+        className="mb-3 inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-[11px] font-medium text-[var(--fg-1)] backdrop-blur-md"
       >
+        <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" strokeWidth={2.2} />
         Lumen Studio
       </motion.p>
 
@@ -108,51 +85,17 @@ export function Onboarding({
         className="type-page-title max-w-[20rem] break-words text-balance sm:max-w-2xl md:text-[28px]"
       >
         从一句话开始，
-        <span className="text-[var(--accent)]">
-          慢慢把画面定下来。
-        </span>
+        <span className="text-[var(--accent)]">慢慢把画面定下来。</span>
       </motion.h1>
 
       <motion.p
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.16 }}
-        className="type-body mt-3 max-w-lg text-pretty px-1"
+        className="type-body mt-3 max-w-lg text-pretty px-1 text-[var(--fg-2)]"
       >
         选一个起点，或直接写下你想要的画面。
       </motion.p>
-
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, delay: 0.18 }}
-        className="mt-5 w-full max-w-4xl"
-      >
-        <Link
-          href="/projects/apparel-model-showcase/new"
-          className={cn(
-            "group flex min-h-14 items-center justify-between gap-3 rounded-lg border border-[var(--border-amber)]/45",
-            "bg-[var(--accent-soft)] px-4 text-left transition-colors hover:bg-[var(--accent-soft)]/80",
-          )}
-        >
-          <span className="flex min-w-0 items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--accent)] text-black">
-              <Shirt className="h-4 w-4" />
-            </span>
-            <span className="min-w-0">
-              <span className="block text-sm font-medium text-[var(--fg-0)]">
-                服饰模特图
-              </span>
-              <span className="mt-0.5 block text-xs text-[var(--fg-2)]">
-                上传商品图，先确认模特，再生成电商展示图
-              </span>
-            </span>
-          </span>
-          <span className="text-xs font-medium text-[var(--amber-300)]">
-            创建项目
-          </span>
-        </Link>
-      </motion.div>
 
       <div className="mt-5 sm:mt-7 grid w-full max-w-4xl grid-cols-1 gap-2.5 sm:gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {PRESETS.map((preset, index) => (
@@ -168,25 +111,17 @@ export function Onboarding({
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.35, delay: 0.18 + index * 0.04 }}
-            whileHover={loading ? undefined : { y: -2 }}
+            whileHover={loading ? undefined : { y: -1 }}
             className={cn(
-              "group relative min-w-0 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.035] p-3.5 text-left",
-              "shadow-[0_12px_40px_-20px_rgba(0,0,0,0.8)] backdrop-blur-md",
-              "transition-[border-color,background-color,box-shadow] duration-200 hover:border-[var(--accent)]/35 hover:bg-white/[0.06]",
+              "group relative min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-4 text-left",
+              "transition-[border-color,background-color,transform] duration-200 hover:border-[var(--border-amber)]/35 hover:bg-white/[0.04]",
               "cursor-pointer",
               "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 active:scale-[0.99] disabled:cursor-wait disabled:opacity-60",
               loading && "pointer-events-none",
             )}
           >
-            <div
-              aria-hidden
-              className={cn(
-                "absolute inset-0 bg-gradient-to-br opacity-0 transition-opacity duration-300 group-hover:opacity-100",
-                preset.accent,
-              )}
-            />
-            <div className="relative flex items-start gap-3">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-white/5 text-[var(--fg-1)] transition-colors group-hover:text-[var(--accent)]">
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)] transition-colors group-hover:text-[var(--accent)]">
                 {preset.icon}
               </span>
               <span className="min-w-0 flex-1">
