@@ -157,6 +157,7 @@ def _apply_filters(
         Conversation.user_id == user_id,
         Conversation.deleted_at.is_(None),
         Conversation.archived.is_(False),
+        Generation.upstream_request["workflow_run_id"].astext.is_(None),
     )
 
     if ratio:

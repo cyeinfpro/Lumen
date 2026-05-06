@@ -37,13 +37,19 @@ def test_generation_feed_filters_out_deleted_or_archived_conversations() -> None
         fast=False,
         q=None,
     )
-    rendered = str(stmt.compile(dialect=postgresql.dialect()))
+    rendered = str(
+        stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
 
     assert "JOIN messages" in rendered
     assert "JOIN conversations" in rendered
     assert "messages.deleted_at IS NULL" in rendered
     assert "conversations.deleted_at IS NULL" in rendered
     assert "conversations.archived IS false" in rendered
+    assert "(generations.upstream_request ->> 'workflow_run_id') IS NULL" in rendered
 
 
 def test_generation_feed_cursor_carries_total_for_next_page() -> None:

@@ -86,6 +86,9 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const candidateStep = stepOf(workflow, "model_candidates");
   const modelSettingsStep = stepOf(workflow, "model_settings");
   const approvalStep = stepOf(workflow, "model_approval");
+  const stageError =
+    stringValue(approvalStep?.output_json?.error_message) ??
+    stringValue(candidateStep?.output_json?.error_message);
   const initialTemplate = coerceTemplate(showcaseStep?.input_json?.template);
   const initialAspectRatio = coerceAspectRatio(showcaseStep?.input_json?.aspect_ratio);
   const initialQuality = coerceQuality(showcaseStep?.input_json?.final_quality);
@@ -251,6 +254,14 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         </div>
       }
     >
+      {stageError ? (
+        <section className="border-t border-[var(--border)] py-4">
+          <p className="border-l-2 border-[var(--danger)] pl-3 text-[13px] leading-6 text-[var(--danger)]">
+            {stageError}
+          </p>
+        </section>
+      ) : null}
+
       <section className="border-t border-[var(--border)] py-5">
         <div className="mb-3 flex items-center justify-between gap-3">
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">

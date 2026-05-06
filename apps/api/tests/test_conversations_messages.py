@@ -71,6 +71,26 @@ class _WriteDb:
         return _WriteResult(self.rowcount)
 
 
+@pytest.mark.asyncio
+async def test_list_conversations_filters_workflow_backing_conversations() -> None:
+    db = _Db([])
+
+    out = await conversations.list_conversations(
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+        limit=30,
+    )
+
+    assert out.items == []
+    rendered = str(
+        db.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "(conversations.default_params ->> 'workflow_type') IS NULL" in rendered
+
+
 def _message(message_id: str, created_at: datetime) -> SimpleNamespace:
     return SimpleNamespace(
         id=message_id,
