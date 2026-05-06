@@ -8,13 +8,16 @@ import { useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { makeQueryClient } from "@/lib/queryClient";
+import { useIsMobile } from "@/hooks/useMediaQuery";
 
 export function QueryProvider({ children }: { children: React.ReactNode }) {
   const [client] = useState(() => makeQueryClient());
+  const isMobile = useIsMobile();
+
   return (
     <QueryClientProvider client={client}>
       {children}
-      {process.env.NODE_ENV !== "production" ? (
+      {process.env.NODE_ENV !== "production" && isMobile === false ? (
         <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
       ) : null}
     </QueryClientProvider>

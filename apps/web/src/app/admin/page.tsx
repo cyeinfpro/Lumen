@@ -57,7 +57,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "users", label: "用户" },
   { key: "events", label: "请求事件" },
   { key: "invites", label: "邀请链接" },
-  { key: "providers", label: "Provider" },
+  { key: "providers", label: "供应商" },
   { key: "proxies", label: "代理池" },
   { key: "telegram", label: "Telegram 机器人" },
   { key: "settings", label: "系统设置" },
@@ -188,7 +188,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
                   {me.email}
                 </span>
                 <span className="px-1.5 py-0.5 rounded-md bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/25 text-[10px] font-medium">
-                  admin
+                  管理员
                 </span>
               </div>
             )}
@@ -350,7 +350,7 @@ function AllowedEmailsPanel() {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="someone@example.com"
+              placeholder="name@示例.com"
               autoComplete="off"
               className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-neutral-600"
             />
@@ -418,7 +418,7 @@ function AllowedEmailsPanel() {
               <table className="w-full text-sm">
                 <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-white/10">
                   <tr>
-                    <th className="text-left py-3 px-4 font-medium">Email</th>
+                    <th className="text-left py-3 px-4 font-medium">邮箱</th>
                     <th className="text-left py-3 px-4 font-medium">邀请人</th>
                     <th className="text-left py-3 px-4 font-medium">创建时间</th>
                     <th className="text-right py-3 px-4 font-medium">操作</th>
@@ -627,7 +627,7 @@ function UsersPanel() {
                   : "text-neutral-400 hover:text-neutral-100")
               }
             >
-              {r === "all" ? "全部" : r}
+              {r === "all" ? "全部" : r === "admin" ? "管理员" : "成员"}
             </button>
           ))}
         </div>
@@ -658,7 +658,7 @@ function UsersPanel() {
               <table className="w-full text-sm">
                 <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-white/10">
                   <tr>
-                    <th className="text-left py-3 px-4 font-medium">Email</th>
+                    <th className="text-left py-3 px-4 font-medium">邮箱</th>
                     <th className="text-left py-3 px-4 font-medium">角色</th>
                     <th className="text-left py-3 px-4 font-medium">名称</th>
                     <th className="text-left py-3 px-4 font-medium">注册</th>
@@ -856,14 +856,14 @@ function RoleBadge({ role }: { role: "admin" | "member" }) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
         <UserCog className="w-3 h-3" />
-        admin
+        管理员
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-neutral-400 border border-white/10">
       <UsersIcon className="w-3 h-3" />
-      member
+      成员
     </span>
   );
 }

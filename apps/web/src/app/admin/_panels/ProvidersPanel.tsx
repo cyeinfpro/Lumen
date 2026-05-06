@@ -163,6 +163,16 @@ function relativeTime(iso: string): string {
   return `${Math.floor(diff / 3_600_000)}h 前`;
 }
 
+function endpointDisplayLabel(value: string | null | undefined): string {
+  if (value === "generations") return "生成接口";
+  if (value === "responses") return "响应接口";
+  return "自动";
+}
+
+function editTransportDisplayLabel(value: string | null | undefined): string {
+  return value === "file" ? "文件" : "链接";
+}
+
 // ---------------------------------------------------------------------------
 // 主组件
 // ---------------------------------------------------------------------------
@@ -328,7 +338,7 @@ export function ProvidersPanel() {
         return;
       }
       if (!p.host.trim()) {
-        setGlobalError(`代理「${p.name}」缺少 Host`);
+        setGlobalError(`代理「${p.name}」缺少主机地址`);
         return;
       }
       if (!Number.isFinite(p.port) || p.port < 1 || p.port > 65535) {
@@ -350,30 +360,30 @@ export function ProvidersPanel() {
     for (let i = 0; i < drafts.length; i++) {
       const d = drafts[i];
       if (!d.name.trim()) {
-        setGlobalError(`Provider #${i + 1} 缺少名称`);
+        setGlobalError(`供应商 #${i + 1} 缺少名称`);
         setEditingIdx(i);
         return;
       }
       if (!d.base_url.trim()) {
-        setGlobalError(`「${d.name}」缺少 Base URL`);
+        setGlobalError(`「${d.name}」缺少基础地址`);
         setEditingIdx(i);
         return;
       }
       try {
         const u = new URL(d.base_url.trim());
         if (u.protocol !== "http:" && u.protocol !== "https:") {
-          setGlobalError(`「${d.name}」Base URL 必须使用 HTTP 或 HTTPS`);
+          setGlobalError(`「${d.name}」基础地址必须使用 HTTP 或 HTTPS`);
           setEditingIdx(i);
           return;
         }
       } catch {
-        setGlobalError(`「${d.name}」Base URL 格式不合法`);
+        setGlobalError(`「${d.name}」基础地址格式不合法`);
         setEditingIdx(i);
         return;
       }
       const isExisting = serverItems.some((s) => s.name === d.name.trim());
       if (!d.api_key && !isExisting) {
-        setGlobalError(`「${d.name}」缺少 API Key`);
+        setGlobalError(`「${d.name}」缺少 API 密钥`);
         setEditingIdx(i);
         return;
       }
@@ -515,7 +525,7 @@ export function ProvidersPanel() {
               </div>
               <div>
                 <h3 className="text-sm font-medium text-neutral-100">
-                  Provider Pool
+                  供应商池
                 </h3>
                 <p className="text-xs text-neutral-500 mt-0.5">
                   加权轮询 · 断路器 · 主动探活
@@ -666,9 +676,9 @@ export function ProvidersPanel() {
               <CloudOff className="w-6 h-6 text-neutral-500" />
             </div>
             <div>
-              <p className="text-sm text-neutral-200">还没有 Provider</p>
+              <p className="text-sm text-neutral-200">还没有供应商</p>
               <p className="text-xs text-neutral-500 mt-1">
-                添加至少一个 Provider 后，请求会从池里选择可用账号。
+                添加至少一个供应商后，请求会从池里选择可用账号。
               </p>
             </div>
             <button
@@ -679,7 +689,7 @@ export function ProvidersPanel() {
               }}
               className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium transition-all"
             >
-              <Plus className="w-3.5 h-3.5" /> 添加首个 Provider
+              <Plus className="w-3.5 h-3.5" /> 添加首个供应商
             </button>
           </div>
         </div>
@@ -718,7 +728,7 @@ export function ProvidersPanel() {
                   <span className="font-mono tabular-nums">
                     {drafts?.length ?? 0}
                   </span>
-                  <span>个 Provider</span>
+                  <span>个供应商</span>
                 </span>
               </span>
               <div className="flex-1 sm:flex-none" />
@@ -794,7 +804,7 @@ function StatsRow({
   return (
     <div className="grid grid-cols-3 gap-3">
       <StatCard
-        label="Providers"
+        label="供应商"
         value={total}
         sub={
           <span className="inline-flex items-center gap-1 text-neutral-500">
@@ -1114,7 +1124,7 @@ function PriorityGroupView({
           </span>
           <div className="flex-1 h-px bg-white/8" />
           <span className="text-[10px] text-neutral-600 tabular-nums">
-            {group.items.length} provider{group.items.length > 1 ? "s" : ""}
+            {group.items.length} 个供应商
           </span>
         </div>
       )}
@@ -1199,7 +1209,7 @@ function ProviderCard({
             onClick={() => onProbeSingle(p.name)}
             disabled={probing || !p.enabled}
             className="opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex items-center justify-center w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-400 disabled:opacity-30 transition-all"
-            title="探活此 Provider"
+            title="探活此供应商"
           >
             <Activity className="w-3 h-3" />
           </button>
@@ -1214,7 +1224,7 @@ function ProviderCard({
           (p.enabled ? "text-neutral-400" : "text-neutral-500")
         }
       >
-        <MetaItem label="Key" value={p.api_key_hint} mono />
+        <MetaItem label="密钥" value={p.api_key_hint} mono />
         <MetaSep />
         <MetaItem label="优先级" value={String(p.priority)} mono />
         <MetaSep />
@@ -1232,12 +1242,12 @@ function ProviderCard({
           <>
             <MetaSep />
             <MetaItem
-              label="Endpoint"
+              label="接口"
               value={
                 p.image_jobs_endpoint_lock &&
                 p.image_jobs_endpoint !== "auto"
-                  ? `${p.image_jobs_endpoint} · locked`
-                  : (p.image_jobs_endpoint ?? "auto")
+                  ? `${endpointDisplayLabel(p.image_jobs_endpoint)} · 已锁定`
+                  : endpointDisplayLabel(p.image_jobs_endpoint)
               }
               mono
               color={
@@ -1251,7 +1261,7 @@ function ProviderCard({
               <>
                 <MetaSep />
                 <MetaItem
-                  label="Sidecar"
+                  label="旁路地址"
                   value={p.image_jobs_base_url}
                   mono
                   color="text-sky-300"
@@ -1262,8 +1272,8 @@ function ProviderCard({
               <>
                 <MetaSep />
                 <MetaItem
-                  label="Edit 输入"
-                  value={p.image_edit_input_transport ?? "url"}
+                  label="编辑输入"
+                  value={editTransportDisplayLabel(p.image_edit_input_transport)}
                   mono
                   color={
                     (p.image_edit_input_transport ?? "url") === "file"
@@ -1434,8 +1444,8 @@ function DraftList({
   if (drafts.length === 0) {
     return (
       <EmptyBlock
-        title="暂无 Provider"
-        description="点击底部「添加」新增一个上游 Provider"
+        title="暂无供应商"
+        description="点击底部「添加」新增一个上游供应商"
       />
     );
   }
@@ -1602,12 +1612,12 @@ const DraftCard = forwardRef<
                     type="text"
                     value={draft.name}
                     onChange={(e) => onUpdate({ name: e.target.value })}
-                    placeholder="my-provider"
+                    placeholder="例如：主供应商"
                     className={fieldCls(!!errors?.name)}
                   />
                 </Field>
                 <Field
-                  label="Base URL"
+                  label="基础地址"
                   required
                   error={errors?.base_url}
                   hint="支持 HTTP/HTTPS，可填内网地址"
@@ -1622,11 +1632,11 @@ const DraftCard = forwardRef<
                 </Field>
               </div>
 
-              {/* API Key */}
+              {/* API 密钥 */}
               <Field
-                label="API Key"
+                label="API 密钥"
                 hint={
-                  isExisting ? "留空保持原值不变" : "新增 Provider 必须填写"
+                  isExisting ? "留空保持原值不变" : "新增供应商必须填写"
                 }
                 required={!isExisting}
               >
@@ -1643,7 +1653,7 @@ const DraftCard = forwardRef<
               </Field>
 
               {/* 代理选择 */}
-              <Field label="代理" hint="Provider 可直连或使用一个代理">
+              <Field label="代理" hint="供应商可直连或使用一个代理">
                 <select
                   value={draft.proxy ?? ""}
                   onChange={(e) => onUpdate({ proxy: e.target.value || null })}
@@ -1685,7 +1695,7 @@ const DraftCard = forwardRef<
                     className={fieldCls(false)}
                   />
                 </Field>
-                <Field label="并发数" hint="该 provider 同时跑的任务上限">
+                <Field label="并发数" hint="该供应商同时跑的任务上限">
                   <input
                     type="number"
                     min={1}
@@ -1750,7 +1760,7 @@ const DraftCard = forwardRef<
                     {draft.image_jobs_enabled ? "支持" : "不支持"}
                   </button>
                   <span className="mt-1 text-[11px] leading-4 text-neutral-600">
-                    勾选后，image_jobs 路由才会使用这个 Provider。
+                    勾选后，图片任务路由才会使用这个供应商。
                   </span>
                 </div>
               </div>
@@ -1758,7 +1768,7 @@ const DraftCard = forwardRef<
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-xl bg-white/[0.02] border border-white/5">
                 <div className="flex flex-col">
                   <label className="text-xs text-neutral-300 font-medium mb-1.5">
-                    Endpoint 偏好
+                    接口偏好
                   </label>
                   <select
                     value={draft.image_jobs_endpoint ?? "auto"}
@@ -1770,12 +1780,12 @@ const DraftCard = forwardRef<
                     }
                     className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-sky-500/50"
                   >
-                    <option value="auto">auto（按健康度自适应）</option>
-                    <option value="generations">generations（/v1/images/generations · /v1/images/edits）</option>
-                    <option value="responses">responses（/v1/responses + image_generation）</option>
+                    <option value="auto">自动（按健康度自适应）</option>
+                    <option value="generations">生成接口（/v1/images/generations · /v1/images/edits）</option>
+                    <option value="responses">响应接口（/v1/responses + image_generation）</option>
                   </select>
                   <span className="mt-1 text-[11px] leading-4 text-neutral-600">
-                    适用于异步与同步生图：auto 时按健康度在两种 endpoint 间切换；锁定后该号只服务对应 endpoint，由其他号兜底对端。
+                    适用于异步与同步生图：自动时按健康度在两种接口间切换；锁定后该号只服务对应接口，由其他号兜底对端。
                   </span>
                   {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
                     <button
@@ -1794,24 +1804,24 @@ const DraftCard = forwardRef<
                       }
                     >
                       {draft.image_jobs_endpoint_lock
-                        ? `已锁定 · 仅服务 ${draft.image_jobs_endpoint}`
-                        : "锁定到该 endpoint"}
+                        ? `已锁定 · 仅服务 ${endpointDisplayLabel(draft.image_jobs_endpoint)}`
+                        : "锁定到该接口"}
                     </button>
                   )}
                   {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
                     <span className="mt-1 text-[11px] leading-4 text-neutral-600">
-                      锁定后该号不再服务对端 endpoint：选号阶段直接被过滤、失败也不再回退到对端，由其它号兜底。
+                      锁定后该号不再服务另一个接口：选号阶段直接被过滤，失败也不再回退到对端，由其它号兜底。
                     </span>
                   )}
                 </div>
                 {draft.image_jobs_enabled && (
                   <div className="flex flex-col">
                     <label className="text-xs text-neutral-300 font-medium mb-1.5">
-                      Sidecar Base URL（可选）
+                      旁路服务地址（可选）
                     </label>
                     <input
                       type="url"
-                      placeholder="留空 = 使用全局 image.job_base_url"
+                      placeholder="留空 = 使用全局任务旁路地址"
                       value={draft.image_jobs_base_url ?? ""}
                       onChange={(e) =>
                         onUpdate({ image_jobs_base_url: e.target.value })
@@ -1819,14 +1829,14 @@ const DraftCard = forwardRef<
                       className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 placeholder:text-neutral-700 focus:outline-none focus:border-sky-500/50"
                     />
                     <span className="mt-1 text-[11px] leading-4 text-neutral-600">
-                      支持给不同 Provider 指定独立的 image-job sidecar，例如多区域部署时按 Provider 路由。
+                      支持给不同供应商指定独立的图片任务旁路服务，例如多区域部署时按供应商路由。
                     </span>
                   </div>
                 )}
                 {draft.image_jobs_enabled && (
                   <div className="flex flex-col">
                     <label className="text-xs text-neutral-300 font-medium mb-1.5">
-                      Edits 输入
+                      编辑接口输入
                     </label>
                     <select
                       value={draft.image_edit_input_transport ?? "url"}
@@ -1838,11 +1848,11 @@ const DraftCard = forwardRef<
                       }
                       className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-sky-500/50"
                     >
-                      <option value="url">url（JSON image_url）</option>
-                      <option value="file">file（multipart image[]）</option>
+                      <option value="url">链接（JSON image_url）</option>
+                      <option value="file">文件（multipart image[]）</option>
                     </select>
                     <span className="mt-1 text-[11px] leading-4 text-neutral-600">
-                      只影响 image-job 转发 /v1/images/edits；未启用 image-job 时直连始终是 multipart 文件。
+                      只影响图片任务转发 /v1/images/edits；未启用图片任务时直连始终是 multipart 文件。
                     </span>
                   </div>
                 )}

@@ -618,6 +618,9 @@ class ApparelModelLibraryJobOut(BaseModel):
 
 class ApparelModelLibraryJobsOut(BaseModel):
     items: list[ApparelModelLibraryJobOut]
+    limit: int = 50
+    offset: int = 0
+    has_more: bool = False
 
 
 class ApparelModelLibraryJobsClearOut(BaseModel):

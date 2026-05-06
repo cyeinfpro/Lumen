@@ -157,6 +157,8 @@
     --mobile-dialog-footer-pad-bottom: calc(0.875rem + var(--mobile-dialog-bottom-gap));
     --mobile-dialog-max-height: calc(100dvh - var(--mobile-dialog-margin-top) - var(--mobile-dialog-bottom-gap));
     --mobile-dialog-sheet-max-height: min(88dvh, var(--mobile-dialog-max-height));
+    --mobile-tabbar-height: calc(56px + env(safe-area-inset-bottom, 0px));
+    --project-mobile-cta-height: calc(84px + env(safe-area-inset-bottom, 0px));
   }
 
   /* .dark 保留作 opt-in：与 :root 等价，便于 <html class="dark"> 现有写法继续 work */
@@ -594,6 +596,12 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
+  .project-mobile-scroll {
+    padding-bottom: calc(var(--mobile-tabbar-height) + 1.5rem);
+  }
+  .project-mobile-scroll-with-cta {
+    padding-bottom: calc(var(--mobile-tabbar-height) + var(--project-mobile-cta-height) + 1.5rem);
+  }
   @media (min-width: 640px) {
     .mobile-dialog-shell {
       padding: 1rem;
@@ -812,6 +820,14 @@
 
 /* ——— 移动端表单补强 ——— */
 @media (max-width: 640px) {
+  .project-mobile-scroll {
+    padding-bottom: calc(var(--mobile-tabbar-height) + 1rem);
+  }
+  .project-mobile-scroll-with-cta {
+    padding-bottom: calc(
+      var(--mobile-tabbar-height) + var(--project-mobile-cta-height) + 1rem
+    );
+  }
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
   textarea,
   select {

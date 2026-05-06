@@ -25,7 +25,7 @@ const BASE =
   "transition-[background-color,color,border-color,box-shadow] duration-150 " +
   "focus-visible:outline-none " +
   "disabled:opacity-50 disabled:pointer-events-none disabled:cursor-not-allowed " +
-  "select-none whitespace-nowrap";
+  "select-none text-center leading-tight";
 
 const VARIANTS: Record<Variant, string> = {
   primary:

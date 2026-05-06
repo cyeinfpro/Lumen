@@ -39,8 +39,8 @@ RESOLUTION_LABELS: list[tuple[str, str]] = [
 ]
 
 FORMAT_LABELS: list[tuple[str, str]] = [
-    ("PNG", "png"),
-    ("JPG", "jpeg"),
+    ("PNG 格式", "png"),
+    ("JPG 格式", "jpeg"),
 ]
 
 
@@ -97,7 +97,7 @@ def main_menu(params: dict[str, object]) -> InlineKeyboardMarkup:
     fast_on = bool(params.get("fast"))
     enh_on = bool(params.get("enhance"))
     b_fast.button(
-        text=f"⚡ Fast：{'开' if fast_on else '关'}",
+        text=f"⚡ 快速：{'开' if fast_on else '关'}",
         callback_data=f"cfg:fast:{'false' if fast_on else 'true'}",
     )
     b_fast.button(
@@ -132,12 +132,12 @@ def retry_keyboard(gen_id: str) -> InlineKeyboardMarkup:
 def render_params_summary(params: dict[str, object]) -> str:
     tags = []
     if params.get("fast"):
-        tags.append("⚡ Fast")
+        tags.append("⚡ 快速")
     if params.get("enhance"):
         tags.append("✨ 优化")
     tail = ("  ·  " + "  ·  ".join(tags)) if tags else ""
     fmt = str(params.get("output_format") or "jpeg")
-    fmt_label = "JPG" if fmt == "jpeg" else fmt.upper()
+    fmt_label = "JPG 格式" if fmt == "jpeg" else "PNG 格式"
     return (
         f"📐 比例 {params['aspect_ratio']}  ·  "
         f"🎨 质量 {params['render_quality']}  ·  "

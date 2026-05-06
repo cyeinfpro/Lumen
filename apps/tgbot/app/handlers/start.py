@@ -73,7 +73,7 @@ async def cmd_start(message: Message, command: CommandObject, api: LumenApi) -> 
 async def cmd_help(message: Message) -> None:
     await message.answer(
         "命令列表\n\n"
-        "/new — 进入生成菜单（选比例/质量/张数/分辨率，再发送 prompt）\n"
+        "/new — 进入生成菜单（选比例/质量/张数/分辨率，再发送提示词）\n"
         "/tasks 或 /list — 最近 10 个任务\n"
         "/unbind — 解除当前账号绑定\n"
         "/start <code> — 用网站给的绑定码绑定"

@@ -380,14 +380,14 @@ export function ApparelWorkflowNewPage() {
       <OnlineBanner />
       <ProjectMobileTopBar
         title="新建"
-        subtitle="NEW APPAREL PROJECT"
+        subtitle="新建服饰项目"
         backHref="/projects/apparel-model-showcase"
         backLabel="返回服饰模特图"
       />
       <ProjectTopBar />
 
-      <main className="lumen-studio-bg mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[160px] pt-3 md:mb-0 md:px-10 md:py-6 md:pb-12">
-        <div className="mx-auto grid w-full max-w-[1280px] gap-6 md:gap-8">
+      <main className="lumen-studio-bg project-mobile-scroll-with-cta mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-3 md:mb-0 md:px-10 md:py-6 md:pb-12">
+        <div className="mx-auto grid w-full max-w-[1280px] gap-5 md:gap-8">
           {/* Breadcrumb */}
           <nav
             aria-label="项目路径"
@@ -404,13 +404,13 @@ export function ApparelWorkflowNewPage() {
               Apparel
             </Link>
             <span aria-hidden className="text-[var(--fg-3)]">·</span>
-            <span className="text-[var(--fg-0)]">New</span>
+            <span className="text-[var(--fg-0)]">新建</span>
           </nav>
 
           {/* Hero */}
           <header className="hidden border-b border-[var(--border)] pb-6 md:grid">
             <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              New Project
+              新建项目
             </p>
             <h1 className="mt-2 font-display text-[34px] italic leading-[1] text-[var(--fg-0)] md:text-[42px]">
               新建服饰模特图
@@ -420,11 +420,11 @@ export function ApparelWorkflowNewPage() {
             </p>
           </header>
 
-          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-10">
-            <section className="grid gap-7 md:gap-8">
+          <div className="grid gap-7 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-10">
+            <section className="grid gap-6 md:gap-8">
               {/* Upload */}
               <SectionHeader
-                eyebrow="N°01 — Upload"
+                eyebrow="N°01 — 上传"
                 title="商品图"
                 trailing={
                   <span className="font-mono text-[11px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-2)]">
@@ -447,13 +447,13 @@ export function ApparelWorkflowNewPage() {
                   setDragActive(false);
                 }}
                 onDrop={onDrop}
-                className="relative -mt-4"
+                className="relative -mt-3 md:-mt-4"
               >
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   className={cn(
-                    "flex min-h-[220px] w-full cursor-pointer flex-col items-center justify-center gap-4 border border-dashed text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-[260px]",
+                    "flex min-h-[188px] w-full cursor-pointer flex-col items-center justify-center gap-3 border border-dashed px-3 text-center transition-[background-color,border-color] duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 sm:min-h-[220px] md:min-h-[260px]",
                     dragActive
                       ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
                       : "border-[var(--border-strong)] hover:border-[var(--border-amber)]/50 hover:bg-white/[0.02]",
@@ -461,7 +461,7 @@ export function ApparelWorkflowNewPage() {
                 >
                   <span
                     className={cn(
-                      "inline-flex h-12 w-12 items-center justify-center rounded-full border transition-colors",
+                      "inline-flex h-11 w-11 items-center justify-center rounded-full border transition-colors md:h-12 md:w-12",
                       dragActive
                         ? "border-[var(--border-amber)] bg-[var(--accent)] text-black"
                         : "border-[var(--border)] bg-transparent text-[var(--fg-1)]",
@@ -471,14 +471,14 @@ export function ApparelWorkflowNewPage() {
                   </span>
                   <p
                     className={cn(
-                      "text-[18px] font-semibold leading-snug md:text-[20px]",
+                      "text-[16px] font-semibold leading-snug md:text-[20px]",
                       dragActive ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
                     )}
                   >
                     {dragActive ? "松开即可加入项目" : "拖拽到这里，或点击选择"}
                   </p>
-                  <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-                    PNG · JPEG · WebP &nbsp;·&nbsp; ≤ {formatBytes(MAX_PRODUCT_IMAGE_BYTES)} &nbsp;·&nbsp; Max {MAX_PRODUCT_IMAGES} files
+                  <p className="max-w-[18rem] font-mono text-[10px] uppercase tracking-[0.12em] leading-5 text-[var(--fg-2)] sm:tracking-[0.22em]">
+                    PNG / JPG / WebP 格式 &nbsp;·&nbsp; ≤ {formatBytes(MAX_PRODUCT_IMAGE_BYTES)} &nbsp;·&nbsp; 最多 {MAX_PRODUCT_IMAGES} 张
                   </p>
                 </button>
                 <input
@@ -498,7 +498,7 @@ export function ApparelWorkflowNewPage() {
               {anyUploading ? (
                 <div className="-mt-6 grid gap-2">
                   <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-                    <span>Uploading</span>
+                    <span>上传中</span>
                     <span className="tabular-nums text-[var(--amber-300)]">
                       {Math.round(totalProgress * 100).toString().padStart(2, "0")}%
                     </span>
@@ -534,7 +534,7 @@ export function ApparelWorkflowNewPage() {
               {/* Project title */}
               <div className="grid gap-4">
                 <SectionHeader
-                  eyebrow="N°02 — Title"
+                  eyebrow="N°02 — 标题"
                   title="项目名称"
                   trailing={
                     <CharCount remaining={titleRemaining} max={TITLE_MAX} />
@@ -553,7 +553,7 @@ export function ApparelWorkflowNewPage() {
               {/* Settings */}
               <div className="grid gap-5">
                 <SectionHeader
-                  eyebrow="N°03 — Settings"
+                  eyebrow="N°03 — 设置"
                   title="基础参数"
                   trailing={
                     <CharCount remaining={promptRemaining} max={PROMPT_MAX} />
@@ -561,28 +561,28 @@ export function ApparelWorkflowNewPage() {
                 />
                 <div className="-mt-2 grid gap-x-8 gap-y-6 md:grid-cols-2">
                   <ParamSelect
-                    label="Age"
+                    label="年龄段"
                     chineseLabel="年龄段"
                     value={ageSegment}
                     options={AGE_SEGMENTS}
                     onChange={setAgeSegment}
                   />
                   <ParamSelect
-                    label="Gender"
+                    label="性别"
                     chineseLabel="性别"
                     value={gender}
                     options={GENDERS}
                     onChange={setGender}
                   />
                   <ParamSelect
-                    label="Appearance"
+                    label="外貌方向"
                     chineseLabel="外貌方向"
                     value={appearanceDirection}
                     options={APPEARANCE_DIRECTIONS}
                     onChange={setAppearanceDirection}
                   />
                   <ParamSelect
-                    label="Style"
+                    label="风格"
                     chineseLabel="风格气质"
                     value={styleDirection}
                     options={STYLE_DIRECTIONS}
@@ -607,7 +607,7 @@ export function ApparelWorkflowNewPage() {
 
                 <div className="border-t border-[var(--border)] pt-4">
                   <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-                    Composed prompt
+                    组合提示词
                   </p>
                   <p className="mt-2 text-[13px] leading-[1.7] text-[var(--fg-1)]">
                     {composedPrompt}
@@ -621,7 +621,7 @@ export function ApparelWorkflowNewPage() {
                     <X className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
                     <div>
                       <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--danger)]">
-                        Error
+                        错误
                       </p>
                       <p className="mt-1 text-[13px] text-[var(--fg-0)]">{error}</p>
                     </div>
@@ -661,17 +661,17 @@ export function ApparelWorkflowNewPage() {
 
             {/* Right rail */}
             <aside className="hidden grid-cols-1 gap-0 self-start lg:grid">
-              <InfoPanel title="Loop">
+              <InfoPanel title="流程">
                 <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
                   商品约束、3 套模特候选、配饰四宫格、4 张展示图、一次文字返修。
                 </p>
               </InfoPanel>
-              <InfoPanel title="Quality">
+              <InfoPanel title="质量">
                 <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
                   默认高质量模式，优先模特一致性、商品还原度和高级质感。
                 </p>
               </InfoPanel>
-              <InfoPanel title="Order">
+              <InfoPanel title="顺序">
                 <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
                   第一张图作为商品主图。可用上移 / 下移调整顺序。
                 </p>
@@ -781,14 +781,14 @@ function FilePortrait({
 
   const statusLabel =
     item.status === "uploading"
-      ? "Uploading"
+      ? "上传中"
       : item.status === "done"
-        ? "Ready"
+        ? "已就绪"
         : item.status === "error"
-          ? "Failed"
+          ? "失败"
           : item.status === "canceled"
-            ? "Canceled"
-            : "Queued";
+            ? "已取消"
+            : "排队中";
 
   const statusToneText =
     item.status === "error"
@@ -834,7 +834,7 @@ function FilePortrait({
         {item.status === "error" ? (
           <div className="absolute inset-x-0 bottom-0 bg-[var(--danger)]/90 px-3 py-2">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-white/90">
-              Failed
+              失败
             </p>
             <p className="mt-1 line-clamp-2 text-[12px] leading-[1.4] text-white">
               {item.error}
@@ -849,7 +849,7 @@ function FilePortrait({
           </span>
           {isMain ? (
             <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.22em] text-black">
-              Selected
+              主图
             </span>
           ) : null}
         </div>
@@ -953,9 +953,11 @@ function ParamSelect({
     <label className="block">
       <span className="flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
         <span>{label}</span>
-        <span className="normal-case tracking-normal text-[var(--fg-3)]">
-          {chineseLabel}
-        </span>
+        {chineseLabel && chineseLabel !== label ? (
+          <span className="normal-case tracking-normal text-[var(--fg-3)]">
+            {chineseLabel}
+          </span>
+        ) : null}
       </span>
       <select
         value={value}

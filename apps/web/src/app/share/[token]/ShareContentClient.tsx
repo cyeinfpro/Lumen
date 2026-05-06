@@ -191,8 +191,8 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
     try {
       if (typeof navigator.share === "function") {
         await navigator.share({
-          title: "Lumen 图片分享",
-          text: `${images.length} 张 Lumen 图片`,
+          title: "图片分享",
+          text: `${images.length} 张图片`,
           url,
         });
         showNotice({ kind: "success", text: "已打开分享菜单" });
@@ -221,7 +221,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
         <div className="min-w-0 space-y-2">
           <p className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-xs text-[var(--fg-1)]">
             <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
-            Lumen Share
+            图片分享
           </p>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono tabular-nums text-[var(--fg-2)]">
             <span className="inline-flex items-center gap-1.5">
@@ -308,7 +308,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
             <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-xs uppercase text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]">
               <span className="inline-flex items-center gap-2">
                 <Sparkles className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
-                Prompt
+                提示词
               </span>
               <ArrowRight className="h-3.5 w-3.5 text-[var(--fg-2)] transition-transform group-open:rotate-90" />
             </summary>
@@ -331,7 +331,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
           href="/"
           className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 active:scale-[0.97] md:w-auto"
         >
-          打开 Lumen
+          打开主页
           <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       </div>
@@ -1041,7 +1041,7 @@ function sharePrompts(images: PublicShareImageOut[]): string[] {
 function shareSizeLabel(images: PublicShareImageOut[]): string {
   if (images.length === 1) {
     const image = images[0];
-    return `${image.width} x ${image.height} · ${image.mime}`;
+    return `${image.width} x ${image.height} · ${shareMimeLabel(image.mime)}`;
   }
   const first = images[0];
   const sameSize = images.every(
@@ -1052,7 +1052,14 @@ function shareSizeLabel(images: PublicShareImageOut[]): string {
 
 function shareImageAlt(image: PublicShareImageOut): string {
   const prompt = image.prompt?.trim();
-  return prompt ? prompt.slice(0, 120) : "Lumen 分享图片";
+  return prompt ? prompt.slice(0, 120) : "分享图片";
+}
+
+function shareMimeLabel(mime: string): string {
+  if (mime === "image/png") return "PNG 格式";
+  if (mime === "image/jpeg") return "JPG 格式";
+  if (mime === "image/webp") return "WEBP 格式";
+  return mime;
 }
 
 async function saveShareImage(
@@ -1101,7 +1108,7 @@ async function saveShareImage(
 async function fetchImageBlob(src: string): Promise<Blob> {
   const response = await fetch(src, { credentials: "same-origin" });
   if (!response.ok) {
-    throw new Error(`Image download failed: ${response.status}`);
+    throw new Error(`图片下载失败：${response.status}`);
   }
   return response.blob();
 }

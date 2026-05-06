@@ -182,14 +182,14 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
 
   return (
     <StageFrame
-      eyebrow="N°04 — Model Candidates"
+      eyebrow="N°04 — 模特候选"
       title="模特候选"
       subtitle="每套候选是同一个合成模特的四视图概念图。确认模特后继续生成并选择配饰四宫格。"
     >
       <section className="border-t border-[var(--border)] py-5">
         <div className="mb-3 flex items-center justify-between gap-3">
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-            Candidates
+            候选方案
           </p>
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
             {String(candidates.length).padStart(2, "0")} / 03
@@ -235,6 +235,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             loading={approve.isPending}
             disabled={!chosenCandidate || Boolean(selectedCandidate)}
             onClick={approveChosenCandidate}
+            className="w-full md:w-auto"
           >
             确认模特并继续
           </Button>
@@ -255,7 +256,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             </p>
             {accessoryImages.length > 0 ? (
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
-                {String(accessoryImages.length).padStart(2, "0")} shots
+                {String(accessoryImages.length).padStart(2, "0")} 张
               </p>
             ) : null}
           </div>
@@ -271,6 +272,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               loading={createAccessoryPreviews.isPending}
               disabled={!selectedCandidate || accessoryPreviewRunning}
               onClick={generateAccessoryPreview}
+              className="w-full md:w-auto"
             >
               {accessoryPreviewRunning
                 ? "生成中"

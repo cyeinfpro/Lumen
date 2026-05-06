@@ -56,7 +56,7 @@ export function SelectableImageGrid({
               {selected ? (
                 <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-black shadow-[var(--shadow-amber)]">
                   <Check className="h-3 w-3" />
-                  Selected
+                  已选中
                 </span>
               ) : null}
             </div>
@@ -72,7 +72,7 @@ export function SelectableImageGrid({
                 "disabled:cursor-not-allowed disabled:opacity-60",
               )}
             >
-              {saving ? "Saving…" : selected ? "取消选择" : "选择此饰品"}
+              {saving ? "保存中…" : selected ? "取消选择" : "选择此饰品"}
             </button>
           </article>
         );
@@ -83,7 +83,7 @@ export function SelectableImageGrid({
 
 export function SelectableImageGridLoading({
   count = 4,
-  label = "Generating",
+  label = "生成中",
 }: {
   count?: number;
   label?: string;

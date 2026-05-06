@@ -1,7 +1,7 @@
 """成功生成后的二级操作：
 
-- redo:<gen_id>  —— 用相同 prompt + 相同参数重画一张
-- iter:<gen_id>  —— 把这张图当 reference，等用户输入新 prompt 走 image_to_image
+- redo:<gen_id>  —— 用相同提示词 + 相同参数重画一张
+- iter:<gen_id>  —— 把这张图当参考图，等用户输入新提示词走图生图
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
         return
     prompt = gen.get("prompt") or ""
     if not prompt:
-        await cb.answer("原任务没有 prompt，无法重画。", show_alert=True)
+        await cb.answer("原任务没有提示词，无法重画。", show_alert=True)
         return
 
     payload = _payload_from_gen(gen, prompt)

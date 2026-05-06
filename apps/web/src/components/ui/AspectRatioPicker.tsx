@@ -116,10 +116,10 @@ export function AspectRatioPicker() {
     ? "提交：尺寸非法，请重新选择"
     : is4KLandscape
       ? "提交：4K 横图 3840×2160"
-      : is4KPortrait
-        ? "提交：4K 竖图 2160×3840"
-        : resolved.size === "auto"
-          ? "提交：auto（默认 4K 按比例分配 + 比例指令）"
+        : is4KPortrait
+          ? "提交：4K 竖图 2160×3840"
+          : resolved.size === "auto"
+          ? "提交：自动（默认 4K 按比例分配 + 比例指令）"
           : `提交：${resolved.width}×${resolved.height}`;
 
   const selectAspect = (target: AspectRatio) => {
@@ -191,7 +191,7 @@ export function AspectRatioPicker() {
               : "bg-[var(--color-lumen-amber)]/20 text-[var(--color-lumen-amber)]",
           )}
         >
-          {params.size_mode}
+          {params.size_mode === "auto" ? "自动" : "固定"}
         </span>
         <ChevronDown
           className={cn(

@@ -40,7 +40,7 @@ import {
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
 import {
-  useApparelModelLibraryJobsQuery,
+  useApparelModelLibraryJobsInfiniteQuery,
   useClearApparelModelLibraryJobsMutation,
   useDeleteApparelModelLibraryJobMutation,
   useSaveApparelModelLibraryJobItemMutation,
@@ -92,8 +92,11 @@ const AGE_LABEL: Record<ModelLibraryItemAgeSegment, string> = {
 };
 
 export function ModelLibraryJobsPanel() {
-  const jobs = useApparelModelLibraryJobsQuery();
-  const items = useMemo(() => jobs.data?.items ?? [], [jobs.data?.items]);
+  const jobs = useApparelModelLibraryJobsInfiniteQuery({ limit: 30 });
+  const items = useMemo(
+    () => jobs.data?.pages.flatMap((page) => page.items) ?? [],
+    [jobs.data?.pages],
+  );
   const clearJobs = useClearApparelModelLibraryJobsMutation({
     onSuccess: (result) =>
       toast.success("已清理生成任务", {
@@ -116,28 +119,28 @@ export function ModelLibraryJobsPanel() {
   }, [items]);
 
   return (
-    <div className="grid gap-7">
-      <header className="border-b border-[var(--border)] pb-6">
+    <div className="grid gap-4">
+      <header className="border-b border-[var(--border)] pb-3">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1">
             <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Jobs Center
+              任务中心
             </p>
-            <h2 className="mt-2 font-display text-[32px] italic leading-[1] text-[var(--fg-0)] md:text-[40px]">
+            <h2 className="mt-1.5 font-display text-[24px] italic leading-[1] text-[var(--fg-0)] md:text-[30px]">
               任务中心
             </h2>
-            <p className="mt-3 max-w-xl text-[13px] leading-6 text-[var(--fg-2)]">
+            <p className="mt-2 max-w-xl text-[12px] leading-5 text-[var(--fg-2)]">
               独立生成与项目候选的统一进度跟踪
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2 self-start md:self-end">
+          <div className="grid w-full grid-cols-2 gap-2 self-start min-[420px]:flex min-[420px]:w-auto min-[420px]:flex-wrap min-[420px]:items-center md:self-end">
             <button
               type="button"
               aria-label="清理已完成任务"
               onClick={() => clearJobs.mutate()}
-              disabled={clearJobs.isPending || finished.length === 0}
+              disabled={clearJobs.isPending || (finished.length === 0 && !jobs.hasNextPage)}
               className={cn(
-                "inline-flex h-10 items-center gap-2 rounded-full border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50",
+                "inline-flex min-h-10 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
             >
@@ -146,7 +149,7 @@ export function ModelLibraryJobsPanel() {
               ) : (
                 <Eraser className="h-3.5 w-3.5" />
               )}
-              <span>Clear Done</span>
+              <span>清理已完成</span>
             </button>
             <button
               type="button"
@@ -154,20 +157,20 @@ export function ModelLibraryJobsPanel() {
               onClick={() => jobs.refetch()}
               disabled={jobs.isFetching}
               className={cn(
-                "inline-flex h-10 items-center gap-2 rounded-full border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60",
+                "inline-flex min-h-10 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
             >
               <RefreshCw className={cn("h-3.5 w-3.5", jobs.isFetching && "animate-spin")} />
-              <span>Refresh</span>
+              <span>刷新</span>
             </button>
           </div>
         </div>
         {!jobs.isPending && items.length > 0 ? (
-          <div className="mt-6 grid grid-cols-1 gap-px overflow-hidden border border-[var(--border)] sm:grid-cols-3 md:max-w-2xl">
-            <Stat label="Total" value={items.length} />
-            <Stat label="Active" value={running.length} accent={running.length > 0} />
-            <Stat label="Done" value={finished.length} />
+          <div className="mt-3 grid grid-cols-3 gap-px overflow-hidden border border-[var(--border)] md:max-w-xl">
+            <Stat label="已加载" value={items.length} />
+            <Stat label="进行中" value={running.length} accent={running.length > 0} />
+            <Stat label="完成" value={finished.length} />
           </div>
         ) : null}
       </header>
@@ -175,17 +178,17 @@ export function ModelLibraryJobsPanel() {
       {jobs.isPending ? (
         <div className="flex h-40 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           <Spinner size={20} />
-          Loading
+          加载中
         </div>
       ) : items.length === 0 ? (
         <EmptyJobs />
       ) : (
         <>
-          <Section title="进行中" eyebrow="Active" count={running.length}>
+          <Section title="进行中" eyebrow="进行中" count={running.length}>
             {running.length === 0 ? (
               <EmptyLine label="目前没有进行中的任务" />
             ) : (
-              <div className="grid gap-8">
+              <div className="grid gap-4">
                 {running.map((job) => (
                   <RunningJobCard key={job.job_id} job={job} />
                 ))}
@@ -193,17 +196,31 @@ export function ModelLibraryJobsPanel() {
             )}
           </Section>
 
-          <Section title="已完成 / 失败" eyebrow="Archive" count={finished.length}>
+          <Section title="已完成 / 失败" eyebrow="归档" count={finished.length}>
             {finished.length === 0 ? (
               <EmptyLine label="还没有已完成的任务" />
             ) : (
-              <div className="grid gap-8">
+              <div className="grid gap-4">
                 {finished.map((job) => (
                   <FinishedJobCard key={job.job_id} job={job} />
                 ))}
               </div>
             )}
           </Section>
+          {jobs.hasNextPage ? (
+            <button
+              type="button"
+              onClick={() => jobs.fetchNextPage()}
+              disabled={jobs.isFetchingNextPage}
+              className={cn(
+                "mx-auto inline-flex h-9 items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+              )}
+            >
+              {jobs.isFetchingNextPage ? <Spinner size={12} /> : null}
+              加载更多历史任务
+            </button>
+          ) : null}
         </>
       )}
     </div>
@@ -220,13 +237,13 @@ function Stat({
   accent?: boolean;
 }) {
   return (
-    <div className="bg-[var(--bg-0)] px-4 py-4 md:px-5 md:py-5">
+    <div className="bg-[var(--bg-0)] px-3 py-3 md:px-4">
       <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
         {label}
       </p>
       <p
         className={cn(
-          "mt-1 text-[24px] font-semibold leading-none tabular-nums md:text-[28px]",
+          "mt-1 text-[20px] font-semibold leading-none tabular-nums md:text-[22px]",
           accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
         )}
       >
@@ -248,12 +265,12 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="grid gap-5">
-      <div className="flex items-baseline gap-3 border-t border-[var(--border)] pt-5">
+    <section className="grid gap-3">
+      <div className="flex items-baseline gap-3 border-t border-[var(--border)] pt-3">
         <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
           {eyebrow}
         </span>
-        <h3 className="text-[18px] font-semibold leading-tight text-[var(--fg-0)] md:text-[20px]">
+        <h3 className="text-[16px] font-semibold leading-tight text-[var(--fg-0)] md:text-[18px]">
           {title}
         </h3>
         <span className="font-mono text-[11px] tabular-nums text-[var(--fg-2)]">
@@ -418,7 +435,7 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
               ) : (
                 <Trash2 className="h-3 w-3" />
               )}
-              {confirmDelete ? "Confirm" : "Del"}
+              {confirmDelete ? "确认" : "删除"}
             </button>
           ) : null}
         </div>
@@ -450,7 +467,7 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
   );
 }
 
-// 候选区：dual_race 另一路 provider 的产出，不参与 finished_count，但可按需收藏入库。
+// 候选区：双路竞速另一路供应商的产出，不参与 finished_count，但可按需收藏入库。
 function CandidatesGroup({
   job,
   candidates,
@@ -472,10 +489,10 @@ function CandidatesGroup({
     <section className="grid gap-3 border-t border-[var(--border)] pt-4">
       <header className="grid gap-1">
         <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-          Candidates · 竞速产出
+          候选 · 竞速产出
         </p>
         <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
-          另一路 provider 的产出，可预览或入库
+          另一路供应商的产出，可预览或入库
         </p>
       </header>
       <div
@@ -504,7 +521,7 @@ function CandidatesGroup({
 function BriefMeta({ job }: { job: ApparelModelLibraryJob }) {
   const tokens: string[] = [];
   if (job.age_segment) tokens.push(AGE_LABEL[job.age_segment]);
-  if (job.gender) tokens.push(job.gender);
+  if (job.gender) tokens.push(job.gender === "male" ? "男" : "女");
   if (job.appearance_direction) {
     const key = job.appearance_direction as AppearanceKey;
     tokens.push(MODEL_LIBRARY_APPEARANCE_LABEL[key] ?? job.appearance_direction);
@@ -625,7 +642,7 @@ function JobThumb({
         {saved ? (
           <span className="absolute right-2 top-2 inline-flex items-center gap-1 bg-[var(--success)]/90 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-white backdrop-blur">
             <Bookmark className="h-3 w-3" />
-            Saved
+            已入库
           </span>
         ) : null}
         <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-100 backdrop-blur transition-opacity duration-150 md:opacity-0 md:group-hover:opacity-100">
@@ -647,7 +664,7 @@ function JobThumb({
               className="inline-flex h-7 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
             >
               <Bookmark className="h-3 w-3" />
-              Save
+              入库
             </button>
           ) : null}
         </div>
@@ -768,7 +785,7 @@ function SaveJobItemDialog({
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Save to library
+              收藏入库
             </p>
             <h3 className="mt-2 text-[20px] font-semibold leading-tight text-[var(--fg-0)]">
               收藏入库
@@ -851,11 +868,11 @@ function SaveJobItemDialog({
             入库后再跑一次自动识别
           </label>
         </div>
-        <footer className="mobile-dialog-footer flex shrink-0 justify-end gap-2 border-t border-[var(--border)] px-5 py-4">
-          <Button variant="outline" onClick={onClose}>
+        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] px-5 py-4 md:flex md:justify-end">
+          <Button variant="outline" onClick={onClose} className="w-full md:w-auto">
             取消
           </Button>
-          <Button variant="primary" loading={save.isPending} onClick={submit}>
+          <Button variant="primary" loading={save.isPending} onClick={submit} className="w-full md:w-auto">
             保存
           </Button>
         </footer>
@@ -921,7 +938,7 @@ function EmptyJobs() {
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
             <Library className="mr-1.5 -mt-px inline-block h-3 w-3" />
-            Empty queue
+            空队列
           </p>
           <h4 className="mt-3 text-[24px] font-semibold leading-tight text-[var(--fg-0)] md:text-[28px]">
             还没有任务

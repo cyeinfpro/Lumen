@@ -179,7 +179,7 @@ STEP_LABELS = {
 SHOT_LABELS = {
     "front_full_body": "正面全身，自然不僵硬",
     "natural_pose": "自然全身展示，姿态自由不死板",
-    "detail_half_body": "另一张自然全身展示，姿态自然不重复",
+    "detail_half_body": "自然全身展示，姿态自然不重复",
     "side_or_back": "侧面全身，姿态自然",
 }
 
@@ -5338,10 +5338,12 @@ async def list_apparel_model_library_jobs(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ) -> ApparelModelLibraryJobsOut:
     """聚合任务中心：模特库独立生成 + 项目候选 step。"""
     migrated_legacy = await _ensure_legacy_user_library_migrated(db, user.id)
     saved_map = await _saved_image_id_set(db, user.id)
+    fetch_limit = offset + limit + 1
     library_runs = list(
         (
             await db.execute(
@@ -5352,7 +5354,7 @@ async def list_apparel_model_library_jobs(
                     WorkflowRun.type == WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
                 )
                 .order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id))
-                .limit(limit)
+                .limit(fetch_limit)
             )
         ).scalars().all()
     )
@@ -5362,63 +5364,55 @@ async def list_apparel_model_library_jobs(
             await _job_from_library_run(db, run=run, saved_map=saved_map)
         )
 
-    project_runs = list(
+    candidate_rows = list(
         (
             await db.execute(
-                select(WorkflowRun)
+                select(WorkflowRun, WorkflowStep)
+                .join(WorkflowStep, WorkflowStep.workflow_run_id == WorkflowRun.id)
                 .where(
                     WorkflowRun.user_id == user.id,
                     WorkflowRun.deleted_at.is_(None),
                     WorkflowRun.type == WORKFLOW_TYPE,
+                    WorkflowStep.step_key == "model_candidates",
+                    WorkflowStep.status.in_(
+                        [
+                            "queued",
+                            "running",
+                            "succeeded",
+                            "failed",
+                            "needs_review",
+                            "approved",
+                            "completed",
+                        ]
+                    ),
                 )
                 .order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id))
-                .limit(limit)
+                .limit(fetch_limit)
             )
-        ).scalars().all()
+        ).all()
     )
     project_jobs: list[ApparelModelLibraryJobOut] = []
-    if project_runs:
-        run_ids = [run.id for run in project_runs]
-        run_index = {run.id: run for run in project_runs}
-        candidate_steps = list(
-            (
-                await db.execute(
-                    select(WorkflowStep).where(
-                        WorkflowStep.workflow_run_id.in_(run_ids),
-                        WorkflowStep.step_key == "model_candidates",
-                        WorkflowStep.status.in_(
-                            [
-                                "queued",
-                                "running",
-                                "succeeded",
-                                "failed",
-                                "needs_review",
-                                "approved",
-                                "completed",
-                            ]
-                        ),
-                    )
-                )
-            ).scalars().all()
-        )
-        for step in candidate_steps:
-            run_obj = run_index.get(step.workflow_run_id)
-            if run_obj is None:
-                continue
-            project_jobs.append(
-                await _job_from_project_candidate_step(
-                    db, run=run_obj, step=step, saved_map=saved_map
-                )
+    for run_obj, step in candidate_rows:
+        project_jobs.append(
+            await _job_from_project_candidate_step(
+                db, run=run_obj, step=step, saved_map=saved_map
             )
+        )
 
     merged = sorted(
         [*library_jobs, *project_jobs],
         key=lambda job: job.updated_at or job.created_at,
         reverse=True,
     )
+    page = merged[offset : offset + limit]
     if migrated_legacy:
         await db.commit()
-    return ApparelModelLibraryJobsOut(items=merged[:limit])
+    return ApparelModelLibraryJobsOut(
+        items=page,
+        limit=limit,
+        offset=offset,
+        has_more=len(merged) > offset + limit,
+    )
 
 
 @router.delete(

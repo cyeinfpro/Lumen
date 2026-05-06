@@ -94,6 +94,12 @@ const GENDER_OPTIONS: Array<[ModelLibraryGender, string]> = [
   ["male", "男"],
 ];
 
+function genderLabel(value: ModelLibraryGender | null | undefined): string {
+  if (value === "male") return "男";
+  if (value === "female") return "女";
+  return "未知";
+}
+
 const SOURCE_FILTERS: Array<[BrowserSource, string]> = [
   ["all", "全部"],
   ["preset", "预设"],
@@ -236,9 +242,10 @@ export function ModelLibraryBrowser({
     },
     { enabled: !isLoserView },
   );
-  const jobsQuery = useApparelModelLibraryJobsQuery({
-    enabled: isLoserView,
-  });
+  const jobsQuery = useApparelModelLibraryJobsQuery(
+    { limit: 100 },
+    { enabled: isLoserView },
+  );
   const syncInfo = libraryQuery.data?.sync;
   const isLoadingItems = isLoserView ? jobsQuery.isPending : libraryQuery.isPending;
 
@@ -271,7 +278,7 @@ export function ModelLibraryBrowser({
             id: `loser:${job.workflow_run_id}:${it.image_id}`,
             source: "generated" as ModelLibrarySource,
             visibility_scope: "user_private",
-            title: `${itemGender || "未知"} · ${
+            title: `${genderLabel(itemGender)} · ${
               job.age_segment ? AGE_LABEL[job.age_segment] ?? job.age_segment : "—"
             }`,
             age_segment: (job.age_segment ?? "young_adult") as ModelLibraryItemAgeSegment,
@@ -386,62 +393,59 @@ export function ModelLibraryBrowser({
     if (source !== "all") n += 1;
     return n;
   }, [ageSegment, appearance, source]);
+  const syncSummary = syncInfo?.last_success_at
+    ? `同步 ${formatShortDate(syncInfo.last_success_at)}`
+    : "预设 / 收藏 / 上传 / 生成";
+  const renderBrowserActions = () => (
+    <>
+      {syncInfo?.can_sync ? (
+        <button
+          type="button"
+          onClick={() => sync.mutate()}
+          disabled={sync.isPending}
+          className="inline-flex h-8 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-default disabled:opacity-50"
+        >
+          {sync.isPending ? <Spinner size={12} /> : <RefreshCw className="h-3 w-3" />}
+          同步
+        </button>
+      ) : null}
+      <Button
+        size="sm"
+        variant="primary"
+        onClick={() => setUploadOpen(true)}
+        leftIcon={<Upload className="h-3.5 w-3.5" />}
+      >
+        上传
+      </Button>
+      {headerExtra}
+    </>
+  );
 
   return (
-    <div className={cn("flex min-h-0 flex-1 flex-col gap-6", className)}>
+    <div className={cn("flex min-h-0 flex-1 flex-col gap-3", className)}>
       {showHeader ? (
-        <header className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3 border-b border-[var(--border)] pb-4">
-          <div className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Browser
-            </p>
-            <p className="mt-1 min-w-0 truncate text-[12.5px] text-[var(--fg-2)]">
-              {syncInfo?.last_success_at
-                ? `Last sync · ${formatShortDate(syncInfo.last_success_at)}`
-                : "Preset · favorite · upload · generated"}
-            </p>
+        <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-[var(--border)] pb-2 md:hidden">
+          <div className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            <p className="min-w-0 truncate">{syncSummary}</p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {syncInfo?.can_sync ? (
-              <button
-                type="button"
-                onClick={() => sync.mutate()}
-                disabled={sync.isPending}
-                className="inline-flex h-9 items-center gap-2 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:opacity-50"
-              >
-                {sync.isPending ? (
-                  <Spinner size={12} />
-                ) : (
-                  <RefreshCw className="h-3 w-3" />
-                )}
-                Sync
-              </button>
-            ) : null}
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => setUploadOpen(true)}
-              leftIcon={<Upload className="h-3.5 w-3.5" />}
-            >
-              上传
-            </Button>
-            {headerExtra}
+            {renderBrowserActions()}
           </div>
         </header>
       ) : null}
 
       <div
         className={cn(
-          "grid min-h-0 flex-1 gap-6",
-          showSourceSidebar ? "md:grid-cols-[168px_minmax(0,1fr)]" : "",
+          "grid min-h-0 flex-1 gap-4",
+          showSourceSidebar ? "md:grid-cols-[116px_minmax(0,1fr)] xl:grid-cols-[124px_minmax(0,1fr)]" : "",
         )}
       >
         {showSourceSidebar ? (
-          <aside className="hidden border-r border-[var(--border)] pr-5 md:block">
+          <aside className="hidden border-r border-[var(--border)] pr-3 md:block">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Source
+              来源
             </p>
-            <div className="mt-3 grid">
+            <div className="mt-2 grid">
               {SOURCE_FILTERS.map(([value, label]) => {
                 const active = source === value;
                 return (
@@ -450,7 +454,7 @@ export function ModelLibraryBrowser({
                     type="button"
                     onClick={() => setSource(value)}
                     className={cn(
-                      "group relative flex h-10 cursor-pointer items-center justify-between border-b border-[var(--border)] py-2 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors",
+                      "group relative flex h-8 cursor-pointer items-center justify-between border-b border-[var(--border)] py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors",
                       active
                         ? "text-[var(--fg-0)]"
                         : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
@@ -467,7 +471,7 @@ export function ModelLibraryBrowser({
           </aside>
         ) : null}
 
-        <main className="flex min-h-0 min-w-0 flex-col gap-5">
+        <main className="flex min-h-0 min-w-0 flex-col gap-3">
           {/* 移动端：紧凑筛选条 */}
           <div className="flex items-center gap-2 md:hidden">
             <div className="relative flex-1 min-w-0">
@@ -498,9 +502,9 @@ export function ModelLibraryBrowser({
           </div>
 
           {/* 桌面端：完整筛选区 */}
-          <div className="hidden md:grid md:gap-4">
+          <div className="hidden md:grid md:gap-1.5 xl:grid-cols-[minmax(460px,1fr)_minmax(0,1.35fr)] xl:gap-x-4">
             {/* 年龄 chip 行 */}
-            <ChipRowGroup label="Age">
+            <ChipRowGroup label="年龄段">
               {AGE_TABS.map(([value, label]) => (
                 <Chip
                   key={value}
@@ -512,7 +516,7 @@ export function ModelLibraryBrowser({
               ))}
             </ChipRowGroup>
             {/* 外貌 chip 行 */}
-            <ChipRowGroup label="Appearance">
+            <ChipRowGroup label="外貌方向">
               {APPEARANCE_TABS.map(([value, label]) => (
                 <Chip
                   key={value}
@@ -524,14 +528,14 @@ export function ModelLibraryBrowser({
               ))}
             </ChipRowGroup>
             {/* 搜索 + 来源（无 sidebar 时显示 select） */}
-            <div className="flex min-w-0 items-center gap-4 border-b border-[var(--border)] pb-4">
+            <div className="flex min-w-0 items-center gap-3 border-b border-[var(--border)] pb-2 xl:col-span-2">
               <div className="relative w-full min-w-0 max-w-md">
                 <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
                 <input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="搜索名称、标签"
-                  className="h-10 w-full min-w-0 border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                  className="h-9 w-full min-w-0 border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
                   aria-label="搜索模特"
                 />
                 {query ? (
@@ -558,6 +562,14 @@ export function ModelLibraryBrowser({
                   ))}
                 </select>
               ) : null}
+              {showHeader ? (
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <p className="hidden max-w-[180px] truncate font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-2)] xl:block">
+                    {syncSummary}
+                  </p>
+                  {renderBrowserActions()}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -565,14 +577,14 @@ export function ModelLibraryBrowser({
             {isLoadingItems ? (
               <div className="flex h-64 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
                 <Spinner size={20} />
-                {isLoserView ? "Loading queue" : "Loading"}
+                {isLoserView ? "正在加载队列" : "正在加载"}
               </div>
             ) : items.length === 0 ? (
               <EmptyBrowser />
             ) : (
-              <div className="grid gap-4">
+              <div className="grid gap-3">
                 {!isLoserView && deletableIds.length > 0 ? (
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-y border-[var(--border)] py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-y border-[var(--border)] py-1.5">
                     <button
                       type="button"
                       onClick={() =>
@@ -586,8 +598,8 @@ export function ModelLibraryBrowser({
                         <Square className="h-3.5 w-3.5" />
                       )}
                       {selectedDeletableIds.length > 0
-                        ? `${selectedDeletableIds.length} Selected`
-                        : "Select"}
+                        ? `已选 ${selectedDeletableIds.length} 个`
+                        : "选择"}
                     </button>
                     {selectedDeletableIds.length > 0 ? (
                       <div className="flex items-center gap-2">
@@ -596,7 +608,7 @@ export function ModelLibraryBrowser({
                           onClick={() => setSelectedIds([])}
                           className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
                         >
-                          Cancel
+                          取消
                         </button>
                         <Button
                           size="sm"
@@ -613,10 +625,10 @@ export function ModelLibraryBrowser({
                 ) : null}
                 <motion.div
                   className={cn(
-                    "grid min-w-0 gap-x-4 gap-y-8 md:gap-x-5 md:gap-y-10",
+                    "grid min-w-0 gap-x-3 gap-y-5 md:gap-x-4 md:gap-y-6",
                     mode === "page"
-                      ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
-                      : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5",
+                      ? "grid-cols-3 sm:grid-cols-4 md:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8"
+                      : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6",
                   )}
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -698,11 +710,11 @@ function ChipRowGroup({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid min-w-0 gap-2">
-      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+    <div className="flex min-w-0 items-start gap-2.5">
+      <p className="mt-1.5 w-[68px] shrink-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
         {label}
       </p>
-      <div className="-mx-1 flex min-w-0 flex-1 flex-wrap gap-x-3 gap-y-1 overflow-x-auto px-1 pb-1">
+      <div className="-mx-1 flex min-w-0 flex-1 flex-wrap gap-x-2 gap-y-0.5 overflow-x-auto px-1 pb-0.5">
         {children}
       </div>
     </div>
@@ -724,7 +736,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-9 shrink-0 cursor-pointer items-center px-1 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "group relative inline-flex min-h-8 shrink-0 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
@@ -747,7 +759,7 @@ function EmptyBrowser() {
     <div className="border-y border-[var(--border)] py-16 md:py-20">
       <div className="grid gap-3">
         <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
-          Empty
+          空
         </p>
         <h4 className="font-display text-[28px] italic leading-[1.05] text-[var(--fg-0)] md:text-[36px]">
           当前筛选没有模特
@@ -902,8 +914,8 @@ function ModelLibraryCard({
       </button>
 
       {/* 信息区：底部 mono 元数据 */}
-      <div className="mt-2.5 grid gap-1">
-        <p className="line-clamp-1 text-[14px] font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
+      <div className="mt-2 grid gap-0.5">
+        <p className="line-clamp-1 text-[13px] font-medium leading-[1.3] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
           {item.title}
         </p>
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
@@ -911,7 +923,7 @@ function ModelLibraryCard({
           {item.gender ? (
             <>
               <span aria-hidden className="mx-1.5 text-[var(--fg-3)]">·</span>
-              <span>{item.gender === "male" ? "M" : "F"}</span>
+              <span>{item.gender === "male" ? "男" : "女"}</span>
             </>
           ) : null}
         </p>
@@ -921,12 +933,12 @@ function ModelLibraryCard({
           </p>
         ) : (
           <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
-            Untagged
+            未标记
           </p>
         )}
 
         {/* 操作行 */}
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
           {onSelect ? (
             <Button
               size="sm"
@@ -966,14 +978,14 @@ function ModelLibraryCard({
                 disabled={autoTag.isPending}
                 title="重新识别气质方向"
                 aria-label="重新识别气质方向"
-                className="inline-flex h-8 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-7 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {autoTag.isPending ? (
                   <Spinner size={12} />
                 ) : (
                   <Sparkles className="h-3 w-3" />
                 )}
-                Tag
+                识别
               </button>
               <button
                 type="button"
@@ -994,14 +1006,14 @@ function ModelLibraryCard({
                       : "删除条目"
                 }
                 className={cn(
-                  "inline-flex h-8 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                  "inline-flex h-7 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
                   confirmingDelete
                     ? "text-[var(--danger)]"
                     : "text-[var(--fg-2)] hover:text-[var(--danger)]",
                 )}
               >
                 {deleting ? <Spinner size={12} /> : <Trash2 className="h-3 w-3" />}
-                {confirmingDelete ? "Confirm" : isPreset ? "Hide" : "Del"}
+                {confirmingDelete ? "确认" : isPreset ? "隐藏" : "删除"}
               </button>
             </>
           )}
@@ -1111,7 +1123,7 @@ function UploadDialog({
         <header className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Upload to library
+              上传到模特库
             </p>
             <h3 className="mt-2 font-display text-[24px] italic leading-none text-[var(--fg-0)] md:text-[28px]">
               上传到模特库
@@ -1271,11 +1283,11 @@ function UploadDialog({
           </div>
         </div>
 
-        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border)] px-5 py-4">
-          <Button variant="outline" onClick={onClose} disabled={submitting}>
+        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] px-5 py-4 md:flex md:items-center md:justify-end">
+          <Button variant="outline" onClick={onClose} disabled={submitting} className="w-full md:w-auto">
             取消
           </Button>
-          <Button variant="primary" loading={submitting} onClick={submit}>
+          <Button variant="primary" loading={submitting} onClick={submit} className="w-full md:w-auto">
             加入
           </Button>
         </footer>
@@ -1354,7 +1366,7 @@ function MobileFilterSheet({
         <header className="flex items-start justify-between gap-2 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Filter
+              筛选
             </p>
             <h3 className="mt-2 font-display text-[22px] italic leading-none text-[var(--fg-0)]">
               筛选
@@ -1373,7 +1385,7 @@ function MobileFilterSheet({
           {/* 年龄 */}
           <div className="grid gap-2">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Age
+              年龄段
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               {AGE_TABS.map(([value, label]) => (
@@ -1390,7 +1402,7 @@ function MobileFilterSheet({
           {/* 外貌 */}
           <div className="grid gap-2">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Appearance
+              外貌方向
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               {APPEARANCE_TABS.map(([value, label]) => (
@@ -1407,7 +1419,7 @@ function MobileFilterSheet({
           {/* 来源 */}
           <div className="grid gap-2">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-              Source
+              来源
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               {SOURCE_FILTERS.map(([value, label]) => (
@@ -1422,7 +1434,7 @@ function MobileFilterSheet({
             </div>
           </div>
         </div>
-        <footer className="mobile-dialog-footer flex shrink-0 items-center justify-between gap-2 border-t border-[var(--border)] px-5 py-4">
+        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] px-5 py-4 md:flex md:items-center md:justify-between">
           <Button
             variant="outline"
             onClick={() => {
@@ -1430,10 +1442,11 @@ function MobileFilterSheet({
               onAppearanceChange("all");
               onSourceChange("all");
             }}
+            className="w-full md:w-auto"
           >
             清空
           </Button>
-          <Button variant="primary" onClick={onClose}>
+          <Button variant="primary" onClick={onClose} className="w-full md:w-auto">
             完成
           </Button>
         </footer>

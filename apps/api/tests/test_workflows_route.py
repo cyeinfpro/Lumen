@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,21 +27,30 @@ class _Result:
 
 
 class _Db:
-    def __init__(self, rows: list[Any]) -> None:
+    def __init__(self, rows: list[Any], responses: list[list[Any]] | None = None) -> None:
         self.rows = rows
+        self.responses = responses
         self.statements: list[Any] = []
         self.added: list[Any] = []
         self.flushed = False
+        self.committed = False
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
-        return _Result(self.rows)
+        if self.responses is not None:
+            rows = self.responses.pop(0)
+        else:
+            rows = self.rows
+        return _Result(rows)
 
     def add(self, row: Any) -> None:
         self.added.append(row)
 
     async def flush(self) -> None:
         self.flushed = True
+
+    async def commit(self) -> None:
+        self.committed = True
 
 
 def test_model_candidates_mvp_requires_three_candidates() -> None:
@@ -246,6 +256,97 @@ def test_default_github_contents_url_points_to_user_repo_folder() -> None:
     assert workflows._github_contents_url().startswith(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/assets/apparel-model-presets"
     )
+
+
+@pytest.mark.asyncio
+async def test_apparel_model_library_jobs_respects_offset_and_has_more(monkeypatch) -> None:
+    async def fake_ensure_legacy_user_library_migrated(_db, _user_id):
+        return False
+
+    async def fake_saved_image_id_set(_db, _user_id):
+        return {}
+
+    monkeypatch.setattr(
+        workflows, "_ensure_legacy_user_library_migrated", fake_ensure_legacy_user_library_migrated
+    )
+    monkeypatch.setattr(workflows, "_saved_image_id_set", fake_saved_image_id_set)
+
+    async def fake_library_job(_db, *, run, saved_map):
+        ts_map = {
+            "library-1": datetime(2026, 1, 3, tzinfo=timezone.utc),
+            "library-2": datetime(2026, 1, 2, tzinfo=timezone.utc),
+        }
+        return workflows.ApparelModelLibraryJobOut(  # noqa: SLF001
+            job_id=run.id,
+            origin="library_generate",
+            workflow_run_id=run.id,
+            project_title=None,
+            status="succeeded",
+            requested_count=1,
+            finished_count=1,
+            age_segment=None,
+            gender=None,
+            appearance_direction=None,
+            extra_requirements=None,
+            items=[],
+            candidates=[],
+            error_message=None,
+            created_at=ts_map[run.id],
+            updated_at=ts_map[run.id],
+        )
+
+    async def fake_project_job(_db, *, run, step, saved_map):
+        return workflows.ApparelModelLibraryJobOut(  # noqa: SLF001
+            job_id=f"{run.id}:model_candidates",
+            origin="project_candidate",
+            workflow_run_id=run.id,
+            project_title=run.title,
+            status="succeeded",
+            requested_count=1,
+            finished_count=1,
+            age_segment=None,
+            gender=None,
+            appearance_direction=None,
+            extra_requirements=None,
+            items=[],
+            candidates=[],
+            error_message=None,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(workflows, "_job_from_library_run", fake_library_job)
+    monkeypatch.setattr(workflows, "_job_from_project_candidate_step", fake_project_job)
+
+    library_runs = [
+        SimpleNamespace(id="library-1"),
+        SimpleNamespace(id="library-2"),
+    ]
+    candidate_rows = [
+        (SimpleNamespace(id="project-1", title="Project 1"), SimpleNamespace(id="step-1")),
+    ]
+    expected_db = _Db([], responses=[library_runs, candidate_rows])
+    expected_db_second = _Db([], responses=[library_runs, candidate_rows])
+
+    async def run_page(db: _Db, offset: int) -> workflows.ApparelModelLibraryJobsOut:  # noqa: SLF001
+        return await workflows.list_apparel_model_library_jobs(  # noqa: SLF001
+            user=SimpleNamespace(id="user-1"),
+            db=db,  # type: ignore[arg-type]
+            limit=2,
+            offset=offset,
+        )
+
+    first = await run_page(expected_db, 0)
+    assert first.limit == 2
+    assert first.offset == 0
+    assert first.has_more is True
+    assert [item.job_id for item in first.items] == ["library-1", "library-2"]
+
+    second = await run_page(expected_db_second, 2)
+    assert second.limit == 2
+    assert second.offset == 2
+    assert second.has_more is False
+    assert [item.job_id for item in second.items] == ["project-1:model_candidates"]
 
 
 @pytest.mark.asyncio
@@ -613,8 +714,9 @@ def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
     assert "正面全身" in prompts["front_full_body"]
     assert "姿势生动活泼有活力" in prompts["natural_pose"]
     assert "姿态自由不死板" in prompts["natural_pose"]
-    assert "另一张自然全身展示" in prompts["detail_half_body"]
+    assert "自然全身展示" in prompts["detail_half_body"]
     assert "姿态自然不重复" in prompts["detail_half_body"]
+    assert "另一张" not in prompts["detail_half_body"]
     assert "侧面" in prompts["side_or_back"]
     assert "背面" not in prompts["side_or_back"]
     for prompt in prompts.values():

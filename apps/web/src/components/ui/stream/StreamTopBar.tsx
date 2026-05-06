@@ -25,7 +25,7 @@ export function StreamTopBar({
   onToggleSearch,
   onToggleFilter,
 }: StreamTopBarProps) {
-  const countLabel = `共 ${total} 张 · ${promptCount} 段 prompt`;
+  const countLabel = `共 ${total} 张 · ${promptCount} 段提示词`;
   return (
     <MobileStreamTopBar
       compact={compact}

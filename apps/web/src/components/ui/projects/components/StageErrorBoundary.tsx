@@ -50,7 +50,7 @@ export class StageErrorBoundary extends Component<Props, State> {
           </span>
           <div className="min-w-0 flex-1">
             <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
-              Error
+              错误
             </p>
             <h3 className="mt-1 font-display text-[20px] italic text-[var(--fg-0)]">
               阶段渲染异常

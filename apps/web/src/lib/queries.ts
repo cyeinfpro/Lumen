@@ -96,6 +96,7 @@ import {
   type ApparelModelLibraryItem,
   type ApparelModelLibraryItemCreateIn,
   type ApparelModelLibraryJob,
+  type ApparelModelLibraryJobsOpts,
   type ApparelModelLibraryJobsList,
   type ApparelModelLibraryListResponse,
   type ApparelModelLibrarySaveJobItemIn,
@@ -1406,14 +1407,15 @@ export function useGenerateApparelModelLibraryMutation(
 }
 
 export function useApparelModelLibraryJobsQuery(
+  params?: ApparelModelLibraryJobsOpts,
   options?: Omit<
     UseQueryOptions<ApparelModelLibraryJobsList>,
     "queryKey" | "queryFn"
   >,
 ) {
   return useQuery<ApparelModelLibraryJobsList>({
-    queryKey: qk.apparelModelLibraryJobs(),
-    queryFn: getApparelModelLibraryJobs,
+    queryKey: [...qk.apparelModelLibraryJobs(), params ?? {}] as const,
+    queryFn: () => getApparelModelLibraryJobs(params),
     // 5s 轮询：进行中的 job 完成后自动 surface 新图。
     // 无进行中也保持 5s——前端不知道后端何时完成；列表很轻可以接受。
     refetchInterval: 5_000,
@@ -1421,6 +1423,28 @@ export function useApparelModelLibraryJobsQuery(
     refetchOnWindowFocus: true,
     staleTime: 2_000,
     ...options,
+  });
+}
+
+export function useApparelModelLibraryJobsInfiniteQuery(params?: { limit?: number }) {
+  const limit = params?.limit ?? 30;
+  return useInfiniteQuery<
+    ApparelModelLibraryJobsList,
+    Error,
+    InfiniteData<ApparelModelLibraryJobsList, number>,
+    readonly ["workflows", "apparel_model_library", "jobs", "infinite", { limit: number }],
+    number
+  >({
+    queryKey: [...qk.apparelModelLibraryJobs(), "infinite", { limit }] as const,
+    queryFn: ({ pageParam }) =>
+      getApparelModelLibraryJobs({ limit, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last) =>
+      last.has_more ? last.offset + last.items.length : undefined,
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    staleTime: 2_000,
   });
 }
 

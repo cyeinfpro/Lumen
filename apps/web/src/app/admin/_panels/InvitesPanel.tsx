@@ -3,7 +3,7 @@
 // Lumen V1.0 管理面板：邀请链接。
 // - 顶部生成表单：邮箱(可空) / 过期天数 / 角色 / 提交
 // - 生成成功 → 高亮卡片展示，一键复制 URL
-// - 列表：URL / Email / Role / 状态 / 过期 / 创建 / 撤销（内嵌确认）
+// - 列表：链接 / 邮箱 / 角色 / 状态 / 过期 / 创建 / 撤销（内嵌确认）
 // - 三态 loading/empty/error；ApiError 分支细化文案
 
 import { useMemo, useState, useSyncExternalStore } from "react";
@@ -139,7 +139,7 @@ export function InvitesPanel() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="someone@example.com"
+              placeholder="name@示例.com"
               autoComplete="off"
               className="w-full min-h-[44px] sm:h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors"
             />
@@ -163,8 +163,8 @@ export function InvitesPanel() {
               onChange={(e) => setRole(e.target.value as "member" | "admin")}
               className="w-full min-h-[44px] sm:h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
             >
-              <option value="member">member</option>
-              <option value="admin">admin</option>
+              <option value="member">成员</option>
+              <option value="admin">管理员</option>
             </select>
           </FormField>
           <div className="self-end">
@@ -235,17 +235,17 @@ export function InvitesPanel() {
                 </button>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                <Field label="Token">
+                <Field label="令牌">
                   <span className="font-mono text-neutral-300">
                     {created.token.slice(0, 12)}…
                   </span>
                 </Field>
-                <Field label="Email">
+                <Field label="邮箱">
                   <span className="text-neutral-300">
                     {created.email ?? "—"}
                   </span>
                 </Field>
-                <Field label="Role">
+                <Field label="角色">
                   <RoleBadge role={created.role} />
                 </Field>
                 <Field label="过期时间">
@@ -312,7 +312,7 @@ export function InvitesPanel() {
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div>
                       <div className="text-[11px] uppercase tracking-wider text-neutral-500">
-                        Email
+                        邮箱
                       </div>
                       <div className="text-neutral-300 break-all">
                         {row.email ?? "—"}
@@ -320,7 +320,7 @@ export function InvitesPanel() {
                     </div>
                     <div>
                       <div className="text-[11px] uppercase tracking-wider text-neutral-500">
-                        Role
+                        角色
                       </div>
                       <div className="mt-0.5">
                         <RoleBadge role={row.role} />
@@ -398,8 +398,8 @@ export function InvitesPanel() {
               <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-white/10">
                 <tr>
                   <th className="text-left py-3 px-4 font-medium">链接</th>
-                  <th className="text-left py-3 px-4 font-medium">Email</th>
-                  <th className="text-left py-3 px-4 font-medium">Role</th>
+                  <th className="text-left py-3 px-4 font-medium">邮箱</th>
+                  <th className="text-left py-3 px-4 font-medium">角色</th>
                   <th className="text-left py-3 px-4 font-medium">状态</th>
                   <th className="text-left py-3 px-4 font-medium">过期</th>
                   <th className="text-left py-3 px-4 font-medium">创建</th>
@@ -565,14 +565,14 @@ function RoleBadge({ role }: { role: "admin" | "member" }) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
         <UserCog className="w-3 h-3" />
-        admin
+        管理员
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-neutral-400 border border-white/10">
       <UsersIcon className="w-3 h-3" />
-      member
+      成员
     </span>
   );
 }

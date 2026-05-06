@@ -34,7 +34,7 @@ async def cmd_new(message: Message, state: FSMContext) -> None:
     await state.update_data(params=params)
     await message.answer(
         f"生成参数\n{render_params_summary(params)}\n\n"
-        "选好后点「开始生成」，再发送你的 prompt。",
+        "选好后点「开始生成」，再发送你的提示词。",
         reply_markup=main_menu(params),
     )
 
@@ -56,9 +56,9 @@ async def on_cfg(cb: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(GenFlow.awaiting_prompt)
         await state.update_data(params=params)
         await msg.edit_text(
-            f"📝 现在发送你的 prompt（中英文均可）。\n\n{render_params_summary(params)}"
+            f"📝 现在发送你的提示词（中英文均可）。\n\n{render_params_summary(params)}"
         )
-        await cb.answer("等待 prompt…")
+        await cb.answer("等待提示词…")
         return
 
     if action == "cancel":
@@ -80,7 +80,7 @@ async def on_cfg(cb: CallbackQuery, state: FSMContext) -> None:
     try:
         await msg.edit_text(
             f"生成参数\n{render_params_summary(params)}\n\n"
-            "选好后点「开始生成」，再发送你的 prompt。",
+            "选好后点「开始生成」，再发送你的提示词。",
             reply_markup=main_menu(params),
         )
     except Exception:  # noqa: BLE001

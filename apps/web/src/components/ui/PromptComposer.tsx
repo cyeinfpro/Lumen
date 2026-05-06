@@ -623,8 +623,8 @@ function FastToggle() {
     <motion.button
       type="button"
       onClick={() => setFast(!fast)}
-      aria-label={fast ? "Fast 模式已开" : "Fast 模式已关"}
-      title={fast ? "Fast 模式：更快响应" : "Fast 模式：已关闭"}
+      aria-label={fast ? "快速模式已开启" : "快速模式已关闭"}
+      title={fast ? "快速模式：更快响应" : "快速模式：已关闭"}
       whileHover={{ scale: 1.03 }}
       whileTap={{ scale: 0.94 }}
       transition={{ type: "spring", stiffness: 400, damping: 25 }}
@@ -640,7 +640,7 @@ function FastToggle() {
       <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
         <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
       </svg>
-      <span>Fast</span>
+      <span>快速</span>
     </motion.button>
   );
 }

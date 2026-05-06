@@ -118,7 +118,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
         snapPoints={["80%", "60%"]}
       >
         <DrawerHeader onClose={onClose} />
-        <div className="px-5">
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5">
           <ConstraintBody workflow={workflow} />
         </div>
       </BottomSheet>

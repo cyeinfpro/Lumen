@@ -101,7 +101,7 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
                   </p>
                 ) : isFailed ? (
                   <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--danger)]">
-                    Failed
+                    失败
                   </p>
                 ) : null}
               </div>

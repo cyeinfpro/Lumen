@@ -212,6 +212,29 @@ export function Sidebar() {
     return BUCKET_ORDER.flatMap((b) => grouped[b].map((c) => c.id));
   }, [filtered, grouped, tab]);
 
+  useEffect(() => {
+    if (!list.hasNextPage || list.isFetchingNextPage) return;
+    if (query.trim()) return;
+
+    const currentLoaded =
+      currentConvId == null || allConvs.some((conv) => conv.id === currentConvId);
+    const tabHasResults =
+      tab === "archived"
+        ? allConvs.some((conv) => conv.archived)
+        : allConvs.some((conv) => !conv.archived);
+
+    if (currentLoaded && tabHasResults) return;
+    void list.fetchNextPage();
+  }, [
+    allConvs,
+    currentConvId,
+    list,
+    list.hasNextPage,
+    list.isFetchingNextPage,
+    query,
+    tab,
+  ]);
+
   const handleNewCanvas = useCallback(() => {
     if (createMut.isPending) return;
     createMut.mutate({});
