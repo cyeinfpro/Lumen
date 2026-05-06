@@ -4,8 +4,7 @@
 // 点击卡片 → onPick(text, mode) + dispatch "lumen:composer-expand" 事件。
 
 import { useState } from "react";
-import Link from "next/link";
-import { AlertTriangle, ArrowRight, Shirt, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/primitives";
 import { useChatStore } from "@/store/useChatStore";
 import { cn } from "@/lib/utils";
@@ -102,7 +101,7 @@ export function MobileEmptyStudio({
   return (
     <div className="flex flex-col items-stretch py-8 px-1">
       {/* Hero */}
-      <div className="mb-10">
+      <div className="mb-8">
         <div className="flex items-center gap-2.5 mb-3">
           <span
             className={cn(
@@ -151,29 +150,6 @@ export function MobileEmptyStudio({
           正在载入历史消息…
         </div>
       ) : null}
-
-      <Link
-        href="/projects/apparel-model-showcase/new"
-        className={cn(
-          "mb-5 flex min-h-14 items-center justify-between gap-3 rounded-[var(--radius-lg)]",
-          "border border-[var(--border-amber)]/45 bg-[var(--amber-400)]/10 px-3.5 py-3",
-        )}
-      >
-        <span className="flex min-w-0 items-center gap-3">
-          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--amber-400)] text-black">
-            <Shirt className="h-4 w-4" />
-          </span>
-          <span className="min-w-0">
-            <span className="block text-body-sm font-medium text-[var(--fg-0)]">
-              服饰模特图
-            </span>
-            <span className="mt-0.5 block truncate text-caption text-[var(--fg-2)]">
-              先确认模特，再生成电商图
-            </span>
-          </span>
-        </span>
-        <ArrowRight className="h-4 w-4 shrink-0 text-[var(--amber-300)]" />
-      </Link>
 
       {/* 生图建议 — 2 列网格 */}
       <div className="mb-5">
