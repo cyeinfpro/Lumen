@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { ModelLibraryPage } from "@/components/ui/projects/library";
 
 export const metadata = {
@@ -5,5 +6,9 @@ export const metadata = {
 };
 
 export default function Page() {
-  return <ModelLibraryPage />;
+  return (
+    <Suspense fallback={null}>
+      <ModelLibraryPage />
+    </Suspense>
+  );
 }
