@@ -21,10 +21,15 @@ import type { BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { ResultImageCard } from "../components/ResultImageCard";
 import { RunningState, StageFrame } from "../components/StageFrame";
-import { showcaseImages } from "../utils";
+import { showcaseImages, stepOf, stringValue } from "../utils";
 
 export function QualityReviewStage({ workflow }: { workflow: WorkflowRun }) {
   const images = showcaseImages(workflow);
+  const showcaseStep = stepOf(workflow, "showcase_generation");
+  const qualityStep = stepOf(workflow, "quality_review");
+  const stageError =
+    stringValue(qualityStep?.output_json?.error_message) ??
+    stringValue(showcaseStep?.output_json?.error_message);
   const reportsByImage = new Map(
     workflow.quality_reports.map((report) => [report.image_id, report]),
   );
@@ -95,6 +100,14 @@ export function QualityReviewStage({ workflow }: { workflow: WorkflowRun }) {
         </Button>
       }
     >
+      {stageError ? (
+        <section className="border-t border-[var(--border)] py-4">
+          <p className="border-l-2 border-[var(--danger)] pl-3 text-[13px] leading-6 text-[var(--danger)]">
+            {stageError}
+          </p>
+        </section>
+      ) : null}
+
       <section className="border-t border-[var(--border)] py-5">
         <div className="mb-3 flex items-center justify-between gap-3">
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">

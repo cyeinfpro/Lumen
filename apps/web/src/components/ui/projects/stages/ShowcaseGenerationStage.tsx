@@ -29,7 +29,7 @@ import {
   type CreateAspectRatio,
   type CreateTemplate,
 } from "../types";
-import { imageById, showcaseImages, stepOf } from "../utils";
+import { imageById, showcaseImages, stepOf, stringValue } from "../utils";
 
 export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun }) {
   const step = stepOf(workflow, "showcase_generation");
@@ -70,6 +70,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
 
   const hasTasks = Boolean(step?.task_ids?.length);
   const isRunning = step?.status === "running";
+  const stageError = stringValue(step?.output_json?.error_message);
   if (!isRunning && trackedConfigKey !== currentConfigKey) {
     setTrackedConfigKey(currentConfigKey);
     setTemplate(initialTemplate);
@@ -127,6 +128,14 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         </Button>
       }
     >
+      {stageError ? (
+        <section className="border-t border-[var(--border)] py-4">
+          <p className="border-l-2 border-[var(--danger)] pl-3 text-[13px] leading-6 text-[var(--danger)]">
+            {stageError}
+          </p>
+        </section>
+      ) : null}
+
       <section className="grid gap-x-6 gap-y-2 lg:grid-cols-2">
         <ReferenceBlock
           title="商品原图"

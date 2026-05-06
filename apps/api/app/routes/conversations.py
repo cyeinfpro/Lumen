@@ -280,6 +280,7 @@ async def list_conversations(
     stmt = select(Conversation).where(
         Conversation.user_id == user.id,
         Conversation.deleted_at.is_(None),
+        Conversation.default_params["workflow_type"].astext.is_(None),
     )
     if q:
         # Why: escape LIKE wildcards so user input cannot match outside intent.

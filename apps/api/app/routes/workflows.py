@@ -22,7 +22,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage
-from sqlalchemy import desc, or_, select
+from sqlalchemy import delete, desc, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.providers import (
@@ -2060,14 +2060,25 @@ async def _get_or_create_workflow_conversation(
     user: User,
     conversation_id: str | None,
     title: str,
+    workflow_type: str = WORKFLOW_TYPE,
 ) -> Conversation:
     if conversation_id:
-        return await _get_owned_conversation(db, user_id=user.id, conversation_id=conversation_id)
+        conv = await _get_owned_conversation(
+            db, user_id=user.id, conversation_id=conversation_id
+        )
+        params = dict(conv.default_params or {})
+        params["workflow_type"] = workflow_type
+        params["hidden_from_conversations"] = True
+        conv.default_params = params
+        return conv
     conv = Conversation(
         user_id=user.id,
         title=title,
         archived=True,
-        default_params={"workflow_type": WORKFLOW_TYPE},
+        default_params={
+            "workflow_type": workflow_type,
+            "hidden_from_conversations": True,
+        },
     )
     db.add(conv)
     await db.flush()
@@ -2116,6 +2127,223 @@ async def _step(db: AsyncSession, run_id: str, step_key: str) -> WorkflowStep:
     if row is None:
         raise _http("workflow_corrupt", f"missing workflow step: {step_key}", 500)
     return row
+
+
+def _task_error_summary(rows: Iterable[Any], fallback: str) -> str:
+    messages: list[str] = []
+    for row in rows:
+        raw_message = getattr(row, "error_message", None)
+        raw_code = getattr(row, "error_code", None)
+        message = str(raw_message).strip() if raw_message else ""
+        code = str(raw_code).strip() if raw_code else ""
+        if message and code and code not in message:
+            messages.append(f"{code}: {message}")
+        elif message:
+            messages.append(message)
+        elif code:
+            messages.append(code)
+    return "；".join(_dedupe_nonempty(messages))[:2000] or fallback
+
+
+async def _workflow_steps_and_candidates(
+    db: AsyncSession,
+    run: WorkflowRun,
+) -> tuple[list[WorkflowStep], list[ModelCandidate]]:
+    steps = await _load_steps(db, run.id)
+    candidates = list(
+        (
+            await db.execute(
+                select(ModelCandidate).where(ModelCandidate.workflow_run_id == run.id)
+            )
+        ).scalars().all()
+    )
+    return steps, candidates
+
+
+def _workflow_direct_task_ids(
+    steps: Iterable[WorkflowStep],
+    candidates: Iterable[ModelCandidate],
+) -> list[str]:
+    return _dedupe_nonempty(
+        [
+            *(task_id for step in steps for task_id in (step.task_ids or [])),
+            *(task_id for candidate in candidates for task_id in (candidate.task_ids or [])),
+        ]
+    )
+
+
+def _workflow_direct_image_ids(
+    steps: Iterable[WorkflowStep],
+    candidates: Iterable[ModelCandidate],
+) -> list[str]:
+    candidate_image_fields = (
+        "contact_sheet_image_id",
+        "portrait_image_id",
+        "front_image_id",
+        "side_image_id",
+        "back_image_id",
+    )
+    return _dedupe_nonempty(
+        [
+            *(image_id for step in steps for image_id in (step.image_ids or [])),
+            *(
+                getattr(candidate, field, None)
+                for candidate in candidates
+                for field in candidate_image_fields
+            ),
+        ]
+    )
+
+
+async def _workflow_generation_ids_from_task_ids(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    task_ids: list[str],
+) -> list[str]:
+    generations = await _workflow_generation_rows_from_task_ids(
+        db,
+        user_id=user_id,
+        task_ids=task_ids,
+        include_dual_bonus=True,
+    )
+    return _dedupe_nonempty(generation.id for generation in generations)
+
+
+async def _workflow_generation_rows_from_task_ids(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    task_ids: list[str],
+    include_dual_bonus: bool,
+) -> list[Generation]:
+    task_ids = _dedupe_nonempty(task_ids)
+    if not task_ids:
+        return []
+    base_generations = list(
+        (
+            await db.execute(
+                select(Generation).where(
+                    Generation.user_id == user_id,
+                    Generation.id.in_(task_ids),
+                )
+            )
+        ).scalars().all()
+    )
+    if not include_dual_bonus:
+        return base_generations
+    bonus_generations = list(
+        (
+            await db.execute(
+                select(Generation)
+                .where(
+                    Generation.user_id == user_id,
+                    Generation.upstream_request["parent_generation_id"].astext.in_(
+                        task_ids
+                    ),
+                    Generation.upstream_request["is_dual_race_bonus"]
+                    .as_boolean()
+                    .is_(True),
+                )
+                .order_by(Generation.created_at.asc(), Generation.id.asc())
+            )
+        ).scalars().all()
+    )
+    return [*base_generations, *bonus_generations]
+
+
+async def _soft_delete_workflow_generated_images(
+    db: AsyncSession,
+    *,
+    run: WorkflowRun,
+    deleted_at: datetime,
+    cancel_message: str,
+) -> dict[str, int]:
+    """Soft-delete images produced by a workflow and cancel its active tasks.
+
+    Images explicitly saved into the user's model library are preserved; those
+    are no longer just transient task outputs.
+    """
+    steps, candidates = await _workflow_steps_and_candidates(db, run)
+    task_ids = _workflow_direct_task_ids(steps, candidates)
+    image_ids = _workflow_direct_image_ids(steps, candidates)
+    generation_ids = await _workflow_generation_ids_from_task_ids(
+        db, user_id=run.user_id, task_ids=task_ids
+    )
+
+    canceled_generations = 0
+    if generation_ids:
+        result = await db.execute(
+            update(Generation)
+            .where(
+                Generation.user_id == run.user_id,
+                Generation.id.in_(generation_ids),
+                Generation.status.in_(
+                    [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
+                ),
+            )
+            .values(
+                status=GenerationStatus.CANCELED.value,
+                progress_stage="finalizing",
+                finished_at=deleted_at,
+                error_code="cancelled",
+                error_message=cancel_message,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        canceled_generations = int(result.rowcount or 0)
+
+    canceled_completions = 0
+    if task_ids:
+        result = await db.execute(
+            update(Completion)
+            .where(
+                Completion.user_id == run.user_id,
+                Completion.id.in_(task_ids),
+                Completion.status.in_(
+                    [CompletionStatus.QUEUED.value, CompletionStatus.RUNNING.value]
+                ),
+            )
+            .values(
+                status=CompletionStatus.CANCELED.value,
+                progress_stage="finalizing",
+                finished_at=deleted_at,
+                error_code="cancelled",
+                error_message=cancel_message,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        canceled_completions = int(result.rowcount or 0)
+
+    deleted_images = 0
+    image_matchers = []
+    if generation_ids:
+        image_matchers.append(Image.owner_generation_id.in_(generation_ids))
+    if image_ids:
+        image_matchers.append(Image.id.in_(image_ids))
+    if image_matchers:
+        preserved_library_images = select(ModelLibraryItem.image_id).where(
+            ModelLibraryItem.user_id == run.user_id,
+            ModelLibraryItem.image_id.is_not(None),
+        )
+        result = await db.execute(
+            update(Image)
+            .where(
+                Image.user_id == run.user_id,
+                Image.deleted_at.is_(None),
+                or_(*image_matchers),
+                ~Image.id.in_(preserved_library_images),
+            )
+            .values(deleted_at=deleted_at)
+            .execution_options(synchronize_session=False)
+        )
+        deleted_images = int(result.rowcount or 0)
+
+    return {
+        "images_deleted": deleted_images,
+        "generations_canceled": canceled_generations,
+        "completions_canceled": canceled_completions,
+    }
 
 
 def _seed_steps(run: WorkflowRun, *, user_prompt: str) -> list[WorkflowStep]:
@@ -2920,6 +3148,21 @@ async def _sync_workflow_outputs(
                     approval_step.status = "needs_review"
             elif failed_count and failed_count == len(candidates):
                 candidate_step.status = "failed"
+                failed_generations = [
+                    generation
+                    for generation in gens_by_id.values()
+                    if generation.status == GenerationStatus.FAILED.value
+                ]
+                output_json = dict(candidate_step.output_json or {})
+                output_json["failed_generation_ids"] = [
+                    generation.id for generation in failed_generations
+                ]
+                output_json["error_message"] = _task_error_summary(
+                    failed_generations,
+                    "模特候选生成失败",
+                )
+                candidate_step.output_json = output_json
+                run.current_step = "model_candidates"
                 run.status = "failed"
 
     showcase_step = steps.get("showcase_generation")
@@ -2967,6 +3210,29 @@ async def _sync_workflow_outputs(
             if approval_step.status == "running":
                 approval_step.status = "needs_review"
                 run.status = "needs_review"
+                run.current_step = "model_approval"
+        else:
+            failed = [
+                generation
+                for generation in accessory_generations
+                if generation.status == GenerationStatus.FAILED.value
+            ]
+            active = [
+                generation
+                for generation in accessory_generations
+                if generation.status
+                in {GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value}
+            ]
+            if approval_step.status == "running" and failed and not active:
+                output_json = dict(approval_step.output_json or {})
+                output_json["failed_generation_ids"] = [g.id for g in failed]
+                output_json["error_message"] = _task_error_summary(
+                    failed,
+                    "配饰四宫格生成失败",
+                )
+                approval_step.output_json = output_json
+                approval_step.status = "failed"
+                run.status = "failed"
                 run.current_step = "model_approval"
     if showcase_step and showcase_step.task_ids:
         base_generations = (
@@ -3030,18 +3296,33 @@ async def _sync_workflow_outputs(
                 output_json = dict(showcase_step.output_json or {})
                 output_json["failed_generation_ids"] = [g.id for g in failed]
                 output_json["succeeded_generation_ids"] = [g.id for g in succeeded]
+                output_json["error_message"] = _task_error_summary(
+                    failed,
+                    "部分展示图生成失败",
+                )
                 output_json["recovered_by_bonus_images"] = True
                 showcase_step.output_json = output_json
             if quality_step:
-                quality_step.status = "waiting_input"
+                quality_step.status = "needs_review"
                 quality_step.image_ids = image_ids
-            run.current_step = "showcase_generation"
+                reports = await _load_quality_reports(db, run.id)
+                quality_step.output_json = _merge_quality_summary_payload(
+                    quality_step.output_json,
+                    reports,
+                )
+                run.current_step = "quality_review"
+            else:
+                run.current_step = "showcase_generation"
             run.status = "needs_review"
         elif showcase_step.status == "running" and failed and not active:
             showcase_step.status = "failed"
             showcase_step.output_json = {
                 "failed_generation_ids": [g.id for g in failed],
                 "succeeded_generation_ids": [g.id for g in succeeded],
+                "error_message": _task_error_summary(
+                    failed,
+                    "展示图生成失败",
+                ),
             }
             run.status = "failed"
         elif showcase_step.status == "completed" and quality_step:
@@ -3063,6 +3344,15 @@ async def _sync_workflow_outputs(
                 quality_step.output_json,
                 reports,
             )
+            if (
+                image_ids
+                and quality_step.status in {"waiting_input", "running", "needs_review"}
+                and run.status != "completed"
+                and run.current_step == "showcase_generation"
+            ):
+                quality_step.status = "needs_review"
+                run.current_step = "quality_review"
+                run.status = "needs_review"
 
 
 def _quality_summary_payload(reports: list[QualityReport]) -> dict[str, Any]:
@@ -3461,7 +3751,9 @@ async def create_apparel_model_showcase(
     conv = await _get_or_create_workflow_conversation(
         db,
         user=user,
-        conversation_id=body.conversation_id,
+        # Workflow task messages need a backing conversation, but it should not
+        # attach to a user-visible chat session.
+        conversation_id=None,
         title=title,
     )
     conv.title = title
@@ -3862,7 +4154,26 @@ async def delete_workflow(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
     run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
-    run.deleted_at = _now()
+    deleted_at = _now()
+    await _soft_delete_workflow_generated_images(
+        db,
+        run=run,
+        deleted_at=deleted_at,
+        cancel_message="workflow deleted",
+    )
+    run.deleted_at = deleted_at
+    if run.conversation_id:
+        conv = (
+            await db.execute(
+                select(Conversation).where(
+                    Conversation.id == run.conversation_id,
+                    Conversation.user_id == user.id,
+                    Conversation.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if conv is not None:
+            conv.deleted_at = deleted_at
     await db.commit()
     return {"ok": True}
 
@@ -4349,6 +4660,7 @@ async def reopen_model_selection(
     quality.output_json = {}
     quality.task_ids = []
     quality.image_ids = []
+    await db.execute(delete(QualityReport).where(QualityReport.workflow_run_id == run.id))
     delivery = await _step(db, run.id, "delivery")
     delivery.status = "waiting_input"
     delivery.input_json = {}
@@ -5236,9 +5548,34 @@ async def _job_from_library_run(
         for bid in bonus_ids
     ]
     error_message = None
-    if step is not None and step.status == "failed":
+    if step is not None:
         out_json = step.output_json if isinstance(step.output_json, dict) else {}
         error_message = _clean_optional_text(out_json.get("error_message"), max_len=400)
+        task_generations = await _workflow_generation_rows_from_task_ids(
+            db,
+            user_id=run.user_id,
+            task_ids=list(step.task_ids or []),
+            include_dual_bonus=False,
+        )
+        failed_generations = [
+            generation
+            for generation in task_generations
+            if generation.status == GenerationStatus.FAILED.value
+        ]
+        active_generations = [
+            generation
+            for generation in task_generations
+            if generation.status
+            in {GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value}
+        ]
+        if failed_generations and not active_generations and finished < requested:
+            if step_status == "running":
+                step_status = "failed"
+            if error_message is None:
+                error_message = _clean_optional_text(
+                    _task_error_summary(failed_generations, "模特库生成失败"),
+                    max_len=400,
+                )
     job_status = _model_library_job_status(
         step_status=step_status,
         requested_count=requested,
@@ -5323,8 +5660,36 @@ async def _job_from_project_candidate_step(
         )
         for bid in bonus_ids
     ]
+    out_json = step.output_json if isinstance(step.output_json, dict) else {}
+    error_message = _clean_optional_text(out_json.get("error_message"), max_len=400)
+    step_status = step.status
+    task_generations = await _workflow_generation_rows_from_task_ids(
+        db,
+        user_id=run.user_id,
+        task_ids=list(step.task_ids or []),
+        include_dual_bonus=False,
+    )
+    failed_generations = [
+        generation
+        for generation in task_generations
+        if generation.status == GenerationStatus.FAILED.value
+    ]
+    active_generations = [
+        generation
+        for generation in task_generations
+        if generation.status
+        in {GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value}
+    ]
+    if failed_generations and not active_generations and len(image_ids) < requested_count:
+        if step_status == "running":
+            step_status = "failed"
+        if error_message is None:
+            error_message = _clean_optional_text(
+                _task_error_summary(failed_generations, "项目模特候选生成失败"),
+                max_len=400,
+            )
     job_status = _model_library_job_status(
-        step_status=step.status,
+        step_status=step_status,
         requested_count=requested_count,
         finished_count=len(image_ids),
     )
@@ -5342,7 +5707,7 @@ async def _job_from_project_candidate_step(
         extra_requirements=None,
         items=items,
         candidates=candidates,
-        error_message=None,
+        error_message=error_message,
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -5436,6 +5801,7 @@ async def generate_apparel_model_library_job(
         user=user,
         conversation_id=None,
         title=title,
+        workflow_type=WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
     )
     conv.title = title
     conv.archived = True
@@ -5600,7 +5966,26 @@ async def delete_apparel_model_library_job(
             "only standalone model-library jobs can be cleaned here",
             400,
         )
-    run.deleted_at = _now()
+    deleted_at = _now()
+    await _soft_delete_workflow_generated_images(
+        db,
+        run=run,
+        deleted_at=deleted_at,
+        cancel_message="model library job deleted",
+    )
+    run.deleted_at = deleted_at
+    if run.conversation_id:
+        conv = (
+            await db.execute(
+                select(Conversation).where(
+                    Conversation.id == run.conversation_id,
+                    Conversation.user_id == user.id,
+                    Conversation.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if conv is not None:
+            conv.deleted_at = deleted_at
     await db.commit()
     return {"ok": True}
 
@@ -5628,7 +6013,25 @@ async def clear_apparel_model_library_jobs(
     )
     now = _now()
     for run in rows:
+        await _soft_delete_workflow_generated_images(
+            db,
+            run=run,
+            deleted_at=now,
+            cancel_message="model library job cleared",
+        )
         run.deleted_at = now
+        if run.conversation_id:
+            conv = (
+                await db.execute(
+                    select(Conversation).where(
+                        Conversation.id == run.conversation_id,
+                        Conversation.user_id == user.id,
+                        Conversation.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if conv is not None:
+                conv.deleted_at = now
     await db.commit()
     return ApparelModelLibraryJobsClearOut(deleted=len(rows))
 

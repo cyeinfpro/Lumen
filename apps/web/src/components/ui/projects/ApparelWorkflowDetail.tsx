@@ -9,16 +9,13 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Check,
-  ChevronDown,
   Loader2,
-  MessageSquare,
   MoreHorizontal,
   PanelRightOpen,
   Pencil,
   Trash2,
   X,
 } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -38,6 +35,8 @@ import { ProductAnalysisStage } from "./stages/ProductAnalysisStage";
 import { ModelSettingsStage } from "./stages/ModelSettingsStage";
 import { ModelCandidatesStage } from "./stages/ModelCandidatesStage";
 import { ShowcaseGenerationStage } from "./stages/ShowcaseGenerationStage";
+import { QualityReviewStage } from "./stages/QualityReviewStage";
+import { DeliveryStage } from "./stages/DeliveryStage";
 import { STATUS_LABEL, STEP_INDEX, STEPS } from "./types";
 import { formatRelativeTime } from "./utils";
 
@@ -121,7 +120,6 @@ function ProjectConsole({
           </AnimatePresence>
         </StageErrorBoundary>
 
-        <Conversation workflow={workflow} />
       </section>
 
       <aside className="hidden overflow-y-auto border-l border-[var(--border)] px-5 py-6 xl:block">
@@ -409,48 +407,14 @@ function WorkflowStagePanel({ workflow }: { workflow: WorkflowRun }) {
     case "model_approval":
       return <ModelCandidatesStage workflow={workflow} />;
     case "showcase_generation":
-    case "quality_review":
-    case "delivery":
       return <ShowcaseGenerationStage workflow={workflow} />;
+    case "quality_review":
+      return <QualityReviewStage workflow={workflow} />;
+    case "delivery":
+      return <DeliveryStage workflow={workflow} />;
     default:
       return <ProductUploadSummary workflow={workflow} />;
   }
-}
-
-function Conversation({ workflow }: { workflow: WorkflowRun }) {
-  const [open, setOpen] = useState(false);
-  if (!workflow.conversation_id) return null;
-  return (
-    <section className="mt-10 border-t border-[var(--border)] pt-4">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center justify-between gap-2 py-1 text-left transition-colors hover:text-[var(--fg-0)]"
-      >
-        <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-1)]">
-          <MessageSquare className="h-3.5 w-3.5 text-[var(--fg-2)]" />
-          关联对话
-        </span>
-        <ChevronDown
-          className={cn("h-4 w-4 text-[var(--fg-2)] transition-transform", open && "rotate-180")}
-          aria-hidden
-        />
-      </button>
-      {open ? (
-        <div className="mt-3 text-[13px] leading-6 text-[var(--fg-1)]">
-          <Link
-            href={`/?conversationId=${workflow.conversation_id}`}
-            className="text-[16px] font-semibold text-[var(--amber-300)] hover:underline underline-offset-4"
-          >
-            打开关联对话 →
-          </Link>
-          <p className="mt-1 text-[var(--fg-2)]">
-            所有阶段的派发与确认都会写入这条对话的事件流，可在创作页继续追问与微调。
-          </p>
-        </div>
-      ) : null}
-    </section>
-  );
 }
 
 function DetailSkeleton() {

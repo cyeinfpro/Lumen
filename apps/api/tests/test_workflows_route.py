@@ -16,6 +16,7 @@ from lumen_core.schemas import ApparelModelLibraryBatchDeleteIn, ModelCandidates
 class _Result:
     def __init__(self, rows: list[Any]) -> None:
         self.rows = rows
+        self.rowcount = len(rows)
 
     def scalars(self) -> "_Result":
         return self
@@ -278,6 +279,208 @@ async def test_workflow_produced_model_image_ids_skips_sql_when_no_task_ids() ->
     assert db.statements == []
 
 
+def test_task_error_summary_prefers_messages_and_dedupes() -> None:
+    out = workflows._task_error_summary(  # noqa: SLF001
+        [
+            SimpleNamespace(error_code="upstream_error", error_message="provider timeout"),
+            SimpleNamespace(error_code="upstream_error", error_message="provider timeout"),
+            SimpleNamespace(error_code="safety", error_message=None),
+        ],
+        "生成失败",
+    )
+
+    assert out == "upstream_error: provider timeout；safety"
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_workflow_generated_images_uses_explicit_image_ids() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    step = SimpleNamespace(
+        step_key="showcase_generation",
+        image_ids=["img-step"],
+        task_ids=[],
+    )
+    candidate = SimpleNamespace(
+        contact_sheet_image_id="img-candidate",
+        portrait_image_id="img-portrait",
+        front_image_id=None,
+        side_image_id=None,
+        back_image_id=None,
+        task_ids=[],
+    )
+    run = SimpleNamespace(id="run-1", user_id="user-1")
+    db = _Db([], responses=[[step], [candidate], []])
+
+    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        run=run,  # type: ignore[arg-type]
+        deleted_at=datetime.now(timezone.utc),
+        cancel_message="workflow deleted",
+    )
+
+    assert out == {
+        "images_deleted": 0,
+        "generations_canceled": 0,
+        "completions_canceled": 0,
+    }
+    rendered = str(db.statements[-1].compile(dialect=postgresql.dialect()))
+    assert "UPDATE images" in rendered
+    assert "images.id IN" in rendered
+    assert "model_library_items.image_id IS NOT NULL" in rendered
+
+
+@pytest.mark.asyncio
+async def test_delete_workflow_cleans_generated_outputs_and_backing_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        deleted_at=None,
+        conversation_id="conv-1",
+    )
+    conv = SimpleNamespace(id="conv-1", user_id="user-1", deleted_at=None)
+    cleanup_calls: list[dict[str, Any]] = []
+
+    async def fake_get_run(
+        db: Any,
+        *,
+        user_id: str,
+        run_id: str,
+        lock: bool = False,
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-1"
+        assert lock is True
+        return run
+
+    async def fake_cleanup(
+        db: Any,
+        *,
+        run: Any,
+        deleted_at: datetime,
+        cancel_message: str,
+    ) -> dict[str, int]:
+        cleanup_calls.append(
+            {
+                "run_id": run.id,
+                "deleted_at": deleted_at,
+                "cancel_message": cancel_message,
+            }
+        )
+        return {"images_deleted": 1, "generations_canceled": 0, "completions_canceled": 0}
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_soft_delete_workflow_generated_images", fake_cleanup)
+    db = _Db([], responses=[[conv]])
+
+    out = await workflows.delete_workflow(  # noqa: SLF001
+        "run-1",
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"ok": True}
+    assert cleanup_calls == [
+        {
+            "run_id": "run-1",
+            "deleted_at": run.deleted_at,
+            "cancel_message": "workflow deleted",
+        }
+    ]
+    assert conv.deleted_at == run.deleted_at
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_delete_apparel_model_library_job_cleans_generated_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        type=workflows.WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
+        deleted_at=None,
+        conversation_id=None,
+    )
+    cleanup_calls: list[str] = []
+
+    async def fake_get_run(
+        db: Any,
+        *,
+        user_id: str,
+        run_id: str,
+        lock: bool = False,
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-1"
+        assert lock is True
+        return run
+
+    async def fake_cleanup(
+        db: Any,
+        *,
+        run: Any,
+        deleted_at: datetime,
+        cancel_message: str,
+    ) -> dict[str, int]:
+        assert deleted_at.tzinfo is not None
+        cleanup_calls.append(f"{run.id}:{cancel_message}")
+        return {"images_deleted": 2, "generations_canceled": 0, "completions_canceled": 0}
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_soft_delete_workflow_generated_images", fake_cleanup)
+    db = _Db([])
+
+    out = await workflows.delete_apparel_model_library_job(  # noqa: SLF001
+        "run-1",
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"ok": True}
+    assert cleanup_calls == ["run-1:model library job deleted"]
+    assert run.deleted_at is not None
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_clear_apparel_model_library_jobs_cleans_each_finished_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        SimpleNamespace(id="run-1", user_id="user-1", deleted_at=None, conversation_id=None),
+        SimpleNamespace(id="run-2", user_id="user-1", deleted_at=None, conversation_id=None),
+    ]
+    cleanup_calls: list[str] = []
+
+    async def fake_cleanup(
+        db: Any,
+        *,
+        run: Any,
+        deleted_at: datetime,
+        cancel_message: str,
+    ) -> dict[str, int]:
+        cleanup_calls.append(f"{run.id}:{cancel_message}:{deleted_at.isoformat()}")
+        return {"images_deleted": 1, "generations_canceled": 0, "completions_canceled": 0}
+
+    monkeypatch.setattr(workflows, "_soft_delete_workflow_generated_images", fake_cleanup)
+    db = _Db([], responses=[rows])
+
+    out = await workflows.clear_apparel_model_library_jobs(  # noqa: SLF001
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out.deleted == 2
+    assert rows[0].deleted_at is not None
+    assert rows[1].deleted_at == rows[0].deleted_at
+    assert [call.split(":")[0] for call in cleanup_calls] == ["run-1", "run-2"]
+    assert all("model library job cleared" in call for call in cleanup_calls)
+    assert db.committed is True
+
+
 def test_default_github_contents_url_points_to_user_repo_folder() -> None:
     assert workflows._github_contents_url().startswith(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/assets/apparel-model-presets"
@@ -325,6 +528,47 @@ async def test_resolve_model_library_sync_proxy_uses_enabled_proxy() -> None:
     assert proxy is not None
     assert proxy.name == "s5-us"
     assert proxy_url == "socks5h://127.0.0.1:1080"
+
+
+@pytest.mark.asyncio
+async def test_library_job_derives_failed_status_from_failed_generation() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        created_at=now,
+        updated_at=now,
+    )
+    step = SimpleNamespace(
+        workflow_run_id="run-1",
+        step_key=workflows.MODEL_LIBRARY_GENERATE_STEP_KEY,
+        status="running",
+        input_json={
+            "age_segment": "adult",
+            "gender": "female",
+            "appearance_direction": "asian",
+            "count": 1,
+        },
+        output_json={},
+        task_ids=["gen-1"],
+        image_ids=[],
+    )
+    failed_generation = SimpleNamespace(
+        id="gen-1",
+        status=workflows.GenerationStatus.FAILED.value,
+        error_code="upstream_error",
+        error_message="provider timeout",
+    )
+    db = _Db([], responses=[[step], [failed_generation]])
+
+    job = await workflows._job_from_library_run(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        run=run,  # type: ignore[arg-type]
+        saved_map={},
+    )
+
+    assert job.status == "failed"
+    assert job.error_message == "upstream_error: provider timeout"
 
 
 @pytest.mark.asyncio
@@ -582,6 +826,223 @@ def test_showcase_regeneration_target_keeps_existing_outputs() -> None:
         )
         == 8
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_showcase_completion_advances_to_quality_review() -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        current_step="showcase_generation",
+        status="running",
+    )
+    showcase_step = SimpleNamespace(
+        step_key="showcase_generation",
+        status="running",
+        input_json={"target_image_count": 1, "output_count": 1},
+        output_json={},
+        task_ids=["gen-1"],
+        image_ids=[],
+    )
+    quality_step = SimpleNamespace(
+        step_key="quality_review",
+        status="waiting_input",
+        input_json={},
+        output_json={},
+        task_ids=[],
+        image_ids=[],
+    )
+    steps = [
+        SimpleNamespace(step_key="model_approval", task_ids=[]),
+        showcase_step,
+        quality_step,
+    ]
+    db = _Db(
+        [],
+        responses=[
+            steps,  # _load_steps
+            [],  # model candidates
+            [SimpleNamespace(id="gen-1", status=workflows.GenerationStatus.SUCCEEDED.value)],
+            [],  # dual-race bonus generations
+            [SimpleNamespace(id="image-1", owner_generation_id="gen-1")],
+            [],  # quality reports
+        ],
+    )
+
+    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+
+    assert showcase_step.status == "completed"
+    assert showcase_step.image_ids == ["image-1"]
+    assert quality_step.status == "needs_review"
+    assert quality_step.image_ids == ["image-1"]
+    assert quality_step.output_json["overall"] == "pending"
+    assert run.current_step == "quality_review"
+    assert run.status == "needs_review"
+
+
+@pytest.mark.asyncio
+async def test_sync_showcase_failure_records_generation_error_message() -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        current_step="showcase_generation",
+        status="running",
+    )
+    showcase_step = SimpleNamespace(
+        step_key="showcase_generation",
+        status="running",
+        input_json={"target_image_count": 1, "output_count": 1},
+        output_json={},
+        task_ids=["gen-1"],
+        image_ids=[],
+    )
+    steps = [
+        SimpleNamespace(step_key="model_approval", task_ids=[]),
+        showcase_step,
+    ]
+    db = _Db(
+        [],
+        responses=[
+            steps,  # _load_steps
+            [],  # model candidates
+            [
+                SimpleNamespace(
+                    id="gen-1",
+                    status=workflows.GenerationStatus.FAILED.value,
+                    error_code="upstream_error",
+                    error_message="provider timeout",
+                )
+            ],
+            [],  # dual-race bonus generations
+            [],  # images
+        ],
+    )
+
+    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+
+    assert showcase_step.status == "failed"
+    assert showcase_step.output_json["failed_generation_ids"] == ["gen-1"]
+    assert showcase_step.output_json["error_message"] == (
+        "upstream_error: provider timeout"
+    )
+    assert run.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_reopen_model_selection_resets_downstream_and_clears_quality_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        current_step="delivery",
+        status="completed",
+    )
+    selected = SimpleNamespace(
+        id="cand-1",
+        status="selected",
+        contact_sheet_image_id="model-1",
+        selected_at=datetime.now(timezone.utc),
+    )
+    rejected = SimpleNamespace(
+        id="cand-2",
+        status="rejected",
+        contact_sheet_image_id="model-2",
+        selected_at=None,
+    )
+    steps = {
+        "model_approval": SimpleNamespace(
+            status="approved",
+            input_json={
+                "accessory_plan": {"enabled": True, "items": ["bag"], "strength": "subtle"},
+                "style_prompt": "clean studio",
+            },
+            output_json={"selected_candidate_id": "cand-1"},
+            task_ids=["acc-task"],
+            image_ids=["acc-image"],
+            approved_at=datetime.now(timezone.utc),
+            approved_by="user-1",
+        ),
+        "model_candidates": SimpleNamespace(
+            status="needs_review",
+            input_json={},
+            output_json={},
+            task_ids=[],
+            image_ids=[],
+        ),
+        "model_settings": SimpleNamespace(output_json={}),
+        "product_analysis": SimpleNamespace(output_json={}),
+        "showcase_generation": SimpleNamespace(
+            status="completed",
+            input_json={"template": "premium_studio"},
+            output_json={"some": "result"},
+            task_ids=["showcase-task"],
+            image_ids=["showcase-image"],
+        ),
+        "quality_review": SimpleNamespace(
+            status="approved",
+            input_json={"latest_revision": {}},
+            output_json={"overall": "approve"},
+            task_ids=["quality-task"],
+            image_ids=["showcase-image"],
+        ),
+        "delivery": SimpleNamespace(
+            status="completed",
+            input_json={"final_image_ids": ["showcase-image"]},
+            output_json={"download_image_ids": ["showcase-image"]},
+            task_ids=[],
+            image_ids=["showcase-image"],
+        ),
+    }
+
+    async def fake_get_run(db: Any, *, user_id: str, run_id: str, lock: bool = False) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-1"
+        assert lock is True
+        return run
+
+    async def fake_sync(db: Any, current_run: Any) -> None:
+        assert current_run is run
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        assert run_id == "run-1"
+        return steps[step_key]
+
+    async def fake_build_run_out(db: Any, current_run: Any) -> Any:
+        return current_run
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflows, "_step", fake_step)
+    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+    db = _Db([], responses=[[selected, rejected], []])
+
+    out = await workflows.reopen_model_selection(
+        "run-1",
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out is run
+    assert selected.status == "ready"
+    assert selected.selected_at is None
+    assert rejected.status == "ready"
+    assert steps["model_approval"].status == "needs_review"
+    assert steps["model_approval"].input_json == {
+        "accessory_plan": {"enabled": True, "items": ["bag"], "strength": "subtle"},
+        "style_prompt": "clean studio",
+    }
+    for step_key in ("showcase_generation", "quality_review", "delivery"):
+        step = steps[step_key]
+        assert step.status == "waiting_input"
+        assert step.input_json == {}
+        assert step.output_json == {}
+        assert step.task_ids == []
+        assert step.image_ids == []
+    assert run.current_step == "model_candidates"
+    assert run.status == "needs_review"
+    assert db.committed is True
+    assert any("DELETE FROM quality_reports" in str(statement) for statement in db.statements)
 
 
 def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -> None:
