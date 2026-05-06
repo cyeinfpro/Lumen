@@ -1,7 +1,7 @@
 "use client";
 
 // Desktop Lightbox。
-// 保留键盘快捷键（j/k/Arrow/D/E/Esc）、鼠标双击缩放、背景点击关闭、缩略图条、
+// 保留键盘快捷键（j/k/Arrow/D/E/Esc）、鼠标单击缩放、背景点击关闭、缩略图条、
 // 触摸手势（pinch / pan / swipe）；展示层优先使用 display2048，下载仍走原图。
 //
 // Phase 6 分流后，移动端（<768px）走 MobileLightbox；桌面端继续使用本文件。
@@ -51,6 +51,9 @@ const RESET_PAN_OFFSET = { x: 0, y: 0 };
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.25;
+const CLICK_ZOOM = 2;
+const CLICK_TAP_SLOP = 6;
+const CLICK_MAX_DURATION_MS = 400;
 const DESKTOP_THUMB_WINDOW_SIZE = 19;
 const EMPTY_GENERATIONS: Record<string, Generation> = {};
 type ViewMode = "fit" | "actual" | "fill";
@@ -62,6 +65,15 @@ type MousePanState = {
   startX: number;
   startY: number;
   startOffset: PanOffset;
+};
+type ImagePointerState = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  startOffset: PanOffset;
+  canPan: boolean;
+  moved: boolean;
+  startTime: number;
 };
 type ImageTransientState = {
   key: string;
@@ -349,6 +361,7 @@ export function DesktopLightbox() {
   const [shareStatus, setShareStatus] = useState<ShareStatus>("idle");
   const [pendingImageId, setPendingImageId] = useState<string | null>(null);
   const [mousePan, setMousePan] = useState<MousePanState | null>(null);
+  const imagePointerRef = useRef<ImagePointerState | null>(null);
   const isPanning = mousePan !== null;
   const [mainImageLoaded, setMainImageLoaded] = useState(false);
   const switchSeqRef = useRef(0);
@@ -414,6 +427,7 @@ export function DesktopLightbox() {
     switchSeqRef.current += 1;
     preloadAbortRef.current?.abort();
     preloadAbortRef.current = null;
+    imagePointerRef.current = null;
     setEventGallery(null);
     setDetailsOpen(false);
     setPromptCopied(false);
@@ -619,6 +633,30 @@ export function DesktopLightbox() {
     [updateImageState],
   );
 
+  // 单击缩放固定留在 fit 基线，避免 actual/fill 切换后锚点跟着布局尺寸漂移。
+  const zoomToPointer = useCallback(
+    (clientX: number, clientY: number, nextZoom: number) => {
+      const rect = imageRef.current?.getBoundingClientRect();
+      updateImageState((state) => {
+        const zoom = clampZoom(nextZoom);
+        const centerX = clientX - (rect?.left ?? 0) - (rect?.width ?? 0) / 2;
+        const centerY = clientY - (rect?.top ?? 0) - (rect?.height ?? 0) / 2;
+        const ratio = zoom / state.zoom;
+        const nextPan = {
+          x: centerX * (1 - ratio) + state.panOffset.x * ratio,
+          y: centerY * (1 - ratio) + state.panOffset.y * ratio,
+        };
+        return {
+          ...state,
+          viewMode: "fit",
+          zoom,
+          panOffset: clampPanForCurrentView(nextPan, zoom, "fit"),
+        };
+      });
+    },
+    [clampPanForCurrentView, updateImageState],
+  );
+
   const handleOpenOriginal = useCallback(() => {
     if (!lightbox.imageSrc) return;
     window.open(lightbox.imageSrc, "_blank", "noopener,noreferrer");
@@ -806,29 +844,50 @@ export function DesktopLightbox() {
   }, [clampPanForCurrentView, gotoDelta, handleClose, updateImageState]);
 
   function handleImagePointerDown(e: React.PointerEvent<HTMLImageElement>) {
+    if (e.pointerType === "touch" || e.button !== 0) return;
     const canPan = activeZoom > 1 || activeViewMode !== "fit";
-    if (!canPan || e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-    setMousePan({
+    imagePointerRef.current = {
       pointerId: e.pointerId,
       startX: e.clientX,
       startY: e.clientY,
       startOffset: panOffsetRef.current,
-    });
-    e.currentTarget.setPointerCapture(e.pointerId);
+      canPan,
+      moved: false,
+      startTime: performance.now(),
+    };
+    if (canPan) {
+      e.preventDefault();
+      e.stopPropagation();
+      setMousePan({
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        startOffset: panOffsetRef.current,
+      });
+    } else {
+      setMousePan(null);
+    }
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* noop */
+    }
   }
 
   function handleImagePointerMove(e: React.PointerEvent<HTMLImageElement>) {
-    const pan = mousePan;
-    if (!pan || pan.pointerId !== e.pointerId) return;
+    const gesture = imagePointerRef.current;
+    if (!gesture || gesture.pointerId !== e.pointerId) return;
+    const dx = e.clientX - gesture.startX;
+    const dy = e.clientY - gesture.startY;
+    if (!gesture.moved && (Math.abs(dx) > CLICK_TAP_SLOP || Math.abs(dy) > CLICK_TAP_SLOP)) {
+      gesture.moved = true;
+    }
+    if (!gesture.canPan) return;
     e.preventDefault();
-    const dx = e.clientX - pan.startX;
-    const dy = e.clientY - pan.startY;
     const nextOffset = clampPanForCurrentView(
       {
-        x: pan.startOffset.x + dx,
-        y: pan.startOffset.y + dy,
+        x: gesture.startOffset.x + dx,
+        y: gesture.startOffset.y + dy,
       },
       activeZoom,
       activeViewMode,
@@ -840,8 +899,28 @@ export function DesktopLightbox() {
   }
 
   function handleImagePointerEnd(e: React.PointerEvent<HTMLImageElement>) {
-    const pan = mousePan;
-    if (!pan || pan.pointerId !== e.pointerId) return;
+    const gesture = imagePointerRef.current;
+    if (!gesture || gesture.pointerId !== e.pointerId) return;
+    imagePointerRef.current = null;
+    setMousePan(null);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* noop */
+    }
+    if (gesture.moved) return;
+    if (performance.now() - gesture.startTime > CLICK_MAX_DURATION_MS) return;
+    if (activeZoom > 1 || activeViewMode !== "fit") {
+      resetView();
+      return;
+    }
+    zoomToPointer(e.clientX, e.clientY, CLICK_ZOOM);
+  }
+
+  function handleImagePointerCancel(e: React.PointerEvent<HTMLImageElement>) {
+    const gesture = imagePointerRef.current;
+    if (!gesture || gesture.pointerId !== e.pointerId) return;
+    imagePointerRef.current = null;
     setMousePan(null);
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
@@ -968,6 +1047,7 @@ export function DesktopLightbox() {
       setDetailsOpen(false);
       setPromptCopied(false);
       setMousePan(null);
+      imagePointerRef.current = null;
     });
     return () => {
       canceled = true;
@@ -983,6 +1063,7 @@ export function DesktopLightbox() {
       setShareStatus("idle");
       setPendingImageId(null);
       setMousePan(null);
+      imagePointerRef.current = null;
       setMainImageLoaded(false);
     });
     return () => {
@@ -1497,33 +1578,7 @@ export function DesktopLightbox() {
                   onPointerDown={handleImagePointerDown}
                   onPointerMove={handleImagePointerMove}
                   onPointerUp={handleImagePointerEnd}
-                  onPointerCancel={handleImagePointerEnd}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    if (activeZoom > 1 || activeViewMode !== "fit") {
-                      updateImageState((state) => ({
-                        ...state,
-                        viewMode: "fit",
-                        zoom: 1,
-                        panOffset: RESET_PAN_OFFSET,
-                      }));
-                    } else {
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      const dx = e.clientX - (rect.left + rect.width / 2);
-                      const dy = e.clientY - (rect.top + rect.height / 2);
-                      const targetZoom = 2;
-                      updateImageState((state) => ({
-                        ...state,
-                        viewMode: "actual",
-                        zoom: targetZoom,
-                        panOffset: clampPanForCurrentView(
-                          { x: -dx * (targetZoom - 1), y: -dy * (targetZoom - 1) },
-                          targetZoom,
-                          "actual",
-                        ),
-                      }));
-                    }
-                  }}
+                  onPointerCancel={handleImagePointerCancel}
                   className={cn(
                     "rounded-md shadow-2xl",
                     activeViewMode === "fill"

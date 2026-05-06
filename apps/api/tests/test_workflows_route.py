@@ -10,7 +10,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.routes import workflows
-from lumen_core.schemas import ApparelModelLibraryBatchDeleteIn, ModelCandidatesCreateIn
+from lumen_core.schemas import (
+    ApparelModelLibraryBatchDeleteIn,
+    ModelCandidatesCreateIn,
+    ShowcaseImagesCreateIn,
+)
 
 
 class _Result:
@@ -66,6 +70,19 @@ def test_model_candidates_mvp_requires_three_candidates() -> None:
 
     with pytest.raises(ValidationError):
         ModelCandidatesCreateIn(candidate_count=2, style_prompt="premium")
+
+
+def test_showcase_images_output_count_allows_batch_choices() -> None:
+    for count in (1, 2, 4, 8, 16):
+        assert ShowcaseImagesCreateIn(output_count=count).output_count == count
+
+    assert (
+        ShowcaseImagesCreateIn(template="natural_phone_snapshot").template
+        == "natural_phone_snapshot"
+    )
+
+    with pytest.raises(ValidationError):
+        ShowcaseImagesCreateIn(output_count=3)
 
 
 def test_model_library_batch_delete_accepts_export_sized_batches() -> None:
@@ -1476,6 +1493,37 @@ def test_daily_snapshot_template_uses_phone_realistic_scene() -> None:
     assert "超真实、超自然" in prompt
     assert "不像棚拍" in prompt
     assert "帆布包" not in prompt
+
+
+def test_natural_phone_snapshot_template_uses_real_phone_constraints() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "8岁儿童，亚洲，自然童装模特"},
+    )
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"category": "童装连衣裙", "must_preserve": ["蓝色薄纱", "蓬蓬裙摆"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": True, "items": ["帆布包"], "strength": "subtle"},
+        template="natural_phone_snapshot",
+        shot_type="natural_pose",
+        final_quality="high",
+    )
+
+    assert "真实手机竖屏自然随手拍" in prompt
+    assert "轻微高机位或自然手持视角" in prompt
+    assert "儿童服饰店" in prompt
+    assert "床边" in prompt
+    assert "轻微俯拍的自然动作照" in prompt
+    assert "抬手" in prompt
+    assert "自然窗光或柔和室内暖光" in prompt
+    assert "自然碎发" in prompt
+    assert "衣服真实褶皱" in prompt
+    assert "社交媒体截图界面" in prompt
+    assert "重点保留：蓝色薄纱、蓬蓬裙摆" in prompt
+    assert "帆布包" not in prompt
+    assert "超写实商业摄影" not in prompt
+    assert "适合亚马逊电商主图" not in prompt
 
 
 def test_revision_prompt_is_short_repair_brief() -> None:

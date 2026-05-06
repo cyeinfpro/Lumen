@@ -191,6 +191,12 @@ SHOT_LABELS = {
     "detail_half_body": "自然全身展示，姿态自然不重复",
     "side_or_back": "侧面全身，姿态自然",
 }
+NATURAL_PHONE_SHOT_LABELS = {
+    "front_full_body": "门口、墙边或店铺角落的正面全身手机照，自然站立或轻轻靠墙，服装完整清晰",
+    "natural_pose": "轻微俯拍的自然动作照，可抬手、歪头、拿小包、看向镜头或看向旁边",
+    "detail_half_body": "床边、木凳或椅子旁的生活化穿搭照，突出上身和面料质感，尽量保留整体搭配",
+    "side_or_back": "轻微侧身、转头、靠门框或走动中的自然照片，展示服装侧面和轮廓",
+}
 
 TEMPLATE_LABELS = {
     "white_ecommerce": "白底主图",
@@ -198,6 +204,7 @@ TEMPLATE_LABELS = {
     "urban_commute": "质感街拍",
     "lifestyle": "精品空间",
     "daily_snapshot": "日常随拍",
+    "natural_phone_snapshot": "自然手机摄影",
     "social_seed": "自然种草",
 }
 
@@ -215,9 +222,31 @@ def _template_requirement(template: str, product_analysis: dict[str, Any]) -> st
         "urban_commute": f"与{category}匹配的质感街拍氛围，真实自然但不杂乱",
         "lifestyle": f"与{category}匹配的精品空间氛围，克制、高级、有层次",
         "daily_snapshot": f"与{category}匹配的日常随拍质感，手机拍摄感，超真实、超自然、不像棚拍",
+        "natural_phone_snapshot": (
+            f"真实手机竖屏自然随手拍，轻微高机位或自然手持视角；真实室内生活空间，"
+            f"例如卧室、窗边、门口、走廊、儿童服饰店、浅色墙面、木地板、地砖、床边、"
+            f"椅子、镜子、木凳；少量生活细节真实但不要遮挡{category}主体，"
+            "不要棚拍或亚马逊主图感"
+        ),
         "social_seed": f"与{category}匹配的自然种草氛围，松弛、真实、有生活感",
     }
     return requirements.get(template, TEMPLATE_LABELS.get(template, template))
+
+
+def _showcase_render_direction(template: str) -> str:
+    if template == "natural_phone_snapshot":
+        return (
+            "真实手机照片质感，清晰自然，服装细节可见；自然窗光或柔和室内暖光，"
+            "真实阴影、真实皮肤纹理、自然碎发、衣服真实褶皱；不要影棚照、白底主图、"
+            "T台、商业广告大片、亚马逊主图感、过度磨皮、AI网红脸、文字水印或社交媒体截图界面"
+        )
+    return "超写实商业摄影，干净高级，适合亚马逊电商主图，无文字水印"
+
+
+def _showcase_shot_direction(template: str, shot_type: str) -> str:
+    if template == "natural_phone_snapshot":
+        return NATURAL_PHONE_SHOT_LABELS.get(shot_type, shot_type)
+    return SHOT_LABELS.get(shot_type, shot_type)
 
 
 def _showcase_prompt_brief(
@@ -229,6 +258,7 @@ def _showcase_prompt_brief(
     model_consistency: str,
     shot_direction: str,
     quality_direction: str,
+    render_direction: str,
     style_region: str,
 ) -> str:
     direction = template_direction.strip() or "背景与衣服图片搭配"
@@ -244,7 +274,7 @@ def _showcase_prompt_brief(
             f"2. 模特参考模特图，{model_consistency}身材和表情自然。",
             f"3. 配饰：{accessory_direction}",
             f"4. 场景：背景与衣服风格搭配，{direction}。",
-            f"5. 画质：{quality_direction}，超写实商业摄影，干净高级，适合亚马逊电商主图，无文字水印。",
+            f"5. 画质：{quality_direction}，{render_direction}。",
             f"6. 构图：全身照，{style_region}风格，姿势生动活泼有活力，{shot_direction}。",
             "7. 单人照。",
         ]
@@ -2477,7 +2507,7 @@ def _showcase_prompt(
         f"模特方向：{summary}。"
     )
     accessory_direction = "少量自然搭配，不要抢衣服主体；如果附件中包含已选配饰四宫格，优先参考它。"
-    shot_direction = SHOT_LABELS.get(shot_type, shot_type)
+    shot_direction = _showcase_shot_direction(template, shot_type)
     quality_direction = "4K 终稿" if final_quality == "4k" else "高质量"
     style_region = _style_region_from_text(summary)
     return _showcase_prompt_brief(
@@ -2488,6 +2518,7 @@ def _showcase_prompt(
         model_consistency=model_consistency,
         shot_direction=shot_direction,
         quality_direction=quality_direction,
+        render_direction=_showcase_render_direction(template),
         style_region=style_region,
     )
 
