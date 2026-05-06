@@ -103,6 +103,23 @@ def test_github_folder_metadata_accepts_jpg_and_webp() -> None:
         assert item["library_folder"] == "05_adult/male"
 
 
+def test_github_folder_metadata_keeps_fine_grained_appearance() -> None:
+    item = workflows._metadata_from_github_file(  # noqa: SLF001
+        {
+            "type": "file",
+            "name": "adult-female-southeast-asian-001.webp",
+            "path": (
+                "assets/apparel-model-presets/05_adult/female/"
+                "adult-female-southeast-asian-001.webp"
+            ),
+            "download_url": "https://example.invalid/model.webp",
+        }
+    )
+
+    assert item is not None
+    assert item["appearance_direction"] == "southeast_asian"
+
+
 def test_preset_title_uses_updated_age_labels() -> None:
     assert workflows._title_from_preset_id("adult-female-001").startswith("熟龄 女性")
     assert workflows._title_from_preset_id("middle-aged-male-001").startswith("中年 男性")

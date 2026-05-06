@@ -1318,10 +1318,21 @@ def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
         gender = "female"
     elif any(token in lower_name for token in ("male", "man", "boy")):
         gender = "male"
+    normalized_name = re.sub(r"[_\s]+", "-", lower_name)
     appearance = None
-    for token in ("asian", "european", "latin", "middle-east", "african"):
-        if token in lower_name:
-            appearance = token
+    for token, value in (
+        ("southeast-asian", "southeast_asian"),
+        ("south-asian", "south_asian"),
+        ("east-asian", "east_asian"),
+        ("middle-eastern", "middle_eastern"),
+        ("middle-east", "middle_eastern"),
+        ("european", "european"),
+        ("latin", "latin"),
+        ("african", "african"),
+        ("asian", "asian"),
+    ):
+        if token in normalized_name:
+            appearance = value
             break
     words = [
         part
