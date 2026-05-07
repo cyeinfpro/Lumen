@@ -1674,6 +1674,33 @@ def test_pick_shot_variants_covers_all_four_classes_when_output_4() -> None:
 @pytest.mark.parametrize(
     "template",
     [
+        "urban_commute",
+        "lifestyle",
+        "daily_snapshot",
+        "natural_phone_snapshot",
+        "social_seed",
+    ],
+)
+def test_natural_light_templates_describe_light_direction_and_contrast(template: str) -> None:
+    """自然光模板要明确光线方向和明暗反差，否则模型默认渲染均匀照明 → 假感重。
+
+    棚拍类（white/premium）有人造光，本来就工整，不在此约束。
+    """
+    direction = workflows._showcase_render_direction(template)  # noqa: SLF001
+    direction_keywords = ("方向", "侧光", "侧面", "逆光", "斜上光", "顶光", "侧窗光")
+    assert any(kw in direction for kw in direction_keywords), (
+        f"{template} render direction lacks light direction cue"
+    )
+    contrast_keywords = ("高光", "阴影", "明暗", "光斑")
+    assert any(kw in direction for kw in contrast_keywords), (
+        f"{template} render direction lacks light contrast cue"
+    )
+    assert "全脸均匀照明" in direction
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
         "white_ecommerce",
         "premium_studio",
         "urban_commute",
