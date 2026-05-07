@@ -291,10 +291,10 @@ _RENDER_DIRECTIONS: dict[str, str] = {
     ),
     "social_seed": (
         "真实生活种草质感，窗光或室内灯光带方向，"
-        "颧骨鼻梁有真实高光、半边脸略阴影、镜面或玻璃反光真实；"
+        "颧骨鼻梁有真实高光、半边脸略阴影、玻璃反光真实；"
         "服装搭配清晰；皮肤有真实毛孔细纹和自然光泽，皮下血色自然，碎发真实；"
         "有轻微痘印或皮肤色不均，眼角真实细纹；"
-        "不要塑料感、过度磨皮、AI美颜脸、全脸均匀照明"
+        "不要塑料感、过度磨皮、AI美颜脸、全脸均匀照明，不要画面中出现镜子或镜面"
     ),
 }
 
@@ -307,13 +307,13 @@ def _showcase_render_direction(template: str) -> str:
 
 
 _POSE_DIRECTIONS: dict[str, str] = {
-    "white_ecommerce": "姿态规范不僵硬，舒展自然",
-    "premium_studio": "姿态戏剧化有张力，时装大片感",
-    "urban_commute": "姿态自然不摆拍，街头抓拍感",
-    "lifestyle": "姿态从容松弛，有空间感和呼吸感",
-    "daily_snapshot": "姿态自然不刻意，朋友视角随手拍",
-    "natural_phone_snapshot": "姿态自然松弛，平视手持视角",
-    "social_seed": "姿态轻松自然，有互动展示感",
+    "white_ecommerce": "动作放松舒展自然，肩颈松弛、重心轻松，不绷不僵",
+    "premium_studio": "保留时装大片调性但肢体放松不绷紧，戏剧化只在视线和气场，不在僵硬姿势",
+    "urban_commute": "动作像无意被定格的瞬间，街头抓拍感，不刻意",
+    "lifestyle": "动作从容松弛，有空间感和呼吸感",
+    "daily_snapshot": "动作自然不刻意，朋友视角随手拍",
+    "natural_phone_snapshot": "姿态自然松弛、动作放松，平视手持视角",
+    "social_seed": "动作轻松自然，分享穿搭般的互动展示感，不摆 pose",
 }
 
 
@@ -366,11 +366,15 @@ def _showcase_prompt_brief(
         [
             "请根据这张白底产品图和模特图，生成真实自然的真人模特穿搭图。",
             "",
+            f"【商品 1:1 还原（最高优先级）】衣服以白底产品图为唯一来源，模特图只用于复刻人物身份。"
+            f"重点保留：{product_preserve}，每一项必须清晰可见。"
+            "不要改款、改色、改廓形、改领口袖型衣长、改图案/logo/印花/文字、改纽扣拉链口袋缝线拼接。",
+            "",
             "要求：",
-            f"1. 模特穿着这件衣服，颜色、版型、款式还原原图；重点保留：{product_preserve}。",
+            "1. 模特按产品图自然穿着这件衣服，版型贴合，褶皱合理；动作放松像被朋友抓拍，不要摆 pose、不要人偶感、不要时装秀台步。",
             f"2. 模特参考模特图，{model_consistency}身材和表情自然。",
-            f"3. 配饰：{accessory_direction}",
-            f"4. 场景：背景与衣服风格搭配，{direction}。",
+            f"3. 配饰：{accessory_direction}（不得遮挡商品）。",
+            f"4. 场景：背景与衣服风格搭配，{direction}；画面里不要出现镜子或镜面反射。",
             f"5. 画质：{quality_direction}，{render_direction}。",
             f"6. 构图：{style_region}风格，{pose_direction}，{shot_direction}。",
             f"7. 画面：{framing_direction}；服装主体清晰可见。",
@@ -2595,13 +2599,13 @@ def _showcase_prompt(
     brief = selected_candidate.model_brief_json or {}
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
     must_preserve = product_analysis.get("must_preserve")
-    fallback_preserve = "颜色、版型、款式"
+    fallback_preserve = "颜色、版型、款式、领口、袖型、衣长、图案/logo、纽扣/拉链/口袋/缝线"
     preserve_items = (
         [str(item).strip() for item in must_preserve if str(item).strip()]
         if isinstance(must_preserve, list)
         else []
     )
-    product_preserve = "、".join(preserve_items[:5]) or fallback_preserve
+    product_preserve = "、".join(preserve_items[:8]) or fallback_preserve
     model_consistency = (
         "保持同一张脸、发型、年龄感和身材比例一致，不要换人。"
         f"模特方向：{summary}。"
@@ -2681,10 +2685,13 @@ def _revision_prompt(
     must_preserve = product_analysis.get("must_preserve")
     preserve = ", ".join(str(x) for x in must_preserve) if isinstance(must_preserve, list) else ""
     return (
-        "请根据用户要求返修这张服饰电商模特图。保持已确认模特的人脸、发型、身材比例和整体身份不变；"
-        "保持商品为同一件衣服，不要改款。需要保留的商品细节："
+        "请根据用户要求返修这张服饰电商模特图。"
+        "【商品 1:1 还原】衣服以白底产品图为准，不要改款、改色、改廓形、改领口袖型衣长、改图案/logo、改纽扣拉链口袋缝线。"
+        "保持已确认模特的人脸、发型、身材比例和整体身份不变。"
+        "需要逐项保留的商品细节："
         f"{preserve or '颜色、版型、领口、袖型、长度、logo/图案、口袋、纽扣、缝线'}。"
-        f"返修要求：{instruction}。参考模特方案：{selected_candidate.id}。"
+        f"返修要求：{instruction}，仅按此改动，不动商品和模特身份。"
+        f"参考模特方案：{selected_candidate.id}。"
     )
 
 
@@ -2779,13 +2786,15 @@ def _quality_review_prompt(
     brief = selected_candidate.model_brief_json or {}
     return (
         "请对生成的服饰电商模特图做自动质检。对比商品参考图、已确认模特参考图和最终图，检查："
-        "1. 是否还是同一件商品，颜色、版型和关键细节是否保留；"
+        "1. 是否还是同一件商品（核对：颜色、廓形、领口袖型衣长、图案/logo/文字、纽扣拉链口袋缝线拼接）；"
+        "任一关键细节不一致，product_fidelity_score 须低于 60、recommendation 须为 revise；"
         "2. 模特人脸、发型、身材比例和年龄感是否接近确认方案；"
         "3. 手、脚、脸、衣服边缘、背景是否有明显瑕疵；"
         "4. 是否适合作为电商主图使用；"
         "5. 是否单人照，多人出现要 revise。"
         "只返回严格 JSON，字段：overall_score, product_fidelity_score, model_consistency_score, "
         "aesthetic_score, artifact_score, issues, recommendation。分数 0-100，recommendation 只能是 approve 或 revise。"
+        "issues 需列出商品不还原的具体点（如「图案位置改变」「领口变形」「颜色偏移」），便于返修定位。"
         f"必须保留：{preserve}。镜头类型：{shot_type or 'unknown'}。"
         f"已确认模特摘要：{brief.get('summary') or 'synthetic ecommerce model'}。"
     )
