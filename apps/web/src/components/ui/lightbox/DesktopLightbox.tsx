@@ -9,6 +9,7 @@
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowUpRight,
+  Brush,
   ChevronLeft,
   ChevronRight,
   X,
@@ -28,6 +29,7 @@ import {
 } from "lucide-react";
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
+import { useInpaintStore } from "@/store/useInpaintStore";
 import type { Generation } from "@/lib/types";
 import {
   CLOSE_EVENT,
@@ -589,6 +591,21 @@ export function DesktopLightbox() {
     handleClose();
     void useChatStore.getState().rerollImage(id);
   }, [lightbox.imageId, handleClose]);
+
+  const handleInpaint = useCallback(() => {
+    const id = lightbox.imageId;
+    if (!id) return;
+    const img = useChatStore.getState().imagesById[id];
+    if (!img) return;
+    handleClose();
+    useInpaintStore.getState().openInpaint({
+      imageId: img.id,
+      src: img.data_url,
+      alt: lightbox.imageAlt ?? "图片",
+      width: img.width,
+      height: img.height,
+    });
+  }, [lightbox.imageId, lightbox.imageAlt, handleClose]);
 
   const setZoom = useCallback(
     (nextValue: number | ((current: number) => number)) => {
@@ -1416,6 +1433,14 @@ export function DesktopLightbox() {
                   disabled={!imageActionsAvailable}
                 >
                   迭代
+                </TopButton>
+                <TopButton
+                  onClick={handleInpaint}
+                  title="局部修改"
+                  icon={Brush}
+                  disabled={!imageActionsAvailable}
+                >
+                  局部
                 </TopButton>
                 <TopButton
                   onClick={handleUpscale}

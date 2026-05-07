@@ -8,10 +8,11 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Download, Maximize2, Pencil, RefreshCw, Loader2 } from "lucide-react";
+import { ArrowUpRight, Brush, Download, Maximize2, Pencil, RefreshCw, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
+import { useInpaintStore } from "@/store/useInpaintStore";
 import { ViewportImage } from "./ViewportImage";
 
 interface PremiumImageCardProps {
@@ -123,6 +124,20 @@ export function PremiumImageCard({
     } finally {
       setIsRerollPending(false);
     }
+  };
+
+  // 局部修改：打开全局 InpaintModal，源图取自 imagesById（含 data_url + 尺寸）
+  const handleInpaint = () => {
+    if (isStreaming) return;
+    const img = useChatStore.getState().imagesById[id];
+    if (!img) return;
+    useInpaintStore.getState().openInpaint({
+      imageId: img.id,
+      src: img.data_url,
+      alt,
+      width: img.width,
+      height: img.height,
+    });
   };
 
   // data: URL 用隐藏 <a download>；http(s) URL 用新标签页
@@ -303,11 +318,11 @@ export function PremiumImageCard({
         )}
       </AnimatePresence>
 
-      {/* hover 操作层：底部渐变 + IconButton 行 */}
+      {/* hover 操作层：底部渐变 + IconButton 行（窄卡片自动换行 + compact 紧凑间距） */}
       <motion.div
         className={cn(
-          "absolute inset-x-0 bottom-0 flex justify-end gap-2 bg-gradient-to-t from-black/75 via-black/30 to-transparent",
-          compact ? "p-2 pt-14" : "p-3 pt-20",
+          "absolute inset-x-0 bottom-0 flex flex-wrap justify-end bg-gradient-to-t from-black/75 via-black/30 to-transparent",
+          compact ? "p-2 pt-14 gap-1.5" : "p-3 pt-20 gap-2",
         )}
         initial={false}
         animate={{
@@ -321,6 +336,7 @@ export function PremiumImageCard({
                 key="iterate"
                 label="继续以此图迭代"
                 delay={0}
+                compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleIterate();
@@ -329,9 +345,22 @@ export function PremiumImageCard({
                 <Pencil className="w-4 h-4" />
               </HoverIconButton>,
               <HoverIconButton
+                key="inpaint"
+                label="局部修改"
+                delay={0.015}
+                compact={compact}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleInpaint();
+                }}
+              >
+                <Brush className="w-4 h-4" />
+              </HoverIconButton>,
+              <HoverIconButton
                 key="upscale"
                 label="放大到中等质量"
                 delay={0.03}
+                compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
                   void handleUpscale();
@@ -348,6 +377,7 @@ export function PremiumImageCard({
                 key="reroll"
                 label="重新生成"
                 delay={0.06}
+                compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
                   void handleReroll();
@@ -364,6 +394,7 @@ export function PremiumImageCard({
                 key="download"
                 label="下载"
                 delay={0.09}
+                compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleDownload();
@@ -375,6 +406,7 @@ export function PremiumImageCard({
                 key="lightbox"
                 label="查看大图"
                 delay={0.12}
+                compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleOpenLightbox();
@@ -394,12 +426,14 @@ function HoverIconButton({
   onClick,
   disabled,
   delay,
+  compact,
   children,
 }: {
   label: string;
   onClick: (e: React.MouseEvent) => void;
   disabled?: boolean;
   delay: number;
+  compact?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -416,7 +450,11 @@ function HoverIconButton({
       whileHover={{ scale: 1.05 }}
       whileTap={{ scale: 0.92 }}
       className={cn(
-        "pointer-events-auto inline-flex items-center justify-center w-11 h-11 md:w-10 md:h-10 rounded-full",
+        "pointer-events-auto inline-flex items-center justify-center rounded-full",
+        // compact 卡片（grid 多列展示）按钮缩小，6 个一行能放下；默认尺寸保持 44/40 触控达标
+        compact
+          ? "w-10 h-10 md:w-9 md:h-9"
+          : "w-11 h-11 md:w-10 md:h-10",
         "bg-black/60 backdrop-blur-md border border-white/15",
         "text-white hover:bg-black/75 hover:border-white/25",
         "transition-colors duration-150",
