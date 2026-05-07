@@ -592,6 +592,7 @@ function clearLocalAccountState(queryClient: QueryClient) {
       fileSearch: false,
       codeInterpreter: false,
       imageGeneration: false,
+      mask: null,
     },
   });
   useUiStore.setState({

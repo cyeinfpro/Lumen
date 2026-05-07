@@ -171,6 +171,10 @@ class PostMessageIn(BaseModel):
         default_factory=list,
         max_length=MAX_MESSAGE_ATTACHMENTS,
     )
+    # 局部 inpaint 用 mask（attachment 级别，不进 image_params）。
+    # RGBA PNG，alpha=0 处即要重画区域。复用 POST /images/upload 上传后把返回
+    # 的 image_id 填到这里；worker 侧用 PIL 自适应 resize 到第一张参考图尺寸。
+    mask_image_id: str | None = None
     # intent 必须由前端显式给出；V1 删掉了 auto 启发式（命中率低，易误判）。
     # 历史客户端若仍带 "auto"，统一按 chat 处理（后端在 intent.resolve_intent 里兜底）。
     intent: Literal["auto", "chat", "vision_qa", "text_to_image", "image_to_image"] = "chat"
@@ -208,6 +212,7 @@ class GenerationOut(BaseOut):
     aspect_ratio: str
     input_image_ids: list[str]
     primary_input_image_id: str | None
+    mask_image_id: str | None = None
     status: str
     progress_stage: str
     attempt: int

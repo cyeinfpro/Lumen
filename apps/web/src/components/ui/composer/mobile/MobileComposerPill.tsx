@@ -24,6 +24,7 @@ import {
   MessageSquare,
   Palette,
   Paperclip,
+  SquareDashedMousePointer,
   Sparkles,
   Undo2,
   X,
@@ -51,6 +52,8 @@ import { DURATION, EASE } from "@/lib/motion";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
+import { useMaskInpaint } from "../shared/useMaskInpaint";
+import { MaskCanvas } from "../MaskCanvas";
 
 interface MobileComposerPillProps {
   onSubmit: () => void | Promise<void>;
@@ -285,6 +288,8 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
     setIsDragActive,
     setExpanded,
   });
+
+  const inpaint = useMaskInpaint();
 
   const handleSubmit = useCallback(async () => {
     if (submittingRef.current) return;
@@ -591,36 +596,82 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
                   "px-3 pt-3",
                 )}
               >
-                {attachments.map((att) => (
-                  <div
-                    key={att.id}
-                    className={cn(
-                      "relative shrink-0 w-12 h-12 rounded-lg overflow-hidden",
-                      "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                    )}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={att.data_url}
-                      alt=""
-                      className="w-full h-full object-cover"
-                      loading="lazy"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(att.id)}
-                      aria-label="移除参考图"
+                {attachments.map((att, idx) => {
+                  const isFirst = idx === 0;
+                  const showMaskBadge = isFirst && inpaint.maskActive;
+                  return (
+                    <div
+                      key={att.id}
                       className={cn(
-                        "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
-                        "bg-black/70 backdrop-blur-sm text-white",
-                        "flex items-center justify-center",
-                        "active:scale-[0.92] transition-transform",
+                        "relative shrink-0 w-12 h-12 rounded-lg overflow-hidden",
+                        "border bg-[var(--bg-2)]",
+                        showMaskBadge
+                          ? "border-[var(--amber-400)]/70"
+                          : "border-[var(--border-subtle)]",
                       )}
                     >
-                      <X className="w-3 h-3" aria-hidden />
-                    </button>
-                  </div>
-                ))}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={att.data_url}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                      {showMaskBadge && (
+                        <button
+                          type="button"
+                          onClick={() => inpaint.openInpaint()}
+                          aria-label="重新涂抹 mask"
+                          className={cn(
+                            "absolute inset-x-0 bottom-0 px-0.5 py-0.5",
+                            "bg-[var(--amber-400)]/85 text-[9px] font-semibold text-[var(--bg-0)]",
+                            "text-center leading-tight tracking-wide",
+                          )}
+                        >
+                          Mask
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(att.id)}
+                        aria-label="移除参考图"
+                        className={cn(
+                          "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
+                          "bg-black/70 backdrop-blur-sm text-white",
+                          "flex items-center justify-center",
+                          "active:scale-[0.92] transition-transform",
+                        )}
+                      >
+                        <X className="w-3 h-3" aria-hidden />
+                      </button>
+                    </div>
+                  );
+                })}
+                {isImageMode && (
+                  <button
+                    type="button"
+                    onClick={inpaint.openInpaint}
+                    disabled={inpaint.disabled}
+                    aria-label="局部修改"
+                    title={inpaint.tooltip}
+                    className={cn(
+                      "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
+                      "w-12 h-12 rounded-lg border text-[9px] font-medium",
+                      "transition-colors",
+                      inpaint.disabled
+                        ? "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed"
+                        : inpaint.maskActive
+                          ? "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10"
+                          : "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)]",
+                    )}
+                  >
+                    <SquareDashedMousePointer
+                      className="w-3.5 h-3.5"
+                      aria-hidden
+                    />
+                    <span>{inpaint.maskActive ? "重涂" : "局部"}</span>
+                  </button>
+                )}
               </div>
             )}
 
@@ -1054,6 +1105,15 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
           }))}
         />
       </BottomSheet>
+
+      {/* 局部修改 mask 画布弹窗 */}
+      <MaskCanvas
+        open={inpaint.open}
+        imageSrc={inpaint.sourceImageSrc}
+        onClose={inpaint.closeInpaint}
+        onConfirm={inpaint.handleConfirm}
+        submitting={inpaint.submitting}
+      />
     </>
   );
 }

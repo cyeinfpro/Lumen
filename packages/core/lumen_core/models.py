@@ -226,6 +226,12 @@ class Generation(Base, TimestampMixin):
     primary_input_image_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True
     )
+    # 局部 inpaint mask 引用（PostMessageIn.mask_image_id）。指向 images.id；
+    # 不加 FK 约束，与 input_image_ids 保持一致：图片记录可能后续被软删，
+    # 但 generation 行需要保留历史记录。worker 读到该字段后从存储拉 mask PNG。
+    mask_image_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
     upstream_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     progress_stage: Mapped[str] = mapped_column(

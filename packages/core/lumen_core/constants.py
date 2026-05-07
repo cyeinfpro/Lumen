@@ -148,6 +148,7 @@ class GenerationErrorCode(StrEnum):
     PROVIDER_EXHAUSTED = "provider_exhausted"
     NETWORK_TRANSIENT = "network_transient"
     NO_PROVIDERS = "no_providers"
+    NO_MASK_CAPABLE_PROVIDER = "no_mask_capable_provider"  # inpaint 任务无 file 模式 provider
     ALL_DIRECT_IMAGE_PROVIDERS_FAILED = "all_direct_image_providers_failed"
     REFERENCE_TIMEOUT = "reference_timeout"
     SHA_ECHO = "sha_echo"
