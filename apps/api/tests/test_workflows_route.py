@@ -1280,8 +1280,6 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "生成真实自然的真人模特穿搭图" in prompt
     assert "要求：" in prompt
     assert "明亮松弛" in prompt
-    assert "走动" not in prompt
-    assert "回头" not in prompt
     assert "明亮松弛的日常随拍氛围" in prompt
     assert "重点保留：lapel shape、button position、pocket placement" in prompt
     assert "少量自然搭配" in prompt
@@ -1291,11 +1289,11 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "超写实" in prompt
     assert "商业摄影" in prompt
     assert "适合亚马逊电商主图" in prompt
-    assert "全身照" in prompt
     assert "正面全身" in prompt
     assert "欧美风格" in prompt
     assert "无文字水印" in prompt
-    assert len(prompt) < 650
+    assert "服装主体在画面中清晰可见" in prompt
+    assert len(prompt) < 700
 
 
 def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() -> None:
@@ -1377,16 +1375,10 @@ def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
     }
 
     assert "正面全身" in prompts["front_full_body"]
-    assert "姿势生动活泼有活力" in prompts["natural_pose"]
-    assert "姿态自由不死板" in prompts["natural_pose"]
-    assert "自然全身展示" in prompts["detail_half_body"]
-    assert "姿态自然不重复" in prompts["detail_half_body"]
+    assert "上身近景" in prompts["detail_half_body"]
     assert "另一张" not in prompts["detail_half_body"]
-    assert "侧面" in prompts["side_or_back"]
-    assert "背面" not in prompts["side_or_back"]
     for prompt in prompts.values():
-        assert "走动" not in prompt
-        assert "回头" not in prompt
+        assert "戏剧化" in prompt or "时装大片" in prompt
         assert "扶袖口" not in prompt
     assert len(set(prompts.values())) == len(workflows.DEFAULT_SHOT_PLAN)
 
@@ -1464,13 +1456,10 @@ def test_lifestyle_template_uses_product_matched_scene_and_integration() -> None
 
     assert "克制高级" in prompt
     assert "精品空间氛围" in prompt
-    assert "画廊" not in prompt
-    assert "酒店" not in prompt
-    assert "咖啡馆" not in prompt
-    assert "买手店" not in prompt
     assert "西装外套" in prompt
     assert "羊毛混纺" not in prompt
     assert "boutique hotel lobby" not in prompt
+    assert "从容" in prompt or "空间感" in prompt
 
 
 def test_daily_snapshot_template_uses_phone_realistic_scene() -> None:
@@ -1502,7 +1491,11 @@ def test_natural_phone_snapshot_template_uses_real_phone_constraints() -> None:
     )
 
     prompt = workflows._showcase_prompt(  # noqa: SLF001
-        product_analysis={"category": "童装连衣裙", "must_preserve": ["蓝色薄纱", "蓬蓬裙摆"]},
+        product_analysis={
+            "category": "童装连衣裙",
+            "must_preserve": ["蓝色薄纱", "蓬蓬裙摆"],
+            "background_recommendation": "明亮温馨的儿童房或木质客厅",
+        },
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": True, "items": ["帆布包"], "strength": "subtle"},
         template="natural_phone_snapshot",
@@ -1510,12 +1503,14 @@ def test_natural_phone_snapshot_template_uses_real_phone_constraints() -> None:
         final_quality="high",
     )
 
-    assert "真实手机竖屏自然随手拍" in prompt
-    assert "轻微高机位或自然手持视角" in prompt
-    assert "儿童服饰店" in prompt
-    assert "床边" in prompt
-    assert "轻微俯拍的自然动作照" in prompt
-    assert "抬手" in prompt
+    assert "真实手机竖屏随手拍" in prompt
+    assert "平视或自然手持视角" in prompt
+    assert "明亮温馨的儿童房或木质客厅" in prompt
+    assert "氛围跟童装连衣裙搭配" in prompt
+    assert "姿态自然松弛" in prompt
+    assert "姿势生动活泼有活力" not in prompt
+    assert "俯拍" not in prompt
+    assert "高机位" not in prompt
     assert "自然窗光或柔和室内暖光" in prompt
     assert "自然碎发" in prompt
     assert "衣服真实褶皱" in prompt
@@ -1524,6 +1519,173 @@ def test_natural_phone_snapshot_template_uses_real_phone_constraints() -> None:
     assert "帆布包" not in prompt
     assert "超写实商业摄影" not in prompt
     assert "适合亚马逊电商主图" not in prompt
+
+
+def test_natural_phone_snapshot_falls_back_to_category_scene() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "都市轻熟女，自然通勤"},
+    )
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"category": "针织开衫", "must_preserve": ["米白色"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="natural_phone_snapshot",
+        shot_type="front_full_body",
+        final_quality="high",
+    )
+
+    assert "与针织开衫风格搭配的真实生活空间" in prompt
+    assert "氛围跟针织开衫搭配" in prompt
+    assert "姿态自然松弛" in prompt
+    assert "俯拍" not in prompt
+    assert "不要棚拍" in prompt
+
+
+def test_showcase_pose_direction_per_template() -> None:
+    pairs = {
+        "white_ecommerce": "舒展自然",
+        "premium_studio": "戏剧化",
+        "urban_commute": "街头抓拍感",
+        "lifestyle": "空间感",
+        "daily_snapshot": "朋友视角",
+        "natural_phone_snapshot": "平视手持",
+        "social_seed": "互动展示",
+    }
+    for template, keyword in pairs.items():
+        assert keyword in workflows._showcase_pose_direction(template)  # noqa: SLF001
+
+
+def test_age_soft_constraint_applied_to_pose_direction() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "60岁银发女性"},
+    )
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": ["米白色"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="premium_studio",
+        shot_type="natural_pose",
+        final_quality="high",
+        age_segment="senior",
+    )
+    assert "姿态温和稳重" in prompt
+
+
+def test_kids_pool_routes_to_child_band_for_child_segment() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "8岁儿童，活泼自然"},
+    )
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"category": "童装连衣裙", "must_preserve": ["蓝色薄纱"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="premium_studio",
+        shot_type="natural_pose",
+        final_quality="high",
+        age_segment="child",
+    )
+    # 童版棚拍不应出现成人池里的戏剧化成人 pose
+    assert "腾空跳跃" not in prompt
+    assert "单腿后踢" not in prompt
+    assert "坐地半躺" not in prompt
+    assert "插袋收腰" not in prompt
+
+
+def test_toddler_pool_routes_to_toddler_band() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "2岁幼儿"},
+    )
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"category": "幼童 T 恤", "must_preserve": ["纯棉"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="natural_phone_snapshot",
+        shot_type="front_full_body",
+        final_quality="high",
+        age_segment="toddler",
+    )
+    # 幼儿池不允许出现需要他人配合的元素
+    assert "牵手" not in prompt
+    assert "陪伴" not in prompt
+    assert "妈妈" not in prompt
+
+
+def test_pick_shot_variants_counts_match_output_count() -> None:
+    for n in (1, 2, 4, 8, 16):
+        picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+            template="premium_studio",
+            age_segment="young_adult",
+            output_count=n,
+            seed_key=f"test-seed-{n}",
+        )
+        assert len(picks) == n, f"expected {n} picks for output_count={n}"
+        product_count = sum(1 for _, v in picks if v["framing"] == "product_first")
+        if n >= 2:
+            assert product_count >= 2, f"need >= 2 product_first for N={n}, got {product_count}"
+        else:
+            assert product_count >= 1
+
+
+def test_pick_shot_variants_is_deterministic_for_same_seed() -> None:
+    a = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+        template="urban_commute",
+        age_segment="young_adult",
+        output_count=8,
+        seed_key="seed-A",
+    )
+    b = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+        template="urban_commute",
+        age_segment="young_adult",
+        output_count=8,
+        seed_key="seed-A",
+    )
+    c = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+        template="urban_commute",
+        age_segment="young_adult",
+        output_count=8,
+        seed_key="seed-B",
+    )
+    assert [v["label"] for _, v in a] == [v["label"] for _, v in b]
+    assert [v["label"] for _, v in a] != [v["label"] for _, v in c]
+
+
+def test_pick_shot_variants_covers_all_four_classes_when_output_4() -> None:
+    picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+        template="lifestyle",
+        age_segment="young_adult",
+        output_count=4,
+        seed_key="cover-test",
+    )
+    classes = [cls for cls, _ in picks]
+    assert set(classes) == {
+        "front_full_body",
+        "natural_pose",
+        "detail_half_body",
+        "side_or_back",
+    }
+
+
+@pytest.mark.parametrize("age_segment", ["child", "toddler"])
+def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(age_segment: str) -> None:
+    """child 每类只 3 条、toddler 每类只 2 条，请求 16 张需循环复用变体而不是少返回。"""
+    picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+        template="premium_studio",
+        age_segment=age_segment,
+        output_count=16,
+        seed_key=f"kids-16-{age_segment}",
+    )
+    assert len(picks) == 16
+    classes = [cls for cls, _ in picks]
+    for cls_name in ("front_full_body", "natural_pose", "detail_half_body", "side_or_back"):
+        assert classes.count(cls_name) == 4, f"{cls_name} should appear 4 times"
+    # 至少 2 张 product_first（min_product_first 保证）
+    product = sum(1 for _, v in picks if v["framing"] == "product_first")
+    assert product >= 2
 
 
 def test_revision_prompt_is_short_repair_brief() -> None:

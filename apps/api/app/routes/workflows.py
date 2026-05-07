@@ -114,6 +114,25 @@ from .messages import (
     _publish_assistant_task,
     _publish_message_appended,
 )
+from ._showcase_shot_pool import (
+    SHOT_CLASS_ORDER,
+    ShotClass,
+    ShotPool,
+    ShotVariant,
+    age_soft_constraint as _age_soft_constraint,
+    resolve_pool_band as _resolve_pool_band,
+    select_variants as _select_shot_variants,
+    shot_class_distribution as _shot_class_distribution,
+)
+from ._showcase_shot_pool_adult import ADULT_POOL
+from ._showcase_shot_pool_kids import CHILD_POOL, TODDLER_POOL
+
+
+SHOT_POOL_BY_BAND: dict[str, ShotPool] = {
+    "young_adult": ADULT_POOL,
+    "child": CHILD_POOL,
+    "toddler": TODDLER_POOL,
+}
 
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -185,19 +204,6 @@ STEP_LABELS = {
     "delivery": "交付",
 }
 
-SHOT_LABELS = {
-    "front_full_body": "正面全身，自然不僵硬",
-    "natural_pose": "自然全身展示，姿态自由不死板",
-    "detail_half_body": "自然全身展示，姿态自然不重复",
-    "side_or_back": "侧面全身，姿态自然",
-}
-NATURAL_PHONE_SHOT_LABELS = {
-    "front_full_body": "门口、墙边或店铺角落的正面全身手机照，自然站立或轻轻靠墙，服装完整清晰",
-    "natural_pose": "轻微俯拍的自然动作照，可抬手、歪头、拿小包、看向镜头或看向旁边",
-    "detail_half_body": "床边、木凳或椅子旁的生活化穿搭照，突出上身和面料质感，尽量保留整体搭配",
-    "side_or_back": "轻微侧身、转头、靠门框或走动中的自然照片，展示服装侧面和轮廓",
-}
-
 TEMPLATE_LABELS = {
     "white_ecommerce": "白底主图",
     "premium_studio": "高级棚拍",
@@ -216,6 +222,11 @@ def _template_requirement(template: str, product_analysis: dict[str, Any]) -> st
         if recommended_background and recommended_background.lower() != "unknown"
         else f"根据{category}选择好看的服饰商业摄影氛围"
     )
+    phone_scene = (
+        recommended_background
+        if recommended_background and recommended_background.lower() != "unknown"
+        else f"与{category}风格搭配的真实生活空间"
+    )
     requirements = {
         "white_ecommerce": "白底或近白底，柔和棚拍光",
         "premium_studio": f"{matched_background}，高级棚拍质感，柔和光影",
@@ -223,10 +234,9 @@ def _template_requirement(template: str, product_analysis: dict[str, Any]) -> st
         "lifestyle": f"与{category}匹配的精品空间氛围，克制、高级、有层次",
         "daily_snapshot": f"与{category}匹配的日常随拍质感，手机拍摄感，超真实、超自然、不像棚拍",
         "natural_phone_snapshot": (
-            f"真实手机竖屏自然随手拍，轻微高机位或自然手持视角；真实室内生活空间，"
-            f"例如卧室、窗边、门口、走廊、儿童服饰店、浅色墙面、木地板、地砖、床边、"
-            f"椅子、镜子、木凳；少量生活细节真实但不要遮挡{category}主体，"
-            "不要棚拍或亚马逊主图感"
+            f"真实手机竖屏随手拍，平视或自然手持视角；"
+            f"{phone_scene}，氛围跟{category}搭配；自然光或室内暖光；"
+            f"少量生活细节真实但不要遮挡{category}主体，不要棚拍或亚马逊主图感"
         ),
         "social_seed": f"与{category}匹配的自然种草氛围，松弛、真实、有生活感",
     }
@@ -243,10 +253,19 @@ def _showcase_render_direction(template: str) -> str:
     return "超写实商业摄影，干净高级，适合亚马逊电商主图，无文字水印"
 
 
-def _showcase_shot_direction(template: str, shot_type: str) -> str:
-    if template == "natural_phone_snapshot":
-        return NATURAL_PHONE_SHOT_LABELS.get(shot_type, shot_type)
-    return SHOT_LABELS.get(shot_type, shot_type)
+_POSE_DIRECTIONS: dict[str, str] = {
+    "white_ecommerce": "姿态规范不僵硬，舒展自然",
+    "premium_studio": "姿态戏剧化有张力，时装大片感",
+    "urban_commute": "姿态自然不摆拍，街头抓拍感",
+    "lifestyle": "姿态从容松弛，有空间感和呼吸感",
+    "daily_snapshot": "姿态自然不刻意，朋友视角随手拍",
+    "natural_phone_snapshot": "姿态自然松弛，平视手持视角",
+    "social_seed": "姿态轻松自然，有互动展示感",
+}
+
+
+def _showcase_pose_direction(template: str) -> str:
+    return _POSE_DIRECTIONS.get(template, "姿态自然舒展")
 
 
 def _showcase_prompt_brief(
@@ -257,6 +276,7 @@ def _showcase_prompt_brief(
     accessory_direction: str,
     model_consistency: str,
     shot_direction: str,
+    pose_direction: str,
     quality_direction: str,
     render_direction: str,
     style_region: str,
@@ -275,7 +295,8 @@ def _showcase_prompt_brief(
             f"3. 配饰：{accessory_direction}",
             f"4. 场景：背景与衣服风格搭配，{direction}。",
             f"5. 画质：{quality_direction}，{render_direction}。",
-            f"6. 构图：全身照，{style_region}风格，姿势生动活泼有活力，{shot_direction}。",
+            f"6. 构图：{style_region}风格，{pose_direction}，{shot_direction}；"
+            "服装主体在画面中清晰可见。",
             "7. 单人照。",
         ]
     )
@@ -2491,6 +2512,8 @@ def _showcase_prompt(
     shot_type: str,
     final_quality: str,
     user_prompt: str = "",
+    shot_variant: ShotVariant | None = None,
+    age_segment: str | None = None,
 ) -> str:
     brief = selected_candidate.model_brief_json or {}
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
@@ -2507,7 +2530,13 @@ def _showcase_prompt(
         f"模特方向：{summary}。"
     )
     accessory_direction = "少量自然搭配，不要抢衣服主体；如果附件中包含已选配饰四宫格，优先参考它。"
-    shot_direction = _showcase_shot_direction(template, shot_type)
+    if shot_variant is None:
+        shot_variant = _showcase_default_variant(template, shot_type, age_segment)
+    shot_direction = shot_variant["label"] if shot_variant else shot_type
+    pose_direction = _showcase_pose_direction(template)
+    soft = _age_soft_constraint(age_segment)
+    if soft:
+        pose_direction = f"{pose_direction}，{soft}"
     quality_direction = "4K 终稿" if final_quality == "4k" else "高质量"
     style_region = _style_region_from_text(summary)
     return _showcase_prompt_brief(
@@ -2517,10 +2546,50 @@ def _showcase_prompt(
         accessory_direction=accessory_direction,
         model_consistency=model_consistency,
         shot_direction=shot_direction,
+        pose_direction=pose_direction,
         quality_direction=quality_direction,
         render_direction=_showcase_render_direction(template),
         style_region=style_region,
     )
+
+
+def _showcase_default_variant(
+    template: str,
+    shot_type: str,
+    age_segment: str | None,
+) -> ShotVariant | None:
+    band = _resolve_pool_band(age_segment)
+    pool = SHOT_POOL_BY_BAND.get(band, ADULT_POOL)
+    template_pool = pool.get(template) or ADULT_POOL.get(template)  # type: ignore[arg-type]
+    if not template_pool:
+        return None
+    variants = template_pool.get(shot_type) or template_pool.get(SHOT_CLASS_ORDER[0])  # type: ignore[arg-type]
+    if not variants:
+        return None
+    for variant in variants:
+        if variant["framing"] == "product_first":
+            return variant
+    return variants[0]
+
+
+def _showcase_pick_shot_variants(
+    *,
+    template: str,
+    age_segment: str | None,
+    output_count: int,
+    seed_key: str,
+) -> list[tuple[ShotClass, ShotVariant]]:
+    band = _resolve_pool_band(age_segment)
+    pool = SHOT_POOL_BY_BAND.get(band, ADULT_POOL)
+    template_pool = pool.get(template) or ADULT_POOL.get(template) or {}  # type: ignore[arg-type]
+    plan = _shot_class_distribution(output_count)
+    variants = _select_shot_variants(
+        pool=template_pool,
+        plan=plan,
+        seed_key=seed_key,
+        min_product_first=2 if output_count >= 2 else 1,
+    )
+    return list(zip(plan, variants))
 
 
 def _revision_prompt(
@@ -4869,9 +4938,15 @@ async def create_showcase_images(
         raise _http("missing_model_reference", "selected model has no reference image", 409)
     showcase = await _step(db, run.id, "showcase_generation")
     conv = await _get_owned_conversation(db, user_id=user.id, conversation_id=run.conversation_id or "")
-    shot_plan = (body.shot_plan or DEFAULT_SHOT_PLAN)[: body.output_count]
-    while len(shot_plan) < body.output_count:
-        shot_plan.append(DEFAULT_SHOT_PLAN[len(shot_plan) % len(DEFAULT_SHOT_PLAN)])
+    age_segment = _infer_age_segment_from_workflow(run)
+    seed_key = f"{run.id}:{body.template}:{body.output_count}:{showcase.task_ids and len(showcase.task_ids) or 0}"
+    shot_picks = _showcase_pick_shot_variants(
+        template=body.template,
+        age_segment=age_segment,
+        output_count=body.output_count,
+        seed_key=seed_key,
+    )
+    shot_plan = [shot_class for shot_class, _ in shot_picks]
 
     approval = await _step(db, run.id, "model_approval")
     accessory_plan = (approval.input_json or {}).get("accessory_plan")
@@ -4889,7 +4964,7 @@ async def create_showcase_images(
     existing_image_ids = _dedupe_nonempty(showcase.image_ids or [])
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
-    for idx, shot_type in enumerate(shot_plan, start=1):
+    for idx, (shot_type, variant) in enumerate(shot_picks, start=1):
         bundle, _, gen_ids = await _create_workflow_task(
             db=db,
             user=user,
@@ -4901,6 +4976,8 @@ async def create_showcase_images(
                 accessory_plan=accessory_plan,
                 template=body.template,
                 shot_type=shot_type,
+                shot_variant=variant,
+                age_segment=age_segment,
                 final_quality=body.final_quality,
                 user_prompt=run.user_prompt,
             ),
@@ -4919,7 +4996,10 @@ async def create_showcase_images(
                 "workflow_action": "showcase_image",
                 "workflow_candidate_id": candidate.id,
                 "workflow_shot_type": shot_type,
+                "workflow_shot_variant": variant["label"],
+                "workflow_shot_framing": variant["framing"],
                 "workflow_template": body.template,
+                "workflow_age_segment": age_segment,
                 "workflow_final_quality": body.final_quality,
             },
         )
@@ -4931,6 +5011,11 @@ async def create_showcase_images(
     showcase.input_json = {
         "template": body.template,
         "shot_plan": shot_plan,
+        "shot_variants": [
+            {"shot_class": cls, "label": v["label"], "framing": v["framing"]}
+            for cls, v in shot_picks
+        ],
+        "age_segment": age_segment,
         "aspect_ratio": body.aspect_ratio,
         "final_quality": body.final_quality,
         "output_count": body.output_count,
