@@ -505,6 +505,78 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         env_fallback="TELEGRAM_PROXY_STRATEGY",
         allowed_values=("random", "latency", "failover", "round_robin"),
     ),
+
+    # ----- 存储后端（/opt/lumendata 挂载来源） -----
+    SettingSpec(
+        key="storage.backend",
+        description=(
+            "Lumen 数据目录（/opt/lumendata）从哪里来。"
+            "local = 本机磁盘上的目录；smb = 远端 SMB/CIFS 共享。"
+            "切换会触发容器短暂重启（约 30 秒），且不会自动迁移已有数据，"
+            "请先确认目标位置上的内容是你需要的。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_BACKEND",
+        allowed_values=("local", "smb"),
+    ),
+    SettingSpec(
+        key="storage.local.root",
+        description=(
+            "本机模式下，宿主机上要 bind 到 /opt/lumendata 的真实目录。"
+            "例如 /var/lib/lumen-data。必须是绝对路径；目录会在挂载时自动创建。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_LOCAL_ROOT",
+    ),
+    SettingSpec(
+        key="storage.smb.host",
+        description=(
+            "SMB 服务器地址（IP 或域名）。例如 10.10.10.40 或 nas.local。"
+            "不要带 // 前缀。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_SMB_HOST",
+    ),
+    SettingSpec(
+        key="storage.smb.share",
+        description=(
+            "SMB 共享名（NAS 上对外公开的那个名字）。例如 Lumen。"
+            "不要带斜杠。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_SMB_SHARE",
+    ),
+    SettingSpec(
+        key="storage.smb.subpath",
+        description=(
+            "共享内的子路径（可选）。例如 / 或 /lumen-prod。"
+            "默认 /，表示直接用共享根目录。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_SMB_SUBPATH",
+    ),
+    SettingSpec(
+        key="storage.smb.username",
+        description="SMB 登录用户名。",
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_SMB_USERNAME",
+    ),
+    SettingSpec(
+        key="storage.smb.password",
+        description=(
+            "SMB 登录密码。提交时留空表示保留旧值；首次配置必填。"
+            "存储在 host 上的 conf 文件里（0600 权限），mount 时读取。"
+        ),
+        sensitive=True,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_SMB_PASSWORD",
+    ),
 ]
 
 

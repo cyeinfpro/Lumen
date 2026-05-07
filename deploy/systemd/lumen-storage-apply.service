@@ -1,0 +1,15 @@
+[Unit]
+Description=Lumen storage apply (admin-triggered remount cycle)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/var/lib/lumen-storage/apply.env
+ExecStart=/usr/local/sbin/lumen-storage-mount apply
+# Always clean up the trigger so the next click re-fires PathChanged.
+ExecStopPost=/bin/sh -c "rm -f /var/lib/lumen-storage/apply.trigger /var/lib/lumen-storage/apply.env"
+# Treat non-zero as success so PathChanged keeps working; real status lives in
+# /var/lib/lumen-storage/last-apply.json which the API surfaces to the UI.
+SuccessExitStatus=0 1 2
+TimeoutStartSec=600

@@ -37,6 +37,7 @@ import { ProvidersPanel } from "./_panels/ProvidersPanel";
 import { ProxiesPanel } from "./_panels/ProxiesPanel";
 import { RequestEventsPanel } from "./_panels/RequestEventsPanel";
 import { SettingsPanel } from "./_panels/SettingsPanel";
+import { StoragePanel } from "./_panels/StoragePanel";
 import { TelegramPanel } from "./_panels/TelegramPanel";
 
 type MaybeAdminUser = AuthUser & { role?: "admin" | "member" };
@@ -50,6 +51,7 @@ type Tab =
   | "proxies"
   | "telegram"
   | "settings"
+  | "storage"
   | "backups";
 
 const TABS: { key: Tab; label: string }[] = [
@@ -61,6 +63,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "proxies", label: "代理池" },
   { key: "telegram", label: "Telegram 机器人" },
   { key: "settings", label: "系统设置" },
+  { key: "storage", label: "存储后端" },
   { key: "backups", label: "备份与恢复" },
 ];
 
@@ -229,6 +232,8 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
                 <TelegramPanel />
               ) : tab === "settings" ? (
                 <SettingsPanel />
+              ) : tab === "storage" ? (
+                <StoragePanel />
               ) : (
                 <BackupsPanel />
               )}

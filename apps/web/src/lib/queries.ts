@@ -149,6 +149,16 @@ import type {
   SystemSettingsOut,
   UsageOut,
 } from "./types";
+import {
+  getAdminStorage,
+  testAdminStorage,
+  putAdminStorage,
+  type StorageApplyResponseOut,
+  type StorageConfigOut,
+  type StorageConfigUpdateIn,
+  type StorageTestIn,
+  type StorageTestResultOut,
+} from "./api/storage";
 
 // ——— Query keys ———
 export const qk = {
@@ -173,6 +183,7 @@ export const qk = {
   adminProxies: () => ["admin", "proxies"] as const,
   adminUpdateStatus: () => ["admin", "update", "status"] as const,
   adminReleases: () => ["admin", "releases"] as const,
+  adminStorage: () => ["admin", "storage"] as const,
   systemPrompts: () => ["system_prompts"] as const,
   mySessions: () => ["me", "sessions"] as const,
   conversations: (opts?: ListConversationsOpts) =>
@@ -1518,5 +1529,44 @@ export function useAutoTagApparelModelLibraryItemMutation(
       qc.invalidateQueries({ queryKey: qk.apparelModelLibrary() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
+  });
+}
+
+// ——— Admin: Storage backend (local / SMB) ———
+
+export function useAdminStorageQuery(
+  options?: Omit<UseQueryOptions<StorageConfigOut>, "queryKey" | "queryFn">,
+) {
+  return useQuery<StorageConfigOut>({
+    queryKey: qk.adminStorage(),
+    queryFn: getAdminStorage,
+    ...options,
+  });
+}
+
+export function useTestAdminStorageMutation(
+  options?: Omit<
+    UseMutationOptions<StorageTestResultOut, Error, StorageTestIn>,
+    "mutationFn"
+  >,
+) {
+  return useMutation<StorageTestResultOut, Error, StorageTestIn>({
+    mutationFn: (body) => testAdminStorage(body),
+    ...options,
+  });
+}
+
+// 注意：PUT 后 lumen-api 会被 docker stop ~10–30s，这段时间任何 fetch 都会失败。
+// 所以这里 onSuccess 不主动 invalidate（refetch 一定 throw），由组件层在 polling
+// 完成后自行 setQueryData / invalidate。
+export function usePutAdminStorageMutation(
+  options?: Omit<
+    UseMutationOptions<StorageApplyResponseOut, Error, StorageConfigUpdateIn>,
+    "mutationFn"
+  >,
+) {
+  return useMutation<StorageApplyResponseOut, Error, StorageConfigUpdateIn>({
+    mutationFn: (body) => putAdminStorage(body),
+    ...options,
   });
 }
