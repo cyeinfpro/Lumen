@@ -104,6 +104,10 @@ services:
       # admin_update / admin_backups 用 _discover_scripts_dir() 定位 update/backup
       # 脚本，做 preflight 校验。镜像里不打包 scripts/，由 release 目录挂载提供。
       - ./scripts:/app/scripts:ro
+      # admin_storage 与 host 上的 lumen-storage-{mount,apply,test} 单元用这个目录
+      # 双向通信：API 写 storage.conf / apply.trigger，host 写 status.json / last-*.json。
+      # 此目录不在 /opt/lumendata 上，所以 SMB 切换时不会被卸载，避免鸡生蛋。
+      - /var/lib/lumen-storage:/var/lib/lumen-storage
     networks:
       - lumen_backend
     healthcheck:

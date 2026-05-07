@@ -854,6 +854,82 @@ class SystemSettingsUpdateIn(BaseModel):
     items: list[SystemSettingsUpdateItem]
 
 
+# ---------- Storage 后端（local / smb 切换） ----------
+
+
+class StorageMountStatusOut(BaseModel):
+    mode: str = ""  # "local" | "smb" | ""
+    mounted: bool = False
+    source: str = ""
+    fstype: str = ""
+    target: str = "/opt/lumendata"
+    disabled: bool = False
+    updated_at: int | None = None
+
+
+class StorageLocalConfigOut(BaseModel):
+    root: str = "/var/lib/lumen-data"
+
+
+class StorageSmbConfigOut(BaseModel):
+    host: str = ""
+    share: str = ""
+    subpath: str = "/"
+    username: str = ""
+    has_password: bool = False
+
+
+class StorageConfigOut(BaseModel):
+    backend: str = ""  # "local" | "smb" | ""
+    local: StorageLocalConfigOut
+    smb: StorageSmbConfigOut
+    status: StorageMountStatusOut | None = None
+    last_apply: dict | None = None
+    last_test: dict | None = None
+
+
+class StorageLocalConfigIn(BaseModel):
+    root: str = Field(..., min_length=1, max_length=512)
+
+
+class StorageSmbConfigIn(BaseModel):
+    host: str = Field(..., min_length=1, max_length=255)
+    share: str = Field(..., min_length=1, max_length=255)
+    subpath: str = Field("/", max_length=512)
+    username: str = Field(..., min_length=1, max_length=255)
+    # 空字符串 = 保留旧值
+    password: str = Field("", max_length=512)
+
+
+class StorageConfigUpdateIn(BaseModel):
+    backend: str  # "local" | "smb"
+    local: StorageLocalConfigIn | None = None
+    smb: StorageSmbConfigIn | None = None
+
+
+class StorageTestIn(BaseModel):
+    host: str = Field(..., min_length=1, max_length=255)
+    share: str = Field(..., min_length=1, max_length=255)
+    subpath: str = Field("/", max_length=512)
+    username: str = Field(..., min_length=1, max_length=255)
+    # 空字符串 = 用已存的密码（必须 has_password）
+    password: str = Field("", max_length=512)
+
+
+class StorageTestResultOut(BaseModel):
+    status: str  # "ok" | "fail" | "pending"
+    message: str = ""
+    tested_at: int | None = None
+    call_id: str | None = None
+
+
+class StorageApplyResponseOut(BaseModel):
+    config: StorageConfigOut
+    call_id: str
+    status: str  # "pending" | "ok" | "fail"
+    message: str = ""
+
+
 # ---------- Providers（管理员 Provider Pool CRUD + 探活） ----------
 
 class ProviderItemOut(BaseModel):
@@ -1053,6 +1129,16 @@ __all__ = [
     "SystemSettingsOut",
     "SystemSettingsUpdateItem",
     "SystemSettingsUpdateIn",
+    "StorageMountStatusOut",
+    "StorageLocalConfigOut",
+    "StorageSmbConfigOut",
+    "StorageConfigOut",
+    "StorageLocalConfigIn",
+    "StorageSmbConfigIn",
+    "StorageConfigUpdateIn",
+    "StorageTestIn",
+    "StorageTestResultOut",
+    "StorageApplyResponseOut",
     "ProviderItemOut",
     "ProvidersOut",
     "AdminModelOut",

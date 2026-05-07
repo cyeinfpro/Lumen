@@ -193,13 +193,31 @@ deploy_systemd_units() {
     for f in lumen-api.service lumen-web.service lumen-worker.service \
              lumen-tgbot.service lumen-update-runner.service \
              lumen-update.path lumen-backup.service lumen-backup.timer \
-             lumen-health-watchdog.service lumen-health-watchdog.timer; do
+             lumen-health-watchdog.service lumen-health-watchdog.timer \
+             lumen-storage-mount.service \
+             lumen-storage-apply.service lumen-storage-apply.path \
+             lumen-storage-test.service lumen-storage-test.path; do
         if [ -f "${src_dir}/${f}" ]; then
             cp -f "${src_dir}/${f}" "/etc/systemd/system/${f}"
         fi
     done
+    # storage mount 控制脚本部署到 /usr/local/sbin（unit 通过绝对路径调用）
+    local storage_script="${ROOT}/current/deploy/scripts/lumen_storage_mount.sh"
+    if [ -f "${storage_script}" ]; then
+        install -m 0755 "${storage_script}" /usr/local/sbin/lumen-storage-mount
+        log_info "  /usr/local/sbin/lumen-storage-mount"
+    fi
+    # storage 共享目录（host ↔ lumen-api 容器双向 bind）
+    if id lumen >/dev/null 2>&1; then
+        install -d -m 0775 -o root -g lumen /var/lib/lumen-storage
+    else
+        install -d -m 0775 /var/lib/lumen-storage
+    fi
     systemctl daemon-reload
     log_info "systemctl daemon-reload 完成"
+    # 启用 storage path-watcher（admin UI 通过 trigger 文件触发 apply/test）
+    systemctl enable --now lumen-storage-apply.path lumen-storage-test.path 2>/dev/null \
+        || log_warn "启用 lumen-storage-{apply,test}.path 失败（继续）"
 }
 
 # 修正 ownership：所有迁移产物归 lumen:lumen（如该用户存在）。

@@ -1,0 +1,19 @@
+[Unit]
+Description=Lumen storage mount (/opt/lumendata)
+After=network-online.target var-lib-lumen\x2dstorage.mount
+Wants=network-online.target
+# So docker / lumen services start after this.
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/lumen-storage-mount up
+ExecStop=/usr/local/sbin/lumen-storage-mount down
+# Mount failures here are not fatal: cmd_up falls back to local default so the
+# host always has /opt/lumendata available; admin can recover via UI.
+SuccessExitStatus=0 1 2
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

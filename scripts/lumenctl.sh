@@ -54,6 +54,8 @@ Docker compose runtime:
   restore <ts>         调用 scripts/restore.sh <timestamp>
 
 Auxiliary:
+  install-storage-units 安装存储后端组件（lumen-storage-mount + 4 个 systemd unit）
+                       对应管理后台「存储后端」页（local / smb 切换）
   install-image-job    安装 image-job sidecar、systemd 服务
   uninstall-image-job  卸载 image-job sidecar
   nginx-scan           扫描 nginx 配置
@@ -723,6 +725,65 @@ ensure_service_user() {
     shell_path="$(detect_nologin_shell)"
     log_info "创建 system 用户：${service_user}"
     as_sudo useradd --system --home-dir "${app_dir}" --shell "${shell_path}" "${service_user}"
+}
+
+install_storage_units() {
+    # 安装 lumen-storage-mount + 4 个 systemd unit（local/smb 切换的 host 端实现）。
+    # 幂等：重复跑不会重启正在运行的 mount。
+    ensure_linux_systemd
+    require_sudo
+
+    log_step "安装 Lumen 存储后端组件"
+
+    local deploy_scripts="${ROOT}/deploy/scripts"
+    local deploy_systemd="${ROOT}/deploy/systemd"
+    local mount_script="${deploy_scripts}/lumen_storage_mount.sh"
+
+    if [ ! -f "${mount_script}" ]; then
+        log_error "找不到 ${mount_script}（请在 Lumen 仓库根目录或 release current 下运行）"
+        exit 1
+    fi
+
+    # 1) 共享通信目录：/var/lib/lumen-storage（host ↔ lumen-api 容器双向 bind）
+    log_info "创建 /var/lib/lumen-storage（root:lumen 0775）"
+    if id lumen >/dev/null 2>&1; then
+        as_sudo install -d -m 0775 -o root -g lumen /var/lib/lumen-storage
+    else
+        as_sudo install -d -m 0775 /var/lib/lumen-storage
+        log_warn "  未找到 lumen 用户，使用 root:root；安装 Lumen 后再 chgrp。"
+    fi
+
+    # 2) 主脚本到 /usr/local/sbin
+    log_info "安装 mount 脚本：/usr/local/sbin/lumen-storage-mount"
+    as_sudo install -m 0755 "${mount_script}" /usr/local/sbin/lumen-storage-mount
+
+    # 3) systemd 单元
+    local unit
+    for unit in lumen-storage-mount.service \
+                lumen-storage-apply.service lumen-storage-apply.path \
+                lumen-storage-test.service lumen-storage-test.path; do
+        if [ -f "${deploy_systemd}/${unit}" ]; then
+            as_sudo install -m 0644 "${deploy_systemd}/${unit}" "/etc/systemd/system/${unit}"
+            log_info "  ${unit}"
+        else
+            log_warn "  ${deploy_systemd}/${unit} 不存在，跳过"
+        fi
+    done
+
+    as_sudo systemctl daemon-reload
+
+    # 4) 启用 path-watcher（用于 admin UI 触发 apply / test）
+    log_info "启用 path watchers"
+    as_sudo systemctl enable --now lumen-storage-apply.path lumen-storage-test.path
+
+    # mount.service 视情况启用：默认无配置时回退到本地路径
+    if as_sudo systemctl enable --now lumen-storage-mount.service 2>/dev/null; then
+        log_info "lumen-storage-mount.service 已启用并启动"
+    else
+        log_warn "lumen-storage-mount.service 启动失败（默认会回退到本地路径，admin UI 配好后再 systemctl restart 即可）"
+    fi
+
+    log_info "完成。下一步：在管理后台「存储后端」页面配置 local 或 smb。"
 }
 
 install_image_job() {
@@ -1931,6 +1992,7 @@ main() {
         backup) lumen_compose_backup "$@" ;;
         restore) lumen_compose_restore "$@" ;;
         # Auxiliary（保留，不再适用 docker 时由内部函数自行报错）
+        install-storage-units) install_storage_units ;;
         install-image-job) install_image_job ;;
         uninstall-image-job) uninstall_image_job ;;
         nginx-scan) nginx_scan ;;

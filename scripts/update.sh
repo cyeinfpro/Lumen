@@ -1047,6 +1047,36 @@ emit_info switch to   "${NEW_ID}"
 emit_done switch 0
 
 # ---------------------------------------------------------------------------
+# Phase: check_storage
+# 验证 /opt/lumendata 已挂载且可写。这里只校验，不重挂；真正的切换由 admin UI →
+# lumen-storage-apply.service 单独负责。如果用户跑 update 之前 SMB 挂不上，
+# 业务容器起来也会失败，所以早 abort 比 restart_services 失败再回滚更省事。
+# 跳过条件：SKIP_STORAGE_CHECK=1（适用于 host 还没装 lumen-storage-* 的过渡期）。
+# ---------------------------------------------------------------------------
+if [ "${SKIP_STORAGE_CHECK:-0}" = "1" ]; then
+    emit_info check_storage status "skipped_via_env"
+else
+    emit_start check_storage
+    if ! findmnt -T /opt/lumendata >/dev/null 2>&1; then
+        log_error "[check_storage] /opt/lumendata 未挂载。"
+        log_error "  在管理后台「存储后端」页面配置 local 或 smb 后即可生效；"
+        log_error "  紧急绕过：SKIP_STORAGE_CHECK=1 ./update.sh"
+        emit_fail check_storage 1
+        exit 1
+    fi
+    _storage_probe="/opt/lumendata/.update_probe_$$"
+    if ! touch "${_storage_probe}" 2>/dev/null; then
+        log_error "[check_storage] /opt/lumendata 不可写（host 端挂载源可能不可达）。"
+        emit_fail check_storage 1
+        exit 1
+    fi
+    rm -f "${_storage_probe}"
+    _storage_fstype="$(findmnt -T /opt/lumendata -no FSTYPE 2>/dev/null || true)"
+    emit_info check_storage fstype "${_storage_fstype:-unknown}"
+    emit_done check_storage 0
+fi
+
+# ---------------------------------------------------------------------------
 # Phase: restart_services
 # 启动 api / worker / web；如启用 Telegram，则起 tgbot。
 # 失败 → 自动用 PREVIOUS_TAG 回滚（pull && up）。
