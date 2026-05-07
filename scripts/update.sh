@@ -90,7 +90,15 @@ fi
 
 if ! command -v lumen_compose >/dev/null 2>&1; then
     lumen_compose() {
-        COMPOSE_PROJECT_NAME="lumen" lumen_docker compose "$@"
+        local explicit=()
+        if [ ! -f "./docker-compose.yml" ]; then
+            local _cur="${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current"
+            if [ -f "${_cur}/docker-compose.yml" ]; then
+                explicit+=("-f" "${_cur}/docker-compose.yml")
+                [ -f "${_cur}/.env" ] && explicit+=("--env-file" "${_cur}/.env")
+            fi
+        fi
+        COMPOSE_PROJECT_NAME="lumen" lumen_docker compose "${explicit[@]}" "$@"
     }
 fi
 

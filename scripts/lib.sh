@@ -2088,13 +2088,29 @@ lumen_compose_project_name() {
 }
 
 # 包装 docker compose；自动注入 COMPOSE_PROJECT_NAME，并探测 v2 可用性。
+#
+# 显式 -f / --env-file 兜底：
+# 当 caller cwd 不是 release 目录（例如 lumenctl/update.sh 从 /opt/lumen 而非
+# /opt/lumen/current 调起）时，docker compose 默认无法读到 release dir 的 .env，
+# 所有 ${VAR:-default} 走 fallback。曾在 update-lumen 时把 LUMEN_DB_ROOT
+# 从 /var/lib/lumen-data 错回 /opt/lumendata（SMB），触发 pg recreate 后
+# initdb 错乱清空数据目录。这里探测 caller cwd 没有 docker-compose.yml 时，
+# 自动指向 ${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current 的 compose 文件 + .env。
 lumen_compose() {
     if ! docker compose version >/dev/null 2>&1; then
         log_error "未检测到 docker compose v2，请安装/升级到 Docker Compose v2 后重试。"
         return 1
     fi
+    local explicit=()
+    if [ ! -f "./docker-compose.yml" ]; then
+        local _cur="${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current"
+        if [ -f "${_cur}/docker-compose.yml" ]; then
+            explicit+=("-f" "${_cur}/docker-compose.yml")
+            [ -f "${_cur}/.env" ] && explicit+=("--env-file" "${_cur}/.env")
+        fi
+    fi
     COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT:-lumen}" \
-        lumen_docker compose --ansi=never "$@"
+        lumen_docker compose --ansi=never "${explicit[@]}" "$@"
 }
 
 # 在指定目录执行 lumen_compose（release 切换时用）。
