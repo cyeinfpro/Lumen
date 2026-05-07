@@ -849,14 +849,16 @@ if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
         exit 1
     fi
     if [ ! -d "${REPO_DIR}/.git" ]; then
-        log_warn "[fetch_release] ${REPO_DIR} 不是 git 仓库;尝试 image-extract fallback。"
         IMAGE_EXTRACT_DIR="${ROOT}/.update-image-extract"
-        if try_image_extract_release "${TARGET_TAG:-main}" "${IMAGE_EXTRACT_DIR}"; then
+        # CI smoke tests set LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT=1 to skip the
+        # network-y docker pull and exercise the legacy snapshot-only branch.
+        if [ "${LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT:-0}" != "1" ] && \
+           try_image_extract_release "${TARGET_TAG:-main}" "${IMAGE_EXTRACT_DIR}"; then
             REPO_DIR="${IMAGE_EXTRACT_DIR}"
             emit_info fetch_release source "image_extract"
             log_info "[fetch_release] 已从 image 提取代码到 ${REPO_DIR}"
         else
-            log_warn "[fetch_release] image-extract 也失败,使用当前发布物快照继续(可能过期)。"
+            log_warn "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续。"
         fi
     else
         GIT_REF="${LUMEN_UPDATE_GIT_REF:-}"
