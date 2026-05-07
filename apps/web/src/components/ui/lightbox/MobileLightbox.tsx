@@ -21,6 +21,7 @@ import {
 } from "framer-motion";
 import {
   X,
+  Brush,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -54,6 +55,7 @@ import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { useCreateShareMutation } from "@/lib/queries";
+import { useInpaintStore } from "@/store/useInpaintStore";
 import { LightboxParamsPanel } from "./LightboxParamsPanel";
 import { useLightboxGestures } from "./LightboxGestures";
 import {
@@ -973,6 +975,20 @@ export function MobileLightbox() {
     pushMobileToast("正在重新生成…", "success");
   }, [state, close]);
 
+  const handleInpaint = useCallback(() => {
+    if (!state) return;
+    const id = state.currentId;
+    const img = useChatStore.getState().imagesById[id];
+    if (!img) return;
+    close();
+    useInpaintStore.getState().openInpaint({
+      imageId: img.id,
+      src: img.data_url,
+      width: img.width,
+      height: img.height,
+    });
+  }, [state, close]);
+
   const items = state?.items ?? EMPTY_LIGHTBOX_ITEMS;
   const idx = state ? items.findIndex((x) => x.id === state.currentId) : -1;
   const current = idx >= 0 ? items[idx] : null;
@@ -1453,8 +1469,8 @@ export function MobileLightbox() {
           </div>
         )}
 
-        {/* 创作操作行：迭代 / 放大 / 重画 */}
-        <div className="mx-auto mt-2 flex max-w-[34rem] justify-center gap-2.5">
+        {/* 创作操作行：迭代 / 局部 / 放大 / 重画 */}
+        <div className="mx-auto mt-2 flex max-w-[34rem] flex-wrap justify-center gap-2">
           <button
             type="button"
             onClick={handleIterate}
@@ -1463,6 +1479,15 @@ export function MobileLightbox() {
           >
             <Pencil className="w-3.5 h-3.5" aria-hidden />
             迭代
+          </button>
+          <button
+            type="button"
+            onClick={handleInpaint}
+            tabIndex={chromeVisible ? undefined : -1}
+            className="pointer-events-auto inline-flex items-center gap-1.5 h-10 px-4 rounded-full bg-[rgba(242,169,58,0.2)] border border-[rgba(242,169,58,0.35)] text-[var(--amber-300)] text-[13px] font-medium active:scale-95 transition-transform"
+          >
+            <Brush className="w-3.5 h-3.5" aria-hidden />
+            局部
           </button>
           <button
             type="button"

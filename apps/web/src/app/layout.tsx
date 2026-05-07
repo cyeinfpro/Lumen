@@ -3,6 +3,7 @@ import { cookies, headers } from "next/headers";
 import localFont from "next/font/local";
 import "./globals.css";
 import { Lightbox } from "@/components/ui/Lightbox";
+import { InpaintModal } from "@/components/ui/inpaint";
 import { GlobalTaskTray } from "@/components/ui/GlobalTaskTray";
 import { SSEProvider } from "@/components/SSEProvider";
 import { QueryProvider } from "@/components/QueryProvider";
@@ -166,6 +167,7 @@ export default async function RootLayout({
                 <PageTransitions>{children}</PageTransitions>
               </SSEProvider>
               <Lightbox />
+              <InpaintModal />
               <GlobalTaskTray />
               <OfflineBanner />
               <ToastViewport />

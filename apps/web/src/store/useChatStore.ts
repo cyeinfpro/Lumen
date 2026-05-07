@@ -157,6 +157,17 @@ interface ChatState {
   upscaleImage: (imageId: string) => Promise<void>;
   // 重画：完全复用原 generation 参数，再生成一张新图
   rerollImage: (imageId: string) => Promise<void>;
+  // 独立局部修改提交：从 Lightbox / 卡片等浏览态入口直接发起一次 image_to_image + mask 生成。
+  // 不污染当前 composer 草稿（提交完成后会还原 text/attachments/mask）。
+  submitInpaintTask: (input: {
+    sourceImageId: string;
+    sourceSrc: string;
+    sourceWidth?: number;
+    sourceHeight?: number;
+    maskBlob: Blob;
+    maskPreviewDataUrl: string;
+    prompt: string;
+  }) => Promise<void>;
 
   // —— 内部 / SSE ——
   appendUserMessage: (msg: UserMessage) => void;
@@ -2658,6 +2669,121 @@ function createChatStore() {
         messages: [...s.messages, realAssistant],
         generations: { ...s.generations, ...optimisticGens },
       }));
+    },
+
+    // —— 独立的局部修改提交入口 ——
+    // 浏览态（Lightbox / 卡片 / 对话气泡）的"局部修改"会调到这里。
+    //
+    // 实现：
+    //   1) 把 mask blob 上传到后端拿到 mask_image_id
+    //   2) 备份用户当前 composer 草稿
+    //   3) 临时把 composer 覆盖为：单张 inpaint 参考图 + mask + prompt + image 模式
+    //   4) 复用 sendMessage（它会发出 image_to_image + mask_image_id，并 reset composer 偏好以外的字段）
+    //   5) finally 还原用户原始 text/attachments/mask/forceIntent —— 保留 mode/params/偏好已经被 sendMessage 留住
+    //
+    // 不走 createSilentGeneration：silent endpoint 当前不接受 mask_image_id，且 inpaint 期望在
+    // 对话历史里出现一条用户消息（带 prompt 与所引用的图），UX 上更自然。
+    async submitInpaintTask({
+      sourceImageId,
+      sourceSrc,
+      sourceWidth,
+      sourceHeight,
+      maskBlob,
+      maskPreviewDataUrl,
+      prompt,
+    }) {
+      const text = prompt.trim();
+      if (!text) {
+        set({ composerError: "请输入要修改的内容" });
+        throw new Error("请输入要修改的内容");
+      }
+      if (isPromptTooLong(text)) {
+        set({ composerError: PROMPT_TOO_LONG_MESSAGE });
+        throw new Error(PROMPT_TOO_LONG_MESSAGE);
+      }
+      if (!sourceImageId || !sourceSrc) {
+        const msg = "图片信息不完整，无法发起局部修改";
+        set({ composerError: msg });
+        throw new Error(msg);
+      }
+
+      let maskUploaded;
+      try {
+        const maskFile = new File([maskBlob], "mask.png", {
+          type: "image/png",
+        });
+        maskUploaded = await apiUploadImage(maskFile);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "mask 上传失败";
+        logWarn("inpaint mask upload failed", {
+          scope: "inpaint",
+          extra: { msg },
+        });
+        set({ composerError: `局部修改失败：${msg}` });
+        throw err instanceof Error ? err : new Error(msg);
+      }
+
+      const backup = get().composer;
+      const tempAttId = uuid();
+      const tempAtt: AttachmentImage = {
+        id: tempAttId,
+        kind: "generated",
+        data_url: sourceSrc,
+        mime: "image/png",
+        width: sourceWidth,
+        height: sourceHeight,
+        source_image_id: sourceImageId,
+      };
+
+      set((s) => ({
+        composer: {
+          ...s.composer,
+          text,
+          attachments: [tempAtt],
+          mode: "image",
+          forceIntent: "image",
+          mask: {
+            image_id: maskUploaded.id,
+            preview_data_url: maskPreviewDataUrl,
+            target_attachment_id: tempAttId,
+          },
+          // 局部修改强制单张，避免继承 composer 上次设置的 4/8/16 张
+          params: { ...s.composer.params, count: 1 },
+        },
+      }));
+
+      try {
+        await get().sendMessage();
+      } finally {
+        // sendMessage reset composer 后，把用户原本未发出的草稿字段补回。
+        // 但若 composer 已被外部改动（如其他流程主动写了新草稿），不要覆盖。
+        // 识别：sendMessage 内部 reset 后 attachments=[] / text=""，这是我们能安全还原的标志。
+        const cur = get().composer;
+        const isStillReset =
+          cur.text === "" &&
+          cur.attachments.length === 0 &&
+          cur.mask === null &&
+          cur.forceIntent === undefined;
+        if (isStillReset) {
+          set((s) => ({
+            composer: {
+              ...s.composer,
+              text: backup.text,
+              attachments: backup.attachments,
+              mask: backup.mask,
+              forceIntent: backup.forceIntent,
+              params: backup.params,
+            },
+          }));
+        }
+      }
+
+      // sendMessage 失败时只设 composerError 不抛错（其他调用方依赖这一行为）；
+      // 但 inpaint 路径需要把失败传给 InpaintModal，否则会走成功 toast/清草稿/关弹窗。
+      const sendError = get().composerError;
+      if (sendError) {
+        throw new Error(sendError);
+      }
     },
 
     appendUserMessage: (msg) => {
