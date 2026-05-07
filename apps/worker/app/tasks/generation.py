@@ -656,6 +656,7 @@ async def _reserve_image_queue_slot(
     *,
     dual_race: bool = False,
     endpoint_kind: str | None = None,
+    requires_mask: bool = False,
 ) -> Any | None:
     """Reserve one global image slot for the oldest queued task.
 
@@ -774,15 +775,25 @@ async def _reserve_image_queue_slot(
                 task_id=task_id,
                 endpoint_kind=endpoint_kind,
                 acquire_inflight=False,
+                requires_mask=requires_mask,
             )
         except TypeError as exc:
-            if "acquire_inflight" not in str(exc):
+            msg = str(exc)
+            # 兼容老 mock：依次去掉新增 kwargs（requires_mask、acquire_inflight）。
+            # requires_mask=True 但 mock 不识别时，select 出来的候选可能含 url 模式
+            # provider；upstream 层已经在 _direct_edit_image_with_failover /
+            # _image_job_with_failover 入口再加守卫，能把误选号兜成 NO_MASK_CAPABLE_PROVIDER。
+            if "requires_mask" not in msg and "acquire_inflight" not in msg:
                 raise
-            providers = await pool.select(
-                route="image",
-                task_id=task_id,
-                endpoint_kind=endpoint_kind,
-            )
+            kwargs = {
+                "route": "image",
+                "task_id": task_id,
+                "endpoint_kind": endpoint_kind,
+            }
+            try:
+                providers = await pool.select(**kwargs, acquire_inflight=False)
+            except TypeError:
+                providers = await pool.select(**kwargs)
         if not providers:
             return None
 
@@ -1117,6 +1128,114 @@ async def _load_reference_images(
             ) from exc
         out.append((sha, raw))
     return out
+
+
+# 局部 inpaint mask 字节大小上限：复用 ref image 的 50MB（routes/images.py:69
+# MAX_BYTES）——mask 通常 <100KB，给 50MB 上限只是兜住极端 4K alpha PNG 异常上传。
+_MASK_MAX_BYTES = 50 * 1024 * 1024
+
+
+async def _load_mask_image(
+    session: Any, mask_image_id: str
+) -> bytes:
+    """从 Image 表读 mask PNG 字节。
+
+    与 ``_load_reference_images`` 行为对齐：DB 行缺失 / storage 读不到 → 抛硬错误，
+    不静默降级（mask 任务退化成普通 i2i 体验比明确报错更糟）。读到的字节超过
+    ``_MASK_MAX_BYTES`` 也按 reference_image_too_large 抛终态错。
+
+    返回值：原始字节（PIL 在调用方 resize 时再处理）。
+    """
+    row = (
+        await session.execute(
+            select(Image.id, Image.storage_key).where(
+                Image.id == mask_image_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).first()
+    if row is None:
+        raise UpstreamError(
+            f"mask image not found id={mask_image_id}",
+            error_code=EC.REFERENCE_MISSING.value,
+            status_code=404,
+        )
+    storage_key = row.storage_key
+    try:
+        async with asyncio.timeout(_REFERENCE_LOAD_TIMEOUT_S):
+            raw = await storage.aget_bytes(storage_key)
+    except TimeoutError as exc:
+        raise UpstreamError(
+            f"mask image bytes read timed out key={storage_key}",
+            error_code=EC.REFERENCE_TIMEOUT.value,
+            status_code=None,
+        ) from exc
+    except FileNotFoundError as exc:
+        raise UpstreamError(
+            f"mask image bytes missing key={storage_key}",
+            error_code=EC.REFERENCE_MISSING.value,
+            status_code=404,
+        ) from exc
+    if len(raw) > _MASK_MAX_BYTES:
+        raise UpstreamError(
+            "mask image exceeds size limit",
+            error_code=EC.REFERENCE_IMAGE_TOO_LARGE.value,
+            status_code=413,
+            payload={"max_bytes": _MASK_MAX_BYTES, "actual_bytes": len(raw)},
+        )
+    return raw
+
+
+def _resize_mask_to_reference(
+    mask_bytes: bytes,
+    reference_bytes: bytes,
+) -> bytes:
+    """把 mask 缩放到第一张参考图的像素尺寸（LANCZOS）。
+
+    上游 /v1/images/edits + mask 字段要求 mask 与 image 等尺寸；前端裁切时已经做过
+    一次但移动端 / DPR 偶尔会偏 1-2px，worker 兜底再 normalize 一次。
+
+    - 已经等尺寸 → 原 PNG 字节直接返回（避免无谓 PIL 重编码改 bytes，prompt cache
+      key 可读）。
+    - 不等尺寸 → 转 RGBA + LANCZOS resize + 保存 PNG（保持透明通道；mask 通常用
+      alpha 表示"要替换的区域"）。
+    - mask 解码失败 → terminal bad_reference_image（用户输入问题，重试无效）。
+    """
+    try:
+        with PILImage.open(io.BytesIO(reference_bytes)) as ref_im:
+            ref_size = ref_im.size  # (W, H)
+    except Exception as exc:  # noqa: BLE001
+        # 参考图解码失败应当在 _normalize_reference_image 那条路被抛；这里兜底
+        # 转 bad_reference_image，不让 mask resize 阶段静默吞错。
+        raise UpstreamError(
+            f"reference image not decodable for mask sizing: {exc}",
+            error_code=EC.BAD_REFERENCE_IMAGE.value,
+            status_code=400,
+        ) from exc
+    try:
+        with PILImage.open(io.BytesIO(mask_bytes)) as mask_im:
+            if mask_im.size == ref_size and mask_im.mode in ("RGBA", "L", "LA"):
+                # 同尺寸 + 已经是合法 mask 形态 → 直接返回原字节，避免无谓编码。
+                return mask_bytes
+            target_mode = "RGBA"
+            mask_normalized = (
+                mask_im if mask_im.mode == target_mode else mask_im.convert(target_mode)
+            )
+            if mask_normalized.size != ref_size:
+                mask_normalized = mask_normalized.resize(
+                    ref_size, resample=PILImage.LANCZOS
+                )
+            out = io.BytesIO()
+            mask_normalized.save(out, format="PNG")
+            return out.getvalue()
+    except UpstreamError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise UpstreamError(
+            f"mask image not decodable: {exc}",
+            error_code=EC.BAD_REFERENCE_IMAGE.value,
+            status_code=400,
+        ) from exc
 
 
 def _bounded_next_attempt(current_attempt: int | None) -> tuple[int, bool]:
@@ -2398,6 +2517,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         size_requested = gen.size_requested
         input_image_ids = list(gen.input_image_ids or [])
         primary_input_image_id = gen.primary_input_image_id
+        # 局部 inpaint mask（PostMessageIn.mask_image_id）。EDIT 任务可选；GENERATE
+        # 任务忽略（schema 不允许，但防御性 detach 一份不影响）。worker 在 reference
+        # images 加载阶段从 Image.storage_key 取 mask 字节。
+        mask_image_id: str | None = getattr(gen, "mask_image_id", None)
         # session 关闭后仍要在 dual_race bonus 处理里读这两个字段，提前 detach 取值
         gen_idempotency_key = gen.idempotency_key
         gen_model = gen.model
@@ -2596,14 +2719,22 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         image_route = "responses"
     is_dual_race = image_route == "dual_race"
     endpoint_kind = None if is_dual_race else _image_endpoint_kind_for_engine(image_route)
+    # mask 不为空 → 选号必须走 transport=file 候选；reserve 阶段就过滤，避免后面
+    # _direct_edit_image_with_failover / _image_job_with_failover 再被迫拒绝
+    # provider_override 引发 NO_MASK_CAPABLE_PROVIDER（terminal）。
+    requires_mask_provider = bool(mask_image_id) and action == GenerationAction.EDIT
     try:
         reserved_provider = await _reserve_image_queue_slot(
             redis,
             task_id,
             dual_race=is_dual_race,
             endpoint_kind=endpoint_kind,
+            requires_mask=requires_mask_provider,
         )
     except UpstreamError as exc:
+        # NO_MASK_CAPABLE_PROVIDER：terminal，直接抛给 task 主循环走 _record_failure。
+        if getattr(exc, "error_code", None) == EC.NO_MASK_CAPABLE_PROVIDER.value:
+            raise
         if getattr(exc, "error_code", None) != EC.ALL_ACCOUNTS_FAILED.value:
             raise
         provider_queue_delay = _IMAGE_PROVIDER_UNAVAILABLE_RETRY_S
@@ -2777,8 +2908,22 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
         async with SessionLocal() as session:
             references = await _load_reference_images(session, input_image_ids)
+            # mask_image_id 仅 EDIT + 局部 inpaint 任务设置；GENERATE 任务忽略。
+            # 与 reference 同 session 加载（少跑一次连接），mask 拿到后立刻按第一张
+            # 参考图尺寸 normalize（OpenAI /v1/images/edits + mask 要求等尺寸）。
+            mask_bytes_raw: bytes | None = None
+            if mask_image_id and action == GenerationAction.EDIT:
+                mask_bytes_raw = await _load_mask_image(session, mask_image_id)
 
         ref_for_body = references if action == GenerationAction.EDIT else []
+        # mask normalize：与第一张参考图尺寸对齐，模式统一为 RGBA。reference 解码
+        # 在 _normalize_reference_image 还会再过一遍（统一 WebP 编码），所以这里只
+        # 用第一张原字节量像素尺寸即可，不重复重编码。
+        mask_bytes: bytes | None = None
+        if mask_bytes_raw is not None and ref_for_body:
+            mask_bytes = _resize_mask_to_reference(
+                mask_bytes_raw, ref_for_body[0][1]
+            )
 
         # 即将调用上游（同步 HTTP，20-60s），先推一条 rendering progress 让前端切指示。
         # substage=stream_started 让 DevelopingCard 显影扫光从"占位"切到"真在工作"。
@@ -3004,6 +3149,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 prompt=prompt,
                                 size=resolved.size,
                                 images=[raw for _sha, raw in ref_for_body],
+                                mask=mask_bytes,
                                 quality=str(image_request_options["render_quality"]),
                                 output_format=str(image_request_options["output_format"]),
                                 output_compression=image_request_options.get("output_compression"),

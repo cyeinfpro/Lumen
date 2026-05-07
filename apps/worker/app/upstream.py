@@ -1414,11 +1414,29 @@ async def _direct_generate_image_once(
     )
 
 
+def _wrap_inpaint_prompt(user_intent: str) -> str:
+    """局部 inpaint 的 prompt 包装。
+
+    OpenAI /v1/images/edits + mask 字段必须用 invariant 模板才能正确 inpaint：
+    否则 mask 区会被填黑、prompt 内容画到别处。本地 spike 已验证（mean diff 1.9）。
+
+    前缀（"Inside the masked region,"）和后缀（preserve / do not add 两条）都稳定，
+    user_intent 夹在中间——这样 prompt cache prefix 在多次 retry 间保持稳定。
+    只在 mask 不为空时调用；mask 为空时直接发原始 prompt（保持 i2i 行为不变）。
+    """
+    return (
+        f"Inside the masked region, {user_intent.strip()}.\n"
+        "Preserve everything outside the mask exactly: colors, geometry, lighting.\n"
+        "Do not add anything outside the masked area."
+    )
+
+
 async def _direct_edit_image_once(
     *,
     prompt: str,
     size: str,
     images: list[bytes],
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None,
@@ -1435,6 +1453,10 @@ async def _direct_edit_image_once(
     与上游 OpenAI /v1/images/edits 协议一致。复用 `_curl_post_multipart`（见
     "图生图 multipart 走 curl 子进程" 那段注释，httpx 的 multipart 在某些上游网关下
     会持续 502，curl 反而能 200）。
+
+    mask 不为空时把 PNG 字节作为单字段名 `mask`（不是 `mask[]`）一并发送，触发上游
+    inpaint 路径（圆外像素级保留，已 spike 验证）。mask 为 None 时不带这个字段，
+    走纯图生图路径，保持现有 i2i 行为。
     """
     url = _image_edits_url(base_url_override)
     assert UPSTREAM_MODEL, "model must be set"
@@ -1469,6 +1491,12 @@ async def _direct_edit_image_once(
     files: list[tuple[str, tuple[str, bytes, str]]] = []
     for i, raw in enumerate(images):
         files.append(("image[]", (f"ref-{i}.png", raw, "image/png")))
+    # inpaint mask（可选）：单字段 `mask`，不是 `mask[]`。content-type image/png。
+    # 走和 image[] 同款 _curl_post_multipart 路径；不走 httpx multipart（那条路上历史
+    # 在某些网关下持续 502，curl 反而能 200，详见上方"图生图 multipart 走 curl 子进程"
+    # 注释）。
+    if mask is not None:
+        files.append(("mask", ("mask.png", mask, "image/png")))
 
     trace_id = _generate_trace_id()
     headers = _auth_headers(api_key_override, trace_id=trace_id)
@@ -2039,6 +2067,7 @@ async def _image_job_edit_once(
     prompt: str,
     size: str,
     images: list[bytes],
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None,
@@ -2062,6 +2091,15 @@ async def _image_job_edit_once(
         moderation=moderation,
     )
     body["images"] = _image_job_reference_image_entries(images)
+    # inpaint mask 透传给 image-job sidecar：与 images[] entry 同款 data URL，sidecar
+    # 按 image_edit_input_transport=file 时挂到 multipart 字段 `mask`，url 模式时挂
+    # 到 body 的 mask 字段。mask 为 None → 不带，保持现有 i2i 调用形态。
+    # 注意：本路径只在 _image_job_with_failover 选号阶段已校验 transport=file 时才
+    # 应被携带 mask；调用方（generation.py）通过 requires_mask=True 保证选号正确，
+    # 这里只负责 transport 透传。
+    if mask is not None:
+        mask_b64 = base64.b64encode(mask).decode("ascii")
+        body["mask"] = {"image_url": f"data:image/png;base64,{mask_b64}"}
     return await _submit_and_wait_image_job(
         payload=_image_job_payload(
             request_type="edits",
@@ -3974,7 +4012,17 @@ async def _pool_select_compat(
     task_id: str | None = None,
     endpoint_kind: str | None = None,
     acquire_inflight: bool = True,
+    requires_mask: bool = False,
+    mask_transport_required: bool = True,
 ) -> list[Any]:
+    """ProviderPool.select 兼容包装。
+
+    ``mask_transport_required``：仅在 sidecar 路径（image_jobs）调用时为 True；
+    direct edits 路径调用时传 False——direct multipart 自身就处理 mask binary，
+    不依赖 provider.image_edit_input_transport。让两条路径共享同一份 mask 任务
+    标识（``requires_mask``）但用不同的 transport 过滤策略，避免 sidecar 的
+    transport 配置错误地泄漏到 direct 路径。
+    """
     selector = getattr(pool, "select")
     kwargs: dict[str, Any] = {
         "route": route,
@@ -3985,36 +4033,82 @@ async def _pool_select_compat(
         kwargs["task_id"] = task_id
     if endpoint_kind is not None:
         kwargs["endpoint_kind"] = endpoint_kind
+    if requires_mask:
+        kwargs["requires_mask"] = True
+        # 只有需要 transport 过滤时才透传，避免老 mock TypeError 多一层。
+        if not mask_transport_required:
+            kwargs["mask_transport_required"] = False
+
+    def _filter_for_mask(providers: list[Any]) -> list[Any]:
+        """老 mock 不识别 requires_mask 时本地兜一层过滤——只在 sidecar 调用方
+        （mask_transport_required=True）才执行；direct 路径下任意 transport 可用。"""
+        if not requires_mask or not mask_transport_required:
+            return list(providers)
+        filtered = [
+            provider
+            for provider in providers
+            if getattr(provider, "image_edit_input_transport", "url") == "file"
+        ]
+        if not filtered and providers:
+            raise UpstreamError(
+                "no providers support inpaint mask "
+                "(need image_edit_input_transport=file)",
+                error_code=EC.NO_MASK_CAPABLE_PROVIDER.value,
+                status_code=503,
+                payload={"requires_mask": True},
+            )
+        return filtered
+
     try:
-        return await selector(**kwargs)
+        providers = await selector(**kwargs)
+        return _filter_for_mask(providers) if requires_mask else providers
     except TypeError as exc:
         msg = str(exc)
-        # 兼容老版本 select 签名（旧 mock / 测试桩）：去掉 acquire_inflight、
-        # endpoint_kind 后重试，filter 留给本函数兜底。
+        # 兼容老版本 select 签名（旧 mock / 测试桩）：依次去掉新增 kwargs 重试。
+        # 优先去 mask_transport_required（最新加的），再 requires_mask、acquire_inflight、endpoint_kind。
+        if "mask_transport_required" in msg:
+            kwargs.pop("mask_transport_required", None)
+            try:
+                providers = await selector(**kwargs)
+                return _filter_for_mask(providers)
+            except TypeError as exc_inner:
+                exc = exc_inner
+                msg = str(exc_inner)
+        if "requires_mask" in msg:
+            kwargs.pop("requires_mask", None)
+            try:
+                providers = await selector(**kwargs)
+                return _filter_for_mask(providers)
+            except TypeError as exc_inner:
+                exc = exc_inner
+                msg = str(exc_inner)
         if "acquire_inflight" in msg:
             kwargs.pop("acquire_inflight", None)
             try:
-                return await selector(**kwargs)
+                providers = await selector(**kwargs)
+                return _filter_for_mask(providers)
             except TypeError as exc2:
                 msg = str(exc2)
                 if endpoint_kind is None or "endpoint_kind" not in msg:
                     raise
                 kwargs.pop("endpoint_kind", None)
                 providers = await selector(**kwargs)
-                return [
+                providers = [
                     provider
                     for provider in providers
                     if _provider_allows_image_endpoint(provider, endpoint_kind)
                 ]
+                return _filter_for_mask(providers)
         if endpoint_kind is None or "endpoint_kind" not in msg:
             raise
         kwargs.pop("endpoint_kind", None)
         providers = await selector(**kwargs)
-        return [
+        providers = [
             provider
             for provider in providers
             if _provider_allows_image_endpoint(provider, endpoint_kind)
         ]
+        return _filter_for_mask(providers)
 
 
 def _is_image_rate_limit_error(exc: BaseException) -> tuple[bool, float | None]:
@@ -4245,6 +4339,7 @@ async def _image_job_run_once(
     prompt: str,
     size: str,
     images: list[bytes] | None,
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None,
@@ -4263,6 +4358,11 @@ async def _image_job_run_once(
     endpoint is the high-level kind: ``generations`` (which means generations or
     edits depending on action) or ``responses``. Choosing /v1/images/generations
     vs /v1/images/edits is action-driven and stays inside the once functions.
+
+    mask 仅对 (action=edit, endpoint=generations) 路径有意义；responses lane 不支持
+    inpaint mask（上游 /v1/responses image_generation 工具没暴露 mask 字段），
+    把 mask 透传到那条路径会被忽略，不影响出图但浪费 body bytes，所以这里只在
+    edit + generations 时拼上去。
     """
     common: dict[str, Any] = {
         "prompt": prompt,
@@ -4295,6 +4395,7 @@ async def _image_job_run_once(
             )
         return await _image_job_edit_once(
             images=images,
+            mask=mask,
             image_edit_input_transport=image_edit_input_transport,
             **common,
         )
@@ -4307,6 +4408,7 @@ async def _image_job_with_failover(
     prompt: str,
     size: str,
     images: list[bytes] | None,
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None = None,
@@ -4363,6 +4465,7 @@ async def _image_job_with_failover(
     # 和 select 排序维度对齐用 forced_kind（None 时聚合到 "" key）。
     lane_owns_inflight = provider_override is None
     inflight_ek = forced_kind
+    requires_mask = mask is not None
     providers = (
         [provider_override]
         if provider_override is not None
@@ -4371,8 +4474,24 @@ async def _image_job_with_failover(
             route="image_jobs",
             ignore_cooldown=True,
             endpoint_kind=forced_kind,
+            requires_mask=requires_mask,
         )
     )
+    # provider_override + inpaint：上层（generation.py）按 requires_mask 选过 reserved
+    # provider，理论上 transport=file；这里再校一次，配错时直接抛 NO_MASK_CAPABLE_PROVIDER。
+    if requires_mask and provider_override is not None:
+        if getattr(provider_override, "image_edit_input_transport", "url") != "file":
+            raise UpstreamError(
+                f"provider {getattr(provider_override, 'name', 'unknown')} does not "
+                "support mask (image_edit_input_transport != 'file')",
+                error_code=EC.NO_MASK_CAPABLE_PROVIDER.value,
+                status_code=503,
+                payload={
+                    "provider": getattr(provider_override, "name", "unknown"),
+                    "reason": "transport_not_file",
+                    "requires_mask": True,
+                },
+            )
     errors: list[BaseException] = []
 
     source_label = "image_jobs" if action == "generate" else "image_jobs_edit"
@@ -4457,6 +4576,7 @@ async def _image_job_with_failover(
                         prompt=prompt,
                         size=size,
                         images=images,
+                        mask=mask,
                         n=n,
                         quality=quality,
                         output_format=output_format,
@@ -4629,6 +4749,7 @@ async def _image_job_edit_with_failover(
     prompt: str,
     size: str,
     images: list[bytes],
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None = None,
@@ -4644,6 +4765,7 @@ async def _image_job_edit_with_failover(
         prompt=prompt,
         size=size,
         images=images,
+        mask=mask,
         n=n,
         quality=quality,
         output_format=output_format,
@@ -4661,6 +4783,7 @@ async def _direct_edit_image_with_failover(
     prompt: str,
     size: str,
     images: list[bytes],
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None = None,
@@ -4677,6 +4800,10 @@ async def _direct_edit_image_with_failover(
     terminal 错误直接 raise。安全策略类拒绝允许继续切 provider，因为不同上游策略可能不同。
     上层 `edit_image` 在 image2 模式下调用本函数；本函数耗尽所有 provider 后抛
     ALL_DIRECT_IMAGE_PROVIDERS_FAILED，由 `edit_image` 捕获并 fallback 到 responses。
+
+    mask 透传给 ``_direct_edit_image_once``：直接 multipart 路径不依赖 provider 的
+    ``image_edit_input_transport``（自身就是 multipart），所以这里不做 transport
+    校验；mask 字段本身在 once 函数内构造 multipart 时按 None / bytes 二态处理。
     """
     from . import account_limiter
     from .retry import is_retriable as classify_retriable
@@ -4686,6 +4813,11 @@ async def _direct_edit_image_with_failover(
     # 本函数不再动 inflight；override 为空时由本函数管 acquire/release——i=0 由
     # _pool_select_compat 软占座，i>0 由 finally 段前显式 acquire。
     lane_owns_inflight = provider_override is None
+    # mask 任务标识让 select 跳过对此次任务的常规过滤（如 cooldown），但
+    # ``mask_transport_required=False`` 显式告诉 select 不要按 transport=file
+    # 过滤——direct multipart 自己处理 image+mask binary，不依赖 sidecar 的
+    # transport 字段；任意 transport 的 provider 在 direct 路径都能携带 mask。
+    requires_mask = mask is not None
     providers = (
         [provider_override]
         if provider_override is not None
@@ -4694,6 +4826,8 @@ async def _direct_edit_image_with_failover(
             route="image",
             ignore_cooldown=True,
             endpoint_kind="generations",
+            requires_mask=requires_mask,
+            mask_transport_required=False,
         )
     )
     errors: list[BaseException] = []
@@ -4713,6 +4847,7 @@ async def _direct_edit_image_with_failover(
                     "prompt": prompt,
                     "size": size,
                     "images": images,
+                    "mask": mask,
                     "n": n,
                     "quality": quality,
                     "output_format": output_format,
@@ -5120,6 +5255,7 @@ async def _dual_race_image_action(
     prompt: str,
     size: str,
     images: list[bytes] | None,
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None,
@@ -5195,6 +5331,7 @@ async def _dual_race_image_action(
                 prompt=prompt,
                 size=size,
                 images=images,
+                mask=mask,
                 n=n,
                 quality=quality,
                 output_format=output_format,
@@ -5364,6 +5501,7 @@ async def _dual_race_image_jobs_action(
     prompt: str,
     size: str,
     images: list[bytes] | None,
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None,
@@ -5428,11 +5566,15 @@ async def _dual_race_image_jobs_action(
         )
 
     async def _lane(endpoint: str, lane_progress: ImageProgressCallback | None) -> tuple[str, str | None]:
+        # mask 仅在 generations endpoint 有意义；responses lane 上游 image_generation
+        # 工具不支持 mask 字段，无脑透传只会浪费 body bytes。这里按 endpoint 过滤一次。
+        lane_mask = mask if endpoint == "generations" else None
         return await _image_job_with_failover(
             action=action,
             prompt=prompt,
             size=size,
             images=images,
+            mask=lane_mask,
             n=n,
             quality=quality,
             output_format=output_format,
@@ -5621,6 +5763,7 @@ async def _run_image_once_for_provider(
     prompt: str,
     size: str,
     images: list[bytes] | None,
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None,
@@ -5633,13 +5776,70 @@ async def _run_image_once_for_provider(
     use_jobs = _should_use_image_jobs(channel, provider)
     provider_name = getattr(provider, "name", "unknown")
     logger.info(
-        "%s image dispatch provider=%s channel=%s engine=%s use_jobs=%s",
+        "%s image dispatch provider=%s channel=%s engine=%s use_jobs=%s mask=%s",
         action,
         provider_name,
         channel,
         engine,
         use_jobs,
+        mask is not None,
     )
+
+    # ---- 局部 inpaint mask 强制走 generations endpoint ----
+    # responses lane / image_generation tool 不支持 mask 字段（OpenAI 协议只在
+    # /v1/images/edits 上接 mask）。如果让 mask 任务走 dual_race 或 responses fallback，
+    # responses lane 会跑成"不带 mask 的普通 i2i"然后赢 race 或 fallback 成功，
+    # 用户涂的区域被静默忽略。这里在 dispatch 入口拦掉所有可能跑到 responses 的
+    # 路径，强制单 lane 走 generations（image_jobs sidecar 锁 endpoint=generations
+    # 或 direct /v1/images/edits）。
+    if mask is not None:
+        if action != "edit":
+            raise UpstreamError(
+                f"mask only supported on edit action (got {action})",
+                error_code=EC.INVALID_REQUEST_ERROR.value,
+                status_code=400,
+            )
+        if not images or not any(images):
+            raise UpstreamError(
+                "mask requires at least one reference image",
+                error_code=EC.MISSING_INPUT_IMAGES.value,
+                status_code=400,
+            )
+        if use_jobs:
+            yield await _image_job_with_failover(
+                action="edit",
+                prompt=prompt,
+                size=size,
+                images=images,
+                mask=mask,
+                n=n,
+                quality=quality,
+                output_format=output_format,
+                output_compression=output_compression,
+                background=background,
+                moderation=moderation,
+                model=model,
+                progress_callback=progress_callback,
+                provider_override=provider,
+                # 锁定 generations，禁止内部切到 responses（responses 不带 mask）
+                endpoint_override="generations",
+            )
+            return
+        yield await _direct_edit_image_with_failover(
+            prompt=prompt,
+            size=size,
+            images=images,
+            mask=mask,
+            n=n,
+            quality=quality,
+            output_format=output_format,
+            output_compression=output_compression,
+            background=background,
+            moderation=moderation,
+            progress_callback=progress_callback,
+            provider_override=provider,
+        )
+        return
 
     if engine == _IMAGE_ROUTE_DUAL_RACE:
         if use_jobs:
@@ -5648,6 +5848,7 @@ async def _run_image_once_for_provider(
                 prompt=prompt,
                 size=size,
                 images=images,
+                mask=mask,
                 n=n,
                 quality=quality,
                 output_format=output_format,
@@ -5665,6 +5866,7 @@ async def _run_image_once_for_provider(
             prompt=prompt,
             size=size,
             images=images,
+            mask=mask,
             n=n,
             quality=quality,
             output_format=output_format,
@@ -5685,6 +5887,7 @@ async def _run_image_once_for_provider(
             prompt=prompt,
             size=size,
             images=images,
+            mask=mask,
             n=n,
             quality=quality,
             output_format=output_format,
@@ -5711,6 +5914,7 @@ async def _run_image_once_for_provider(
                     prompt=prompt,
                     size=size,
                     images=images,
+                    mask=mask,
                     n=n,
                     quality=quality,
                     output_format=output_format,
@@ -5832,6 +6036,7 @@ async def _run_image_once_for_provider(
                     prompt=prompt,
                     size=size,
                     images=images,
+                    mask=mask,
                     n=n,
                     quality=quality,
                     output_format=output_format,
@@ -5884,6 +6089,7 @@ async def _dispatch_image(
     prompt: str,
     size: str,
     images: list[bytes] | None,
+    mask: bytes | None = None,
     n: int,
     quality: str,
     output_format: str | None,
@@ -5933,6 +6139,7 @@ async def _dispatch_image(
                     prompt=prompt,
                     size=size,
                     images=images,
+                    mask=mask,
                     n=n,
                     quality=quality,
                     output_format=output_format,
@@ -6021,6 +6228,7 @@ async def generate_image(
         prompt=prompt,
         size=size,
         images=None,
+        mask=None,
         n=n,
         quality=quality,
         output_format=output_format,
@@ -6039,6 +6247,7 @@ async def edit_image(
     prompt: str,
     size: str,
     images: list[bytes],
+    mask: bytes | None = None,
     n: int = 1,
     quality: str = "high",
     output_format: str | None = None,
@@ -6049,7 +6258,16 @@ async def edit_image(
     progress_callback: ImageProgressCallback | None = None,
     provider_override: Any | None = None,
 ) -> AsyncIterator[tuple[str, str | None]]:
-    """Image-to-image dispatch using image.channel + image.engine."""
+    """Image-to-image dispatch using image.channel + image.engine.
+
+    mask 不为空时本路径走局部 inpaint：
+    - prompt 自动包成 ``Inside the masked region, ...`` invariant 模板（OpenAI
+      推荐写法，否则 mask 区会被填黑、prompt 内容画到别处——已 spike 验证）。
+    - 调用方（generation.py）应该已经在 reserved_provider 阶段保证 transport=file，
+      也可以靠 _image_job_with_failover 内部的 NO_MASK_CAPABLE_PROVIDER 守卫兜底。
+    - mask 字节本身不参与 prompt cache key（前缀稳定 = "Inside the masked region,"），
+      retry 时 mask 不变就不会污染 cache，与现有 i2i retry 行为对齐。
+    """
     # 防御性：调用方（generation.py）理论上不会传空 images，但这里再兜一层——
     # 空 images 进 /v1/responses + action=edit 会被上游当成无参考图的文生图，
     # 静默降级体验比抛错更糟。
@@ -6060,11 +6278,18 @@ async def edit_image(
             status_code=400,
         )
 
+    # mask 不为空 → 用 invariant inpaint 模板包住 user_intent。
+    # 包装放在 _dispatch_image 之前一次完成，所有下游路径（image2 / image_jobs /
+    # dual_race / responses fallback）都拿到同一份 wrapped prompt——保证 prompt cache
+    # 前缀在所有 lane 里一致。
+    effective_prompt = _wrap_inpaint_prompt(prompt) if mask is not None else prompt
+
     async for item in _dispatch_image(
         action="edit",
-        prompt=prompt,
+        prompt=effective_prompt,
         size=size,
         images=images,
+        mask=mask,
         n=n,
         quality=quality,
         output_format=output_format,

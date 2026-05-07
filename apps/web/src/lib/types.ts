@@ -65,6 +65,16 @@ export interface AttachmentImage {
   source_image_id?: string;
 }
 
+// 局部修改 (inpaint) mask：与第一张参考图绑定。
+// - image_id：上传到后端 /images/upload 后拿到的 mask 图 image_id（RGBA PNG，alpha=0 处会被重画）
+// - preview_data_url：浏览器内本地预览（红色 overlay 已合成在原图上），仅用于 composer UI 显示"已设置 mask"
+// - target_attachment_id：mask 绑定的参考图 attachment.id；附件变化时（删除 / 第二张加入）需要清除 mask
+export interface MaskState {
+  image_id: string;
+  preview_data_url: string;
+  target_attachment_id: string;
+}
+
 export interface GeneratedImage {
   id: string;
   data_url: string;

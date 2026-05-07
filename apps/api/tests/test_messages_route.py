@@ -609,6 +609,243 @@ async def test_image_prompt_transparent_background_forces_png(
 
 
 @pytest.mark.asyncio
+async def test_post_message_persists_mask_image_id_for_image_to_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """带 mask_image_id 的 i2i 消息应能正常入库并落到 Generation.mask_image_id。"""
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_appended(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_assistant_task(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
+    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+
+    db = _Db(
+        [
+            _Result(_conv()),       # conversation lookup
+            _Result(None),          # idempotency completion lookup
+            _Result(None),          # idempotency generation lookup
+            _Result(),              # with_for_update completion (unused)
+            _Result(),              # with_for_update generation (unused)
+            _Result(all_values=["img-att"]),  # attachment_image_ids validation
+            _Result("img-mask"),    # mask image ownership lookup
+        ]
+    )
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-mask",
+            text="把背景换成海滩",
+            intent="image_to_image",
+            attachment_image_ids=["img-att"],
+            mask_image_id="img-mask",
+            image_params=ImageParamsIn(
+                aspect_ratio="1:1",
+                size_mode="fixed",
+                fixed_size="1024x1024",
+            ),
+        ),
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
+    assert gen.mask_image_id == "img-mask"
+    assert gen.input_image_ids == ["img-att"]
+    assert gen.primary_input_image_id == "img-att"
+
+
+@pytest.mark.asyncio
+async def test_post_message_rejects_mask_without_reference_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式 intent=image_to_image + mask + 无参考图 → 400 missing_reference_image。
+
+    intent 解析在 mask 校验之前发生：image_to_image 必须有参考图，否则先在
+    intent 阶段拦截。这是预期行为，比"mask 校验先报 422"更准确——根本问题是
+    没有参考图。
+    """
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+
+    db = _Db(
+        [
+            _Result(_conv()),  # conversation lookup
+            _Result(None),     # idempotency completion lookup
+            _Result(None),     # idempotency generation lookup
+        ]
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await messages.post_message(
+            "conv-1",
+            PostMessageIn(
+                idempotency_key="idem-mask-no-ref",
+                text="局部重画",
+                intent="image_to_image",
+                attachment_image_ids=[],
+                mask_image_id="img-mask",
+            ),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "missing_reference_image"
+    assert db.committed is False
+    # 没有 Generation 入库
+    assert not any(item.__class__.__name__ == "Generation" for item in db.added)
+
+
+@pytest.mark.asyncio
+async def test_post_message_rejects_mask_with_chat_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug 3：mask + intent=chat → 422 mask_requires_image_to_image。
+
+    外部客户端可能传 mask_image_id + intent=chat 的不一致请求；之前 API 没挡，
+    intent 解析后 mask 校验现在能精准 422。
+    """
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+
+    db = _Db(
+        [
+            _Result(_conv()),  # conversation lookup
+            _Result(None),     # idempotency completion lookup
+            _Result(None),     # idempotency generation lookup
+        ]
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await messages.post_message(
+            "conv-1",
+            PostMessageIn(
+                idempotency_key="idem-mask-chat",
+                text="hello",
+                intent="chat",
+                attachment_image_ids=[],
+                mask_image_id="img-mask",
+            ),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "mask_requires_image_to_image"
+    assert db.committed is False
+    assert not any(item.__class__.__name__ == "Generation" for item in db.added)
+
+
+@pytest.mark.asyncio
+async def test_post_message_rejects_mask_with_multiple_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug 3：mask + 多张参考图 → 422 mask_requires_single_reference_image。
+
+    OpenAI /v1/images/edits 协议下 mask 只对 image[] 第 0 张生效；多张参考图 +
+    mask 是不符合上游契约的请求。前端已经禁了，但外部 / 旧客户端可绕过——
+    API 层兜底校验。
+    """
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+
+    db = _Db(
+        [
+            _Result(_conv()),                                # conversation lookup
+            _Result(None),                                   # idempotency completion
+            _Result(None),                                   # idempotency generation
+            _Result(),                                       # with_for_update completion (unused)
+            _Result(),                                       # with_for_update generation (unused)
+            _Result(all_values=["img-a", "img-b"]),          # attachment validation
+        ]
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await messages.post_message(
+            "conv-1",
+            PostMessageIn(
+                idempotency_key="idem-mask-multi",
+                text="局部重画",
+                intent="image_to_image",
+                attachment_image_ids=["img-a", "img-b"],
+                mask_image_id="img-mask",
+            ),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "mask_requires_single_reference_image"
+    assert db.committed is False
+    assert not any(item.__class__.__name__ == "Generation" for item in db.added)
+
+
+@pytest.mark.asyncio
+async def test_post_message_rejects_mask_not_owned_by_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mask_image_id 不属于当前用户（或不存在）→ 404 mask_not_found。"""
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+
+    db = _Db(
+        [
+            _Result(_conv()),                  # conversation lookup
+            _Result(None),                     # idempotency completion lookup
+            _Result(None),                     # idempotency generation lookup
+            _Result(),                         # with_for_update completion (unused)
+            _Result(),                         # with_for_update generation (unused)
+            _Result(all_values=["img-att"]),   # attachment validation passes
+            _Result(None),                     # mask lookup → not owned / missing
+        ]
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await messages.post_message(
+            "conv-1",
+            PostMessageIn(
+                idempotency_key="idem-mask-foreign",
+                text="局部重画",
+                intent="image_to_image",
+                attachment_image_ids=["img-att"],
+                mask_image_id="img-foreign-mask",
+            ),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 404
+    assert excinfo.value.detail["error"]["code"] == "mask_not_found"
+    assert db.committed is False
+    assert not any(item.__class__.__name__ == "Generation" for item in db.added)
+
+
+@pytest.mark.asyncio
 async def test_publish_message_appended_payload_contains_conversation_and_message_ids() -> None:
     redis = _Redis()
 

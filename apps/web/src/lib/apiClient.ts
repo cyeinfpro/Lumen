@@ -1135,6 +1135,9 @@ export interface PostMessageIn {
   idempotency_key: string;
   text: string;
   attachment_image_ids?: string[];
+  // 局部修改 (inpaint) mask 的 image_id（已通过 /images/upload 上传，
+  // RGBA PNG，alpha=0 处为要重画区域）。仅 image_to_image 时有意义。
+  mask_image_id?: string;
   intent?: Intent;
   image_params?: ImageParams;
   chat_params?: Record<string, unknown>;

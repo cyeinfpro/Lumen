@@ -27,6 +27,7 @@ import type {
   GeneratedImage,
   ImageParams,
   Intent,
+  MaskState,
   Message,
   Quality,
   RenderQualityChoice,
@@ -83,6 +84,9 @@ interface ComposerState {
   fileSearch: boolean;
   codeInterpreter: boolean;
   imageGeneration: boolean;
+  // 局部修改 (inpaint) mask；仅 image_to_image 单参考图场景生效。
+  // 任何会让"主参考图"漂移的操作（删第一张、加第二张、清空）都应顺手 clearMask。
+  mask: MaskState | null;
 }
 
 interface ChatState {
@@ -126,6 +130,8 @@ interface ChatState {
   setImageGeneration: (v: boolean) => void;
   addAttachment: (att: AttachmentImage) => void;
   removeAttachment: (id: string) => void;
+  setMask: (mask: MaskState) => void;
+  clearMask: () => void;
   clearComposer: () => void;
   promoteImageToReference: (imageId: string) => void;
 
@@ -261,6 +267,7 @@ const DEFAULT_COMPOSER: ComposerState = {
   fileSearch: false,
   codeInterpreter: false,
   imageGeneration: false,
+  mask: null,
 };
 
 let _runtimeFastDefault: boolean | null = null;
@@ -289,6 +296,7 @@ function createInitialComposer(): ComposerState {
     fast,
     attachments: [],
     params: { ...DEFAULT_PARAMS },
+    mask: null,
   };
 }
 
@@ -1566,20 +1574,43 @@ function createChatStore() {
             composerError: `最多添加 ${MAX_COMPOSER_ATTACHMENTS} 张参考图`,
           };
         }
+        // 局部修改 mask 仅允许单张参考图：第二张加入时自动清除已设置的 mask。
+        const nextMask =
+          s.composer.attachments.length === 0 ? s.composer.mask : null;
         return {
           composer: {
             ...s.composer,
             attachments: [...s.composer.attachments, att],
+            mask: nextMask,
           },
         };
       }),
     removeAttachment: (id) =>
-      set((s) => ({
-        composer: {
-          ...s.composer,
-          attachments: s.composer.attachments.filter((a) => a.id !== id),
-        },
-      })),
+      set((s) => {
+        const nextAttachments = s.composer.attachments.filter(
+          (a) => a.id !== id,
+        );
+        // mask 跟着第一张参考图：若被删的是 mask 绑定的那张，或剩余张数为 0，
+        // 都要把 mask 清掉，避免脏 mask_image_id 跟着发出去。
+        const nextMask =
+          s.composer.mask &&
+          nextAttachments.some(
+            (a) => a.id === s.composer.mask!.target_attachment_id,
+          )
+            ? s.composer.mask
+            : null;
+        return {
+          composer: {
+            ...s.composer,
+            attachments: nextAttachments,
+            mask: nextMask,
+          },
+        };
+      }),
+    setMask: (mask) =>
+      set((s) => ({ composer: { ...s.composer, mask } })),
+    clearMask: () =>
+      set((s) => ({ composer: { ...s.composer, mask: null } })),
     clearComposer: () =>
       set((s) => ({
         composer: {
@@ -1619,6 +1650,11 @@ function createChatStore() {
               ? s.composer.attachments
               : [att, ...s.composer.attachments],
           mode: "image",
+          // 新参考图被插到首位 → 旧的 mask 已不再绑定主参考图，必须清掉
+          mask:
+            s.composer.attachments.length >= MAX_COMPOSER_ATTACHMENTS
+              ? s.composer.mask
+              : null,
         },
       }));
     },
@@ -1814,6 +1850,7 @@ function createChatStore() {
         fileSearch,
         codeInterpreter,
         imageGeneration,
+        mask,
       } = state.composer;
       const params = normalizeImageParams(rawParams);
       const text = rawText.trim();
@@ -1938,12 +1975,23 @@ function createChatStore() {
         return Object.keys(cp).length > 0 ? cp : undefined;
       })();
 
+      // 局部修改 mask：只有 image_to_image + 单张参考图 + mask.target 仍指向第一张时才发。
+      // 任意一条不满足都视为脏状态，直接吞掉避免发出无效字段。
+      const maskImageId =
+        intent === "image_to_image" &&
+        attachments.length === 1 &&
+        mask &&
+        mask.target_attachment_id === attachments[0]?.id
+          ? mask.image_id
+          : undefined;
+
       const body: PostMessageIn = {
         idempotency_key: uuid(),
         text,
         // generated 参考图的 a.id 是本地 uuid（用于 composer 增删管理），真实后端
         // image_id 在 source_image_id；upload 路径下两者相同（id = 后端 image_id）。
         attachment_image_ids: attachments.map((a) => a.source_image_id ?? a.id),
+        ...(maskImageId ? { mask_image_id: maskImageId } : {}),
         intent,
         image_params: isImage
           ? (() => {

@@ -25,6 +25,7 @@ import {
   MessageSquare,
   Palette,
   Paperclip,
+  SquareDashedMousePointer,
   Sparkles,
   Undo2,
   X,
@@ -53,6 +54,8 @@ import {
 } from "./DesktopPopover";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
+import { useMaskInpaint } from "../shared/useMaskInpaint";
+import { MaskCanvas } from "../MaskCanvas";
 
 interface DesktopComposerPillProps {
   onSubmit: () => void | Promise<void>;
@@ -315,6 +318,8 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
     setExpanded,
   });
 
+  const inpaint = useMaskInpaint();
+
   const handleSubmit = useCallback(async () => {
     if (submittingRef.current) return;
     const snapshot = useChatStore.getState().composer;
@@ -427,6 +432,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const isImageMode = mode === "image";
 
   return (
+    <>
     <motion.div
       ref={rootRef}
       onDragEnter={handleDragEnter}
@@ -551,36 +557,86 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                 "px-3 pt-3",
               )}
             >
-              {attachments.map((att) => (
-                <div
-                  key={att.id}
-                  className={cn(
-                    "relative shrink-0 w-16 h-16 rounded-xl overflow-hidden",
-                    "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                  )}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={att.data_url}
-                    alt=""
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(att.id)}
-                    aria-label="移除参考图"
+              {attachments.map((att, idx) => {
+                const isFirst = idx === 0;
+                const showMaskBadge = isFirst && inpaint.maskActive;
+                return (
+                  <div
+                    key={att.id}
                     className={cn(
-                      "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
-                      "bg-black/70 backdrop-blur-sm text-white",
-                      "flex items-center justify-center",
-                      "active:scale-[0.92] transition-transform",
+                      "relative shrink-0 w-16 h-16 rounded-xl overflow-hidden",
+                      "border bg-[var(--bg-2)]",
+                      showMaskBadge
+                        ? "border-[var(--amber-400)]/70"
+                        : "border-[var(--border-subtle)]",
                     )}
                   >
-                    <X className="w-3 h-3" aria-hidden />
-                  </button>
-                </div>
-              ))}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={att.data_url}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                    {showMaskBadge && (
+                      <button
+                        type="button"
+                        onClick={() => inpaint.openInpaint()}
+                        aria-label="重新涂抹 mask"
+                        title="点击重新涂抹"
+                        className={cn(
+                          "absolute inset-x-0 bottom-0 px-1 py-0.5",
+                          "bg-[var(--amber-400)]/85 text-[10px] font-semibold text-[var(--bg-0)]",
+                          "text-center leading-tight tracking-wide",
+                          "hover:bg-[var(--amber-400)] transition-colors",
+                        )}
+                      >
+                        Mask
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(att.id)}
+                      aria-label="移除参考图"
+                      className={cn(
+                        "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
+                        "bg-black/70 backdrop-blur-sm text-white",
+                        "flex items-center justify-center",
+                        "active:scale-[0.92] transition-transform",
+                      )}
+                    >
+                      <X className="w-3 h-3" aria-hidden />
+                    </button>
+                  </div>
+                );
+              })}
+              {/* 局部修改按钮：单张参考图 + image 模式时可用 */}
+              {isImageMode && (
+                <button
+                  type="button"
+                  onClick={inpaint.openInpaint}
+                  disabled={inpaint.disabled}
+                  aria-label="局部修改"
+                  title={inpaint.tooltip}
+                  className={cn(
+                    "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
+                    "w-16 h-16 rounded-xl border text-[10px] font-medium",
+                    "transition-colors",
+                    inpaint.disabled
+                      ? "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed"
+                      : inpaint.maskActive
+                        ? "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10 hover:bg-[var(--amber-400)]/15"
+                        : "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:border-[var(--border)]",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                  )}
+                >
+                  <SquareDashedMousePointer
+                    className="w-4 h-4"
+                    aria-hidden
+                  />
+                  <span>{inpaint.maskActive ? "重涂" : "局部"}</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -983,6 +1039,16 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
         onChange={handleFileInput}
       />
     </motion.div>
+
+    {/* 局部修改 mask 画布弹窗 */}
+    <MaskCanvas
+      open={inpaint.open}
+      imageSrc={inpaint.sourceImageSrc}
+      onClose={inpaint.closeInpaint}
+      onConfirm={inpaint.handleConfirm}
+      submitting={inpaint.submitting}
+    />
+    </>
   );
 }
 

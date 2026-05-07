@@ -831,6 +831,28 @@ queued ──► running ──► succeeded
 
 虽然我们**默认不走 `/edits`**，但 Worker 保留一道保险：若某次结果 `sha256 == 参考图 sha256`，视为 `failed(retriable=false)` 并提示用户（防止隐性错误流到用户）。
 
+### 7.6 局部 inpaint（mask）
+
+V1 在创作会话 i2i 路径上支持 OpenAI 标准的 mask-based 局部 inpaint。2026-05-07 对上游 flux.infpro.me + gpt-image-2 实测确认 mask 字段可用，但**必须用 invariant prompt 模板**才会正确 inpaint，否则 mask 区被填黑、prompt 内容画到画面别处。
+
+**触发条件**：`PostMessageIn.mask_image_id` 不为空。
+
+**字段约定**：
+
+- multipart `mask`（**单字段**，PNG RGBA，alpha=0 表示需要重画的区域）
+- `image[]` 仍传单张参考图（与 mask 同尺寸）
+- provider 强制走 `image_edit_input_transport=file`（不能 base64 inline，部分网关 mask 仅文件模式可用）
+
+**prompt 自动包装**：worker 在拼装 edit 请求前对用户输入加固定 invariant 包装：
+
+```text
+Inside the masked region, {user_intent}. Preserve everything outside the mask exactly: colors, geometry, lighting. Do not add anything outside the masked area.
+```
+
+用户输入只承载"编辑意图"（如"换成红苹果"），模板前缀由后端固定，对 prompt cache 友好。短 prompt（"Replace the masked region with X..."）已实测会失败，禁止跳过 wrapper。
+
+详见 `feedback_inpaint_prompt.md`（spike 数据：outside mean diff 9.7 → 1.9，inside/outside 比例 5x → 41x）。
+
 ---
 
 ## 8. 存储、缓存、限流

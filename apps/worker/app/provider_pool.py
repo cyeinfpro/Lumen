@@ -493,7 +493,24 @@ class ProviderPool:
         task_id: str | None = None,
         endpoint_kind: str | None = None,
         acquire_inflight: bool = True,
+        requires_mask: bool = False,
+        mask_transport_required: bool = True,
     ) -> list[ResolvedProvider]:
+        """Select 候选 provider。
+
+        ``requires_mask=True`` 标识本次是局部 inpaint 任务。是否真的按
+        ``image_edit_input_transport=file`` 过滤候选，由 ``mask_transport_required``
+        决定：
+
+        - ``mask_transport_required=True``（默认，sidecar 路径调用方）：过滤掉
+          transport != "file" 的号——sidecar url 模式不会透传 mask 字段，会静默
+          退化成普通 i2i；过滤后无候选时抛 ``NO_MASK_CAPABLE_PROVIDER``。
+        - ``mask_transport_required=False``（direct edits 路径调用方）：跳过
+          transport 过滤——direct multipart 自身就是 multipart，不依赖 sidecar
+          的 transport 字段；该路径下任意 provider 都能携带 mask。
+
+        把 sidecar 能力和 direct 能力拆开，避免把 sidecar 配置泄漏成普适过滤器。
+        """
         await self._maybe_reload()
         if route == "image":
             return await self._select_for_image(
@@ -501,6 +518,8 @@ class ProviderPool:
                 task_id=task_id,
                 endpoint_kind=endpoint_kind,
                 acquire_inflight=acquire_inflight,
+                requires_mask=requires_mask,
+                mask_transport_required=mask_transport_required,
             )
         if route == "image_jobs":
             return await self._select_for_image(
@@ -508,6 +527,8 @@ class ProviderPool:
                 task_id=task_id,
                 endpoint_kind=endpoint_kind,
                 acquire_inflight=acquire_inflight,
+                requires_mask=requires_mask,
+                mask_transport_required=mask_transport_required,
             )
         if route == "text":
             endpoint_kind = endpoint_kind or "responses"
@@ -537,6 +558,8 @@ class ProviderPool:
         task_id: str | None = None,
         endpoint_kind: str | None = None,
         acquire_inflight: bool = True,
+        requires_mask: bool = False,
+        mask_transport_required: bool = True,
     ) -> list[ResolvedProvider]:
         """按账号视角选号：跳过熔断 / image cooldown / 配额耗尽的账号，
         剩余候选按 `(inflight[ek], image_last_used_at[ek], -priority)` 升序排序。
@@ -613,6 +636,21 @@ class ProviderPool:
                 p, route="image", endpoint_kind=endpoint_kind
             ):
                 skipped.append((p.name, "capability_unsupported"))
+                continue
+            # mask 能力门：仅在 sidecar 路径调用方（mask_transport_required=True）
+            # 才按 transport=file 过滤。direct edits 调用方传 False，因为 direct
+            # multipart 自身处理 image+mask binary，与 sidecar 的 transport 字段无关。
+            # 这一层是核心解耦点：sidecar url 模式 = 真不能携带 mask；direct 任何
+            # transport = 都能携带 mask（multipart 自己发）。误把它当普适过滤器会
+            # 把可用号当成 NO_MASK_CAPABLE_PROVIDER 错杀。
+            if (
+                requires_mask
+                and mask_transport_required
+                and p.image_edit_input_transport != "file"
+            ):
+                skipped.append(
+                    (p.name, f"mask_requires_file_transport(got={p.image_edit_input_transport})")
+                )
                 continue
             h = self._health.setdefault(p.name, ProviderHealth())
             if p.name in avoided:
@@ -692,8 +730,21 @@ class ProviderPool:
                     task_id=None,
                     endpoint_kind=endpoint_kind,
                     acquire_inflight=acquire_inflight,
+                    requires_mask=requires_mask,
+                    mask_transport_required=mask_transport_required,
                 )
             detail = ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
+            # 全部候选都被 mask 过滤掉 → NO_MASK_CAPABLE_PROVIDER（terminal，不重试）。
+            # 区别于 ALL_ACCOUNTS_FAILED（短期 quota / cooldown，应重试）。
+            if requires_mask and skipped and all(
+                reason.startswith("mask_requires_file_transport") for _, reason in skipped
+            ):
+                raise UpstreamError(
+                    f"no providers support inpaint mask (need image_edit_input_transport=file): {detail}",
+                    error_code=EC.NO_MASK_CAPABLE_PROVIDER.value,
+                    status_code=503,
+                    payload={"skipped": skipped, "requires_mask": True},
+                )
             raise UpstreamError(
                 f"all accounts unavailable for image: {detail}",
                 error_code=EC.ALL_ACCOUNTS_FAILED.value,

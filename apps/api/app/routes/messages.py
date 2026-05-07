@@ -428,6 +428,7 @@ async def _create_assistant_task(
     attachment_ids: list[str],
     text: str,
     default_image_output_format: str = _DEFAULT_IMAGE_OUTPUT_FORMAT,
+    mask_image_id: str | None = None,
 ) -> AssistantTaskResult:
     """Build assistant message + sub-task(s) + outbox in the open transaction.
 
@@ -524,6 +525,11 @@ async def _create_assistant_task(
                 aspect_ratio=image_params.aspect_ratio,
                 input_image_ids=attachment_ids,
                 primary_input_image_id=primary,
+                # mask 仅在 image_to_image 有意义；text_to_image 强制 None，
+                # 保险起见在主流程入口做了 422，这里再兜一层避免误传。
+                mask_image_id=(
+                    mask_image_id if intent == Intent.IMAGE_TO_IMAGE else None
+                ),
                 status=GenerationStatus.QUEUED.value,
                 progress_stage=GenerationStage.QUEUED.value,
                 attempt=0,
@@ -923,6 +929,9 @@ async def submit_user_message(
         if len(rows) != len(attachment_ids):
             raise _http("invalid_attachment", "one or more attachment images are not owned or were deleted", 400)
 
+    # ---- mask 字段归一（intent 解析前只做 strip，规约移到 intent 后） ----
+    mask_image_id = (body.mask_image_id or "").strip() or None
+
     # ---- intent routing ----
     intent = resolve_intent(
         explicit=body.intent,
@@ -935,6 +944,38 @@ async def submit_user_message(
             "image_to_image requires at least one reference image",
             400,
         )
+
+    # ---- validate mask (local inpaint, image_to_image 专用) ----
+    # 设计契约（DESIGN.md §7.6 + apps/web mask UI 已对齐）：
+    #   - mask 仅在 intent=image_to_image 时有意义；其他 intent 带 mask → 422
+    #   - mask 必须正好对应 1 张 reference（OpenAI /v1/images/edits 协议：mask
+    #     只对 image[] 的第 0 张生效，多张参考图 + mask 是不符合上游契约的请求）
+    #   - mask 必须属于当前用户 + 未软删 → 404
+    #   - 尺寸不一致不在 API 层挡，留给 worker 用 PIL resize（API 简单）
+    if mask_image_id is not None:
+        if intent != Intent.IMAGE_TO_IMAGE:
+            raise _http(
+                "mask_requires_image_to_image",
+                f"mask requires intent=image_to_image (got intent={intent.value})",
+                422,
+            )
+        if len(attachment_ids) != 1:
+            raise _http(
+                "mask_requires_single_reference_image",
+                f"mask requires exactly one reference image (got {len(attachment_ids)})",
+                422,
+            )
+        mask_row = (
+            await db.execute(
+                select(Image.id).where(
+                    Image.id == mask_image_id,
+                    Image.user_id == user.id,
+                    Image.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if mask_row is None:
+            raise _http("mask_not_found", "mask image not found", 404)
 
     # ---- single transaction ----
     now = datetime.now(timezone.utc)
@@ -1011,6 +1052,7 @@ async def submit_user_message(
         attachment_ids=attachment_ids,
         text=body.text or "",
         default_image_output_format=default_image_output_format,
+        mask_image_id=mask_image_id,
     )
 
     # bump conversation last_activity_at
