@@ -1,10 +1,10 @@
 "use client";
 
 // 商品融合阶段（editorial 重构）：
-// • 基于已确认模特 + 商品原图，生成 4 张电商展示图。
+// • 基于已确认模特 + 商品原图，生成 1/2/4/8/16 张电商展示图（默认 4）。
 // 1) reopen / 重新生成 用 ConfirmDialog 兜底
 // 2) 展示图运行中显示带骨架的 placeholder 网格
-// 3) 模板/质量在运行态禁用
+// 3) 模板/质量/张数在运行态禁用
 // 4) 视觉：hairline 段落 + mono dot status badge + underline select。
 
 import { Check, Layers, RefreshCw, Shirt } from "lucide-react";
@@ -24,18 +24,25 @@ import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { RunningState, StageFrame } from "../components/StageFrame";
 import {
   ASPECT_RATIO_LABELS,
+  OUTPUT_COUNT_LABELS,
   SHOT_PLAN_DEFAULT,
   TEMPLATE_LABELS,
   type CreateAspectRatio,
+  type CreateOutputCount,
   type CreateTemplate,
 } from "../types";
 import { candidateImages, showcaseImages, stepOf, stringValue } from "../utils";
+
+const OUTPUT_COUNT_SELECT_OPTIONS = OUTPUT_COUNT_LABELS.map(
+  ([value, label]) => [String(value), label] as const,
+);
 
 export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun }) {
   const step = stepOf(workflow, "showcase_generation");
   const initialTemplate = coerceTemplate(step?.input_json?.template);
   const initialAspectRatio = coerceAspectRatio(step?.input_json?.aspect_ratio);
   const initialQuality = coerceQuality(step?.input_json?.final_quality);
+  const initialOutputCount = coerceOutputCount(step?.input_json?.output_count);
   const create = useCreateShowcaseImagesMutation(workflow.id, {
     onError: (err) =>
       toast.error("生成展示图失败", {
@@ -62,7 +69,8 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const [template, setTemplate] = useState<CreateTemplate>(initialTemplate);
   const [aspectRatio, setAspectRatio] = useState<CreateAspectRatio>(initialAspectRatio);
   const [quality, setQuality] = useState<"high" | "4k">(initialQuality);
-  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}`;
+  const [outputCount, setOutputCount] = useState<CreateOutputCount>(initialOutputCount);
+  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}`;
   const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
   const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
@@ -76,6 +84,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
     setTemplate(initialTemplate);
     setAspectRatio(initialAspectRatio);
     setQuality(initialQuality);
+    setOutputCount(initialOutputCount);
   }
   const generated = showcaseImages(workflow);
   const productImages = workflow.product_images;
@@ -94,7 +103,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       shot_plan: [...SHOT_PLAN_DEFAULT],
       aspect_ratio: aspectRatio,
       final_quality: quality,
-      output_count: 4,
+      output_count: outputCount,
     });
   };
 
@@ -102,7 +111,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
     <StageFrame
       eyebrow="N°06 — 展示融合"
       title="商品融合"
-      subtitle="使用已确认模特和商品图，生成 4 张电商展示图。预计 1-3 分钟。"
+      subtitle="使用已确认模特和商品图，生成电商展示图。可选 1/2/4/8/16 张，张数越多耗时越长。"
       badge={
         isRunning ? (
           <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
@@ -152,7 +161,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           Output Setup
         </p>
-        <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-3">
+        <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-4">
           <SelectField
             label="输出模板"
             value={template}
@@ -177,16 +186,25 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
               ["4k", "4K 终稿"],
             ]}
           />
+          <SelectField
+            label="张数"
+            value={String(outputCount)}
+            onChange={(value) => setOutputCount(coerceOutputCount(value))}
+            disabled={isRunning}
+            options={OUTPUT_COUNT_SELECT_OPTIONS}
+          />
         </div>
         <p className="mt-4 inline-flex flex-wrap items-center gap-2 text-[12px] leading-6 text-[var(--fg-2)]">
           <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
             <Layers className="h-3 w-3" />
-            04 张
+            {String(outputCount).padStart(2, "0")} 张
           </span>
           <span aria-hidden className="text-[var(--fg-3)]">·</span>
           <span>{aspectRatio} 画幅</span>
           <span aria-hidden className="text-[var(--fg-3)]">·</span>
           <span>{quality === "4k" ? "4K 终稿" : "2K 高质量"}</span>
+          <span aria-hidden className="text-[var(--fg-3)]">·</span>
+          <span className="text-[var(--fg-3)]">张数越多耗时越长</span>
         </p>
       </section>
 
@@ -199,7 +217,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
           leftIcon={hasTasks ? <RefreshCw className="h-4 w-4" /> : <Shirt className="h-4 w-4" />}
           className="w-full sm:w-auto"
         >
-          {hasTasks ? "按当前模板再生成一批" : "开始生成展示图"}
+          {hasTasks ? `按当前模板再生成 ${outputCount} 张` : `开始生成 ${outputCount} 张展示图`}
         </Button>
         {generated.length > 0 ? (
           <Button
@@ -260,10 +278,10 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       <ConfirmDialog
         open={confirmRegenerate}
         onOpenChange={setConfirmRegenerate}
-        title="再生成一批展示图？"
+        title={`再生成 ${outputCount} 张展示图？`}
         description={`已生成的成品会继续保留，新一轮会按当前选择的模板、${aspectRatio} 画幅和 ${
           quality === "4k" ? "4K 终稿" : "2K 高质量"
-        } 模式追加生成 4 张。`}
+        } 模式追加生成 ${outputCount} 张。`}
         confirmText="追加生成"
         confirming={create.isPending}
         onConfirm={async () => {
@@ -336,4 +354,11 @@ function coerceAspectRatio(value: unknown): CreateAspectRatio {
 
 function coerceQuality(value: unknown): "high" | "4k" {
   return value === "4k" ? "4k" : "high";
+}
+
+function coerceOutputCount(value: unknown): CreateOutputCount {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return OUTPUT_COUNT_LABELS.some(([option]) => option === numberValue)
+    ? (numberValue as CreateOutputCount)
+    : 4;
 }
