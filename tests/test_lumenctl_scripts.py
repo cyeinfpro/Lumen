@@ -1184,6 +1184,9 @@ esac
     export LUMEN_RELEASE_KEEP=3
     export LUMEN_BACKUP_RESTORE_LOCKFILE="${{DATA_ROOT}}/backup/backup-restore.lock"
     export LUMEN_BACKUP_ROOT="${{DATA_ROOT}}/backup"
+    # update.sh 的 check_storage phase 检查 /opt/lumendata 是否挂载；CI 临时目录里
+    # 这个路径不存在（也跟测试无关），跳过避免 false fail。
+    export SKIP_STORAGE_CHECK=1
 
     bash scripts/lumenctl.sh install-lumen --image-tag=old > "${{LOG_DIR}}/install.out" 2> "${{LOG_DIR}}/install.err"
     test -L "${{DEPLOY_ROOT}}/current"
