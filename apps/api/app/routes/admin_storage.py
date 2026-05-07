@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -75,6 +76,79 @@ def _http(code: str, msg: str, http: int = 400, **details) -> HTTPException:
     if details:
         err["details"] = details
     return HTTPException(status_code=http, detail={"error": err})
+
+
+# ----- Input normalization -----
+# 用户在 UI 容易把 //10.10.10.40 整段塞进 host，或在 share 前后加 /。
+# 为了避免在 mount 时拼出 //10.10.10.40//Lumen 这种坏路径，统一在写入 conf 前 normalize。
+
+_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-_]*$")
+_SHARE_RE = re.compile(r"^[^/\\]+$")
+
+
+def _normalize_smb_host(raw: str) -> str:
+    value = (raw or "").strip()
+    # 用户可能填 \\10.10.10.40 / //10.10.10.40 / smb://host
+    value = value.removeprefix("\\\\").removeprefix("//")
+    if value.lower().startswith("smb://"):
+        value = value[6:]
+    # 去掉末尾斜杠 + 用户可能不小心带的 share name
+    if "/" in value:
+        value = value.split("/", 1)[0]
+    if "\\" in value:
+        value = value.split("\\", 1)[0]
+    return value
+
+
+def _normalize_smb_share(raw: str) -> str:
+    return (raw or "").strip().strip("/").strip("\\")
+
+
+def _normalize_smb_subpath(raw: str) -> str:
+    """Always start with single /, no trailing /, no .. traversal."""
+    value = (raw or "/").strip().replace("\\", "/")
+    while "//" in value:
+        value = value.replace("//", "/")
+    if not value.startswith("/"):
+        value = "/" + value
+    if value != "/" and value.endswith("/"):
+        value = value.rstrip("/")
+    # 拒绝 .. 路径穿越（CIFS 通常不会但防御性）
+    if any(part == ".." for part in value.split("/")):
+        raise _http("invalid_subpath", "subpath 不能包含 .. 路径", 422)
+    return value
+
+
+def _normalize_local_root(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value.startswith("/"):
+        raise _http(
+            "invalid_local_root",
+            "local.root 必须是绝对路径（以 / 开头）",
+            422,
+        )
+    # collapse //
+    while "//" in value:
+        value = value.replace("//", "/")
+    # 不允许末尾 /，除非根
+    if len(value) > 1 and value.endswith("/"):
+        value = value.rstrip("/")
+    return value
+
+
+def _validate_smb_inputs(host: str, share: str) -> None:
+    if not _HOST_RE.fullmatch(host):
+        raise _http(
+            "invalid_smb_host",
+            f"SMB host 格式不合法：{host!r}（只能含字母数字、点、连字符、下划线，不要带 //）",
+            422,
+        )
+    if not _SHARE_RE.fullmatch(share):
+        raise _http(
+            "invalid_smb_share",
+            f"SMB share 格式不合法：{share!r}（不能含斜杠）",
+            422,
+        )
 
 
 def _read_json(path: Path) -> dict | None:
@@ -223,11 +297,16 @@ async def test_storage_endpoint(
             )
         password = stored
 
+    host = _normalize_smb_host(body.host)
+    share = _normalize_smb_share(body.share)
+    subpath = _normalize_smb_subpath(body.subpath)
+    _validate_smb_inputs(host, share)
+
     call_id = uuid.uuid4().hex
     fields = {
-        "SMB_HOST": body.host.strip(),
-        "SMB_SHARE": body.share.strip(),
-        "SMB_SUBPATH": (body.subpath or "/").strip(),
+        "SMB_HOST": host,
+        "SMB_SHARE": share,
+        "SMB_SUBPATH": subpath,
         "SMB_USERNAME": body.username.strip(),
         "SMB_PASSWORD": password,
     }
@@ -287,19 +366,24 @@ async def put_storage_endpoint(
     if body.backend == "local":
         if body.local is None:
             raise _http("missing_local", "local config is required when backend=local", 422)
-        root = body.local.root.strip()
-        if not root.startswith("/"):
-            raise _http("invalid_local_root", "local.root must be an absolute path", 422)
+        root = _normalize_local_root(body.local.root)
         pairs.append(("storage.local.root", root))
     else:
         if body.smb is None:
             raise _http("missing_smb", "smb config is required when backend=smb", 422)
         smb = body.smb
+        host = _normalize_smb_host(smb.host)
+        share = _normalize_smb_share(smb.share)
+        subpath = _normalize_smb_subpath(smb.subpath)
+        _validate_smb_inputs(host, share)
+        username = smb.username.strip()
+        if not username:
+            raise _http("invalid_smb_username", "username 不能为空", 422)
         pairs.extend([
-            ("storage.smb.host", smb.host.strip()),
-            ("storage.smb.share", smb.share.strip()),
-            ("storage.smb.subpath", (smb.subpath or "/").strip() or "/"),
-            ("storage.smb.username", smb.username.strip()),
+            ("storage.smb.host", host),
+            ("storage.smb.share", share),
+            ("storage.smb.subpath", subpath),
+            ("storage.smb.username", username),
         ])
         if smb.password != "":
             pairs.append(("storage.smb.password", smb.password))
@@ -311,8 +395,9 @@ async def put_storage_endpoint(
                     "password is required (no saved password to reuse)",
                     422,
                 )
+        # local.root 在切到 SMB 时也可一并保存（让用户切回时能用回先前的本地路径）
         if body.local is not None and body.local.root.strip():
-            pairs.append(("storage.local.root", body.local.root.strip()))
+            pairs.append(("storage.local.root", _normalize_local_root(body.local.root)))
 
     try:
         await update_settings(db, pairs)

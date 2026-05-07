@@ -2380,7 +2380,65 @@ function LumenUpdateBlock({
     [phases],
   );
 
-  const [logOpen, setLogOpen] = useState(false);
+  // 当前正在执行的 phase（最近一个 status="running" 的；没有 running 则最后一个 done 的）
+  const activePhase = useMemo(() => {
+    const runningIdx = phases.findIndex((p) => p.status === "running");
+    if (runningIdx >= 0) return phases[runningIdx];
+    if (phases.length === 0) return null;
+    return phases[phases.length - 1];
+  }, [phases]);
+
+  // 进度计数（不包括 rc != 0 的 fail，因为视觉上失败不算 done）
+  const completedCount = useMemo(
+    () => phases.filter((p) => p.status === "done" && (p.rc ?? 0) === 0).length,
+    [phases],
+  );
+  const totalCount = checklist.length;
+  const progressPct = totalCount > 0
+    ? Math.round((completedCount / totalCount) * 100)
+    : 0;
+
+  // log 默认在 running 时展开方便看实时输出；用户手动 toggle 后尊重选择
+  // (用 derived state 实现，避开 react-hooks 在 effect 中 setState 的限制)
+  const [userLogOpen, setUserLogOpen] = useState<boolean | null>(null);
+  const logOpen = userLogOpen ?? running;
+  const onLogToggle = useCallback(() => {
+    setUserLogOpen((prev) => !(prev ?? running));
+  }, [running]);
+
+  // 更新成功完成后倒计时自动刷新页面（让用户看到新版本前端 bundle 生效）。
+  // 失败时不自动刷新，让用户能停留看 checklist / log。
+  const RELOAD_DELAY_SEC = 6;
+  const [reloadCountdown, setReloadCountdown] = useState<number | null>(null);
+  const reloadNow = useCallback(() => {
+    if (typeof window !== "undefined") window.location.reload();
+  }, []);
+  const cancelReload = useCallback(() => setReloadCountdown(null), []);
+
+  const prevRunningRef = useRef(running);
+  useEffect(() => {
+    const wasRunning = prevRunningRef.current;
+    prevRunningRef.current = running;
+    if (!wasRunning || running || failed) return;
+    // running: true → false 转换 + 没失败 → 启动倒计时
+    // setTimeout 0 包装：避开 effect 中同步 setState 的 lint 约束。
+    const t = setTimeout(() => setReloadCountdown(RELOAD_DELAY_SEC), 0);
+    return () => clearTimeout(t);
+  }, [running, failed]);
+
+  useEffect(() => {
+    if (reloadCountdown == null) return;
+    if (reloadCountdown <= 0) {
+      reloadNow();
+      return;
+    }
+    const t = setTimeout(
+      () => setReloadCountdown((c) => (c == null ? null : c - 1)),
+      1000,
+    );
+    return () => clearTimeout(t);
+  }, [reloadCountdown, reloadNow]);
+
   const logRef = useRef<HTMLPreElement | null>(null);
   const userScrolledRef = useRef(false);
   useEffect(() => {
@@ -2549,14 +2607,106 @@ function LumenUpdateBlock({
         </div>
       )}
 
+      {/* —— 完成后自动刷新倒计时 —— */}
+      {reloadCountdown != null && (
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-100">
+          <div className="flex min-w-0 items-center gap-2">
+            <Check className="h-4 w-4 shrink-0 text-emerald-300" />
+            <span className="min-w-0">
+              更新成功 ·{" "}
+              <span className="font-mono text-emerald-200">{reloadCountdown}s</span>{" "}
+              后自动刷新页面以加载新版本
+            </span>
+          </div>
+          <div className="flex shrink-0 gap-1.5">
+            <button
+              type="button"
+              onClick={cancelReload}
+              className="rounded-md border border-white/15 bg-white/[0.04] px-2 py-1 text-[11px] text-neutral-200 transition-colors hover:bg-white/8"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={reloadNow}
+              className="rounded-md bg-emerald-500/80 px-2 py-1 text-[11px] font-medium text-black transition-[filter] hover:brightness-110"
+            >
+              立即刷新
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* —— 当前 phase 高亮 + 进度条（运行时最直观的"在哪一步") —— */}
+      {(running || (phases.length > 0 && !running)) && (
+        <div className="mt-4 rounded-xl border border-white/10 bg-[var(--bg-0)]/60 p-3">
+          <div className="flex items-center gap-3">
+            <div
+              className={cn(
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border",
+                running
+                  ? "border-sky-400/40 bg-sky-500/12"
+                  : failed
+                    ? "border-red-500/40 bg-red-500/12"
+                    : "border-emerald-500/30 bg-emerald-500/12",
+              )}
+              aria-hidden="true"
+            >
+              {running ? (
+                <Loader2 className="h-4 w-4 animate-spin text-sky-300" />
+              ) : failed ? (
+                <X className="h-4 w-4 text-red-300" />
+              ) : (
+                <Check className="h-4 w-4 text-emerald-300" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="truncate text-sm font-medium text-neutral-100">
+                  {running
+                    ? `正在执行：${phaseLabel(activePhase?.phase ?? "")}`
+                    : failed
+                      ? `失败于：${phaseLabel(activePhase?.phase ?? "")}`
+                      : "更新已完成"}
+                </span>
+                <span className="shrink-0 font-mono text-[11px] text-neutral-500">
+                  {completedCount}/{totalCount}
+                </span>
+              </div>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+                <div
+                  className={cn(
+                    "h-full transition-[width] duration-500 ease-out",
+                    failed
+                      ? "bg-red-500/80"
+                      : running
+                        ? "bg-sky-400/90"
+                        : "bg-emerald-400/90",
+                  )}
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+              {running && activePhase?.info && Object.keys(activePhase.info).length > 0 && (
+                <div className="mt-2 truncate text-[11px] text-neutral-500">
+                  {Object.entries(activePhase.info)
+                    .slice(-1)
+                    .map(([k, v]) => `${k} = ${v}`)
+                    .join(" · ")}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* —— Step Checklist —— */}
       <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60">
         <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-3 py-2">
           <span className="text-xs font-medium text-neutral-300">执行步骤</span>
           {phases.length > 0 && (
             <span className="text-[11px] text-neutral-500">
-              {phases.filter((p) => p.status === "done" && (p.rc ?? 0) === 0).length} /{" "}
-              {checklist.length} 完成
+              {completedCount} /{" "}
+              {totalCount} 完成
             </span>
           )}
         </div>
@@ -2571,7 +2721,7 @@ function LumenUpdateBlock({
       <div className="mt-3">
         <button
           type="button"
-          onClick={() => setLogOpen((v) => !v)}
+          onClick={onLogToggle}
           className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-neutral-300 transition-colors hover:bg-white/8"
         >
           <Terminal className="h-3.5 w-3.5" />
