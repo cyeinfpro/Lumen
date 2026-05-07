@@ -1187,6 +1187,11 @@ esac
     # update.sh 的 check_storage phase 检查 /opt/lumendata 是否挂载；CI 临时目录里
     # 这个路径不存在（也跟测试无关），跳过避免 false fail。
     export SKIP_STORAGE_CHECK=1
+    # update.sh 的 image-extract fallback (try_image_extract_release) 会真去
+    # docker pull GHCR；CI runner 里那个 image 真的能拉到，会让本测试本意的
+    # "host 不是 git repo → fallback 到当前快照" 路径走不到。这里强制禁用，
+    # 让测试只验证 legacy snapshot-only 行为。
+    export LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT=1
 
     bash scripts/lumenctl.sh install-lumen --image-tag=old > "${{LOG_DIR}}/install.out" 2> "${{LOG_DIR}}/install.err"
     test -L "${{DEPLOY_ROOT}}/current"
