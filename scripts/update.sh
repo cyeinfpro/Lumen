@@ -806,6 +806,42 @@ else
 fi
 emit_info fetch_release repo_dir "${REPO_DIR}"
 
+# Image-extract fallback: host 不是 git repo 时,从 lumen-api image 里 docker cp
+# 出 release-time files (docker-compose.yml + deploy/ + scripts/ + VERSION),让
+# update 流程不再依赖 host 上是否有 git clone / 公网 GitHub 可达。
+# 见 Dockerfile.python 的 "Release-time files" COPY 块。
+try_image_extract_release() {
+    local tag="${1:-main}"
+    local out_dir="$2"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+    local registry="${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}"
+    local image="${registry}/lumen-api:${tag}"
+    log_info "[fetch_release] 尝试 docker pull ${image}"
+    if ! docker pull "${image}" >/dev/null 2>&1; then
+        log_warn "[fetch_release] docker pull 失败 (image=${image})"
+        return 1
+    fi
+    rm -rf "${out_dir}"
+    mkdir -p "${out_dir}"
+    local cid
+    cid="$(docker create "${image}" /bin/true 2>/dev/null)" || return 1
+    local rc=0
+    # docker cp 不支持通配符;逐个 cp release-time 路径
+    for path in docker-compose.yml VERSION deploy scripts; do
+        if ! docker cp "${cid}:/app/${path}" "${out_dir}/${path}" 2>/dev/null; then
+            log_warn "[fetch_release] image 内缺少 /app/${path}（image 可能是旧版本）"
+            rc=1
+        fi
+    done
+    docker rm "${cid}" >/dev/null 2>&1 || true
+    [ "${rc}" = "0" ] || return 1
+    test -f "${out_dir}/docker-compose.yml" || return 1
+    test -d "${out_dir}/scripts" || return 1
+    return 0
+}
+
 if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
     if ! command -v git >/dev/null 2>&1; then
         log_error "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但缺少 git。"
@@ -813,7 +849,15 @@ if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
         exit 1
     fi
     if [ ! -d "${REPO_DIR}/.git" ]; then
-        log_warn "[fetch_release] LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续。"
+        log_warn "[fetch_release] ${REPO_DIR} 不是 git 仓库;尝试 image-extract fallback。"
+        IMAGE_EXTRACT_DIR="${ROOT}/.update-image-extract"
+        if try_image_extract_release "${TARGET_TAG:-main}" "${IMAGE_EXTRACT_DIR}"; then
+            REPO_DIR="${IMAGE_EXTRACT_DIR}"
+            emit_info fetch_release source "image_extract"
+            log_info "[fetch_release] 已从 image 提取代码到 ${REPO_DIR}"
+        else
+            log_warn "[fetch_release] image-extract 也失败,使用当前发布物快照继续(可能过期)。"
+        fi
     else
         GIT_REF="${LUMEN_UPDATE_GIT_REF:-}"
         log_info "[fetch_release] git fetch in ${REPO_DIR}"
