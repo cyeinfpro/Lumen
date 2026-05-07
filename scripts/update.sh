@@ -1069,7 +1069,9 @@ fi
 # ---------------------------------------------------------------------------
 emit_start start_infra
 
-if ! lumen_compose_in "${NEW_RELEASE}" up -d --wait postgres redis; then
+# --force-recreate：避免容器名已存在但配置签名不一致（caller 历史 cwd 不同
+# 或人工 docker compose up 留下来的孤儿容器）时报 conflict 直接 fail。
+if ! lumen_compose_in "${NEW_RELEASE}" up -d --wait --force-recreate postgres redis; then
     log_error "[start_infra] postgres / redis 启动或健康检查失败。"
     log_error "  当前 API/Worker/Web 服务保持不变。"
     emit_fail start_infra 1
@@ -1146,7 +1148,8 @@ fi
 emit_start restart_services
 
 CURRENT_LINK="${ROOT}/current"
-if lumen_compose_in "${CURRENT_LINK}" up -d --wait api worker web; then
+# --force-recreate：同 start_infra 理由，避免容器名冲突 fail。
+if lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate api worker web; then
     :
 else
     log_error "[restart_services] api/worker/web 启动失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
@@ -1163,7 +1166,7 @@ else
             if lumen_set_image_tag_in_env "${SHARED_ENV}" "${PREVIOUS_TAG}"; then
                 if lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
                     && lumen_compose_in "${CURRENT_LINK}" pull \
-                    && lumen_compose_in "${CURRENT_LINK}" up -d --wait api worker web; then
+                    && lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate api worker web; then
                     SWITCHED=0  # current 已切回旧 release，on_err 不再重复切
                     log_warn "[restart_services] 已用 ${PREVIOUS_TAG} 回滚成功（current → ${CURRENT_ID}）；本次 update 视为失败。"
                     emit_info restart_services rolled_back_to "${PREVIOUS_TAG}"
@@ -1195,7 +1198,7 @@ fi
 
 # tgbot：如果 .env 有 TELEGRAM_BOT_TOKEN 非空才起
 if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
-    if ! lumen_compose_in "${CURRENT_LINK}" --profile tgbot up -d tgbot; then
+    if ! lumen_compose_in "${CURRENT_LINK}" --profile tgbot up -d --force-recreate tgbot; then
         log_warn "[restart_services] tgbot 启动失败，已忽略（业务 API 不受影响）。"
         emit_warn restart_services "tgbot_failed_ignored"
     else
