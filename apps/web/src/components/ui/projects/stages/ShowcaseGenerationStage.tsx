@@ -27,6 +27,7 @@ import {
   OUTPUT_COUNT_LABELS,
   SHOT_PLAN_DEFAULT,
   TEMPLATE_LABELS,
+  coerceOutputCount,
   type CreateAspectRatio,
   type CreateOutputCount,
   type CreateTemplate,
@@ -354,11 +355,4 @@ function coerceAspectRatio(value: unknown): CreateAspectRatio {
 
 function coerceQuality(value: unknown): "high" | "4k" {
   return value === "4k" ? "4k" : "high";
-}
-
-function coerceOutputCount(value: unknown): CreateOutputCount {
-  const numberValue = typeof value === "number" ? value : Number(value);
-  return OUTPUT_COUNT_LABELS.some(([option]) => option === numberValue)
-    ? (numberValue as CreateOutputCount)
-    : 4;
 }
