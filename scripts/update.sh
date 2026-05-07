@@ -828,12 +828,20 @@ try_image_extract_release() {
     local cid
     cid="$(docker create "${image}" /bin/true 2>/dev/null)" || return 1
     local rc=0
-    # docker cp 不支持通配符;逐个 cp release-time 路径
-    for path in docker-compose.yml VERSION deploy scripts; do
+    # docker cp 不支持通配符;逐个 cp 完整 release-time 内容
+    # （host 仅严格需要 docker-compose.yml + scripts + deploy；apps/packages/pyproject/
+    # uv.lock 主要让 host ssh 调试时能看到完整代码树，不影响 runtime — 容器从 image 起。）
+    local required_paths=(docker-compose.yml VERSION deploy scripts)
+    local optional_paths=(apps packages pyproject.toml uv.lock)
+    local path
+    for path in "${required_paths[@]}"; do
         if ! docker cp "${cid}:/app/${path}" "${out_dir}/${path}" 2>/dev/null; then
-            log_warn "[fetch_release] image 内缺少 /app/${path}（image 可能是旧版本）"
+            log_warn "[fetch_release] image 内缺少必须的 /app/${path}（image 可能是旧版本）"
             rc=1
         fi
+    done
+    for path in "${optional_paths[@]}"; do
+        docker cp "${cid}:/app/${path}" "${out_dir}/${path}" 2>/dev/null || true
     done
     docker rm "${cid}" >/dev/null 2>&1 || true
     [ "${rc}" = "0" ] || return 1
