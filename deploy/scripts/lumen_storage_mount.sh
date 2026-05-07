@@ -21,14 +21,14 @@ TEST_TARGET="${LUMEN_STORAGE_TEST_TARGET:-${STATE_DIR}/scratch}"
 DEFAULT_LOCAL_ROOT="${LUMEN_STORAGE_DEFAULT_LOCAL_ROOT:-/var/lib/lumen-data}"
 
 # CIFS options tuned for Lumen workload (4K large files, forceuid model, EPERM-tolerant).
-# vers=3.0 — SMB3 baseline; broadly compatible (3.1.1 errors out as Invalid Argument
-#   on older cifs-utils / NAS combos with mount error(22)).
-# soft + retrans=3 — survive transient drops without hanging containers.
+# vers=3.0 — SMB3 baseline; broadly compatible.
+# soft — IO returns ENETUNREACH on disconnect instead of hanging (the kernel
+#   handles retries internally; cifs has no NFS-style `retrans` option — adding
+#   it triggers `Unknown mount option` and aborts with mount error(22)).
 # rsize/wsize=4M — large-block IO friendly (4K image task pattern).
 # noperm — client trusts server permissions (matches our chmod EPERM tolerance).
 # mfsymlinks / mapposix — symlinks + reserved-char filenames work transparently.
-# (bsize is kernel-default; setting it explicitly was rejected on some Linux 6.x kernels.)
-CIFS_OPTS_BASE="vers=3.0,soft,retrans=3,rsize=4194304,wsize=4194304,actimeo=1,cache=strict,echo_interval=60,noperm,mfsymlinks,mapposix,nounix,serverino,_netdev"
+CIFS_OPTS_BASE="vers=3.0,soft,rsize=4194304,wsize=4194304,actimeo=1,cache=strict,echo_interval=60,noperm,mfsymlinks,mapposix,nounix,serverino,_netdev"
 
 LUMEN_UID="${LUMEN_APP_UID:-995}"
 LUMEN_GID="${LUMEN_APP_GID:-994}"
