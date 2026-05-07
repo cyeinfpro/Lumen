@@ -33,11 +33,18 @@ import {
 import { RunningState, StageFrame } from "../components/StageFrame";
 import {
   ASPECT_RATIO_LABELS,
+  OUTPUT_COUNT_LABELS,
   SHOT_PLAN_DEFAULT,
   TEMPLATE_LABELS,
+  coerceOutputCount,
   type CreateAspectRatio,
+  type CreateOutputCount,
   type CreateTemplate,
 } from "../types";
+
+const OUTPUT_COUNT_SELECT_OPTIONS = OUTPUT_COUNT_LABELS.map(
+  ([value, label]) => [String(value), label] as const,
+);
 import {
   accessorySuggestionText,
   defaultLibraryAgeSegment,
@@ -92,6 +99,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const initialTemplate = coerceTemplate(showcaseStep?.input_json?.template);
   const initialAspectRatio = coerceAspectRatio(showcaseStep?.input_json?.aspect_ratio);
   const initialQuality = coerceQuality(showcaseStep?.input_json?.final_quality);
+  const initialOutputCount = coerceOutputCount(showcaseStep?.input_json?.output_count);
   const modelStylePrompt =
     stringValue(approvalStep?.input_json?.style_prompt) ??
     stringValue(candidateStep?.input_json?.style_prompt) ??
@@ -114,7 +122,8 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const [template, setTemplate] = useState<CreateTemplate>(initialTemplate);
   const [aspectRatio, setAspectRatio] = useState<CreateAspectRatio>(initialAspectRatio);
   const [quality, setQuality] = useState<"high" | "4k">(initialQuality);
-  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}`;
+  const [outputCount, setOutputCount] = useState<CreateOutputCount>(initialOutputCount);
+  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}`;
   const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
   const [accessoryPrompt, setAccessoryPrompt] = useState(suggestedAccessoryPrompt);
   const [trackedAccessoryPrompt, setTrackedAccessoryPrompt] = useState(suggestedAccessoryPrompt);
@@ -135,6 +144,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     setTemplate(initialTemplate);
     setAspectRatio(initialAspectRatio);
     setQuality(initialQuality);
+    setOutputCount(initialOutputCount);
   }
   if (trackedAccessoryPrompt !== suggestedAccessoryPrompt) {
     const previousPrompt = trackedAccessoryPrompt;
@@ -179,7 +189,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       shot_plan: [...SHOT_PLAN_DEFAULT],
       aspect_ratio: aspectRatio,
       final_quality: quality,
-      output_count: 4,
+      output_count: outputCount,
     });
   };
 
@@ -387,7 +397,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
             Showcase Setup
           </p>
-          <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-3">
+          <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-4">
             <SelectField
               label="输出模板"
               value={template}
@@ -412,7 +422,15 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
                 ["4k", "4K 终稿"],
               ]}
             />
+            <SelectField
+              label="张数"
+              value={String(outputCount)}
+              onChange={(value) => setOutputCount(coerceOutputCount(value))}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+              options={OUTPUT_COUNT_SELECT_OPTIONS}
+            />
           </div>
+          <p className="mt-2 text-[12px] text-[var(--fg-3)]">张数越多耗时越长</p>
           <Button
             className="mt-5"
             variant="primary"

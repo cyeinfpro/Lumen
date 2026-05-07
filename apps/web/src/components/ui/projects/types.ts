@@ -149,6 +149,13 @@ export type CreateTemplate =
 export type CreateAspectRatio = (typeof ASPECT_RATIO_LABELS)[number][0];
 export type CreateOutputCount = (typeof OUTPUT_COUNT_LABELS)[number][0];
 
+export function coerceOutputCount(value: unknown): CreateOutputCount {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return OUTPUT_COUNT_LABELS.some(([option]) => option === numberValue)
+    ? (numberValue as CreateOutputCount)
+    : 4;
+}
+
 export const MAX_PRODUCT_IMAGES = 3;
 export const MAX_PRODUCT_IMAGE_BYTES = 12 * 1024 * 1024;
 
