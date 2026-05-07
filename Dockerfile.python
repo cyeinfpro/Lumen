@@ -45,6 +45,13 @@ COPY apps/api/ apps/api/
 COPY apps/worker/ apps/worker/
 COPY apps/tgbot/ apps/tgbot/
 
+# Release-time files: 打包到 image 让 update.sh 能在 host 不是 git repo 时用
+# `docker create + docker cp` 从 image 提取出来同步到 host release dir。
+# 这样无论 host 上 update.sh 多老，只要拉到新 image 就能自愈到新代码。
+COPY docker-compose.yml VERSION ./
+COPY deploy/ deploy/
+COPY scripts/ scripts/
+
 
 FROM ${PYTHON_BASE} AS runtime
 
