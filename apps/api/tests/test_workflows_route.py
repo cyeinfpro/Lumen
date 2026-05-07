@@ -1292,8 +1292,10 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "正面全身" in prompt
     assert "欧美风格" in prompt
     assert "无文字水印" in prompt
-    assert "服装主体在画面中清晰可见" in prompt
-    assert len(prompt) < 700
+    assert "服装主体清晰可见" in prompt
+    assert "全身完整入镜" in prompt
+    assert "顶满" in prompt
+    assert len(prompt) < 800
 
 
 def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() -> None:
@@ -1668,6 +1670,52 @@ def test_pick_shot_variants_covers_all_four_classes_when_output_4() -> None:
         "detail_half_body",
         "side_or_back",
     }
+
+
+def test_framing_direction_differs_between_full_body_and_detail() -> None:
+    candidate = SimpleNamespace(id="c", model_brief_json={"summary": "都市轻熟女"})
+    full = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": ["米白"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="lifestyle",
+        shot_type="front_full_body",
+        final_quality="high",
+    )
+    detail = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": ["米白"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="lifestyle",
+        shot_type="detail_half_body",
+        final_quality="high",
+    )
+    assert "全身完整入镜" in full
+    assert "脚下完整不切断" in full
+    assert "上半身或胸口以上入镜" in detail
+    assert "肩部肘部不顶画面边缘" in detail
+
+
+def test_framing_direction_for_tone_first_emphasizes_environment() -> None:
+    """tone_first 变体应该让人物只占画面 1/3-1/2，环境为主体。"""
+    candidate = SimpleNamespace(id="c", model_brief_json={"summary": "都市通勤"})
+    # premium_studio side_or_back 有 3 条 tone_first 变体，第一条 product 用 default 取
+    # 所以这里直接构造一个 tone_first variant 测试
+    tone_variant = workflows.ShotVariant(
+        label="远景剪影，街景延伸为画面主体",
+        framing="tone_first",
+    )
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": ["深灰"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="urban_commute",
+        shot_type="natural_pose",
+        shot_variant=tone_variant,
+        final_quality="high",
+    )
+    assert "人物占画面 1/3 到 1/2 高度" in prompt
+    assert "环境或空间为画面主体" in prompt
 
 
 @pytest.mark.parametrize("age_segment", ["child", "toddler"])
