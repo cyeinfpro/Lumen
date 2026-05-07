@@ -1192,6 +1192,11 @@ esac
     # "host 不是 git repo → fallback 到当前快照" 路径走不到。这里强制禁用，
     # 让测试只验证 legacy snapshot-only 行为。
     export LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT=1
+    # lumenctl 入口会触发 lumen_self_update_scripts 从 GitHub raw 拉最新 scripts。
+    # 紧贴 release 之后跑（< 5 分钟）会撞上 raw.githubusercontent 缓存，把 install
+    # 阶段 rsync 进去的当前 commit 的 update.sh 替换成上一个 commit 的版本，导致
+    # log/grep 断言失败。CI 测试本来就只想验证当前 working tree 的脚本，禁用 self-update。
+    export LUMEN_SELF_UPDATE=0
 
     bash scripts/lumenctl.sh install-lumen --image-tag=old > "${{LOG_DIR}}/install.out" 2> "${{LOG_DIR}}/install.err"
     test -L "${{DEPLOY_ROOT}}/current"
