@@ -236,11 +236,17 @@ cmd_apply() {
   load_conf
   log "apply start mode=$MODE"
 
+  # docker compose stop/start 加 timeout 防卡死。stop 用 -t 30 + 整体 timeout 60s
+  # （worker stop_grace_period=1830s 但我们必须跳过这个 grace 否则 apply 一卡半小时）。
+  # start 90s 给容器拉起 + healthcheck 余地。
+  local stop_timeout="${LUMEN_STORAGE_DOCKER_STOP_TIMEOUT:-60}"
+  local start_timeout="${LUMEN_STORAGE_DOCKER_START_TIMEOUT:-90}"
+
   if [[ -d "$LUMEN_DOCKER_COMPOSE_DIR" ]] && command -v docker >/dev/null 2>&1; then
-    log "docker compose stop $LUMEN_DOCKER_SERVICES"
+    log "docker compose stop $LUMEN_DOCKER_SERVICES (timeout ${stop_timeout}s)"
     # shellcheck disable=SC2086
-    (cd "$LUMEN_DOCKER_COMPOSE_DIR" && docker compose stop $LUMEN_DOCKER_SERVICES) \
-      || log "docker compose stop returned non-zero (continuing)"
+    (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "${stop_timeout}" docker compose stop -t 30 $LUMEN_DOCKER_SERVICES) \
+      || log "docker compose stop returned non-zero or timed out (continuing)"
   fi
 
   umount_target_force
@@ -251,17 +257,17 @@ cmd_apply() {
     write_status
     if [[ -d "$LUMEN_DOCKER_COMPOSE_DIR" ]] && command -v docker >/dev/null 2>&1; then
       # shellcheck disable=SC2086
-      (cd "$LUMEN_DOCKER_COMPOSE_DIR" && docker compose start $LUMEN_DOCKER_SERVICES) || true
+      (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "${start_timeout}" docker compose start $LUMEN_DOCKER_SERVICES) || true
     fi
     write_apply_result "$call_id" "fail" "mount failed; fell back to local default $DEFAULT_LOCAL_ROOT" "$started_at"
     return 1
   fi
 
   if [[ -d "$LUMEN_DOCKER_COMPOSE_DIR" ]] && command -v docker >/dev/null 2>&1; then
-    log "docker compose start $LUMEN_DOCKER_SERVICES"
+    log "docker compose start $LUMEN_DOCKER_SERVICES (timeout ${start_timeout}s)"
     # shellcheck disable=SC2086
-    (cd "$LUMEN_DOCKER_COMPOSE_DIR" && docker compose start $LUMEN_DOCKER_SERVICES) \
-      || log "docker compose start failed (services may still recover via restart policy)"
+    (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "${start_timeout}" docker compose start $LUMEN_DOCKER_SERVICES) \
+      || log "docker compose start failed or timed out (services may still recover via restart policy)"
   fi
 
   log "apply done"

@@ -7,8 +7,13 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=-/var/lib/lumen-storage/apply.env
 ExecStart=/usr/local/sbin/lumen-storage-mount apply
-# Always clean up the trigger so the next click re-fires PathChanged.
-ExecStopPost=/bin/sh -c "rm -f /var/lib/lumen-storage/apply.trigger /var/lib/lumen-storage/apply.env"
+# 1) Clean up the trigger so the next click re-fires PathChanged.
+# 2) Restart watchers whose inotify watches were attached to /opt/lumendata
+#    paths (lumen-update.path watches /opt/lumendata/backup/.update.trigger).
+#    A mount swap invalidates those inode handles silently, so we re-attach
+#    here. systemctl is async; ignore errors so a flaky reload never blocks
+#    the apply result file write.
+ExecStopPost=/bin/sh -c "rm -f /var/lib/lumen-storage/apply.trigger /var/lib/lumen-storage/apply.env; systemctl try-restart lumen-update.path 2>/dev/null || true"
 # Treat non-zero as success so PathChanged keeps working; real status lives in
 # /var/lib/lumen-storage/last-apply.json which the API surfaces to the UI.
 SuccessExitStatus=0 1 2
