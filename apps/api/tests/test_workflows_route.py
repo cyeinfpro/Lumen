@@ -1286,16 +1286,15 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "small earrings" not in prompt
     assert "优先参考它" in prompt
     assert "不要抢衣服主体" in prompt
-    assert "超写实" in prompt
-    assert "商业摄影" in prompt
-    assert "适合亚马逊电商主图" in prompt
+    assert "杂志大片质感" in prompt
+    assert "皮肤真实有毛孔和细纹" in prompt
+    assert "不要塑料感、过度磨皮、AI网红脸" in prompt
     assert "正面全身" in prompt
     assert "欧美风格" in prompt
-    assert "无文字水印" in prompt
     assert "服装主体清晰可见" in prompt
     assert "全身完整入镜" in prompt
     assert "顶满" in prompt
-    assert len(prompt) < 800
+    assert len(prompt) < 900
 
 
 def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() -> None:
@@ -1670,6 +1669,41 @@ def test_pick_shot_variants_covers_all_four_classes_when_output_4() -> None:
         "detail_half_body",
         "side_or_back",
     }
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "white_ecommerce",
+        "premium_studio",
+        "urban_commute",
+        "lifestyle",
+        "daily_snapshot",
+        "natural_phone_snapshot",
+        "social_seed",
+    ],
+)
+def test_render_direction_includes_skin_texture_for_every_template(template: str) -> None:
+    """每个模板都要给"真实皮肤毛孔/细纹"正面约束 + 反对塑料感/磨皮，避免 AI 假感。"""
+    direction = workflows._showcase_render_direction(template)  # noqa: SLF001
+    assert "皮肤" in direction
+    assert "毛孔" in direction
+    assert "塑料感" in direction or "棚拍感" in direction
+    assert "磨皮" in direction
+    # 每个模板都要给具体瑕疵线索，否则模型会渲染"真实但完美无瑕"的脸
+    imperfection_keywords = (
+        "痘印",
+        "黑头",
+        "非完美对称",
+        "不对称",
+        "色不",  # "皮肤色不均" / "色不完全均匀"
+        "深浅不均",
+        "细微差异",
+        "细纹",
+    )
+    assert any(kw in direction for kw in imperfection_keywords), (
+        f"{template} render direction lacks imperfection cue"
+    )
 
 
 def test_framing_direction_differs_between_full_body_and_detail() -> None:
