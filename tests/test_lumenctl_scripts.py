@@ -465,8 +465,8 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     # docker compose 关键命令
     assert "lumen_compose_in" in text
     assert "--profile migrate run --rm migrate" in text
-    assert "up -d --wait postgres redis" in text
-    assert "up -d --wait api worker web" in text
+    assert "up -d --wait --force-recreate postgres redis" in text
+    assert "up -d --wait --force-recreate api worker web" in text
     # release 切换走 atomic switch
     assert 'lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"' in text
     # 反断言：脚本注释里可以提"不再 uv sync / npm ci"，但实际可执行命令必须不包含。
