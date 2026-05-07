@@ -268,6 +268,29 @@ def _showcase_pose_direction(template: str) -> str:
     return _POSE_DIRECTIONS.get(template, "姿态自然舒展")
 
 
+def _showcase_framing_direction(shot_class: str, framing: str | None) -> str:
+    """按机位类 + framing tag 控制画面构图留白，避免人物顶天立地撑满整个画面。
+
+    - detail_half_body 是上半身近景，单独走"半身入镜"分支
+    - tone_first 走"环境为主体、画面留白"
+    - product_first（除 detail）走"全身入镜 + 上下留边"
+    """
+    if shot_class == "detail_half_body":
+        return (
+            "上半身或胸口以上入镜，头顶留出适度边距，"
+            "肩部肘部不顶画面边缘，背景留白干净"
+        )
+    if framing == "tone_first":
+        return (
+            "人物占画面 1/3 到 1/2 高度，"
+            "环境或空间为画面主体，大半画面留白有呼吸感，避免顶天立地"
+        )
+    return (
+        "全身完整入镜，头顶上方留出 5-10% 边距，脚下完整不切断，"
+        "人物占画面 70-85% 高度，避免顶满"
+    )
+
+
 def _showcase_prompt_brief(
     *,
     user_direction: str,
@@ -277,6 +300,7 @@ def _showcase_prompt_brief(
     model_consistency: str,
     shot_direction: str,
     pose_direction: str,
+    framing_direction: str,
     quality_direction: str,
     render_direction: str,
     style_region: str,
@@ -295,9 +319,9 @@ def _showcase_prompt_brief(
             f"3. 配饰：{accessory_direction}",
             f"4. 场景：背景与衣服风格搭配，{direction}。",
             f"5. 画质：{quality_direction}，{render_direction}。",
-            f"6. 构图：{style_region}风格，{pose_direction}，{shot_direction}；"
-            "服装主体在画面中清晰可见。",
-            "7. 单人照。",
+            f"6. 构图：{style_region}风格，{pose_direction}，{shot_direction}。",
+            f"7. 画面：{framing_direction}；服装主体清晰可见。",
+            "8. 单人照。",
         ]
     )
 
@@ -2533,6 +2557,8 @@ def _showcase_prompt(
     if shot_variant is None:
         shot_variant = _showcase_default_variant(template, shot_type, age_segment)
     shot_direction = shot_variant["label"] if shot_variant else shot_type
+    framing = shot_variant["framing"] if shot_variant else "product_first"
+    framing_direction = _showcase_framing_direction(shot_type, framing)
     pose_direction = _showcase_pose_direction(template)
     soft = _age_soft_constraint(age_segment)
     if soft:
@@ -2547,6 +2573,7 @@ def _showcase_prompt(
         model_consistency=model_consistency,
         shot_direction=shot_direction,
         pose_direction=pose_direction,
+        framing_direction=framing_direction,
         quality_direction=quality_direction,
         render_direction=_showcase_render_direction(template),
         style_region=style_region,
