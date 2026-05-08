@@ -98,6 +98,10 @@ export function useSSE(
   const maxRetryCountRef = useRef<number>(
     opts?.maxRetryCount ?? defaultMaxRetryCount(),
   );
+  // 每次 render 后同步 ref。inline `{}` / 裸函数每次 render 引用都不同,
+  // 写依赖数组反而每次都触发；省略 deps 等价 "每次 render 之后跑",
+  // 是 React 文档明确认可的 ref 同步写法（render 阶段本身不访问 ref）。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     handlersRef.current = handlers;
     onOpenRef.current = opts?.onOpen;

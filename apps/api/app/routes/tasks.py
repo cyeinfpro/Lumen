@@ -74,7 +74,7 @@ async def cancel_generation(
         await db.execute(
             select(Generation).where(
                 Generation.id == gen_id, Generation.user_id == user.id
-            )
+            ).with_for_update()
         )
     ).scalar_one_or_none()
     if not gen:
@@ -83,12 +83,21 @@ async def cancel_generation(
         raise _http("not_cancelable", f"status is {gen.status}", 409)
 
     redis = get_redis()
-    await redis.set(f"task:{gen.id}:cancel", "1", ex=3600)
+    was_queued = gen.status == GenerationStatus.QUEUED.value
     if gen.status == GenerationStatus.RUNNING.value:
         # The worker still owns an upstream call and the image queue lease.
         # Keep the task visible as running until the worker observes the cancel
         # flag, stops the upstream awaitable, and writes the final canceled row.
-        await db.commit()
+        # Why no explicit commit: this branch makes no field mutation on `gen`
+        # — only the SELECT FOR UPDATE row lock is held. The lock is released
+        # at session exit by ``get_db``'s context manager (rollback on raise,
+        # commit on clean return); calling commit() here would just be wasted
+        # round-trip with identical lock-release timing.
+        try:
+            await redis.set(f"task:{gen.id}:cancel", "1", ex=3600)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel flag write failed gen=%s err=%s", gen.id, exc)
+            raise _http("cancel_unavailable", "cancel signal unavailable", 503) from exc
         return {"status": gen.status}
 
     gen.status = GenerationStatus.CANCELED.value
@@ -98,20 +107,21 @@ async def cancel_generation(
     # image_queue side state so a canceled queued row cannot keep capacity.
     try:
         task_provider_key = f"generation:image_queue:task_provider:{gen.id}"
-        raw = await redis.get(task_provider_key)
-        provider_name: str | None = None
-        if isinstance(raw, bytes):
-            provider_name = raw.decode("utf-8", "replace")
-        elif isinstance(raw, str):
-            provider_name = raw
-        if provider_name:
-            await redis.zrem("generation:image_queue:active", provider_name)
-            if not provider_name.startswith("__dr:"):
-                await redis.delete(
-                    f"generation:image_queue:provider:{provider_name}"
-                )
-            await redis.delete(task_provider_key)
-        await redis.delete(f"task:{gen.id}:lease")
+        if was_queued:
+            raw = await redis.get(task_provider_key)
+            provider_name: str | None = None
+            if isinstance(raw, bytes):
+                provider_name = raw.decode("utf-8", "replace")
+            elif isinstance(raw, str):
+                provider_name = raw
+            if provider_name:
+                await redis.zrem("generation:image_queue:active", provider_name)
+                if not provider_name.startswith("__dr:"):
+                    await redis.delete(
+                        f"generation:image_queue:provider:{provider_name}"
+                    )
+                await redis.delete(task_provider_key)
+            await redis.delete(f"task:{gen.id}:lease")
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "cancel image_queue release failed gen=%s err=%s",
@@ -131,13 +141,24 @@ async def retry_generation(
         await db.execute(
             select(Generation).where(
                 Generation.id == gen_id, Generation.user_id == user.id
-            )
+            ).with_for_update()
         )
     ).scalar_one_or_none()
     if not gen:
         raise _http("not_found", "generation not found", 404)
     if gen.status not in (GenerationStatus.FAILED.value, GenerationStatus.CANCELED.value):
         raise _http("not_retryable", f"status is {gen.status}", 409)
+
+    redis = get_redis()
+    # Why: clearing the prior cancel flag is best-effort cleanup. The
+    # worker double-checks the cancel key before each terminal write, so
+    # even if a stale flag survives a transient redis blip, the worst
+    # case is a re-cancel on the next attempt — never a corrupted row.
+    # Don't 503 the user for a transient redis issue.
+    try:
+        await redis.delete(f"task:{gen.id}:cancel")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("retry cancel-flag cleanup failed gen=%s err=%s", gen.id, exc)
 
     gen.status = GenerationStatus.QUEUED.value
     gen.progress_stage = GenerationStage.QUEUED.value
@@ -186,7 +207,7 @@ async def cancel_completion(
         await db.execute(
             select(Completion).where(
                 Completion.id == comp_id, Completion.user_id == user.id
-            )
+            ).with_for_update()
         )
     ).scalar_one_or_none()
     if not comp:
@@ -198,10 +219,16 @@ async def cancel_completion(
         raise _http("not_cancelable", f"status is {comp.status}", 409)
 
     redis = get_redis()
-    await redis.set(f"task:{comp.id}:cancel", "1", ex=3600)
+    was_streaming = comp.status == CompletionStatus.STREAMING.value
     comp.status = CompletionStatus.CANCELED.value
     comp.finished_at = datetime.now(timezone.utc)
     await db.commit()
+    if was_streaming:
+        try:
+            await redis.set(f"task:{comp.id}:cancel", "1", ex=3600)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel flag write failed comp=%s err=%s", comp.id, exc)
+            raise _http("cancel_unavailable", "cancel signal unavailable", 503) from exc
     return {"status": comp.status}
 
 
@@ -215,13 +242,20 @@ async def retry_completion(
         await db.execute(
             select(Completion).where(
                 Completion.id == comp_id, Completion.user_id == user.id
-            )
+            ).with_for_update()
         )
     ).scalar_one_or_none()
     if not comp:
         raise _http("not_found", "completion not found", 404)
     if comp.status not in (CompletionStatus.FAILED.value, CompletionStatus.CANCELED.value):
         raise _http("not_retryable", f"status is {comp.status}", 409)
+
+    redis = get_redis()
+    try:
+        await redis.delete(f"task:{comp.id}:cancel")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("retry cancel-flag cleanup failed comp=%s err=%s", comp.id, exc)
+        raise _http("retry_unavailable", "could not clear prior cancel signal", 503) from exc
 
     comp.status = CompletionStatus.QUEUED.value
     comp.progress_stage = CompletionStage.QUEUED.value
@@ -260,9 +294,10 @@ async def list_tasks(
     gens = (await db.execute(gen_stmt.order_by(Generation.created_at.desc()).limit(limit))).scalars().all()
     comps = (await db.execute(comp_stmt.order_by(Completion.created_at.desc()).limit(limit))).scalars().all()
 
-    items: list[TaskItemOut] = []
+    sortable_items: list[tuple[datetime, TaskItemOut]] = []
     for g in gens:
-        items.append(
+        sortable_items.append((
+            g.started_at or g.created_at or datetime.min.replace(tzinfo=timezone.utc),
             TaskItemOut(
                 kind="generation",
                 id=g.id,
@@ -270,10 +305,11 @@ async def list_tasks(
                 status=g.status,
                 progress_stage=g.progress_stage,
                 started_at=g.started_at,
-            )
-        )
+            ),
+        ))
     for c in comps:
-        items.append(
+        sortable_items.append((
+            c.started_at or c.created_at or datetime.min.replace(tzinfo=timezone.utc),
             TaskItemOut(
                 kind="completion",
                 id=c.id,
@@ -281,13 +317,10 @@ async def list_tasks(
                 status=c.status,
                 progress_stage=c.progress_stage,
                 started_at=c.started_at,
-            )
-        )
-    # rough recency sort: started_at desc, None last
-    items.sort(
-        key=lambda t: (t.started_at or datetime.min.replace(tzinfo=timezone.utc)),
-        reverse=True,
-    )
+            ),
+        ))
+    sortable_items.sort(key=lambda pair: pair[0], reverse=True)
+    items = [item for _sort_at, item in sortable_items]
     return items[:limit]
 
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=Lumen storage mount (/opt/lumendata)
-After=network-online.target var-lib-lumen\x2dstorage.mount
+After=network-online.target
 Wants=network-online.target
 # So docker / lumen services start after this.
 Before=docker.service
@@ -10,8 +10,11 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/lumen-storage-mount up
 ExecStop=/usr/local/sbin/lumen-storage-mount down
-# Mount failures here are not fatal: cmd_up falls back to local default so the
-# host always has /opt/lumendata available; admin can recover via UI.
+# CIFS 抖动场景下，up 子命令可能因网络/远端不可达返回 1/2；如果让 unit 直接
+# fail，After=/Wants= 这条 service 的 lumen-api / docker.service 都会被卡住，
+# 整机起不来。把 1/2 当成 success 退出码：cmd_apply 已经有 fallback 到本地
+# 默认根的逻辑（lumen_storage_mount.sh §cmd_apply），admin 后续可以从 UI 重新
+# 调 apply / 改 storage.conf 恢复。
 SuccessExitStatus=0 1 2
 TimeoutStartSec=120
 

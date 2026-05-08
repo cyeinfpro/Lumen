@@ -85,6 +85,9 @@ cleanup() {
         systemctl start lumen-api lumen-worker || true
     fi
     release_lock
+    if command -v lumen_release_lock >/dev/null 2>&1; then
+        lumen_release_lock 2>/dev/null || true
+    fi
     return "$rc"
 }
 
@@ -175,7 +178,48 @@ redis_cli() {
 }
 
 redis_host_dir() {
-    docker inspect "$REDIS_CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}'
+    # 限定 destination=/data，避免容器同时挂了别的 volume 时 docker inspect
+    # 输出多行 / 顺序不稳，被 validate_redis_host_dir 当成单值消费——拿错路径
+    # 后 find -exec rm -rf 会删错目录。这里显式拒绝多行结果。
+    local out
+    out="$(docker inspect "$REDIS_CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{println}}{{end}}{{end}}')" || return $?
+    # 去尾部空行后还有多行就报错退出
+    out="${out%$'\n'}"
+    case "$out" in
+        *$'\n'*)
+            log "ERROR: redis container has multiple /data mounts; refusing to guess: ${out}"
+            return 1
+            ;;
+    esac
+    if [ -z "$out" ]; then
+        log "ERROR: redis container has no /data mount"
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+validate_redis_host_dir() {
+    local dir="$1"
+    local resolved
+    if [ -z "$dir" ] || [ "$dir" = "/" ] || [[ "$dir" == *$'\n'* ]] || [[ "$dir" == *$'\r'* ]]; then
+        log "ERROR: unsafe redis volume mountpoint: ${dir:-<empty>}"
+        return 1
+    fi
+    if [ ! -d "$dir" ]; then
+        log "ERROR: redis volume mountpoint is not a directory: $dir"
+        return 1
+    fi
+    if ! resolved="$(cd -- "$dir" && pwd -P)"; then
+        log "ERROR: cannot resolve redis volume mountpoint: $dir"
+        return 1
+    fi
+    case "$resolved" in
+        "/"|"/bin"|"/sbin"|"/usr"|"/usr/local"|"/var"|"/var/lib"|"/var/lib/docker"|"/opt"|"/opt/lumendata"|"/tmp"|"/private"|"/Users")
+            log "ERROR: refusing to restore redis into broad system directory: $resolved"
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$resolved"
 }
 
 trap cleanup EXIT
@@ -197,6 +241,10 @@ if command -v lumen_acquire_lock >/dev/null 2>&1; then
 fi
 
 acquire_lock
+# 注意：lumen_acquire_lock 会自己 `trap 'lumen_release_lock' EXIT`，这里再次
+# `trap cleanup EXIT` 会覆盖它 —— 但 cleanup() 内显式 fall through 调
+# `lumen_release_lock`，维护锁仍会被释放。改 order 前请保留这条不变量。
+trap cleanup EXIT
 
 if [ ! -f "$PG_FILE" ] || [ ! -f "$REDIS_FILE" ]; then
     echo "missing backup files for $TS" >&2
@@ -225,12 +273,13 @@ if ! REDIS_HOST_DIR="$(redis_host_dir 2>/dev/null)"; then
     log "ERROR: cannot inspect redis container mount"
     exit 4
 fi
-if [ -z "$REDIS_HOST_DIR" ] || [ ! -d "$REDIS_HOST_DIR" ]; then
-    log "ERROR: cannot locate redis volume mountpoint"
+if ! REDIS_HOST_DIR="$(validate_redis_host_dir "$REDIS_HOST_DIR")"; then
     exit 4
 fi
 # 清空旧数据
-rm -rf "$REDIS_HOST_DIR"/dump.rdb "$REDIS_HOST_DIR"/appendonly.aof "$REDIS_HOST_DIR"/appendonlydir
+find "$REDIS_HOST_DIR" -mindepth 1 -maxdepth 1 \
+    \( -name dump.rdb -o -name appendonly.aof -o -name appendonlydir \) \
+    -exec rm -rf -- {} +
 # 拷回新数据
 [ -f "$TMP_DIR/dump.rdb" ] && cp "$TMP_DIR/dump.rdb" "$REDIS_HOST_DIR/dump.rdb"
 [ -d "$TMP_DIR/appendonlydir" ] && cp -r "$TMP_DIR/appendonlydir" "$REDIS_HOST_DIR/appendonlydir"

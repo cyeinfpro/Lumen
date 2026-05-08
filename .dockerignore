@@ -1,17 +1,28 @@
 .git/
+.git/index.lock
 .github/
 
 .venv/
 **/__pycache__/
 **/*.pyc
 **/*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+tests/
+**/tests/
 
 node_modules/
 apps/web/node_modules/
 apps/web/.next/
 apps/web/.next-build/
 apps/web/out/
-apps/web/.env*
+apps/web/.env
+apps/web/.env.*
+!apps/web/.env.example
 
 var/
 apps/worker/var/
@@ -19,17 +30,22 @@ apps/worker/var/
 **/.DS_Store
 **/.idea/
 **/.vscode/
+**/*.swp
+**/*.swo
+**/*~
 
 *.log
 logs/
 /opt/lumendata
 scripts/__pycache__/
 
-.env
-.env.local
-.env.*.local
+.env*
+!.env.example
+credentials.json
+**/credentials.json
 shared/
 
 image-job/
 
 docs/
+ISSUES.md

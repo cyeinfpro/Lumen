@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -32,9 +34,12 @@ from ..audit import request_ip_hash, write_audit
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf_session
+from ..ratelimit import RateLimiter
+from ..redis_client import get_redis
 
 
 router = APIRouter(prefix="/me", tags=["me"])
+logger = logging.getLogger(__name__)
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -52,6 +57,11 @@ _EXT_BY_MIME = {
 }
 _EXPORT_BATCH_SIZE = 500
 _EXPORT_CHUNK_SIZE = 64 * 1024
+# Why: capacity=2 (instead of 1) so a transient redis blip mid-export — which
+# leaves a token "consumed" in redis state — does not lock the user out for a
+# full hour. The refill rate (1/hr) still caps sustained use to one export per
+# hour; the extra burst slot is purely for retry-after-failure ergonomics.
+_EXPORT_LIMITER = RateLimiter(capacity=2, refill_per_sec=1 / 3600, always_on=True)
 
 
 def _ext_for(mime: str) -> str:
@@ -292,6 +302,7 @@ async def export_my_data(
     ).scalar_one_or_none()
     if active_user_id is None:
         raise _http("user_deleted", "user account was deleted", 401)
+    await _EXPORT_LIMITER.check(get_redis(), f"rl:me:export:{user.id}")
 
     tmp = tempfile.TemporaryFile()
     messages_exported = 0
@@ -351,9 +362,10 @@ async def export_my_data(
                                 m.created_at.isoformat() if m.created_at else None
                             ),
                         }
-                        messages_file.write(
+                        await asyncio.to_thread(
+                            messages_file.write,
                             json.dumps(line, ensure_ascii=False).encode("utf-8")
-                            + b"\n"
+                            + b"\n",
                         )
                         messages_exported += 1
                     last_created_at = rows[-1].created_at
@@ -389,17 +401,23 @@ async def export_my_data(
                 if not rows:
                     break
                 for img in rows:
-                    src = _open_storage_file_safe(img.storage_key)
+                    src = await asyncio.to_thread(
+                        _open_storage_file_safe,
+                        img.storage_key,
+                    )
                     if src is None:
                         images_skipped += 1
                         continue
                     ext = _ext_for(img.mime)
                     with src, zf.open(f"images/{img.id}.{ext}", "w") as image_file:
                         while True:
-                            chunk = src.read(_EXPORT_CHUNK_SIZE)
+                            chunk = await asyncio.to_thread(
+                                src.read,
+                                _EXPORT_CHUNK_SIZE,
+                            )
                             if not chunk:
                                 break
-                            image_file.write(chunk)
+                            await asyncio.to_thread(image_file.write, chunk)
                     images_exported += 1
                 last_created_at = rows[-1].created_at
                 last_id = rows[-1].id
@@ -494,6 +512,60 @@ async def delete_my_account(
         )
         .values(deleted_at=now)
     )
+    # SELECT-then-UPDATE race: there is a small window between this SELECT and
+    # the UPDATE below where a worker could finalize a row (QUEUED/RUNNING ->
+    # SUCCEEDED/FAILED). The list may therefore include rows the UPDATE then
+    # skipped because they were already terminal. Writing a redis cancel flag
+    # for an already-terminal row is harmless noise (the worker has already
+    # exited and there is no consumer of the flag), so we accept the race
+    # rather than serialize via FOR UPDATE / advisory lock here. The flag's
+    # 1-hour TTL also self-cleans the redundant key.
+    active_generation_ids = (
+        await db.execute(
+            select(Generation.id).where(
+                Generation.user_id == user.id,
+                Generation.status.in_(
+                    [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
+                ),
+            )
+        )
+    ).scalars().all()
+    active_completion_ids = (
+        await db.execute(
+            select(Completion.id).where(
+                Completion.user_id == user.id,
+                Completion.status.in_(
+                    [CompletionStatus.QUEUED.value, CompletionStatus.STREAMING.value]
+                ),
+            )
+        )
+    ).scalars().all()
+    generations_canceled = await db.execute(
+        update(Generation)
+        .where(
+            Generation.user_id == user.id,
+            Generation.status.in_(
+                [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
+            ),
+        )
+        .values(
+            status=GenerationStatus.CANCELED.value,
+            finished_at=now,
+        )
+    )
+    completions_canceled = await db.execute(
+        update(Completion)
+        .where(
+            Completion.user_id == user.id,
+            Completion.status.in_(
+                [CompletionStatus.QUEUED.value, CompletionStatus.STREAMING.value]
+            ),
+        )
+        .values(
+            status=CompletionStatus.CANCELED.value,
+            finished_at=now,
+        )
+    )
     await write_audit(
         db,
         event_type="me.account.delete",
@@ -506,8 +578,21 @@ async def delete_my_account(
             "sessions_revoked": sessions_result.rowcount,
             "conversations_deleted": conversations_result.rowcount,
             "images_deleted": images_result.rowcount,
+            "generations_canceled": generations_canceled.rowcount,
+            "completions_canceled": completions_canceled.rowcount,
         },
     )
+    # Why: cancel keys MUST be written BEFORE db.commit. If the process
+    # crashes between commit and the redis SET, the worker may finish the
+    # task and overwrite the CANCELED rows with succeeded/failed. Setting
+    # the flag first means the worker's _is_cancelled() short-circuits
+    # before any terminal write.
+    try:
+        redis = get_redis()
+        for task_id in [*active_generation_ids, *active_completion_ids]:
+            await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("account deletion cancel signal write failed user=%s err=%s", user.id, exc)
     await db.commit()
 
     # Best-effort: clear cookies

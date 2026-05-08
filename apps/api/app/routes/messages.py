@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Awaitable, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +80,28 @@ from ..runtime_settings import get_setting
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+
+async def _lock_idempotency_key(
+    db: AsyncSession,
+    user_id: str,
+    idempotency_key: str,
+) -> None:
+    connection = getattr(db, "connection", None)
+    if connection is None:
+        return
+    bind = await connection()
+    if bind.dialect.name != "postgresql":
+        return
+    lock_key = f"{user_id}:{idempotency_key}"
+    # Why hashtext is OK here: pg_advisory_xact_lock takes a 64-bit signed int
+    # and hashtext returns a 32-bit signed int — i.e. there is collision risk
+    # across distinct (user_id, idempotency_key) pairs. Collisions only cost
+    # serialization (one extra waiter blocks until the txn commits) and never
+    # corrupt; the race we actually guard against is duplicate inserts of the
+    # same key, which still hash identically. So 32-bit hash collisions only
+    # slow, never corrupt.
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(lock_key))))
 
 # Why: align with the global ``MAX_PROMPT_CHARS`` so server-side truncation
 # matches the validation cap exposed to clients. Previously this was a local
@@ -891,28 +913,11 @@ async def submit_user_message(
     if prior is not None:
         return prior
 
-    # Why: pre-acquire row-level locks on any prior Completion/Generation
-    # rows tied to (user_id, idempotency_key). Combined with the unique
-    # constraint + IntegrityError fallback below, this serialises concurrent
-    # requests with the same idempotency_key so a second caller blocks until
-    # the first commits, then returns the prior result via the IntegrityError
-    # branch (instead of double-creating partial state).
-    await db.execute(
-        select(Completion.id)
-        .where(
-            Completion.user_id == user.id,
-            Completion.idempotency_key == body.idempotency_key,
-        )
-        .with_for_update()
-    )
-    await db.execute(
-        select(Generation.id)
-        .where(
-            Generation.user_id == user.id,
-            Generation.idempotency_key == body.idempotency_key,
-        )
-        .with_for_update()
-    )
+    # Empty SELECT ... FOR UPDATE locks no rows, so it does not serialize the
+    # first concurrent INSERT for an idempotency key. PostgreSQL advisory locks
+    # give the intended per-user/per-key critical section; other dialects keep
+    # relying on the unique constraint + IntegrityError fallback below.
+    await _lock_idempotency_key(db, user.id, body.idempotency_key)
 
     # ---- validate attachments belong to user (and are alive) ----
     attachment_ids = list(body.attachment_image_ids or [])

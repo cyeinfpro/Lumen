@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -215,6 +216,20 @@ def _parse_weight(raw: Any) -> int:
     return max(1, min(int(value), _MAX_PROVIDER_WEIGHT))
 
 
+def _parse_priority(raw: Any) -> int:
+    if raw in (None, ""):
+        return 0
+    if isinstance(raw, bool):
+        raise ValueError("provider priority must be an integer")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        value = raw.strip()
+        if value and value.lstrip("+-").isdigit():
+            return int(value)
+    raise ValueError("provider priority must be an integer")
+
+
 def _parse_optional_str(raw: Any) -> str | None:
     if not isinstance(raw, str):
         return None
@@ -282,7 +297,7 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
     api_key = item.get("api_key", "")
     if not isinstance(api_key, str) or not api_key.strip():
         raise ValueError(f"provider {name}: api_key is required")
-    priority = int(item.get("priority", 0))
+    priority = _parse_priority(item.get("priority", 0))
     weight = _parse_weight(item.get("weight", 1))
     enabled = bool(item.get("enabled", True))
     rate_limit_raw = item.get("image_rate_limit")
@@ -307,7 +322,14 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
     if normalized_endpoint not in IMAGE_JOBS_ENDPOINT_VALUES:
         normalized_endpoint = "auto"
     raw_lock = item.get("image_jobs_endpoint_lock", False)
-    image_jobs_endpoint_lock = bool(raw_lock) if normalized_endpoint != "auto" else False
+    parsed_lock = _parse_optional_bool(raw_lock)
+    if raw_lock not in (None, "") and parsed_lock is None:
+        raise ValueError("image_jobs_endpoint_lock must be a boolean")
+    if parsed_lock and normalized_endpoint == "auto":
+        raise ValueError(
+            "image_jobs_endpoint_lock requires image_jobs_endpoint to be responses or generations"
+        )
+    image_jobs_endpoint_lock = bool(parsed_lock)
     raw_base = item.get("image_jobs_base_url")
     image_jobs_base_url = ""
     if isinstance(raw_base, str):
@@ -664,12 +686,73 @@ async def _local_port_accepts(port: int) -> bool:
             await writer.wait_closed()
 
 
+def _secret_dir() -> str:
+    """Pick the safest writable directory for SSH secret/askpass files.
+
+    Preference order:
+      1. ``$XDG_RUNTIME_DIR``  — tmpfs scoped to the user, gone on logout
+      2. ``/run/user/<uid>``    — same place even when the env var is missing
+      3. ``tempfile.gettempdir()`` — last resort (typically /tmp; world-readable)
+
+    Anything before /tmp is preferred because /tmp is shared between users on
+    multi-tenant hosts and persists across re-login.
+    """
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg and os.path.isdir(xdg):
+        return xdg
+    try:
+        run_user = f"/run/user/{os.getuid()}"
+    except AttributeError:  # pragma: no cover — non-POSIX
+        run_user = ""
+    if run_user and os.path.isdir(run_user):
+        return run_user
+    return tempfile.gettempdir()
+
+
+def _atomic_secret_open(prefix: str, mode: int) -> tuple[int, str]:
+    """Atomically create a 0o600/0o700 secret file in the runtime dir.
+
+    Uses ``O_CREAT|O_EXCL|O_WRONLY`` so the file is created with the requested
+    mode in one syscall; this eliminates the mkstemp+chmod race where a
+    privileged reader could open the file between creation (default 0600 from
+    mkstemp on Linux but not guaranteed cross-platform) and our explicit chmod.
+    """
+    base_dir = _secret_dir()
+    for _ in range(8):
+        suffix = secrets.token_hex(8)
+        path = os.path.join(base_dir, f"{prefix}{suffix}")
+        try:
+            fd = os.open(
+                path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                mode,
+            )
+        except FileExistsError:
+            continue
+        return fd, path
+    raise RuntimeError("failed to allocate unique secret filename")
+
+
+def _write_secret_file(value: str) -> str:
+    # Atomic 0o600 create in $XDG_RUNTIME_DIR; eliminates the previous
+    # mkstemp-then-chmod race, and keeps the secret off /tmp on systems with
+    # a per-user runtime tmpfs. Path is still returned for sshpass -f / askpass
+    # consumption — readers must consume it promptly and unlink afterwards
+    # (see `_unlink_quietly`); the path leaks via /proc/<pid>/environ for the
+    # lifetime of the spawned ssh process, which is unavoidable as long as
+    # askpass needs to dereference it from env.
+    fd, path = _atomic_secret_open("lumen-ssh-secret-", 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(value)
+        fh.write("\n")
+    return path
+
+
 def _write_ssh_askpass_helper() -> str:
-    fd, path = tempfile.mkstemp(prefix="lumen-ssh-askpass-", text=True)
+    fd, path = _atomic_secret_open("lumen-ssh-askpass-", 0o700)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("#!/bin/sh\n")
-        fh.write("printf '%s\\n' \"$LUMEN_SSH_PASSWORD\"\n")
-    os.chmod(path, 0o700)
+        fh.write("cat \"$LUMEN_SSH_PASSWORD_FILE\"\n")
     return path
 
 
@@ -778,18 +861,20 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
 
             env = None
             askpass_path = None
+            password_file = None
             sshpass_bin = shutil.which("sshpass") if proxy.password else None
-            if proxy.password and sshpass_bin:
-                cmd = [sshpass_bin, "-e", *cmd]
+            if proxy.password:
+                password_file = _write_secret_file(proxy.password)
+            if proxy.password and sshpass_bin and password_file:
+                cmd = [sshpass_bin, "-f", password_file, *cmd]
                 env = os.environ.copy()
-                env["SSHPASS"] = proxy.password
             elif proxy.password:
                 askpass_path = _write_ssh_askpass_helper()
                 env = os.environ.copy()
                 env["SSH_ASKPASS"] = askpass_path
                 env["SSH_ASKPASS_REQUIRE"] = "force"
                 env.setdefault("DISPLAY", "localhost:0")
-                env["LUMEN_SSH_PASSWORD"] = proxy.password
+                env["LUMEN_SSH_PASSWORD_FILE"] = str(password_file)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -816,6 +901,7 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
                     last_error = f"timed out waiting for local SOCKS port: {stderr}".strip()
             finally:
                 _unlink_quietly(askpass_path)
+                _unlink_quietly(password_file)
 
             await _terminate_process(proc)
 

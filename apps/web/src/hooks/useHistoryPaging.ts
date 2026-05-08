@@ -61,6 +61,11 @@ interface ScrollAnchorSnapshot {
 
 const HISTORY_ANCHOR_SELECTOR = "[data-history-scroll-anchor]";
 
+interface InFlightHistoryRequest {
+  convId: string;
+  requestId: symbol;
+}
+
 function captureScrollAnchor(
   scrollRef?: RefObject<HTMLDivElement | null>,
 ): ScrollAnchorSnapshot | null {
@@ -177,7 +182,7 @@ export function useHistoryPaging(
   const { currentConvId, loadHistoricalMessages, hasMore, loading, storeError } =
     useHistoryStoreState();
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
-  const inFlightRef = useRef<string | null>(null);
+  const inFlightRef = useRef<InFlightHistoryRequest | null>(null);
   const [fallback, setFallback] = useState<{
     convId: string | null;
     loading: boolean;
@@ -191,11 +196,16 @@ export function useHistoryPaging(
 
   const requestHistory = useCallback(
     async (loadMore: boolean) => {
-      if (!currentConvId || inFlightRef.current === currentConvId || effectiveLoading) {
+      if (
+        !currentConvId ||
+        inFlightRef.current?.convId === currentConvId ||
+        effectiveLoading
+      ) {
         return;
       }
       const scrollSnapshot = loadMore ? captureScrollAnchor(scrollRef) : null;
-      inFlightRef.current = currentConvId;
+      const requestId = Symbol(currentConvId);
+      inFlightRef.current = { convId: currentConvId, requestId };
       setFallback({ convId: currentConvId, loading: true, error: null });
       try {
         await loadHistoricalMessages(currentConvId, loadMore);
@@ -208,7 +218,7 @@ export function useHistoryPaging(
           });
         }
       } finally {
-        if (inFlightRef.current === currentConvId) {
+        if (inFlightRef.current?.requestId === requestId) {
           inFlightRef.current = null;
         }
         setFallback((prev) =>

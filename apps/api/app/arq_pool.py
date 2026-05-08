@@ -24,6 +24,22 @@ _pool: ArqRedis | None = None
 _pool_loop: asyncio.AbstractEventLoop | None = None
 _pool_loop_id: int | None = None
 _pool_checked_at: float = 0.0
+# Why: locks are bound to an event loop. Constructing a module-level
+# `asyncio.Lock()` at import time binds it to whatever loop is running
+# (or none). Tests that swap event loops between cases then hit
+# RuntimeError("attached to a different loop"). Lazy-init a lock per
+# current loop instead, keyed by `id(loop)`.
+_pool_locks: dict[int, asyncio.Lock] = {}
+
+
+def _lock_for_current_loop() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    lock = _pool_locks.get(loop_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _pool_locks[loop_id] = lock
+    return lock
 
 _ARQ_MAX_CONNECTIONS = 50
 _ARQ_HEALTH_CHECK_INTERVAL_SECONDS = 30.0
@@ -65,43 +81,45 @@ async def _pool_is_healthy(pool: ArqRedis) -> bool:
 async def get_arq_pool() -> ArqRedis:
     """Return a process-wide ArqRedis pool (initialized on first call)."""
     global _pool, _pool_loop, _pool_loop_id, _pool_checked_at
-    loop = asyncio.get_running_loop()
-    loop_id = id(loop)
-    loop_marker_mismatch = _pool_loop_id is not None and _pool_loop_id != loop_id
-    if _pool is not None and (_pool_loop is not loop or loop_marker_mismatch):
-        old = _pool
-        _pool = None
-        _pool_loop = None
-        _pool_loop_id = None
-        _pool_checked_at = 0.0
-        await _close_pool(old)
-    if (
-        _pool is not None
-        and loop.time() - _pool_checked_at >= _ARQ_HEALTH_CHECK_INTERVAL_SECONDS
-    ):
-        healthy = await _pool_is_healthy(_pool)
-        _pool_checked_at = loop.time()
-        if not healthy:
+    async with _lock_for_current_loop():
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+        loop_marker_mismatch = _pool_loop_id is not None and _pool_loop_id != loop_id
+        if _pool is not None and (_pool_loop is not loop or loop_marker_mismatch):
             old = _pool
             _pool = None
             _pool_loop = None
             _pool_loop_id = None
             _pool_checked_at = 0.0
             await _close_pool(old)
-    if _pool is None:
-        _pool = await create_pool(_redis_settings())
-        _pool_loop = loop
-        _pool_loop_id = loop_id
-        _pool_checked_at = loop.time()
-    return _pool
+        if (
+            _pool is not None
+            and loop.time() - _pool_checked_at >= _ARQ_HEALTH_CHECK_INTERVAL_SECONDS
+        ):
+            healthy = await _pool_is_healthy(_pool)
+            _pool_checked_at = loop.time()
+            if not healthy:
+                old = _pool
+                _pool = None
+                _pool_loop = None
+                _pool_loop_id = None
+                _pool_checked_at = 0.0
+                await _close_pool(old)
+        if _pool is None:
+            _pool = await create_pool(_redis_settings())
+            _pool_loop = loop
+            _pool_loop_id = loop_id
+            _pool_checked_at = loop.time()
+        return _pool
 
 
 async def close_arq_pool() -> None:
     """Close the pool on shutdown. Safe to call when not initialized."""
     global _pool, _pool_loop, _pool_loop_id, _pool_checked_at
-    if _pool is not None:
-        await _close_pool(_pool)
-        _pool = None
-        _pool_loop = None
-        _pool_loop_id = None
-        _pool_checked_at = 0.0
+    async with _lock_for_current_loop():
+        if _pool is not None:
+            await _close_pool(_pool)
+            _pool = None
+            _pool_loop = None
+            _pool_loop_id = None
+            _pool_checked_at = 0.0

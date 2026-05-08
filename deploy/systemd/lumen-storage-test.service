@@ -8,5 +8,4 @@ Type=oneshot
 EnvironmentFile=-/var/lib/lumen-storage/test.env
 ExecStart=/usr/local/sbin/lumen-storage-mount test
 ExecStopPost=/bin/sh -c "rm -f /var/lib/lumen-storage/test.trigger /var/lib/lumen-storage/test.env"
-SuccessExitStatus=0 1 2
 TimeoutStartSec=120

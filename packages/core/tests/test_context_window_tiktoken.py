@@ -21,6 +21,7 @@ def _reset_tiktoken_state(monkeypatch, cw):
     monkeypatch.setattr(cw, "_TIKTOKEN_LOAD_THREAD", None)
     monkeypatch.setattr(cw, "_TIKTOKEN_LOADING", False)
     monkeypatch.setattr(cw, "_TIKTOKEN_LOAD_WARNED", False)
+    monkeypatch.setattr(cw, "_TOKEN_COUNTER_MODE", "auto")
 
 
 def test_count_tokens_uses_tiktoken_when_available():
@@ -117,3 +118,24 @@ def test_slow_tiktoken_load_falls_back_without_blocking(monkeypatch):
     started = time.monotonic()
     assert cw._get_tiktoken_encoding(timeout_sec=0.01) is None
     assert time.monotonic() - started < 0.1
+
+
+def test_count_tokens_keeps_estimator_after_cold_slow_load(monkeypatch):
+    import lumen_core.context_window as cw
+
+    encoding = object()
+    fake_tiktoken = types.ModuleType("tiktoken")
+
+    def get_encoding(_name: str):  # noqa: ANN202
+        time.sleep(0.2)
+        return encoding
+
+    fake_tiktoken.get_encoding = get_encoding  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tiktoken", fake_tiktoken)
+    _reset_tiktoken_state(monkeypatch, cw)
+
+    text = "The same text should not change counting modes."
+    first = cw.count_tokens(text)
+    time.sleep(0.25)
+    assert cw.count_tokens(text) == first
+    assert cw._TOKEN_COUNTER_MODE == "estimate"

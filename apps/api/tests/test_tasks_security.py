@@ -26,6 +26,114 @@ class _CapturingDb:
         return _EmptyScalars()
 
 
+class _One:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self) -> Any:
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_retry_generation_locks_row_and_clears_cancel_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen = SimpleNamespace(
+        id="gen-1",
+        user_id="user-1",
+        status="canceled",
+        progress_stage="canceled",
+        attempt=1,
+        error_code="cancelled",
+        error_message="cancelled",
+        started_at=object(),
+        finished_at=object(),
+        message_id="msg-1",
+    )
+
+    class Db:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+            self.added: list[Any] = []
+            self.committed = False
+
+        async def execute(self, statement: Any) -> _One:
+            self.statements.append(statement)
+            return _One(gen)
+
+        def add(self, row: Any) -> None:
+            self.added.append(row)
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    class Redis:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        async def delete(self, key: str) -> None:
+            self.deleted.append(key)
+
+    async def noop_publish(_payload: dict, _message_id: str) -> None:
+        return None
+
+    redis = Redis()
+    db = Db()
+    monkeypatch.setattr(tasks, "get_redis", lambda: redis)
+    monkeypatch.setattr(tasks, "_publish_queued", noop_publish)
+
+    out = await tasks.retry_generation(
+        "gen-1",
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"status": "queued"}
+    assert redis.deleted == ["task:gen-1:cancel"]
+    assert db.committed is True
+    assert "FOR UPDATE" in str(
+        db.statements[0].compile(dialect=postgresql.dialect())
+    ).upper()
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_generation_sets_cancel_without_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RUNNING-branch contract: write redis cancel flag, do NOT commit.
+
+    The branch makes no field mutation on the generation row, so an
+    explicit commit would just round-trip without releasing any work — the
+    SELECT FOR UPDATE row lock is released by the FastAPI session
+    context manager at request exit. This test pins the contract so a
+    future regression that re-adds the commit is caught.
+    """
+    gen = SimpleNamespace(id="gen-1", user_id="user-1", status="running")
+    order: list[str] = []
+
+    class Db:
+        async def execute(self, _statement: Any) -> _One:
+            return _One(gen)
+
+        async def commit(self) -> None:
+            order.append("commit")
+
+    class Redis:
+        async def set(self, key: str, value: str, *, ex: int) -> None:
+            order.append(f"set:{key}:{value}:{ex}")
+
+    monkeypatch.setattr(tasks, "get_redis", lambda: Redis())
+
+    out = await tasks.cancel_generation(
+        "gen-1",
+        SimpleNamespace(id="user-1"),
+        Db(),  # type: ignore[arg-type]
+    )
+
+    assert out == {"status": "running"}
+    assert order == ["set:task:gen-1:cancel:1:3600"]
+
+
 @pytest.mark.asyncio
 async def test_list_tasks_scopes_generation_and_completion_queries_to_user() -> None:
     db = _CapturingDb()

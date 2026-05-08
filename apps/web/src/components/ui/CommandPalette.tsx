@@ -46,6 +46,11 @@ function normalizeSearchValue(value: string) {
   return value.toLocaleLowerCase("zh-CN").replace(/\s+/g, " ").trim();
 }
 
+function detectModifierLabel(): "⌘" | "Ctrl" {
+  if (typeof navigator === "undefined") return "Ctrl";
+  return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || "") ? "⌘" : "Ctrl";
+}
+
 function command(definition: Omit<Command, "searchText">): Command {
   return {
     ...definition,
@@ -138,9 +143,14 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [modifierLabel, setModifierLabel] = useState("Ctrl");
+  // SSR/CSR 一致：首屏一律 "Ctrl"，挂载后再用 navigator.platform 探测（避免 React 19 hydration mismatch）。
+  const [modifierLabel, setModifierLabel] = useState<string>("Ctrl");
   // SSR safe：首屏视为桌面，挂载后由 matchMedia 修正。
   const [isDesktop, setIsDesktop] = useState(true);
+
+  useEffect(() => {
+    setModifierLabel(detectModifierLabel());
+  }, []);
 
   const filteredCommands = useMemo(() => {
     const tokens = normalizeSearchValue(query).split(" ").filter(Boolean);
@@ -159,15 +169,6 @@ export function CommandPalette() {
     (id: string) => `${listboxId}-${id}`,
     [listboxId],
   );
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      setModifierLabel(
-        /Mac|iPhone|iPad|iPod/i.test(navigator.platform || "") ? "⌘" : "Ctrl",
-      );
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;

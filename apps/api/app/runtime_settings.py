@@ -11,6 +11,8 @@ import logging
 from typing import Iterable
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import SystemSetting
@@ -169,8 +171,31 @@ async def migrate_image_primary_route(db: AsyncSession) -> bool:
         return False
 
     channel, engine = image_primary_route_to_parts(old)
-    db.add(SystemSetting(key="image.channel", value=channel))
-    db.add(SystemSetting(key="image.engine", value=engine))
+    bind = await db.connection()
+    if bind.dialect.name == "postgresql":
+        await db.execute(
+            pg_insert(SystemSetting)
+            .values(
+                [
+                    {"key": "image.channel", "value": channel},
+                    {"key": "image.engine", "value": engine},
+                ]
+            )
+            .on_conflict_do_nothing(index_elements=["key"])
+        )
+    else:
+        try:
+            db.add(SystemSetting(key="image.channel", value=channel))
+            db.add(SystemSetting(key="image.engine", value=engine))
+            await db.flush()
+        except IntegrityError:
+            # Why: align sqlite to the postgres on_conflict_do_nothing semantics
+            # — a unique-key conflict means the migration target row already
+            # exists, which is the post-condition we want. Treat skip as success
+            # so the caller does not need branchy "did this actually do work"
+            # logic; the early guard above already filters the no-op case.
+            await db.rollback()
+            return True
     logger.info(
         "migrated image.primary_route=%s -> channel=%s engine=%s",
         old,

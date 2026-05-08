@@ -113,10 +113,11 @@ class LoadedSummaryMessages:
     image_captions: dict[str, str] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class _SummaryLock:
     kind: str
     token: str | None = None
+    lost_reason: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -1292,10 +1293,12 @@ async def _renew_summary_lock_loop(
                 if isinstance(value, bytes):
                     value = value.decode("utf-8", errors="replace")
                 if value != lock.token:
-                    # Lock已被其他持有者覆盖；退出，让主流程在 CAS 阶段自然失败。
+                    # Lock已过期或被其他持有者覆盖；主流程需要停止写入，
+                    # 不能继续假装自己仍然持锁。
+                    lock.lost_reason = "expired" if value is None else "stolen"
                     logger.warning(
-                        "context_summary.lock_renew_lost conv=%s holder=%s",
-                        conv_id, value,
+                        "context_summary.lock_renew_lost conv=%s holder=%s reason=%s",
+                        conv_id, value, lock.lost_reason,
                     )
                     return
                 await redis.expire(key, _SUMMARY_LOCK_TTL_S)
@@ -1651,6 +1654,35 @@ async def ensure_context_summary(
             "last_quality_signal": fallback_reason,
             "fallback_reason": fallback_reason,
         }
+        if lock.lost_reason:
+            latest = await _read_current_summary(session, conv_id)
+            if _summary_satisfies_request(latest, boundary, extra_hash):
+                return _public_summary_result(
+                    latest, created=False, status="cached_after_lock_lost"
+                )  # type: ignore[arg-type]
+            _observe_compaction_duration(
+                trigger=trigger,
+                outcome="lock_lost",
+                elapsed_s=time.monotonic() - started_monotonic,
+            )
+            await record_summary_metrics(
+                redis, conv_id=conv_id, trigger=trigger, outcome="lock_lost"
+            )
+            await _publish_compaction_event(
+                redis,
+                conv_id,
+                {
+                    "conversation_id": conv_id,
+                    "phase": "completed",
+                    "trigger": trigger,
+                    "started_at": started_at.isoformat(),
+                    "completed_at": _utc_now().isoformat(),
+                    "elapsed_ms": int((time.monotonic() - started_monotonic) * 1000),
+                    "ok": False,
+                    "fallback_reason": f"lock_{lock.lost_reason}",
+                },
+            )
+            return None
         wrote = await _cas_write_summary(session, conv_id, summary_jsonb)
         if not wrote:
             latest = await _read_current_summary(session, conv_id)

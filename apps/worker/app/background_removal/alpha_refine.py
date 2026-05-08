@@ -116,12 +116,10 @@ def _label_components(
     if label == 1:
         return work, {}
 
-    data = work.tobytes()
     counts: dict[int, int] = {}
-    for v in range(1, label):
-        c = data.count(bytes([v]))
-        if c:
-            counts[v] = c
+    for v in work.tobytes():
+        if 0 < v < label:
+            counts[v] = counts.get(v, 0) + 1
     return work, counts
 
 

@@ -48,6 +48,7 @@ UPSTREAM_USED_PERCENT = Gauge(
 
 # 合法 token kind 集合（避免任意字符串污染 label cardinality）
 _VALID_TOKEN_KINDS = ("input", "output", "cached", "reasoning")
+_MAX_OBSERVED_DURATION_SECONDS = 24 * 60 * 60
 
 
 def record_upstream_tokens(kind: str, n: int) -> None:
@@ -61,6 +62,7 @@ def record_upstream_duration(seconds: float, endpoint: str) -> None:
     """记录一次上游请求的耗时；负值（例如 monotonic 异常）忽略。"""
     if seconds < 0:
         return
+    seconds = min(float(seconds), _MAX_OBSERVED_DURATION_SECONDS)
     UPSTREAM_DURATION_SECONDS.labels(endpoint=endpoint).observe(seconds)
 
 

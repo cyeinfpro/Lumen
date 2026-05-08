@@ -61,3 +61,6 @@ docs/internal/
 
 # 一次性整理 checklist
 RELEASE-CHECKLIST.md
+
+# 内部审计成果，本机保留供参考但不入库（含潜在敏感发现）。
+ISSUES.md

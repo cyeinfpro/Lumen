@@ -439,6 +439,81 @@ async def test_probe_image_all_skips_generation_locked_provider(
     assert calls == ["sk-responses"]
 
 
+def test_text_probe_failure_does_not_open_text_circuit() -> None:
+    pool = _make_pool(_cfg("acc1"))
+    h = pool._health["acc1"]
+
+    pool.report_failure("acc1", is_probe=True)
+    pool.report_failure("acc1", is_probe=True)
+    pool.report_failure("acc1", is_probe=True)
+
+    # probe 不毒化熔断（consecutive_failures / cooldown_until 不动），但仍计入
+    # total/failed 让 monitoring 看到——否则 probe 阶段一直挂掉运维感知不到。
+    assert h.consecutive_failures == 0
+    assert h.cooldown_until is None
+    assert h.total_requests == 3
+    assert h.failed_requests == 3
+    assert h.last_failure_at is not None
+
+
+@pytest.mark.asyncio
+async def test_probe_all_limits_parallelism(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import provider_pool as provider_pool_module
+
+    providers = [_cfg(f"acc{i}") for i in range(5)]
+    pool = _make_pool(*providers)
+    active = 0
+    max_active = 0
+
+    async def fake_probe(_provider: ProviderConfig) -> bool:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.01)
+            return True
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(provider_pool_module, "_PROBE_MAX_CONCURRENCY", 2)
+    monkeypatch.setattr(pool, "_probe_one", fake_probe)
+
+    results = await pool.probe_all()
+
+    assert results == {provider.name: True for provider in providers}
+    assert max_active <= 2
+
+
+@pytest.mark.asyncio
+async def test_probe_image_all_limits_parallelism(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool as provider_pool_module
+
+    providers = [_cfg(f"acc{i}") for i in range(5)]
+    pool = _make_pool(*providers)
+    active = 0
+    max_active = 0
+
+    async def fake_probe(_provider: ProviderConfig) -> bool:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.01)
+            return True
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(provider_pool_module, "_PROBE_MAX_CONCURRENCY", 2)
+    monkeypatch.setattr(pool, "_probe_image_one", fake_probe)
+
+    results = await pool.probe_image_all()
+
+    assert results == {provider.name: True for provider in providers}
+    assert max_active <= 2
+
+
 # --- 默认配置：image probe interval=0 关闭 ---------------------------------
 
 

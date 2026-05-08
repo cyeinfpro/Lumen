@@ -745,17 +745,21 @@ def parse_value(spec: SettingSpec, raw: str) -> object:
             raise ValueError(f"{spec.key} must be one of: {allowed}")
         return raw
     if spec.parser is int:
-        if spec.allowed_values is not None and raw not in spec.allowed_values:
-            allowed = ", ".join(spec.allowed_values)
-            raise ValueError(f"{spec.key} must be one of: {allowed}")
         value: int | float = int(raw)
     elif spec.parser is float:
-        if spec.allowed_values is not None and raw not in spec.allowed_values:
-            allowed = ", ".join(spec.allowed_values)
-            raise ValueError(f"{spec.key} must be one of: {allowed}")
         value = float(raw)
     else:
         raise ValueError(f"unsupported parser {spec.parser!r}")
+
+    if spec.allowed_values is not None:
+        # 严格按字符串字面比对：把 raw 和 allowed_values 都做 strip 后比 string，
+        # 不要先 int(raw) → set(int(allowed)) 再比。后者会让 "00" / " 0 " / "+0"
+        # 等变体被误判为合法（都 parse 成 0），而管理员配置 ("0", "1") 时
+        # 期望的是布尔开关字面值。
+        normalized = raw.strip()
+        if normalized not in {av.strip() for av in spec.allowed_values}:
+            allowed = ", ".join(spec.allowed_values)
+            raise ValueError(f"{spec.key} must be one of: {allowed}")
 
     if spec.min_value is not None and value < spec.min_value:
         raise ValueError(

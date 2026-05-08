@@ -55,6 +55,7 @@ const USER_EVENTS = ["user.notice"] as const;
 // Keep the client below that ceiling; overflow tasks are still repaired by
 // pollInflightTasks(), just without live progress events until capacity frees.
 const MAX_SSE_CHANNELS_PER_CONNECTION = 62;
+const SSE_RECOVERY_POLL_MS = 10_000;
 
 function sortedUniqueTaskKey(ids: Iterable<string>): string {
   return [...new Set(ids)].sort().join(",");
@@ -243,41 +244,45 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     return h;
   }, [applyStoreEvent, handleRenamed]);
 
+  const recoveryInFlightRef = useRef(false);
+  const runRecovery = useCallback(
+    (phase: string, hydrateTasks: boolean, refreshCompletionText: boolean) => {
+      if (recoveryInFlightRef.current) return;
+      recoveryInFlightRef.current = true;
+
+      const store = useChatStore.getState();
+      const jobs: Array<Promise<unknown>> = [];
+      if (hydrateTasks) jobs.push(store.hydrateActiveTasks());
+      jobs.push(store.pollInflightTasks());
+      if (refreshCompletionText) jobs.push(refreshActiveCompletionText());
+
+      void Promise.allSettled(jobs)
+        .then((results) => {
+          for (const result of results) {
+            if (result.status === "rejected") {
+              logError(result.reason, {
+                scope: "sse-recovery",
+                extra: { phase },
+              });
+            }
+          }
+        })
+        .finally(() => {
+          recoveryInFlightRef.current = false;
+        });
+    },
+    [],
+  );
+
   const handleSSEOpen = useCallback(() => {
-    const store = useChatStore.getState();
-    void Promise.allSettled([
-      // 用户级中心列表：把所有会话的 inflight 任务一次性灌进 store，
-      // 让 GlobalTaskTray 显示全局任务而非碎片化按会话。
-      store.hydrateActiveTasks(),
-      store.pollInflightTasks(),
-      refreshActiveCompletionText(),
-    ]).then((results) => {
-      for (const result of results) {
-        if (result.status === "rejected") {
-          logError(result.reason, { scope: "sse-recovery", extra: { phase: "onOpen" } });
-        }
-      }
-    });
-  }, []);
+    runRecovery("onOpen", true, true);
+  }, [runRecovery]);
 
   useSSE(channels, handlers, { onOpen: handleSSEOpen });
 
   useEffect(() => {
     const unsubscribeOnlineRestore = onOnlineRestore(() => {
-      const store = useChatStore.getState();
-      void Promise.allSettled([
-        store.hydrateActiveTasks(),
-        store.pollInflightTasks(),
-      ]).then((results) => {
-        for (const result of results) {
-          if (result.status === "rejected") {
-            logError(result.reason, {
-              scope: "sse-recovery",
-              extra: { phase: "online-restore" },
-            });
-          }
-        }
-      });
+      runRecovery("online-restore", true, false);
     });
     const stopConnectivity = startConnectivity();
     return () => {
@@ -285,24 +290,20 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       stopConnectivity();
       disposeChatStoreRuntime();
     };
-  }, []);
+  }, [runRecovery]);
 
-  // 自愈轮询：5 秒一次扫描 in-flight 任务，发现 SSE 漏接的 terminal 状态时主动 refetch。
+  // 自愈轮询：周期扫描 in-flight 任务，发现 SSE 漏接的 terminal 状态时主动 refetch。
   // 覆盖 Redis Pub/Sub 不持久化的盲区（刷新瞬间错过的 succeeded/failed event）。
   useEffect(() => {
     const tick = () => {
-      useChatStore.getState().pollInflightTasks().catch((err) => {
-        logError(err, {
-          scope: "sse-recovery",
-          extra: { phase: "poll-inflight" },
-        });
-      });
+      runRecovery("poll-inflight", false, false);
     };
-    // mount 立即跑一次（覆盖刷新场景的初始窗口）
+    // 挂载后立刻跑一次，覆盖刷新瞬间错过的 terminal event；
+    // tick 走 runRecovery，无 in-flight 任务时为 no-op，重复调用安全。
     tick();
-    const t = setInterval(tick, 5000);
+    const t = setInterval(tick, SSE_RECOVERY_POLL_MS);
     return () => clearInterval(t);
-  }, []);
+  }, [runRecovery]);
 
   return <>{children}</>;
 }

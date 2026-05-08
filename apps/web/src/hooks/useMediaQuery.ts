@@ -6,8 +6,6 @@ import { useCallback, useSyncExternalStore } from "react";
 const VIEWPORT_COOKIE = "lumen.viewport";
 const MOBILE_QUERY = "(max-width: 767px)";
 
-const mediaQueryCache = new Map<string, boolean>();
-
 function writeViewportCookie(v: "mobile" | "desktop"): void {
   if (typeof document === "undefined") return;
   // 1 年；同源即可，不需要 secure 属性（仅给 SSR 提示）
@@ -60,8 +58,14 @@ function getServerSnapshot(): boolean | null {
   return null;
 }
 
+// useSyncExternalStore 要求 getSnapshot 在两次 publish 之间返回稳定引用，
+// 因此用 module 级 cache 兜底；subscribe 时同步刷新 cache 再 onStoreChange，确保后续 read 读到新值。
+const mediaQueryCache = new Map<string, boolean>();
+
 function getMediaQuerySnapshot(query: string): boolean | null {
   if (typeof window === "undefined") return null;
+  const cached = mediaQueryCache.get(query);
+  if (cached !== undefined) return cached;
   const next = readMediaQuery(query);
   mediaQueryCache.set(query, next);
   return next;
@@ -83,11 +87,15 @@ function subscribeMediaQuery(
 
   if (typeof window.matchMedia !== "function") {
     const update = () => publish(readMediaQuery(query));
+    // 订阅时立即同步一次 cache，避免首屏从 null 跳过初值。
+    mediaQueryCache.set(query, readMediaQuery(query));
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }
 
   const mql = window.matchMedia(query);
+  // 订阅瞬间立即同步 cache（不触发 onStoreChange，让首次 getSnapshot 返回真值）。
+  mediaQueryCache.set(query, mql.matches);
   const update = () => publish(mql.matches);
   mql.addEventListener("change", update);
   return () => mql.removeEventListener("change", update);

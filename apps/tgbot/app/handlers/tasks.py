@@ -21,7 +21,7 @@ from aiogram.types import (
 )
 
 from ..api_client import ApiError, LumenApi
-from ._helpers import require_message
+from ._helpers import mime_extension, require_message, truncate_text
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -79,7 +79,7 @@ async def cmd_tasks(message: Message, api: LumenApi) -> None:
             )
 
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows) if keyboard_rows else None
-    await message.answer("\n".join(lines), reply_markup=markup)
+    await message.answer(truncate_text("\n".join(lines), 3900), reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("task:send:"))
@@ -116,7 +116,7 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
             except ApiError as exc:
                 logger.warning("task send: download failed gen=%s img=%s err=%s", gen_id, image_id, exc)
                 continue
-            ext = "png" if "png" in mime else ("webp" if "webp" in mime else "jpg")
+            ext = mime_extension(mime)
             filename = f"{gen_id[:8]}-{idx + 1}.{ext}"
             downloads.append((path, mime, size, filename))
 

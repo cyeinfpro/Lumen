@@ -19,6 +19,7 @@ import logging
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from typing import Any
 
 from sqlalchemy import and_, exists, or_, select, update
@@ -48,7 +49,11 @@ _MAX_PROMPT_CHARS = 1200  # 每条消息文本最大保留长度，避免 prompt
 # 内存缓存：避免对已有标题的会话反复查 DB
 # 正条目（title 已非默认）存 _TITLE_CONFIRMED_SENTINEL，永不过期；
 # 负条目（title 仍是占位符）存时间戳，TTL 后允许重新检查。
+# 旧版本曾配 _title_cache_pending set 做并发 dedupe，但 cache 时间戳本身已经能
+# 覆盖那个窗口（先 stamp 再做 IO，DB/enqueue 失败也会被 60s TTL 自然冷却），
+# 多一个 set 反而增加 race 面，移除。
 _title_cache: dict[str, float] = {}
+_title_cache_lock = Lock()
 _TITLE_CONFIRMED_SENTINEL: float = -1.0
 _TITLE_CACHE_TTL_S = 60.0
 
@@ -104,12 +109,20 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
     仅当缓存 miss 或缓存为旧时间戳（待确认状态）时才查 DB。
     """
     now = time.monotonic()
-    cache_entry = _title_cache.get(conversation_id)
-    if cache_entry is not None:
-        if cache_entry == _TITLE_CONFIRMED_SENTINEL:
-            return  # permanently cached: title is set
-        if now - cache_entry < _TITLE_CACHE_TTL_S:
-            return  # recently checked, still in grace period
+    with _title_cache_lock:
+        cache_entry = _title_cache.get(conversation_id)
+        if cache_entry is not None:
+            if cache_entry == _TITLE_CONFIRMED_SENTINEL:
+                return  # permanently cached: title is set
+            if now - cache_entry < _TITLE_CACHE_TTL_S:
+                return  # recently checked, still in grace period
+        # 抢占式占位：先把 cache 时间戳写入再做 IO，避免并发 race 重复 enqueue。
+        # 之前用 _title_cache_pending set 在 enqueue_job 后才 discard，但如果两次
+        # 调用恰好都进了 lock 内的 cache miss 分支并先后看到 pending=空，pending
+        # 仍能 dedupe；不过同一个 cache 时间戳本身 + 60s TTL 已经足够覆盖这个窗
+        # 口。stamp 提前到这里：成功/失败都在 60s 内不再重试，避免上游短暂故障
+        # 时被反复戳。confirmed sentinel 走单独分支（DB 查到非占位标题时）。
+        _title_cache[conversation_id] = now
     try:
         async with SessionLocal() as session:
             row = (
@@ -118,7 +131,8 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
                 )
             ).scalar_one_or_none()
             if row is None or not _is_default_title(row):
-                _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
+                with _title_cache_lock:
+                    _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
                 return
         # enqueue 异步任务，避免阻塞 worker 当前任务收尾
         await redis.enqueue_job("auto_title_conversation", conversation_id)
@@ -341,7 +355,7 @@ async def _call_upstream(input_list: list[dict[str, Any]]) -> str:
 
     失败处理：
     - 单 provider 内部 retriable 错（5xx / 网络）→ 短 backoff 重试一次
-    - 单 provider terminal 失败 → 立刻 failover 下一个候选
+    - 单 provider terminal 失败 → 直接停止 provider 链，避免同一无效输入烧多账号
     - 所有候选都失败 → 抛 UpstreamError 让 caller 判定不重试
     """
     from ..provider_pool import get_pool
@@ -373,9 +387,12 @@ async def _call_upstream(input_list: list[dict[str, Any]]) -> str:
                     error_message=str(exc),
                 )
                 if not decision.retriable:
-                    # terminal：换一个 provider 也无意义但 spec 类的 4xx 可能是该号 auth 坏，
-                    # 故仍跳出内层循环，让外层 try 下一个 provider。
-                    break
+                    logger.info(
+                        "auto_title terminal upstream failure provider=%s reason=%s",
+                        provider.name,
+                        decision.reason,
+                    )
+                    raise exc
                 if attempt + 1 < _PER_PROVIDER_RETRY_ATTEMPTS:
                     await asyncio.sleep(
                         _PER_PROVIDER_RETRY_BACKOFF_S * (2 ** attempt)
@@ -438,6 +455,8 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
             if conv is None:
                 return
             if not _is_default_title(conv.title):
+                with _title_cache_lock:
+                    _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
                 return  # 用户可能手动改过；尊重用户
             user_id = conv.user_id
             input_list = await _build_summary(session, conversation_id)
@@ -471,6 +490,8 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
                 )
             ).scalar_one_or_none()
             if not _is_default_title(row):
+                with _title_cache_lock:
+                    _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
                 return
             await session.execute(
                 update(Conversation)
@@ -491,7 +512,8 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
         except Exception as exc:  # noqa: BLE001
             logger.warning("auto_title publish_event failed conv=%s err=%s", conversation_id, exc)
 
-        _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
+        with _title_cache_lock:
+            _title_cache[conversation_id] = _TITLE_CONFIRMED_SENTINEL
         logger.info("auto_title set conv=%s title=%r", conversation_id, title)
     except Exception as exc:  # noqa: BLE001
         # 不抛异常以免触发 arq 重试（一次失败就算了）

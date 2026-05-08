@@ -26,8 +26,14 @@ class _FakeDb:
     async def execute(self, _stmt: object) -> _Rows:
         return _Rows(self.rows)
 
+    async def connection(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
     def add(self, obj: object) -> None:
         self.added.append(SimpleNamespace(key=obj.key, value=obj.value))
+
+    async def flush(self) -> None:
+        return None
 
 
 @pytest.mark.parametrize(

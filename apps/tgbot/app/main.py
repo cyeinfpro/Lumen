@@ -209,7 +209,7 @@ async def _amain() -> None:
     dp["api"] = api
 
     # 全局准入：拒非私聊 + 可选 TG user_id 白名单
-    gate = AccessGate()
+    gate = AccessGate(api)
     dp.message.middleware(gate)
     dp.callback_query.middleware(gate)
 

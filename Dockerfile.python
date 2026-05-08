@@ -58,13 +58,16 @@ FROM ${PYTHON_BASE} AS runtime
 ARG LUMEN_VERSION=0.0.0
 ARG LUMEN_GIT_SHA=unknown
 ARG LUMEN_BUILD_TIME=1970-01-01T00:00:00Z
+ARG LUMEN_APP_UID=10001
+ARG LUMEN_APP_GID=10001
 
 LABEL org.opencontainers.image.source="https://github.com/cyeinfpro/Lumen" \
       org.opencontainers.image.version="${LUMEN_VERSION}" \
       org.opencontainers.image.revision="${LUMEN_GIT_SHA}" \
       org.opencontainers.image.created="${LUMEN_BUILD_TIME}"
 
-ENV PYTHONUNBUFFERED=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
     PATH=/app/.venv/bin:$PATH \
     LUMEN_VERSION=${LUMEN_VERSION}
 
@@ -77,8 +80,13 @@ RUN apt-get update \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -g 10001 lumen \
-    && useradd -m -u 10001 -g 10001 -s /bin/bash lumen
+# Trade-off：LUMEN_APP_UID/GID 在 build 时烙进镜像 → 同一镜像不能跨主机共用
+# （host 上 storage 目录的 ownership 必须跟 build-arg 对齐）。改成 runtime entrypoint
+# chown 可以解锁跨主机共用，但要新增 entrypoint + 处理 CIFS forceuid 上的 EPERM，
+# 工作量较大；目前 GHCR 镜像默认 10001:10001，运维侧约定 host 数据目录与之一致即可。
+# TODO(post-1.0): runtime chown via entrypoint, drop build-time uid bake-in.
+RUN groupadd -g "${LUMEN_APP_GID}" lumen \
+    && useradd -m -u "${LUMEN_APP_UID}" -g "${LUMEN_APP_GID}" -s /bin/bash lumen
 
 WORKDIR /app
 

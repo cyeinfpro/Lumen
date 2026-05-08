@@ -256,6 +256,24 @@ def test_write_marker_tolerates_chmod_eperm_on_squashed_mount(
     assert "unit=lumen-update-runner.service" in text
 
 
+def test_read_marker_drops_stale_pid_only_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_update, "_pid_is_running", lambda _pid: True)
+    marker = backup_root / ".update.running"
+    marker.write_text(
+        "pid=12345\nstarted_at=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    assert admin_update._read_marker() is None
+    assert not marker.exists()
+
+
 def test_start_update_via_path_unit_tolerates_chmod_eperm_for_env_and_trigger(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -61,6 +61,10 @@ class _FakeRedis:
         self.deleted.append(key)
         self.kv.pop(key, None)
 
+    async def expire(self, key: str, ttl: int) -> None:
+        _ = (key, ttl)
+        return None
+
     async def publish(self, channel: str, payload: str) -> None:
         self.published.append((channel, json.loads(payload)))
 
@@ -338,6 +342,28 @@ def test_chunk_lines_by_budget_splits_single_oversized_line() -> None:
         for chunk in chunks
         for line in chunk
     )
+
+
+@pytest.mark.asyncio
+async def test_renew_summary_lock_marks_lock_lost_when_key_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = _FakeRedis()
+    lock = context_summary._SummaryLock("redis", "token-1")
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(context_summary.asyncio, "sleep", fake_sleep)
+
+    await context_summary._renew_summary_lock_loop(
+        redis,
+        "conv-1",
+        lock,
+        interval_s=1,
+    )
+
+    assert lock.lost_reason == "expired"
 
 
 @pytest.mark.asyncio

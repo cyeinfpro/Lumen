@@ -359,6 +359,14 @@ def _configure_chat_tools(body: dict[str, Any], tools: list[dict[str, Any]]) -> 
     body["parallel_tool_calls"] = False
 
 
+def _decode_upstream_image_b64(value: str) -> bytes:
+    raw = value.strip()
+    if raw[:5].lower() == "data:" and "," in raw:
+        raw = raw.split(",", 1)[1]
+    raw = "".join(raw.split())
+    return base64.b64decode(raw, validate=True)
+
+
 def _tool_display_label(tool_type: str, name: str | None = None) -> str:
     if tool_type == _WEB_SEARCH_TOOL_TYPE:
         return "联网搜索"
@@ -960,7 +968,7 @@ async def _store_and_publish_completion_tool_image(
     revised_prompt: str | None,
 ) -> dict[str, Any] | None:
     try:
-        raw_image = base64.b64decode(b64_image, validate=False)
+        raw_image = _decode_upstream_image_b64(b64_image)
     except binascii.Error as exc:
         raise UpstreamError(
             f"bad base64 from image_generation tool: {exc}",
@@ -1049,7 +1057,7 @@ async def _release_lease(redis: Any, task_id: str) -> None:
 async def _lease_renewer(
     redis: Any, task_id: str, lease_lost: asyncio.Event | None = None
 ) -> None:
-    """每 30s EXPIRE 一次。被 cancel 时优雅退出；连续 3 次失败抛 RuntimeError。"""
+    """每 30s EXPIRE 一次。被 cancel 时优雅退出；连续 3 次失败设置 lease_lost。"""
     consecutive_failures = 0
     try:
         while True:
@@ -1068,9 +1076,12 @@ async def _lease_renewer(
                 if consecutive_failures >= 3:
                     if lease_lost is not None:
                         lease_lost.set()
-                    raise RuntimeError(
-                        f"lease renewer giving up after {consecutive_failures} failures"
+                    logger.error(
+                        "lease renewer giving up task=%s failures=%d",
+                        task_id,
+                        consecutive_failures,
                     )
+                    return
     except asyncio.CancelledError:
         raise
 
@@ -2460,6 +2471,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     redis=redis,
                     chat_model=chat_model,
                 )
+                # _pack_recent_history 可能跑数百 ms（多张图 base64、history scan）；
+                # 期间 lease 可能因 redis 抖动丢掉。下面还有 db 写入，先卡一道。
+                if lease_lost.is_set():
+                    raise _LeaseLost("lease lost after history pack")
                 input_list = packed.input_list
                 instructions = _instructions_with_summary_guardrail(
                     system_prompt,
@@ -2514,6 +2529,8 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             raise _LeaseLost("lease lost before stream start")
         completed_response: dict[str, Any] | None = None
         async for ev in stream_completion(body):
+            if lease_lost.is_set():
+                raise _LeaseLost("lease lost during stream")
             ev_type = ev.get("type", "")
             tool_call = tool_tracker.update(ev)
             if tool_call is not None:
@@ -2555,6 +2572,11 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     raw_id = item.get("id")
                     image_id = raw_id if isinstance(raw_id, str) else None
                 if image_id is None or image_id not in stored_image_call_ids:
+                    # 图片存储是 base64 解码 + PIL 处理 + 多 storage 写 + DB
+                    # insert，最长可达数秒；进入前再卡一道 lease，避免 lease 已
+                    # 被接管 worker 抢走时这边继续写图。
+                    if lease_lost.is_set():
+                        raise _LeaseLost("lease lost before tool image store")
                     image_payload = await _store_and_publish_completion_tool_image(
                         redis=redis,
                         user_id=user_id,
@@ -2695,6 +2717,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             )
 
         # --- 6. 成功态 ---
+        # 写终态 db 前最后一道 lease 检查：如果 stream 期间 lease 丢失但事件循环
+        # 没立刻 raise（lease_lost.set() + 当前 await 不在 stream 循环里），
+        # 这里是写 SUCCEEDED 行前最后机会，否则会出现"lease 已被别人接管 +
+        # 我又写了 SUCCEEDED"的双写。
+        if lease_lost.is_set():
+            raise _LeaseLost("lease lost before success commit")
         async with SessionLocal() as session:
             res = await session.execute(
                 update(Completion)
@@ -2731,6 +2759,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 msg.status = MessageStatus.SUCCEEDED
             await session.commit()
 
+        # publish_event 是 SSE 推送+回放写入；万一 lease 已丢，就别再以"我"的身份
+        # 把 succeeded 推给前端——接管 worker 会再推一次造成重复。
+        if lease_lost.is_set():
+            raise _LeaseLost("lease lost before success event")
         await publish_event(
             redis,
             user_id,
@@ -2936,7 +2968,16 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await renewer
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
-        await _release_lease(redis, task_id)
+        release_future = asyncio.ensure_future(_release_lease(redis, task_id))
+        try:
+            await asyncio.shield(release_future)
+        except asyncio.CancelledError:
+            release_future.add_done_callback(
+                lambda _t: logger.debug(
+                    "completion late lease release finished task=%s", task_id
+                )
+            )
+            raise
         if _stream_span_cm is not None:
             try:
                 _stream_span_cm.__exit__(None, None, None)

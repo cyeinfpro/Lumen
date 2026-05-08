@@ -248,8 +248,10 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     assert "PasswordAuthentication=yes" in cmd
     assert "root@203.0.113.10" in cmd
     assert isinstance(env, dict)
-    assert env["LUMEN_SSH_PASSWORD"] == "secret-password"
+    assert "LUMEN_SSH_PASSWORD" not in env
     assert "SSHPASS" not in env
+    assert isinstance(env["LUMEN_SSH_PASSWORD_FILE"], str)
+    assert not os.path.exists(env["LUMEN_SSH_PASSWORD_FILE"])
     assert isinstance(env["SSH_ASKPASS"], str)
     assert not os.path.exists(env["SSH_ASKPASS"])
 
@@ -272,6 +274,33 @@ def test_parse_provider_item_clamps_extreme_float_weight_values():
     assert parse_provider_item({**base, "weight": "nan"}, index=0).weight == 1
     assert parse_provider_item({**base, "weight": "0"}, index=0).weight == 1
     assert parse_provider_item({**base, "weight": "2500"}, index=0).weight == 1000
+
+
+def test_parse_provider_item_rejects_non_integral_priority():
+    base = {"base_url": "https://upstream.example", "api_key": "sk-test"}
+    for value in ("5.5", "high", True):
+        with pytest.raises(ValueError, match="priority"):
+            parse_provider_item({**base, "priority": value}, index=0)
+
+
+def test_parse_provider_item_requires_locked_image_endpoint_to_be_explicit():
+    base = {"base_url": "https://upstream.example", "api_key": "sk-test"}
+    with pytest.raises(ValueError, match="image_jobs_endpoint_lock"):
+        parse_provider_item(
+            {**base, "image_jobs_endpoint": "auto", "image_jobs_endpoint_lock": True},
+            index=0,
+        )
+
+    provider = parse_provider_item(
+        {
+            **base,
+            "image_jobs_endpoint": "generations",
+            "image_jobs_endpoint_lock": "true",
+        },
+        index=0,
+    )
+    assert provider.image_jobs_endpoint == "generations"
+    assert provider.image_jobs_endpoint_lock is True
 
 
 def test_parse_provider_json_accumulates_item_errors():

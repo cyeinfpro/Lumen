@@ -133,6 +133,34 @@ def is_retriable(
         return RetryDecision(False, "terminal safety_policy")
     if "pixel budget" in msg or "invalid size" in msg:
         return RetryDecision(False, "terminal pixel_budget")
+    if http_status is not None and http_status in (400, 401, 403, 404, 422):
+        if err_code not in {EC.RATE_LIMIT_ERROR.value, EC.RATE_LIMIT_EXCEEDED.value}:
+            # Treat explicit rate-limit codes as transient even if a gateway
+            # reports them with a bad 4xx status, but do not let arbitrary
+            # "rate limit" wording in a 400 payload override terminal input
+            # failures.
+            #
+            # 关键字救援：部分网关把 rate_limit / concurrency / too_many_requests
+            # 包装成 status=400 + body 含 "rate_limit_exceeded" 等。早决策若直接
+            # terminal 会吃掉下方的 retriable 关键字分支。命中任一 marker 就放行
+            # 到后续逻辑，由 keyword / 429 / err_code 分支判 retriable。
+            #
+            # 注意：marker 只匹配确凿的 rate-limit 形态，避免误把
+            # `bad request: rate limit field is invalid` 这类描述性文案误放行——
+            # 见 test_http_400_rate_limit_wording_without_code_is_terminal。
+            _rate_markers = (
+                "rate_limit_exceeded",
+                "rate_limit_error",
+                "rate_limited",
+                "rate_limit:",
+                "too many requests",
+                "too_many_requests",
+                "concurrency limit exceeded",
+                "concurrency_limit_exceeded",
+                "concurrency_limit_error",
+            )
+            if not any(marker in msg for marker in _rate_markers):
+                return RetryDecision(False, f"terminal http={http_status}")
 
     # 2) retriable signals — 关键词优先，其次 status_code
     if (
@@ -157,8 +185,6 @@ def is_retriable(
         or "no upstream account" in msg
     ):
         return RetryDecision(True, "retriable upstream_wrapped_failure")
-    if http_status is not None and http_status in (400, 401, 403, 404, 422):
-        return RetryDecision(False, f"terminal http={http_status}")
     if err_code in _RETRIABLE_ERROR_CODES:
         return RetryDecision(True, f"retriable error_code={err_code}")
     if http_status is None:

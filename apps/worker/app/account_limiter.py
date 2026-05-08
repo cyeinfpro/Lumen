@@ -24,6 +24,7 @@ from typing import Any
 _KEY_TS = "lumen:acct:{name}:image:ts"
 _KEY_DAILY = "lumen:acct:{name}:image:daily:{day}"
 _TS_TTL_S = 86400 * 2
+_REDIS_ERROR_RETRY_AFTER_S = 5.0
 
 _CHECK_WINDOW_LUA = """
 local key = KEYS[1]
@@ -128,13 +129,26 @@ async def _check_window_fallback(
         return used, None
 
 
+def _make_redis_blip_retry_after(cur_now: float, window_s: float) -> float:
+    """Redis 抖动时的 fail-closed 短冷却，"oldest" 占位让上层算出 5s 级 retry。
+
+    上层公式：``retry_after = max(1.0, (oldest + window_s) - cur_now)``。
+    所以这里用 ``cur_now - window_s + _REDIS_ERROR_RETRY_AFTER_S`` 作为伪
+    oldest，正好让 retry_after = _REDIS_ERROR_RETRY_AFTER_S（5s）。语义：
+    "Redis 抖了，5 秒后再让选号器试一次"，不依赖 cutoff 数学耦合。
+    """
+    return cur_now - float(window_s) + _REDIS_ERROR_RETRY_AFTER_S
+
+
 async def _check_window(
     redis: Any,
     ts_key: str,
     *,
-    cutoff: float,
+    cur_now: float,
+    window_s: float,
     count_limit: int,
 ) -> tuple[int, float | None]:
+    cutoff = cur_now - float(window_s)
     eval_fn = getattr(redis, "eval", None)
     if callable(eval_fn):
         try:
@@ -156,11 +170,9 @@ async def _check_window(
                 return used, None
             return used, float(oldest_raw)
         except Exception:  # noqa: BLE001
-            # P1: Lua eval 异常（Redis 短暂不可达等）时保守拒绝，返回 (count_limit, None)
-            # 即假设窗口已满。这是安全侧策略：宁拒不放。建议加 Prometheus Counter
-            # `lumen_account_limiter_lua_eval_errors_total` 监控该路径触发频率，
-            # 若频繁触发说明 Redis 需要扩容或切换主从。
-            return count_limit, None
+            # Redis 短暂不可达时仍 fail-closed，但只冷却几秒；旧行为把 oldest=None
+            # 交给上层，导致整段 window_s 都被视为不可用，放大一次 Redis 抖动。
+            return count_limit, _make_redis_blip_retry_after(cur_now, window_s)
     return await _check_window_fallback(
         redis, ts_key, cutoff=cutoff, count_limit=count_limit
     )
@@ -262,9 +274,12 @@ async def check_quota(
     if parsed is not None:
         count_limit, window_s = parsed
         ts_key = _KEY_TS.format(name=account)
-        cutoff = cur_now - window_s
         used, oldest = await _check_window(
-            redis, ts_key, cutoff=cutoff, count_limit=count_limit
+            redis,
+            ts_key,
+            cur_now=cur_now,
+            window_s=window_s,
+            count_limit=count_limit,
         )
         if used >= count_limit:
             retry_after = float(window_s)

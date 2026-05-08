@@ -180,6 +180,24 @@ async def test_image_params_from_target_preserves_explicit_format() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mask_image_id_from_target_preserves_alive_mask() -> None:
+    # Why: mask must come from the SAME canonical "first generation" row
+    # that _image_params_from_target uses (gens[0]). This test feeds an
+    # ordered list with a mask on gens[0] and expects that mask back.
+    first = SimpleNamespace(mask_image_id="mask-1")
+    db = _Db([_Result(all_values=[first]), _Result("mask-1")])
+
+    out = await regenerate._mask_image_id_from_target(
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        conv_id="conv-1",
+        target_msg_id="assistant-old",
+    )
+
+    assert out == "mask-1"
+
+
+@pytest.mark.asyncio
 async def test_regenerate_rejects_image_to_image_without_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

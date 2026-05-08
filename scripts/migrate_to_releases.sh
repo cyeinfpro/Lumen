@@ -75,6 +75,24 @@ move_to_release() {
 
     log_info "把 ${ROOT} 当前内容（除 .env）移到 ${TMP_ROOT}/releases/${INITIAL_ID}/"
     mkdir -p "${TMP_ROOT}/releases/${INITIAL_ID}"
+    local moved_manifest="${TMP_ROOT}/.moved-manifest"
+    : > "${moved_manifest}"
+
+    rollback_move_to_release() {
+        log_error "迁移中断，回滚已移动的顶层条目。"
+        local moved_name
+        while IFS= read -r moved_name; do
+            [ -n "${moved_name}" ] || continue
+            if [ -e "${TMP_ROOT}/releases/${INITIAL_ID}/${moved_name}" ] || [ -L "${TMP_ROOT}/releases/${INITIAL_ID}/${moved_name}" ]; then
+                mv "${TMP_ROOT}/releases/${INITIAL_ID}/${moved_name}" "${ROOT}/${moved_name}" 2>/dev/null || true
+            fi
+        done < "${moved_manifest}"
+        if [ -f "${TMP_ROOT}/.env" ] && [ ! -e "${ROOT}/.env" ]; then
+            mv "${TMP_ROOT}/.env" "${ROOT}/.env" 2>/dev/null || true
+        fi
+        rm -rf "${TMP_ROOT}" 2>/dev/null || true
+    }
+    trap rollback_move_to_release ERR
 
     # 用 find -mindepth 1 -maxdepth 1 列出所有顶层条目（含点开头），逐个移动。
     # 跳过 .env（共享配置，迁移后挂在 ${ROOT}/.env）。
@@ -85,12 +103,14 @@ move_to_release() {
             ''|'.'|'..'|'.env') continue ;;
         esac
         mv "${entry}" "${TMP_ROOT}/releases/${INITIAL_ID}/${name}"
+        printf '%s\n' "${name}" >> "${moved_manifest}"
     done < <(find "${ROOT}" -mindepth 1 -maxdepth 1 \( -type d -o -type f -o -type l \) 2>/dev/null)
 
     # 把 .env 单独搬到 ${TMP_ROOT}/.env
     if [ -f "${ROOT}/.env" ]; then
         mv "${ROOT}/.env" "${TMP_ROOT}/.env"
     fi
+    trap - ERR
 
     log_info "把中转目录内容回填到 ${ROOT}"
     # 此时 ${ROOT} 已空。把 ${TMP_ROOT} 下的 releases / shared / .env 移过来。

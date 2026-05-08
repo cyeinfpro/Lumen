@@ -82,13 +82,24 @@ jobs:
         run: npm run build
 
       - name: Prepare compose env file
-        run: cp .env.example .env
+        run: |
+          set -euo pipefail
+          cp .env.example .env.ci
+          db_pass="$(openssl rand -hex 32)"
+          redis_pass="$(openssl rand -hex 32)"
+          session_secret="$(openssl rand -hex 64)"
+          sed -i \
+            -e "s|^DB_PASSWORD=.*|DB_PASSWORD=${db_pass}|" \
+            -e "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${redis_pass}|" \
+            -e "s|^SESSION_SECRET=.*|SESSION_SECRET=${session_secret}|" \
+            .env.ci
+          sed -i "s|^LUMEN_COMPOSE_ENV_FILE=.*|LUMEN_COMPOSE_ENV_FILE=.env.ci|" .env.ci
 
       - name: Compose config
-        run: docker compose --env-file .env.example config >/tmp/lumen-compose-config.yml
+        run: docker compose --env-file .env.ci config >/tmp/lumen-compose-config.yml
 
       - name: Docker build smoke
-        run: docker compose --env-file .env.example build api worker web tgbot
+        run: docker compose --env-file .env.ci build api worker web tgbot
 
       - name: Image start smoke
         env:
@@ -105,9 +116,10 @@ jobs:
           sudo chown -R 70:70 "$LUMEN_DB_ROOT/postgres"
           sudo chown -R 999:999 "$LUMEN_DB_ROOT/redis"
           sudo chown -R 10001:10001 "$LUMEN_DATA_ROOT/storage" "$LUMEN_DATA_ROOT/backup"
-          docker compose --env-file .env.example -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait postgres redis
-          docker compose --env-file .env.example -f docker-compose.yml -f deploy/docker/docker-compose.local.yml --profile migrate run --rm migrate
-          docker compose --env-file .env.example -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait api worker web
+          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
+          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait postgres redis
+          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml --profile migrate run --rm migrate
+          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait api worker web
           curl -fsS http://127.0.0.1:18000/healthz
           curl -fsS http://127.0.0.1:13000/
 
@@ -117,7 +129,7 @@ jobs:
           LUMEN_DATA_ROOT: /tmp/lumen-ci-data
           LUMEN_DB_ROOT: /tmp/lumen-ci-data
           COMPOSE_PROJECT_NAME: lumen-ci
-        run: docker compose --env-file .env.example -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
+        run: docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
 
   build:
     name: Build & push ${{ matrix.image.name }}
@@ -196,6 +208,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image.name }}
+          # mode=max 保留所有中间层，否则 base / pip-install / source-copy 这种
+          # 构建慢但变化少的层在下次 build 命中不到，CI 时间会从 ~6min 涨到 ~18min。
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
           build-args: |
             LUMEN_VERSION=${{ steps.meta-vars.outputs.lumen_version }}
@@ -256,6 +270,8 @@ jobs:
           platforms: ${{ matrix.platform.name }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=lumen-web-${{ matrix.platform.tag }}
+          # mode=max 保留所有中间层；Next.js 16 build 在 arm64 native runner 上
+          # 编译耗时大头，没全量 cache 会让每次 push 都退化到冷启动。
           cache-to: type=gha,mode=max,scope=lumen-web-${{ matrix.platform.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/cyeinfpro/Lumen

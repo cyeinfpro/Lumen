@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -223,15 +224,31 @@ def _format_kv_file(content: dict[str, str]) -> str:
 
 
 def _write_atomic(path: Path, content: str, mode: int = 0o600) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    tmp = Path(tmp_name)
     try:
-        os.chmod(tmp, mode)
-    except OSError:
-        # CIFS forceuid mounts can EPERM on chmod; STATE_DIR isn't on CIFS but
-        # tolerate to avoid future surprises.
-        pass
-    os.replace(tmp, path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            # CIFS forceuid mounts can EPERM on chmod; STATE_DIR isn't on CIFS but
+            # tolerate to avoid future surprises.
+            pass
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _ensure_state_dir() -> None:

@@ -2293,6 +2293,7 @@ lumen_image_tag_is_rolling() {
 lumen_set_image_tag_in_env() {
     local file="$1"
     local tag="$2"
+    local dir base tmp
     if [ -z "${file}" ] || [ -z "${tag}" ]; then
         log_error "lumen_set_image_tag_in_env：参数不完整 (file=${file} tag=${tag})。"
         return 1
@@ -2301,14 +2302,39 @@ lumen_set_image_tag_in_env() {
         log_error "lumen_set_image_tag_in_env：${file} 不存在。"
         return 1
     fi
-    if grep -qE '^LUMEN_IMAGE_TAG=' "${file}"; then
-        if ! sed -i.bak "s|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${tag}|" "${file}"; then
-            log_error "sed 替换 LUMEN_IMAGE_TAG 失败：${file}"
-            return 1
-        fi
-        rm -f "${file}.bak" 2>/dev/null || true
-    else
-        printf '\nLUMEN_IMAGE_TAG=%s\n' "${tag}" >> "${file}"
+    dir="$(dirname "${file}")"
+    base="$(basename "${file}")"
+    # 显式 `.tmp` 后缀：dir 可能恰好是 nginx sites-enabled 之类含 `include *` 的
+    # 目录（运维误把 .env 放进去过），mktemp 默认无后缀的临时名 `.foo.image-tag.AbCdEf`
+    # 会被纳入 include。`.tmp` 后缀让所有 conf 风格 include 一致跳过。
+    if ! tmp="$(mktemp "${dir}/.${base}.image-tag.XXXXXX.tmp")"; then
+        log_error "lumen_set_image_tag_in_env：无法创建临时文件。"
+        return 1
+    fi
+    if ! awk -v tag="${tag}" '
+        BEGIN { done = 0 }
+        /^LUMEN_IMAGE_TAG=/ {
+            if (done == 0) {
+                print "LUMEN_IMAGE_TAG=" tag
+                done = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (done == 0) {
+                print "LUMEN_IMAGE_TAG=" tag
+            }
+        }
+    ' "${file}" > "${tmp}"; then
+        rm -f "${tmp}" 2>/dev/null || true
+        log_error "写入 LUMEN_IMAGE_TAG 临时文件失败：${file}"
+        return 1
+    fi
+    if ! mv "${tmp}" "${file}"; then
+        rm -f "${tmp}" 2>/dev/null || true
+        log_error "替换 LUMEN_IMAGE_TAG 文件失败：${file}"
+        return 1
     fi
     local count
     count="$(grep -cE '^LUMEN_IMAGE_TAG=' "${file}" || true)"

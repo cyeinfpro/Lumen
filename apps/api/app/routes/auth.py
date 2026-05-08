@@ -86,6 +86,7 @@ _PASSWORD_RESET_CONFIRM_IP_LIMITER = RateLimiter(
 _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER = RateLimiter(
     capacity=5, refill_per_sec=5 / 900, always_on=True
 )
+_DEV_ENVS = {"dev", "development", "local", "test"}
 
 
 def _sanitize_ua(raw: str | None) -> str:
@@ -115,19 +116,26 @@ def _password_reset_key(token: str) -> str:
     return f"{_PASSWORD_RESET_KEY_PREFIX}:{hash_token(token)}"
 
 
+def _is_dev_env() -> bool:
+    return settings.app_env.strip().lower() in _DEV_ENVS
+
+
+def _cookie_secure() -> bool:
+    return not _is_dev_env()
+
+
 def _cookie_samesite() -> str:
-    return "lax" if settings.app_env == "dev" else "strict"
+    return "lax" if _is_dev_env() else "strict"
 
 
 def _set_auth_cookies(response: Response, session_id: str, csrf: str) -> None:
-    secure = settings.app_env != "dev"
     max_age = settings.session_ttl_min * 60
     response.set_cookie(
         SESSION_COOKIE,
         make_session_cookie(session_id),
         max_age=max_age,
         httponly=True,
-        secure=secure,
+        secure=_cookie_secure(),
         samesite=_cookie_samesite(),
         path="/",
     )
@@ -135,7 +143,6 @@ def _set_auth_cookies(response: Response, session_id: str, csrf: str) -> None:
 
 
 def _set_csrf_cookie(response: Response, csrf: str) -> None:
-    secure = settings.app_env != "dev"
     max_age = settings.session_ttl_min * 60
     # CSRF must be readable by JS (double-submit). Not httponly.
     response.set_cookie(
@@ -143,15 +150,27 @@ def _set_csrf_cookie(response: Response, csrf: str) -> None:
         csrf,
         max_age=max_age,
         httponly=False,
-        secure=secure,
+        secure=_cookie_secure(),
         samesite=_cookie_samesite(),
         path="/",
     )
 
 
 def _clear_auth_cookies(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE, path="/")
-    response.delete_cookie(CSRF_COOKIE, path="/")
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        secure=_cookie_secure(),
+        httponly=True,
+        samesite=_cookie_samesite(),
+    )
+    response.delete_cookie(
+        CSRF_COOKIE,
+        path="/",
+        secure=_cookie_secure(),
+        httponly=False,
+        samesite=_cookie_samesite(),
+    )
 
 
 class CsrfOut(BaseModel):
@@ -287,6 +306,7 @@ async def signup(
                 select(InviteLink)
                 .where(InviteLink.token == body.invite_token)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if invite is None:
@@ -461,29 +481,23 @@ async def password_reset_request(
             select(User).where(User.email == email, User.deleted_at.is_(None))
         )
     ).scalar_one_or_none()
-    if user is None:
-        return OkOut(ok=True)
-
     token = secrets.token_urlsafe(32)
+    store_value = user.id if user is not None else "0"
+    store_ttl = _PASSWORD_RESET_TTL_SECONDS if user is not None else 10
     try:
         await redis.set(
             _password_reset_key(token),
-            user.id,
-            ex=_PASSWORD_RESET_TTL_SECONDS,
+            store_value,
+            ex=store_ttl,
         )
-    except Exception as exc:
-        # Do not reveal whether the email exists; without mail integration this
-        # endpoint remains a safe no-op if Redis is temporarily unavailable.
+    except Exception:
+        # Do not reveal whether the email exists. Redis failures must not create
+        # a 200-vs-503 side channel for registered addresses.
         logger.error(
             "password_reset_token_store_failed",
-            extra={"email_hash": _log_hash(email), "user_id": user.id},
+            extra={"email_hash": _log_hash(email), "user_id": user.id if user else None},
             exc_info=True,
         )
-        raise _bad(
-            "reset_unavailable",
-            "password reset is temporarily unavailable",
-            503,
-        ) from exc
     return OkOut(ok=True)
 
 

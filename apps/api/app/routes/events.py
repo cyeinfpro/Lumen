@@ -196,6 +196,36 @@ def _compaction_conv_id(channel: object) -> str | None:
     return channel_text.removeprefix(_COMPACTION_CHANNEL_PREFIX)
 
 
+def _task_ids_from_payload(payload: dict) -> set[str]:
+    ids: set[str] = set()
+    for key in ("task_id", "generation_id", "completion_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            ids.add(value)
+    return ids
+
+
+def _replay_payload_matches_channels(
+    payload: object,
+    *,
+    requested_channels: set[str],
+    user_channel: str,
+) -> bool:
+    if not requested_channels or user_channel in requested_channels:
+        return True
+    if not isinstance(payload, dict):
+        return False
+
+    event_channels: set[str] = set()
+    conv_id = payload.get("conversation_id")
+    if isinstance(conv_id, str) and conv_id:
+        event_channels.add(f"conv:{conv_id}")
+    event_channels.update(f"task:{task_id}" for task_id in _task_ids_from_payload(payload))
+    if not event_channels:
+        return False
+    return bool(event_channels & requested_channels)
+
+
 @router.get("/events")
 async def events(
     request: Request,
@@ -220,6 +250,13 @@ async def events(
             },
         )
     valid = await _validate_channels(requested, user.id, db)
+    client_valid = await _validate_channels(client_requested, user.id, db)
+    user_channel = f"user:{user.id}"
+    # Why: live subscription always includes `user:<id>` (see `requested`
+    # above), so replay must do the same. Otherwise a client that only
+    # asked for `conv:X` would miss user-scoped events (account changes,
+    # system notifications) that landed in the stream while disconnected.
+    replay_requested_channels = set(client_valid) | {user_channel}
 
     last_event_id = request.headers.get("Last-Event-ID")
     # Why: Last-Event-ID is attacker-controlled; an unsanitised value can
@@ -257,9 +294,17 @@ async def events(
                         except Exception:
                             ev_name = event_name or "message"
                             payload = {"raw": data}
+                        if not _replay_payload_matches_channels(
+                            payload,
+                            requested_channels=replay_requested_channels,
+                            user_channel=user_channel,
+                        ):
+                            continue
                         # GEN-P0-7 (3): 让 payload 也带 msg_id，前端做 JSON 级去重
                         if isinstance(payload, dict):
                             payload = {**payload, "msg_id": msg_id}
+                        else:
+                            payload = {"data": payload, "msg_id": msg_id}
                         yield {
                             "id": msg_id,
                             "event": ev_name,
@@ -320,6 +365,12 @@ async def events(
                     _deadline, event = pending_compaction_started.pop(conv_id)
                     yield event
 
+                # Why: default 1.0s instead of 0.25s — at 0.25s every idle
+                # SSE connection wakes 4× per second just to spin the loop,
+                # which scales poorly with many subscribers. A 1-second
+                # baseline still satisfies our keep-alive cadence; when
+                # `pending_compaction_started` carries a tighter deadline,
+                # narrow the timeout dynamically.
                 timeout = 1.0
                 if pending_compaction_started:
                     next_deadline = min(
@@ -376,8 +427,11 @@ async def events(
                         # Last-Event-ID 即为这个 id，下次 XREAD 严格 resume。
                         event_id = parsed.get("sse_id") if isinstance(parsed, dict) else None
                         # 同时把 msg_id 放进 payload 方便前端 JSON 级去重
-                        if isinstance(payload, dict) and isinstance(event_id, str) and event_id:
-                            payload = {**payload, "msg_id": event_id}
+                        if isinstance(event_id, str) and event_id:
+                            if isinstance(payload, dict):
+                                payload = {**payload, "msg_id": event_id}
+                            else:
+                                payload = {"data": payload, "msg_id": event_id}
                         out = {
                             "event": ev_name,
                             "data": json.dumps(payload, separators=(",", ":")),

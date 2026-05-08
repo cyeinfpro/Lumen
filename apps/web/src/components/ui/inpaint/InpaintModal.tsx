@@ -88,7 +88,7 @@ function InpaintModalInner() {
 
   // —— 全部 useState / useRef 一次性声明（Hooks 顺序稳定） ——
   const [prompt, setPrompt] = useState(initialDraft);
-  const [prevImageId, setPrevImageId] = useState(currentImageId);
+  const prevImageIdRef = useRef(currentImageId);
   const [hasStroke, setHasStroke] = useState(
     () => (initialStrokes?.length ?? 0) > 0,
   );
@@ -104,19 +104,24 @@ function InpaintModalInner() {
   }, [submitting]);
 
   // —— imageId 切换时同步 state（modal 不重 mount 的边界场景：openInpaint(B) 直接覆盖）——
-  // ref 写入不能放 render 阶段（React 19 lint），timer cleanup 由下方 effect 处理。
-  if (prevImageId !== currentImageId) {
-    setPrevImageId(currentImageId);
-    setPrompt(currentImageId ? drafts[currentImageId] ?? "" : "");
+  // React 19 strict mode 下不能在 render 阶段连发 setState；切换同步放进 effect。
+  // deps 只放 currentImageId：drafts/maskDrafts 是 zustand store 引用，每次写入引用变会让
+  // effect 重跑然后早 return（prevImageIdRef 守卫），白白浪费。effect 内部用 getState() 读最新值。
+  useEffect(() => {
+    if (prevImageIdRef.current === currentImageId) return;
+    prevImageIdRef.current = currentImageId;
+    const snapshot = useInpaintStore.getState();
+    setPrompt(currentImageId ? snapshot.drafts[currentImageId] ?? "" : "");
     setHasStroke(
       currentImageId
-        ? (maskDrafts[currentImageId]?.length ?? 0) > 0
+        ? (snapshot.maskDrafts[currentImageId]?.length ?? 0) > 0
         : false,
     );
     setCoverage(0);
     setWarning(null);
     setConfirmingClose(false);
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentImageId]);
 
   // imageId 切换时清掉 confirmClose timer（ref 操作必须在 effect 里）
   useEffect(() => {

@@ -633,8 +633,6 @@ async def test_post_message_persists_mask_image_id_for_image_to_image(
             _Result(_conv()),       # conversation lookup
             _Result(None),          # idempotency completion lookup
             _Result(None),          # idempotency generation lookup
-            _Result(),              # with_for_update completion (unused)
-            _Result(),              # with_for_update generation (unused)
             _Result(all_values=["img-att"]),  # attachment_image_ids validation
             _Result("img-mask"),    # mask image ownership lookup
         ]
@@ -775,8 +773,6 @@ async def test_post_message_rejects_mask_with_multiple_references(
             _Result(_conv()),                                # conversation lookup
             _Result(None),                                   # idempotency completion
             _Result(None),                                   # idempotency generation
-            _Result(),                                       # with_for_update completion (unused)
-            _Result(),                                       # with_for_update generation (unused)
             _Result(all_values=["img-a", "img-b"]),          # attachment validation
         ]
     )
@@ -818,8 +814,6 @@ async def test_post_message_rejects_mask_not_owned_by_user(
             _Result(_conv()),                  # conversation lookup
             _Result(None),                     # idempotency completion lookup
             _Result(None),                     # idempotency generation lookup
-            _Result(),                         # with_for_update completion (unused)
-            _Result(),                         # with_for_update generation (unused)
             _Result(all_values=["img-att"]),   # attachment validation passes
             _Result(None),                     # mask lookup → not owned / missing
         ]

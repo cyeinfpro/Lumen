@@ -11,6 +11,7 @@ from pathlib import Path
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 
 # 让 alembic 能 import app.* 与 lumen_core.*
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,8 +24,11 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# migration 用同步驱动
-sync_url = settings.database_url.replace("+asyncpg", "")
+# migration 用同步驱动；用 URL parser 避免误改 username/password/path 里的字符串。
+_db_url = make_url(settings.database_url)
+if _db_url.drivername in {"postgresql+asyncpg", "postgresql"}:
+    _db_url = _db_url.set(drivername="postgresql+psycopg2")
+sync_url = _db_url.render_as_string(hide_password=False)
 config.set_main_option("sqlalchemy.url", sync_url)
 
 target_metadata = Base.metadata
@@ -46,6 +50,7 @@ def run_migrations_online() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"connect_timeout": 10, "application_name": "alembic"},
     )
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

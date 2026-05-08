@@ -31,6 +31,7 @@ _CONTROL_CHANNEL = "admin:tgbot:control"
 class RestartOut(BaseModel):
     ok: bool
     receivers: int  # Redis publish 返回的 subscriber 数；0 表示 bot 进程不在线
+    error: str | None = None
 
 
 @router.post("/restart", response_model=RestartOut, dependencies=[Depends(verify_csrf)])
@@ -42,16 +43,23 @@ async def restart_bot(
     redis = get_redis()
     try:
         receivers = int(await redis.publish(_CONTROL_CHANNEL, b"restart"))
+        error = None
     except Exception as exc:  # noqa: BLE001
         logger.error("publish restart failed: %s", exc)
         receivers = 0
+        error = "publish_failed"
     await write_admin_audit(
         db,
         request,
         admin,
         event_type="admin.telegram.restart",
-        details={"receivers": receivers},
+        details={"receivers": receivers, "error": error},
     )
     await db.commit()
-    logger.info("admin restart tgbot by user=%s receivers=%d", admin.id, receivers)
-    return RestartOut(ok=True, receivers=receivers)
+    logger.info(
+        "admin restart tgbot by user=%s receivers=%d error=%s",
+        admin.id,
+        receivers,
+        error,
+    )
+    return RestartOut(ok=error is None, receivers=receivers, error=error)

@@ -50,6 +50,7 @@ _UPDATE_TRIGGER_NAME = ".update.trigger"
 _UPDATE_RUNNER_ENV_NAME = ".update.env"
 _UPDATE_RUNNER_UNIT = "lumen-update-runner.service"
 _LOG_TAIL_CHARS = 6000
+_PID_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
 
 # Release directory layout — overridable via env so unit tests / non-prod
 # installs can point at a sandbox without touching config.py schema.
@@ -234,6 +235,19 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
+def _marker_is_stale(started_at: str | None) -> bool:
+    if not started_at:
+        return False
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    age = datetime.now(timezone.utc) - started.astimezone(timezone.utc)
+    return age.total_seconds() > _PID_MARKER_STALE_AFTER_SECONDS
+
+
 def _unit_is_running(unit: str) -> bool:
     if not unit or shutil.which("systemctl") is None:
         return False
@@ -273,7 +287,7 @@ def _read_marker() -> UpdateMarker | None:
             unit = value.strip() or None
     if unit and _unit_is_running(unit):
         return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
-    if pid and _pid_is_running(pid):
+    if pid and _pid_is_running(pid) and not _marker_is_stale(started_at):
         return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
     try:
         marker.unlink()
@@ -1371,7 +1385,7 @@ async def trigger_update(
     script = _update_script()
     if not script.is_file():
         raise _http("script_missing", f"missing {script}", 500)
-    marker = _read_marker()
+    marker = await asyncio.to_thread(_read_marker)
     if marker is not None:
         if marker.unit:
             raise _http("update_running", f"Lumen update is already running ({marker.unit})", 409)
@@ -1413,7 +1427,7 @@ async def trigger_update(
         # Preferred path: a system-installed lumen-update-runner.service watched
         # by lumen-update.path. Trigger via a file write — PID 1 starts the
         # runner, so we sidestep lumen-api's sandbox completely.
-        if _runner_unit_available():
+        if await asyncio.to_thread(_runner_unit_available):
             outcome = _start_update_via_path_unit(
                 env=env,
                 log_fh=log_fh,

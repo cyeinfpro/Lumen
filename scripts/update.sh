@@ -491,9 +491,14 @@ probe_ghcr_tag() {
 }
 
 # Trap：任何未结束 phase 收口为 fail，并尝试切回旧 release。
+UPDATE_ERROR_HANDLED=0
 on_err() {
-    local rc="$?"
+    local rc="${1:-1}"
     [ "${rc}" -eq 0 ] && return 0
+    if [ "${UPDATE_ERROR_HANDLED}" -eq 1 ]; then
+        return 0
+    fi
+    UPDATE_ERROR_HANDLED=1
     lumen_step_finalize_failure "${rc}"
     log_error "更新失败：返回码 ${rc}"
     if [ "${ROLLBACK_DONE}" -eq 0 ]; then
@@ -517,10 +522,12 @@ on_err() {
             fi
         fi
     fi
-    exit "${rc}"
+    return 0
 }
-trap 'on_err' ERR
-trap 'rc=$?; [ "$rc" -ne 0 ] && on_err || true; lumen_release_lock' EXIT
+# ERR trap：只调 on_err 标记/回滚，不再 exit —— bash 默认会让出错命令的非零 rc
+# 透传到 EXIT trap，避免双 exit 与 EXIT 内 lumen_release_lock 的执行顺序竞态。
+trap 'rc=$?; on_err "$rc"' ERR
+trap 'rc=$?; [ "$rc" -ne 0 ] && on_err "$rc" || true; lumen_release_lock' EXIT
 
 # ---------------------------------------------------------------------------
 # 主流程封装：用 lumen_with_lock 套一层
@@ -1149,7 +1156,19 @@ emit_start restart_services
 
 CURRENT_LINK="${ROOT}/current"
 # --force-recreate：同 start_infra 理由，避免容器名冲突 fail。
-if lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate api worker web; then
+# 服务启动顺序：worker → web → api。lumen-api **必须最后重启**——
+# update.sh 自身就是被 admin_update 通过 lumen-update-runner 触发的，
+# 如果 api 先重启，正在等 update 进度 SSE 的前端会立刻断流；
+# 把 api 放到最后还能用旧 api 把进度写完，再无缝切到新版本。
+# (per project_lumen_update_button.md)
+_restart_ok=1
+for _svc in worker web api; do
+    if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+        _restart_ok=0
+        break
+    fi
+done
+if [ "${_restart_ok}" = "1" ]; then
     :
 else
     log_error "[restart_services] api/worker/web 启动失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
@@ -1164,9 +1183,20 @@ else
             log_error "[restart_services] previous release 目录不存在（${ROOT}/releases/${CURRENT_ID:-<none>}），跳过自动回滚。"
         else
             if lumen_set_image_tag_in_env "${SHARED_ENV}" "${PREVIOUS_TAG}"; then
+                _rollback_started=1
                 if lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
-                    && lumen_compose_in "${CURRENT_LINK}" pull \
-                    && lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate api worker web; then
+                    && lumen_compose_in "${CURRENT_LINK}" pull; then
+                    # 回滚同样按 worker → web → api 顺序逐个 up，保留 api 最后启动的偏好。
+                    for _svc in worker web api; do
+                        if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+                            _rollback_started=0
+                            break
+                        fi
+                    done
+                else
+                    _rollback_started=0
+                fi
+                if [ "${_rollback_started}" = "1" ]; then
                     SWITCHED=0  # current 已切回旧 release，on_err 不再重复切
                     log_warn "[restart_services] 已用 ${PREVIOUS_TAG} 回滚成功（current → ${CURRENT_ID}）；本次 update 视为失败。"
                     emit_info restart_services rolled_back_to "${PREVIOUS_TAG}"

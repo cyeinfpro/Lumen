@@ -127,6 +127,17 @@ def upgrade() -> None:
         base_url=base_url,
         api_key=api_key or "",
     )
+    # Why no raise on empty merged: a fresh install with no upstream.api_key
+    # in system_settings legitimately yields merged=[] here (nothing to migrate),
+    # and we still want the DELETE below to clean up any stray empty rows. Only
+    # warn so operators notice if a deployment that *should* have legacy keys
+    # somehow ends up dropping them, but never block the upgrade.
+    if not merged:
+        import logging
+        logging.getLogger("alembic").warning(
+            "provider migration: no providers to seed (legacy upstream "
+            "settings missing or empty); proceeding with cleanup only"
+        )
     if merged != providers:
         _upsert_setting(conn, "providers", json.dumps(merged, ensure_ascii=False))
 

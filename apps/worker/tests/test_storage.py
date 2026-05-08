@@ -78,6 +78,25 @@ def test_put_bytes_fallback_retries_transient_file_exists(
     assert storage.get_bytes("u/user/g/gen/orig.png") == b"first"
 
 
+def test_put_bytes_ignores_tmp_cleanup_failure_after_successful_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = LocalStorage(tmp_path)
+    original_unlink = Path.unlink
+
+    def flaky_unlink(self: Path, *args, **kwargs):  # noqa: ANN002, ANN003
+        if self.name.startswith(".orig.png.") and self.name.endswith(".tmp"):
+            raise OSError("cleanup failed")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    result = storage.put_bytes_result("u/user/g/gen/orig.png", b"first")
+
+    assert result.created is True
+    assert storage.get_bytes("u/user/g/gen/orig.png") == b"first"
+
+
 @pytest.mark.asyncio
 async def test_async_put_get_and_delete_bytes(tmp_path: Path) -> None:
     storage = LocalStorage(tmp_path)

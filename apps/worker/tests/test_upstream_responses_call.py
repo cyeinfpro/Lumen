@@ -200,6 +200,53 @@ async def test_responses_call_aggregates_sse_completed_frame(
 
 
 @pytest.mark.asyncio
+async def test_iter_sse_with_runtime_counts_utf8_bytes_for_line_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_response = _FakeStreamResponse(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        sse_lines=["汉汉"],
+    )
+    client = _FakeClient(fake_response)
+    _patch_client(monkeypatch, client)
+    monkeypatch.setattr(upstream, "_SSE_MAX_LINE_BYTES", 4)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        _ = [
+            event
+            async for event in upstream._iter_sse_with_runtime(
+                base="https://upstream.example/v1",
+                api_key="test-key",
+                body=_valid_body(),
+            )
+        ]
+
+    assert exc_info.value.error_code == "stream_too_large"
+    assert fake_response.aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_responses_call_counts_utf8_bytes_for_line_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_response = _FakeStreamResponse(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        sse_lines=["汉汉"],
+    )
+    client = _FakeClient(fake_response)
+    _patch_client(monkeypatch, client)
+    monkeypatch.setattr(upstream, "_SSE_MAX_LINE_BYTES", 4)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await upstream.responses_call(_valid_body())
+
+    assert exc_info.value.error_code == "stream_too_large"
+    assert fake_response.aclose_called is True
+
+
+@pytest.mark.asyncio
 async def test_responses_call_returns_json_body_directly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

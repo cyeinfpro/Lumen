@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from typing import Any
 import asyncio
 
@@ -30,23 +31,19 @@ _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
 # GEN-P2 ts_ms 单调：进程内 last value，wall clock 回退（NTP 校时 / 闰秒）时
 # 至少递增 1ms，保证前端按 ts_ms 排序的事件不会乱序。
 _LAST_TS_MS = 0
-# P2-3: 多 publish_event 并发时（asyncio 内部多 coroutine 间通过 await 交错），
-# _LAST_TS_MS 的读改写非原子，可能被覆盖导致两条事件拿到同一 ts_ms。用
-# asyncio.Lock 保护读写，保证单调严格递增。lazily 创建避免 import 阶段抓不到
-# 当前事件循环。
+# P2-3: 多 publish_event 并发时 _LAST_TS_MS 的读改写非原子，可能被覆盖导致
+# 两条事件拿到同一 ts_ms。改用 asyncio.Lock：worker 单 loop 下没有跨 loop 风险，
+# 而 threading.Lock 在 DLQ 抖动 + 大量并发 publish 时短暂阻塞 event loop。
+# 懒构造避免 import 时无 running loop——所有调用点都在 coroutine 内，进入
+# `_monotonic_ts_ms` 时 loop 一定存在。
 _TS_LOCK: asyncio.Lock | None = None
 
 
-def _get_ts_lock() -> asyncio.Lock:
-    global _TS_LOCK
+async def _monotonic_ts_ms() -> int:
+    global _LAST_TS_MS, _TS_LOCK
     if _TS_LOCK is None:
         _TS_LOCK = asyncio.Lock()
-    return _TS_LOCK
-
-
-async def _monotonic_ts_ms() -> int:
-    global _LAST_TS_MS
-    async with _get_ts_lock():
+    async with _TS_LOCK:
         now = int(time.time() * 1000)
         if now <= _LAST_TS_MS:
             now = _LAST_TS_MS + 1
@@ -112,22 +109,34 @@ async def publish_event(
     if stream_id is not None:
         envelope["sse_id"] = stream_id
     else:
-        envelope["sse_id"] = f"dlq-{envelope['ts_ms']}-0"
+        envelope["sse_id"] = f"dlq-{envelope['ts_ms']}-{uuid.uuid4().hex[:12]}"
+        redis_dlq_ok = False
         try:
             await redis.lpush(
                 f"{stream_key}:dlq",
                 json.dumps(envelope, ensure_ascii=False, separators=(",", ":")),
             )
-            await redis.ltrim(f"{stream_key}:dlq", 0, _EVENTS_DLQ_MAXLEN - 1)
+            redis_dlq_ok = True
         except Exception as exc:  # noqa: BLE001
             logger.error("publish_event: DLQ write failed key=%s err=%s", stream_key, exc)
-        # 追加：持久化到 PG outbox_dead_letter（独立短事务，写失败仅 logger）
-        await _persist_sse_dlq(
+        if redis_dlq_ok:
+            try:
+                await redis.ltrim(f"{stream_key}:dlq", 0, _EVENTS_DLQ_MAXLEN - 1)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "publish_event: DLQ trim failed key=%s err=%s",
+                    stream_key,
+                    exc,
+                )
+        # 追加：持久化到 PG outbox_dead_letter（独立短事务）
+        pg_dlq_ok = await _persist_sse_dlq(
             event_name=event_name,
             payload={"user_id": user_id, "channel": channel, "envelope": envelope},
             error_class="XADDFailed",
             error_message=f"all retries failed for stream {stream_key}",
         )
+        if not redis_dlq_ok and not pg_dlq_ok:
+            raise RuntimeError(f"publish_event: no durable sink for {stream_key}")
 
     payload_json = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
 
@@ -159,7 +168,7 @@ async def _persist_sse_dlq(
     payload: dict[str, Any],
     error_class: str,
     error_message: str,
-) -> None:
+) -> bool:
     """把彻底失败的 SSE 发布事件写入 PG outbox_dead_letter（独立事务）。
 
     P3-9: insert 前用 (event_type, sse_id, ts_ms) 三元组 dedupe。XADD 全部重试
@@ -220,7 +229,7 @@ async def _persist_sse_dlq(
                         "publish_event: PG DLQ dedup hit event=%s sse_id=%s ts_ms=%s",
                         event_name, sse_id, ts_ms,
                     )
-                    return
+                    return True
 
             session.add(
                 OutboxDeadLetter(
@@ -231,14 +240,12 @@ async def _persist_sse_dlq(
                     error_message=error_message,
                 )
             )
+            return True
     except Exception as exc:  # noqa: BLE001
-        # P3: Known tradeoff — after all XADD retries fail, a PG DLQ write failure
-        # means the event is permanently lost.  Monitor with a Prometheus Counter:
-        #   lumen_sse_dlq_persist_failed_total{event="..."}
-        # If this counter grows, investigate PG / connection pool health.
         logger.error(
             "publish_event: PG DLQ persist failed event=%s err=%s", event_name, exc
         )
+        return False
 
 
 __all__ = ["publish_event"]

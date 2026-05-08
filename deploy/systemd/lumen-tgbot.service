@@ -1,8 +1,13 @@
 [Unit]
 Description=Lumen Telegram Bot
 After=network-online.target lumen-api.service
-Wants=network-online.target
+# Wants=network-online.target + lumen-api.service：软依赖，api 没起来 tgbot 启动会
+# 失败但不会被 cascade 拉爆。避免 `Requires=lumen-api.service` 在 api crash-loop
+# 时把 tgbot 一起拖进 StartLimitBurst 速死循环。
+Wants=network-online.target lumen-api.service
 PartOf=lumen-api.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

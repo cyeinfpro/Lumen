@@ -18,6 +18,15 @@ x-app-build: &app-build
   dockerfile: Dockerfile.python
   args:
     LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
+    LUMEN_APP_UID: "${LUMEN_APP_UID:-10001}"
+    LUMEN_APP_GID: "${LUMEN_APP_GID:-10001}"
+
+x-redis-url-env: &redis-url-env
+  REDIS_URL: "${REDIS_URL:-redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0}"
+
+x-app-runtime-env: &app-runtime-env
+  <<: *redis-url-env
+  DATABASE_URL: "${DATABASE_URL:-postgresql+asyncpg://${DB_USER:?Set DB_USER in .env}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/${DB_NAME:?Set DB_NAME in .env}}"
 
 services:
   postgres:
@@ -66,7 +75,10 @@ services:
     networks:
       - lumen_backend
     healthcheck:
-      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli --no-auth-warning ping | grep -q PONG"]
+      # REDIS_PASSWORD 用普通展开：`${VAR:?msg}` 是 shell 强制语法，空字符串
+      # 或未导出都会让 healthcheck 永远 fail。fail-fast 留给 entrypoint
+      # （deploy/redis/redis-entrypoint.sh）和 compose 顶部 redis-url-env 处理。
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$${REDIS_PASSWORD} redis-cli --no-auth-warning --raw ping | grep -qx PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -77,11 +89,29 @@ services:
     container_name: lumen-api
     build: *app-build
     working_dir: /app/apps/api
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command:
+      - "uvicorn"
+      - "app.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--workers"
+      - "${LUMEN_API_WORKERS:-2}"
+      - "--limit-max-requests"
+      - "${LUMEN_API_LIMIT_MAX_REQUESTS:-10000}"
+      - "--limit-max-requests-jitter"
+      - "${LUMEN_API_LIMIT_MAX_REQUESTS_JITTER:-1000}"
+      - "--timeout-keep-alive"
+      - "${LUMEN_API_TIMEOUT_KEEP_ALIVE:-60}"
+      - "--timeout-graceful-shutdown"
+      - "${LUMEN_API_TIMEOUT_GRACEFUL_SHUTDOWN:-30}"
+      - "--timeout-worker-healthcheck"
+      - "${LUMEN_API_TIMEOUT_WORKER_HEALTHCHECK:-10}"
     user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
     group_add:
       - "${LUMEN_APP_STORAGE_GID:-10001}"
-    env_file: .env
+    env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     restart: unless-stopped
     stop_grace_period: 60s
     cpus: "1.5"
@@ -94,6 +124,7 @@ services:
     ports:
       - "${API_BIND_HOST:-127.0.0.1}:8000:8000"
     environment:
+      <<: *app-runtime-env
       # 容器化部署下让 admin_update 走 path-unit 触发，跳过容器内 systemctl 探测。
       # 触发文件由 lumen-api 写到挂载的 backup 目录，宿主机 PID 1 监听并启动
       # lumen-update-runner.service 真正执行 update.sh。
@@ -111,7 +142,12 @@ services:
     networks:
       - lumen_backend
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/healthz >/dev/null || exit 1"]
+      # 用 stdlib urllib 做健康探测：镜像内不一定装了 curl/wget，依赖外部
+      # 二进制会让 worker 的 depends_on: service_healthy 永远阻塞。
+      # python 始终在镜像里（runtime 本体），最稳。
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read(); sys.exit(0)\" || exit 1"
       interval: 10s
       timeout: 5s
       retries: 6
@@ -127,7 +163,9 @@ services:
     user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
     group_add:
       - "${LUMEN_APP_STORAGE_GID:-10001}"
-    env_file: .env
+    env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
+    environment:
+      <<: *app-runtime-env
     restart: unless-stopped
     stop_signal: SIGTERM
     # 4K long task envelope: arq 1800s task timeout + 30s buffer; do not shorten (see §8.5).
@@ -140,7 +178,7 @@ services:
       redis:
         condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
     networks:
@@ -174,13 +212,13 @@ services:
       NODE_ENV: "production"
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${WEB_BIND_HOST:-0.0.0.0}:3000:3000"
     networks:
       - lumen_backend
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/healthz >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -193,11 +231,24 @@ services:
     build: *app-build
     working_dir: /app/apps/tgbot
     command: ["python", "-m", "app.main"]
-    env_file: .env
+    # 与 api/worker 一致：先 env_file 读 .env，environment 块再覆盖关键变量。
+    # 没 env_file 会让 tgbot 漏掉 admin / DB / observability 等共用配置。
+    env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     environment:
+      <<: *redis-url-env
       # tgbot 容器要走 docker network 调 lumen-api，不能用 config.py 里的
       # 127.0.0.1:8000 默认值（那指向 tgbot 容器自己的 loopback）。
       LUMEN_API_BASE: "http://api:8000"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_BOT_USERNAME: "${TELEGRAM_BOT_USERNAME:-LumenBot}"
+      TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
+      TELEGRAM_PROXY_URL: "${TELEGRAM_PROXY_URL:-}"
+      DOWNLOAD_TMP_DIR: "${DOWNLOAD_TMP_DIR:-}"
+      BOT_MODE: "${BOT_MODE:-polling}"
+      WEBHOOK_URL: "${WEBHOOK_URL:-}"
+      WEBHOOK_SECRET_PATH: "${WEBHOOK_SECRET_PATH:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
     restart: unless-stopped
     stop_grace_period: 30s
     cpus: "0.5"
@@ -217,7 +268,12 @@ services:
     build: *app-build
     working_dir: /app/apps/api
     command: ["alembic", "upgrade", "head"]
-    env_file: .env
+    environment:
+      <<: *app-runtime-env
+      APP_ENV: "${APP_ENV:-dev}"
+      SESSION_SECRET: "${SESSION_SECRET:-}"
+      IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"
+      TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
     restart: "no"
     profiles: ["migrate"]
     depends_on:
@@ -232,8 +288,12 @@ services:
     build: *app-build
     working_dir: /app/apps/api
     command: ["python", "-m", "app.scripts.bootstrap"]
-    env_file: .env
     environment:
+      <<: *app-runtime-env
+      APP_ENV: "${APP_ENV:-dev}"
+      SESSION_SECRET: "${SESSION_SECRET:-}"
+      IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"
+      TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
       LUMEN_ADMIN_EMAIL: "${LUMEN_ADMIN_EMAIL:-}"
       LUMEN_ADMIN_PASSWORD: "${LUMEN_ADMIN_PASSWORD:-}"
     restart: "no"

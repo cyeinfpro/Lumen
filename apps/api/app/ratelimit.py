@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import logging
 from typing import Literal
 
@@ -28,6 +29,10 @@ def _is_dev_env() -> bool:
     """dev / local / test 环境判断。"""
     env = getattr(settings, "app_env", "dev").strip().lower()
     return env in _DEV_ENVS
+
+
+def _is_test_env() -> bool:
+    return getattr(settings, "app_env", "dev").strip().lower() == "test"
 
 
 # KEYS[1] = bucket key
@@ -139,7 +144,11 @@ class RateLimiter:
         if not self.always_on:
             # dev/local/test 仍可通过 USER_RATE_LIMIT_ENABLED 开关开启；
             # 生产环境默认强制开启（fail-closed），避免忘开等于无限流。
-            if is_dev and not getattr(settings, "user_rate_limit_enabled", False):
+            if (
+                is_dev
+                and not _is_test_env()
+                and not getattr(settings, "user_rate_limit_enabled", False)
+            ):
                 return
 
         now_ms = int(time.time() * 1000)
@@ -157,9 +166,9 @@ class RateLimiter:
         except Exception as exc:
             # always_on 限流（公开端点防刷）总是 fail-closed，避免 dev 漏放被刷。
             # dev 下其他限流保留 fail-open 但 ERROR 级别日志方便定位。
-            if is_dev and not self.always_on:
+            if is_dev and not _is_test_env() and not self.always_on:
                 logger.error(
-                    "rate limiter redis failure (dev fail-open) key=%s err=%r",
+                    "rate limiter redis failure (dev/local fail-open) key=%s err=%r",
                     key,
                     exc,
                 )
@@ -191,7 +200,7 @@ class RateLimiter:
                         "retry_after_ms": retry_ms,
                     }
                 },
-                headers={"Retry-After": str(max(1, retry_ms // 1000))},
+                headers={"Retry-After": str(max(1, math.ceil(retry_ms / 1000)))},
             )
 
 

@@ -83,7 +83,13 @@ class LocalStorage:
                     if not created:
                         return StoragePutResult(size=len(data), created=False)
             finally:
-                tmp.unlink(missing_ok=True)
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    # The final object has already been linked. A temp cleanup
+                    # failure should not turn a successful durable write into a
+                    # user-visible storage failure; the next temp name is random.
+                    pass
             return StoragePutResult(size=len(data), created=True)
         except OSError as exc:
             if isinstance(exc, StorageDiskFullError):

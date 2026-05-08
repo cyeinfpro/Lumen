@@ -139,16 +139,17 @@ def test_select_messages_to_compact_keeps_system_messages() -> None:
 
 
 def test_select_messages_to_compact_splits_old_and_recent() -> None:
-    # 8 条非 system，keep_recent=3 → 前 5 条压，后 3 条留。
+    # 8 条非 system，keep_recent=3 would start with assistant; split advances
+    # to the next user so the retained window stays role-aligned.
     msgs = []
     for i in range(8):
         role = Role.USER.value if i % 2 == 0 else Role.ASSISTANT.value
         msgs.append(_msg(role, f"m{i}"))
     to_compact, to_keep = select_messages_to_compact(msgs, keep_recent=3)
-    assert len(to_compact) == 5
-    assert len(to_keep) == 3
-    # to_keep 是后 3 条
-    assert to_keep[0]["content"]["text"] == "m5"
+    assert len(to_compact) == 6
+    assert len(to_keep) == 2
+    # to_keep starts at the last user/assistant pair.
+    assert to_keep[0]["content"]["text"] == "m6"
     assert to_keep[-1]["content"]["text"] == "m7"
 
 
@@ -206,3 +207,16 @@ def test_select_messages_to_compact_preserves_order_in_to_keep() -> None:
     assert keep_texts.count("s1") == 1
     assert keep_texts.count("s2") == 1
     assert "u2" in keep_texts and "a2" in keep_texts
+
+
+def test_select_messages_to_compact_does_not_keep_orphan_assistant() -> None:
+    msgs = [
+        _msg(Role.USER.value, "u1"),
+        _msg(Role.ASSISTANT.value, "a1"),
+        _msg(Role.USER.value, "u2"),
+        _msg(Role.ASSISTANT.value, "a2"),
+    ]
+    to_compact, to_keep = select_messages_to_compact(msgs, keep_recent=1)
+
+    assert [m["content"]["text"] for m in to_compact] == ["u1", "a1", "u2", "a2"]
+    assert to_keep == []

@@ -165,12 +165,10 @@ def _largest_component_ratio(fg_mask: PILImage.Image) -> float | None:
         if label == 1:
             return None
 
-        data = work.tobytes()
         counts: dict[int, int] = {}
-        for v in range(1, label):
-            c = data.count(bytes([v]))
-            if c:
-                counts[v] = c
+        for v in work.tobytes():
+            if 0 < v < label:
+                counts[v] = counts.get(v, 0) + 1
         if not counts:
             return None
         return max(counts.values()) / total_fg

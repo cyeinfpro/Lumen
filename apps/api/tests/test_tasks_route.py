@@ -68,6 +68,8 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
     async def fake_publish_queued(payload: dict[str, Any], message_id: str) -> None:
         published.append((payload, message_id))
 
+    redis = _Redis()
+    monkeypatch.setattr(tasks, "get_redis", lambda: redis)
     monkeypatch.setattr(tasks, "_publish_queued", fake_publish_queued)
 
     upstream_request = {
@@ -118,6 +120,7 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
     assert gen.upstream_request is upstream_request
 
     assert db.committed is True
+    assert redis.calls == [("delete", "task:gen-1:cancel")]
     assert len(db.added) == 1
     assert published == [
         (
@@ -152,7 +155,12 @@ async def test_cancel_running_generation_keeps_row_active_until_worker_stops(
     assert out == {"status": GenerationStatus.RUNNING.value}
     assert gen.status == GenerationStatus.RUNNING.value
     assert gen.finished_at is None
-    assert db.committed is True
+    # Why no commit on the RUNNING branch: there is no field mutation on
+    # `gen` (status stays RUNNING, finished_at stays None). The SELECT FOR
+    # UPDATE row lock is released by the FastAPI session context manager at
+    # request exit, so an explicit commit here would just be a wasted
+    # round-trip. See cancel_generation() comment.
+    assert db.committed is False
     assert redis.calls == [("set", "task:gen-1:cancel", "1", 3600)]
 
 
@@ -182,7 +190,6 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
     assert gen.status == GenerationStatus.CANCELED.value
     assert gen.finished_at is not None
     assert redis.calls == [
-        ("set", "task:gen-1:cancel", "1", 3600),
         ("get", "generation:image_queue:task_provider:gen-1"),
         ("zrem", "generation:image_queue:active", "provider-a"),
         ("delete", "generation:image_queue:provider:provider-a"),

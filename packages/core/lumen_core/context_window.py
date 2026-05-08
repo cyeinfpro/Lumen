@@ -19,6 +19,7 @@ FALLBACK_INPUT_TOKEN_BUDGET = 128_000
 MODEL_INPUT_BUDGETS: dict[str, int] = {
     # 维护建议：仅放已经确认通过 api.example.com 真实测试的模型；未知 slug 走 fallback
     "gpt-5.4": 200_000,
+    "gpt-5.4-mini": 200_000,
     "gpt-5.5": 200_000,
 }
 
@@ -31,7 +32,11 @@ def get_input_budget(model_slug: str | None) -> int:
     """
     if not model_slug:
         return FALLBACK_INPUT_TOKEN_BUDGET
-    return MODEL_INPUT_BUDGETS.get(model_slug, FALLBACK_INPUT_TOKEN_BUDGET)
+    if model_slug in MODEL_INPUT_BUDGETS:
+        return MODEL_INPUT_BUDGETS[model_slug]
+    if model_slug.startswith(("gpt-5.4-", "gpt-5.5-")):
+        return CONTEXT_INPUT_TOKEN_BUDGET
+    return FALLBACK_INPUT_TOKEN_BUDGET
 
 
 HISTORY_FETCH_BATCH = 128
@@ -189,6 +194,7 @@ _TIKTOKEN_LOCK = threading.Lock()
 _TIKTOKEN_LOAD_THREAD: threading.Thread | None = None
 _TIKTOKEN_LOADING = False
 _TIKTOKEN_LOAD_WARNED = False
+_TOKEN_COUNTER_MODE = "auto"
 
 
 def _tiktoken_load_timeout(default: float) -> float:
@@ -276,9 +282,21 @@ def count_tokens(text: str | None) -> int:
     """
     if not text:
         return 0
+    global _TOKEN_COUNTER_MODE
+    # Note: once estimate mode is set, never switch back even if tiktoken loads later —
+    # keeps token-count semantics stable across one task (sticky by design). 中途切换
+    # 会让同一段对话历史在不同轮次给出不同 token 数，触发 compact/截断阈值抖动。
+    if _TOKEN_COUNTER_MODE == "estimate":
+        return estimate_text_tokens(text)
     enc = _get_tiktoken_encoding()
     if enc is None:
+        with _TIKTOKEN_LOCK:
+            if _TOKEN_COUNTER_MODE == "auto":
+                _TOKEN_COUNTER_MODE = "estimate"
         return estimate_text_tokens(text)
+    with _TIKTOKEN_LOCK:
+        if _TOKEN_COUNTER_MODE == "auto":
+            _TOKEN_COUNTER_MODE = "tiktoken"
     try:
         return len(enc.encode(text, disallowed_special=()))
     except Exception as exc:  # noqa: BLE001
@@ -289,7 +307,14 @@ def count_tokens(text: str | None) -> int:
 def warm_tiktoken(timeout_sec: float = 1.0) -> bool:
     """Pre-load tiktoken at process start to avoid first-request latency.
     Returns True if successfully loaded, False otherwise."""
-    return _get_tiktoken_encoding(timeout_sec=timeout_sec) is not None
+    global _TOKEN_COUNTER_MODE
+    loaded = _get_tiktoken_encoding(timeout_sec=timeout_sec) is not None
+    with _TIKTOKEN_LOCK:
+        if loaded:
+            _TOKEN_COUNTER_MODE = "tiktoken"
+        elif _TOKEN_COUNTER_MODE == "auto":
+            _TOKEN_COUNTER_MODE = "estimate"
+    return loaded
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +428,11 @@ def select_messages_to_compact(
         return [], list(system_msgs) + non_system
 
     cut = len(non_system) - keep_recent
+    while cut < len(non_system):
+        role, _content = _coerce_message_view(non_system[cut])
+        if role != Role.ASSISTANT.value:
+            break
+        cut += 1
     to_compact = non_system[:cut]
     recent = non_system[cut:]
     return to_compact, list(system_msgs) + recent
