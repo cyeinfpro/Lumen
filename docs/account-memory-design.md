@@ -391,10 +391,12 @@ SQL 预筛: 同 user_id ∧ 同 type ∧ alive
    <user_constraints>  avoid_set
    <user_context>      ranked_candidates ∪ (pinned_set ∩ context-like)
 
-6. token 预算: 1000 (硬上限)
+6. token 预算: 见 §7.5 全局预算表
+   - user_profile + user_constraints 软上限 400
+   - user_context 软上限 600
    超出按裁剪优先级:
      profile > avoid > pinned > 高相关 preference > project
-   按相关性 / 衰减分数从尾部砍
+   按相关性 / 衰减分数从尾部砍;最终全局复核见 §7.5
 
 7. 拼接位置:
    system_prompts → user_profile → user_constraints
@@ -769,21 +771,18 @@ decay_factor =
 | 模块 | 改动 |
 |---|---|
 | `apps/api/app/routes/providers.py` | + `PATCH /enabled`;接受 `purposes` |
-| `apps/api/app/routes/memories.py`(新) | 完整 CRUD + staging |
-| `apps/api/app/db.py` | + `UserMemory`、`UserMemoryStaging` model |
+| `apps/api/app/routes/memories.py`(新) | 完整 CRUD + staging + `POST /undo` + `GET /timeline` + `PATCH /onboarding-seen` |
+| `apps/api/app/routes/conversations.py` | + memory_disabled 字段 + 注入命中暴露(used_memory_ids + summary) |
+| `apps/api/app/db.py` | + `UserMemory` / `UserMemoryStaging` / `MemoryAudit` model + `users.onboarding_seen` bitmap 列 + `users.memory_paused/disabled/extraction_threshold` 列 |
 | `apps/api/app/scripts/bootstrap.py` | 启用 vector 扩展 + 表 + provider purposes 默认值 migrator |
-| `apps/api/app/routes/conversations.py` | + memory_disabled 字段 + 注入命中暴露 |
+| `apps/api/app/sse.py`(或现有 SSE 通道) | + `account_settings_updated` 事件 + `memory_writes` 事件 |
 | `apps/worker/app/provider_pool.py` | `select` 加 `purpose`;`route` 转译 |
-| `apps/worker/app/tasks/memory_extraction.py`(新) | 抽取 + 去重 worker |
-| `apps/worker/app/upstream.py` | 接入 `assemble_user_memory_prompt` |
+| `apps/worker/app/tasks/memory_extraction.py`(新) | 抽取 + 去重 worker;完成后通过 SSE 推 `memory_writes` 给在线用户 |
+| `apps/worker/app/upstream.py` | 接入 `assemble_user_memory_prompt` + 全局 token 预算裁剪 |
 | `apps/web/src/...admin/providers/...` | + 三选框 + 启停 toggle |
 | `apps/web/src/...settings/memory/...`(新) | 记忆管理 tab + timeline 子页(§8.6) + onboarding 卡片(§8.7) |
 | `apps/web/src/...conversation/...` | + 气泡 inline 写入提示(§5.4) + 注入 chip + popover(§7.4) + 记忆抽屉 + 本会话开关 |
 | `apps/web/src/...common/...` | + onboarding tooltip 复用组件 + undo toast |
-| `apps/api/app/routes/memories.py`(新) | + `POST /undo` + `GET /timeline` + `PATCH /onboarding-seen` |
-| `apps/api/app/db.py` | + `UserMemory` / `UserMemoryStaging` / `MemoryAudit` model + `users.onboarding_seen` bitmap 列 |
-| `apps/worker/app/tasks/memory_extraction.py`(新) | 完成后通过 SSE 推 `memory_writes` 给在线用户 |
-| `apps/api/app/sse.py`(或现有 SSE) | + `account_settings_updated` 事件 + `memory_writes` 事件 |
 | `lumen_core/providers` | schema 加 purposes |
 
 ---
@@ -798,6 +797,10 @@ decay_factor =
 6. **tgbot 复用**:数据层共享,但 tgbot 当前只生图,等加文本对话再上 UI;不阻塞本设计
 7. **冲突判断成本**:每条新候选都跑一次 GPT-5.4 mini 二次判断会增加抽取成本约 50%;若 staging 队列长,可批量(一次 prompt 处理 5 条)摊销
 8. **记忆库膨胀**:单用户记忆数 > 1000 条时,top-K 检索质量下降。届时加 type-quota(profile ≤ 30 / preference ≤ 200 / avoid ≤ 50 / project ≤ 50),超出时按衰减分数物理删除最低分
+9. **跨设备同步语义**:settings 改动通过 SSE 广播 `account_settings_updated`,所有在线设备订阅。离线设备下次拉数据时刷新。极端场景:A 设备暂停写入与 B 设备 inline 接受 staging 几乎同时发生,以服务端时间戳为准 last-write-wins,不会写入冲突(user_id 唯一);用户视角最坏只是"我刚点的接受没生效",P3 metric 监控该窗口
+10. **inline 反馈刷屏**:连续多轮高密度对话每条都有"已记下"会噪。P3 节流:同 conversation 5 分钟内 ≥ 3 条同 type 写入合并成 `已记下 3 条偏好 · 查看` 折叠态;点击展开见全部
+11. **撤销 token 丢失**:用户跨设备 A 看到 inline,B 看不到 token——undo 仅在 A 设备 5 分钟内有效。这是可接受的简化(token 本就 5 分钟过期,不持久化到 DB);用户跨设备需求时走 timeline 还原
+12. **首次抽取的"惊吓感"**:即便有 inline 提示,首次发现"AI 在记我说的话"仍可能有隐私顾虑。§8.7 onboarding tooltip 第一次抽取必触发,且 settings 默认提供"暂停记忆"一键开关。文档/官网 onboarding 页同步说明数据不出账号边界
 
 ---
 
