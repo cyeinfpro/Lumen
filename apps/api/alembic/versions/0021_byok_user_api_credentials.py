@@ -195,7 +195,7 @@ def upgrade() -> None:
         # review #14：用 PG enum 而不是 CHECK；跨语言/工具识别更一致。
         sa.Column(
             "status",
-            sa.Enum(
+            postgresql.ENUM(
                 "active",
                 "invalid",
                 "replaced",
