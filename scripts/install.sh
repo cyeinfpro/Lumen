@@ -462,6 +462,7 @@ dispatch_entrypoint "$@"
 INSTALL_PHASE=""               # 当前阶段名（用于错误时报告 + step protocol）
 INSTALL_STARTED_SERVICES=()    # 已启动的 compose service 列表（失败时 stop）
 INSTALL_SWITCHED=0             # current symlink 是否已切到本次 RELEASE_DIR
+INSTALL_TGBOT_STATUS=""        # started / failed / skipped；print_summary 汇报
 INSTALL_PREV_CURRENT_TARGET="" # switch 前 current 指向的相对路径（失败回滚用）
 
 on_error() {
@@ -1571,11 +1572,14 @@ start_application_services() {
         log_info "检测到 TELEGRAM_BOT_TOKEN 非空，启动 tgbot service。"
         if ! _install_compose --profile tgbot up -d tgbot; then
             log_warn "tgbot 启动失败（可能是 token 无效或网络问题）。主栈不受影响。"
+            INSTALL_TGBOT_STATUS="failed"
         else
             INSTALL_STARTED_SERVICES+=("tgbot")
+            INSTALL_TGBOT_STATUS="started"
         fi
     else
         log_info "未配置 TELEGRAM_BOT_TOKEN，跳过 tgbot。"
+        INSTALL_TGBOT_STATUS="skipped"
     fi
     emit_step_done
 }
@@ -1687,6 +1691,7 @@ print_summary() {
   数据目录 ......... storage/backup=${LUMEN_DATA_ROOT}，postgres/redis=${LUMEN_DB_ROOT}
   共享 .env ........ ${SHARED_DIR}/.env
   镜像 tag ......... ${image_tag}
+  tgbot ............ ${INSTALL_TGBOT_STATUS:-unknown}（started=正常 / failed=token 或网络问题 / skipped=未配置）
 
   ${LUMEN_C_BOLD}日常运维${LUMEN_C_RESET}
 
