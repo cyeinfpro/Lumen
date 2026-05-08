@@ -640,10 +640,12 @@ async def test_image_jobs_dual_race_winner_then_bonus_yield(
     """winner yield 后 loser 在 grace 内成功 → 二次 yield bonus 图。"""
     async def fake_image_job(*, endpoint_override: str, **_kw: Any) -> tuple[str, str | None]:
         if endpoint_override == "generations":
-            await asyncio.sleep(0.01)
+            # GHA runner CPU 抢占下 0.01 vs 0.05 的差距会被调度抖动颠倒,
+            # 拉大到 0.05 vs 0.30 让 winner / bonus 顺序不依赖 scheduler.
+            await asyncio.sleep(0.05)
             return ("winner-img", None)
         # responses lane 稍后完成
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.30)
         return ("bonus-img", None)
 
     monkeypatch.setattr(upstream, "_image_job_with_failover", fake_image_job)
