@@ -1316,7 +1316,9 @@ def test_showcase_prompt_preserves_model_identity_height_and_limb_proportions() 
     assert "发型" in prompt
     assert "身材比例" in prompt
     assert "不要换人" in prompt
-    assert "身高约" not in prompt
+    assert "身高 128cm" in prompt
+    assert "头身比" in prompt
+    assert "肢体长度" in prompt
 
 
 def test_showcase_prompt_uses_quality_mode_variable() -> None:
@@ -1542,6 +1544,80 @@ def test_natural_phone_snapshot_falls_back_to_category_scene() -> None:
     assert "姿态自然松弛" in prompt
     assert "俯拍" not in prompt
     assert "不要棚拍" in prompt
+
+
+def test_showcase_prompt_scene_environment_indoor_keeps_default_scene() -> None:
+    """3 个生活化模板 indoor 时保持原场景 prompt（向后兼容）。"""
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "natural model", "height_cm": 168},
+    )
+    common = dict(
+        product_analysis={"category": "针织开衫", "must_preserve": ["米白色"]},
+        selected_candidate=candidate,
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        shot_type="front_full_body",
+        final_quality="high",
+    )
+    for template in ("daily_snapshot", "natural_phone_snapshot", "social_seed"):
+        default_prompt = workflows._showcase_prompt(template=template, **common)  # noqa: SLF001
+        indoor_prompt = workflows._showcase_prompt(  # noqa: SLF001
+            template=template, scene_environment="indoor", **common
+        )
+        assert default_prompt == indoor_prompt
+        assert "户外" not in indoor_prompt
+
+
+def test_showcase_prompt_scene_environment_outdoor_branches_for_lifestyle_templates() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "natural model", "height_cm": 168},
+    )
+    common = dict(
+        product_analysis={"category": "针织开衫", "must_preserve": ["米白色"]},
+        selected_candidate=candidate,
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        shot_type="front_full_body",
+        final_quality="high",
+    )
+    for template, outdoor_keyword in (
+        ("daily_snapshot", "户外随拍"),
+        ("natural_phone_snapshot", "户外随手拍"),
+        ("social_seed", "户外种草"),
+    ):
+        outdoor_prompt = workflows._showcase_prompt(  # noqa: SLF001
+            template=template, scene_environment="outdoor", **common
+        )
+        indoor_prompt = workflows._showcase_prompt(  # noqa: SLF001
+            template=template, scene_environment="indoor", **common
+        )
+        assert outdoor_keyword in outdoor_prompt
+        assert outdoor_keyword not in indoor_prompt
+        assert "自然日光" in outdoor_prompt
+        assert outdoor_prompt != indoor_prompt
+
+
+def test_showcase_prompt_scene_environment_ignored_for_other_templates() -> None:
+    """非 3 个生活化模板时，indoor/outdoor 输出相同。"""
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "natural model", "height_cm": 168},
+    )
+    common = dict(
+        product_analysis={"category": "针织开衫", "must_preserve": ["米白色"]},
+        selected_candidate=candidate,
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        shot_type="front_full_body",
+        final_quality="high",
+    )
+    for template in ("white_ecommerce", "premium_studio", "urban_commute", "lifestyle"):
+        indoor = workflows._showcase_prompt(  # noqa: SLF001
+            template=template, scene_environment="indoor", **common
+        )
+        outdoor = workflows._showcase_prompt(  # noqa: SLF001
+            template=template, scene_environment="outdoor", **common
+        )
+        assert indoor == outdoor
 
 
 def test_showcase_pose_direction_per_template() -> None:

@@ -28,6 +28,7 @@ import {
   ContextWindowMeter,
   DesktopConversationCanvas,
 } from "@/components/ui/chat/desktop";
+import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
 import {
@@ -236,6 +237,7 @@ export function DesktopStudio() {
         )}
       </AnimatePresence>
       <ContextWindowMeter stats={contextStats} />
+      <ConversationMemoryButton />
       <SystemPromptManager compact />
       {isAdmin && (
         <Link

@@ -15,6 +15,7 @@ import {
 } from "@/lib/queries";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { ContextWindowMeter } from "@/components/ui/chat/ContextWindowMeter";
+import { ConversationMemoryButton } from "@/components/ui/chat/ConversationMemoryButton";
 
 export function MobileStudioTopBar() {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -117,6 +118,7 @@ export function MobileStudioTopBar() {
               <FastLamp on={fast} />
             </button>
             <ContextWindowMeter stats={contextStats} compact />
+            <ConversationMemoryButton compact />
             <AnimatePresence>
               {running.any && (
                 <motion.button

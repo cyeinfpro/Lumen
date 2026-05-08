@@ -3,6 +3,7 @@
 import {
   ArrowRight,
   BarChart3,
+  Brain,
   FileText,
   Home,
   Image as ImageIcon,
@@ -115,6 +116,15 @@ const COMMANDS: Command[] = [
     group: "设置",
     keywords: ["settings", "prompts", "system prompt", "提示词", "系统提示词"],
     icon: FileText,
+  }),
+  command({
+    id: "settings-memory",
+    label: "记忆设置",
+    detail: "管理长期记忆与候选建议",
+    href: "/settings/memory",
+    group: "设置",
+    keywords: ["settings", "memory", "记忆", "偏好", "长期记忆"],
+    icon: Brain,
   }),
   command({
     id: "settings-privacy",

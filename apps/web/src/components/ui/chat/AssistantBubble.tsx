@@ -6,12 +6,26 @@
 import { motion, AnimatePresence } from "framer-motion";
 import dynamic from "next/dynamic";
 import { useState } from "react";
-import { Copy, Check, RotateCw, ChevronDown } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Copy, Check, RotateCw, ChevronDown, Brain, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Markdown } from "../Markdown";
 import { toast } from "@/components/ui/primitives";
 import { IntentBadge } from "./IntentBadge";
 import type { AssistantMessage, Generation, Intent } from "@/lib/types";
+import {
+  acceptMemoryStaging,
+  confirmMemory,
+  getMemorySettings,
+  listMemoryScopes,
+  markMemoryOnboardingSeen,
+  patchMemory,
+  patchMemoryScopeAssignment,
+  patchMemoryStaging,
+  rejectMemoryStaging,
+  undoMemory,
+} from "@/lib/apiClient";
+import { useChatStore } from "@/store/useChatStore";
 
 export interface AssistantBubbleProps {
   msg: AssistantMessage;
@@ -37,6 +51,9 @@ export function AssistantBubble({
 }: AssistantBubbleProps) {
   const [copied, setCopied] = useState(false);
   const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [confirmationDone, setConfirmationDone] = useState(false);
+  const currentConvId = useChatStore((s) => s.currentConvId);
   const isStreamingText = msg.status === "streaming";
   const isThinking = isStreamingText && !!msg.thinking && !msg.text;
   const isChatLike =
@@ -145,6 +162,94 @@ export function AssistantBubble({
                 ▍
               </span>
             )}
+            {msg.memory_writes && msg.memory_writes.length > 0 && (
+              <div className="mt-3 flex flex-col gap-1.5 border-t border-white/8 pt-2">
+                <MemoryWriteHints
+                  conversationId={currentConvId}
+                  writes={msg.memory_writes}
+                />
+              </div>
+            )}
+            {msg.used_memory_summary && msg.used_memory_summary.length > 0 && (
+              <div className="mt-3 border-t border-white/8 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setMemoryOpen((v) => !v)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-[var(--fg-1)] hover:bg-white/[0.07]"
+                >
+                  <Brain className="h-3 w-3" />
+                  用了 {msg.used_memory_summary.length} 条记忆
+                  <ChevronDown
+                    className={cn("h-3 w-3 transition-transform", memoryOpen && "rotate-180")}
+                  />
+                </button>
+                {memoryOpen && (
+                  <div className="mt-2 space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2">
+                    {msg.used_memory_summary.map((memory) => (
+                      <div
+                        key={memory.id}
+                        className="flex items-start justify-between gap-2 text-[11px] text-[var(--fg-1)]"
+                      >
+                        <span className="min-w-0 break-words">
+                          {memory.content}
+                          <span className="ml-1 text-[var(--fg-2)]">({memory.type})</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void disableMemory(memory.id)}
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--fg-2)] hover:bg-white/10 hover:text-[var(--fg-0)]"
+                        >
+                          停用
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {msg.confirmation_candidate_id && !confirmationDone && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--fg-2)]">
+                    <Sparkles className="h-3 w-3 text-[var(--color-lumen-amber)]" />
+                    <span title="基于一条高置信偏好">这条偏好还适用吗?</span>
+                    <ConfirmButton
+                      label="是"
+                      onClick={() =>
+                        confirmMemoryDecision(
+                          msg.confirmation_candidate_id ?? "",
+                          "yes",
+                          setConfirmationDone,
+                          currentConvId,
+                        )
+                      }
+                    />
+                    <ConfirmButton
+                      label="不是"
+                      onClick={() =>
+                        confirmMemoryDecision(
+                          msg.confirmation_candidate_id ?? "",
+                          "no",
+                          setConfirmationDone,
+                          currentConvId,
+                        )
+                      }
+                    />
+                    <ConfirmButton
+                      label="这次不用"
+                      onClick={() =>
+                        confirmMemoryDecision(
+                          msg.confirmation_candidate_id ?? "",
+                          "skip",
+                          setConfirmationDone,
+                          currentConvId,
+                        )
+                      }
+                    />
+                  </div>
+                )}
+                <MemoryOnboardingTip
+                  flag={2}
+                  text="我刚才参考了你之前告诉我的记忆。"
+                />
+              </div>
+            )}
             <IntentBadge
               currentIntent={msg.intent_resolved}
               disabled={!canSwitchIntent}
@@ -214,6 +319,258 @@ export function AssistantBubble({
         )}
       </div>
     </motion.div>
+  );
+}
+
+async function disableMemory(id: string) {
+  try {
+    await patchMemory(id, { disabled: true });
+    toast.success("已停用这条记忆");
+  } catch {
+    toast.error("停用失败");
+  }
+}
+
+async function confirmMemoryDecision(
+  id: string,
+  decision: "yes" | "no" | "skip",
+  setDone: (done: boolean) => void,
+  conversationId?: string | null,
+) {
+  if (!id) return;
+  try {
+    await confirmMemory(id, decision, conversationId);
+    setDone(true);
+    toast.success("已更新记忆反馈");
+  } catch {
+    toast.error("反馈失败");
+  }
+}
+
+function ConfirmButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded px-1.5 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+    >
+      {label}
+    </button>
+  );
+}
+
+function MemoryOnboardingTip({ flag, text }: { flag: number; text: string }) {
+  const qc = useQueryClient();
+  const settingsQ = useQuery({
+    queryKey: ["me", "memory", "settings"],
+    queryFn: getMemorySettings,
+    staleTime: 60_000,
+  });
+  const mut = useMutation({
+    mutationFn: markMemoryOnboardingSeen,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["me", "memory"] });
+    },
+  });
+  const seen = ((settingsQ.data?.onboarding_seen ?? 0) & (1 << flag)) !== 0;
+  if (seen || settingsQ.isPending) return null;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-md border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/8 px-2 py-1 text-[11px] text-[var(--fg-1)]">
+      <Brain className="h-3 w-3 text-[var(--color-lumen-amber)]" />
+      <span>{text}</span>
+      <button
+        type="button"
+        onClick={() => mut.mutate(flag)}
+        className="rounded px-1 py-0.5 text-[var(--color-lumen-amber)] hover:bg-white/10"
+      >
+        知道了
+      </button>
+    </div>
+  );
+}
+
+function MemoryWriteHints({
+  writes,
+  conversationId,
+}: {
+  writes: NonNullable<AssistantMessage["memory_writes"]>;
+  conversationId?: string | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const compactable = writes.filter(
+    (write) => write.kind !== "staged" && write.kind !== "rejected_pii" && write.type,
+  );
+  if (compactable.length === writes.length && compactable.length >= 3 && !expanded) {
+    const type = compactable[0]?.type ?? "preference";
+    return (
+      <>
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--fg-2)]">
+          <Brain className="h-3 w-3 text-[var(--color-lumen-amber)]" />
+          <span>已记下 {compactable.length} 条{memoryTypeLabel(type)}</span>
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+          >
+            查看
+          </button>
+        </div>
+        <MemoryOnboardingTip
+          flag={1}
+          text="我从这句话学到了长期偏好，5 分钟内可以撤销。"
+        />
+      </>
+    );
+  }
+  return (
+    <>
+      {writes.map((write, idx) => (
+        <MemoryWriteHint
+          key={`${write.kind}-${write.id ?? idx}`}
+          conversationId={conversationId}
+          write={write}
+        />
+      ))}
+      <MemoryOnboardingTip
+        flag={1}
+        text="我从这句话学到了长期偏好，5 分钟内可以撤销。"
+      />
+    </>
+  );
+}
+
+function memoryTypeLabel(type: string | null | undefined): string {
+  if (type === "profile") return "身份";
+  if (type === "avoid") return "禁忌";
+  if (type === "project") return "项目";
+  return "偏好";
+}
+
+function MemoryWriteHint({
+  write,
+}: {
+  write: NonNullable<AssistantMessage["memory_writes"]>[number];
+  conversationId?: string | null;
+}) {
+  const [doneLabel, setDoneLabel] = useState<string | null>(null);
+  const [scopeId, setScopeId] = useState(write.scope_id ?? "");
+  const scopesQ = useQuery({
+    queryKey: ["me", "memory", "scopes"],
+    queryFn: listMemoryScopes,
+    enabled: Boolean(write.id) && write.kind !== "rejected_pii",
+    staleTime: 60_000,
+  });
+  const label =
+    write.kind === "staged"
+      ? `想让我记住「${write.content}」吗?`
+      : write.kind === "rejected_pii"
+        ? "检测到敏感信息,未记住"
+        : write.kind === "merged"
+          ? `已合并到现有偏好:${write.content}`
+          : write.kind === "superseded"
+            ? `已更新偏好:${write.content}`
+            : `已记下:${write.content}`;
+  const handleUndo = async () => {
+    if (!write.undo_token) return;
+    try {
+      await undoMemory(write.undo_token);
+      setDoneLabel("已撤销");
+      toast.success("已撤销");
+    } catch {
+      toast.error("撤销失败");
+    }
+  };
+  const handleAccept = async () => {
+    if (!write.id) return;
+    try {
+      await acceptMemoryStaging(write.id);
+      setDoneLabel("已加入记忆");
+      toast.success("已加入记忆");
+    } catch {
+      toast.error("接受失败");
+    }
+  };
+  const handleReject = async () => {
+    if (!write.id) return;
+    try {
+      await rejectMemoryStaging(write.id);
+      setDoneLabel("已忽略");
+      toast.success("已忽略");
+    } catch {
+      toast.error("拒绝失败");
+    }
+  };
+  const handleScopeChange = async (nextScopeId: string) => {
+    if (!write.id) return;
+    setScopeId(nextScopeId);
+    try {
+      if (write.kind === "staged") {
+        await patchMemoryStaging(write.id, { scope_id: nextScopeId });
+      } else {
+        await patchMemoryScopeAssignment(write.id, nextScopeId);
+      }
+      toast.success("已更新作用域");
+    } catch {
+      setScopeId(write.scope_id ?? "");
+      toast.error("作用域更新失败");
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--fg-2)]">
+      <Brain className="h-3 w-3 text-[var(--color-lumen-amber)]" />
+      <span>{doneLabel ?? label}</span>
+      {write.id && write.kind !== "rejected_pii" && scopesQ.data && !doneLabel && (
+        <select
+          value={scopeId}
+          onChange={(e) => void handleScopeChange(e.target.value)}
+          className="h-6 rounded-md border border-white/10 bg-white/[0.03] px-1 text-[11px] text-[var(--fg-1)] outline-none"
+          title={
+            write.recommended_scope_id && write.recommended_scope_id === scopeId
+              ? "推荐作用域"
+              : "作用域"
+          }
+        >
+          {scopesQ.data.map((scope) => (
+            <option key={scope.id} value={scope.id}>
+              {scope.is_default ? "默认" : scope.name}
+            </option>
+          ))}
+        </select>
+      )}
+      {write.kind === "staged" && write.id && !doneLabel && (
+        <>
+          <button
+            type="button"
+            onClick={() => void handleAccept()}
+            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+          >
+            是
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleReject()}
+            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+          >
+            否
+          </button>
+        </>
+      )}
+      {write.undo_token && !doneLabel && (
+        <button
+          type="button"
+          onClick={() => void handleUndo()}
+          className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+        >
+          撤销
+        </button>
+      )}
+      <a
+        href="/settings/memory"
+        className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+      >
+        管理
+      </a>
+    </div>
   );
 }
 

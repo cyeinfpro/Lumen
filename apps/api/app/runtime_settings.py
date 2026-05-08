@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import logging
+import json
 from typing import Iterable
 
 from sqlalchemy import delete, select
@@ -21,6 +22,12 @@ from lumen_core.runtime_settings import (
     SettingSpec,
     get_spec,
     parse_value,
+)
+from lumen_core.providers import (
+    DEFAULT_PROVIDER_PURPOSES,
+    has_embedding_purpose,
+    normalize_provider_purposes,
+    parse_provider_json,
 )
 from lumen_core.schemas import SystemSettingItem
 
@@ -205,10 +212,79 @@ async def migrate_image_primary_route(db: AsyncSession) -> bool:
     return True
 
 
+async def migrate_provider_purposes(db: AsyncSession) -> bool:
+    """Backfill provider purposes for legacy provider JSON.
+
+    Old provider rows implicitly served chat + image. Persisting the default
+    avoids newer selectors seeing an empty purpose set after an admin saves an
+    unrelated provider field.
+    """
+    row = (
+        await db.execute(
+            select(SystemSetting).where(SystemSetting.key == "providers")
+        )
+    ).scalar_one_or_none()
+    if row is None or not row.value:
+        return False
+    try:
+        parsed = json.loads(row.value)
+    except json.JSONDecodeError:
+        return False
+    changed = False
+    if isinstance(parsed, list):
+        items = parsed
+        wrapper: object = parsed
+    elif isinstance(parsed, dict) and isinstance(parsed.get("providers"), list):
+        items = parsed["providers"]
+        wrapper = parsed
+    else:
+        return False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            purposes = normalize_provider_purposes(item.get("purposes"))
+        except ValueError:
+            purposes = DEFAULT_PROVIDER_PURPOSES
+        if item.get("purposes") != list(purposes):
+            item["purposes"] = list(purposes)
+            changed = True
+    if not changed:
+        return False
+    row.value = json.dumps(wrapper, ensure_ascii=False)
+    logger.info("migrated provider purposes defaults")
+    return True
+
+
+async def embedding_provider_available(db: AsyncSession) -> bool:
+    """Cheap check used by memory routes/workers to gate the feature.
+
+    Returns True iff at least one enabled provider exposes the embedding purpose.
+    Without one, real LLM embeddings are not reachable and we must short-circuit
+    every memory write/read path so the feature degrades cleanly instead of
+    silently producing useless deterministic vectors.
+    """
+    raw = (
+        await db.execute(
+            select(SystemSetting.value).where(SystemSetting.key == "providers")
+        )
+    ).scalar_one_or_none()
+    if not raw:
+        spec = get_spec("providers")
+        if spec:
+            raw = os.environ.get(spec.env_fallback)
+    if not raw:
+        return False
+    providers, _errors = parse_provider_json(raw)
+    return has_embedding_purpose(providers)
+
+
 __all__ = [
+    "embedding_provider_available",
     "get_setting",
     "get_settings_view",
     "image_primary_route_to_parts",
     "migrate_image_primary_route",
+    "migrate_provider_purposes",
     "update_settings",
 ]

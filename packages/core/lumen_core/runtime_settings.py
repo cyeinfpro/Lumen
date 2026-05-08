@@ -13,6 +13,8 @@ import json
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from .providers import normalize_provider_purposes
+
 
 @dataclass(frozen=True)
 class SettingSpec:
@@ -689,6 +691,12 @@ def validate_providers(raw: str) -> str:
                 raise ValueError(
                     f"providers[{i}].proxy references unknown proxy: {name_clean}"
                 )
+        try:
+            normalize_provider_purposes(item.get("purposes"))
+        except ValueError as exc:
+            raise ValueError(
+                f"providers[{i}].purposes invalid: {exc}"
+            ) from exc
     return value
 
 

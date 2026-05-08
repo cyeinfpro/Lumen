@@ -9,14 +9,17 @@ import pytest
 import lumen_core.providers as provider_mod
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
+    DEFAULT_PROVIDER_PURPOSES,
     ProviderDefinition,
     ProviderProxyDefinition,
     RoundRobinState,
     build_effective_provider_config,
     build_effective_providers,
+    has_embedding_purpose,
     parse_provider_item,
     parse_proxy_item,
     parse_provider_json,
+    route_to_purpose,
     socks_proxy_url,
     weighted_priority_order,
     weighted_priority_order_and_advance,
@@ -115,6 +118,27 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
     assert provider.image_daily_quota == 10
     assert provider.image_jobs_enabled is True
     assert provider.image_edit_input_transport == "file"
+    assert provider.purposes == DEFAULT_PROVIDER_PURPOSES
+
+
+def test_parse_provider_item_normalizes_purposes() -> None:
+    provider = parse_provider_item(
+        {
+            "base_url": "https://upstream.example",
+            "api_key": "sk-test",
+            "purposes": [" embedding ", "chat", "chat"],
+        },
+        index=0,
+    )
+
+    assert provider.purposes == ("embedding", "chat")
+
+
+def test_route_to_purpose_preserves_legacy_route_aliases() -> None:
+    assert route_to_purpose("text") == "chat"
+    assert route_to_purpose("image_jobs") == "image"
+    assert route_to_purpose("embedding") == "embedding"
+    assert route_to_purpose(None) == "chat"
 
 
 def test_parse_provider_item_defaults_unknown_edit_transport_to_url():
@@ -364,6 +388,35 @@ def test_build_effective_providers_defaults_legacy_base_url():
     assert errors == []
     assert len(providers) == 1
     assert providers[0].base_url == DEFAULT_LEGACY_PROVIDER_BASE_URL
+
+
+def test_has_embedding_purpose_requires_enabled_provider_with_embedding() -> None:
+    chat_only = ProviderDefinition(
+        name="chat",
+        base_url="https://chat.example",
+        api_key="sk",
+        purposes=("chat", "image"),
+        enabled=True,
+    )
+    embed_disabled = ProviderDefinition(
+        name="embed-off",
+        base_url="https://embed.example",
+        api_key="sk",
+        purposes=("embedding",),
+        enabled=False,
+    )
+    embed_enabled = ProviderDefinition(
+        name="embed",
+        base_url="https://embed.example",
+        api_key="sk",
+        purposes=("embedding",),
+        enabled=True,
+    )
+
+    assert has_embedding_purpose([]) is False
+    assert has_embedding_purpose([chat_only]) is False
+    assert has_embedding_purpose([chat_only, embed_disabled]) is False
+    assert has_embedding_purpose([chat_only, embed_enabled]) is True
 
 
 def test_build_effective_providers_does_not_merge_legacy_when_pool_exists():

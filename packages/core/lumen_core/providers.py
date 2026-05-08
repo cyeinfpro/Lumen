@@ -27,6 +27,8 @@ from urllib.parse import quote
 
 IMAGE_EDIT_INPUT_TRANSPORT_VALUES = ("url", "file")
 DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT = "url"
+PROVIDER_PURPOSE_VALUES = ("chat", "image", "embedding")
+DEFAULT_PROVIDER_PURPOSES = ("chat", "image")
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class ProviderDefinition:
     priority: int = 0
     weight: int = 1
     enabled: bool = True
+    purposes: tuple[str, ...] = DEFAULT_PROVIDER_PURPOSES
     proxy_name: str | None = None
     proxy: ProviderProxyDefinition | None = field(
         default=None, repr=False, compare=False
@@ -194,6 +197,55 @@ def provider_supports_route(
     return True
 
 
+def route_to_purpose(route: str | None) -> str:
+    """Map legacy high-level provider routes to account-level purposes."""
+    if route in {"image", "image_jobs", "image2", "image2_direct", "image2_edit_direct"}:
+        return "image"
+    if route == "embedding":
+        return "embedding"
+    return "chat"
+
+
+def has_embedding_purpose(providers: list[ProviderDefinition]) -> bool:
+    """Return True iff at least one enabled provider exposes the embedding purpose.
+
+    Memory writes/retrieval depend on a real text-embedding-3-large provider —
+    without one we cannot compute usable cosine similarity, so the entire
+    feature must short-circuit instead of writing deterministic placeholders
+    that won't match anything at retrieval time.
+    """
+    return any(
+        p.enabled and "embedding" in p.purposes for p in providers
+    )
+
+
+def normalize_provider_purposes(raw: Any) -> tuple[str, ...]:
+    """Parse provider purposes with backward-compatible defaults.
+
+    Missing/empty values on legacy providers mean "chat + image"; explicit
+    values must be a non-empty subset of PROVIDER_PURPOSE_VALUES.
+    """
+    if raw is None or raw == "":
+        return DEFAULT_PROVIDER_PURPOSES
+    if not isinstance(raw, list | tuple):
+        raise ValueError("provider purposes must be an array")
+    seen: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError("provider purposes entries must be strings")
+        value = item.strip().lower()
+        if value not in PROVIDER_PURPOSE_VALUES:
+            raise ValueError(
+                "provider purposes entries must be one of "
+                + ", ".join(PROVIDER_PURPOSE_VALUES)
+            )
+        if value not in seen:
+            seen.append(value)
+    if not seen:
+        raise ValueError("provider purposes must contain at least one value")
+    return tuple(seen)
+
+
 @dataclass
 class RoundRobinState:
     counters: dict[int, int] = field(default_factory=dict)
@@ -300,6 +352,7 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
     priority = _parse_priority(item.get("priority", 0))
     weight = _parse_weight(item.get("weight", 1))
     enabled = bool(item.get("enabled", True))
+    purposes = normalize_provider_purposes(item.get("purposes"))
     rate_limit_raw = item.get("image_rate_limit")
     image_rate_limit: str | None = None
     if isinstance(rate_limit_raw, str) and rate_limit_raw.strip():
@@ -351,6 +404,7 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         priority=priority,
         weight=weight,
         enabled=enabled,
+        purposes=purposes,
         proxy_name=proxy_name,
         image_rate_limit=image_rate_limit,
         image_daily_quota=image_daily_quota,
@@ -507,6 +561,7 @@ def build_legacy_provider(
         priority=0,
         weight=1,
         enabled=True,
+        purposes=DEFAULT_PROVIDER_PURPOSES,
     )
 
 
@@ -943,6 +998,7 @@ __all__ = [
     "build_legacy_provider",
     "close_provider_proxy_tunnels",
     "endpoint_kind_allowed",
+    "has_embedding_purpose",
     "parse_provider_item",
     "parse_provider_config_json",
     "parse_provider_json",
