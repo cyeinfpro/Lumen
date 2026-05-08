@@ -96,7 +96,17 @@ if ! COMPOSE_PROJECT_NAME="${TARGET_PROJECT}" docker compose up -d --wait; then
     exit 1
 fi
 
+# tgbot 在 compose 的 tgbot profile 下，默认 up 不起。如果 shared/.env 设了
+# TELEGRAM_BOT_TOKEN（非空），把 tgbot 也起回来。失败仅 warn，不阻断主修复。
+SHARED_ENV="${DEPLOY_ROOT}/shared/.env"
+if [ -f "${SHARED_ENV}" ] && grep -qE '^TELEGRAM_BOT_TOKEN=.+$' "${SHARED_ENV}"; then
+    log_info "[step] 检测到 TELEGRAM_BOT_TOKEN，启动 tgbot (--profile tgbot)"
+    if ! COMPOSE_PROJECT_NAME="${TARGET_PROJECT}" docker compose --profile tgbot up -d --wait tgbot 2>&1 | tail -5; then
+        log_warn "tgbot 启动失败（其它服务正常）。可手动：cd ${COMPOSE_DIR} && COMPOSE_PROJECT_NAME=${TARGET_PROJECT} docker compose --profile tgbot up -d tgbot"
+    fi
+fi
+
 log_info "$(c_green '[done] project unified')"
 log_info "stack ps:"
 COMPOSE_PROJECT_NAME="${TARGET_PROJECT}" docker compose ps
-log_info "下一步：从 admin 触发"一键更新"应可以正常完成。"
+log_info "下一步：从 admin 触发一键更新应可以正常完成。"
