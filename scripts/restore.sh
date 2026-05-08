@@ -144,7 +144,25 @@ acquire_lock() {
         return 0
     fi
 
-    log "ERROR: another backup/restore is already running (lock: $LOCKDIR)"
+    # mkdir 失败：stale-check（进程被 kill -9 后锁残留）。同 lib.sh 行为。
+    local _owner_pid="" _stale=0
+    if [ -f "$LOCKDIR/pid" ]; then
+        _owner_pid="$(cat "$LOCKDIR/pid" 2>/dev/null | tr -d '[:space:]')"
+        if [ -n "$_owner_pid" ] && ! kill -0 "$_owner_pid" 2>/dev/null; then
+            _stale=1
+        fi
+    fi
+    if [ "$_stale" = "1" ]; then
+        log "WARN stale lock (owner pid=$_owner_pid 已死)，清理后重试"
+        rm -rf "$LOCKDIR" 2>/dev/null || true
+        if mkdir "$LOCKDIR" 2>/dev/null; then
+            printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null || true
+            LOCK_KIND="mkdir"
+            return 0
+        fi
+    fi
+
+    log "ERROR: another backup/restore is already running (lock: $LOCKDIR, owner=${_owner_pid:-未知})"
     exit 10
 }
 
