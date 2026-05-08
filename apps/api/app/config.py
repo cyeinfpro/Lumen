@@ -157,18 +157,19 @@ class Settings(BaseSettings):
                 raise ValueError(f"invalid TRUSTED_PROXIES CIDR: {cidr}") from exc
         env = self.app_env.strip().lower()
         is_dev = env in {"dev", "development", "local", "test"}
-        # Why: BYOK_API_KEY_MASTER_SECRET is required *in every environment* —
-        # without it AES-GCM encryption can't deterministically derive a key
-        # and every restart would silently invalidate stored credentials.
-        # Dev gets a relaxed minimum (16 chars) but cannot be empty; prod
-        # demands ≥32 chars (production-grade entropy).
+        # Why: BYOK_API_KEY_MASTER_SECRET is required *in production* — without
+        # it AES-GCM encryption can't deterministically derive a key and every
+        # restart would silently invalidate stored credentials. In dev/test we
+        # fall back to a deterministic dummy so smoke tests / image start-ups
+        # / fresh local checkouts don't require explicit env configuration.
         byok_secret = self.byok_api_key_master_secret.strip()
-        byok_min_len = 16 if is_dev else 32
-        if len(byok_secret) < byok_min_len:
+        if is_dev and len(byok_secret) < 16:
+            byok_secret = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
+            self.byok_api_key_master_secret = byok_secret
+        elif not is_dev and len(byok_secret) < 32:
             raise ValueError(
-                f"BYOK_API_KEY_MASTER_SECRET must be at least {byok_min_len} characters "
-                f"({'development' if is_dev else 'production'} mode); generate with: "
-                "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+                "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters in production; "
+                "generate with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
             )
         if not is_dev:
             secret = self.session_secret.strip()
