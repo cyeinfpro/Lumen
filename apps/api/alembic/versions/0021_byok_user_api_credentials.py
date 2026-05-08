@@ -1,7 +1,7 @@
 """Add BYOK supplier templates and user API credentials.
 
-Revision ID: 0019_byok_user_api_credentials
-Revises: 0018_account_memory
+Revision ID: 0021_byok_user_api_credentials
+Revises: 0020_lower_extraction_threshold
 Create Date: 2026-05-08
 """
 
@@ -14,8 +14,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 
-revision: str = "0019_byok_user_api_credentials"
-down_revision: str | None = "0018_account_memory"
+revision: str = "0021_byok_user_api_credentials"
+down_revision: str | None = "0020_lower_extraction_threshold"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
