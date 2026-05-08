@@ -722,7 +722,8 @@ async def memory_extract(
             )
             if llm_candidates:
                 candidates = llm_candidates
-        threshold = max(0.7, min(0.95, float(user.extraction_threshold or 0.85)))
+        # 默认 0.80 (0020 migration), forget 反馈会推到 0.95 上限 / pin 反馈推到 0.6 下限.
+        threshold = max(0.6, min(0.95, float(user.extraction_threshold or 0.80)))
         for candidate in candidates:
             existing = (
                 await session.execute(

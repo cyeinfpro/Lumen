@@ -583,7 +583,7 @@ async def forget_memory(
     memory.disabled = True
     memory.deleted_at = datetime.now(timezone.utc)
     memory.negative_signal += 2
-    user.extraction_threshold = min(0.95, float(user.extraction_threshold or 0.85) + 0.02)
+    user.extraction_threshold = min(0.95, float(user.extraction_threshold or 0.80) + 0.02)
     db.add(
         _audit(
             user_id=user.id,
@@ -711,7 +711,7 @@ async def undo_memory_write(
                     ),
                     source=cand_source,
                     embedding=None,
-                    confidence=float(candidate.get("confidence") or 0.85),
+                    confidence=float(candidate.get("confidence") or 0.80),
                     scope_id=scope.id,
                     last_used_at=datetime.now(timezone.utc),
                 )
