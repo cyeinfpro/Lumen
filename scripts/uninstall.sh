@@ -492,6 +492,27 @@ cat <<EOF
 EOF
 
 if [ "${LUMEN_UNINSTALL_NONINTERACTIVE}" != "1" ]; then
+    # 列出实际会被删 / 保留的路径（含大小），让用户确认前知道影响面。
+    if [ "${LUMEN_UNINSTALL_PURGE:-0}" = "1" ]; then
+        log_warn "  --purge 模式：以下数据目录将被【永久删除】，请确认数据已 backup："
+        _seen_paths=""
+        for _d in "${LUMEN_DATA_ROOT}" "${LUMEN_DB_ROOT}"; do
+            case " ${_seen_paths} " in
+                *" ${_d} "*) continue ;;
+            esac
+            _seen_paths="${_seen_paths} ${_d}"
+            if [ -d "${_d}" ]; then
+                _sz="$(du -sh "${_d}" 2>/dev/null | awk '{print $1}')"
+                log_warn "    ✗ ${_d}  (大小 ${_sz:-未知})"
+            else
+                log_warn "    · ${_d}  (不存在，跳过)"
+            fi
+        done
+    else
+        log_info "  默认保留数据目录（如需删除请加 --purge 或设 LUMEN_UNINSTALL_PURGE=1）："
+        log_info "    ✓ ${LUMEN_DATA_ROOT}"
+        log_info "    ✓ ${LUMEN_DB_ROOT}"
+    fi
     if ! confirm "确认开始卸载？"; then
         log_info "用户取消，未做任何修改。"
         exit 0

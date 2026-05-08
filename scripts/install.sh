@@ -713,8 +713,25 @@ _install_health_compose() {
 }
 
 # 阶段记录 wrapper
+# 记录每个 phase 的 wall-clock 起止时间，emit_step_done 时打印耗时摘要给
+# 终端用户（lumen_emit_step 的 dur_ms 仅写入 SSE 协议，终端看不到）。
+INSTALL_PHASE_START_TS=""
+declare -A INSTALL_PHASE_DURATIONS=()  # phase -> duration_seconds (decimal)
+
+_now_seconds() {
+    # 高精度 wall-clock；macOS date 不支持 +%s.%N，用 perl 兜底，再不行用秒精度。
+    if date +%s.%N >/dev/null 2>&1 && [ "$(date +%N)" != "N" ]; then
+        date +%s.%N
+    elif command -v perl >/dev/null 2>&1; then
+        perl -MTime::HiRes=time -e 'printf "%.3f\n", time'
+    else
+        date +%s
+    fi
+}
+
 emit_step_start() {
     INSTALL_PHASE="$1"
+    INSTALL_PHASE_START_TS="$(_now_seconds)"
     log_step "[${INSTALL_PHASE}] $2"
     if command -v lumen_emit_step >/dev/null 2>&1; then
         lumen_emit_step "phase=${INSTALL_PHASE}" "status=start" || true
@@ -722,10 +739,24 @@ emit_step_start() {
 }
 
 emit_step_done() {
+    local dur=""
+    if [ -n "${INSTALL_PHASE_START_TS}" ] && [ -n "${INSTALL_PHASE:-}" ]; then
+        local end_ts
+        end_ts="$(_now_seconds)"
+        # awk 处理浮点；不依赖 bc。失败时 dur 留空，不打耗时。
+        dur="$(awk -v s="${INSTALL_PHASE_START_TS}" -v e="${end_ts}" \
+            'BEGIN { d = e - s; if (d < 0) d = 0; printf "%.1f", d }' 2>/dev/null || true)"
+        if [ -n "${dur}" ]; then
+            INSTALL_PHASE_DURATIONS["${INSTALL_PHASE}"]="${dur}"
+            log_info "  ✓ ${INSTALL_PHASE} 完成（耗时 ${dur}s）"
+        fi
+    fi
     if command -v lumen_emit_step >/dev/null 2>&1 && [ -n "${INSTALL_PHASE:-}" ]; then
-        lumen_emit_step "phase=${INSTALL_PHASE}" "status=done" "rc=0" || true
+        lumen_emit_step "phase=${INSTALL_PHASE}" "status=done" "rc=0" \
+            ${dur:+dur_ms=$(awk -v d="${dur}" 'BEGIN { printf "%d", d * 1000 }')} || true
     fi
     INSTALL_PHASE=""
+    INSTALL_PHASE_START_TS=""
 }
 
 emit_info() {
