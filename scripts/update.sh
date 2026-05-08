@@ -325,8 +325,10 @@ disk_free_gb_opt() {
     printf '%s' "-1"
 }
 
-# 校验数据目录属主：postgres=70, redis=999, storage/backup 对齐应用 storage gid。
-# 不严格 chown，只 warn——install.sh 才负责强制 chown。
+# 校验数据目录属主：postgres=999, redis=999, storage/backup 对齐应用 storage gid。
+# v1.0.48 起 postgres 容器换到 pgvector/pgvector:pg16（Debian, uid=999）。
+# 老老 alpine 镜像 postgres uid=70 的数据目录会在 migrate_postgres_uid 阶段
+# 一次性 chown 70 → 999；这里仍仅 warn 兜底。
 check_data_owners() {
     local missing=0
     local path
@@ -347,7 +349,7 @@ check_data_owners() {
     local uid gid
     if command -v stat >/dev/null 2>&1; then
         uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || echo "")"
-        [ -n "${uid}" ] && [ "${uid}" != "70" ] && log_warn "${LUMEN_DB_ROOT}/postgres 属主非 70（实际 ${uid}），postgres 容器可能起不来。"
+        [ -n "${uid}" ] && [ "${uid}" != "999" ] && log_warn "${LUMEN_DB_ROOT}/postgres 属主非 999（实际 ${uid}），postgres 容器可能起不来。"
         uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || echo "")"
         [ -n "${uid}" ] && [ "${uid}" != "999" ] && log_warn "${LUMEN_DB_ROOT}/redis 属主非 999（实际 ${uid}），redis 容器可能起不来。"
         gid="$(stat -c '%g' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || stat -f '%g' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || echo "")"
@@ -356,6 +358,30 @@ check_data_owners() {
         [ -n "${gid}" ] && [ "${gid}" != "${LUMEN_APP_STORAGE_GID}" ] && log_warn "${LUMEN_DATA_ROOT}/backup 属组非 ${LUMEN_APP_STORAGE_GID}（实际 ${gid}），备份/日志可能写不进去。"
     fi
     return 0
+}
+
+# v1.0.48: postgres 镜像从 alpine (uid=70) 切到 pgvector/pgvector:pg16 (uid=999).
+# 老 install 在数据目录写过 owner=70 的文件,新容器 uid=999 启动会 EACCES.
+# 这个 helper 检测属主, 仅在 ≠ 999 时 chown 一次, idempotent.
+migrate_postgres_uid() {
+    local pg_dir="${LUMEN_DB_ROOT}/postgres"
+    if [ ! -d "${pg_dir}" ]; then
+        return 0
+    fi
+    local current_uid=""
+    if command -v stat >/dev/null 2>&1; then
+        current_uid="$(stat -c '%u' "${pg_dir}" 2>/dev/null || stat -f '%u' "${pg_dir}" 2>/dev/null || echo "")"
+    fi
+    if [ -z "${current_uid}" ] || [ "${current_uid}" = "999" ]; then
+        return 0
+    fi
+    log_info "[migrate_postgres_uid] ${pg_dir} 属主 ${current_uid} → 999 (pgvector 镜像 postgres uid)"
+    if lumen_run_as_root chown -R 999:999 "${pg_dir}"; then
+        log_info "[migrate_postgres_uid] chown 完成"
+        return 0
+    fi
+    log_error "[migrate_postgres_uid] chown 失败,postgres 容器可能起不来"
+    return 1
 }
 
 # rsync 仓库内容到 release 目录；与 install 的发布物布局对齐。
@@ -1080,6 +1106,14 @@ emit_start start_infra
 # (project=current 而非 lumen)，先 down 掉，避免新 project=lumen 撞容器名。
 # idempotent — 无 stale 直接返回。
 lumen_compose_project_unify
+
+# v1.0.48 镜像切到 pgvector/pgvector:pg16, postgres uid 70 → 999.
+# 老老 install 留下的 alpine 数据目录 uid=70, 必须先 chown 否则 PG 起不来.
+if ! migrate_postgres_uid; then
+    log_error "[start_infra] postgres 数据目录 chown 999 失败,中止升级."
+    emit_fail start_infra 1
+    exit 1
+fi
 
 # --force-recreate：避免容器名已存在但配置签名不一致（caller 历史 cwd 不同
 # 或人工 docker compose up 留下来的孤儿容器）时报 conflict 直接 fail。

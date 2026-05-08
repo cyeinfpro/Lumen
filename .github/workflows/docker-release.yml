@@ -113,7 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$LUMEN_DB_ROOT"/{postgres,redis} "$LUMEN_DATA_ROOT"/{storage,backup}
-          sudo chown -R 70:70 "$LUMEN_DB_ROOT/postgres"
+          sudo chown -R 999:999 "$LUMEN_DB_ROOT/postgres"
           sudo chown -R 999:999 "$LUMEN_DB_ROOT/redis"
           sudo chown -R 10001:10001 "$LUMEN_DATA_ROOT/storage" "$LUMEN_DATA_ROOT/backup"
           docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
