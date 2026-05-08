@@ -25,3 +25,43 @@ async def require_message(cb: CallbackQuery) -> Message | None:
         await cb.answer("消息已过期，请重新发起", show_alert=True)
         return None
     return msg
+
+
+def message_prompt(message: Message) -> str:
+    return (message.text or message.caption or "").strip()
+
+
+def resolution_from_size(size_requested: str) -> str:
+    try:
+        w, h = (int(x) for x in size_requested.lower().split("x", 1))
+    except Exception:  # noqa: BLE001
+        return "2k"
+    longest = max(w, h)
+    if longest >= 2944:
+        return "4k"
+    if longest >= 1536:
+        return "2k"
+    return "1k"
+
+
+def mime_extension(mime: str, *, default: str = "jpg") -> str:
+    normalized = (mime or "").split(";", 1)[0].strip().lower()
+    return {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/webp": "webp",
+        "image/avif": "avif",
+        "image/heic": "heic",
+        "image/heif": "heif",
+    }.get(normalized, default)
+
+
+def truncate_text(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit == 1:
+        return "…"
+    return text[: limit - 1] + "…"

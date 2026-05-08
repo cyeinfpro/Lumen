@@ -138,6 +138,9 @@ class ChatParamsIn(BaseModel):
     # system_prompt 与用户文本一同进入上游 instructions，保持同样上限。
     system_prompt: str | None = Field(default=None, max_length=10000)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    # TODO: 后续 release 内把 le 收敛到 16000；当前先保持 32000，避免老客户端
+    # 提交 (16000, 32000] 区间值被 422 拒绝。worker 侧若需要更紧的实际上限，
+    # 应在调度层 silent clamp，不要在 schema 这一层做 hard fail。
     max_output_tokens: int = Field(default=2048, ge=1, le=32000)
     stream: bool = True
     # 推理强度（仅 chat / vision_qa 生效；"none"=不思考；"minimal" 兼容旧客户端）

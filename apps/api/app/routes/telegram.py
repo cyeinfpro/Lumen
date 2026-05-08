@@ -62,6 +62,7 @@ from ..proxy_pool import (
     report_success as pool_report_success,
 )
 from ..runtime_settings import get_setting
+from ..ratelimit import RateLimiter, require_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,11 @@ _LINK_CODE_TTL_SECONDS = 600  # 10 min
 _LINK_CODE_REDIS_PREFIX = "tg:link:"
 _TG_CONV_TITLE = "Telegram Bot"
 _TG_CONV_MARKER = {"telegram": True}
+_BOT_BIND_CODE_LIMITER = RateLimiter(
+    capacity=30,
+    refill_per_sec=30 / 60,
+    always_on=True,
+)
 
 
 def _link_code_key(code: str) -> str:
@@ -88,8 +94,9 @@ def _link_code_key(code: str) -> str:
 
 
 def _gen_link_code() -> str:
-    # 6 字节 → 8 字符 url-safe；够防爆破，TG /start 又不会太长。
-    return secrets.token_urlsafe(6).replace("-", "A").replace("_", "B").upper()[:10]
+    # 16 random bytes -> ~22 URL-safe chars. Keep the original alphabet and
+    # casing so no entropy is collapsed before the bot consumes the code.
+    return secrets.token_urlsafe(16).rstrip("=")
 
 
 def _aspect_ratio_to_size(ratio: str, max_long_side: int) -> str:
@@ -186,6 +193,7 @@ class BindOut(BaseModel):
 
 
 class GenerateIn(BaseModel):
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=64)
     prompt: str = Field(min_length=1, max_length=10000)
     aspect_ratio: Literal["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "4:5"] = "1:1"
     render_quality: Literal["low", "medium", "high", "auto"] = "high"
@@ -218,6 +226,7 @@ class GenerationStatusOut(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     image_ids: list[str] = Field(default_factory=list)
+    input_image_ids: list[str] = Field(default_factory=list)
     prompt: str
     created_at: datetime
     # 完整的生成参数：retry 直接用这些回填，不必再扫 /telegram/tasks 推断
@@ -277,6 +286,7 @@ async def create_link_code(user: CurrentUser) -> LinkCodeOut:
 
 @router_bot.post("/telegram/bind", response_model=BindOut, dependencies=[Depends(require_bot_token)])
 async def bind_telegram(
+    request: Request,
     body: BindIn,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BindOut:
@@ -284,6 +294,13 @@ async def bind_telegram(
     key = _link_code_key(body.code)
     raw = await redis.get(key)
     if raw is None:
+        # Why: key is IP-only. Including `len:{len(body.code)}` partitions
+        # the bucket per code length, letting an attacker brute-force in
+        # parallel across lengths and bypass the rate limit.
+        await _BOT_BIND_CODE_LIMITER.check(
+            redis,
+            f"rl:telegram:bind:{require_client_ip(request)}",
+        )
         raise _http("invalid_code", "binding code is invalid or expired", 400)
     user_id = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
     # 一次性消费：删 key 后再写表，失败回滚把 key 写回（best-effort）
@@ -391,6 +408,11 @@ class RuntimeConfigOut(BaseModel):
     cooldown_seconds: int
 
 
+class RuntimeAccessOut(BaseModel):
+    bot_enabled: bool
+    allowed_user_ids: str
+
+
 async def _get_setting_str(db: AsyncSession, key: str, default: str = "") -> str:
     spec = get_spec(key)
     if spec is None:
@@ -428,7 +450,7 @@ async def runtime_config(
     avoid 是逗号分隔的 proxy name 列表（最近失败的），用来在 pool 里跳过它们。
     """
     redis = get_redis()
-    enabled_raw = (await _get_setting_str(db, "telegram.bot_enabled", "1")).strip()
+    enabled_raw = (await _get_setting_str(db, "telegram.bot_enabled", "1")).strip().lower()
     bot_enabled = enabled_raw not in {"0", "false", "no", ""}
     bot_token = await _get_setting_str(db, "telegram.bot_token")
     bot_username = await _get_setting_str(db, "telegram.bot_username")
@@ -473,6 +495,23 @@ async def runtime_config(
         proxy_strategy=strategy,
         failure_threshold=failure_threshold,
         cooldown_seconds=cooldown_seconds,
+    )
+
+
+@router_bot.get(
+    "/telegram/access-config",
+    response_model=RuntimeAccessOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def access_config(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RuntimeAccessOut:
+    enabled_raw = (await _get_setting_str(db, "telegram.bot_enabled", "1")).strip().lower()
+    bot_enabled = enabled_raw not in {"0", "false", "no", ""}
+    allowed_user_ids = await _get_setting_str(db, "telegram.allowed_user_ids")
+    return RuntimeAccessOut(
+        bot_enabled=bot_enabled,
+        allowed_user_ids=allowed_user_ids,
     )
 
 
@@ -572,7 +611,7 @@ async def create_generation(
     )
     intent = "image_to_image" if body.attachment_image_ids else "text_to_image"
     msg_in = PostMessageIn(
-        idempotency_key=uuid.uuid4().hex,
+        idempotency_key=body.idempotency_key or uuid.uuid4().hex,
         text=body.prompt,
         intent=intent,
         image_params=image_params,
@@ -623,6 +662,7 @@ async def get_generation(
         error_code=gen.error_code,
         error_message=gen.error_message,
         image_ids=list(image_ids),
+        input_image_ids=list(gen.input_image_ids or []),
         prompt=gen.prompt,
         created_at=gen.created_at,
         aspect_ratio=gen.aspect_ratio,

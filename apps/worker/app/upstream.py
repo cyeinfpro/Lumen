@@ -45,7 +45,7 @@ import signal
 import tempfile
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -234,6 +234,7 @@ _FALLBACK_RETRY_ERROR_CODES = {
     "sse_curl_failed",
     "stream_too_large",
 }
+_RACE_CANCEL_WAIT_S = 5.0
 
 
 # 单例 client——进程内复用连接池
@@ -617,20 +618,27 @@ async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
 async def close_client() -> None:
     """Worker shutdown 钩子可调用此方法关闭连接池。"""
     global _client, _images_client, _client_timeout_config, _images_client_timeout_config
-    if _client is not None:
-        await _client.aclose()
-        _client = None
-        _client_timeout_config = None
-    for client in list(_proxied_clients.values()):
+    async with _client_lock:
+        clients: list[httpx.AsyncClient] = []
+        if _client is not None:
+            clients.append(_client)
+            _client = None
+            _client_timeout_config = None
+        clients.extend(_proxied_clients.values())
+        _proxied_clients.clear()
+    for client in clients:
         await client.aclose()
-    _proxied_clients.clear()
-    if _images_client is not None:
-        await _images_client.aclose()
-        _images_client = None
-        _images_client_timeout_config = None
-    for client in list(_proxied_images_clients.values()):
+
+    async with _images_client_lock:
+        image_clients: list[httpx.AsyncClient] = []
+        if _images_client is not None:
+            image_clients.append(_images_client)
+            _images_client = None
+            _images_client_timeout_config = None
+        image_clients.extend(_proxied_images_clients.values())
+        _proxied_images_clients.clear()
+    for client in image_clients:
         await client.aclose()
-    _proxied_images_clients.clear()
     await close_provider_proxy_tunnels()
 
 
@@ -1239,12 +1247,12 @@ async def _resolve_image_job_base_url() -> str:
 # 直接真测 curl 同样请求 93s 能成功——所以策略：先在主链路重试，耗尽才降级到备用。
 # 否则"一抖就跑去备用"，而备用走 chat+image_tool 反而更脆弱。
 _RETRY_STATUS = {502, 503, 504}
+# httpx.TimeoutException 是 ConnectTimeout/ReadTimeout/WriteTimeout/PoolTimeout
+# 的共同基类（已 verify），单写基类即可全覆盖；ConnectError 不继承 TimeoutException
+# 必须单列。
 _RETRY_HTTPX_EXC: tuple[type[BaseException], ...] = (
+    httpx.TimeoutException,
     httpx.ConnectError,
-    httpx.ConnectTimeout,
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
-    httpx.PoolTimeout,
     httpx.RemoteProtocolError,
 )
 
@@ -2254,15 +2262,21 @@ async def _stage_multipart_bytes_to_tmp(
     """
     staged: list[tuple[str, str, str, str]] = []
     tmpfiles: list[str] = []
-    for field_name, (filename, raw, mime) in files:
-        fd, tmp_path = tempfile.mkstemp(prefix="lumen_curl_", suffix=".bin")
-        tmpfiles.append(tmp_path)
-        try:
-            await asyncio.to_thread(_write_bytes_file, fd, raw)
-        finally:
-            os.close(fd)
-        staged.append((field_name, tmp_path, filename, mime))
-    return staged, tmpfiles
+    try:
+        for field_name, (filename, raw, mime) in files:
+            fd, tmp_path = tempfile.mkstemp(prefix="lumen_curl_", suffix=".bin")
+            tmpfiles.append(tmp_path)
+            try:
+                await asyncio.to_thread(_write_bytes_file, fd, raw)
+            finally:
+                os.close(fd)
+            staged.append((field_name, tmp_path, filename, mime))
+        return staged, tmpfiles
+    except BaseException:
+        for tmp_path in tmpfiles:
+            with suppress(Exception):
+                os.unlink(tmp_path)
+        raise
 
 
 async def _curl_post_multipart_using_paths(
@@ -2309,12 +2323,17 @@ async def _curl_post_multipart_using_paths(
         # start_new_session: 把 curl 放进自己的进程组，cleanup 时用 killpg 一并
         # 收掉 curl 派生的 DNS / TLS / proxy connect 子进程，避免 terminate 只命中
         # 主 PID 留下孤儿进程占住 fd / socket。
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise httpx.ConnectError(
+                f"curl executable failed to start: {_CURL_BIN!r}: {exc}"
+            ) from exc
         curl_timeout_s = float(_curl_timeout_arg(timeout_s))
         guard_timeout_s = curl_timeout_s + min(5.0, max(0.25, curl_timeout_s * 0.1))
         try:
@@ -2548,7 +2567,7 @@ async def _iter_sse_curl(
                 raise UpstreamError(
                     f"curl sse idle timeout after {idle_timeout_s:.0f}s",
                     error_code=EC.SSE_CURL_FAILED.value,
-                    status_code=200,
+                    status_code=None,
                 ) from exc
             if not chunk:
                 stream_eof = True
@@ -2606,12 +2625,19 @@ async def _iter_sse_curl(
         # start_new_session: 让 curl 自成进程组，cleanup 用 killpg 收掉它派生的
         # DNS/TLS/proxy 子进程，避免 terminate 只命中主 PID 留下孤儿（详见
         # _terminate_curl_proc_group 注释）。SSE 路径长 idle，更怕这种泄漏。
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise UpstreamError(
+                f"curl sse executable failed to start: {_CURL_BIN!r}: {exc}",
+                error_code=EC.SSE_CURL_FAILED.value,
+                status_code=None,
+            ) from exc
         assert proc.stdout is not None
 
         # 1) 读状态行："HTTP/1.1 200 OK" / "HTTP/2 200"
@@ -4200,8 +4226,10 @@ async def _direct_generate_image_with_failover(
                     kwargs["proxy_override"] = proxy
                 result = await _direct_generate_image_once(**kwargs)
                 _pool_report_image_success(pool, provider.name, endpoint_kind="generations")
-                await account_limiter.record_image_call(
-                    _provider_pool_redis(pool), provider.name
+                await asyncio.shield(
+                    account_limiter.record_image_call(
+                        _provider_pool_redis(pool), provider.name
+                    )
                 )
                 await _emit_image_progress(
                     progress_callback,
@@ -4639,8 +4667,10 @@ async def _image_job_with_failover(
                         provider.name, endpoint, latency_ms=latency_ms
                     )
                     _pool_report_image_success(pool, provider.name, endpoint_kind=inflight_ek)
-                    await account_limiter.record_image_call(
-                        _provider_pool_redis(pool), provider.name
+                    await asyncio.shield(
+                        account_limiter.record_image_call(
+                            _provider_pool_redis(pool), provider.name
+                        )
                     )
                     await _emit_image_progress(
                         progress_callback,
@@ -4862,8 +4892,10 @@ async def _direct_edit_image_with_failover(
                     kwargs["proxy_override"] = proxy
                 result = await _direct_edit_image_once(**kwargs)
                 _pool_report_image_success(pool, provider.name, endpoint_kind="generations")
-                await account_limiter.record_image_call(
-                    _provider_pool_redis(pool), provider.name
+                await asyncio.shield(
+                    account_limiter.record_image_call(
+                        _provider_pool_redis(pool), provider.name
+                    )
                 )
                 await _emit_image_progress(
                     progress_callback,
@@ -5017,8 +5049,10 @@ async def _responses_image_stream_with_failover(
                 result = await _responses_image_stream_with_retry(**kwargs)
                 _pool_report_image_success(pool, provider.name, endpoint_kind="responses")
                 # 入账：滑动窗口 + 当日计数（rate_limit/daily_quota 都为空时短路不查 Redis）
-                await account_limiter.record_image_call(
-                    _provider_pool_redis(pool), provider.name, task_id=task_id
+                await asyncio.shield(
+                    account_limiter.record_image_call(
+                        _provider_pool_redis(pool), provider.name, task_id=task_id
+                    )
                 )
                 await _emit_image_progress(
                     progress_callback,
@@ -5087,6 +5121,40 @@ async def _responses_image_stream_with_failover(
     )
     merged.payload["provider_errors"] = _provider_error_details(providers, errors)
     raise merged
+
+
+def _drain_task_group_result(task_group: asyncio.Future[Any]) -> None:
+    with suppress(BaseException):
+        task_group.result()
+
+
+async def _cancel_and_wait_tasks(
+    tasks: Iterable[asyncio.Task[Any]],
+    *,
+    label: str,
+) -> None:
+    pending = [task for task in tasks if not task.done()]
+    if not pending:
+        return
+    for task in pending:
+        task.cancel()
+    grouped = asyncio.gather(*pending, return_exceptions=True)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(grouped),
+            timeout=_RACE_CANCEL_WAIT_S,
+        )
+    except asyncio.TimeoutError:
+        grouped.add_done_callback(_drain_task_group_result)
+        logger.warning(
+            "%s cancel cleanup still pending after %.1fs for %d task(s)",
+            label,
+            _RACE_CANCEL_WAIT_S,
+            len(pending),
+        )
+    except asyncio.CancelledError:
+        grouped.add_done_callback(_drain_task_group_result)
+        raise
 
 
 async def _race_responses_image(
@@ -5187,10 +5255,11 @@ async def _race_responses_image(
                 if exc is None:
                     winner_name = finished.get_name()
                     losers = [t for t in pending if not t.done()]
-                    for loser in losers:
-                        loser.cancel()
                     if losers:
-                        await asyncio.gather(*losers, return_exceptions=True)
+                        await _cancel_and_wait_tasks(
+                            losers,
+                            label=f"{action} race loser cleanup",
+                        )
                     logger.info(
                         "%s race: %s won, cancelled %d lane(s)",
                         action, winner_name, len(losers),
@@ -5199,10 +5268,11 @@ async def _race_responses_image(
                 # GEN-P1-4: 调用方主动取消 → 立即 cancel 残余 lane 并透传，不再 race。
                 if isinstance(exc, UpstreamCancelled):
                     losers = [t for t in pending if not t.done()]
-                    for loser in losers:
-                        loser.cancel()
                     if losers:
-                        await asyncio.gather(*losers, return_exceptions=True)
+                        await _cancel_and_wait_tasks(
+                            losers,
+                            label=f"{action} race cancelled cleanup",
+                        )
                     logger.info(
                         "%s race: cancelled by caller; aborting %d lane(s)",
                         action, len(losers),
@@ -5233,13 +5303,16 @@ async def _race_responses_image(
         # 兜底：GEN-P0-9 确保残留 lane 被 cancel，并 gather(return_exceptions=True) 收割，
         # 避免泄漏 Task 造成 "Task exception was never retrieved" noisy log。
         leftovers = [t for t in tasks if not t.done()]
-        for t in leftovers:
-            t.cancel()
         if leftovers:
             try:
-                await asyncio.gather(*leftovers, return_exceptions=True)
+                await _cancel_and_wait_tasks(
+                    leftovers,
+                    label=f"{action} race final cleanup",
+                )
+            except asyncio.CancelledError:
+                raise
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("%s race final cleanup failed", action, exc_info=True)
 
 
 # dual_race "bonus 图" 宽限期：winner yield 后给 loser 多少时间出图。
@@ -5440,9 +5513,10 @@ async def _dual_race_image_action(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if still:
-                for t in still:
-                    t.cancel()
-                await asyncio.gather(*still, return_exceptions=True)
+                await _cancel_and_wait_tasks(
+                    still,
+                    label=f"{action} dual_race bonus cleanup",
+                )
                 logger.info(
                     "%s dual_race: loser exceeded grace=%.0fs, cancelled silently",
                     action, grace_s,
@@ -5467,13 +5541,16 @@ async def _dual_race_image_action(
                 return
     finally:
         leftovers = [t for t in tasks if not t.done()]
-        for t in leftovers:
-            t.cancel()
         if leftovers:
             try:
-                await asyncio.gather(*leftovers, return_exceptions=True)
+                await _cancel_and_wait_tasks(
+                    leftovers,
+                    label=f"{action} dual_race final cleanup",
+                )
+            except asyncio.CancelledError:
+                raise
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("%s dual_race final cleanup failed", action, exc_info=True)
 
 
 # image_jobs dual_race 的 bonus grace。
@@ -5654,9 +5731,10 @@ async def _dual_race_image_jobs_action(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if still:
-                for t in still:
-                    t.cancel()
-                await asyncio.gather(*still, return_exceptions=True)
+                await _cancel_and_wait_tasks(
+                    still,
+                    label=f"{action} image_jobs dual_race bonus cleanup",
+                )
                 logger.info(
                     "%s image_jobs dual_race: loser exceeded grace=%.0fs, cancelled silently",
                     action, grace_s,
@@ -5681,13 +5759,20 @@ async def _dual_race_image_jobs_action(
                 return
     finally:
         leftovers = [t for t in tasks if not t.done()]
-        for t in leftovers:
-            t.cancel()
         if leftovers:
             try:
-                await asyncio.gather(*leftovers, return_exceptions=True)
+                await _cancel_and_wait_tasks(
+                    leftovers,
+                    label=f"{action} image_jobs dual_race final cleanup",
+                )
+            except asyncio.CancelledError:
+                raise
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug(
+                    "%s image_jobs dual_race final cleanup failed",
+                    action,
+                    exc_info=True,
+                )
 
 
 def _image_jobs_endpoint_for_engine(engine: str) -> str:
@@ -6428,15 +6513,16 @@ async def _iter_sse_with_runtime(
             byte_count = 0
             try:
                 async for line in resp.aiter_lines():
+                    line_bytes = len(line.encode("utf-8"))
                     line_count += 1
-                    byte_count += len(line)
+                    byte_count += line_bytes
                     if line_count > _SSE_MAX_LINES:
                         raise UpstreamError(
                             "sse exceeded max lines",
                             error_code=EC.STREAM_TOO_LARGE.value,
                             status_code=resp.status_code,
                         )
-                    if len(line) > _SSE_MAX_LINE_BYTES:
+                    if line_bytes > _SSE_MAX_LINE_BYTES:
                         raise UpstreamError(
                             "sse exceeded max line bytes",
                             error_code=EC.STREAM_TOO_LARGE.value,
@@ -6472,6 +6558,8 @@ async def _iter_sse_with_runtime(
                             _maybe_record_usage_from_event(data)
                             yield data
             except UpstreamError:
+                with suppress(Exception):
+                    await resp.aclose()
                 raise
             except asyncio.CancelledError:
                 # cancellation safe: 显式 aclose() 释放底层连接；async with 的 __aexit__
@@ -6689,15 +6777,16 @@ async def responses_call(
                     current_event: str | None = None
                     try:
                         async for line in resp.aiter_lines():
+                            line_bytes = len(line.encode("utf-8"))
                             line_count += 1
-                            byte_count += len(line)
+                            byte_count += line_bytes
                             if line_count > _SSE_MAX_LINES:
                                 raise UpstreamError(
                                     "sse exceeded max lines",
                                     error_code=EC.STREAM_TOO_LARGE.value,
                                     status_code=resp.status_code,
                                 )
-                            if len(line) > _SSE_MAX_LINE_BYTES:
+                            if line_bytes > _SSE_MAX_LINE_BYTES:
                                 raise UpstreamError(
                                     "sse exceeded max line bytes",
                                     error_code=EC.STREAM_TOO_LARGE.value,
@@ -6760,6 +6849,8 @@ async def responses_call(
                                     if isinstance(err, dict):
                                         error_terminal = err
                     except UpstreamError:
+                        with suppress(Exception):
+                            await resp.aclose()
                         raise
                     except asyncio.CancelledError:
                         try:

@@ -157,11 +157,13 @@ def _clean_style_tags(value: Any) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw in candidates:
+        # 显式 strip → 截 8 字：上游 prompt 偶尔输出带空格的标签（"  时尚  "），
+        # 没先 strip 直接 [:8] 会把空格算进 8 字预算丢真实字符。
         tag = str(raw).strip()
         if not tag or tag in seen:
             continue
         seen.add(tag)
-        out.append(tag[:32])
+        out.append(tag.strip()[:8])
         if len(out) >= 6:
             break
     return out
@@ -180,12 +182,12 @@ def _strip_markdown_fences(text: str) -> str:
     """模型偶尔会把 JSON 包在 ```json ... ``` 里；把外层 fence 砍掉。"""
     stripped = text.strip()
     if stripped.startswith("```"):
-        # 去 ```json\n 或 ```\n
-        first_newline = stripped.find("\n")
-        if first_newline != -1:
-            stripped = stripped[first_newline + 1 :]
-        if stripped.endswith("```"):
-            stripped = stripped[:-3]
+        lines = stripped.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines)
     return stripped.strip()
 
 
@@ -428,7 +430,14 @@ async def _call_upstream(
                     error_message=str(exc),
                 )
                 if not decision.retriable:
-                    break
+                    logger.info(
+                        "model_library_tagging terminal upstream failure "
+                        "image_id=%s provider=%s reason=%s",
+                        getattr(image_record, "id", None),
+                        provider.name,
+                        decision.reason,
+                    )
+                    return None
                 if attempt + 1 < _PER_PROVIDER_RETRY_ATTEMPTS:
                     await asyncio.sleep(_PER_PROVIDER_RETRY_BACKOFF_S * (2**attempt))
 

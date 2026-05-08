@@ -41,6 +41,7 @@ _CB_FAILURE_THRESHOLD = 3
 _CB_COOLDOWN_BASE_S = 30.0
 _CB_COOLDOWN_MAX_S = 300.0
 _PROBE_TIMEOUT_S = 15.0
+_PROBE_MAX_CONCURRENCY = 8
 _CONFIG_TTL_S = 5.0
 
 # image route 独立熔断（多账号场景下 image 失败 3 次内只熔该账号，不影响 text）
@@ -803,10 +804,16 @@ class ProviderPool:
         if h is None:
             return
         now = time.monotonic()
+        if is_probe:
+            # probe 不毒化熔断（不动 consecutive_failures / cooldown_until），但仍
+            # 上报一次 fail 让监控可见——_record_request_stats 只递 total/fail
+            # 计数器，不会触发熔断逻辑（已 verify）。
+            h.last_failure_at = now
+            self._record_request_stats(h, total=1, fail=1)
+            return
         h.consecutive_failures += 1
         h.last_failure_at = now
-        if not is_probe:
-            self._record_request_stats(h, total=1, fail=1)
+        self._record_request_stats(h, total=1, fail=1)
         if h.consecutive_failures >= _CB_FAILURE_THRESHOLD:
             multiplier = min(h.consecutive_failures - _CB_FAILURE_THRESHOLD + 1, 10)
             duration = min(_CB_COOLDOWN_BASE_S * multiplier, _CB_COOLDOWN_MAX_S)
@@ -1221,8 +1228,14 @@ class ProviderPool:
         if not providers:
             return {}
 
+        probe_sem = asyncio.Semaphore(max(1, _PROBE_MAX_CONCURRENCY))
+
+        async def run_probe(provider: ProviderConfig) -> bool:
+            async with probe_sem:
+                return await self._probe_one(provider)
+
         results = await asyncio.gather(
-            *(self._probe_one(p) for p in providers),
+            *(run_probe(p) for p in providers),
             return_exceptions=True,
         )
 
@@ -1317,8 +1330,14 @@ class ProviderPool:
         ]
         if not providers:
             return {}
+        probe_sem = asyncio.Semaphore(max(1, _PROBE_MAX_CONCURRENCY))
+
+        async def run_probe(provider: ProviderConfig) -> bool:
+            async with probe_sem:
+                return await self._probe_image_one(provider)
+
         results = await asyncio.gather(
-            *(self._probe_image_one(p) for p in providers),
+            *(run_probe(p) for p in providers),
             return_exceptions=True,
         )
         outcome: dict[str, bool] = {}

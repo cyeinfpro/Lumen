@@ -1,7 +1,7 @@
 [Unit]
 Description=Lumen Worker
-After=network-online.target docker.service
-Wants=network-online.target
+After=network-online.target docker.service lumen-storage-mount.service
+Wants=network-online.target lumen-storage-mount.service
 
 [Service]
 Type=simple
@@ -11,6 +11,9 @@ WorkingDirectory=/opt/lumen/current/apps/worker
 EnvironmentFile=-/opt/lumen/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=PYTHONUNBUFFERED=1
+# 同 lumen-api.service：CIFS forceuid remount，确保 lumen 进程能写
+# /opt/lumendata。worker 跑 4K 长任务，写不进 storage 会让所有任务直接 fail。
+# (per feedback_cifs_chmod_eperm.md)
 ExecStartPre=+/bin/sh -c 'if findmnt -T /opt/lumendata >/dev/null 2>&1 && [ "$$(findmnt -T /opt/lumendata -no FSTYPE)" = "cifs" ]; then /bin/mount -o remount,uid=$$(id -u lumen),gid=$$(id -g lumen),forceuid,forcegid,file_mode=0664,dir_mode=0775 /opt/lumendata || true; fi'
 ExecStart=/opt/lumen/current/.venv/bin/python -m arq app.main.WorkerSettings
 Restart=on-failure

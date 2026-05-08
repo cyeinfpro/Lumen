@@ -22,6 +22,7 @@ import asyncio
 import logging
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
@@ -40,9 +41,16 @@ def _normalize_proxy_url(url: str) -> str:
     runtime-config 返回的是 `socks5h://...`（h = remote DNS），把 h 去掉转成 `socks5://`。
     httpx 那边两种都接受，所以仅在 bot 入口做这一次归一就够了。
     """
-    if url.startswith("socks5h://"):
-        return "socks5://" + url[len("socks5h://") :]
-    return url
+    value = (url or "").strip()
+    if not value:
+        return ""
+    if value.startswith("socks5h://"):
+        value = "socks5://" + value[len("socks5h://") :]
+    parts = urlsplit(value)
+    if parts.scheme and parts.scheme.lower() not in {"socks4", "socks5", "http", "https"}:
+        logger.warning("unsupported telegram proxy scheme: %s", parts.scheme)
+        return ""
+    return value
 
 
 class ProxyManager:
@@ -119,17 +127,20 @@ class ProxyManager:
         但实际打 API 最多每分钟一次，避免高频 TG 流量打爆 lumen-api。
         """
         now = time.monotonic()
-        if now - self._last_success_report < _SUCCESS_REPORT_INTERVAL_SEC:
-            return
-        self._last_success_report = now
-        if self.current_name:
+        async with self._lock:
+            if now - self._last_success_report < _SUCCESS_REPORT_INTERVAL_SEC:
+                return
+            self._last_success_report = now
+            current_name = self.current_name
+            # 清掉 _failed_names 但保留当前快照（防止下次 failover 又选回它）。
+            self._failed_names = {
+                name for name in self._failed_names if name == current_name
+            }
+        if current_name:
             try:
-                await self._api.report_proxy(self.current_name, success=True)
+                await self._api.report_proxy(current_name, success=True)
             except ApiError:
                 pass
-        # 清掉 _failed_names 但保留 current（防止下次 failover 又选回它）
-        async with self._lock:
-            self._failed_names = {n for n in self._failed_names if n == self.current_name}
 
 
 class FailoverSession(AiohttpSession):
@@ -142,7 +153,14 @@ class FailoverSession(AiohttpSession):
 
     async def make_request(self, bot, method, timeout=None):  # type: ignore[override]
         last_exc: Exception | None = None
-        for attempt in range(3):
+        method_name = str(
+            getattr(method, "__api_method__", "")
+            or getattr(method, "method", "")
+            or method.__class__.__name__
+        )
+        retry_safe = method_name.lower().startswith("get")
+        max_attempts = 3 if retry_safe else 1
+        for attempt in range(max_attempts):
             try:
                 result = await super().make_request(bot, method, timeout=timeout)
             except (TelegramNetworkError, ClientError) as exc:
@@ -152,7 +170,7 @@ class FailoverSession(AiohttpSession):
                     attempt + 1, self._manager.current_name, exc,
                 )
                 swapped = await self._manager.failover()
-                if not swapped:
+                if not swapped or not retry_safe:
                     raise
             else:
                 # 通路 OK：节流地通知 manager 清失败缓存。失败本身不影响主路径。

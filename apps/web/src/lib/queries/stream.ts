@@ -39,11 +39,12 @@ export interface GenerationSummary {
   conversation_id: string;
 }
 
+// 注意：搜索按 spec §6.9 是纯客户端过滤（DesktopStream/MobileStream 自管 q + deferredQ），
+// 不进 filters，避免类型上误导调用方把 q 发给后端。
 export interface StreamFeedFilters {
   ratio?: string;
   has_ref?: boolean;
   fast?: boolean;
-  q?: string;
 }
 
 export interface StreamFeedPage {
@@ -65,7 +66,6 @@ function buildQuery(
   if (filters.ratio) p.set("ratio", filters.ratio);
   if (filters.has_ref) p.set("has_ref", "1");
   if (filters.fast) p.set("fast", "1");
-  if (filters.q && filters.q.trim()) p.set("q", filters.q.trim());
   return p.toString();
 }
 
@@ -96,7 +96,7 @@ export function useStreamFeedQuery(
   >({
     queryKey: ["stream", "feed", key, limit] as const,
     queryFn: ({ pageParam }) => {
-      // 注意：这里不把 filters.q 传后端，按 spec 是纯客户端过滤。
+      // 注意：搜索是纯客户端过滤（见 StreamFeedFilters 注释），后端只收 ratio/has_ref/fast。
       const qs = buildQuery(
         { ratio: filters.ratio, has_ref: filters.has_ref, fast: filters.fast },
         limit,

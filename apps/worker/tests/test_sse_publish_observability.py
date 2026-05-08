@@ -10,11 +10,19 @@ from app import observability, sse_publish
 
 
 class FakeRedis:
-    def __init__(self, *, xadd_failures: int = 0, publish_failures: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        xadd_failures: int = 0,
+        publish_failures: int = 0,
+        dlq_failures: int = 0,
+    ) -> None:
         self.xadd_failures = xadd_failures
         self.publish_failures = publish_failures
+        self.dlq_failures = dlq_failures
         self.xadd_calls = 0
         self.publish_calls = 0
+        self.dlq_calls = 0
         self.published: list[tuple[str, str]] = []
         self.dlq: list[tuple[str, str]] = []
 
@@ -32,6 +40,9 @@ class FakeRedis:
         return 1
 
     async def lpush(self, key: str, payload: str):
+        self.dlq_calls += 1
+        if self.dlq_calls <= self.dlq_failures:
+            raise RuntimeError("dlq unavailable")
         self.dlq.append((key, payload))
         return 1
 
@@ -101,6 +112,32 @@ async def test_publish_event_dlq_payload_has_fallback_sse_id(monkeypatch):
     payload = json.loads(redis.dlq[0][1])
     assert payload["sse_id"].startswith("dlq-")
     assert persisted["payload"]["envelope"]["sse_id"] == payload["sse_id"]
+    assert len(payload["sse_id"].split("-")) >= 3
+
+
+@pytest.mark.asyncio
+async def test_publish_event_raises_when_all_durable_sinks_fail(monkeypatch):
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def fake_persist_sse_dlq(**_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(sse_publish.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sse_publish, "_persist_sse_dlq", fake_persist_sse_dlq)
+
+    redis = FakeRedis(xadd_failures=3, dlq_failures=1)
+
+    with pytest.raises(RuntimeError, match="no durable sink"):
+        await sse_publish.publish_event(
+            redis,
+            "user-1",
+            "user:user-1",
+            "generation.failed",
+            {"generation_id": "gen-1"},
+        )
+
+    assert redis.publish_calls == 0
 
 
 @pytest.mark.asyncio

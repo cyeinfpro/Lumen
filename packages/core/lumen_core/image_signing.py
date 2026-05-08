@@ -7,7 +7,7 @@
 - 未来切 S3 / Cloudflare R2 时统一切到对象存储原生预签名（API 不变）
 - 其他第三方嵌入（embed widget / OG meta）
 
-签名算法：HMAC-SHA256("img|{image_id}|{variant}|{exp_ms}", secret) 取前 24 hex
+签名算法：HMAC-SHA256("img|{image_id}|{variant}|{exp_ms}", derived_secret) 取前 24 hex
 （96 bits 防碰撞，足够；过长反而拉长 URL）。
 
 **重要**：签名只授予"按 image_id + variant 取 binary"的能力，不授予增删改。
@@ -17,6 +17,7 @@ secret 只在 API 进程内使用；不要写进数据库或日志。
 from __future__ import annotations
 
 import hmac
+import re
 import time
 from hashlib import sha256
 
@@ -31,6 +32,14 @@ ALLOWED_VARIANTS: frozenset[str] = frozenset(
     {"orig", "display2048", "preview1024", "thumb256"}
 )
 
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{12}$"
+)
+
 
 class ImageSigningError(ValueError):
     """签名 / 校验阶段的输入合法性错误。HTTP 层应映射成 400。"""
@@ -40,8 +49,12 @@ def _msg(image_id: str, variant: str, exp_ms: int) -> bytes:
     return f"img|{image_id}|{variant}|{exp_ms}".encode("utf-8")
 
 
+def _purpose_key(secret: bytes) -> bytes:
+    return hmac.new(secret, b"lumen:image-url-signing:v1", sha256).digest()
+
+
 def _validate_inputs(image_id: str, variant: str) -> None:
-    if not image_id or "|" in image_id or "/" in image_id:
+    if not _UUID_RE.fullmatch(image_id):
         raise ImageSigningError(f"invalid image_id: {image_id!r}")
     if variant not in ALLOWED_VARIANTS:
         raise ImageSigningError(
@@ -58,12 +71,13 @@ def compute_image_sig(
     """生成 sig（hex，固定 SIG_HEX_LEN 长度）。
 
     secret 是 API 进程的对称密钥；从环境变量读取，绝不写日志。
+    实际 HMAC key 先按图片 URL 用途派生，避免未来其它签名用途误复用同一 secret。
     exp_ms 必须由调用方决定（通常 = now + ttl）。
     """
     if not secret:
         raise ImageSigningError("secret must be non-empty bytes")
     _validate_inputs(image_id, variant)
-    mac = hmac.new(secret, _msg(image_id, variant, exp_ms), sha256)
+    mac = hmac.new(_purpose_key(secret), _msg(image_id, variant, exp_ms), sha256)
     return mac.hexdigest()[:SIG_HEX_LEN]
 
 

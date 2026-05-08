@@ -3,9 +3,11 @@
 # ---- deps: install npm dependencies (with native build tools, then strip) ----
 FROM node:22-alpine AS deps
 WORKDIR /app
+ARG NPM_VERSION=10.9.0
 RUN apk add --no-cache --virtual .build-deps libc6-compat python3 make g++
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund --prefer-offline \
+RUN npm install -g "npm@${NPM_VERSION}" \
+    && npm ci --no-audit --no-fund --prefer-offline \
     && apk del .build-deps
 
 # ---- builder: compile Next.js to .next/standalone ----

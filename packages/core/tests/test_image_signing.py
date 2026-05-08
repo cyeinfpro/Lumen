@@ -58,6 +58,16 @@ def test_compute_image_sig_rejects_invalid_image_id() -> None:
         compute_image_sig("../etc/passwd", "orig", 1_700_000_000_000, SECRET)
     with pytest.raises(ImageSigningError):
         compute_image_sig("a|b", "orig", 1_700_000_000_000, SECRET)
+    for bad in (
+        "..",
+        "01900000-0000-7000-8000-000000000001 ",
+        "01900000-0000-7000-8000-000000000001?download=1",
+        "01900000-0000-7000-8000-000000000001#frag",
+        r"01900000-0000-7000-8000-000000000001\thumb",
+        "%2e%2e",
+    ):
+        with pytest.raises(ImageSigningError):
+            compute_image_sig(bad, "orig", 1_700_000_000_000, SECRET)
 
 
 def test_compute_image_sig_rejects_empty_secret() -> None:

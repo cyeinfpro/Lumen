@@ -39,6 +39,7 @@ router = APIRouter()
 
 
 CURSOR_VERSION = "v2"
+COUNT_CAP = 10_000
 
 
 # ---------- 支持的 aspect ratio 白名单 ----------
@@ -174,7 +175,9 @@ def _apply_filters(
 
     if fast:
         stmt = stmt.where(
-            Generation.upstream_request["fast"].as_boolean().is_(True)
+            func.lower(Generation.upstream_request["fast"].astext).in_(
+                ("true", "1")
+            )
         )
 
     if q:
@@ -216,7 +219,7 @@ async def list_generation_feed(
     if cursor_total is not None:
         total = cursor_total
     else:
-        count_stmt: Select = select(func.count(Generation.id))  # type: ignore[assignment]
+        count_stmt: Select = select(Generation.id)  # type: ignore[assignment]
         count_stmt = _apply_filters(
             count_stmt,
             user_id=user.id,
@@ -225,7 +228,11 @@ async def list_generation_feed(
             fast=fast,
             q=q,
         )
-        total = int((await db.execute(count_stmt)).scalar() or 0)
+        limited_count = (
+            select(func.count())
+            .select_from(count_stmt.limit(COUNT_CAP + 1).subquery())
+        )
+        total = int((await db.execute(limited_count)).scalar() or 0)
 
     # ---- page ----
     stmt: Select = select(Generation)  # type: ignore[assignment]

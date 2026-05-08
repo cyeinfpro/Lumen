@@ -222,7 +222,14 @@ async def _call_upstream(image_record: Any, image_url: str, *, model: str) -> st
                     error_message=str(exc),
                 )
                 if not decision.retriable:
-                    break
+                    logger.info(
+                        "context image caption terminal upstream failure "
+                        "image_id=%s provider=%s reason=%s",
+                        getattr(image_record, "id", None),
+                        provider.name,
+                        decision.reason,
+                    )
+                    return None
                 if attempt + 1 < _PER_PROVIDER_RETRY_ATTEMPTS:
                     await asyncio.sleep(_PER_PROVIDER_RETRY_BACKOFF_S * (2**attempt))
 
@@ -328,10 +335,12 @@ async def batch_caption_images(
     max_concurrency: int = 4,
     total_timeout: float = 45,
 ) -> dict[str, str]:
-    """Caption many images with a hard total deadline.
+    """Caption many images with a soft launch deadline.
 
-    Returns only successful captions keyed by image id. Timed-out pending tasks
-    are cancelled, while completed successes are preserved.
+    Returns only successful captions keyed by image id. ``total_timeout`` stops
+    starting new images after the deadline; requests already sent upstream are
+    allowed to finish under their own per-item timeout so cancellation does not
+    strand external quota/accounting work.
     """
     if not image_records:
         return {}
@@ -367,32 +376,52 @@ async def batch_caption_images(
             image_id = getattr(record, "id", None)
             return (str(image_id) if image_id else None), caption, record, bool(caption)
 
-    tasks = [asyncio.create_task(_one(record)) for record in image_records]
-    done: set[asyncio.Task[tuple[str | None, str | None, Any | None, bool]]] = set()
-    pending: set[asyncio.Task[tuple[str | None, str | None, Any | None, bool]]] = set(tasks)
-    cache_writes = 0
-    try:
-        done, pending = await asyncio.wait(tasks, timeout=total_timeout)
-        for task in done:
+    completed: list[tuple[str | None, str | None, Any | None, bool]] = []
+    next_index = 0
+    index_lock = asyncio.Lock()
+    deadline = (
+        asyncio.get_running_loop().time() + total_timeout
+        if total_timeout > 0
+        else None
+    )
+
+    async def _next_record() -> Any | None:
+        nonlocal next_index
+        async with index_lock:
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                return None
+            if next_index >= len(image_records):
+                return None
+            record = image_records[next_index]
+            next_index += 1
+            return record
+
+    async def _worker() -> None:
+        while True:
+            record = await _next_record()
+            if record is None:
+                return
             try:
-                image_id, caption, record, should_cache = task.result()
+                completed.append(await _one(record))
             except Exception as exc:  # noqa: BLE001
                 logger.info("context image batch caption item failed err=%s", exc)
-                continue
-            if image_id and caption:
-                results[image_id] = caption
-                if should_cache and record is not None:
-                    await _write_caption_cache(session, record, caption)
-                    cache_writes += 1
-        if cache_writes:
-            commit = getattr(session, "commit", None)
-            if callable(commit):
-                await commit()
-    finally:
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+
+    workers = [
+        asyncio.create_task(_worker())
+        for _ in range(min(max(1, max_concurrency), len(image_records)))
+    ]
+    cache_writes = 0
+    await asyncio.gather(*workers, return_exceptions=True)
+    for image_id, caption, record, should_cache in completed:
+        if image_id and caption:
+            results[image_id] = caption
+            if should_cache and record is not None:
+                await _write_caption_cache(session, record, caption)
+                cache_writes += 1
+    if cache_writes:
+        commit = getattr(session, "commit", None)
+        if callable(commit):
+            await commit()
     return results
 
 

@@ -108,10 +108,11 @@ async def test_ensure_caption_for_image_returns_none_when_image_unreadable(
 
 
 @pytest.mark.asyncio
-async def test_batch_caption_images_returns_partial_success_and_cancels_pending(
+async def test_batch_caption_images_stops_starting_new_work_after_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cancelled: list[str] = []
+    calls: list[str] = []
 
     async def fake_image_data_url(record: _ImageRecord) -> str:
         return f"data:image/png;base64,{record.id}"
@@ -120,29 +121,30 @@ async def test_batch_caption_images_returns_partial_success_and_cancels_pending(
         record: _ImageRecord, _image_url: str, *, model: str
     ) -> str | None:
         assert model == "gpt-vision"
+        calls.append(record.id)
         if record.id == "slow":
             try:
-                await asyncio.sleep(10)
+                await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 cancelled.append(record.id)
                 raise
-        if record.id == "none":
-            return None
         return f"caption-{record.id}"
 
     monkeypatch.setattr(context_image_caption, "_image_data_url", fake_image_data_url)
     monkeypatch.setattr(context_image_caption, "_call_upstream", fake_upstream)
+    monkeypatch.setattr(context_image_caption, "_CAPTION_HTTP_TIMEOUT_S", 1.0)
 
     results = await context_image_caption.batch_caption_images(
         _Session(),
-        [_ImageRecord(id="ok"), _ImageRecord(id="none"), _ImageRecord(id="slow")],
+        [_ImageRecord(id="slow"), _ImageRecord(id="late")],
         model="gpt-vision",
-        max_concurrency=3,
-        total_timeout=0.05,
+        max_concurrency=1,
+        total_timeout=0.01,
     )
 
-    assert results == {"ok": "caption-ok"}
-    assert cancelled == ["slow"]
+    assert results == {"slow": "caption-slow"}
+    assert calls == ["slow"]
+    assert cancelled == []
 
 
 @pytest.mark.asyncio
@@ -184,3 +186,107 @@ def test_extract_response_text_supports_top_level_and_nested_output() -> None:
         )
         == "nested"
     )
+
+
+class _Provider:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.base_url = f"https://{name}.example"
+        self.api_key = f"sk-{name}"
+
+
+class _Pool:
+    def __init__(self, providers: list[_Provider]) -> None:
+        self.providers = providers
+
+    async def select(self, *, route: str = "text") -> list[_Provider]:
+        assert route == "text"
+        return self.providers
+
+
+@pytest.mark.asyncio
+async def test_call_upstream_stops_provider_chain_on_terminal_4xx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_pool() -> _Pool:
+        return _Pool([_Provider("acc1"), _Provider("acc2")])
+
+    from app import provider_pool
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(context_image_caption, "_PER_PROVIDER_RETRY_ATTEMPTS", 2)
+
+    calls: list[str] = []
+
+    async def fake_one(
+        record: _ImageRecord,
+        image_url: str,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str,
+    ) -> str:
+        assert record.id == "img-terminal"
+        assert image_url == "data:image/png;base64,abc"
+        assert model == "gpt-vision"
+        calls.append(api_key)
+        raise context_image_caption.UpstreamError(
+            "bad request",
+            error_code="invalid_request_error",
+            status_code=400,
+        )
+
+    monkeypatch.setattr(context_image_caption, "_call_upstream_one", fake_one)
+
+    result = await context_image_caption._call_upstream(
+        _ImageRecord(id="img-terminal"),
+        "data:image/png;base64,abc",
+        model="gpt-vision",
+    )
+
+    assert result is None
+    assert calls == ["sk-acc1"]
+
+
+@pytest.mark.asyncio
+async def test_call_upstream_failovers_after_retriable_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_pool() -> _Pool:
+        return _Pool([_Provider("acc1"), _Provider("acc2")])
+
+    from app import provider_pool
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(context_image_caption, "_PER_PROVIDER_RETRY_ATTEMPTS", 1)
+
+    calls: list[str] = []
+
+    async def fake_one(
+        record: _ImageRecord,
+        image_url: str,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str,
+    ) -> str:
+        _ = (record, image_url, model, base_url)
+        calls.append(api_key)
+        if api_key == "sk-acc1":
+            raise context_image_caption.UpstreamError(
+                "temporary",
+                error_code="upstream_error",
+                status_code=503,
+            )
+        return "caption from acc2"
+
+    monkeypatch.setattr(context_image_caption, "_call_upstream_one", fake_one)
+
+    result = await context_image_caption._call_upstream(
+        _ImageRecord(id="img-retry"),
+        "data:image/png;base64,abc",
+        model="gpt-vision",
+    )
+
+    assert result == "caption from acc2"
+    assert calls == ["sk-acc1", "sk-acc2"]

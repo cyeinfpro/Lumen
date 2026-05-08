@@ -143,6 +143,8 @@ def test_estimate_message_tokens_counts_only_list_attachments(monkeypatch):
 def test_get_input_budget_uses_tested_model_budget_and_conservative_fallback():
     assert MODEL_INPUT_BUDGETS["gpt-5.4"] == CONTEXT_INPUT_TOKEN_BUDGET
     assert get_input_budget("gpt-5.4") == CONTEXT_INPUT_TOKEN_BUDGET
+    assert get_input_budget("gpt-5.4-mini") == CONTEXT_INPUT_TOKEN_BUDGET
+    assert get_input_budget("gpt-5.5-2026-05-01") == CONTEXT_INPUT_TOKEN_BUDGET
     assert get_input_budget("unknown-model") == FALLBACK_INPUT_TOKEN_BUDGET
     assert get_input_budget(None) == FALLBACK_INPUT_TOKEN_BUDGET
     assert FALLBACK_INPUT_TOKEN_BUDGET < CONTEXT_INPUT_TOKEN_BUDGET

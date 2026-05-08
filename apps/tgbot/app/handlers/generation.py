@@ -11,19 +11,46 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+import contextlib
 
 from aiogram import F, Router
+from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramForbiddenError, TelegramUnauthorizedError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from ..api_client import ApiError, LumenApi
+from ..api_client import ApiError, LumenApi, make_idempotency_key
 from ..keyboards import DEFAULT_PARAMS, enhance_choice_keyboard, render_params_summary
 from ..states import GenFlow
 from ..tracker import TaskTrack, tracker
-from ._helpers import require_message
+from ._helpers import message_prompt, require_message
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+# 已为某 chat_id 记录过 token-revoked 的 warning，避免心跳每 4s 刷一条
+_HEARTBEAT_AUTH_LOGGED: set[int] = set()
+
+
+async def _chat_action_heartbeat(message: Message, action: ChatAction) -> None:
+    while True:
+        try:
+            await message.bot.send_chat_action(message.chat.id, action)
+        except (TelegramUnauthorizedError, TelegramForbiddenError) as exc:
+            # 401/403：bot token 失效或被踢出 chat。整个进程内 per-chat 只 warn 一次。
+            if message.chat.id not in _HEARTBEAT_AUTH_LOGGED:
+                _HEARTBEAT_AUTH_LOGGED.add(message.chat.id)
+                logger.warning(
+                    "chat_action heartbeat auth failed chat=%s err=%r",
+                    message.chat.id,
+                    exc,
+                )
+        except Exception:  # noqa: BLE001
+            # 其它异常按原行为吞掉（network blip / RetryAfter 等）
+            pass
+        await asyncio.sleep(4.0)
 
 
 async def _submit_generation(
@@ -32,6 +59,7 @@ async def _submit_generation(
     params: dict[str, object],
     api: LumenApi,
     answer,  # callable(text: str) -> Awaitable[Message]
+    idempotency_key: str,
 ) -> None:
     """把 (提示词, params) 提交到 API 并注册 tracker。
 
@@ -40,6 +68,7 @@ async def _submit_generation(
             batch_id；listener 不刷状态，终态事件 DECR batch 计数，归零才删除 placeholder。
     """
     payload = {
+        "idempotency_key": idempotency_key,
         "prompt": prompt,
         "aspect_ratio": params["aspect_ratio"],
         "render_quality": params["render_quality"],
@@ -75,24 +104,28 @@ async def _submit_generation(
         batch_id = gen_ids[0]
 
     status = await answer(status_text)
-    if batch_id:
-        await tracker.init_batch(batch_id, len(gen_ids))
-    for gen_id in gen_ids:
-        await tracker.add(
-            gen_id,
-            TaskTrack(
-                chat_id=chat_id,
-                status_message_id=status.message_id,
-                prompt=prompt,
-                params=params,
-                batch_id=batch_id,
-            ),
-        )
+    try:
+        if batch_id:
+            await tracker.init_batch(batch_id, len(gen_ids))
+        for gen_id in gen_ids:
+            await tracker.add(
+                gen_id,
+                TaskTrack(
+                    chat_id=chat_id,
+                    status_message_id=status.message_id,
+                    prompt=prompt,
+                    params=params,
+                    batch_id=batch_id,
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tracker registration failed ids=%s err=%r", gen_ids, exc)
+        await answer("⚠️ 任务已创建，但通知追踪失败；请用 /tasks 查看结果。")
 
 
 @router.message(GenFlow.awaiting_prompt)
 async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
-    prompt = (message.text or "").strip()
+    prompt = message_prompt(message)
     if not prompt:
         await message.answer("提示词不能为空，请重新发送。")
         return
@@ -102,21 +135,36 @@ async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
 
     data = await state.get_data()
     params = dict(data.get("params") or DEFAULT_PARAMS)
+    idempotency_key = make_idempotency_key(
+        "prompt", message.chat.id, message.message_id
+    )
 
     if params.get("enhance"):
         notice = await message.answer("✨ 正在优化提示词…")
+        heartbeat = asyncio.create_task(
+            _chat_action_heartbeat(message, ChatAction.TYPING)
+        )
         try:
             enhanced = await api.enhance_prompt(message.chat.id, prompt)
         except ApiError as exc:
             logger.warning("enhance failed user=%s err=%s", message.chat.id, exc)
             await notice.delete()
             await message.answer(f"⚠️ 优化失败（{exc.message}），已用原提示词继续。")
-            await _submit_generation(message.chat.id, prompt, params, api, message.answer)
+            await _submit_generation(
+                message.chat.id, prompt, params, api, message.answer, idempotency_key
+            )
             await state.clear()
             return
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
         await state.set_state(GenFlow.confirming_enhanced)
         await state.update_data(
-            params=params, original_prompt=prompt, enhanced_prompt=enhanced
+            params=params,
+            original_prompt=prompt,
+            enhanced_prompt=enhanced,
+            idempotency_key=idempotency_key,
         )
         await notice.delete()
         await message.answer(
@@ -125,7 +173,9 @@ async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
         )
         return
 
-    await _submit_generation(message.chat.id, prompt, params, api, message.answer)
+    await _submit_generation(
+        message.chat.id, prompt, params, api, message.answer, idempotency_key
+    )
     await state.clear()
 
 
@@ -140,6 +190,10 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
     original = str(data.get("original_prompt") or "")
     enhanced = str(data.get("enhanced_prompt") or "")
     params = dict(data.get("params") or DEFAULT_PARAMS)
+    idempotency_key = str(
+        data.get("idempotency_key")
+        or make_idempotency_key("enhance", msg.chat.id, cb.id)
+    )
 
     if choice == "cancel":
         await state.clear()
@@ -166,7 +220,13 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
         await cb.answer()
         return
 
-    prompt = enhanced if choice == "use" else original
+    if choice == "use":
+        prompt = enhanced
+    elif choice == "orig":
+        prompt = original
+    else:
+        await cb.answer("无效选择，请重新发起。", show_alert=True)
+        return
     if not prompt:
         await cb.answer("会话已失效，/new 重开", show_alert=True)
         await state.clear()
@@ -179,7 +239,7 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
         pass
 
     await _submit_generation(
-        msg.chat.id, prompt, params, api, msg.answer
+        msg.chat.id, prompt, params, api, msg.answer, idempotency_key
     )
     await state.clear()
     await cb.answer("已提交")
@@ -187,7 +247,7 @@ async def on_enhance_choice(cb: CallbackQuery, state: FSMContext, api: LumenApi)
 
 @router.message(GenFlow.editing_enhanced)
 async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
-    text = (message.text or "").strip()
+    text = message_prompt(message)
     if text == "/cancel":
         await state.clear()
         await message.answer("已放弃。/new 重新开始。")
@@ -200,5 +260,12 @@ async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -
         return
     data = await state.get_data()
     params = dict(data.get("params") or DEFAULT_PARAMS)
-    await _submit_generation(message.chat.id, text, params, api, message.answer)
+    await _submit_generation(
+        message.chat.id,
+        text,
+        params,
+        api,
+        message.answer,
+        make_idempotency_key("edit-enhanced", message.chat.id, message.message_id),
+    )
     await state.clear()

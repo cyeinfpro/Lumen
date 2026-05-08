@@ -233,12 +233,12 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     # enqueue 成功或已被 dedupe key 证明之前成功 → 标 published_at；commit 由 context manager
                     row.published_at = datetime.now(timezone.utc)
                     processed += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             # 非毒化的 transient 错误：rollback 已发生，published_at 仍是 NULL，
             # 下轮会再被候选选中；这里只记日志。
             # P1-9: dedupe key 用短 TTL 占位，commit 失败这些 key 60s 内自动过期，
             # 下轮 publisher 可正常重试 enqueue，事件不会永久丢失。
-            logger.debug("outbox event tx rolled back: %s", exc)
+            logger.warning("outbox event tx rolled back", exc_info=True)
             return 0
 
     # P1-9: commit 已成功（async with session.begin() 退出无异常）→ 把本批写入的

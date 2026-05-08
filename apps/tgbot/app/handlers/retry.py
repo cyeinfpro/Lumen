@@ -11,25 +11,12 @@ import logging
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
-from ..api_client import ApiError, LumenApi
+from ..api_client import ApiError, LumenApi, make_idempotency_key
 from ..tracker import TaskTrack, tracker
-from ._helpers import require_message
+from ._helpers import require_message, resolution_from_size
 
 logger = logging.getLogger(__name__)
 router = Router()
-
-
-def _resolution_from_size(size_requested: str) -> str:
-    try:
-        w, h = (int(x) for x in size_requested.lower().split("x"))
-    except Exception:  # noqa: BLE001
-        return "2k"
-    longest = max(w, h)
-    if longest >= 3000:
-        return "4k"
-    if longest >= 1500:
-        return "2k"
-    return "1k"
 
 
 @router.callback_query(F.data.startswith("retry:"))
@@ -54,13 +41,21 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
         return
 
     payload = {
+        # 种子里不要拌 cb.id —— Telegram 每次点同一按钮 cb.id 都不同，会让
+        # 服务端 idempotency 去重失效（双击/网络重发都建任务）。用稳定 (chat,
+        # gen) 作为种子，重复点击就是同一 key。
+        "idempotency_key": make_idempotency_key(
+            "retry", msg.chat.id, gen_id
+        ),
         "prompt": prompt,
         "aspect_ratio": gen.get("aspect_ratio") or "1:1",
         "render_quality": gen.get("render_quality") or "high",
         "count": 1,  # 单图重试；多图走 /new
-        "resolution": _resolution_from_size(gen.get("size_requested") or ""),
+        "resolution": resolution_from_size(gen.get("size_requested") or ""),
         "output_format": gen.get("output_format") or "jpeg",
         "fast": bool(gen.get("fast", False)),
+        # API 端 max_length=4；老 gen 可能存了 >4 条，截到 4 避免 422
+        "attachment_image_ids": list(gen.get("input_image_ids") or [])[:4],
     }
 
     try:
@@ -87,13 +82,17 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
     status = await msg.answer(
         f"⏳ 重试已排队 #{new_gen[:8]}\n\n📝 {prompt[:200]}",
     )
-    await tracker.add(
-        new_gen,
-        TaskTrack(
-            chat_id=msg.chat.id,
-            status_message_id=status.message_id,
-            prompt=prompt,
-            params={},
-        ),
-    )
+    try:
+        await tracker.add(
+            new_gen,
+            TaskTrack(
+                chat_id=msg.chat.id,
+                status_message_id=status.message_id,
+                prompt=prompt,
+                params={k: v for k, v in payload.items() if k != "idempotency_key"},
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tracker registration failed gen=%s err=%r", new_gen, exc)
+        await msg.answer("⚠️ 任务已创建，但通知追踪失败；请用 /tasks 查看结果。")
     await cb.answer("已提交")

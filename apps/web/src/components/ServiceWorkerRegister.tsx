@@ -33,6 +33,7 @@ export function ServiceWorkerRegister() {
     }
 
     let cancelled = false;
+    let removeVisibilityListener: (() => void) | null = null;
 
     const onControllerChange = () => {
       // 新 SW 接管页面 → 重新加载，让用户拿到与新 SW 一致的资源版本。
@@ -51,6 +52,7 @@ export function ServiceWorkerRegister() {
           // 校验，配合 next.config.ts 的 no-cache header 双保险。
           updateViaCache: "none",
         });
+        if (cancelled) return;
 
         // 监听新版本：waiting 出现时让它立即激活，触发 controllerchange。
         const promoteWaiting = (worker: ServiceWorker | null) => {
@@ -72,13 +74,16 @@ export function ServiceWorkerRegister() {
         );
 
         // 页面回到前台时主动检查更新（用户长时间挂着 PWA 的常见情况）。
-        document.addEventListener("visibilitychange", () => {
+        const onVisibilityChange = () => {
           if (document.visibilityState === "visible") {
             reg.update().catch(() => {
               /* 网络抖动 / 离线，下次再试 */
             });
           }
-        });
+        };
+        document.addEventListener("visibilitychange", onVisibilityChange);
+        removeVisibilityListener = () =>
+          document.removeEventListener("visibilitychange", onVisibilityChange);
       } catch (error) {
         logWarn("service worker register failed", {
           scope: "pwa",
@@ -111,6 +116,8 @@ export function ServiceWorkerRegister() {
       if (timeoutId !== null) {
         window.clearTimeout(timeoutId);
       }
+      removeVisibilityListener?.();
+      removeVisibilityListener = null;
       navigator.serviceWorker.removeEventListener(
         "controllerchange",
         onControllerChange,

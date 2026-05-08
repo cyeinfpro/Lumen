@@ -22,6 +22,31 @@ def _request() -> Request:
     )
 
 
+def test_replay_payload_filter_matches_requested_channels() -> None:
+    user_channel = "user:user-1"
+
+    assert events._replay_payload_matches_channels(
+        {"conversation_id": "conv-1"},
+        requested_channels={"conv:conv-1"},
+        user_channel=user_channel,
+    )
+    assert not events._replay_payload_matches_channels(
+        {"conversation_id": "conv-2"},
+        requested_channels={"conv:conv-1"},
+        user_channel=user_channel,
+    )
+    assert events._replay_payload_matches_channels(
+        {"generation_id": "gen-1"},
+        requested_channels={"task:gen-1"},
+        user_channel=user_channel,
+    )
+    assert events._replay_payload_matches_channels(
+        {"conversation_id": "conv-2"},
+        requested_channels={user_channel},
+        user_channel=user_channel,
+    )
+
+
 @pytest.mark.asyncio
 async def test_events_rejects_too_many_channels_before_subscribing() -> None:
     channels = ",".join(f"task:{i}" for i in range(events.MAX_SSE_CHANNELS + 1))

@@ -177,14 +177,20 @@ def _compression_option(value: Any) -> int | None:
     return None
 
 
-async def _image_params_from_target(
+async def _ordered_target_generations(
     db: AsyncSession,
     *,
     user_id: str,
     conv_id: str,
     target_msg_id: str,
-) -> ImageParamsIn:
-    gens = (
+) -> list[Generation]:
+    """Canonical ``first generation`` selector for a regenerate target.
+
+    Both ``_image_params_from_target`` (size/format) and
+    ``_mask_image_id_from_target`` (mask pairing) MUST use this same ordering
+    so size + mask come from the same row. See review note REGEN-01.
+    """
+    return (
         await db.execute(
             select(Generation)
             .join(Message, Message.id == Generation.message_id)
@@ -197,6 +203,18 @@ async def _image_params_from_target(
             .order_by(Generation.created_at.asc(), Generation.id.asc())
         )
     ).scalars().all()
+
+
+async def _image_params_from_target(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    conv_id: str,
+    target_msg_id: str,
+) -> ImageParamsIn:
+    gens = await _ordered_target_generations(
+        db, user_id=user_id, conv_id=conv_id, target_msg_id=target_msg_id
+    )
     if not gens:
         return ImageParamsIn()
     first = gens[0]
@@ -248,6 +266,40 @@ async def _image_params_from_target(
             target_msg_id, exc,
         )
         return ImageParamsIn()
+
+
+async def _mask_image_id_from_target(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    conv_id: str,
+    target_msg_id: str,
+) -> str | None:
+    # Why: must read the mask from the SAME row that _image_params_from_target
+    # picks (gens[0]). Picking the first *mask-bearing* row could pair its
+    # mask with the first row's size/format and inpaint at the wrong
+    # resolution. A single i2i target's gens all share one mask, so reading
+    # gens[0].mask_image_id is sufficient.
+    gens = await _ordered_target_generations(
+        db, user_id=user_id, conv_id=conv_id, target_msg_id=target_msg_id
+    )
+    if not gens:
+        return None
+    mask_id = gens[0].mask_image_id
+    if not mask_id:
+        return None
+    alive = (
+        await db.execute(
+            select(Image.id).where(
+                Image.id == mask_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if alive is None:
+        raise _http("mask_not_found", "original mask image was deleted", 404)
+    return mask_id
 
 
 @router.post(
@@ -401,6 +453,16 @@ async def regenerate_message(
     image_params = await _image_params_from_target(
         db, user_id=user.id, conv_id=conv.id, target_msg_id=target.id
     )
+    mask_image_id = (
+        await _mask_image_id_from_target(
+            db,
+            user_id=user.id,
+            conv_id=conv.id,
+            target_msg_id=target.id,
+        )
+        if intent == Intent.IMAGE_TO_IMAGE
+        else None
+    )
     default_image_output_format = (
         await _default_image_output_format(db)
         if intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE)
@@ -442,6 +504,7 @@ async def regenerate_message(
         attachment_ids=attachment_ids,
         text=text,
         default_image_output_format=default_image_output_format,
+        mask_image_id=mask_image_id,
     )
 
     conv.last_activity_at = now

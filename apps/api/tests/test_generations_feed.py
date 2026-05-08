@@ -52,6 +52,25 @@ def test_generation_feed_filters_out_deleted_or_archived_conversations() -> None
     assert "(generations.upstream_request ->> 'workflow_run_id') IS NULL" in rendered
 
 
+def test_generation_feed_fast_filter_accepts_legacy_true_values() -> None:
+    stmt = generations._apply_filters(
+        select(Generation),
+        user_id="user-1",
+        ratio=None,
+        has_ref=False,
+        fast=True,
+        q=None,
+    )
+    rendered = str(
+        stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "lower((generations.upstream_request ->> 'fast')) IN ('true', '1')" in rendered
+
+
 def test_generation_feed_cursor_carries_total_for_next_page() -> None:
     created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
 

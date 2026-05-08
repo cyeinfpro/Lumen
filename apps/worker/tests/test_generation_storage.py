@@ -430,6 +430,53 @@ async def test_image_queue_reserves_different_provider_and_blocks_duplicate_task
 
 
 @pytest.mark.asyncio
+async def test_image_queue_provider_active_count_failure_defers_without_admit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool
+
+    class ActiveCountBrokenRedis(FakeRedis):
+        async def zremrangebyscore(self, key: str, min_score, max_score) -> int:
+            if key == generation._image_provider_active_key("acc1"):
+                raise RuntimeError("redis down")
+            return await super().zremrangebyscore(key, min_score, max_score)
+
+    redis = ActiveCountBrokenRedis()
+
+    async def fake_ready_generation_ids(_redis, _limit: int) -> list[str]:
+        return ["gen-1"]
+
+    class _Pool:
+        async def select(self, **kwargs):
+            assert kwargs["route"] == "image"
+            assert kwargs["task_id"] == "gen-1"
+            return [
+                SimpleNamespace(
+                    name="acc1",
+                    base_url="https://upstream.test",
+                    api_key="k1",
+                    image_concurrency=1,
+                )
+            ]
+
+    async def fake_get_pool():
+        return _Pool()
+
+    monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 4)
+    monkeypatch.setattr(
+        generation, "_ready_queued_generation_ids", fake_ready_generation_ids
+    )
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+
+    reserved = await generation._reserve_image_queue_slot(redis, "gen-1")
+
+    assert reserved is None
+    assert generation._image_task_provider_key("gen-1") not in redis.store
+    assert "gen-1" not in redis.zsets.get(generation._IMAGE_QUEUE_ACTIVE_KEY, {})
+    assert generation._image_queue_not_before_key("gen-1") in redis.store
+
+
+@pytest.mark.asyncio
 async def test_image_queue_per_provider_concurrency_admits_multiple(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

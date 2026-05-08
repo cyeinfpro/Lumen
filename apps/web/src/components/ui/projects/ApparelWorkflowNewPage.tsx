@@ -171,6 +171,7 @@ export function ApparelWorkflowNewPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const filesRef = useRef<PendingFile[]>([]);
 
   const createMutation = useCreateApparelWorkflowMutation({
     onError: (err) =>
@@ -198,10 +199,14 @@ export function ApparelWorkflowNewPage() {
 
   // 释放 ObjectURL，避免内存泄漏
   useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  useEffect(() => {
     return () => {
-      files.forEach((item) => URL.revokeObjectURL(item.url));
+      filesRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+      filesRef.current = [];
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const validateFile = (file: File): string | null => {

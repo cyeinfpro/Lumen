@@ -47,6 +47,10 @@ LOCKFILE="${LUMEN_BACKUP_RESTORE_LOCKFILE:-${LOCK_BASE}/lumen-backup-restore.loc
 LOCKDIR="$LOCKFILE.d"
 LOCK_KIND=""
 TMP_DIR=""
+PG_OUT=""
+REDIS_OUT=""
+PG_TMP=""
+REDIS_TMP=""
 
 log() { printf '[backup %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
@@ -60,10 +64,19 @@ release_lock() {
 
 cleanup() {
     local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ -n "${PG_TMP:-}" ] && rm -f "$PG_TMP" 2>/dev/null || true
+        [ -n "${REDIS_TMP:-}" ] && rm -f "$REDIS_TMP" 2>/dev/null || true
+        [ -n "${PG_OUT:-}" ] && rm -f "$PG_OUT" 2>/dev/null || true
+        [ -n "${REDIS_OUT:-}" ] && rm -f "$REDIS_OUT" 2>/dev/null || true
+    fi
     if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR" 2>/dev/null || true
     fi
     release_lock
+    if command -v lumen_release_lock >/dev/null 2>&1; then
+        lumen_release_lock 2>/dev/null || true
+    fi
     return "$rc"
 }
 
@@ -204,17 +217,22 @@ if command -v lumen_try_acquire_lock >/dev/null 2>&1 && [ "${LUMEN_BACKUP_FORCE:
 fi
 
 acquire_lock
+# 注意：lumen_try_acquire_lock（上面的维护锁）会自己 `trap 'lumen_release_lock' EXIT`，
+# 这里再次 `trap cleanup EXIT` 会覆盖它 —— 但 cleanup() 内显式 fall through 调
+# `lumen_release_lock`，所以维护锁仍会被释放。change order/拆函数前请保留这条不变量。
+trap cleanup EXIT
 mkdir -p "$PG_DIR" "$REDIS_DIR"
 
 # ---- Postgres ----
 PG_OUT="$PG_DIR/$TS.pg.dump.gz"
+PG_TMP="$PG_OUT.tmp.$$"
 log "dumping postgres → $PG_OUT"
 PG_ERR="$(mktemp "${BACKUP_ROOT}/.pg-dump.XXXXXX.err")" || {
     log "ERROR: failed to create pg_dump error log"
     exit 5
 }
 set +e
-docker exec -i "$PG_CONTAINER" pg_dump -U "$PG_USER" -Fc "$PG_DB" 2>"$PG_ERR" | gzip -c > "$PG_OUT"
+docker exec -i "$PG_CONTAINER" pg_dump -U "$PG_USER" -Fc "$PG_DB" 2>"$PG_ERR" | gzip -c > "$PG_TMP"
 PIPE_RC=("${PIPESTATUS[@]}")
 PG_RC="${PIPE_RC[0]:-1}"
 GZIP_RC="${PIPE_RC[1]:-1}"
@@ -227,21 +245,24 @@ if [ "${PG_RC}" -ne 0 ] || [ "${GZIP_RC}" -ne 0 ]; then
     sed -n '1,20p' "$PG_ERR" 2>/dev/null | while IFS= read -r line; do
         [ -n "$line" ] && log "pg_dump stderr: $line"
     done
-    rm -f "$PG_ERR" "$PG_OUT"
+    rm -f "$PG_ERR" "$PG_TMP" "$PG_OUT"
     exit 2
 fi
 rm -f "$PG_ERR"
 # 基本合理性：gzip 有效 + 非空
-if ! gzip -t "$PG_OUT" 2>/dev/null || [ ! -s "$PG_OUT" ]; then
+if ! gzip -t "$PG_TMP" 2>/dev/null || [ ! -s "$PG_TMP" ]; then
     log "ERROR: pg dump invalid, removing"
-    rm -f "$PG_OUT"
+    rm -f "$PG_TMP" "$PG_OUT"
     exit 2
 fi
+mv -f "$PG_TMP" "$PG_OUT"
+PG_TMP=""
 PG_SIZE="$(file_size "$PG_OUT")"
 log "pg dump ok size=$PG_SIZE"
 
 # ---- Redis ----
 REDIS_OUT="$REDIS_DIR/$TS.redis.tgz"
+REDIS_TMP="$REDIS_OUT.tmp.$$"
 # BGSAVE 前先 ping，让认证失败立刻报错，而不是绕一圈伪装成 "BGSAVE did not complete in 60s"。
 if ! ping_out="$(redis_cli PING)" || [ "$ping_out" != "PONG" ]; then
     log "ERROR: redis ping failed before BGSAVE — check REDIS_URL/REDIS_PASSWORD vs lumen-redis requirepass"
@@ -287,7 +308,14 @@ if [ ! -f "$TMP_DIR/dump.rdb" ] && [ ! -d "$TMP_DIR/appendonlydir" ] && [ ! -f "
     exit 4
 fi
 
-tar -czf "$REDIS_OUT" -C "$TMP_DIR" .
+tar -czf "$REDIS_TMP" -C "$TMP_DIR" .
+if ! tar -tzf "$REDIS_TMP" >/dev/null; then
+    log "ERROR: redis archive invalid, removing"
+    rm -f "$REDIS_TMP" "$REDIS_OUT"
+    exit 4
+fi
+mv -f "$REDIS_TMP" "$REDIS_OUT"
+REDIS_TMP=""
 REDIS_SIZE="$(file_size "$REDIS_OUT")"
 log "redis pack ok size=$REDIS_SIZE"
 

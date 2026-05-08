@@ -135,6 +135,13 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
     };
   }, [toast]);
 
+  useEffect(() => {
+    return () => {
+      enhanceAbortRef.current?.abort();
+      enhanceAbortRef.current = null;
+    };
+  }, []);
+
   // React 19 规则：render 阶段不能访问 ref。re-entry guard 的拦截发生在事件 handler 内。
   const canSubmit =
     !isSending && (text.trim().length > 0 || attachments.length > 0);
@@ -218,14 +225,20 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
         ctl.signal,
       );
     } catch (err) {
-      if (ctl.signal.aborted) return;
+      if (ctl.signal.aborted) {
+        setText(current);
+        setOriginalText(null);
+        return;
+      }
       logError(err, { scope: "composer", code: "enhance_failed" });
       setText(current);
       setOriginalText(null);
       setToast("润色失败");
     } finally {
       setIsEnhancing(false);
-      enhanceAbortRef.current = null;
+      if (enhanceAbortRef.current === ctl) {
+        enhanceAbortRef.current = null;
+      }
     }
   };
 

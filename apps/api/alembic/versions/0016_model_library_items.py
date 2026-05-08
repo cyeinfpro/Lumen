@@ -115,6 +115,7 @@ def upgrade() -> None:
         "model_library_items",
         ["style_tags"],
         postgresql_using="gin",
+        postgresql_ops={"style_tags": "jsonb_path_ops"},
     )
 
     op.create_table(

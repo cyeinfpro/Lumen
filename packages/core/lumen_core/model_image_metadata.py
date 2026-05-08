@@ -240,6 +240,7 @@ def parse_model_image_filename(filename: str) -> ModelImageMetadata | None:
         raw = "-".join(tag_tokens)
         known_tags = sorted(TAG_LABEL_BY_SLUG.items(), key=lambda item: -len(item[0]))
         while raw and len(tags) < 2:
+            before = raw
             matched = False
             for slug, label in known_tags:
                 if raw == slug or raw.startswith(f"{slug}-"):
@@ -247,7 +248,7 @@ def parse_model_image_filename(filename: str) -> ModelImageMetadata | None:
                     raw = raw[len(slug) :].strip("-")
                     matched = True
                     break
-            if not matched:
+            if not matched or raw == before:
                 break
     if not any([age_segment, gender, appearance_direction, tags]):
         return None

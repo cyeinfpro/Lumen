@@ -142,6 +142,12 @@ _IMAGE_QUEUE_SCAN_LIMIT = 100
 _IMAGE_QUEUE_ENQUEUE_DEDUPE_TTL_S = 30
 _IMAGE_QUEUE_NOT_BEFORE_GRACE_S = 600
 _IMAGE_PROVIDER_UNAVAILABLE_RETRY_S = 30
+_IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S = 5.0
+# Redis 抖动时 not_before cooldown 写入也可能失败，被 except 吞掉后这一轮立刻
+# 又会被 _kick_image_queue 拉起来重试。fallback 到进程内 monotonic 表，
+# `_ready_queued_generation_ids` 检查时同时看 redis 和本地，确保抖动期间也能
+# 拉开窗口。worker 重启会自然清空，无需 TTL。
+_PROVIDER_COOLDOWN_LOCAL: dict[str, float] = {}
 # task 失败 retry 时把刚刚 reserved 的 provider 写入 avoid set，下次 reserve
 # 跳过它一次，避免 retry 反复打到同一个有问题的 provider（如 model_not_found / 401）。
 # 全部 enabled provider 都被 avoid 时退化为不过滤（防止永远 reserve 失败）。
@@ -530,14 +536,13 @@ async def _active_image_provider_names(redis: Any) -> set[str]:
     return {name for item in raw_names or [] if (name := _redis_text(item))}
 
 
-async def _provider_active_count(redis: Any, provider_name: str) -> int:
+async def _provider_active_count(redis: Any, provider_name: str) -> int | None:
     """Current in-flight task count for one provider after evicting stale
     entries (worker crash mid-flight). Cheap: O(log N) for the cleanup +
     O(1) for ZCARD.
 
-    On redis failure we return 0 so admission keeps moving instead of stalling
-    the queue, but log a warning—the previous silent fallback could over-admit
-    during a redis hiccup without leaving any trail.
+    Redis failure is fail-closed: returning 0 here over-admits every queued
+    task into the same provider when Redis hiccups, defeating image_concurrency.
     """
     key = _image_provider_active_key(provider_name)
     try:
@@ -548,7 +553,7 @@ async def _provider_active_count(redis: Any, provider_name: str) -> int:
             "image queue active_count failed provider=%s err=%s",
             provider_name, exc,
         )
-        return 0
+        return None
     try:
         return int(count or 0)
     except (TypeError, ValueError):
@@ -574,7 +579,15 @@ async def _ready_queued_generation_ids(redis: Any, limit: int) -> list[str]:
         return []
     ready: list[str] = []
     now = time.time()
+    now_mono = time.monotonic()
     for queued_id in ids:
+        # 本地兜底 cooldown：redis 写失败时唯一防 hot-loop 的栅栏
+        local_until = _PROVIDER_COOLDOWN_LOCAL.get(queued_id)
+        if local_until is not None:
+            if local_until > now_mono:
+                continue
+            # 过期了清掉，避免 dict 无限增长
+            _PROVIDER_COOLDOWN_LOCAL.pop(queued_id, None)
         not_before_key = _image_queue_not_before_key(queued_id)
         raw_not_before = _redis_text(await redis.get(not_before_key))
         if raw_not_before:
@@ -820,6 +833,7 @@ async def _reserve_image_queue_slot(
         if not providers:
             return None
 
+        active_count_failed = False
         for provider in providers:
             provider_name = _redis_text(getattr(provider, "name", ""))
             if not provider_name:
@@ -827,6 +841,9 @@ async def _reserve_image_queue_slot(
             concurrency = max(1, int(getattr(provider, "image_concurrency", 1) or 1))
             provider_zset = _image_provider_active_key(provider_name)
             current = await _provider_active_count(redis, provider_name)
+            if current is None:
+                active_count_failed = True
+                continue
             if current >= concurrency:
                 continue
             try:
@@ -864,6 +881,30 @@ async def _reserve_image_queue_slot(
                 capacity,
             )
             return provider
+        if active_count_failed:
+            cooldown = _IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S
+            redis_set_ok = False
+            try:
+                await redis.set(
+                    _image_queue_not_before_key(task_id),
+                    str(time.time() + cooldown),
+                    ex=int(cooldown + _IMAGE_QUEUE_NOT_BEFORE_GRACE_S),
+                )
+                redis_set_ok = True
+            except Exception:  # noqa: BLE001
+                # Redis 也抖了——降级到进程内表，避免本轮立刻又重试。
+                # _ready_queued_generation_ids 同时检查 local map。
+                pass
+            # 不论 redis 写成功与否都更新本地表（双写：redis 失败时这是唯一兜底；
+            # redis 成功时 local 会被同样的 timestamp 覆盖，next_kick 时多一道防线）。
+            _PROVIDER_COOLDOWN_LOCAL[task_id] = time.monotonic() + cooldown
+            logger.warning(
+                "image queue deferred task=%s after provider active count failure "
+                "cooldown=%.1fs redis_set=%s",
+                task_id,
+                cooldown,
+                redis_set_ok,
+            )
     return None
 
 
@@ -918,6 +959,14 @@ def _sha256(data: bytes) -> str:
     h = hashlib.sha256()
     h.update(data)
     return h.hexdigest()
+
+
+def _decode_upstream_image_b64(value: str) -> bytes:
+    raw = value.strip()
+    if raw[:5].lower() == "data:" and "," in raw:
+        raw = raw.split(",", 1)[1]
+    raw = "".join(raw.split())
+    return base64.b64decode(raw, validate=True)
 
 
 def _compute_blurhash(img: PILImage.Image) -> str | None:
@@ -1867,6 +1916,33 @@ async def _await_with_lease_guard(
                 await cancel_task
 
 
+async def _consume_image_iter_close_result(
+    image_iter: AsyncIterator[tuple[str, str | None]] | None,
+    *,
+    task_id: str,
+) -> None:
+    """关 image_iter 并吞掉 cancel / generic 异常。
+
+    失败路径下生成器仍持有 SSE / curl 子进程 fd，必须 await 关掉，cancel 后
+    才不会被推到下一轮 loop 才回收（4K 高负载 + 失败累积会顶到 fd 上限）。
+    aclose() 自身可能再抛（内层已 cancelled / 子进程已死），用 try/except 兜
+    底，不让它打断后续 redis cleanup。模块级函数避免每次进 finally 重新定义。
+    """
+    if image_iter is None:
+        return
+    try:
+        await image_iter.aclose()
+    except (asyncio.CancelledError, GeneratorExit):
+        # 内部本就在退出；视为已关，继续后面 cleanup
+        pass
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "generation image iterator aclose failed task=%s",
+            task_id,
+            exc_info=True,
+        )
+
+
 async def _anext_image_with_guards(
     image_iter: AsyncIterator[tuple[str, str | None]],
     lease_lost: asyncio.Event,
@@ -2114,7 +2190,7 @@ async def _handle_dual_race_bonus_image(
 
     # --- 1. 解码 + 校验 ---
     try:
-        raw_image = base64.b64decode(b64_result, validate=False)
+        raw_image = _decode_upstream_image_b64(b64_result)
     except binascii.Error:
         logger.warning(
             "dual_race bonus base64 decode failed parent=%s", parent_task_id
@@ -2880,6 +2956,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     await _kick_image_queue(redis)
 
     has_partial = False  # 新同步路径不存在 partial，永远为 False（保留变量给下方 classify 用）
+    image_iter: AsyncIterator[tuple[str, str | None]] | None = None
 
     try:
         # 新 API 不支持 size="auto"，强制走 fixed 模式（让 resolve_size 走预设/比例回退）
@@ -2944,7 +3021,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         revised_prompt: str | None = None
         # dual_race async generator：winner 先 yield 一次，loser 也成功时再 yield bonus。
         # 主流程取首张作 winner；处理完成后再尝试取第二张做 bonus image，复用同 iter。
-        image_iter: AsyncIterator[tuple[str, str | None]] | None = None
         provider_used_events: list[dict[str, str]] = []
         # image-job sidecar 把"公网图片地址"通过 image_job_image 事件回传；这里只暂存，
         # 成功提交时再合并到 generation.upstream_request，让 admin 请求事件面板能展示
@@ -3240,7 +3316,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
         # --- 解码 + 校验 ---
         try:
-            raw_image = base64.b64decode(b64_result, validate=False)
+            raw_image = _decode_upstream_image_b64(b64_result)
         except binascii.Error as exc:
             raise UpstreamError(
                 f"bad base64 from upstream: {exc}",
@@ -3594,6 +3670,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     "dual_race bonus iter aborted by cancel/lease task=%s",
                     task_id,
                 )
+                with suppress(Exception):
+                    await image_iter.aclose()
+                image_iter = None
                 bonus_pair = None
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -3640,8 +3719,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         "dual_race bonus finalize unexpected error task=%s err=%r",
                         task_id, exc,
                     )
-            with suppress(Exception):
-                await image_iter.aclose()
 
     except _LeaseLost as exc:
         logger.warning(
@@ -3943,6 +4020,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         )
 
     finally:
+        # image_iter.aclose() 改在 _critical_release_cleanup 内 await（见下方），
+        # 用 shield 跑完，避免外层 cancel 时 generator 关闭被推到下一轮 loop——
+        # 4K 高负载 + 失败路径会累积到 fd 不释放。
         if renewer is not None:
             renewer.cancel()
             try:
@@ -3959,20 +4039,48 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 最后再重抛 CancelledError 让 arq 知道任务真的被 cancel。
         # task_duration_seconds 是纯 best-effort 指标，无需 shield。
         async def _critical_release_cleanup() -> None:
-            with suppress(Exception):
+            # 先关 image_iter——失败路径下生成器还持有 SSE / curl 子进程 fd，
+            # 不 await 关掉它，cancel 后会推到下一轮 loop 才回收。
+            await _consume_image_iter_close_result(image_iter, task_id=task_id)
+            try:
                 await _release_image_queue_slot(
                     redis, task_id=task_id, provider_name=reserved_provider_name
                 )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "generation image queue release failed task=%s provider=%s",
+                    task_id,
+                    reserved_provider_name,
+                    exc_info=True,
+                )
             # in-flight 快照只在"任务还在跑"时有意义；终态/retry 之间任何状态都直接清掉，
             # 下次 attempt 进来会在 EV_GEN_STARTED 之后重新写。
-            with suppress(Exception):
+            try:
                 await _inflight_clear(redis, task_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "generation inflight cleanup failed task=%s",
+                    task_id,
+                    exc_info=True,
+                )
             # task 已到终态时清 avoid set；retry 路径会在下一次 attempt 之前重新写入。
             if _task_outcome != "retry":
-                with suppress(Exception):
+                try:
                     await _clear_avoided_providers(redis, task_id)
-            with suppress(Exception):
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "generation avoid-set cleanup failed task=%s",
+                        task_id,
+                        exc_info=True,
+                    )
+            try:
                 await _release_lease(redis, task_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "generation lease release failed task=%s",
+                    task_id,
+                    exc_info=True,
+                )
 
         cleanup_future = asyncio.ensure_future(_critical_release_cleanup())
         cancel_during_cleanup = False

@@ -176,8 +176,7 @@ async def test_call_upstream_failover_on_first_provider_5xx(
 async def test_call_upstream_does_not_failover_on_terminal_4xx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """terminal（如 400 invalid）按 retry.py 不可重试；当前实现仍跳到下一个 provider
-    （input 共享，下一个号同样 4xx），但保证不会无限重试在同一个 provider。"""
+    """terminal（如 400 invalid）按 retry.py 不可重试；input 共享，换号也无意义。"""
     pool = _StubPool([_StubResolved("acc1"), _StubResolved("acc2")])
 
     async def fake_get_pool() -> _StubPool:
@@ -209,9 +208,8 @@ async def test_call_upstream_does_not_failover_on_terminal_4xx(
         await auto_title._call_upstream(
             [{"role": "user", "content": [{"type": "input_text", "text": "x"}]}]
         )
-    # 每个 provider 只调用 1 次（terminal 不内部 retry）
-    assert calls == ["sk-acc1", "sk-acc2"]
-    assert exc_info.value.error_code == "all_providers_failed"
+    assert calls == ["sk-acc1"]
+    assert exc_info.value.error_code == "invalid_request_error"
 
 
 @pytest.mark.asyncio

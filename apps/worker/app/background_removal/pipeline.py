@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 
 from PIL import Image as PILImage
@@ -50,9 +51,9 @@ async def process_transparent_request(
         # 同时容忍 qc.evaluate 返回 None（若实现里出现 bug 也不至于 AttributeError
         # 把 PIL 对象悬在内存里）。
         try:
-            refined = alpha_refine.refine(result.rgba)
+            refined = await asyncio.to_thread(alpha_refine.refine, result.rgba)
             try:
-                report = qc.evaluate(refined)
+                report = await asyncio.to_thread(qc.evaluate, refined)
                 if report is None:
                     last_provider = provider.name
                     continue

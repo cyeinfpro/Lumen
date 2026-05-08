@@ -671,7 +671,41 @@ async def test_iter_sse_curl_idle_timeout_raises(
         ]
 
     assert exc_info.value.error_code == "sse_curl_failed"
+    assert exc_info.value.status_code is None
     assert "idle timeout" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_stage_multipart_unlinks_tmp_files_on_partial_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    created_paths: list[str] = []
+    real_mkstemp = upstream.tempfile.mkstemp
+
+    def fake_mkstemp(*, prefix: str, suffix: str):
+        fd, path = real_mkstemp(prefix=prefix, suffix=suffix, dir=tmp_path)
+        created_paths.append(path)
+        return fd, path
+
+    def fake_write_bytes_file(fd: int, raw: bytes) -> None:
+        if raw == b"boom":
+            raise OSError("disk full")
+        os.write(fd, raw)
+
+    monkeypatch.setattr(upstream.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(upstream, "_write_bytes_file", fake_write_bytes_file)
+
+    with pytest.raises(OSError):
+        await upstream._stage_multipart_bytes_to_tmp(
+            [
+                ("image[]", ("ok.png", b"ok", "image/png")),
+                ("image[]", ("bad.png", b"boom", "image/png")),
+            ]
+        )
+
+    assert created_paths
+    assert all(not os.path.exists(path) for path in created_paths)
 
 
 @pytest.mark.asyncio

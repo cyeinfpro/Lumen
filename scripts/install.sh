@@ -80,20 +80,25 @@ raw_install_git() {
     raw_refresh_tool_paths
     case "$(uname -s 2>/dev/null || echo unknown)" in
         Darwin)
-            if raw_have_cmd brew; then
-                brew install git
-            elif raw_have_cmd curl; then
-                printf '[INFO] 缺少 Homebrew，尝试先自动安装 Homebrew。\n'
-                NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-                if [ -x /opt/homebrew/bin/brew ]; then
-                    /opt/homebrew/bin/brew install git
-                elif [ -x /usr/local/bin/brew ]; then
-                    /usr/local/bin/brew install git
-                else
+            if ! raw_have_cmd brew; then
+                printf '[INFO] macOS 未发现 Homebrew，尝试自动安装。\n'
+                if ! /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+                    printf '[ERROR] Homebrew 自动安装失败；请手动安装 Homebrew 或 Xcode Command Line Tools 后重跑。\n' >&2
                     return 1
                 fi
+                # brew 默认装到 /opt/homebrew (Apple Silicon) 或 /usr/local (Intel)，
+                # 此时当前 shell PATH 还没拿到 brew，先手动 source brew shellenv 再走。
+                if [ -x /opt/homebrew/bin/brew ]; then
+                    eval "$(/opt/homebrew/bin/brew shellenv)"
+                elif [ -x /usr/local/bin/brew ]; then
+                    eval "$(/usr/local/bin/brew shellenv)"
+                fi
                 raw_refresh_tool_paths
+            fi
+            if raw_have_cmd brew; then
+                brew install git
             else
+                printf '[ERROR] macOS 缺少 git，且未发现可用 brew。请先安装 Xcode Command Line Tools 或 Homebrew 后重跑。\n' >&2
                 return 1
             fi
             ;;
@@ -130,12 +135,23 @@ detect_install_state() {
         printf 'inplace'
         return 0
     fi
-    # 真正的空目录也归 empty
-    if [ -z "$(ls -A "${d}" 2>/dev/null)" ]; then
+    if [ ! -d "${d}" ]; then
+        printf 'mixed'
+        return 0
+    fi
+    # 真正的空目录也归 empty；无法读取目录时保守视为 mixed，避免 clone 报错或覆盖未知内容。
+    if find "${d}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+        printf 'mixed'
+        return 0
+    fi
+    if [ -r "${d}" ] && [ -x "${d}" ]; then
         printf 'empty'
         return 0
     fi
+    # 兜底分支：上面所有判断都没命中（罕见，例如 stat 失败 / 异常 ACL），
+    # 视为 mixed 让调用方走"备份后重建"分支，绝不让函数无 stdout 让调用方拿空。
     printf 'mixed'
+    return 0
 }
 
 # 把最新 main 的代码合并到已有部署目录，保留运行时数据（.env / shared / releases /

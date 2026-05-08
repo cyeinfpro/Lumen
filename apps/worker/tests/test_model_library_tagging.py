@@ -19,6 +19,7 @@ os.environ.setdefault(
 from app.tasks import model_library_tagging as mlt
 from app.tasks.model_library_tagging import (
     AutoTagResult,
+    _clean_style_tags,
     _normalize_age_segment,
     _normalize_gender,
     _parse_tagging_payload,
@@ -40,8 +41,20 @@ def test_strip_markdown_fences_handles_code_block() -> None:
     assert _strip_markdown_fences(raw) == '{"a": 1}'
 
 
+def test_strip_markdown_fences_preserves_embedded_backticks() -> None:
+    raw = '```json\n{"notes": "contains ``` marker"}\n```'
+    assert _strip_markdown_fences(raw) == '{"notes": "contains ``` marker"}'
+
+
 def test_strip_markdown_fences_passes_through_plain() -> None:
     assert _strip_markdown_fences('{"a": 1}') == '{"a": 1}'
+
+
+def test_clean_style_tags_truncates_to_spec_limit() -> None:
+    assert _clean_style_tags(["超长中文标签内容额外", "清冷"]) == [
+        "超长中文标签内容",
+        "清冷",
+    ]
 
 
 def test_normalize_age_segment_recognizes_aliases() -> None:
@@ -180,3 +193,107 @@ async def test_auto_tag_image_record_graceful_when_upstream_returns_garbage(
     assert out.image_id == "img-10"
     assert out.style_tags == []
     assert out.appearance_direction is None
+
+
+class _Provider:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.base_url = f"https://{name}.example"
+        self.api_key = f"sk-{name}"
+
+
+class _Pool:
+    def __init__(self, providers: list[_Provider]) -> None:
+        self.providers = providers
+
+    async def select(self, *, route: str = "text") -> list[_Provider]:
+        assert route == "text"
+        return self.providers
+
+
+@pytest.mark.asyncio
+async def test_call_upstream_stops_provider_chain_on_terminal_4xx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_pool() -> _Pool:
+        return _Pool([_Provider("acc1"), _Provider("acc2")])
+
+    from app import provider_pool
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(mlt, "_PER_PROVIDER_RETRY_ATTEMPTS", 2)
+
+    calls: list[str] = []
+
+    async def fake_one(
+        record: _Image,
+        image_url: str,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str,
+    ) -> str:
+        assert record.id == "img-terminal"
+        assert image_url == "data:image/png;base64,abc"
+        assert model == "gpt-vision"
+        calls.append(api_key)
+        raise mlt.UpstreamError(
+            "bad request",
+            error_code="invalid_request_error",
+            status_code=400,
+        )
+
+    monkeypatch.setattr(mlt, "_call_upstream_one", fake_one)
+
+    result = await mlt._call_upstream(
+        _Image(id="img-terminal"),
+        "data:image/png;base64,abc",
+        model="gpt-vision",
+    )
+
+    assert result is None
+    assert calls == ["sk-acc1"]
+
+
+@pytest.mark.asyncio
+async def test_call_upstream_failovers_after_retriable_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_pool() -> _Pool:
+        return _Pool([_Provider("acc1"), _Provider("acc2")])
+
+    from app import provider_pool
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(mlt, "_PER_PROVIDER_RETRY_ATTEMPTS", 1)
+
+    calls: list[str] = []
+
+    async def fake_one(
+        record: _Image,
+        image_url: str,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str,
+    ) -> str:
+        _ = (record, image_url, model, base_url)
+        calls.append(api_key)
+        if api_key == "sk-acc1":
+            raise mlt.UpstreamError(
+                "temporary",
+                error_code="upstream_error",
+                status_code=503,
+            )
+        return '{"style_tags": ["清冷"]}'
+
+    monkeypatch.setattr(mlt, "_call_upstream_one", fake_one)
+
+    result = await mlt._call_upstream(
+        _Image(id="img-retry"),
+        "data:image/png;base64,abc",
+        model="gpt-vision",
+    )
+
+    assert result == '{"style_tags": ["清冷"]}'
+    assert calls == ["sk-acc1", "sk-acc2"]

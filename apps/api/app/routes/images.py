@@ -116,6 +116,62 @@ def _open_image_bytes(data: bytes, *, verify: bool = False) -> PILImage.Image:
         raise _http("invalid_image", "unreadable image", 400) from exc
 
 
+def _prepare_upload_image(
+    data: bytes,
+    filename: str | None,
+) -> tuple[bytes, str, int, int, dict[str, Any]]:
+    _open_image_bytes(data, verify=True)
+
+    with _open_image_bytes(data) as im:
+        mime = (im.get_format_mimetype() or "").lower()
+        if mime not in ALLOWED_MIME:
+            raise _http("unsupported_mime", f"mime not allowed: {mime}", 400)
+
+        uploaded_model_metadata = _model_metadata_json_from_upload(im, filename)
+        width, height = im.size
+        _enforce_pixel_limit((width, height))
+        output = data
+        if max(width, height) > MAX_LONG_SIDE:
+            ratio = MAX_LONG_SIDE / max(width, height)
+            new_w, new_h = int(width * ratio), int(height * ratio)
+            resized = im.resize((new_w, new_h), PILImage.LANCZOS)
+            try:
+                width, height = new_w, new_h
+                out = io.BytesIO()
+                fmt = (
+                    "WEBP"
+                    if mime == "image/webp"
+                    else ("PNG" if mime == "image/png" else "JPEG")
+                )
+                save_kw: dict[str, Any] = {}
+                if fmt == "JPEG":
+                    save_kw["quality"] = 92
+                elif fmt == "WEBP":
+                    save_kw["quality"] = 90
+                payload = uploaded_model_metadata.get("model_library")
+                if fmt == "PNG" and isinstance(payload, dict):
+                    save_image_with_model_metadata(
+                        resized,
+                        out,
+                        fmt=fmt,
+                        metadata=payload,
+                        **save_kw,
+                    )
+                else:
+                    if isinstance(payload, dict):
+                        logger.warning(
+                            "model metadata cannot be embedded after %s resize; "
+                            "preserving metadata_jsonb only filename=%s",
+                            fmt,
+                            filename,
+                        )
+                    resized.save(out, format=fmt, **save_kw)
+                output = out.getvalue()
+            finally:
+                resized.close()
+        return output, mime, width, height, uploaded_model_metadata
+
+
 def _model_metadata_json_from_upload(
     im: PILImage.Image,
     filename: str | None,
@@ -264,7 +320,7 @@ async def _ensure_display_variant(
     )
     db.add(variant)
     try:
-        await db.commit()
+        await db.flush()
     except IntegrityError:
         await db.rollback()
         winner = (
@@ -279,19 +335,17 @@ async def _ensure_display_variant(
             return winner
         raise
     except Exception:
-        # DB commit failed after file landed on disk. The file is now an
+        # DB flush failed after file landed on disk. The file is now an
         # orphan; the next call self-heals via FileExistsError + new row.
-        # Log loudly so ops can spot persistent commit failures (e.g. PG
+        # Log loudly so ops can spot persistent flush failures (e.g. PG
         # outage) and reclaim disk via a cron sweeper if needed.
         await db.rollback()
         logger.error(
-            "display variant DB commit failed (orphan file left at %s) "
+            "display variant DB flush failed (orphan file left at %s) "
             "image_id=%s key=%s",
             dst_path, img.id, key,
         )
         raise
-
-    await db.refresh(variant)
     return variant
 
 
@@ -546,41 +600,12 @@ async def upload_image(
         raise _http("empty_file", "empty file", 400)
 
     data = bytes(buf)
-    _open_image_bytes(data, verify=True)
-
-    # Re-open after verify() (PIL requires this).
-    im = _open_image_bytes(data)
-    mime = (im.get_format_mimetype() or "").lower()
-    if mime not in ALLOWED_MIME:
-        raise _http("unsupported_mime", f"mime not allowed: {mime}", 400)
-
-    uploaded_model_metadata = _model_metadata_json_from_upload(im, file.filename)
-    width, height = im.size
-    _enforce_pixel_limit((width, height))
-    if max(width, height) > MAX_LONG_SIDE:
-        ratio = MAX_LONG_SIDE / max(width, height)
-        new_w, new_h = int(width * ratio), int(height * ratio)
-        im = im.resize((new_w, new_h), PILImage.LANCZOS)
-        width, height = new_w, new_h
-        out = io.BytesIO()
-        fmt = "WEBP" if mime == "image/webp" else ("PNG" if mime == "image/png" else "JPEG")
-        save_kw: dict[str, Any] = {}
-        if fmt == "JPEG":
-            save_kw["quality"] = 92
-        elif fmt == "WEBP":
-            save_kw["quality"] = 90
-        payload = uploaded_model_metadata.get("model_library")
-        if fmt == "PNG" and isinstance(payload, dict):
-            save_image_with_model_metadata(
-                im,
-                out,
-                fmt=fmt,
-                metadata=payload,
-                **save_kw,
-            )
-        else:
-            im.save(out, format=fmt, **save_kw)
-        buf = bytearray(out.getvalue())
+    data, mime, width, height, uploaded_model_metadata = await asyncio.to_thread(
+        _prepare_upload_image,
+        data,
+        file.filename,
+    )
+    buf = bytearray(data)
 
     # hash
     sha = hashlib.sha256(bytes(buf)).hexdigest()
@@ -622,7 +647,7 @@ async def upload_image(
     # Write to disk.
     path = _fs_path(key)
     try:
-        _write_new_file_atomic(path, bytes(buf))
+        await asyncio.to_thread(_write_new_file_atomic, path, bytes(buf))
     except FileExistsError as exc:
         raise _http("storage_conflict", "image storage key already exists", 409) from exc
 
@@ -716,6 +741,7 @@ async def get_image_variant(
             raise _http("not_found", "variant not found", 404)
         try:
             variant = await _ensure_display_variant(db, img)
+            await db.commit()
         except PILImage.DecompressionBombError as exc:
             raise _too_many_pixels() from exc
     path = _fs_path(variant.storage_key)
@@ -820,8 +846,7 @@ async def get_image_signed(
         path,
         media_type=media_type,
         etag=etag,
-        # 客户端 / 反代缓存 1h，远小于 sig 默认 TTL；既不浪费带宽也避免长缓存暴露失效签名。
-        cache_control="public, max-age=3600",
+        cache_control="private, max-age=300",
         storage_key=storage_key,
         request=request,
     )

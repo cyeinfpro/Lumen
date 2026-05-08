@@ -63,6 +63,20 @@ def test_invalid_size_message_is_terminal() -> None:
     assert decision.retriable is False
 
 
+def test_http_400_rate_limit_wording_without_code_is_terminal() -> None:
+    decision = is_retriable(
+        "upstream_error",
+        400,
+        error_message="bad request: rate limit field is invalid",
+    )
+    assert decision.retriable is False
+
+
+def test_http_400_with_explicit_rate_limit_code_is_retriable() -> None:
+    decision = is_retriable("rate_limit_error", 400, error_message="rate limit exceeded")
+    assert decision.retriable is True
+
+
 def test_disk_full_is_retriable() -> None:
     decision = is_retriable("disk_full", None)
     assert decision.retriable is True

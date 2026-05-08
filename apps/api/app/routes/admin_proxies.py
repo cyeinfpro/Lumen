@@ -35,13 +35,16 @@ from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..proxy_pool import (
     DEFAULT_TEST_TARGET,
+    cooldown_key,
     get_health,
+    health_key,
     measure_latency,
     set_health,
 )
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ._admin_common import admin_http as _http, write_admin_audit
+from .admin_models import invalidate_admin_models_cache
 from .providers import _parse_config, _read_providers
 
 logger = logging.getLogger(__name__)
@@ -119,6 +122,46 @@ async def _load_full_config(db: AsyncSession) -> dict:
     return data
 
 
+def _decode_health(raw: dict) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for k, v in (raw or {}).items():
+        ks = k.decode() if isinstance(k, (bytes, bytearray)) else str(k)
+        vs = v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
+        out[ks] = vs
+    if "last_latency_ms" in out:
+        try:
+            out["last_latency_ms"] = float(str(out["last_latency_ms"]))
+        except ValueError:
+            out["last_latency_ms"] = None
+    return out
+
+
+async def _load_proxy_health_batch(redis, names: list[str]) -> dict[str, tuple[dict[str, object], bool]]:  # type: ignore[no-untyped-def]
+    if not names:
+        return {}
+    try:
+        pipe = redis.pipeline(transaction=False)
+        for name in names:
+            pipe.hgetall(health_key(name))
+            pipe.exists(cooldown_key(name))
+        raw_results = await pipe.execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("batch proxy health load failed; falling back err=%s", exc)
+        out: dict[str, tuple[dict[str, object], bool]] = {}
+        for name in names:
+            out[name] = (
+                await get_health(redis, name),
+                bool(await redis.exists(cooldown_key(name))),
+            )
+        return out
+    out = {}
+    for idx, name in enumerate(names):
+        raw_health = raw_results[idx * 2] if idx * 2 < len(raw_results) else {}
+        raw_cooldown = raw_results[idx * 2 + 1] if idx * 2 + 1 < len(raw_results) else 0
+        out[name] = (_decode_health(raw_health or {}), bool(raw_cooldown))
+    return out
+
+
 # ---------- list ----------
 
 
@@ -147,10 +190,10 @@ async def list_proxies(
 
     target = await _resolve_test_target(db)
     redis = get_redis()
+    health_by_name = await _load_proxy_health_batch(redis, [p.name for p in parsed])
     items: list[ProxyHealthOut] = []
     for p in parsed:
-        h = await get_health(redis, p.name)
-        in_cd = bool(await redis.exists(f"lumen:proxy:cooldown:{p.name}"))
+        h, in_cd = health_by_name.get(p.name, ({}, False))
         items.append(
             ProxyHealthOut(
                 name=p.name,
@@ -250,6 +293,7 @@ async def update_proxies(
         details={"count": len(new_proxies), "names": sorted(seen_names)},
     )
     await db.commit()
+    invalidate_admin_models_cache()
     logger.info("admin proxies updated count=%d by user=%s", len(new_proxies), admin.id)
 
     return await list_proxies(_admin=admin, db=db)

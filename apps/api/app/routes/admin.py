@@ -1438,6 +1438,7 @@ async def get_admin_image_variant(
         if kind != DISPLAY_VARIANT:
             raise _http("not_found", "variant not found", 404)
         variant = await _ensure_display_variant(db, img)
+        await db.commit()
     return _storage_streaming_response(
         _fs_path(variant.storage_key),
         media_type=VARIANT_MEDIA_TYPE.get(kind, "application/octet-stream"),
@@ -1526,16 +1527,38 @@ async def retry_dlq(
         if row.event_type == "outbox.generation":
             exists = (
                 await db.execute(
-                    select(Generation.id).where(Generation.id == task_id)
+                    select(Generation.id)
+                    .join(User, User.id == Generation.user_id)
+                    .where(
+                        Generation.id == task_id,
+                        User.deleted_at.is_(None),
+                    )
                 )
             ).scalar_one_or_none()
         else:
             exists = (
                 await db.execute(
-                    select(Completion.id).where(Completion.id == task_id)
+                    select(Completion.id)
+                    .join(User, User.id == Completion.user_id)
+                    .where(
+                        Completion.id == task_id,
+                        User.deleted_at.is_(None),
+                    )
                 )
             ).scalar_one_or_none()
         if exists is None:
+            # Why: this branch fires when the referenced task is gone OR its
+            # owner was soft-deleted (the join filters User.deleted_at IS NULL).
+            # Both cases mean the DLQ row is unresolvable via retry; log so
+            # operators notice if soft-deleted users are accumulating dead
+            # letters, and call the sweeper helper to bulk-resolve them.
+            logger.info(
+                "dlq retry skipped: task_or_user_missing dlq_id=%s task_id=%s "
+                "event_type=%s — consider POST /admin/dlq/sweep-deleted-users",
+                dlq_id,
+                task_id,
+                row.event_type,
+            )
             raise _http(
                 "task_not_found",
                 "dlq payload references unknown task",
@@ -1577,3 +1600,93 @@ async def retry_dlq(
     )
     await db.commit()
     return {"ok": True, "dlq_id": dlq_id, "requeued": requeued}
+
+
+@router.post("/dlq/sweep-deleted-users", dependencies=[Depends(verify_csrf)])
+async def sweep_dlq_for_deleted_users(
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> dict:
+    """Mark DLQ rows whose owning user was soft-deleted as resolved.
+
+    Why: ``retry_dlq`` joins ``User.deleted_at IS NULL`` for safety, which
+    means dead letters owned by soft-deleted users can never be retried and
+    silently accumulate. This sweeper closes them out as ``resolved`` (not
+    physically deleted, so the audit/forensics trail is preserved) and
+    writes an admin audit row capturing the sweep size.
+    """
+    rows = list(
+        (
+            await db.execute(
+                select(OutboxDeadLetter)
+                .where(OutboxDeadLetter.resolved_at.is_(None))
+                .order_by(OutboxDeadLetter.failed_at.asc())
+                .limit(limit)
+            )
+        ).scalars()
+    )
+    swept_ids: list[str] = []
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        payload = dict(row.payload or {})
+        task_id = payload.get("task_id") or payload.get("id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        if row.event_type == "outbox.generation":
+            owner_active = (
+                await db.execute(
+                    select(Generation.id)
+                    .join(User, User.id == Generation.user_id)
+                    .where(
+                        Generation.id == task_id,
+                        User.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            owner_exists = (
+                await db.execute(
+                    select(Generation.id).where(Generation.id == task_id)
+                )
+            ).scalar_one_or_none()
+        elif row.event_type == "outbox.completion":
+            owner_active = (
+                await db.execute(
+                    select(Completion.id)
+                    .join(User, User.id == Completion.user_id)
+                    .where(
+                        Completion.id == task_id,
+                        User.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            owner_exists = (
+                await db.execute(
+                    select(Completion.id).where(Completion.id == task_id)
+                )
+            ).scalar_one_or_none()
+        else:
+            continue
+        if owner_active is None and owner_exists is not None:
+            row.resolved_at = now
+            row.error_message = (
+                (row.error_message or "")
+                + " | swept: owner soft-deleted"
+            ).strip(" |")
+            swept_ids.append(row.id)
+    await write_admin_audit(
+        db,
+        request,
+        admin,
+        event_type="admin.dlq.sweep_deleted_users",
+        details={"swept": len(swept_ids), "scanned": len(rows)},
+    )
+    await db.commit()
+    logger.info(
+        "dlq sweep deleted-users admin=%s swept=%d scanned=%d",
+        admin.id,
+        len(swept_ids),
+        len(rows),
+    )
+    return {"ok": True, "swept": len(swept_ids), "scanned": len(rows)}

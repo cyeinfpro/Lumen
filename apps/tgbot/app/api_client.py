@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import shutil
 import tempfile
@@ -30,6 +31,11 @@ _download_sem = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
 
 # 下载前最低空闲磁盘门槛。低于此值直接拒绝下载，避免撑爆 /tmp 后整个 bot 崩。
 _MIN_FREE_DISK_BYTES = 200 * 1024 * 1024  # 200 MB
+
+
+def make_idempotency_key(scope: str, *parts: object) -> str:
+    raw = "|".join([scope, *(str(part) for part in parts)])
+    return f"tg:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:61]}"
 
 
 class ApiError(Exception):
@@ -77,6 +83,7 @@ class LumenApi:
         resp = await self._client.post(
             "/telegram/bind",
             json={"chat_id": str(chat_id), "code": code, "tg_username": tg_username},
+            headers=self._hdr(chat_id),
         )
         self._raise_for(resp)
         return resp.json()
@@ -93,8 +100,10 @@ class LumenApi:
     async def create_generation(self, chat_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         # 生成是 enqueue，立即返回 generation_ids；本身很快。但 worker 4K 任务上限 1500s，
         # 这里只是创建，timeout 30s 足够。
+        body = dict(payload)
+        body.setdefault("idempotency_key", f"tg:{chat_id}:{uuid.uuid4().hex}")
         resp = await self._client.post(
-            "/telegram/generations", json=payload, headers=self._hdr(chat_id)
+            "/telegram/generations", json=body, headers=self._hdr(chat_id)
         )
         self._raise_for(resp)
         return resp.json()
@@ -126,6 +135,14 @@ class LumenApi:
             "/telegram/runtime-config",
             params=params,
             timeout=httpx.Timeout(10.0, connect=5.0),
+        )
+        self._raise_for(resp)
+        return resp.json()
+
+    async def get_access_config(self) -> dict[str, Any]:
+        resp = await self._client.get(
+            "/telegram/access-config",
+            timeout=httpx.Timeout(5.0, connect=3.0),
         )
         self._raise_for(resp)
         return resp.json()

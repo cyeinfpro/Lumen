@@ -3755,22 +3755,23 @@ function createChatStore() {
 
 type ChatStoreHook = ReturnType<typeof createChatStore>;
 type ChatSelector<T> = (state: ChatState) => T;
+const identityChatSelector: ChatSelector<ChatState> = (state) => state;
 
-let _clientChatStore: ChatStoreHook | null = null;
+let _chatStore: ChatStoreHook | null = null;
 
+// SSR access gets a fresh store; client reuses singleton.
+// 避免 Node 渲染期模块级单例在多用户请求间泄漏可变 chat 状态。
 function getChatStore(): ChatStoreHook {
-  if (typeof window === "undefined") {
-    return createChatStore();
-  }
-  _clientChatStore ??= createChatStore();
-  return _clientChatStore;
+  if (typeof window === "undefined") return createChatStore();
+  _chatStore ??= createChatStore();
+  return _chatStore;
 }
 
 function useChatStoreBound(): ChatState;
 function useChatStoreBound<T>(selector: ChatSelector<T>): T;
 function useChatStoreBound<T>(selector?: ChatSelector<T>): ChatState | T {
   const store = getChatStore();
-  return selector ? store(selector) : store();
+  return store((selector ?? identityChatSelector) as ChatSelector<T>);
 }
 
 // Browser runtime keeps one interactive store. SSR access gets a fresh store so

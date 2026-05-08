@@ -46,7 +46,12 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("ARRAY[]::varchar[]"),
         ),
-        sa.Column("current_step", sa.String(length=64), nullable=False),
+        sa.Column(
+            "current_step",
+            sa.String(length=64),
+            nullable=False,
+            server_default="initial",
+        ),
         sa.Column(
             "quality_mode",
             sa.String(length=32),

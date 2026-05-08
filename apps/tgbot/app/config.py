@@ -12,7 +12,7 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,10 +31,12 @@ def _workspace_env_file() -> Path | None:
 
 
 def _settings_env_files() -> tuple[str | Path, ...]:
-    files: list[str | Path] = [".env"]
+    files: list[str | Path] = []
     workspace_env = _workspace_env_file()
     if workspace_env is not None:
         files.append(workspace_env)
+    app_env = Path(__file__).resolve().parents[1] / ".env"
+    files.append(app_env)
     explicit = os.environ.get("LUMEN_ENV_FILE", "").strip()
     if explicit:
         files.append(Path(explicit).expanduser())
@@ -74,6 +76,13 @@ class Settings(BaseSettings):
     # 与 telegram_bindings 形成双因子：拿到 X-Bot-Token 又知道 chat_id 也没用，因为
     # 进 bot 这层会先按 from_user.id 拒掉。
     telegram_allowed_user_ids: str = ""
+
+    @field_validator("bot_mode", mode="before")
+    @classmethod
+    def _normalize_bot_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
 
 
 settings = Settings()

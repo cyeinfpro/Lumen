@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import statistics
 
 from PIL import Image as PILImage
@@ -117,7 +118,7 @@ class LocalChromaProvider:
         prompt: str | None = None,
     ) -> BackgroundRemovalResult | None:
         _ = prompt
-        rgba = recover_solid_background_transparency(image)
+        rgba = await asyncio.to_thread(recover_solid_background_transparency, image)
         if rgba is None:
             return None
         alpha_mask = rgba.getchannel("A")

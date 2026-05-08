@@ -47,7 +47,7 @@ def test_resolve_size_fixed_rejects_invalid_format():
         (3856, 2160, "longest side"),
         (256, 256, "total pixels"),
         (3840, 3840, "total pixels"),
-        (3840, 1264, "aspect ratio"),
+        (3072, 1024, "aspect ratio"),
     ],
 )
 def test_validate_explicit_size_rejects_invalid_boundaries(width, height, message):

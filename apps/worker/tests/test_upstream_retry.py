@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from app import upstream
@@ -64,6 +65,12 @@ async def test_responses_image_retry_keeps_progress_callback(
 
     assert result == ("ZmFrZS1wbmc=", None)
     assert callbacks_seen == [True, True]
+
+
+def test_bare_httpx_timeout_exception_is_retryable() -> None:
+    assert upstream._is_retryable_fallback_exception(
+        httpx.TimeoutException("curl guard timeout")
+    )
 
 
 async def _done() -> None:

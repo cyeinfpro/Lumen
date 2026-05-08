@@ -198,6 +198,21 @@ async def test_check_quota_expires_old_window_entries() -> None:
     assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
 
 
+@pytest.mark.asyncio
+async def test_check_quota_lua_failure_uses_short_fail_closed_retry() -> None:
+    class EvalBrokenRedis(FakeRedis):
+        async def eval(self, *_a: Any, **_kw: Any) -> Any:
+            raise RuntimeError("redis down")
+
+    now = 1_700_000_000.0
+    allowed, retry_after = await account_limiter.check_quota(
+        EvalBrokenRedis(), "acc1", rate_limit="5/min", daily_quota=None, now=now
+    )
+
+    assert allowed is False
+    assert 1.0 <= retry_after <= account_limiter._REDIS_ERROR_RETRY_AFTER_S + 0.5
+
+
 # --- record_image_call ------------------------------------------------------
 
 

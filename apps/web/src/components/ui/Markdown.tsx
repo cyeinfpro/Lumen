@@ -127,7 +127,9 @@ function truncateUrl(url: string, max = 48): string {
 }
 
 const ALLOWED_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
-const ALLOWED_IMAGE_PROTOCOLS = new Set(["http:", "https:", "blob:"]);
+// blob: removed for SSRF defense, no current callers — Markdown 只渲染 assistant 文本，
+// 业务里 createObjectURL 都走 <img>/<a> 直渲，不进 markdown 渲染管线。
+const ALLOWED_IMAGE_PROTOCOLS = new Set(["http:", "https:"]);
 
 // P3-2：外链 target/rel 用常量集中维护，避免散落在多处的字符串拼写漂移导致 window.opener 漏洞
 const EXTERNAL_LINK_PROPS = {
@@ -139,8 +141,20 @@ function sanitizeUrl(value: string | undefined, allowedProtocols: Set<string>): 
   if (!value) return undefined;
   const trimmed = value.trim();
   if (!trimmed) return undefined;
-  if (trimmed.startsWith("#") || trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
+  if (trimmed.startsWith("#")) {
     return trimmed;
+  }
+  const isRelative =
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../");
+  if (isRelative) {
+    if (trimmed.startsWith("//") || trimmed.includes("\\")) return undefined;
+    const firstSegment =
+      trimmed
+        .replace(/^(?:\/|\.\.?\/)+/, "")
+        .split(/[/?#]/, 1)[0] ?? "";
+    return firstSegment.includes(":") ? undefined : trimmed;
   }
   try {
     const parsed = new URL(trimmed, "https://lumen.local");

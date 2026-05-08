@@ -55,6 +55,35 @@ async def test_rate_limiter_fails_closed_when_redis_unavailable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rate_limiter_fails_closed_in_test_env_when_redis_unavailable() -> None:
+    old_env = settings.app_env
+    old_enabled = settings.user_rate_limit_enabled
+    settings.app_env = "test"
+    settings.user_rate_limit_enabled = False
+    limiter = RateLimiter(capacity=1, refill_per_sec=1)
+    try:
+        with pytest.raises(Exception) as excinfo:
+            await limiter.check(BadRedis(), "rl:test")
+    finally:
+        settings.app_env = old_env
+        settings.user_rate_limit_enabled = old_enabled
+    assert getattr(excinfo.value, "status_code", None) == 503
+
+
+@pytest.mark.asyncio
+async def test_retry_after_rounds_up() -> None:
+    class LimitedRedis:
+        async def eval(self, *_args) -> list[int]:
+            return [0, 1500]
+
+    limiter = RateLimiter(capacity=1, refill_per_sec=1, always_on=True)
+    with pytest.raises(Exception) as excinfo:
+        await limiter.check(LimitedRedis(), "rl:test")
+
+    assert excinfo.value.headers["Retry-After"] == "2"
+
+
+@pytest.mark.asyncio
 async def test_rate_limiter_passes_initial_tokens_to_lua() -> None:
     limiter = RateLimiter(
         capacity=240,

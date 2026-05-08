@@ -182,7 +182,7 @@ async def test_returns_200_for_valid_orig(
     )
     assert resp.media_type == "image/png"
     assert resp.headers["etag"] == '"abc123"'
-    assert resp.headers["cache-control"].startswith("public")
+    assert resp.headers["cache-control"] == "private, max-age=300"
     assert resp.headers["content-length"] == str(len(b"PNG-PAYLOAD"))
 
 

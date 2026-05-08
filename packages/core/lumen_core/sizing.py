@@ -5,7 +5,7 @@ DESIGN §7.2 + 附录 A。Worker 组装上游 body 前调用；API 校验 image_
 两层策略（4K 升级后）：
 - **默认（auto / fixed=空）**：沿用保守的 ~1.57M `PIXEL_BUDGET` 推导 preset，控制延迟与成本。
 - **显式 fixed_size**：按上游 gpt-image-2 真实能力校验（16 对齐 / 最长边 ≤3840 /
-  总像素 ∈ [655360, 8294400] / 长宽比 ≤3:1）；非法时 raise ValueError 而非静默回退。
+  总像素 ∈ [655360, 8294400] / 长宽比不超过最大 preset 21:9）；非法时 raise ValueError 而非静默回退。
 """
 
 from __future__ import annotations
