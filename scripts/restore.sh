@@ -71,6 +71,25 @@ release_lock() {
     fi
 }
 
+_restore_compose_start_services() {
+    # 优先 lumen_compose（自动找 ${ROOT}/current 的 compose），fallback 到
+    # docker start 容器名。Lumen 全栈已 docker 化，systemd 的 lumen-api.service
+    # 在新部署上不一定存在，systemctl start 会直接报错并被吞，导致服务卡停。
+    if command -v lumen_compose >/dev/null 2>&1 \
+            && lumen_compose start api worker 2>/dev/null; then
+        return 0
+    fi
+    docker start lumen-api lumen-worker >/dev/null 2>&1 || true
+}
+
+_restore_compose_stop_services() {
+    if command -v lumen_compose >/dev/null 2>&1 \
+            && lumen_compose stop api worker 2>/dev/null; then
+        return 0
+    fi
+    docker stop lumen-api lumen-worker >/dev/null 2>&1
+}
+
 cleanup() {
     local rc=$?
     if [ "$REDIS_NEEDS_START" -eq 1 ]; then
@@ -81,8 +100,8 @@ cleanup() {
         rm -rf "$TMP_DIR" 2>/dev/null || true
     fi
     if [ "$SERVICES_STOPPED" -eq 1 ]; then
-        log "starting lumen-api + lumen-worker"
-        systemctl start lumen-api lumen-worker || true
+        log "starting api + worker（compose 优先 / 容器名 fallback）"
+        _restore_compose_start_services
     fi
     release_lock
     if command -v lumen_release_lock >/dev/null 2>&1; then
@@ -257,9 +276,9 @@ fi
 gzip -t "$PG_FILE" || { log "ERROR pg file corrupt"; exit 3; }
 tar -tzf "$REDIS_FILE" >/dev/null || { log "ERROR redis file corrupt"; exit 3; }
 
-log "stopping lumen-api + lumen-worker"
+log "stopping api + worker（compose 优先 / 容器名 fallback）"
 SERVICES_STOPPED=1
-systemctl stop lumen-api lumen-worker
+_restore_compose_stop_services
 
 # ---- Redis ----
 log "restoring redis from $REDIS_FILE"
@@ -276,14 +295,47 @@ fi
 if ! REDIS_HOST_DIR="$(validate_redis_host_dir "$REDIS_HOST_DIR")"; then
     exit 4
 fi
-# 清空旧数据
-find "$REDIS_HOST_DIR" -mindepth 1 -maxdepth 1 \
-    \( -name dump.rdb -o -name appendonly.aof -o -name appendonlydir \) \
-    -exec rm -rf -- {} +
-# 拷回新数据
-[ -f "$TMP_DIR/dump.rdb" ] && cp "$TMP_DIR/dump.rdb" "$REDIS_HOST_DIR/dump.rdb"
-[ -d "$TMP_DIR/appendonlydir" ] && cp -r "$TMP_DIR/appendonlydir" "$REDIS_HOST_DIR/appendonlydir"
-[ -f "$TMP_DIR/appendonly.aof" ] && cp "$TMP_DIR/appendonly.aof" "$REDIS_HOST_DIR/appendonly.aof"
+# 不能直接 rm 旧数据再 cp：cp 失败（磁盘满 / cifs 抽风）会留下"清空但没装回"
+# 的损毁状态，restore 后丢全部 redis 数据。改 mv 旧数据到备份目录 → cp 新数据
+# → 成功才删 backup；任何 cp 失败都把 backup 里的旧数据 mv 回原位。
+REDIS_BACKUP_DIR="$REDIS_HOST_DIR/.lumen-restore-old.$$"
+mkdir -p "$REDIS_BACKUP_DIR" || { log "ERROR cannot mkdir $REDIS_BACKUP_DIR"; exit 4; }
+for _f in dump.rdb appendonly.aof appendonlydir; do
+    if [ -e "$REDIS_HOST_DIR/$_f" ]; then
+        mv "$REDIS_HOST_DIR/$_f" "$REDIS_BACKUP_DIR/$_f" \
+            || { log "ERROR cannot stash existing redis/$_f"; exit 4; }
+    fi
+done
+
+# 拷回新数据；任何一个失败立即回滚
+_redis_cp_ok=1
+if [ -f "$TMP_DIR/dump.rdb" ]; then
+    cp "$TMP_DIR/dump.rdb" "$REDIS_HOST_DIR/dump.rdb" || _redis_cp_ok=0
+fi
+if [ "$_redis_cp_ok" = "1" ] && [ -d "$TMP_DIR/appendonlydir" ]; then
+    cp -r "$TMP_DIR/appendonlydir" "$REDIS_HOST_DIR/appendonlydir" || _redis_cp_ok=0
+fi
+if [ "$_redis_cp_ok" = "1" ] && [ -f "$TMP_DIR/appendonly.aof" ]; then
+    cp "$TMP_DIR/appendonly.aof" "$REDIS_HOST_DIR/appendonly.aof" || _redis_cp_ok=0
+fi
+
+if [ "$_redis_cp_ok" = "0" ]; then
+    log "ERROR redis 数据拷贝失败，回滚到原状态"
+    for _f in dump.rdb appendonly.aof appendonlydir; do
+        rm -rf "$REDIS_HOST_DIR/$_f" 2>/dev/null || true
+        if [ -e "$REDIS_BACKUP_DIR/$_f" ]; then
+            mv "$REDIS_BACKUP_DIR/$_f" "$REDIS_HOST_DIR/$_f" \
+                || log "WARN 回滚 redis/$_f 失败，请人工检查 $REDIS_BACKUP_DIR"
+        fi
+    done
+    rmdir "$REDIS_BACKUP_DIR" 2>/dev/null || true
+    log "建议：检查磁盘空间 (df -h) / 文件系统挂载状态 / 重跑 restore"
+    exit 5
+fi
+
+# 拷贝成功后清理 backup（保留 30 分钟应急人工 rollback；脚本不主动删，
+# 后续 restore 启动时由 mkdir 命名冲突自然不会复用）
+log "redis 数据已恢复，原数据备份在 $REDIS_BACKUP_DIR"
 
 docker start "$REDIS_CONTAINER" >/dev/null
 REDIS_NEEDS_START=0
