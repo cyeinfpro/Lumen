@@ -1968,6 +1968,11 @@ lumenctl_maybe_self_update() {
         return 0
     fi
 
+    # 让用户看到自更新行为（之前完全静默，本地未提交改动被覆盖时用户感知是
+    # "我刚改的代码神奇消失"）。需禁用：LUMEN_LUMENCTL_SELF_UPDATE=0。
+    log_info "[self-update] 检查远端 scripts/ 更新（branch=${LUMEN_SELF_UPDATE_BRANCH:-main}, TTL=${LUMEN_SELF_UPDATE_TTL:-600}s）..."
+    log_info "[self-update] 跳过本次更新：LUMEN_LUMENCTL_SELF_UPDATE=0 bash scripts/lumenctl.sh ..."
+
     lumen_self_update_scripts "${SCRIPT_DIR}" \
         "${LUMEN_SELF_UPDATE_BRANCH:-main}" \
         "${LUMEN_SELF_UPDATE_TTL:-600}"
