@@ -833,7 +833,7 @@ function MemoryWriteHint({
             placeholder="编辑后再保存"
           />
           <div className="mt-1 text-right text-[10px] text-[var(--fg-2)]/70">
-            改完点上面的"是"以编辑后的内容入库
+            改完点上面的「是」以编辑后的内容入库
           </div>
         </div>
       )}
