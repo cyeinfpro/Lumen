@@ -577,7 +577,9 @@ confirm() {
     local reply=""
     printf '%s%s%s [y/N]: ' "${LUMEN_C_CYAN}" "${prompt}" "${LUMEN_C_RESET}"
     if ! IFS= read -r reply; then
-        printf '\n'
+        # EOF（curl|bash 远程模式 / 重定向 stdin / Ctrl-D）下视为 No，但显式
+        # 提示，避免用户感觉"我啥也没按怎么就退出了"。
+        printf '\n[INFO] (EOF / 非交互输入，视为 No)\n'
         return 1
     fi
     case "${reply}" in
