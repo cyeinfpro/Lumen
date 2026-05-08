@@ -23,14 +23,29 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # status enum：用 PG 原生 enum 类型而不是 CHECK，便于跨表/查询统一约束
     # （review #14）。SQLite 测试退化为 VARCHAR + CHECK 由 SA dialect 处理。
-    status_enum = sa.Enum(
-        "active",
-        "invalid",
-        "replaced",
-        "revoked",
-        name="user_api_credential_status",
-    )
-    status_enum.create(op.get_bind(), checkfirst=True)
+    # 用原生 DO $$ ... END$$ pg_type IF NOT EXISTS 守卫；SA 的 Enum.create
+    # checkfirst=True 在 alembic op.get_bind() 上下文中并非总是稳定生效，
+    # 直接走 DO 块更可靠（CI smoke 多次重启后 enum 残留 → DuplicateObject）。
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute(
+            "DO $$\n"
+            "BEGIN\n"
+            "  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_api_credential_status') THEN\n"
+            "    CREATE TYPE user_api_credential_status AS ENUM ('active', 'invalid', 'replaced', 'revoked');\n"
+            "  END IF;\n"
+            "END$$;"
+        )
+    else:
+        # SQLite / 其他 dialect 走 SA 原生路径（VARCHAR + CHECK）
+        status_enum = sa.Enum(
+            "active",
+            "invalid",
+            "replaced",
+            "revoked",
+            name="user_api_credential_status",
+        )
+        status_enum.create(bind, checkfirst=True)
 
     op.create_table(
         "api_supplier_templates",
