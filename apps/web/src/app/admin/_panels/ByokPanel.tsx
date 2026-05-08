@@ -1,14 +1,25 @@
 "use client";
 
-import { useMemo, useState } from "react";
+// Lumen 管理面板：BYOK（用户自带 Key）
+// UI 目标：把 4 个技术开关翻成「业务模式」，新增供应商分基础/高级两段，
+// 已有供应商默认折叠为 summary 行，展开后才显示编辑表单。
+// 视觉风格保持 admin 既定深色主题（var(--bg-1)/(--bg-0) + amber accent）。
+
+import { useId, useMemo, useState } from "react";
 import {
   AlertCircle,
   Check,
+  ChevronDown,
+  Globe,
+  KeyRound,
   Loader2,
+  Lock,
+  Pencil,
   Plus,
   Save,
   Server,
   ShieldCheck,
+  Sparkles,
   TestTube2,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -26,18 +37,25 @@ import type {
   ApiSupplierTemplateIn,
   ApiSupplierTemplateOut,
   ByokPurpose,
+  ByokSettingsOut,
   ByokSettingsPatchIn,
 } from "@/lib/types";
 
 type SupplierDraft = ApiSupplierTemplateIn & { probe_key: string };
 
-const PURPOSES: ByokPurpose[] = ["chat", "image", "embedding"];
+const PURPOSES: Array<{ value: ByokPurpose; label: string }> = [
+  { value: "chat", label: "对话" },
+  { value: "image", label: "生图" },
+  { value: "embedding", label: "嵌入向量" },
+];
 
-// 与后端 ApiSupplierTemplateIn 校验范围对齐（review §9 / #15）。
+// 与后端 ApiSupplierTemplateIn 校验范围对齐（review §9 / #15）
 const TIMEOUT_MIN_MS = 1000;
 const TIMEOUT_MAX_MS = 60_000;
 const CONCURRENCY_MIN = 1;
 const CONCURRENCY_MAX = 32;
+const TTL_MIN_S = 60;
+const TTL_MAX_S = 3600;
 
 const EMPTY_SUPPLIER: SupplierDraft = {
   name: "",
@@ -58,6 +76,93 @@ const EMPTY_SUPPLIER: SupplierDraft = {
   probe_key: "",
 };
 
+// —— 业务模式（review §9）：把 4 个开关合并为单选预设 ——
+
+type ByokMode = "off" | "bind_only" | "key_first" | "fully_open";
+
+type ModeToggles = Required<
+  Pick<
+    ByokSettingsOut,
+    | "mode_enabled"
+    | "byok_signup_enabled"
+    | "byok_signup_bypasses_allowlist"
+    | "fallback_to_admin_provider"
+  >
+>;
+
+interface ModeDef {
+  value: ByokMode;
+  label: string;
+  hint: string;
+  scenario: string;
+  icon: typeof Lock;
+  toggles: ModeToggles;
+}
+
+const MODE_DEFS: ModeDef[] = [
+  {
+    value: "off",
+    label: "关闭 BYOK",
+    hint: "用户全部走站长配置的全局 Key，最简",
+    scenario: "私有部署 / 内部演示",
+    icon: Lock,
+    toggles: { mode_enabled: false, byok_signup_enabled: false, byok_signup_bypasses_allowlist: false, fallback_to_admin_provider: false },
+  },
+  {
+    value: "bind_only",
+    label: "仅老用户绑定",
+    hint: "已注册用户可在账号设置里换成自己的 Key，不开放注册",
+    scenario: "小范围邀请制",
+    icon: KeyRound,
+    toggles: { mode_enabled: true, byok_signup_enabled: false, byok_signup_bypasses_allowlist: false, fallback_to_admin_provider: false },
+  },
+  {
+    value: "key_first",
+    label: "Key 优先注册",
+    hint: "未登录用户可先输 Key 再注册，仍要走邀请链接",
+    scenario: "邀请制 + 自助 BYOK",
+    icon: Sparkles,
+    toggles: { mode_enabled: true, byok_signup_enabled: true, byok_signup_bypasses_allowlist: false, fallback_to_admin_provider: false },
+  },
+  {
+    value: "fully_open",
+    label: "完全开放注册",
+    hint: "任何人凭 Key 即可注册，不再校验邀请白名单",
+    scenario: "公网公开站",
+    icon: Globe,
+    toggles: { mode_enabled: true, byok_signup_enabled: true, byok_signup_bypasses_allowlist: true, fallback_to_admin_provider: false },
+  },
+];
+
+function detectMode(s: ByokSettingsOut | undefined): ByokMode | null {
+  if (!s) return null;
+  for (const def of MODE_DEFS) {
+    if (
+      def.toggles.mode_enabled === s.mode_enabled &&
+      def.toggles.byok_signup_enabled === s.byok_signup_enabled &&
+      def.toggles.byok_signup_bypasses_allowlist === s.byok_signup_bypasses_allowlist &&
+      def.toggles.fallback_to_admin_provider === s.fallback_to_admin_provider
+    ) {
+      return def.value;
+    }
+  }
+  return null; // 自定义组合：用户在高级覆盖里手动改过
+}
+
+const ADVANCED_TOGGLES: Array<{
+  key: keyof ByokSettingsPatchIn;
+  label: string;
+  hint: string;
+  requiresMode: boolean;
+}> = [
+  { key: "mode_enabled", label: "BYOK 总开关", hint: "关闭后所有用户走站长 Key", requiresMode: false },
+  { key: "byok_signup_enabled", label: "公开注册", hint: "未登录用户也能用 Key 注册", requiresMode: true },
+  { key: "byok_signup_bypasses_allowlist", label: "绕过白名单", hint: "BYOK 注册免邀请链接 / allowlist", requiresMode: true },
+  { key: "fallback_to_admin_provider", label: "管理员兜底", hint: "用户 Key 失败时回落到全局 Provider", requiresMode: true },
+];
+
+// —— 工具 ——
+
 function clampInt(raw: string | number, min: number, max: number): number {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n)) return min;
@@ -68,9 +173,7 @@ function validateBaseUrl(v: string): string | null {
   if (!v.trim()) return "必填";
   try {
     const url = new URL(v);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return "必须是 http(s)";
-    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "必须是 http(s)";
     if (url.username || url.password) return "URL 不能包含账号密码";
     return null;
   } catch {
@@ -78,40 +181,66 @@ function validateBaseUrl(v: string): string | null {
   }
 }
 
-function togglePurpose(
-  purposes: ByokPurpose[],
-  target: ByokPurpose,
-): ByokPurpose[] {
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+function togglePurpose(purposes: ByokPurpose[], target: ByokPurpose): ByokPurpose[] {
   if (purposes.includes(target)) {
     const next = purposes.filter((p) => p !== target);
-    // 至少保留一个 purpose（与后端 schemas 校验保持一致）
     return next.length > 0 ? next : purposes;
   }
   return [...purposes, target];
 }
 
+// —— 表单预设：常见 OpenAI / 兼容站点一键填充 ——
+
+const SUPPLIER_PRESETS: Array<{ value: string; label: string; apply: () => SupplierDraft }> = [
+  {
+    value: "openai",
+    label: "OpenAI 官方",
+    apply: () => ({
+      ...EMPTY_SUPPLIER,
+      name: "OpenAI",
+      slug: "openai",
+      base_url: "https://api.openai.com",
+      validation_model: "gpt-5.4",
+      default_chat_model: "gpt-5.4",
+      fast_chat_model: "gpt-5.4-mini",
+      purposes: ["chat", "image"],
+    }),
+  },
+  {
+    value: "compatible",
+    label: "OpenAI 兼容站点",
+    apply: () => ({
+      ...EMPTY_SUPPLIER,
+      validation_model: "gpt-5.4",
+      default_chat_model: "gpt-5.4",
+      fast_chat_model: "gpt-5.4-mini",
+    }),
+  },
+  { value: "blank", label: "自定义（清空）", apply: () => ({ ...EMPTY_SUPPLIER }) },
+];
+
+// —— 主组件 ——
+
 export function ByokPanel() {
   const qc = useQueryClient();
-  const settingsQ = useQuery({
-    queryKey: ["admin", "byok-settings"],
-    queryFn: getByokSettings,
-    retry: false,
-  });
-  const suppliersQ = useQuery({
-    queryKey: ["admin", "byok-suppliers"],
-    queryFn: listApiSuppliers,
-    retry: false,
-  });
+  const settingsQ = useQuery({ queryKey: ["admin", "byok-settings"], queryFn: getByokSettings, retry: false });
+  const suppliersQ = useQuery({ queryKey: ["admin", "byok-suppliers"], queryFn: listApiSuppliers, retry: false });
 
   const [settingsDraft, setSettingsDraft] = useState<ByokSettingsPatchIn>({});
   const [newSupplier, setNewSupplier] = useState<SupplierDraft>(EMPTY_SUPPLIER);
-  const [newSupplierUrlError, setNewSupplierUrlError] = useState<string | null>(
-    null,
-  );
+  const [newSupplierUrlError, setNewSupplierUrlError] = useState<string | null>(null);
+  const [newSupplierOpen, setNewSupplierOpen] = useState(false);
   const [supplierDrafts, setSupplierDrafts] = useState<Record<string, SupplierDraft>>({});
-  const [supplierUrlErrors, setSupplierUrlErrors] = useState<
-    Record<string, string | null>
-  >({});
+  const [supplierUrlErrors, setSupplierUrlErrors] = useState<Record<string, string | null>>({});
+  const [openSupplierId, setOpenSupplierId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [probeResult, setProbeResult] = useState<Record<string, string>>({});
@@ -120,6 +249,7 @@ export function ByokPanel() {
     mutationFn: () => patchByokSettings(settingsDraft),
     onSuccess: async () => {
       setSaved("系统设置已更新");
+      setSettingsDraft({});
       await qc.invalidateQueries({ queryKey: ["admin", "byok-settings"] });
     },
     onError: (err) => setError(errorText(err)),
@@ -130,16 +260,12 @@ export function ByokPanel() {
     onSuccess: async () => {
       setNewSupplier(EMPTY_SUPPLIER);
       setNewSupplierUrlError(null);
+      setNewSupplierOpen(false);
       setSaved("供应商已创建");
       await qc.invalidateQueries({ queryKey: ["admin", "byok-suppliers"] });
     },
     onError: (err) => setError(errorText(err)),
   });
-
-  const supplierIds = useMemo(
-    () => suppliersQ.data?.items.map((supplier) => supplier.id) ?? [],
-    [suppliersQ.data],
-  );
 
   const patchSupplier = useMutation({
     mutationFn: (payload: { id: string; body: SupplierDraft }) =>
@@ -152,435 +278,359 @@ export function ByokPanel() {
   });
 
   const probeMut = useMutation({
-    mutationFn: (payload: { id: string; api_key: string }) =>
-      probeApiSupplier(payload.id, payload.api_key),
+    mutationFn: (payload: { id: string; api_key: string }) => probeApiSupplier(payload.id, payload.api_key),
     onSuccess: (res, vars) => {
-      setProbeResult((current) => ({
-        ...current,
-        [vars.id]: res.ok
-          ? `通过 · ${res.latency_ms}ms`
-          : `${res.error_code ?? "probe_failed"} · ${res.latency_ms}ms`,
+      setProbeResult((cur) => ({
+        ...cur,
+        [vars.id]: res.ok ? `通过 · ${res.latency_ms}ms` : `${res.error_code ?? "probe_failed"} · ${res.latency_ms}ms`,
       }));
     },
     onError: (err, vars) => {
-      setProbeResult((current) => ({
-        ...current,
-        [vars.id]: errorText(err),
-      }));
+      setProbeResult((cur) => ({ ...cur, [vars.id]: errorText(err) }));
     },
   });
 
   const settings = settingsQ.data;
-  const suppliers = suppliersQ.data?.items ?? [];
+  const suppliers = useMemo(() => suppliersQ.data?.items ?? [], [suppliersQ.data]);
 
-  // review §9 / #27 / #9: BYOK 总开关关闭时其他三个开关需 disable + 提示
-  const modeOn = Boolean(
-    settingsDraft.mode_enabled ?? settings?.mode_enabled ?? false,
+  const effectiveSettings = useMemo<ByokSettingsOut | undefined>(() => {
+    if (!settings) return undefined;
+    return { ...settings, ...settingsDraft };
+  }, [settings, settingsDraft]);
+  const currentMode = detectMode(effectiveSettings);
+  const totalActive = useMemo(
+    () => suppliers.reduce((acc, s) => acc + s.active_credentials, 0),
+    [suppliers],
   );
-  const SETTING_TOGGLES: Array<{
-    key: keyof ByokSettingsPatchIn;
-    label: string;
-    requiresMode: boolean;
-  }> = [
-    { key: "mode_enabled", label: "BYOK 总开关", requiresMode: false },
-    { key: "byok_signup_enabled", label: "公开注册", requiresMode: true },
-    {
-      key: "byok_signup_bypasses_allowlist",
-      label: "绕过白名单",
-      requiresMode: true,
-    },
-    {
-      key: "fallback_to_admin_provider",
-      label: "管理员兜底",
-      requiresMode: true,
-    },
-  ];
+
+  const setMode = (mode: ByokMode) => {
+    const def = MODE_DEFS.find((m) => m.value === mode);
+    if (!def) return;
+    setSettingsDraft((cur) => ({ ...cur, ...def.toggles }));
+  };
+
+  const settingsBusy = saveSettingsMut.isPending;
+  const settingsDirty = Object.keys(settingsDraft).length > 0;
+  const loading = settingsQ.isLoading || suppliersQ.isLoading;
 
   return (
     <div className="space-y-6">
+      <Overview mode={currentMode} supplierCount={suppliers.length} activeCredentials={totalActive} loading={loading} />
+
       <section className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-5 space-y-4">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
+        <header className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
           <ShieldCheck className="w-3.5 h-3.5" />
-          BYOK 开关
+          BYOK 模式
+        </header>
+        <p className="text-xs text-[var(--fg-2)]">
+          按业务场景一键配置；下方「高级覆盖」可手动微调四个原始开关。
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          {MODE_DEFS.map((def) => (
+            <ModeCard key={def.value} def={def} active={currentMode === def.value} onSelect={() => setMode(def.value)} />
+          ))}
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {SETTING_TOGGLES.map(({ key, label, requiresMode }) => {
-            const disabled = requiresMode && !modeOn;
-            const draftRecord = settingsDraft as Record<
-              string,
-              boolean | undefined
-            >;
-            const settingsRecord = settings as
-              | Record<string, boolean | undefined>
-              | undefined;
-            const checked = Boolean(
-              draftRecord[key] ?? settingsRecord?.[key as string],
-            );
-            return (
-              <label
-                key={key}
-                className={
-                  "flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 " +
-                  (disabled ? "opacity-60" : "")
-                }
-              >
-                <span className="text-sm text-neutral-200 flex flex-col">
-                  {label}
-                  {disabled && (
-                    <span className="text-[10px] text-neutral-500 mt-0.5">
-                      需要先开启 BYOK 模式
-                    </span>
-                  )}
-                </span>
-                <input
-                  type="checkbox"
-                  disabled={disabled}
+        {currentMode === null && (
+          <p className="flex items-start gap-2 text-xs text-[var(--color-lumen-amber)]/90">
+            <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
+            当前是自定义组合（未匹配预设模式），点上方任意卡片可重置。
+          </p>
+        )}
+
+        <details className="group rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+          <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
+            <span>高级覆盖（手动改 4 个原始开关）</span>
+            <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-white/8">
+            {ADVANCED_TOGGLES.map(({ key, label, hint, requiresMode }) => {
+              const modeOn = Boolean(effectiveSettings?.mode_enabled);
+              const disabled = requiresMode && !modeOn;
+              const checked = Boolean(
+                (effectiveSettings as Record<string, boolean | undefined> | undefined)?.[key],
+              );
+              return (
+                <ToggleRow
+                  key={key}
+                  label={label}
+                  hint={disabled ? "需先开启 BYOK 总开关" : hint}
                   checked={checked}
-                  onChange={(e) =>
-                    setSettingsDraft((current) => ({
-                      ...current,
-                      [key]: e.target.checked,
-                    }))
-                  }
+                  disabled={disabled}
+                  onChange={(v) => setSettingsDraft((cur) => ({ ...cur, [key]: v }))}
                 />
-              </label>
-            );
-          })}
+              );
+            })}
+          </div>
+        </details>
+
+        <div className="space-y-2">
+          <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">验证设置</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <FieldText
+              label="验证模型"
+              hint="发随机算术题给上游验证 Key（建议 gpt-5.4）"
+              value={settingsDraft.validation_model ?? settings?.validation_model ?? ""}
+              onChange={(v) => setSettingsDraft((cur) => ({ ...cur, validation_model: v }))}
+              placeholder="gpt-5.4"
+            />
+            <FieldNumber
+              label="验证超时 (ms)"
+              hint={`单次验证 HTTP 请求超时，${TIMEOUT_MIN_MS}-${TIMEOUT_MAX_MS}（默认 15000）`}
+              min={TIMEOUT_MIN_MS}
+              max={TIMEOUT_MAX_MS}
+              value={settingsDraft.validation_timeout_ms ?? settings?.validation_timeout_ms ?? 15000}
+              onChange={(v) =>
+                setSettingsDraft((cur) => ({ ...cur, validation_timeout_ms: clampInt(v, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS) }))
+              }
+            />
+            <FieldNumber
+              label="Token TTL (秒)"
+              hint={`验证完到注册间的最大间隔，${TTL_MIN_S}-${TTL_MAX_S}（默认 900 = 15min）`}
+              min={TTL_MIN_S}
+              max={TTL_MAX_S}
+              value={settingsDraft.pending_token_ttl_seconds ?? settings?.pending_token_ttl_seconds ?? 900}
+              onChange={(v) =>
+                setSettingsDraft((cur) => ({ ...cur, pending_token_ttl_seconds: clampInt(v, TTL_MIN_S, TTL_MAX_S) }))
+              }
+            />
+          </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <input
-            value={settingsDraft.validation_model ?? settings?.validation_model ?? ""}
-            onChange={(e) =>
-              setSettingsDraft((current) => ({ ...current, validation_model: e.target.value }))
-            }
-            placeholder="验证模型"
-            className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-          <input
-            type="number"
-            min={TIMEOUT_MIN_MS}
-            max={TIMEOUT_MAX_MS}
-            value={
-              settingsDraft.validation_timeout_ms ??
-              settings?.validation_timeout_ms ??
-              15000
-            }
-            onChange={(e) =>
-              setSettingsDraft((current) => ({
-                ...current,
-                validation_timeout_ms: clampInt(
-                  e.target.value,
-                  TIMEOUT_MIN_MS,
-                  TIMEOUT_MAX_MS,
-                ),
-              }))
-            }
-            className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-          <input
-            type="number"
-            min={60}
-            max={3600}
-            value={
-              settingsDraft.pending_token_ttl_seconds ??
-              settings?.pending_token_ttl_seconds ??
-              900
-            }
-            onChange={(e) =>
-              setSettingsDraft((current) => ({
-                ...current,
-                pending_token_ttl_seconds: clampInt(e.target.value, 60, 3600),
-              }))
-            }
-            className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={() => saveSettingsMut.mutate()}
+            disabled={settingsBusy || !settingsDirty}
+            className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+          >
+            {settingsBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            保存系统设置
+          </button>
+          {settingsDirty && (
+            <button
+              type="button"
+              onClick={() => setSettingsDraft({})}
+              className="text-xs text-[var(--fg-2)] underline-offset-2 hover:underline"
+            >
+              丢弃改动
+            </button>
+          )}
         </div>
-        <button
-          type="button"
-          onClick={() => saveSettingsMut.mutate()}
-          disabled={saveSettingsMut.isPending}
-          className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
-        >
-          {saveSettingsMut.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          保存系统设置
-        </button>
       </section>
 
       <section className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-5 space-y-4">
-        <div className="flex items-center justify-between gap-3">
+        <header className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
             <Plus className="w-3.5 h-3.5" />
             新供应商
           </div>
-          <div className="text-xs text-[var(--fg-2)]">
-            {supplierIds.length} 个模板
-          </div>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <input
-            value={newSupplier.name}
-            onChange={(e) =>
-              setNewSupplier((current) => ({ ...current, name: e.target.value }))
-            }
-            placeholder="名称"
-            className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-          <input
-            value={newSupplier.slug ?? ""}
-            onChange={(e) =>
-              setNewSupplier((current) => ({ ...current, slug: e.target.value }))
-            }
-            placeholder="slug"
-            className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-          <div className="md:col-span-2 space-y-1">
-            <input
-              value={newSupplier.base_url}
-              onChange={(e) => {
-                setNewSupplier((current) => ({
-                  ...current,
-                  base_url: e.target.value,
-                }));
-                if (newSupplierUrlError) setNewSupplierUrlError(null);
-              }}
-              onBlur={(e) => setNewSupplierUrlError(validateBaseUrl(e.target.value))}
-              placeholder="https://api.example.com"
-              className={
-                "w-full h-10 rounded-xl border bg-[var(--bg-0)] px-3 text-sm " +
-                (newSupplierUrlError
-                  ? "border-red-500/60"
-                  : "border-[var(--border)]")
-              }
-            />
-            {newSupplierUrlError && (
-              <p className="text-xs text-red-300">{newSupplierUrlError}</p>
-            )}
-          </div>
-        </div>
-        {/* review §9 / #13: 必填的 purposes 多选 chip */}
-        <div className="space-y-2">
-          <label className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
-            用途 (purposes)
-          </label>
-          <div className="flex gap-2 flex-wrap">
-            {PURPOSES.map((p) => {
-              const active = newSupplier.purposes.includes(p);
-              return (
+          <button
+            type="button"
+            onClick={() => setNewSupplierOpen((v) => !v)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-xs text-neutral-300 hover:bg-white/[0.07]"
+          >
+            {newSupplierOpen ? "收起" : "展开表单"}
+            <ChevronDown className={"w-3.5 h-3.5 transition-transform " + (newSupplierOpen ? "rotate-180" : "")} />
+          </button>
+        </header>
+
+        {newSupplierOpen && (
+          <div className="space-y-4">
+            <div className="flex gap-2 flex-wrap">
+              {SUPPLIER_PRESETS.map((preset) => (
                 <button
-                  key={p}
+                  key={preset.value}
                   type="button"
-                  onClick={() =>
-                    setNewSupplier((current) => ({
-                      ...current,
-                      purposes: togglePurpose(current.purposes, p),
-                    }))
-                  }
-                  className={
-                    "px-2.5 py-1 rounded-lg border text-xs transition-colors " +
-                    (active
-                      ? "bg-[var(--color-lumen-amber)] text-black border-[var(--color-lumen-amber)]"
-                      : "bg-white/[0.03] text-neutral-300 border-white/10 hover:bg-white/[0.08]")
-                  }
+                  onClick={() => {
+                    setNewSupplier(preset.apply());
+                    setNewSupplierUrlError(null);
+                  }}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-xs text-neutral-200 hover:bg-white/[0.08]"
                 >
-                  {p}
+                  <Sparkles className="w-3 h-3" />
+                  {preset.label}
                 </button>
-              );
-            })}
+              ))}
+            </div>
+
+            <SupplierForm
+              draft={newSupplier}
+              urlError={newSupplierUrlError}
+              onChange={setNewSupplier}
+              onUrlBlur={setNewSupplierUrlError}
+              showProbe={false}
+            />
+
+            <button
+              type="button"
+              onClick={() => {
+                const urlErr = validateBaseUrl(newSupplier.base_url);
+                if (urlErr) {
+                  setNewSupplierUrlError(urlErr);
+                  return;
+                }
+                if (!newSupplier.name.trim()) {
+                  setError("供应商名称不能为空");
+                  return;
+                }
+                createMut.mutate();
+              }}
+              disabled={createMut.isPending}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+            >
+              {createMut.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Server className="w-4 h-4" />}
+              创建模板
+            </button>
           </div>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <label className="flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm">
-            注册
-            <input
-              type="checkbox"
-              checked={newSupplier.public_signup_enabled}
-              onChange={(e) =>
-                setNewSupplier((current) => ({
-                  ...current,
-                  public_signup_enabled: e.target.checked,
-                }))
-              }
-            />
-          </label>
-          <label className="flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm">
-            绑定
-            <input
-              type="checkbox"
-              checked={newSupplier.user_bind_enabled}
-              onChange={(e) =>
-                setNewSupplier((current) => ({
-                  ...current,
-                  user_bind_enabled: e.target.checked,
-                }))
-              }
-            />
-          </label>
-          <label className="flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm">
-            启用
-            <input
-              type="checkbox"
-              checked={newSupplier.enabled}
-              onChange={(e) =>
-                setNewSupplier((current) => ({
-                  ...current,
-                  enabled: e.target.checked,
-                }))
-              }
-            />
-          </label>
-          <input
-            value={newSupplier.proxy_name ?? ""}
-            onChange={(e) =>
-              setNewSupplier((current) => ({ ...current, proxy_name: e.target.value }))
-            }
-            placeholder="proxy_name"
-            className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <label className="space-y-1">
-            <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
-              验证超时 (ms, 1000-60000)
-            </span>
-            <input
-              type="number"
-              min={TIMEOUT_MIN_MS}
-              max={TIMEOUT_MAX_MS}
-              value={newSupplier.validation_timeout_ms}
-              onChange={(e) =>
-                setNewSupplier((current) => ({
-                  ...current,
-                  validation_timeout_ms: clampInt(
-                    e.target.value,
-                    TIMEOUT_MIN_MS,
-                    TIMEOUT_MAX_MS,
-                  ),
-                }))
-              }
-              className="w-full h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-            />
-          </label>
-          <label className="space-y-1">
-            <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
-              text 并发 (1-32)
-            </span>
-            <input
-              type="number"
-              min={CONCURRENCY_MIN}
-              max={CONCURRENCY_MAX}
-              value={newSupplier.text_concurrency_per_key}
-              onChange={(e) =>
-                setNewSupplier((current) => ({
-                  ...current,
-                  text_concurrency_per_key: clampInt(
-                    e.target.value,
-                    CONCURRENCY_MIN,
-                    CONCURRENCY_MAX,
-                  ),
-                }))
-              }
-              className="w-full h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-            />
-          </label>
-          <label className="space-y-1">
-            <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
-              image 并发 (1-32)
-            </span>
-            <input
-              type="number"
-              min={CONCURRENCY_MIN}
-              max={CONCURRENCY_MAX}
-              value={newSupplier.image_concurrency_per_key}
-              onChange={(e) =>
-                setNewSupplier((current) => ({
-                  ...current,
-                  image_concurrency_per_key: clampInt(
-                    e.target.value,
-                    CONCURRENCY_MIN,
-                    CONCURRENCY_MAX,
-                  ),
-                }))
-              }
-              className="w-full h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-            />
-          </label>
-        </div>
-        <button
-          type="button"
-          onClick={() => {
-            const urlErr = validateBaseUrl(newSupplier.base_url);
-            if (urlErr) {
-              setNewSupplierUrlError(urlErr);
-              return;
-            }
-            createMut.mutate();
-          }}
-          disabled={createMut.isPending}
-          className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-4 text-sm disabled:opacity-50"
-        >
-          {createMut.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Server className="w-4 h-4" />}
-          创建模板
-        </button>
+        )}
       </section>
 
-      <div className="space-y-4">
-        {suppliers.map((supplier) => (
-          <SupplierCard
-            key={supplier.id}
-            supplier={supplier}
-            draft={supplierDrafts[supplier.id] ?? supplierToDraft(supplier)}
-            urlError={supplierUrlErrors[supplier.id] ?? null}
-            onChange={(next) =>
-              setSupplierDrafts((current) => ({ ...current, [supplier.id]: next }))
-            }
-            onUrlBlur={(err) =>
-              setSupplierUrlErrors((current) => ({
-                ...current,
-                [supplier.id]: err,
-              }))
-            }
-            onSave={() => {
-              const body = supplierDrafts[supplier.id] ?? supplierToDraft(supplier);
-              const urlErr = validateBaseUrl(body.base_url);
-              if (urlErr) {
-                setSupplierUrlErrors((current) => ({
-                  ...current,
-                  [supplier.id]: urlErr,
-                }));
-                return;
+      <section className="space-y-3">
+        <header className="flex items-center justify-between gap-3 px-1">
+          <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
+            已有供应商 · {suppliers.length}
+          </div>
+        </header>
+        {suppliers.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] py-10 text-center text-sm text-neutral-400">
+            还没有供应商模板，使用上方「新供应商」创建。
+          </div>
+        ) : (
+          suppliers.map((supplier) => (
+            <SupplierRow
+              key={supplier.id}
+              supplier={supplier}
+              open={openSupplierId === supplier.id}
+              onToggle={() =>
+                setOpenSupplierId((curr) => (curr === supplier.id ? null : supplier.id))
               }
-              patchSupplier.mutate({ id: supplier.id, body });
-            }}
-            onProbe={() =>
-              probeMut.mutate({
-                id: supplier.id,
-                api_key: (supplierDrafts[supplier.id]?.probe_key ?? "").trim(),
-              })
-            }
-            probeLabel={probeResult[supplier.id]}
-            busy={patchSupplier.isPending || probeMut.isPending}
-          />
-        ))}
-      </div>
+              draft={supplierDrafts[supplier.id] ?? supplierToDraft(supplier)}
+              urlError={supplierUrlErrors[supplier.id] ?? null}
+              onChange={(next) => setSupplierDrafts((cur) => ({ ...cur, [supplier.id]: next }))}
+              onUrlBlur={(err) => setSupplierUrlErrors((cur) => ({ ...cur, [supplier.id]: err }))}
+              onSave={() => {
+                const body = supplierDrafts[supplier.id] ?? supplierToDraft(supplier);
+                const urlErr = validateBaseUrl(body.base_url);
+                if (urlErr) {
+                  setSupplierUrlErrors((cur) => ({ ...cur, [supplier.id]: urlErr }));
+                  return;
+                }
+                patchSupplier.mutate({ id: supplier.id, body });
+              }}
+              onProbe={() =>
+                probeMut.mutate({
+                  id: supplier.id,
+                  api_key: (supplierDrafts[supplier.id]?.probe_key ?? "").trim(),
+                })
+              }
+              probeLabel={probeResult[supplier.id]}
+              busy={patchSupplier.isPending || probeMut.isPending}
+            />
+          ))
+        )}
+      </section>
 
       {error && (
         <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300">
           <AlertCircle className="mt-0.5 w-4 h-4 shrink-0" />
-          {error}
+          <span className="flex-1">{error}</span>
+          <button type="button" onClick={() => setError(null)} className="text-xs text-red-200/70 hover:text-red-200">
+            关闭
+          </button>
         </div>
       )}
       {saved && (
         <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-300">
           <Check className="w-4 h-4" />
-          {saved}
+          <span className="flex-1">{saved}</span>
+          <button
+            type="button"
+            onClick={() => setSaved(null)}
+            className="text-xs text-emerald-200/70 hover:text-emerald-200"
+          >
+            关闭
+          </button>
         </div>
       )}
     </div>
   );
 }
 
-function SupplierCard({
+// —— 子组件 ——
+
+function Overview({
+  mode,
+  supplierCount,
+  activeCredentials,
+  loading,
+}: {
+  mode: ByokMode | null;
+  supplierCount: number;
+  activeCredentials: number;
+  loading: boolean;
+}) {
+  const def = mode ? MODE_DEFS.find((m) => m.value === mode) : undefined;
+  const ModeIcon = def?.icon ?? AlertCircle;
+  return (
+    <section className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-5">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <OverviewItem icon={<ModeIcon className="w-4 h-4" />} label="当前模式" value={loading ? "加载中…" : (def?.label ?? "自定义")} />
+        <OverviewItem icon={<Server className="w-4 h-4" />} label="供应商模板" value={loading ? "—" : `${supplierCount} 个`} />
+        <OverviewItem icon={<KeyRound className="w-4 h-4" />} label="活跃 Key 总数" value={loading ? "—" : `${activeCredentials} 把`} />
+      </div>
+    </section>
+  );
+}
+
+function OverviewItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-white/[0.05] border border-white/8 text-[var(--color-lumen-amber)]">
+        {icon}
+      </span>
+      <div className="flex flex-col">
+        <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">{label}</span>
+        <span className="text-sm text-neutral-100 mt-0.5">{value}</span>
+      </div>
+    </div>
+  );
+}
+
+function ModeCard({ def, active, onSelect }: { def: ModeDef; active: boolean; onSelect: () => void }) {
+  const Icon = def.icon;
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={active}
+      className={
+        "text-left rounded-xl border p-3 transition-colors " +
+        (active
+          ? "border-[var(--color-lumen-amber)]/60 bg-[var(--color-lumen-amber)]/10"
+          : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]")
+      }
+    >
+      <div className="flex items-center gap-2">
+        <span
+          className={
+            "flex h-7 w-7 items-center justify-center rounded-lg " +
+            (active ? "bg-[var(--color-lumen-amber)] text-black" : "bg-white/[0.05] text-neutral-300")
+          }
+        >
+          <Icon className="w-3.5 h-3.5" />
+        </span>
+        <span className="text-sm font-medium text-neutral-100">{def.label}</span>
+      </div>
+      <p className="mt-2 text-xs text-[var(--fg-2)] leading-relaxed">{def.hint}</p>
+      <p className="mt-2 text-[11px] text-neutral-500">适合：{def.scenario}</p>
+    </button>
+  );
+}
+
+function SupplierRow({
   supplier,
+  open,
+  onToggle,
   draft,
   urlError,
   onChange,
@@ -591,6 +641,8 @@ function SupplierCard({
   busy,
 }: {
   supplier: ApiSupplierTemplateOut;
+  open: boolean;
+  onToggle: () => void;
   draft: SupplierDraft;
   urlError: string | null;
   onChange: (next: SupplierDraft) => void;
@@ -600,232 +652,344 @@ function SupplierCard({
   probeLabel?: string;
   busy: boolean;
 }) {
-  const set = (patch: Partial<SupplierDraft>) => onChange({ ...draft, ...patch });
   return (
-    <section className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-5 space-y-4">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <h3 className="text-sm text-neutral-100">{supplier.name}</h3>
-          <p className="text-xs text-neutral-500">
-            {supplier.slug} · {supplier.base_url}
+    <article className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 overflow-hidden">
+      <header className="flex flex-wrap items-center gap-3 px-4 py-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-sm text-neutral-100 truncate">{supplier.name}</h3>
+            {supplier.enabled ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                <Check className="w-3 h-3" /> 启用
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-white/5 text-neutral-400 border border-white/10">
+                已禁用
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-neutral-500 truncate mt-0.5">
+            {safeHostname(supplier.base_url)} · {supplier.purposes.join("/")}
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-neutral-400">
-          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
-            active {supplier.active_credentials}
+        <div className="flex items-center gap-2 flex-wrap text-xs">
+          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-neutral-300">
+            活跃 Key {supplier.active_credentials}
           </span>
-          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
-            {supplier.validation_model}
+          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-neutral-400">
+            验证模型 {supplier.validation_model}
           </span>
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={open}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.05] px-3 text-xs text-neutral-200 hover:bg-white/[0.1]"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+            {open ? "收起" : "编辑"}
+          </button>
         </div>
-      </div>
-      {supplier.recent_error_counts && Object.keys(supplier.recent_error_counts).length > 0 && (
-        <p className="text-xs text-neutral-500">
-          {Object.entries(supplier.recent_error_counts)
-            .map(([key, value]) => `${key}:${value}`)
-            .join(" · ")}
+      </header>
+
+      {Object.keys(supplier.recent_error_counts).length > 0 && (
+        <p className="px-4 pb-2 text-xs text-neutral-500">
+          近期错误：
+          {Object.entries(supplier.recent_error_counts).map(([k, v]) => `${k}:${v}`).join(" · ")}
         </p>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <input
-          value={draft.name}
-          onChange={(e) => set({ name: e.target.value })}
-          className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-        />
-        <input
-          value={draft.slug ?? ""}
-          onChange={(e) => set({ slug: e.target.value })}
-          className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-        />
-        <div className="md:col-span-2 space-y-1">
-          <input
-            value={draft.base_url}
-            onChange={(e) => {
-              set({ base_url: e.target.value });
-              if (urlError) onUrlBlur(null);
-            }}
-            onBlur={(e) => onUrlBlur(validateBaseUrl(e.target.value))}
-            className={
-              "w-full h-10 rounded-xl border bg-[var(--bg-0)] px-3 text-sm " +
-              (urlError ? "border-red-500/60" : "border-[var(--border)]")
-            }
-          />
-          {urlError && <p className="text-xs text-red-300">{urlError}</p>}
+
+      {open && (
+        <div className="border-t border-white/10 p-4 space-y-4 bg-white/[0.02]">
+          <SupplierForm draft={draft} urlError={urlError} onChange={onChange} onUrlBlur={onUrlBlur} showProbe />
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={busy}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              保存
+            </button>
+            <button
+              type="button"
+              onClick={onProbe}
+              disabled={busy || !draft.probe_key.trim()}
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-4 text-sm disabled:opacity-50"
+            >
+              <TestTube2 className="w-4 h-4" />
+              探活
+            </button>
+            {probeLabel && <span className="text-xs text-neutral-400">{probeLabel}</span>}
+          </div>
         </div>
-        <input
-          value={draft.validation_model}
-          onChange={(e) => set({ validation_model: e.target.value })}
-          className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-        />
-        <input
-          value={draft.default_chat_model}
-          onChange={(e) => set({ default_chat_model: e.target.value })}
-          className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-        />
-        <input
-          value={draft.fast_chat_model ?? ""}
-          onChange={(e) => set({ fast_chat_model: e.target.value })}
-          className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-        />
-        <label className="space-y-1">
-          <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
-            验证超时 (ms, 1000-60000)
-          </span>
-          <input
-            type="number"
-            min={TIMEOUT_MIN_MS}
-            max={TIMEOUT_MAX_MS}
-            value={draft.validation_timeout_ms}
-            onChange={(e) =>
-              set({
-                validation_timeout_ms: clampInt(
-                  e.target.value,
-                  TIMEOUT_MIN_MS,
-                  TIMEOUT_MAX_MS,
-                ),
-              })
-            }
-            className="w-full h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-        </label>
-        <input
-          value={draft.proxy_name ?? ""}
-          onChange={(e) => set({ proxy_name: e.target.value })}
-          placeholder="proxy_name"
-          className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-        />
-        <label className="space-y-1">
-          <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
-            text 并发 (1-32)
-          </span>
-          <input
-            type="number"
-            min={CONCURRENCY_MIN}
-            max={CONCURRENCY_MAX}
-            value={draft.text_concurrency_per_key}
-            onChange={(e) =>
-              set({
-                text_concurrency_per_key: clampInt(
-                  e.target.value,
-                  CONCURRENCY_MIN,
-                  CONCURRENCY_MAX,
-                ),
-              })
-            }
-            className="w-full h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-        </label>
-        <label className="space-y-1">
-          <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
-            image 并发 (1-32)
-          </span>
-          <input
-            type="number"
-            min={CONCURRENCY_MIN}
-            max={CONCURRENCY_MAX}
-            value={draft.image_concurrency_per_key}
-            onChange={(e) =>
-              set({
-                image_concurrency_per_key: clampInt(
-                  e.target.value,
-                  CONCURRENCY_MIN,
-                  CONCURRENCY_MAX,
-                ),
-              })
-            }
-            className="w-full h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
-          />
-        </label>
-      </div>
-      {/* review §9 / #13: 编辑同样支持 purposes 多选 */}
-      <div className="space-y-2">
-        <label className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
-          用途 (purposes)
-        </label>
-        <div className="flex gap-2 flex-wrap">
-          {PURPOSES.map((p) => {
-            const active = draft.purposes.includes(p);
-            return (
-              <button
-                key={p}
-                type="button"
-                onClick={() =>
-                  set({ purposes: togglePurpose(draft.purposes, p) })
-                }
-                className={
-                  "px-2.5 py-1 rounded-lg border text-xs transition-colors " +
-                  (active
-                    ? "bg-[var(--color-lumen-amber)] text-black border-[var(--color-lumen-amber)]"
-                    : "bg-white/[0.03] text-neutral-300 border-white/10 hover:bg-white/[0.08]")
-                }
-              >
-                {p}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <label className="flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm">
-          启用
-          <input
-            type="checkbox"
-            checked={draft.enabled}
-            onChange={(e) => set({ enabled: e.target.checked })}
-          />
-        </label>
-        <label className="flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm">
-          注册
-          <input
-            type="checkbox"
-            checked={draft.public_signup_enabled}
-            onChange={(e) => set({ public_signup_enabled: e.target.checked })}
-          />
-        </label>
-        <label className="flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm">
-          绑定
-          <input
-            type="checkbox"
-            checked={draft.user_bind_enabled}
-            onChange={(e) => set({ user_bind_enabled: e.target.checked })}
-          />
-        </label>
-        <label className="flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm">
-          探活 Key
-          <input
-            type="password"
-            value={draft.probe_key}
-            onChange={(e) => set({ probe_key: e.target.value })}
-            className="w-24 rounded-md bg-transparent text-right text-xs outline-none"
-          />
-        </label>
-      </div>
-      <div className="flex items-center gap-2 flex-wrap">
-        <button
-          type="button"
-          onClick={onSave}
-          disabled={busy}
-          className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
-        >
-          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          保存
-        </button>
-        <button
-          type="button"
-          onClick={onProbe}
-          disabled={busy}
-          className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-4 text-sm disabled:opacity-50"
-        >
-          <TestTube2 className="w-4 h-4" />
-          探活
-        </button>
-        {probeLabel && (
-          <span className="text-xs text-neutral-500">{probeLabel}</span>
-        )}
-      </div>
-    </section>
+      )}
+    </article>
   );
 }
+
+function SupplierForm({
+  draft,
+  urlError,
+  onChange,
+  onUrlBlur,
+  showProbe,
+}: {
+  draft: SupplierDraft;
+  urlError: string | null;
+  onChange: (next: SupplierDraft) => void;
+  onUrlBlur: (err: string | null) => void;
+  showProbe: boolean;
+}) {
+  const set = (patch: Partial<SupplierDraft>) => onChange({ ...draft, ...patch });
+  return (
+    <div className="space-y-4">
+      <div className="space-y-3">
+        <FieldText
+          label="名称"
+          hint="管理员后台展示的名字（如 OpenAI、SiliconFlow）"
+          value={draft.name}
+          onChange={(v) => set({ name: v })}
+          placeholder="OpenAI"
+        />
+        <FieldText
+          label="Base URL"
+          hint="OpenAI 兼容根域名，不要带 /v1 后缀"
+          value={draft.base_url}
+          onChange={(v) => {
+            set({ base_url: v });
+            if (urlError) onUrlBlur(null);
+          }}
+          onBlur={(v) => onUrlBlur(validateBaseUrl(v))}
+          placeholder="https://api.example.com"
+          error={urlError}
+        />
+        <PurposesField
+          purposes={draft.purposes}
+          onToggle={(p) => set({ purposes: togglePurpose(draft.purposes, p) })}
+        />
+        <ToggleRow
+          checked={draft.enabled}
+          label="启用此供应商"
+          hint="禁用后用户和探活均不可使用"
+          onChange={(v) => set({ enabled: v })}
+        />
+      </div>
+
+      <details className="group rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+        <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
+          <span>高级配置</span>
+          <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="p-3 space-y-3 border-t border-white/8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <FieldText label="Slug" hint="可选；留空后端自动从 name 生成（仅小写英文/数字）" value={draft.slug ?? ""} onChange={(v) => set({ slug: v })} placeholder="auto" />
+            <FieldText label="代理名 proxy_name" hint="可选；走 admin 已配置的 proxy 池" value={draft.proxy_name ?? ""} onChange={(v) => set({ proxy_name: v })} placeholder="无" />
+            <FieldText label="验证模型" hint="探活时用的 chat model" value={draft.validation_model} onChange={(v) => set({ validation_model: v })} placeholder="gpt-5.4" />
+            <FieldText label="默认对话模型" hint="该供应商下用户对话的默认 model" value={draft.default_chat_model} onChange={(v) => set({ default_chat_model: v })} placeholder="gpt-5.4" />
+            <FieldText label="快速对话模型" hint="标题生成 / 上下文等轻任务使用" value={draft.fast_chat_model ?? ""} onChange={(v) => set({ fast_chat_model: v })} placeholder="gpt-5.4-mini" />
+            <FieldNumber
+              label="验证超时 (ms)"
+              hint={`${TIMEOUT_MIN_MS}-${TIMEOUT_MAX_MS}`}
+              min={TIMEOUT_MIN_MS}
+              max={TIMEOUT_MAX_MS}
+              value={draft.validation_timeout_ms}
+              onChange={(v) => set({ validation_timeout_ms: clampInt(v, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS) })}
+            />
+            <FieldNumber
+              label="text 并发 / Key"
+              hint={`${CONCURRENCY_MIN}-${CONCURRENCY_MAX}`}
+              min={CONCURRENCY_MIN}
+              max={CONCURRENCY_MAX}
+              value={draft.text_concurrency_per_key}
+              onChange={(v) => set({ text_concurrency_per_key: clampInt(v, CONCURRENCY_MIN, CONCURRENCY_MAX) })}
+            />
+            <FieldNumber
+              label="image 并发 / Key"
+              hint={`${CONCURRENCY_MIN}-${CONCURRENCY_MAX}`}
+              min={CONCURRENCY_MIN}
+              max={CONCURRENCY_MAX}
+              value={draft.image_concurrency_per_key}
+              onChange={(v) => set({ image_concurrency_per_key: clampInt(v, CONCURRENCY_MIN, CONCURRENCY_MAX) })}
+            />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-white/8">
+            <ToggleRow
+              checked={draft.public_signup_enabled}
+              label="允许公开注册使用"
+              hint="该供应商可被未登录用户在 BYOK 注册流程中选择"
+              onChange={(v) => set({ public_signup_enabled: v })}
+            />
+            <ToggleRow
+              checked={draft.user_bind_enabled}
+              label="允许已登录用户绑定"
+              hint="该供应商出现在账号设置 → API Key 列表中"
+              onChange={(v) => set({ user_bind_enabled: v })}
+            />
+          </div>
+        </div>
+      </details>
+
+      {showProbe && (
+        <FieldText
+          label="探活 Key"
+          hint="临时填一个用户 Key，仅用本次探活，不会保存到后端"
+          value={draft.probe_key}
+          onChange={(v) => set({ probe_key: v })}
+          placeholder="sk-..."
+          isPassword
+        />
+      )}
+    </div>
+  );
+}
+
+// —— 通用 field 组件 ——
+
+function FieldText({
+  label,
+  hint,
+  value,
+  onChange,
+  onBlur,
+  placeholder,
+  error,
+  isPassword,
+}: {
+  label: string;
+  hint?: string;
+  value: string;
+  onChange: (v: string) => void;
+  onBlur?: (v: string) => void;
+  placeholder?: string;
+  error?: string | null;
+  isPassword?: boolean;
+}) {
+  const id = useId();
+  return (
+    <label htmlFor={id} className="flex flex-col gap-1">
+      <span className="text-[11px] uppercase tracking-wider text-[var(--fg-1)]">{label}</span>
+      <input
+        id={id}
+        type={isPassword ? "password" : "text"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur ? (e) => onBlur(e.target.value) : undefined}
+        placeholder={placeholder}
+        className={
+          "h-10 rounded-xl bg-[var(--bg-0)] px-3 text-sm border focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors " +
+          (error ? "border-red-500/60" : "border-[var(--border)]")
+        }
+      />
+      {error ? (
+        <span className="text-[11px] text-red-300">{error}</span>
+      ) : hint ? (
+        <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>
+      ) : null}
+    </label>
+  );
+}
+
+function FieldNumber({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (v: number) => void;
+}) {
+  const id = useId();
+  return (
+    <label htmlFor={id} className="flex flex-col gap-1">
+      <span className="text-[11px] uppercase tracking-wider text-[var(--fg-1)]">{label}</span>
+      <input
+        id={id}
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(clampInt(e.target.value, min, max))}
+        className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+      />
+      {hint && <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>}
+    </label>
+  );
+}
+
+function PurposesField({ purposes, onToggle }: { purposes: ByokPurpose[]; onToggle: (p: ByokPurpose) => void }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[11px] uppercase tracking-wider text-[var(--fg-1)]">用途</span>
+      <div className="flex gap-2 flex-wrap">
+        {PURPOSES.map((p) => {
+          const active = purposes.includes(p.value);
+          return (
+            <button
+              key={p.value}
+              type="button"
+              onClick={() => onToggle(p.value)}
+              className={
+                "px-2.5 py-1 rounded-lg border text-xs transition-colors " +
+                (active
+                  ? "bg-[var(--color-lumen-amber)] text-black border-[var(--color-lumen-amber)]"
+                  : "bg-white/[0.03] text-neutral-300 border-white/10 hover:bg-white/[0.08]")
+              }
+            >
+              {p.label}
+            </button>
+          );
+        })}
+      </div>
+      <span className="text-[11px] text-[var(--fg-2)]">
+        该供应商支持的模型类型，影响下游路由（至少选 1 个）
+      </span>
+    </div>
+  );
+}
+
+function ToggleRow({
+  checked,
+  label,
+  hint,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  label: string;
+  hint?: string;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label
+      className={
+        "flex items-start justify-between gap-3 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 " +
+        (disabled ? "opacity-50" : "")
+      }
+    >
+      <span className="flex flex-col">
+        <span className="text-sm text-neutral-200">{label}</span>
+        {hint && <span className="text-[11px] text-[var(--fg-2)] mt-0.5">{hint}</span>}
+      </span>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-1"
+      />
+    </label>
+  );
+}
+
+// —— mappers ——
 
 function supplierToDraft(supplier: ApiSupplierTemplateOut): SupplierDraft {
   return {
