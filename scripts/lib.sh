@@ -492,10 +492,32 @@ lumen_acquire_lock() {
         LUMEN_LOCK_PATH="${lock_file}"
     else
         if ! mkdir "${lock_dir}" 2>/dev/null; then
-            log_error "已有 Lumen 维护脚本在运行，当前 ${script_name} 退出。"
-            log_error "锁目录：${lock_dir}"
-            log_error "如果确认没有脚本在运行，可手动删除该锁目录后重试。"
-            exit 1
+            # mkdir 锁的 stale-check：进程被 kill -9 / OOM kill 不会跑 EXIT
+            # trap，锁目录残留。读 owner/pid 验证持有者是否还活着；死了就当
+            # stale 强制清理并重试一次。flock 路径不需此逻辑，kernel 自动释放。
+            local _owner_pid=""
+            local _stale=0
+            if [ -f "${lock_dir}/owner" ]; then
+                _owner_pid="$(grep -E '^pid=' "${lock_dir}/owner" 2>/dev/null \
+                    | head -1 | sed 's/^pid=//' | tr -d '[:space:]')"
+                if [ -n "${_owner_pid}" ] && ! kill -0 "${_owner_pid}" 2>/dev/null; then
+                    _stale=1
+                fi
+            fi
+            if [ "${_stale}" = "1" ]; then
+                log_warn "检测到 stale 锁（owner pid=${_owner_pid} 已死），自动清理后重试..."
+                rm -rf "${lock_dir}" 2>/dev/null || true
+                if ! mkdir "${lock_dir}" 2>/dev/null; then
+                    log_error "已有 Lumen 维护脚本在运行（stale 清理后仍冲突），当前 ${script_name} 退出。"
+                    log_error "锁目录：${lock_dir}"
+                    exit 1
+                fi
+            else
+                log_error "已有 Lumen 维护脚本在运行（owner pid=${_owner_pid:-未知}），当前 ${script_name} 退出。"
+                log_error "锁目录：${lock_dir}"
+                log_error "如果确认没有脚本在运行，可手动删除该锁目录后重试。"
+                exit 1
+            fi
         fi
         LUMEN_LOCK_KIND="mkdir"
         LUMEN_LOCK_PATH="${lock_dir}"
