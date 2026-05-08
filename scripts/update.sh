@@ -1128,8 +1128,18 @@ emit_done start_infra 0
 # ---------------------------------------------------------------------------
 # Phase: migrate_db
 # 死规则：失败 → abort，不切 current、不重启业务容器。
+# v1.0.51 升级踩过的设计漏洞: 老 api/worker 在 migrate 期间继续跑, 任何一个
+# idle in transaction (read-only SELECT 也算) 持 share lock, 让 ALTER 等
+# ACCESS EXCLUSIVE 死锁; ALTER 排在 lock queue 头部又把所有后续 query 一起
+# 堵住 → 全局 401/CONNECTION_RESET 雪崩, 直到 systemd 7200s 超时. 修法:
+# migrate 前 stop api/worker/tgbot 让 PG 没活跃业务事务; alembic 自己
+# 也设 lock_timeout=5s fail-fast (env.py). PG/Redis 保持 up.
 # ---------------------------------------------------------------------------
 emit_start migrate_db
+
+log_info "[migrate_db] stop api/worker/tgbot 让出活跃事务,避免 schema lock 死锁"
+# stop 失败 (容器本来没起 / 无该 service 之类) 不阻塞 migrate.
+lumen_compose_in "${NEW_RELEASE}" stop api worker tgbot >/dev/null 2>&1 || true
 
 if ! lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate; then
     log_error "[migrate_db] alembic upgrade 失败 → fail-fast。"

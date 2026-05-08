@@ -53,6 +53,14 @@ def run_migrations_online() -> None:
         connect_args={"connect_timeout": 10, "application_name": "alembic"},
     )
     with connectable.connect() as connection:
+        # Fail-fast 防止活跃事务挡住 ALTER 等元数据操作 → 全局雪崩。
+        # PG 默认 lock_timeout=0 (无限等); 一个 idle in transaction 就能让
+        # ALTER 死等并把后续所有 query 排在它后面阻塞 (v1.0.51 现场踩过).
+        # 5s 拿不到锁立刻 abort migration → update.sh 整体 fail-fast 不切
+        # current 不重启服务, 旧 schema 继续跑, 比 hang 几小时强.
+        # statement_timeout=120s 防 backfill UPDATE 巨表时全表锁过久.
+        connection.exec_driver_sql("SET lock_timeout = '5s'")
+        connection.exec_driver_sql("SET statement_timeout = '120s'")
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()
