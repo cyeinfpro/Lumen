@@ -2109,8 +2109,10 @@ lumen_compose() {
             [ -f "${_cur}/.env" ] && explicit+=("--env-file" "${_cur}/.env")
         fi
     fi
+    # ${explicit[@]+"${explicit[@]}"}: 兼容 set -u — 空数组 ${arr[@]} 报
+    # unbound variable，需用 + 形式 "如果定义了就展开"。
     COMPOSE_PROJECT_NAME="${LUMEN_COMPOSE_PROJECT:-lumen}" \
-        lumen_docker compose --ansi=never "${explicit[@]}" "$@"
+        lumen_docker compose --ansi=never ${explicit[@]+"${explicit[@]}"} "$@"
 }
 
 # 在指定目录执行 lumen_compose（release 切换时用）。

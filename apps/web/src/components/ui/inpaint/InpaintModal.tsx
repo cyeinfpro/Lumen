@@ -120,7 +120,6 @@ function InpaintModalInner() {
     setCoverage(0);
     setWarning(null);
     setConfirmingClose(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentImageId]);
 
   // imageId 切换时清掉 confirmClose timer（ref 操作必须在 effect 里）
