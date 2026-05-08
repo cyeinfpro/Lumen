@@ -1057,19 +1057,31 @@ check_prerequisites() {
         log_warn "未检测到 python3；备份/恢复脚本会有部分辅助功能不可用，但安装可继续。"
     fi
 
-    # 磁盘空间：/opt ≥ 10GB（10 * 1024 * 1024 KB）
-    local free_kb=""
-    local check_path="/opt"
-    [ -d "${check_path}" ] || check_path="/"
-    if command -v df >/dev/null 2>&1; then
-        free_kb="$(df -Pk "${check_path}" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
-    fi
-    if [ -n "${free_kb}" ] && [ "${free_kb}" -lt $((10 * 1024 * 1024)) ] 2>/dev/null; then
-        log_warn "${check_path} 空闲空间约 $((free_kb / 1024)) MB，低于建议值 10 GB（postgres/redis 数据 + 镜像缓存）。"
-        if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] && ! confirm "仍要继续？"; then
-            exit 0
+    # 磁盘空间：分别探测 LUMEN_DATA_ROOT (storage/backup) 与 LUMEN_DB_ROOT
+    # (postgres/redis)。--data-root=/data 时 /opt 容量充足无意义，必须探数据卷。
+    # 没存在的路径退化到上级 / 根分区。
+    local _disk_check_paths
+    _disk_check_paths="$(printf '%s\n%s\n' \
+        "${LUMEN_DATA_ROOT:-/opt/lumendata}" "${LUMEN_DB_ROOT:-/opt/lumendata}" | sort -u)"
+    while IFS= read -r _path; do
+        [ -z "${_path}" ] && continue
+        local probe="${_path}"
+        # 找最近存在的祖先目录
+        while [ -n "${probe}" ] && [ "${probe}" != "/" ] && [ ! -d "${probe}" ]; do
+            probe="$(dirname "${probe}")"
+        done
+        [ -d "${probe}" ] || probe="/"
+        if command -v df >/dev/null 2>&1; then
+            local free_kb
+            free_kb="$(df -Pk "${probe}" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+            if [ -n "${free_kb}" ] && [ "${free_kb}" -lt $((10 * 1024 * 1024)) ] 2>/dev/null; then
+                log_warn "${probe} 空闲约 $((free_kb / 1024)) MB（< 10 GB 建议值；目标路径 ${_path}）"
+                if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] && ! confirm "仍要继续？"; then
+                    exit 0
+                fi
+            fi
         fi
-    fi
+    done <<< "${_disk_check_paths}"
 
     log_info "前置检查通过：docker $(docker --version 2>&1 | awk '{print $3}' | tr -d ',') / compose v2 / openssl / curl"
     emit_step_done
@@ -1176,8 +1188,19 @@ prepare_release_layout() {
     fi
 
     if [ -e "${RELEASE_DIR}" ] && [ "$(ls -A "${RELEASE_DIR}" 2>/dev/null | head -1)" ]; then
-        # 加了 PID 后缀后同秒冲突理论上不会发生；保留 warn 用作早期诊断
-        log_warn "release 目录已存在且非空：${RELEASE_DIR}（异常情况，覆盖式继续。）"
+        # 加了 PID 后缀后同秒冲突理论上不会发生；非空 = 上次失败留下的半成品
+        # 或两个 shell 同时跑（lumen_acquire_lock 应已挡住，但兜底）。fail-fast
+        # 比 rsync 不带 --delete 留半新半旧文件、再产生诡异问题更好。
+        # 紧急绕过：LUMEN_INSTALL_OVERWRITE_RELEASE=1（手动确认要覆盖）。
+        if [ "${LUMEN_INSTALL_OVERWRITE_RELEASE:-0}" != "1" ]; then
+            log_error "release 目录已存在且非空：${RELEASE_DIR}"
+            log_error "  说明：上次 install 中途失败留下半成品，或两个 install 并发。"
+            log_error "  排查：ls -la ${RELEASE_DIR}"
+            log_error "  清理：sudo rm -rf '${RELEASE_DIR}' 然后重跑 install"
+            log_error "  或显式覆盖：LUMEN_INSTALL_OVERWRITE_RELEASE=1 bash scripts/install.sh --install"
+            exit 1
+        fi
+        log_warn "release 目录已存在且非空：${RELEASE_DIR}（OVERWRITE_RELEASE=1，覆盖式继续）"
     fi
     mkdir -p "${RELEASE_DIR}" 2>/dev/null || lumen_run_as_root mkdir -p "${RELEASE_DIR}"
     if [ ! -w "${RELEASE_DIR}" ]; then
