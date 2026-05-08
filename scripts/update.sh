@@ -982,8 +982,28 @@ log_info "[migrate_db] stop api/worker/tgbot 让出活跃事务,避免 schema lo
 # stop 失败 (容器本来没起 / 无该 service 之类) 不阻塞 migrate.
 lumen_compose_in "${NEW_RELEASE}" stop api worker tgbot >/dev/null 2>&1 || true
 
+_migrate_run_failed=0
 if ! lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate; then
-    log_error "[migrate_db] alembic upgrade 失败 → fail-fast。"
+    _migrate_run_failed=1
+fi
+
+# Verify alembic 真到 head — 已观察到 alembic upgrade 在某些情况下 silent
+# exit=0 但 transaction rollback（lock_timeout / FK 验证 abort 时异常被
+# SA 内部吞掉）。仅看 docker compose run 的 exit code 不可靠：必须二次
+# query alembic_version 与 heads 比对。否则 update.sh 误以为 success 后切
+# current → api 用新代码查旧 schema → 全站 500（v1.1.0 prod 已踩过）。
+_alembic_heads="$(lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate alembic heads 2>/dev/null \
+    | awk 'NF && !/^INFO/ {print $1; exit}')"
+_alembic_current="$(lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate alembic current 2>/dev/null \
+    | awk 'NF && !/^INFO/ {print $1; exit}')"
+
+if [ "${_migrate_run_failed}" = "1" ] \
+        || [ -z "${_alembic_heads}" ] \
+        || [ "${_alembic_current}" != "${_alembic_heads}" ]; then
+    log_error "[migrate_db] alembic upgrade 失败或未真正落地 → fail-fast。"
+    log_error "  observed alembic current=${_alembic_current:-<空>}"
+    log_error "  expected head=${_alembic_heads:-<空>}"
+    log_error "  原始 docker compose run rc：${_migrate_run_failed}（0=看起来 success，但 verify 不通过仍 fail-fast）"
     log_error "  根据 §11.3 / §17.6：不切 current、不重启新版本业务容器。"
     # 关键修复：之前 stop 了旧 api/worker/tgbot，migrate 失败后必须把它们用旧
     # release 起回来，否则业务停摆 — 旧 schema 与旧代码兼容，仍可正常服务。
