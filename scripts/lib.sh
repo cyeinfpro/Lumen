@@ -2143,9 +2143,11 @@ lumen_compose_project_unify() {
         return 0
     fi
     local stale
+    # docker ps 的 .Labels 是 "k1=v1,k2=v2" 字符串不能 index；用单数
+    # {{.Label "key"}}（docker ps 专用）取单个 label。
     stale="$(docker ps -a \
         --filter 'name=^lumen-' \
-        --format '{{index .Labels "com.docker.compose.project"}}' \
+        --format '{{.Label "com.docker.compose.project"}}' \
         2>/dev/null | sort -u | grep -v "^${target}$" | grep -v '^$' || true)"
     if [ -z "${stale}" ]; then
         return 0
