@@ -903,10 +903,12 @@ check_prerequisites() {
             ;;
     esac
 
-    # 1) openssl / curl 缺则自动装（轻量、安全副作用低）。
+    # 1) openssl / curl / rsync 缺则自动装（轻量、安全副作用低）。
+    # rsync 在 prepare_release_layout 阶段必需；提前装避免后面才 fail-fast。
     local basics_missing=()
     command -v openssl >/dev/null 2>&1 || basics_missing+=("openssl")
     command -v curl    >/dev/null 2>&1 || basics_missing+=("curl")
+    command -v rsync   >/dev/null 2>&1 || basics_missing+=("rsync")
     if [ "${#basics_missing[@]}" -gt 0 ]; then
         if ! _auto_install_basics "${basics_missing[@]}"; then
             log_error "缺少必备命令：${basics_missing[*]}（自动安装失败）"
@@ -1105,12 +1107,17 @@ prepare_release_layout() {
     fi
 
     # 把当前仓库内容 rsync 到 release 目录（保留 release 布局，§11.1）
+    # check_prerequisites 已经会自动装 rsync；这里保留兜底，便于直接调用本函数
+    # （或老版本 install.sh 跳过 prepare 时）也能自愈。
     if ! command -v rsync >/dev/null 2>&1; then
-        log_error "缺少 rsync，无法把仓库内容复制到 release 目录。"
-        log_error "  Debian/Ubuntu：sudo apt install rsync"
-        log_error "  RHEL/Alma：sudo dnf install rsync"
-        log_error "  macOS：brew install rsync"
-        exit 1
+        log_warn "缺少 rsync，尝试自动安装。"
+        if ! _auto_install_basics rsync; then
+            log_error "缺少 rsync 且自动安装失败；无法把仓库内容复制到 release 目录。"
+            log_error "  Debian/Ubuntu：sudo apt install rsync"
+            log_error "  RHEL/Alma：sudo dnf install rsync"
+            log_error "  macOS：brew install rsync"
+            exit 1
+        fi
     fi
     log_info "rsync 仓库 → ${RELEASE_DIR}"
     rsync -a \
