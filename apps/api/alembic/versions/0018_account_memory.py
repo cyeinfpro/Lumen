@@ -242,11 +242,9 @@ def upgrade() -> None:
         "ALTER TABLE user_memories ALTER COLUMN embedding "
         "TYPE vector(3072) USING embedding::vector"
     )
-    op.execute(
-        "CREATE INDEX idx_user_memories_embedding "
-        "ON user_memories USING hnsw (embedding vector_cosine_ops) "
-        "WHERE embedding IS NOT NULL"
-    )
+    # pgvector HNSW 限制 ≤ 2000 维; text-embedding-3-large 是 3072 维, 建不了.
+    # P0 阶段单用户 < 1k 行 brute-force cosine 完全够用 (毫秒级).
+    # 起量后 (单用户 > 10k) 再切 halfvec(3072) + hnsw, 或改用 1536 维模型.
 
     op.create_table(
         "user_memory_staging",
@@ -428,7 +426,6 @@ def downgrade() -> None:
     op.drop_table("user_memory_staging")
 
     op.drop_index("ix_user_memories_source_message", table_name="user_memories")
-    op.drop_index("idx_user_memories_embedding", table_name="user_memories")
     op.drop_index("idx_user_memories_user_type", table_name="user_memories")
     op.drop_index(
         "idx_user_memories_alive",
