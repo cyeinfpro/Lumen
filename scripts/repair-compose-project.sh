@@ -45,9 +45,10 @@ if [ ! -f "${COMPOSE_FILE}" ]; then
 fi
 
 # 列出所有 name 形如 lumen-* 容器的 compose project label，去重
+# .Labels 是 string slice 不能 index；用单数 {{.Label "key"}} 取单个 label。
 mapfile -t all_projects < <(docker ps -a \
     --filter 'name=^lumen-' \
-    --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null \
+    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null \
     | sort -u | grep -v '^$' || true)
 
 stale=()
