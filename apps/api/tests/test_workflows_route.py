@@ -1290,7 +1290,7 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "皮肤真实有毛孔和细纹" in prompt
     assert "不要塑料感、过度磨皮、AI网红脸" in prompt
     assert "正面全身" in prompt
-    assert "欧美风格" in prompt
+    assert "自然商业摄影风格" in prompt
     assert "服装主体清晰可见" in prompt
     assert "全身完整入镜" in prompt
     assert "顶满" in prompt
@@ -1632,6 +1632,60 @@ def test_pick_shot_variants_counts_match_output_count() -> None:
             assert product_count >= 1
 
 
+def test_default_showcase_pools_avoid_high_risk_motion_terms() -> None:
+    """默认展示图库不应把自然感写成高风险动作。
+
+    跳跃、转圈、跪趴、半躺等动作会让服装物理和摄影构图同时变差；
+    这类动作以后应该进显式 action/lifestyle 模式，而不是默认 showcase pool。
+    """
+    risky_terms = (
+        "跳",
+        "蹦",
+        "腾空",
+        "转圈",
+        "盘腿",
+        "蹲",
+        "跪",
+        "趴",
+        "半躺",
+        "后踢",
+        "甩头",
+        "双手举起",
+        "伸懒腰",
+        "坐地",
+    )
+    pools = {
+        "adult": workflows.ADULT_POOL,
+        "child": workflows.CHILD_POOL,
+        "toddler": workflows.TODDLER_POOL,
+    }
+    offenders: list[str] = []
+    for pool_name, pool in pools.items():
+        for template, classes in pool.items():
+            for shot_class, variants in classes.items():
+                for variant in variants:
+                    label = variant["label"]
+                    if any(term in label for term in risky_terms):
+                        offenders.append(f"{pool_name}/{template}/{shot_class}: {label}")
+
+    assert offenders == []
+
+
+def test_small_showcase_outputs_keep_product_first_composition() -> None:
+    """1-4 张通常是商品展示交付，不应抽到环境主体构图。"""
+    for age_segment in ("young_adult", "child", "toddler"):
+        for template in workflows.TEMPLATE_LABELS:
+            for count in (1, 2, 4):
+                picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+                    template=template,
+                    age_segment=age_segment,
+                    output_count=count,
+                    seed_key=f"small-product-first:{age_segment}:{template}:{count}",
+                )
+                assert len(picks) == count
+                assert all(v["framing"] == "product_first" for _, v in picks)
+
+
 def test_pick_shot_variants_is_deterministic_for_same_seed() -> None:
     a = workflows._showcase_pick_shot_variants(  # noqa: SLF001
         template="urban_commute",
@@ -1758,7 +1812,7 @@ def test_framing_direction_differs_between_full_body_and_detail() -> None:
 
 
 def test_framing_direction_for_tone_first_emphasizes_environment() -> None:
-    """tone_first 变体应该让人物只占画面 1/3-1/2，环境为主体。"""
+    """tone_first 变体可以带环境，但不能让背景压过服装主体。"""
     candidate = SimpleNamespace(id="c", model_brief_json={"summary": "都市通勤"})
     # premium_studio side_or_back 有 3 条 tone_first 变体，第一条 product 用 default 取
     # 所以这里直接构造一个 tone_first variant 测试
@@ -1775,8 +1829,9 @@ def test_framing_direction_for_tone_first_emphasizes_environment() -> None:
         shot_variant=tone_variant,
         final_quality="high",
     )
-    assert "人物占画面 1/3 到 1/2 高度" in prompt
-    assert "环境或空间为画面主体" in prompt
+    assert "人物占画面 55-70% 高度" in prompt
+    assert "环境只作为氛围辅助" in prompt
+    assert "不要让背景压过服装主体" in prompt
 
 
 @pytest.mark.parametrize("age_segment", ["child", "toddler"])

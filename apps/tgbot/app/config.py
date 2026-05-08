@@ -49,7 +49,6 @@ class Settings(BaseSettings):
     )
 
     telegram_bot_token: str = ""
-    telegram_bot_username: str = "LumenBot"  # 拼 deep_link 用，不带 @
     telegram_bot_shared_secret: str = ""
 
     # 出站代理：bot 调 api.telegram.org 必须能 outbound。中国境内服务器 GFW 阻断
@@ -68,7 +67,6 @@ class Settings(BaseSettings):
     # 部署模式：polling 或 webhook。先用 polling，后切 webhook。
     bot_mode: str = Field(default="polling", pattern="^(polling|webhook)$")
     webhook_url: str = ""  # https://your-domain.example.com/tgbot/<secret>/webhook
-    webhook_secret_path: str = ""  # 路径段，加随机性
 
     log_level: str = "INFO"
 

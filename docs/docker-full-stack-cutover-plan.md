@@ -917,8 +917,6 @@ DATABASE_URL=postgresql+asyncpg://lumen_app:replace-with-strong-db-password@post
 REDIS_PASSWORD=replace-with-strong-redis-password
 REDIS_URL=redis://:replace-with-strong-redis-password@redis:6379/0
 
-POSTGRES_BIND_HOST=127.0.0.1
-REDIS_BIND_HOST=127.0.0.1
 API_BIND_HOST=127.0.0.1
 # Web 默认只绑回环；外部流量必须经 nginx。仅当部署没有外层反代时才改 0.0.0.0。
 WEB_BIND_HOST=127.0.0.1

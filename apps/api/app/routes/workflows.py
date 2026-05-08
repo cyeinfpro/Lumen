@@ -307,13 +307,13 @@ def _showcase_render_direction(template: str) -> str:
 
 
 _POSE_DIRECTIONS: dict[str, str] = {
-    "white_ecommerce": "动作放松舒展自然，肩颈松弛、重心轻松，不绷不僵",
-    "premium_studio": "保留时装大片调性但肢体放松不绷紧，戏剧化只在视线和气场，不在僵硬姿势",
-    "urban_commute": "动作像无意被定格的瞬间，街头抓拍感，不刻意",
-    "lifestyle": "动作从容松弛，有空间感和呼吸感",
-    "daily_snapshot": "动作自然不刻意，朋友视角随手拍",
-    "natural_phone_snapshot": "姿态自然松弛、动作放松，平视手持视角",
-    "social_seed": "动作轻松自然，分享穿搭般的互动展示感，不摆 pose",
+    "white_ecommerce": "目录摄影舒展自然站姿，肩颈松弛、重心稳定，不僵硬",
+    "premium_studio": "高级棚拍但动作克制，戏剧化只在光线和眼神，不靠夸张肢体",
+    "urban_commute": "真实街头抓拍感，小幅动作像无意被定格，不刻意摆拍",
+    "lifestyle": "从容松弛的空间感，小幅动作，有呼吸感",
+    "daily_snapshot": "朋友视角随手拍，动作自然不刻意，身体重心可信",
+    "natural_phone_snapshot": "姿态自然松弛，平视手持视角，小幅自然动作，正常手机透视",
+    "social_seed": "自然穿搭分享感，小幅互动展示，不摆硬 pose",
 }
 
 
@@ -335,8 +335,8 @@ def _showcase_framing_direction(shot_class: str, framing: str | None) -> str:
         )
     if framing == "tone_first":
         return (
-            "人物占画面 1/3 到 1/2 高度，"
-            "环境或空间为画面主体，大半画面留白有呼吸感，避免顶天立地"
+            "人物占画面 55-70% 高度，环境只作为氛围辅助，"
+            "不要让背景压过服装主体，头脚完整且透视自然"
         )
     return (
         "全身完整入镜，头顶上方留出 5-10% 边距，脚下完整不切断，"
@@ -371,14 +371,15 @@ def _showcase_prompt_brief(
             "不要改款、改色、改廓形、改领口袖型衣长、改图案/logo/印花/文字、改纽扣拉链口袋缝线拼接。",
             "",
             "要求：",
-            "1. 模特按产品图自然穿着这件衣服，版型贴合，褶皱合理；动作放松像被朋友抓拍，不要摆 pose、不要人偶感、不要时装秀台步。",
-            f"2. 模特参考模特图，{model_consistency}身材和表情自然。",
-            f"3. 配饰：{accessory_direction}（不得遮挡商品）。",
-            f"4. 场景：背景与衣服风格搭配，{direction}；画面里不要出现镜子或镜面反射。",
-            f"5. 画质：{quality_direction}，{render_direction}。",
-            f"6. 构图：{style_region}风格，{pose_direction}，{shot_direction}。",
-            f"7. 画面：{framing_direction}；服装主体清晰可见。",
-            "8. 单人照。",
+            "1. 摄影执行：真实模特目录摄影，正常焦段、平视或胸口高度机位；身体重心可信，动作幅度小，避免跳跃、转圈、跪趴、后仰、大幅甩头。",
+            "2. 模特按产品图自然穿着这件衣服，版型贴合，褶皱合理；不要人偶感、不要时装秀台步。",
+            f"3. 模特参考模特图，{model_consistency}身材和表情自然。",
+            f"4. 配饰：{accessory_direction}（不得遮挡商品）。",
+            f"5. 场景：背景与衣服风格搭配，{direction}；画面里不要出现镜子或镜面反射。",
+            f"6. 画质：{quality_direction}，{render_direction}。",
+            f"7. 构图：{style_region}风格，{pose_direction}，{shot_direction}。",
+            f"8. 画面：{framing_direction}；服装主体清晰可见。",
+            "9. 单人照。",
         ]
     )
 
@@ -569,10 +570,12 @@ def _model_diversity_anchor(
 
 
 def _style_region_from_text(text: str) -> str:
+    if any(token in text for token in ("东亚", "亚洲", "日系", "韩系", "中式")):
+        return "亚洲"
     for region in ("欧美", "亚洲", "拉美", "中东", "非洲"):
         if region in text:
             return region
-    return "欧美"
+    return "自然商业摄影"
 
 
 def _compact_showcase_user_direction(text: str, style_region: str) -> str:
@@ -2671,7 +2674,13 @@ def _showcase_pick_shot_variants(
         pool=template_pool,
         plan=plan,
         seed_key=seed_key,
-        min_product_first=2 if output_count >= 2 else 1,
+        min_product_first=(
+            output_count
+            if output_count <= 4
+            else 6
+            if output_count <= 8
+            else 12
+        ),
     )
     return list(zip(plan, variants))
 
