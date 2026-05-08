@@ -355,7 +355,6 @@ LUMEN_ADMIN_EMAIL=admin@example.com LUMEN_ADMIN_PASSWORD='change-me-strong' \
 | `DATABASE_URL` | async SQLAlchemy 连接串，例如 `postgresql+asyncpg://...` |
 | `REDIS_PASSWORD` | Docker Compose Redis 密码 |
 | `REDIS_URL` | Redis DSN，生产不要写入日志 |
-| `POSTGRES_BIND_HOST` / `REDIS_BIND_HOST` | Compose 端口绑定地址，默认 `127.0.0.1` |
 
 ### Provider Pool
 

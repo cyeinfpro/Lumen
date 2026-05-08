@@ -1307,14 +1307,6 @@ export function getTask(kind: TaskKind, id: string): Promise<TaskResponse> {
   return apiFetch<TaskResponse>(`/${seg}/${id}`);
 }
 
-export function getGeneration(id: string): Promise<BackendGeneration> {
-  return getTask("generations", id);
-}
-
-export function getCompletion(id: string): Promise<BackendCompletion> {
-  return getTask("completions", id);
-}
-
 export function cancelTask(
   kind: TaskKind,
   id: string,

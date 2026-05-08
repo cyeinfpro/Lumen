@@ -26,7 +26,7 @@ import { AccountRow } from "./AccountRow";
 
 type AuthUserMaybeAdmin = AuthUser & { role?: "admin" | "member" };
 
-const APP_VERSION = "v1.0.3";
+const APP_VERSION = "v1.0.47";
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (

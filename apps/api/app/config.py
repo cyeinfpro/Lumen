@@ -79,11 +79,9 @@ class Settings(BaseSettings):
     upstream_global_concurrency: int = 4
     upstream_default_model: str = "gpt-5.5"
     # 图像主路径偏好（覆盖 t2i + i2i），可被 system_settings 覆盖。
-    # 旧字段 image_text_to_image_primary_route 保留为 fallback，确保旧 env / 旧 DB 行平滑切换。
     image_primary_route: str = "responses"
     image_channel: str = Field(default="auto", alias="IMAGE_CHANNEL")
     image_engine: str = Field(default="responses", alias="IMAGE_ENGINE")
-    image_text_to_image_primary_route: str = ""  # DEPRECATED；空字符串表示"未显式设置"
     image_job_base_url: str = "https://image-job.example.com"
 
     session_secret: str = ""

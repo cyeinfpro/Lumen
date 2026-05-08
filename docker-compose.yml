@@ -43,8 +43,8 @@ services:
       POSTGRES_DB: "${DB_NAME:?Set DB_NAME in .env}"
     cpus: "1.0"
     mem_limit: 1g
-    ports:
-      - "${POSTGRES_BIND_HOST:-127.0.0.1}:5432:5432"
+    # 不映射到 host：api/worker/tgbot 走 lumen_backend network 即可。
+    # 调试用 `docker exec lumen-pg psql ...`；外部 GUI 工具按需 ssh -L 隧道。
     volumes:
       - ${LUMEN_DB_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data
     networks:
@@ -66,8 +66,7 @@ services:
       REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
     cpus: "0.5"
     mem_limit: 512m
-    ports:
-      - "${REDIS_BIND_HOST:-127.0.0.1}:6379:6379"
+    # 不映射到 host：调试用 `docker exec lumen-redis redis-cli`。
     entrypoint: ["/bin/sh", "/usr/local/bin/lumen-redis-entrypoint"]
     volumes:
       - ${LUMEN_DB_ROOT:-/opt/lumendata}/redis:/data
@@ -240,13 +239,11 @@ services:
       # 127.0.0.1:8000 默认值（那指向 tgbot 容器自己的 loopback）。
       LUMEN_API_BASE: "http://api:8000"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
-      TELEGRAM_BOT_USERNAME: "${TELEGRAM_BOT_USERNAME:-LumenBot}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
       TELEGRAM_PROXY_URL: "${TELEGRAM_PROXY_URL:-}"
       DOWNLOAD_TMP_DIR: "${DOWNLOAD_TMP_DIR:-}"
       BOT_MODE: "${BOT_MODE:-polling}"
       WEBHOOK_URL: "${WEBHOOK_URL:-}"
-      WEBHOOK_SECRET_PATH: "${WEBHOOK_SECRET_PATH:-}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
     restart: unless-stopped

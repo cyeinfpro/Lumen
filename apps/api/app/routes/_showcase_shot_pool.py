@@ -87,7 +87,7 @@ def age_soft_constraint(age_segment: AgeSegment | str | None) -> str:
 def shot_class_distribution(output_count: int) -> list[ShotClass]:
     """决定 N 张图分配到 4 类机位。
 
-    1: 1 张通用动作
+    1: 1 张正面全身商品展示
     2: 1 正面 + 1 动作
     4: 4 类各 1
     8: 4 类各 2
@@ -95,7 +95,7 @@ def shot_class_distribution(output_count: int) -> list[ShotClass]:
     其他: 按 4 类轮询补齐
     """
     if output_count <= 1:
-        return ["natural_pose"]
+        return ["front_full_body"]
     if output_count == 2:
         return ["front_full_body", "natural_pose"]
     if output_count == 4:
