@@ -2122,6 +2122,48 @@ lumen_compose_in() {
     ( cd "${dir}" && lumen_compose "$@" )
 }
 
+# 把 lumen-* 容器从任意 stale compose project 迁移到 LUMEN_COMPOSE_PROJECT
+# (默认 lumen)。idempotent — 没有 stale 直接返回。
+#
+# Why: 历史上有人在 /opt/lumen/current/ 直接 `cd && docker compose up` 起过容器
+# (project 取 cwd basename = "current"，或随 release dir 变化)。新版 lib.sh 强制
+# COMPOSE_PROJECT_NAME=lumen 后，docker 视角 project=lumen 无该容器要新建，但容器
+# 名 lumen-redis 是全局唯一被 stale project 占用 → "container name in use" 冲突，
+# --force-recreate 跨 project 不生效。
+#
+# 操作：
+#   1. detect 所有 name 形如 lumen-* 的容器，按 project label 分组
+#   2. 找出 project ≠ ${LUMEN_COMPOSE_PROJECT:-lumen} 的，逐个 docker compose -p
+#      <stale> down --remove-orphans (volume 是 bind mount /opt/lumendata/*，不
+#      会被 down 删掉)
+#   3. 让调用方继续正常 up 到目标 project
+lumen_compose_project_unify() {
+    local target="${LUMEN_COMPOSE_PROJECT:-lumen}"
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+    local stale
+    stale="$(docker ps -a \
+        --filter 'name=^lumen-' \
+        --format '{{index .Labels "com.docker.compose.project"}}' \
+        2>/dev/null | sort -u | grep -v "^${target}$" | grep -v '^$' || true)"
+    if [ -z "${stale}" ]; then
+        return 0
+    fi
+    log_info "[compose-project] 检测到 lumen-* 容器跑在非 ${target} 的 project："
+    while IFS= read -r p; do
+        [ -z "${p}" ] && continue
+        log_info "  - project=${p}; 即将 docker compose -p '${p}' down --remove-orphans"
+    done <<< "${stale}"
+    log_info "[compose-project] volumes 是 bind mount (/opt/lumendata/*)，不会丢数据。"
+    while IFS= read -r p; do
+        [ -z "${p}" ] && continue
+        if ! docker compose -p "${p}" down --remove-orphans 2>&1 | tail -10; then
+            log_warn "[compose-project] docker compose -p '${p}' down 失败；后续 up 会撞容器名。"
+        fi
+    done <<< "${stale}"
+}
+
 # 轮询 HTTP 健康端点；用法：lumen_health_http <url> <max_seconds> <interval_seconds>。
 lumen_health_http() {
     local url="$1"

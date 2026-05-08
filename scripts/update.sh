@@ -1076,6 +1076,11 @@ fi
 # ---------------------------------------------------------------------------
 emit_start start_infra
 
+# self-heal: 如果历史上有人手工 `cd current && docker compose up` 起过容器
+# (project=current 而非 lumen)，先 down 掉，避免新 project=lumen 撞容器名。
+# idempotent — 无 stale 直接返回。
+lumen_compose_project_unify
+
 # --force-recreate：避免容器名已存在但配置签名不一致（caller 历史 cwd 不同
 # 或人工 docker compose up 留下来的孤儿容器）时报 conflict 直接 fail。
 if ! lumen_compose_in "${NEW_RELEASE}" up -d --wait --force-recreate postgres redis; then

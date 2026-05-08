@@ -416,6 +416,30 @@ dispatch_entrypoint() {
         uninstall|--uninstall)
             exec bash "${SCRIPT_DIR}/uninstall.sh"
             ;;
+        repair|--repair|repair-compose-project|--repair-compose-project)
+            # self-heal: 把跑在非 lumen project 的 lumen-* 容器迁回 project=lumen
+            # idempotent — 没冲突就秒退。详细文档见 scripts/lib.sh 的
+            # lumen_compose_project_unify 注释。
+            if ! command -v lumen_compose_project_unify >/dev/null 2>&1; then
+                log_error "lib.sh 未提供 lumen_compose_project_unify；请确认 install.sh 与 lib.sh 同版本。"
+                exit 1
+            fi
+            log_step "[repair] 检查并修复 lumen-* 容器 compose project 名漂移"
+            lumen_compose_project_unify
+            local _root="${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current"
+            if [ ! -f "${_root}/docker-compose.yml" ]; then
+                log_error "未找到 ${_root}/docker-compose.yml；无法重新启动 stack。"
+                exit 1
+            fi
+            log_step "[repair] 重新启动 stack 到 project=${LUMEN_COMPOSE_PROJECT:-lumen}"
+            if ! lumen_compose_in "${_root}" up -d --wait --force-recreate; then
+                log_error "[repair] docker compose up 失败；请检查 docker / compose 状态。"
+                exit 1
+            fi
+            log_info "[repair] 完成。当前 stack:"
+            lumen_compose_in "${_root}" ps
+            exit 0
+            ;;
         help|-h|--help)
             usage
             exit 0
