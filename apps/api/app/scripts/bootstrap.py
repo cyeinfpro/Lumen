@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import os
 import sys
 
 from sqlalchemy import select
@@ -169,8 +170,13 @@ async def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # 解决密码：--password 有值就用；没给就看是否需要提示
+    # 解决密码：优先 --password；其次 LUMEN_ADMIN_PASSWORD env（避免密码暴露
+    # 在 host `ps -ef` / docker inspect Args / shell history 里）；最后 prompt。
     password: str | None = args.password
+    if password is None:
+        env_pw = os.environ.get("LUMEN_ADMIN_PASSWORD", "").strip()
+        if env_pw:
+            password = env_pw
     needs_password_prompt = password is None
 
     async with SessionLocal() as session:
