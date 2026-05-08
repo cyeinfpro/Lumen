@@ -628,6 +628,44 @@ _install_compose() {
     fi
 }
 
+# 安静模式拉镜像：枚举 compose 镜像列表后逐个 docker pull --quiet，每个一行
+# `[i/n] image ... OK/FAIL`，避免 docker compose pull 默认逐 layer 刷屏。
+# 失败时 dump 错误日志（缩进，便于人眼区分镜像与错误）。
+# 枚举失败兜底回退到 `_install_compose pull`（行为与原版一致）。
+_install_compose_pull_quiet() {
+    local images
+    if ! images="$(_install_compose config --images 2>/dev/null | sort -u)"; then
+        log_warn "无法枚举 compose 镜像列表，回退默认 pull（输出会逐 layer 刷屏）。"
+        _install_compose pull
+        return $?
+    fi
+    if [ -z "${images}" ]; then
+        log_warn "compose 镜像列表为空，跳过 pull。"
+        return 0
+    fi
+
+    local total idx=0 img rc=0 errlog
+    total="$(printf '%s\n' "${images}" | sed '/^$/d' | wc -l | tr -d ' ')"
+    errlog="$(mktemp -t lumen-pull.XXXXXX 2>/dev/null || mktemp /tmp/lumen-pull.XXXXXX)"
+    log_info "拉取 ${total} 个镜像（每个一行进度）"
+    while IFS= read -r img; do
+        [ -z "${img}" ] && continue
+        idx=$((idx + 1))
+        printf '  [%d/%d] %s ... ' "${idx}" "${total}" "${img}"
+        : > "${errlog}"
+        if lumen_docker pull --quiet "${img}" >/dev/null 2>"${errlog}"; then
+            printf 'OK\n'
+        else
+            printf 'FAIL\n'
+            # 缩进 6 空格，与上一行 `  [i/n] ...` 对齐。
+            sed 's/^/      /' "${errlog}" >&2
+            rc=1
+        fi
+    done <<< "${images}"
+    rm -f "${errlog}" 2>/dev/null || true
+    return "${rc}"
+}
+
 # 健康检查 wrapper
 _install_health_http() {
     local url="$1"
@@ -1357,7 +1395,7 @@ pull_or_build_images() {
     else
         emit_step_start containers "拉取镜像（lumen_compose pull）"
         # 网络抖动是 pull 失败最常见的原因；先重试 3 次（指数退避 5/10/20），仍失败再走 fallback。
-        if ! lumen_retry 3 5 "docker compose pull" _install_compose pull; then
+        if ! lumen_retry 3 5 "docker compose pull" _install_compose_pull_quiet; then
             local shared_env="${SHARED_DIR}/.env"
             local registry current_tag
             registry="$(env_file_get LUMEN_IMAGE_REGISTRY "${shared_env}")"
@@ -1370,7 +1408,7 @@ pull_or_build_images() {
                 if ! grep -q '^# install.sh: fallback to main after pull failure' "${shared_env}"; then
                     printf '\n# install.sh: fallback to main after pull failure; publish stable/latest then switch back\n' >> "${shared_env}"
                 fi
-                if lumen_retry 2 5 "docker compose pull (main fallback)" _install_compose pull; then
+                if lumen_retry 2 5 "docker compose pull (main fallback)" _install_compose_pull_quiet; then
                     log_info "已使用 LUMEN_IMAGE_TAG=main 拉取镜像。"
                 else
                     log_error "docker compose pull 失败（fallback main 后仍失败）。"
