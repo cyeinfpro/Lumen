@@ -1143,8 +1143,28 @@ lumen_compose_in "${NEW_RELEASE}" stop api worker tgbot >/dev/null 2>&1 || true
 
 if ! lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate; then
     log_error "[migrate_db] alembic upgrade 失败 → fail-fast。"
-    log_error "  根据 §11.3 / §17.6：不切 current、不重启业务容器。"
-    log_error "  旧服务继续跑旧 schema；请人工查 logs：docker compose logs --tail=120"
+    log_error "  根据 §11.3 / §17.6：不切 current、不重启新版本业务容器。"
+    # 关键修复：之前 stop 了旧 api/worker/tgbot，migrate 失败后必须把它们用旧
+    # release 起回来，否则业务停摆 — 旧 schema 与旧代码兼容，仍可正常服务。
+    if [ -n "${CURRENT_ID:-}" ] && [ -d "${ROOT}/releases/${CURRENT_ID}" ]; then
+        log_warn "[migrate_db] 用旧 release ${CURRENT_ID} 重启 api/worker，让业务恢复旧 schema 服务..."
+        # 旧 release 的 compose 文件指向旧镜像 tag（PREVIOUS_TAG），SHARED_ENV
+        # 还没被 set_image_tag 改写之前已经被改过；如果已改，先恢复成旧 tag。
+        if [ -n "${PREVIOUS_TAG:-}" ] && [ -n "${TARGET_TAG:-}" ] && [ "${PREVIOUS_TAG}" != "${TARGET_TAG}" ]; then
+            lumen_set_image_tag_in_env "${SHARED_ENV}" "${PREVIOUS_TAG}" 2>/dev/null \
+                || log_warn "  恢复 SHARED_ENV 到 ${PREVIOUS_TAG} 失败，旧服务可能拉错镜像 tag。"
+        fi
+        if lumen_compose_in "${ROOT}/releases/${CURRENT_ID}" up -d worker api 2>/dev/null; then
+            log_info "[migrate_db] 旧服务 (${CURRENT_ID}) 已重启，业务可用旧 schema 继续。"
+        else
+            log_error "[migrate_db] 旧服务重启失败！业务此时停摆，请人工处理："
+            log_error "    cd ${ROOT}/releases/${CURRENT_ID}"
+            log_error "    COMPOSE_PROJECT_NAME=lumen docker compose up -d worker api"
+        fi
+    else
+        log_error "[migrate_db] 无可用的旧 release（CURRENT_ID=${CURRENT_ID:-<none>}），业务停摆。"
+    fi
+    log_error "  请人工查 migrate 日志：docker compose logs --tail=120 migrate"
     emit_fail migrate_db 1
     exit 1
 fi
@@ -1226,12 +1246,23 @@ else
     # 确保 SHARED_ENV 与 current symlink 状态一致（不会出现 .env 是旧 tag 但 current
     # 仍是新 release 的中间态）。
     ROLLBACK_OK=0
-    if [ -n "${PREVIOUS_TAG}" ] && [ "${PREVIOUS_TAG}" != "${TARGET_TAG}" ]; then
+    # 优先用 releases/<CURRENT_ID>/.image-tag 锚定回滚 tag（之前 set_image_tag
+    # 阶段写入），fallback 到 PREVIOUS_TAG（update 开始前 SHARED_ENV 中的值）。
+    # 前者抗"update 中途用户手动改过 SHARED_ENV"的边界情况，避免回滚拉到错误
+    # 镜像导致 release 代码与镜像版本不匹配。
+    ROLLBACK_TAG="${PREVIOUS_TAG}"
+    if [ -n "${CURRENT_ID:-}" ] && [ -f "${ROOT}/releases/${CURRENT_ID}/.image-tag" ]; then
+        _anchored="$(head -n1 "${ROOT}/releases/${CURRENT_ID}/.image-tag" 2>/dev/null | tr -d '[:space:]')"
+        if [ -n "${_anchored}" ]; then
+            ROLLBACK_TAG="${_anchored}"
+        fi
+    fi
+    if [ -n "${ROLLBACK_TAG}" ] && [ "${ROLLBACK_TAG}" != "${TARGET_TAG}" ]; then
         # 还要验证 PREVIOUS release 目录还在；缺失时回滚没意义，直接走手动恢复路径
         if [ -z "${CURRENT_ID:-}" ] || [ ! -d "${ROOT}/releases/${CURRENT_ID}" ]; then
             log_error "[restart_services] previous release 目录不存在（${ROOT}/releases/${CURRENT_ID:-<none>}），跳过自动回滚。"
         else
-            if lumen_set_image_tag_in_env "${SHARED_ENV}" "${PREVIOUS_TAG}"; then
+            if lumen_set_image_tag_in_env "${SHARED_ENV}" "${ROLLBACK_TAG}"; then
                 _rollback_started=1
                 if lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
                     && lumen_compose_in "${CURRENT_LINK}" pull; then
@@ -1247,8 +1278,8 @@ else
                 fi
                 if [ "${_rollback_started}" = "1" ]; then
                     SWITCHED=0  # current 已切回旧 release，on_err 不再重复切
-                    log_warn "[restart_services] 已用 ${PREVIOUS_TAG} 回滚成功（current → ${CURRENT_ID}）；本次 update 视为失败。"
-                    emit_info restart_services rolled_back_to "${PREVIOUS_TAG}"
+                    log_warn "[restart_services] 已用 ${ROLLBACK_TAG} 回滚成功（current → ${CURRENT_ID}）；本次 update 视为失败。"
+                    emit_info restart_services rolled_back_to "${ROLLBACK_TAG}"
                     emit_info restart_services rolled_back_release "${CURRENT_ID}"
                     ROLLBACK_OK=1
                 else
@@ -1259,7 +1290,7 @@ else
                     fi
                 fi
             else
-                log_error "[restart_services] 改写 SHARED_ENV 到 ${PREVIOUS_TAG} 失败，跳过自动回滚。"
+                log_error "[restart_services] 改写 SHARED_ENV 到 ${ROLLBACK_TAG} 失败，跳过自动回滚。"
             fi
         fi
     fi
@@ -1269,8 +1300,8 @@ else
     fi
     log_error "[restart_services] 自动回滚失败 → 请按 §18 手动回滚："
     log_error "  ln -sfn releases/${CURRENT_ID:-<id>} ${ROOT}/current"
-    log_error "  sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${PREVIOUS_TAG:-<old-tag>}|' ${SHARED_ENV}"
-    log_error "  COMPOSE_PROJECT_NAME=lumen docker compose pull && up -d --wait api worker web"
+    log_error "  sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${ROLLBACK_TAG:-${PREVIOUS_TAG:-<old-tag>}}|' ${SHARED_ENV}"
+    log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && up -d --wait api worker web"
     emit_fail restart_services 1
     exit 1
 fi
@@ -1296,13 +1327,17 @@ emit_start health_check
 API_HEALTH_URL="${LUMEN_API_HEALTH_URL:-http://127.0.0.1:8000/healthz}"
 WEB_HEALTH_URL="${LUMEN_WEB_HEALTH_URL:-http://127.0.0.1:3000/}"
 
+# 4K 长任务场景下 worker warm-up 可能持续数分钟（layered timeout：nginx 1800
+# → arq 1800 → task 1500 → upstream 660），原 60s 探测窗口对 cold-start 严重
+# 不够。默认 300s（5 min），可通过 LUMEN_HEALTH_TIMEOUT_SECONDS 覆盖。
+HEALTH_TIMEOUT="${LUMEN_HEALTH_TIMEOUT_SECONDS:-300}"
 HEALTH_FAIL=0
-if ! lumen_health_http "${API_HEALTH_URL}" 60 2; then
-    log_error "[health_check] API ${API_HEALTH_URL} 不可达。"
+if ! lumen_health_http "${API_HEALTH_URL}" "${HEALTH_TIMEOUT}" 2; then
+    log_error "[health_check] API ${API_HEALTH_URL} 在 ${HEALTH_TIMEOUT}s 内不可达。"
     HEALTH_FAIL=1
 fi
-if ! lumen_health_http "${WEB_HEALTH_URL}" 60 2; then
-    log_error "[health_check] Web ${WEB_HEALTH_URL} 不可达。"
+if ! lumen_health_http "${WEB_HEALTH_URL}" "${HEALTH_TIMEOUT}" 2; then
+    log_error "[health_check] Web ${WEB_HEALTH_URL} 在 ${HEALTH_TIMEOUT}s 内不可达。"
     HEALTH_FAIL=1
 fi
 if ! lumen_health_compose api worker web; then
@@ -1313,9 +1348,11 @@ fi
 if [ "${HEALTH_FAIL}" -eq 1 ]; then
     log_error "[health_check] 健康检查失败；新代码已上线但状态异常。"
     log_error "  数据库迁移已应用，**不自动回滚**——请执行："
-    log_error "    docker compose logs --tail=120 api"
-    log_error "    docker compose ps"
-    log_error "  如需回滚，参考 docs/.. §18。"
+    log_error "    cd ${CURRENT_LINK}"
+    log_error "    COMPOSE_PROJECT_NAME=lumen docker compose logs --tail=120 api worker web"
+    log_error "    COMPOSE_PROJECT_NAME=lumen docker compose ps"
+    log_error "  状态快照：release_id=${NEW_ID}  image_tag=${TARGET_TAG}  current → $(readlink "${ROOT}/current" 2>/dev/null || echo unknown)"
+    log_error "  如需回滚，参考 docs/.. §18 或调高 LUMEN_HEALTH_TIMEOUT_SECONDS 重跑健康。"
     emit_fail health_check 1
     exit 1
 fi
