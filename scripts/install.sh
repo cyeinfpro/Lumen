@@ -539,7 +539,9 @@ cleanup_on_failure() {
 on_signal() {
     local signal_name="$1"
     local rc="$2"
-    log_error "安装被 ${signal_name} 中断，正在清理脚本锁。"
+    log_error "安装被 ${signal_name} 中断（rc=${rc}），将走完整失败清理流程。"
+    # exit 触发 EXIT trap (cleanup_on_failure)：清理已起容器、回滚 current
+    # symlink、删半成品 release，最后释放锁。比裸 exit 更彻底。
     exit "${rc}"
 }
 
@@ -1657,14 +1659,26 @@ EOF
 
 # ---------------------------------------------------------------------------
 # 主流程
+#
+# trap 顺序很关键，避免被 lumen_acquire_lock 内部的 trap 覆盖：
+#   1) 先装 INT/TERM/ERR：让 lumen_acquire_lock 之前的代码（参数解析、
+#      DEPLOY_ROOT 推导）按 Ctrl-C 也能走 cleanup（rc != 0 时不会清半成品 —
+#      因为还没建任何东西，但至少日志说明清晰）。
+#   2) lumen_acquire_lock 自身会装 `trap lumen_release_lock EXIT`；不能在它
+#      之前装其他 EXIT trap，否则会被覆盖。
+#   3) lumen_acquire_lock 之后用 cleanup_on_failure 覆盖 EXIT trap：cleanup
+#      末尾会幂等调 lumen_release_lock（line ~533），保证锁仍释放。
 # ---------------------------------------------------------------------------
 trap 'on_error ${LINENO}' ERR
-trap cleanup_on_failure EXIT
 trap 'on_signal SIGINT 130' INT
 trap 'on_signal SIGTERM 143' TERM
 
 # 全局维护锁：与 update.sh / uninstall.sh 互斥（共用 ${ROOT}/.lumen-maintenance.lock）。
 lumen_acquire_lock "${ROOT}" "install.sh"
+
+# 锁拿到后再装 cleanup_on_failure，覆盖 lumen_acquire_lock 内层的 release_lock
+# trap。cleanup 内 chain 调 release_lock 幂等。
+trap cleanup_on_failure EXIT
 
 # 解析最终的部署目录与数据目录（命令行 / 环境变量 / 默认值优先级）
 DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"

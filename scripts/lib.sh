@@ -2551,6 +2551,12 @@ lumen_retry() {
         if [ "${rc}" -eq 0 ]; then
             return 0
         fi
+        # 用户中断（SIGINT=130 / SIGTERM=143）立即 break，不要白白退避 5/10/20s
+        # 浪费用户时间。下游也能更快进入 EXIT trap 的清理流程。
+        if [ "${rc}" -eq 130 ] || [ "${rc}" -eq 143 ]; then
+            log_warn "${label}：被信号中断（rc=${rc}），不再重试。"
+            return "${rc}"
+        fi
         if [ "${attempt}" -ge "${max_attempts}" ]; then
             log_error "${label}：连续 ${attempt} 次失败（rc=${rc}），不再重试。"
             return "${rc}"
