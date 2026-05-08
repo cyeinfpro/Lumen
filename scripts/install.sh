@@ -1558,14 +1558,39 @@ run_bootstrap_admin() {
     # 不写入 .env（§10.3：不要把管理员密码写入 .env）
     # 注意：不再把 --password 作为 CLI 位置参数传，避免密码出现在 host
     # `ps -ef` / docker inspect Args / journalctl logs 里。bootstrap.py 已支持
-    # 读 LUMEN_ADMIN_PASSWORD env 兜底（commit G）。
-    if ! LUMEN_ADMIN_EMAIL="${admin_email}" LUMEN_ADMIN_PASSWORD="${admin_pwd}" \
+    # 读 LUMEN_ADMIN_PASSWORD env 兜底。
+    # 捕获 bootstrap 输出，区分"已存在"（无害，幂等重跑常见）vs "真错误"（DB
+    # 连接 / migration 漂移 / 校验失败），让用户能立即定位是不是真问题。
+    local _boot_log
+    _boot_log="$(mktemp)" || _boot_log=""
+    local _boot_rc=0
+    if [ -n "${_boot_log}" ]; then
+        LUMEN_ADMIN_EMAIL="${admin_email}" LUMEN_ADMIN_PASSWORD="${admin_pwd}" \
             _install_compose --profile bootstrap run --rm \
             -e "LUMEN_ADMIN_EMAIL=${admin_email}" \
             -e "LUMEN_ADMIN_PASSWORD=${admin_pwd}" \
-            bootstrap python -m app.scripts.bootstrap "${admin_email}" --role admin; then
-        log_warn "bootstrap 返回非零。常见原因：管理员账号已存在；继续后续步骤。"
-        log_warn "  如需重置密码，登录后到管理面板修改，或手动 DELETE 后重跑本脚本。"
+            bootstrap python -m app.scripts.bootstrap "${admin_email}" --role admin \
+            >"${_boot_log}" 2>&1 || _boot_rc=$?
+        if [ "${_boot_rc}" -eq 0 ]; then
+            cat "${_boot_log}" || true
+        elif grep -qiE 'already (exists|created)|duplicate key|user_already_exists|already_admin' "${_boot_log}"; then
+            log_info "管理员账号 ${admin_email} 已存在（bootstrap 幂等跳过）。"
+        else
+            log_warn "bootstrap 返回非零（rc=${_boot_rc}），可能是 DB 连接 / migration 漂移 / 校验失败。"
+            log_warn "  最近输出："
+            tail -n 15 "${_boot_log}" | sed 's/^/    /' >&2
+            log_warn "  如确认账号已存在仅是 race，可登录后到管理面板验证；否则查 logs：docker compose logs --tail=120 migrate api"
+        fi
+        rm -f "${_boot_log}"
+    else
+        # mktemp 失败：退化为旧行为（不区分错误来源）
+        if ! LUMEN_ADMIN_EMAIL="${admin_email}" LUMEN_ADMIN_PASSWORD="${admin_pwd}" \
+                _install_compose --profile bootstrap run --rm \
+                -e "LUMEN_ADMIN_EMAIL=${admin_email}" \
+                -e "LUMEN_ADMIN_PASSWORD=${admin_pwd}" \
+                bootstrap python -m app.scripts.bootstrap "${admin_email}" --role admin; then
+            log_warn "bootstrap 返回非零。常见原因：管理员账号已存在；继续后续步骤。"
+        fi
     fi
 
     # 标记已 bootstrapped，避免重复运行
