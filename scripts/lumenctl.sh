@@ -1897,39 +1897,64 @@ show_menu() {
         cat <<EOF
 
 Lumen 一键运维菜单
+（菜单分组：运行/维护/网络/⚠ 危险）
 
-  1) 安装 Lumen
-  2) 更新 Lumen
-  3) 卸载 Lumen
-  4) 安装 image-job
-  5) 卸载 image-job
-  6) 扫描 nginx 配置
-  7) nginx 反代优化向导
-  8) 查看运行状态（compose ps + 健康检查）
-  9) 跟随 API 日志（compose logs -f api）
-  10) 重启 api/worker/web（compose up -d --force-recreate）
-  11) 启动 api/worker/web（compose up -d --wait）
-  12) 停止 api/worker/web/tgbot（compose stop）
-  13) 执行 DB migrate（compose --profile migrate run --rm migrate）
+  ── 运行（read-only）──
+  1) 查看运行状态（compose ps + 健康检查）
+  2) 跟随 API 日志（compose logs -f api）
+  3) 查看 Lumen 版本
+
+  ── 维护（compose 操作）──
+  4) 启动 api/worker/web（compose up -d --wait）
+  5) 重启 api/worker/web（compose up -d --force-recreate）
+  6) 停止 api/worker/web/tgbot（compose stop）
+  7) 执行 DB migrate（compose --profile migrate run --rm migrate）
+  8) 立即触发一次 backup（pg + redis）
+
+  ── 网络（nginx）──
+  9) 扫描 nginx 配置
+  10) nginx 反代优化向导
+
+  ── ⚠ 危险（影响数据/在线服务）──
+  11) 安装 Lumen
+  12) 更新 Lumen
+  13) Restore from backup（drop DB + 覆盖 redis）
+  14) Rollback 到上一版本
+  15) 安装 image-job
+  16) 卸载 image-job
+  17) 卸载 Lumen
+
   0) 退出
 
 EOF
         local choice
         choice="$(read_or_default '请选择' '0')"
         case "${choice}" in
-            1)  menu_action run_lumen_install_script ;;
-            2)  menu_action run_lumen_script update.sh ;;
-            3)  menu_action run_lumen_script uninstall.sh ;;
-            4)  menu_action install_image_job ;;
-            5)  menu_action uninstall_image_job ;;
-            6)  menu_action nginx_scan ;;
-            7)  menu_action nginx_optimize ;;
-            8)  menu_action lumen_compose_status ;;
-            9)  menu_action lumen_compose_logs api ;;
-            10) menu_action lumen_compose_restart ;;
-            11) menu_action lumen_compose_start ;;
-            12) menu_action lumen_compose_stop ;;
-            13) menu_action lumen_compose_migrate ;;
+            1)  menu_action lumen_compose_status ;;
+            2)  menu_action lumen_compose_logs api ;;
+            3)  menu_action lumen_compose_version ;;
+            4)  menu_action lumen_compose_start ;;
+            5)  menu_action lumen_compose_restart ;;
+            6)  menu_action lumen_compose_stop ;;
+            7)  menu_action lumen_compose_migrate ;;
+            8)  menu_action run_lumen_script backup.sh ;;
+            9)  menu_action nginx_scan ;;
+            10) menu_action nginx_optimize ;;
+            11) menu_action run_lumen_install_script ;;
+            12) menu_action run_lumen_script update.sh ;;
+            13)
+                local ts
+                ts="$(read_or_default '请输入 backup timestamp（YYYYMMDD-HHMMSS）' '')"
+                if [ -n "${ts}" ]; then
+                    menu_action lumen_compose_restore "${ts}"
+                else
+                    log_warn "未输入 timestamp，已取消。"
+                fi
+                ;;
+            14) menu_action lumen_compose_rollback ;;
+            15) menu_action install_image_job ;;
+            16) menu_action uninstall_image_job ;;
+            17) menu_action run_lumen_script uninstall.sh ;;
             0)  exit 0 ;;
             *)  log_warn "无效选项：${choice}" ;;
         esac
