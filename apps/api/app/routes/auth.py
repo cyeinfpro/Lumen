@@ -19,11 +19,25 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import AllowedEmail, AuthSession, InviteLink, User
+from lumen_core.models import (
+    AllowedEmail,
+    AuthSession,
+    InviteLink,
+    PendingApiKeyVerification,
+    User,
+    UserApiCredential,
+)
 from lumen_core.runtime_settings import get_spec
-from lumen_core.schemas import LoginIn, RuntimeDefaultsOut, SignupIn, UserOut
+from lumen_core.schemas import (
+    LoginIn,
+    RuntimeDefaultsOut,
+    SignupByokIn,
+    SignupIn,
+    UserOut,
+)
 
 from ..audit import request_ip_hash, write_audit, write_audit_isolated
+from ..byok_service import read_byok_settings, verification_token_hash
 from ..config import settings
 from ..db import get_db
 from ..deps import (
@@ -402,6 +416,225 @@ async def signup(
         actor_ip_hash=request_ip_hash(request),
         details={"role": role},
     )
+    _set_auth_cookies(response, session.id, csrf)
+    return await _user_out_with_runtime_defaults(user, db)
+
+
+@router.post(
+    "/signup/byok",
+    response_model=UserOut,
+    dependencies=[Depends(AUTH_SIGNUP_LIMITER)],
+)
+async def signup_byok(
+    body: SignupByokIn,
+    request: Request,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserOut:
+    byok_settings = await read_byok_settings(db)
+    if not byok_settings.mode_enabled or not byok_settings.byok_signup_enabled:
+        raise _bad("byok_disabled", "BYOK signup is disabled", 403)
+
+    email = body.email.strip().lower()
+    if not email or not body.password:
+        raise _bad("invalid_input", "email and password are required", 422)
+    _validate_password_strength(body.password)
+
+    token = body.verification_token.strip()
+    if not token:
+        raise _bad("invalid_verification_token", "verification token is invalid", 400)
+
+    # Why: do the email-existence check *before* the token check, and collapse
+    # both branches into the same generic `invalid_verification_token`. This
+    # closes the user-enumeration side channel from §8.3 — an attacker can no
+    # longer probe whether `email_taken` ever fires (vs token-expired). The
+    # pending token is *not consumed* in either failure path so a legitimate
+    # user who got the token via a different account can still finish signup
+    # by changing the email.
+    existing = (
+        await db.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if existing is not None:
+        verify_password(_DUMMY_PASSWORD_HASH, body.password)
+        await write_audit_isolated(
+            event_type="auth.signup.byok.fail",
+            actor_email=email,
+            actor_ip_hash=request_ip_hash(request),
+            details={"reason": "email_taken_masked_as_invalid_token"},
+        )
+        raise _bad(
+            "invalid_verification_token",
+            "verification failed; please verify your API key again",
+            400,
+        )
+
+    token_hash = verification_token_hash(token)
+    pending = (
+        await db.execute(
+            select(PendingApiKeyVerification)
+            .where(PendingApiKeyVerification.token_hash == token_hash)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if (
+        pending is None
+        or pending.consumed_at is not None
+        or ensure_utc(pending.expires_at) <= now
+    ):
+        verify_password(_DUMMY_PASSWORD_HASH, body.password)
+        await write_audit_isolated(
+            event_type="auth.signup.byok.fail",
+            actor_email=email,
+            actor_ip_hash=request_ip_hash(request),
+            details={"reason": "invalid_verification_token"},
+        )
+        raise _bad(
+            "invalid_verification_token",
+            "verification token is invalid or expired",
+            400,
+        )
+
+    allow = (
+        await db.execute(select(AllowedEmail).where(AllowedEmail.email == email))
+    ).scalar_one_or_none()
+    invite: InviteLink | None = None
+    role = "member"
+
+    if not byok_settings.byok_signup_bypasses_allowlist and not allow:
+        if not body.invite_token:
+            verify_password(_DUMMY_PASSWORD_HASH, body.password)
+            await write_audit_isolated(
+                event_type="auth.signup.byok.fail",
+                actor_email=email,
+                actor_ip_hash=request_ip_hash(request),
+                details={"reason": "email_not_invited"},
+            )
+            raise _bad(
+                "email_not_invited",
+                "this email is not on the invite allowlist",
+                403,
+            )
+        invite = (
+            await db.execute(
+                select(InviteLink)
+                .where(InviteLink.token == body.invite_token)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if invite is None:
+            verify_password(_DUMMY_PASSWORD_HASH, body.password)
+            await write_audit_isolated(
+                event_type="auth.signup.byok.fail",
+                actor_email=email,
+                actor_ip_hash=request_ip_hash(request),
+                details={"reason": "invalid_invite"},
+            )
+            raise _bad("invalid_invite", "invite token not found", 403)
+        reason = _invite_validity_reason(invite, now)
+        if reason is not None:
+            verify_password(_DUMMY_PASSWORD_HASH, body.password)
+            await write_audit_isolated(
+                event_type="auth.signup.byok.fail",
+                actor_email=email,
+                actor_ip_hash=request_ip_hash(request),
+                details={"reason": reason},
+            )
+            raise _bad("invalid_invite", f"invite is {reason}", 403)
+        if invite.email is not None and invite.email.lower() != email:
+            verify_password(_DUMMY_PASSWORD_HASH, body.password)
+            await write_audit_isolated(
+                event_type="auth.signup.byok.fail",
+                actor_email=email,
+                actor_ip_hash=request_ip_hash(request),
+                details={"reason": "invite_email_mismatch"},
+            )
+            raise _bad(
+                "invite_email_mismatch",
+                "this invite is bound to a different email",
+                403,
+            )
+        role = invite.role or "member"
+
+    user = User(
+        email=email,
+        password_hash=hash_password(body.password),
+        display_name=body.display_name or email.split("@")[0],
+        email_verified=False,
+        role=role,
+    )
+    db.add(user)
+    try:
+        await db.flush()
+        credential = UserApiCredential(
+            user_id=user.id,
+            supplier_id=pending.supplier_id,
+            key_ciphertext=pending.key_ciphertext,
+            key_hash=pending.key_hash,
+            key_hint=pending.key_hint,
+            status="active",
+            last_verified_at=pending.verified_at,
+            capabilities_jsonb={},
+        )
+        db.add(credential)
+        pending.consumed_at = now
+
+        if invite is not None:
+            invite.used_at = now
+            invite.used_by = user.id
+            if not allow:
+                db.add(AllowedEmail(email=email, invited_by=invite.created_by))
+        elif (
+            byok_settings.byok_signup_bypasses_allowlist
+            and not allow
+        ):
+            # Why: when allowlist is bypassed via BYOK, still record the email
+            # in AllowedEmail so subsequent re-signups / OAuth callbacks have a
+            # consistent allowlist view (matches the invite branch above).
+            # invited_by=None marks the row as bypass-sourced.
+            db.add(AllowedEmail(email=email, invited_by=None))
+
+        session, _ = await _create_session(db, user, request)
+        csrf = generate_csrf_token(session.id)
+        # Why: write_audit(autocommit=False) returns False on failure and does
+        # NOT raise. If session-bound audit fails the success row would be lost.
+        # Fall back to write_audit_isolated (independent transaction) so the
+        # audit row survives even when the caller's session has issues.
+        audit_ok = await write_audit(
+            db,
+            event_type="auth.signup.byok.success",
+            user_id=user.id,
+            actor_email=email,
+            actor_ip_hash=request_ip_hash(request),
+            details={"role": role, "supplier_id": pending.supplier_id},
+            autocommit=False,
+        )
+        await db.commit()
+        if not audit_ok:
+            # The user is committed; surface the audit gap via isolated retry.
+            await write_audit_isolated(
+                event_type="auth.signup.byok.success",
+                user_id=user.id,
+                actor_email=email,
+                actor_ip_hash=request_ip_hash(request),
+                details={
+                    "role": role,
+                    "supplier_id": pending.supplier_id,
+                    "audit_fallback": True,
+                },
+            )
+    except IntegrityError as exc:
+        await db.rollback()
+        await write_audit_isolated(
+            event_type="auth.signup.byok.fail",
+            actor_email=email,
+            actor_ip_hash=request_ip_hash(request),
+            details={"reason": "integrity_conflict"},
+        )
+        raise _bad("email_taken", "an account with this email already exists", 409) from exc
+
     _set_auth_cookies(response, session.id, csrf)
     return await _user_out_with_runtime_defaults(user, db)
 

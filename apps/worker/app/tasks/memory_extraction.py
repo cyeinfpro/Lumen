@@ -13,9 +13,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import func, select, update
 
-from lumen_core.constants import EVENTS_STREAM_PREFIX, conv_channel
+from lumen_core.constants import conv_channel
 from lumen_core.memory import (
     ExtractedMemory,
     canonical_memory_text,

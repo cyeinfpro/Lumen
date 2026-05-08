@@ -69,10 +69,24 @@ class Settings(BaseSettings):
 
     worker_metrics_port: int = 9100
 
+    # BYOK 用户 API Key 解密主密钥。必须与 API 服务一致。
+    byok_api_key_master_secret: str = ""
+
     @model_validator(mode="after")
     def validate_runtime(self) -> "Settings":
         if self.edit_race_lanes < 1:
             raise ValueError("EDIT_RACE_LANES must be at least 1")
+        env = self.app_env.strip().lower()
+        is_dev = env in {"dev", "development", "local", "test"}
+        secret = (self.byok_api_key_master_secret or "").strip()
+        # dev 也必须配，否则 BYOK 编/解密直接抛 ByokCryptoError；和 API 端校验一致。
+        # dev 放宽到 16 chars 方便本地，prod 保持 32 chars。
+        min_len = 16 if is_dev else 32
+        if len(secret) < min_len:
+            raise ValueError(
+                "BYOK_API_KEY_MASTER_SECRET must be at least "
+                f"{min_len} characters{' in development' if is_dev else ' outside development'}"
+            )
         return self
 
 

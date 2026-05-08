@@ -5,6 +5,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import {
   AlertCircle,
@@ -19,7 +20,7 @@ import {
   Zap,
 } from "lucide-react";
 
-import { ApiError, login } from "@/lib/apiClient";
+import { ApiError, listPublicApiSuppliers, login } from "@/lib/apiClient";
 import { errorToText } from "@/lib/errors";
 
 export default function LoginPage() {
@@ -41,6 +42,17 @@ function LoginInner() {
   const [showPwd, setShowPwd] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // review §9 / #34: 仅当后端 /auth/api-suppliers 返回非空（即 BYOK 公开注册开启
+  // 且至少有一个 public_signup_enabled 的供应商）才展示"直接注册"入口，避免
+  // 关闭 BYOK 注册时把用户导向 /signup 然后看见空选择器。
+  const byokSuppliersQ = useQuery({
+    queryKey: ["auth", "api-suppliers"],
+    queryFn: listPublicApiSuppliers,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const byokSignupAvailable = (byokSuppliersQ.data?.items?.length ?? 0) > 0;
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -214,11 +226,19 @@ function LoginInner() {
                 </div>
               </div>
 
-              <p className="text-xs text-[var(--fg-2)] text-center leading-relaxed">
-                需要邀请链接才能注册。也可以打开收到的{" "}
-                <span className="text-[var(--fg-1)]">/invite/*</span>{" "}
-                链接完成注册。
-              </p>
+              <div className="text-xs text-[var(--fg-2)] text-center leading-relaxed space-y-1">
+                {byokSignupAvailable && (
+                  <p>
+                    有 API Key？{" "}
+                    <Link href="/signup" className="text-[var(--color-lumen-amber)] hover:underline">
+                      直接注册
+                    </Link>
+                  </p>
+                )}
+                <p>
+                  也可以打开收到的 <span className="text-[var(--fg-1)]">/invite/*</span> 链接注册。
+                </p>
+              </div>
             </div>
           </motion.div>
         </section>

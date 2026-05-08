@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -14,7 +14,6 @@ from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import EVENTS_STREAM_PREFIX, conv_channel
-from lumen_core.memory import MEMORY_TYPES
 from lumen_core.models import (
     Completion,
     Conversation,

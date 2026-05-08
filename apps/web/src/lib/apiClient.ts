@@ -28,6 +28,16 @@ import type {
   ProvidersProbeOut,
   ProviderStatsOut,
   SessionOut,
+  ApiSupplierProbeOut,
+  ApiSupplierTemplateIn,
+  ApiSupplierTemplateListOut,
+  ApiSupplierTemplateOut,
+  ApiSupplierTemplatePublicListOut,
+  ApiKeyVerifyOut,
+  ByokSettingsOut,
+  ByokSettingsPatchIn,
+  UserApiCredentialListOut,
+  UserApiCredentialOut,
 } from "./types";
 export { API_BASE, ApiError, apiFetch, apiFetchNoContent } from "./api/http";
 export type { NoContent } from "./api/http";
@@ -64,6 +74,32 @@ export function signup(
   return apiFetch<AuthUser>("/auth/signup", {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+export function listPublicApiSuppliers(): Promise<ApiSupplierTemplatePublicListOut> {
+  return apiFetch<ApiSupplierTemplatePublicListOut>("/auth/api-suppliers");
+}
+
+export function verifyApiKey(
+  supplier_id: string,
+  api_key: string,
+): Promise<ApiKeyVerifyOut> {
+  return apiFetch<ApiKeyVerifyOut>("/auth/api-key/verify", {
+    method: "POST",
+    body: JSON.stringify({ supplier_id, api_key }),
+  });
+}
+
+export function signupByok(
+  email: string,
+  password: string,
+  verification_token: string,
+  display_name = "",
+): Promise<AuthUser> {
+  return apiFetch<AuthUser>("/auth/signup/byok", {
+    method: "POST",
+    body: JSON.stringify({ email, password, display_name, verification_token }),
   });
 }
 
@@ -221,6 +257,8 @@ export type TaskStatus = GenerationTaskStatus | CompletionTaskStatus;
 export interface BackendGeneration {
   id: string;
   message_id: string;
+  user_api_credential_id?: string | null;
+  upstream_supplier_id?: string | null;
   action: string;
   prompt: string;
   size_requested: string;
@@ -239,6 +277,8 @@ export interface BackendGeneration {
 export interface BackendCompletion {
   id: string;
   message_id: string;
+  user_api_credential_id?: string | null;
+  upstream_supplier_id?: string | null;
   model: string;
   input_image_ids: string[];
   text: string;
@@ -1954,6 +1994,78 @@ export function probeProviders(
 
 export function getProviderStats(): Promise<ProviderStatsOut> {
   return apiFetch<ProviderStatsOut>("/admin/providers/stats");
+}
+
+// ——— BYOK ———
+
+export function getByokSettings(): Promise<ByokSettingsOut> {
+  return apiFetch<ByokSettingsOut>("/admin/byok-settings");
+}
+
+export function patchByokSettings(
+  body: ByokSettingsPatchIn,
+): Promise<ByokSettingsOut> {
+  return apiFetch<ByokSettingsOut>("/admin/byok-settings", {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listApiSuppliers(): Promise<ApiSupplierTemplateListOut> {
+  return apiFetch<ApiSupplierTemplateListOut>("/admin/api-suppliers");
+}
+
+export function createApiSupplier(
+  body: ApiSupplierTemplateIn,
+): Promise<ApiSupplierTemplateOut> {
+  return apiFetch<ApiSupplierTemplateOut>("/admin/api-suppliers", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function patchApiSupplier(
+  id: string,
+  body: Partial<ApiSupplierTemplateIn>,
+): Promise<ApiSupplierTemplateOut> {
+  return apiFetch<ApiSupplierTemplateOut>(`/admin/api-suppliers/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function probeApiSupplier(
+  id: string,
+  api_key: string,
+): Promise<ApiSupplierProbeOut> {
+  return apiFetch<ApiSupplierProbeOut>(`/admin/api-suppliers/${id}/probe`, {
+    method: "POST",
+    body: JSON.stringify({ api_key }),
+  });
+}
+
+export function listMyApiCredentials(): Promise<UserApiCredentialListOut> {
+  return apiFetch<UserApiCredentialListOut>("/me/api-credentials");
+}
+
+export function listBindableApiSuppliers(): Promise<ApiSupplierTemplatePublicListOut> {
+  return apiFetch<ApiSupplierTemplatePublicListOut>("/me/api-credentials/suppliers");
+}
+
+export function putMyApiCredential(
+  supplier_id: string,
+  api_key: string,
+): Promise<UserApiCredentialOut> {
+  return apiFetch<UserApiCredentialOut>(`/me/api-credentials/${supplier_id}`, {
+    method: "PUT",
+    body: JSON.stringify({ api_key }),
+  });
+}
+
+export function revokeMyApiCredential(credential_id: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(`/me/api-credentials/${credential_id}`, {
+    method: "DELETE",
+  });
 }
 
 // ——— Account memory ———

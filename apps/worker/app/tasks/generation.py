@@ -87,6 +87,13 @@ from lumen_core.sizing import resolve_size
 
 from ..config import settings
 from ..db import SessionLocal
+from ..byok_runtime import (
+    byok_error_message,
+    byok_error_to_generation_code,
+    classify_user_credential_error,
+    record_user_credential_runtime_error,
+    resolve_user_credential_runtime,
+)
 from ..observability import (
     get_tracer,
     safe_outcome,
@@ -670,6 +677,7 @@ async def _reserve_image_queue_slot(
     dual_race: bool = False,
     endpoint_kind: str | None = None,
     requires_mask: bool = False,
+    provider_override: Any | None = None,
 ) -> Any | None:
     """Reserve one global image slot for the oldest queued task.
 
@@ -774,39 +782,42 @@ async def _reserve_image_queue_slot(
             )
             return ResolvedProvider(name=sentinel, base_url="", api_key="")
 
-        pool = await get_pool()
-        # P1-8: 把 task_id 透传给 pool；pool 内部会从 Redis avoid set 跳过
-        # 上次失败的 provider，与下方 generation.py 的二次过滤是双保险。
-        # acquire_inflight=False：reserve 只是为了挑号占 zset，不真正发请求；
-        # inflight 由真正发请求的 _dispatch_image / lane 持有。如果这里 acquire
-        # 了，_dispatch_image 之后又 acquire 一次，且 reserve 占的那一份没人
-        # release 会一直泄漏。老版 mock pool 不接受这个 kwarg，TypeError 时退化
-        # 调用——reserve 拿到的候选不消费 inflight，老 mock 也不维护 inflight，结果一致。
-        try:
-            providers = await pool.select(
-                route="image",
-                task_id=task_id,
-                endpoint_kind=endpoint_kind,
-                acquire_inflight=False,
-                requires_mask=requires_mask,
-            )
-        except TypeError as exc:
-            msg = str(exc)
-            # 兼容老 mock：依次去掉新增 kwargs（requires_mask、acquire_inflight）。
-            # requires_mask=True 但 mock 不识别时，select 出来的候选可能含 url 模式
-            # provider；upstream 层已经在 _direct_edit_image_with_failover /
-            # _image_job_with_failover 入口再加守卫，能把误选号兜成 NO_MASK_CAPABLE_PROVIDER。
-            if "requires_mask" not in msg and "acquire_inflight" not in msg:
-                raise
-            kwargs = {
-                "route": "image",
-                "task_id": task_id,
-                "endpoint_kind": endpoint_kind,
-            }
+        if provider_override is not None:
+            providers = [provider_override]
+        else:
+            pool = await get_pool()
+            # P1-8: 把 task_id 透传给 pool；pool 内部会从 Redis avoid set 跳过
+            # 上次失败的 provider，与下方 generation.py 的二次过滤是双保险。
+            # acquire_inflight=False：reserve 只是为了挑号占 zset，不真正发请求；
+            # inflight 由真正发请求的 _dispatch_image / lane 持有。如果这里 acquire
+            # 了，_dispatch_image 之后又 acquire 一次，且 reserve 占的那一份没人
+            # release 会一直泄漏。老版 mock pool 不接受这个 kwarg，TypeError 时退化
+            # 调用——reserve 拿到的候选不消费 inflight，老 mock 也不维护 inflight，结果一致。
             try:
-                providers = await pool.select(**kwargs, acquire_inflight=False)
-            except TypeError:
-                providers = await pool.select(**kwargs)
+                providers = await pool.select(
+                    route="image",
+                    task_id=task_id,
+                    endpoint_kind=endpoint_kind,
+                    acquire_inflight=False,
+                    requires_mask=requires_mask,
+                )
+            except TypeError as exc:
+                msg = str(exc)
+                # 兼容老 mock：依次去掉新增 kwargs（requires_mask、acquire_inflight）。
+                # requires_mask=True 但 mock 不识别时，select 出来的候选可能含 url 模式
+                # provider；upstream 层已经在 _direct_edit_image_with_failover /
+                # _image_job_with_failover 入口再加守卫，能把误选号兜成 NO_MASK_CAPABLE_PROVIDER。
+                if "requires_mask" not in msg and "acquire_inflight" not in msg:
+                    raise
+                kwargs = {
+                    "route": "image",
+                    "task_id": task_id,
+                    "endpoint_kind": endpoint_kind,
+                }
+                try:
+                    providers = await pool.select(**kwargs, acquire_inflight=False)
+                except TypeError:
+                    providers = await pool.select(**kwargs)
         if not providers:
             return None
 
@@ -2547,6 +2558,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     lease_lost = asyncio.Event()
     reserved_provider: Any | None = None
     reserved_provider_name: str | None = None
+    user_api_credential_id: str | None = None
+    user_runtime_provider: Any | None = None
+    loaded_attempt = 0
     channel = task_channel(task_id)
 
     # 让 ProviderPool 能用 redis 做账号级 quota 检查 / 入账（image route）。
@@ -2585,6 +2599,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             logger.info("generation already running task_id=%s", task_id)
             return
 
+        loaded_attempt = gen.attempt
         user_id = gen.user_id
         message_id = gen.message_id
         action = gen.action
@@ -2593,6 +2608,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         size_requested = gen.size_requested
         input_image_ids = list(gen.input_image_ids or [])
         primary_input_image_id = gen.primary_input_image_id
+        user_api_credential_id = getattr(gen, "user_api_credential_id", None)
         # 局部 inpaint mask（PostMessageIn.mask_image_id）。EDIT 任务可选；GENERATE
         # 任务忽略（schema 不允许，但防御性 detach 一份不影响）。worker 在 reference
         # images 加载阶段从 Image.storage_key 取 mask 字节。
@@ -2793,6 +2809,72 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         image_route = await _resolve_image_primary_route()
     except Exception:  # noqa: BLE001
         image_route = "responses"
+    if user_api_credential_id:
+        try:
+            async with SessionLocal() as session:
+                user_runtime_provider = await resolve_user_credential_runtime(
+                    session,
+                    user_api_credential_id,
+                )
+            # purpose 守卫：image 任务必须要 supplier purposes 包含 "image"，
+            # 否则即便 credential 解析成功也拒掉，避免把 chat-only key 用到 image。
+            if "image" not in (getattr(user_runtime_provider, "purposes", ()) or ()):
+                raise UpstreamError(
+                    "user API key supplier does not allow image purpose",
+                    status_code=403,
+                    error_code="byok_purpose_mismatch",
+                    payload={"credential_id": user_api_credential_id},
+                )
+        except Exception as exc:  # noqa: BLE001
+            byok_error = classify_user_credential_error(exc)[1] or "invalid_api_key"
+            await record_user_credential_runtime_error(user_api_credential_id, exc)
+            err_code = byok_error_to_generation_code(byok_error)
+            err_msg = byok_error_message(byok_error)
+            try:
+                async with SessionLocal() as session:
+                    result = await session.execute(
+                        update(Generation)
+                        .where(
+                            Generation.id == task_id,
+                            Generation.attempt == loaded_attempt,
+                        )
+                        .values(
+                            status=GenerationStatus.FAILED.value,
+                            progress_stage=GenerationStage.FINALIZING,
+                            # 不要把 attempt 写回成局部 attempt（初值 0）；该任务可能
+                            # 已经跑过若干次 retry，gen.attempt > 0 时回退会让监控/重试
+                            # 计数错乱。保持原值即可。
+                            attempt=loaded_attempt,
+                            finished_at=datetime.now(timezone.utc),
+                            error_code=err_code,
+                            error_message=err_msg,
+                        )
+                    )
+                    _ensure_generation_updated(result, task_id, loaded_attempt)
+                    msg_failed = await session.get(Message, message_id)
+                    if msg_failed is not None:
+                        msg_failed.status = MessageStatus.FAILED
+                    await session.commit()
+            except _StaleGenerationAttempt:
+                _task_outcome = "stale_attempt"
+                return
+            await publish_event(
+                redis,
+                user_id,
+                task_channel(task_id),
+                EV_GEN_FAILED,
+                {
+                    "generation_id": task_id,
+                    "message_id": message_id,
+                    "code": err_code,
+                    "message": err_msg,
+                    "retriable": False,
+                },
+            )
+            _task_outcome = "failed"
+            return
+        if image_route == "dual_race":
+            image_route = "responses"
     is_dual_race = image_route == "dual_race"
     endpoint_kind = None if is_dual_race else _image_endpoint_kind_for_engine(image_route)
     # mask 不为空 → 选号必须走 transport=file 候选；reserve 阶段就过滤，避免后面
@@ -2806,6 +2888,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             dual_race=is_dual_race,
             endpoint_kind=endpoint_kind,
             requires_mask=requires_mask_provider,
+            provider_override=user_runtime_provider,
         )
     except UpstreamError as exc:
         # NO_MASK_CAPABLE_PROVIDER：terminal，直接抛给 task 主循环走 _record_failure。
@@ -3803,6 +3886,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
     except Exception as exc:  # noqa: BLE001
         decision = _classify_exception(exc, has_partial)
+        _byok_terminal, byok_error = classify_user_credential_error(exc)
+        if user_api_credential_id and byok_error:
+            await record_user_credential_runtime_error(user_api_credential_id, exc)
+            decision = RetryDecision(False, f"byok {byok_error}")
         _err_code_log = getattr(exc, "error_code", None) or type(exc).__name__
         _http_status_log = getattr(exc, "status_code", None)
         _provider_log = (getattr(exc, "payload", None) or {}).get("provider", "")
@@ -3821,10 +3908,16 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         logger.debug("generation exc trace task=%s", task_id, exc_info=True)
 
         err_code = (
-            "timeout" if isinstance(exc, TimeoutError)
+            byok_error_to_generation_code(byok_error)
+            if user_api_credential_id and byok_error
+            else "timeout" if isinstance(exc, TimeoutError)
             else getattr(exc, "error_code", None) or type(exc).__name__
         )
-        err_msg = str(exc)[:2000]
+        err_msg = (
+            byok_error_message(byok_error)
+            if user_api_credential_id and byok_error
+            else str(exc)[:2000]
+        )
 
         moderation_upgrade = False
         if (

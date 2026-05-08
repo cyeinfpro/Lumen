@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from .constants import (
     MAX_MESSAGE_ATTACHMENTS,
@@ -211,6 +211,8 @@ class PostMessageOut(BaseModel):
 class GenerationOut(BaseOut):
     id: str
     message_id: str
+    user_api_credential_id: str | None = None
+    upstream_supplier_id: str | None = None
     action: str
     prompt: str
     size_requested: str
@@ -230,6 +232,8 @@ class GenerationOut(BaseOut):
 class CompletionOut(BaseOut):
     id: str
     message_id: str
+    user_api_credential_id: str | None = None
+    upstream_supplier_id: str | None = None
     model: str
     input_image_ids: list[str]
     text: str
@@ -1076,6 +1080,232 @@ class ProviderStatsOut(BaseModel):
     auto_image_probe_interval: int = 0  # Image probe 间隔（0=关闭，默认 0）
 
 
+# ---------- BYOK 用户自带 API Key ----------
+
+ByokPurpose = Literal["chat", "image", "embedding"]
+
+
+def _default_byok_purposes() -> list[ByokPurpose]:
+    return ["chat", "image"]
+
+
+class ByokSettingsOut(BaseModel):
+    mode_enabled: bool = False
+    byok_signup_enabled: bool = False
+    byok_signup_bypasses_allowlist: bool = False
+    fallback_to_admin_provider: bool = False
+    validation_model: str = "gpt-5.4"
+    validation_timeout_ms: int = 15000
+    pending_token_ttl_seconds: int = 900
+
+
+class ByokSettingsPatchIn(BaseModel):
+    mode_enabled: bool | None = None
+    byok_signup_enabled: bool | None = None
+    byok_signup_bypasses_allowlist: bool | None = None
+    fallback_to_admin_provider: bool | None = None
+    validation_model: str | None = Field(default=None, max_length=64)
+    validation_timeout_ms: int | None = Field(default=None, ge=1000, le=120000)
+    pending_token_ttl_seconds: int | None = Field(default=None, ge=60, le=3600)
+
+
+class ApiSupplierTemplateOut(BaseOut):
+    id: str
+    name: str
+    slug: str
+    base_url: str
+    enabled: bool
+    public_signup_enabled: bool
+    user_bind_enabled: bool
+    purposes: list[ByokPurpose]
+    validation_model: str
+    default_chat_model: str
+    # review #12：image 任务必须用独立的 default_image_model；nullable
+    # 表示该 supplier 不支持图片或 admin 未配置。
+    default_image_model: str | None = None
+    fast_chat_model: str | None = None
+    validation_timeout_ms: int
+    proxy_name: str | None = None
+    text_concurrency_per_key: int
+    image_concurrency_per_key: int
+    capabilities_jsonb: dict[str, Any] = Field(default_factory=dict)
+    active_credentials: int = 0
+    recent_success_rate: float | None = None
+    recent_error_counts: dict[str, int] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApiSupplierTemplatePublicOut(BaseModel):
+    id: str
+    name: str
+    purposes: list[ByokPurpose]
+    validation_model: str
+
+
+class ApiSupplierTemplateListOut(BaseModel):
+    items: list[ApiSupplierTemplateOut]
+
+
+class ApiSupplierTemplatePublicListOut(BaseModel):
+    items: list[ApiSupplierTemplatePublicOut]
+
+
+def _validate_supplier_base_url(v: str) -> str:
+    """review #18：BYOK supplier 的 base_url 必须是 http(s) URL，禁止内嵌凭证。
+
+    与 system_settings.providers 校验行为对齐：清理空白/末尾斜杠、
+    要求 scheme + hostname、拒绝 user:pass@host 这种历史漏洞。
+    """
+    from urllib.parse import urlsplit
+
+    v = v.strip().rstrip("/")
+    parsed = urlsplit(v)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("base_url must be http or https")
+    if parsed.username or parsed.password:
+        raise ValueError("base_url must not contain credentials")
+    if not parsed.hostname:
+        raise ValueError("base_url must include a hostname")
+    return v
+
+
+def _validate_byok_api_key(v: str) -> str:
+    """review #18：BYOK 用户 API Key shape 校验；strip 后判空+长度上限。"""
+    v = v.strip()
+    if not v:
+        raise ValueError("api_key is required")
+    if len(v) > 512:
+        raise ValueError("api_key exceeds 512 characters")
+    return v
+
+
+class ApiSupplierTemplateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    # 设计 §5.2 / review #8：slug 未传时由后端从 name 派生（去空白 + lower-case +
+    # 限制字符集），便于公开列表里直接走 GET /byok/suppliers/<slug>。
+    slug: str | None = Field(default=None, max_length=80)
+    base_url: str = Field(min_length=1, max_length=2048)
+    enabled: bool = True
+    public_signup_enabled: bool = False
+    user_bind_enabled: bool = True
+    purposes: list[ByokPurpose] = Field(default_factory=_default_byok_purposes, min_length=1)
+    validation_model: str = Field(default="gpt-5.4", min_length=1, max_length=64)
+    default_chat_model: str = Field(default="gpt-5.4", min_length=1, max_length=64)
+    # review #12：默认 None，由 admin 显式选填；不在 schema 写默认 image 模型，
+    # 避免误把 chat-only supplier 当成支持 image 任务。
+    default_image_model: str | None = Field(default=None, max_length=128)
+    fast_chat_model: str | None = Field(default="gpt-5.4-mini", max_length=64)
+    validation_timeout_ms: int = Field(default=15000, ge=1000, le=120000)
+    proxy_name: str | None = Field(default=None, max_length=120)
+    text_concurrency_per_key: int = Field(default=4, ge=1, le=100)
+    image_concurrency_per_key: int = Field(default=1, ge=1, le=32)
+    capabilities_jsonb: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str) -> str:
+        return _validate_supplier_base_url(v)
+
+
+class ApiSupplierTemplatePatchIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    slug: str | None = Field(default=None, max_length=80)
+    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    enabled: bool | None = None
+    public_signup_enabled: bool | None = None
+    user_bind_enabled: bool | None = None
+    purposes: list[ByokPurpose] | None = Field(default=None, min_length=1)
+    validation_model: str | None = Field(default=None, min_length=1, max_length=64)
+    default_chat_model: str | None = Field(default=None, min_length=1, max_length=64)
+    # review #12：patch 时 None 表示不变；显式传 "" 或具体 model id 才更新。
+    default_image_model: str | None = Field(default=None, max_length=128)
+    fast_chat_model: str | None = Field(default=None, max_length=64)
+    validation_timeout_ms: int | None = Field(default=None, ge=1000, le=120000)
+    proxy_name: str | None = Field(default=None, max_length=120)
+    text_concurrency_per_key: int | None = Field(default=None, ge=1, le=100)
+    image_concurrency_per_key: int | None = Field(default=None, ge=1, le=32)
+    capabilities_jsonb: dict[str, Any] | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _validate_supplier_base_url(v)
+
+
+class ApiSupplierProbeIn(BaseModel):
+    api_key: str = Field(min_length=1, max_length=512)
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, v: str) -> str:
+        return _validate_byok_api_key(v)
+
+
+class ApiKeyVerifyIn(BaseModel):
+    supplier_id: str
+    api_key: str = Field(min_length=1, max_length=512)
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, v: str) -> str:
+        return _validate_byok_api_key(v)
+
+
+class ApiKeyVerifyOut(BaseModel):
+    ok: bool
+    verification_token: str
+    supplier_id: str
+    key_hint: str
+    verified_at: datetime
+
+
+class SignupByokIn(BaseModel):
+    email: EmailStr
+    # review #18：与 SignupIn.password 一致的强度上下限；上限避免 bcrypt 撞 72-byte
+    # 截断 + 阻挡明显恶意大体积 payload。下限 8 是登录类系统最低基线。
+    password: str = Field(min_length=8, max_length=128)
+    display_name: str = ""
+    verification_token: str = Field(min_length=1)
+    invite_token: str | None = None
+
+
+class UserApiCredentialOut(BaseOut):
+    id: str
+    supplier_id: str
+    supplier_name: str
+    key_hint: str
+    status: str
+    last_verified_at: datetime | None = None
+    last_failed_at: datetime | None = None
+    last_error_code: str | None = None
+    rate_limited_until: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserApiCredentialListOut(BaseModel):
+    items: list[UserApiCredentialOut]
+
+
+class UserApiCredentialUpdateIn(BaseModel):
+    api_key: str = Field(min_length=1, max_length=512)
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, v: str) -> str:
+        return _validate_byok_api_key(v)
+
+
+class ApiSupplierStatsOut(BaseModel):
+    supplier_id: str
+    active_credentials: int = 0
+    recent_success_rate: float | None = None
+    recent_error_counts: dict[str, int] = Field(default_factory=dict)
+
+
 # ---------- Sessions（V1.0 收尾：/me/sessions） ----------
 
 class SessionOut(BaseModel):
@@ -1163,6 +1393,22 @@ __all__ = [
     "ProvidersProbeOut",
     "ProviderStatsItem",
     "ProviderStatsOut",
+    "ByokSettingsOut",
+    "ByokSettingsPatchIn",
+    "ApiSupplierTemplateOut",
+    "ApiSupplierTemplatePublicOut",
+    "ApiSupplierTemplateListOut",
+    "ApiSupplierTemplatePublicListOut",
+    "ApiSupplierTemplateIn",
+    "ApiSupplierTemplatePatchIn",
+    "ApiSupplierProbeIn",
+    "ApiKeyVerifyIn",
+    "ApiKeyVerifyOut",
+    "SignupByokIn",
+    "UserApiCredentialOut",
+    "UserApiCredentialListOut",
+    "UserApiCredentialUpdateIn",
+    "ApiSupplierStatsOut",
     "SessionOut",
     "SessionsOut",
     "RegenerateIn",
