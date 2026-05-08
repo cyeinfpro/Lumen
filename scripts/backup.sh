@@ -30,7 +30,10 @@ TS="$(date -u +%Y%m%d-%H%M%S)"
 BACKUP_ROOT="${BACKUP_ROOT:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
 PG_DIR="$BACKUP_ROOT/pg"
 REDIS_DIR="$BACKUP_ROOT/redis"
-MAX_KEEP="${MAX_KEEP:-40}"
+# MAX_KEEP=56 ≈ 4h 间隔 × 56 = 9.3 天，覆盖工作周末 + 周一来才发现问题的
+# 排查窗口。改小到 40（≈ 6.7 天）容易出现"周末出去几天回来发现备份只剩
+# 一周"的情况。可在 systemd unit 或 .env 中覆盖。
+MAX_KEEP="${MAX_KEEP:-56}"
 
 PG_CONTAINER="${PG_CONTAINER:-lumen-pg}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-lumen-redis}"
@@ -320,32 +323,61 @@ REDIS_SIZE="$(file_size "$REDIS_OUT")"
 log "redis pack ok size=$REDIS_SIZE"
 
 # ---- Retention ----
-# 按文件名字典序（timestamp 格式保证等价于时间序）取最新 MAX_KEEP 份；其余删除。
-prune() {
+# 严格 YYYYMMDD-HHMMSS timestamp 提取；忽略手工 cp 进来的非时间戳文件（例如
+# manual-2024.pg.dump.gz），避免它们干扰排序导致超额删掉真正的 backup。
+_extract_ts() {
     local dir="$1"
-    local pat="$2"
+    local suffix="$2"
+    [ -d "$dir" ] || return 0
+    ls "$dir" 2>/dev/null \
+        | grep -E "^[0-9]{8}-[0-9]{6}\\.${suffix//\./\\.}$" \
+        | sed -E "s/\\.${suffix//\./\\.}$//" \
+        | sort -u
+}
+
+# 配对 prune：之前 PG / Redis 各自独立删，可能淘汰掉"PG 有但 Redis 没有"
+# 的 timestamp，反过来 restore 拿到孤儿对直接 exit 2。
+# 修复：先取 PG ∩ Redis 的成对 timestamp，按字典序保留最新 keep 份；其余
+# 成对删除。同时把没配对的孤儿（PG 有 Redis 没有，或反之）也删——保留没用，
+# restore 也用不了，徒占磁盘。
+prune_paired() {
+    local pg_dir="$1"
+    local redis_dir="$2"
     local keep="$3"
-    local all
-    all=$(
-        shopt -s nullglob
-        for path in "$dir"/$pat; do
-            [ -f "$path" ] || continue
-            basename "$path"
-        done | sort
-    )
-    local total
-    total=$(printf '%s\n' "$all" | grep -c . || true)
+
+    local pg_ts redis_ts
+    pg_ts="$(_extract_ts "$pg_dir" "pg.dump.gz")"
+    redis_ts="$(_extract_ts "$redis_dir" "redis.tgz")"
+
+    # comm 要求两个输入排序；上面 sort -u 已排序。
+    local paired orphan_pg orphan_redis
+    paired="$(comm -12 <(printf '%s\n' "$pg_ts") <(printf '%s\n' "$redis_ts"))"
+    orphan_pg="$(comm -23 <(printf '%s\n' "$pg_ts") <(printf '%s\n' "$redis_ts"))"
+    orphan_redis="$(comm -13 <(printf '%s\n' "$pg_ts") <(printf '%s\n' "$redis_ts"))"
+
+    while IFS= read -r ts; do
+        [ -z "$ts" ] && continue
+        log "prune orphan PG (no redis pair): $ts"
+        rm -f "$pg_dir/$ts.pg.dump.gz"
+    done <<< "$orphan_pg"
+    while IFS= read -r ts; do
+        [ -z "$ts" ] && continue
+        log "prune orphan Redis (no pg pair): $ts"
+        rm -f "$redis_dir/$ts.redis.tgz"
+    done <<< "$orphan_redis"
+
+    local total excess
+    total="$(printf '%s\n' "$paired" | grep -c . || true)"
     if [ "$total" -le "$keep" ]; then
         return 0
     fi
-    local excess=$((total - keep))
-    printf '%s\n' "$all" | sed -n "1,${excess}p" | while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        log "prune old: $f"
-        rm -f "$dir/$f"
+    excess=$((total - keep))
+    printf '%s\n' "$paired" | sort | sed -n "1,${excess}p" | while IFS= read -r ts; do
+        [ -z "$ts" ] && continue
+        log "prune old paired: $ts"
+        rm -f "$pg_dir/$ts.pg.dump.gz" "$redis_dir/$ts.redis.tgz"
     done
 }
-prune "$PG_DIR" "*.pg.dump.gz" "$MAX_KEEP"
-prune "$REDIS_DIR" "*.redis.tgz" "$MAX_KEEP"
+prune_paired "$PG_DIR" "$REDIS_DIR" "$MAX_KEEP"
 
 log "backup $TS complete"
