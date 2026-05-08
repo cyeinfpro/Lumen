@@ -235,8 +235,13 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const handleAccountSettingsUpdated = useCallback(
     (data: unknown) => {
       applyStoreEvent("account_settings_updated", data);
-      qc.invalidateQueries({ queryKey: ["me", "memory"] });
-      qc.invalidateQueries({ queryKey: ["conversation"] });
+      // 之前用 ["me", "memory"] / ["conversation"] 全前缀失效, 任意一次后端推
+      // 都会让 messages list / used-memories / context / scopes / staging /
+      // timeline / settings 七八个 query 一起 refetch — 切页面或后台 worker
+      // 写一条记忆都触发风暴, 是页面卡顿的主因.
+      // settings 事件只代表 user-level memory 开关变了, 精确刷 settings + scopes 即可.
+      qc.invalidateQueries({ queryKey: ["me", "memory", "settings"] });
+      qc.invalidateQueries({ queryKey: ["me", "memory", "scopes"] });
     },
     [applyStoreEvent, qc],
   );
@@ -244,8 +249,16 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const handleConversationMemoryUpdated = useCallback(
     (data: unknown) => {
       applyStoreEvent("conversation.memory.updated", data);
-      qc.invalidateQueries({ queryKey: ["conversation"] });
-      qc.invalidateQueries({ queryKey: ["me", "memory"] });
+      // 只刷这个 conv 的 used-memories,不动 messages / context / 别的 conv.
+      const convId =
+        data && typeof data === "object" && "conversation_id" in data
+          ? (data as { conversation_id?: unknown }).conversation_id
+          : null;
+      if (typeof convId === "string" && convId) {
+        qc.invalidateQueries({
+          queryKey: ["conversation", convId, "used-memories"],
+        });
+      }
     },
     [applyStoreEvent, qc],
   );
