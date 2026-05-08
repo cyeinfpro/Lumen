@@ -829,4 +829,6 @@ reconciler 每分钟会扫描 stuck generation/completion，lease 过期后自�
 
 ## License
 
-MIT. See `LICENSE`.
+Lumen is licensed under the PolyForm Noncommercial License 1.0.0 + Commercial License upon request. See `LICENSE`.
+
+Noncommercial use is permitted under PolyForm Noncommercial License 1.0.0. Commercial use, including selling hosted Lumen services, paid integrations, resale, or using Lumen primarily for commercial advantage, requires a separate commercial license from the copyright holders.
