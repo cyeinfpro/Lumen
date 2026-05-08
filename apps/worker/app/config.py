@@ -79,13 +79,14 @@ class Settings(BaseSettings):
         env = self.app_env.strip().lower()
         is_dev = env in {"dev", "development", "local", "test"}
         secret = (self.byok_api_key_master_secret or "").strip()
-        # dev 也必须配，否则 BYOK 编/解密直接抛 ByokCryptoError；和 API 端校验一致。
-        # dev 放宽到 16 chars 方便本地，prod 保持 32 chars。
-        min_len = 16 if is_dev else 32
-        if len(secret) < min_len:
+        # dev/test：未设时 fallback 到与 API 端一致的 deterministic dummy
+        # （prod 严禁使用，必须显式 ≥ 32 chars）。
+        if is_dev and len(secret) < 16:
+            secret = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
+            self.byok_api_key_master_secret = secret
+        elif not is_dev and len(secret) < 32:
             raise ValueError(
-                "BYOK_API_KEY_MASTER_SECRET must be at least "
-                f"{min_len} characters{' in development' if is_dev else ' outside development'}"
+                "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters outside development"
             )
         return self
 
