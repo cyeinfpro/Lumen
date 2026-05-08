@@ -249,17 +249,17 @@ COMPOSE_PROJECT_NAME=lumen docker compose logs -f api
 单独放到本机 Linux 文件系统：
 
 ```text
-${LUMEN_DB_ROOT:-/opt/lumendata}/postgres   # PostgreSQL PGDATA（容器 uid 70:70）
+${LUMEN_DB_ROOT:-/opt/lumendata}/postgres   # PostgreSQL PGDATA（容器 uid 999:999）
 ${LUMEN_DB_ROOT:-/opt/lumendata}/redis      # Redis dump/aof（容器 uid 999:999）
 ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage  # 图片原图、display/preview/thumb（容器 uid 10001:10001）
 ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup   # PG dump + Redis dump（容器 uid 10001:10001）
 ```
 
-数据根顶层归 root，子目录按服务分别 chown，禁止整体 `chown -R 10001:10001` —— 否则 PostgreSQL（uid 70）、Redis（uid 999）启动会失败。安装脚本会自动按这张表设置；手动恢复时参考 `docs/docker-full-stack-cutover-plan.md` §15.2：
+数据根顶层归 root，子目录按服务分别 chown，禁止整体 `chown -R 10001:10001` —— 否则 PostgreSQL/Redis（uid 999）启动会失败。v1.0.48 起 PostgreSQL 镜像换到 `pgvector/pgvector:pg16`（Debian, uid=999），从 alpine 老镜像（uid=70）升级时 `update.sh` 会自动 chown 数据目录。安装脚本会自动按这张表设置；手动恢复时参考 `docs/docker-full-stack-cutover-plan.md` §15.2：
 
 ```bash
 sudo mkdir -p /var/lib/lumen-data/{postgres,redis} /opt/lumendata/{storage,backup}
-sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/postgres
 sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chown -R 10001:10001 /opt/lumendata/storage /opt/lumendata/backup
 sudo chmod 700 /var/lib/lumen-data/postgres /var/lib/lumen-data/redis

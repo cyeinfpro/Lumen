@@ -794,7 +794,7 @@ prepare_data_dirs() {
         || log_warn "chmod 755 数据根失败（已忽略）"
 
     # 按服务分别 chown（禁止整体 chown 给所有目录 —— §15.2）
-    lumen_run_as_root chown -R 70:70   "${db_root}/postgres" || {
+    lumen_run_as_root chown -R 999:999 "${db_root}/postgres" || {
         log_error "chown postgres 数据目录失败。"
         exit 1
     }

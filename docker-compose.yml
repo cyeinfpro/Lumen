@@ -31,9 +31,13 @@ x-app-runtime-env: &app-runtime-env
 services:
   postgres:
     <<: *service-hardening
-    image: postgres:16.6-alpine
+    # pgvector/pgvector:pg16 = postgres:16 (Debian) + pgvector ext 预装.
+    # account memory 0018 migration 需要 vector extension; alpine 镜像没装.
+    # 镜像内 postgres uid=999 (Debian default), 与之前 alpine 的 uid=70 不同,
+    # update.sh 升级路径会自动 chown 数据目录 (70 → 999).
+    image: pgvector/pgvector:pg16
     container_name: lumen-pg
-    user: "70:70"
+    user: "999:999"
     restart: unless-stopped
     shm_size: "256m"
     stop_grace_period: 60s

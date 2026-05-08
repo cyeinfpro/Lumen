@@ -45,7 +45,7 @@ sudo mkdir -p \
   /opt/lumendata/storage \
   /opt/lumendata/backup
 
-sudo chown -R 70:70   /var/lib/lumen-data/postgres
+sudo chown -R 999:999 /var/lib/lumen-data/postgres
 sudo chown -R 999:999 /var/lib/lumen-data/redis
 sudo chown -R 10001:10001 /opt/lumendata/storage
 sudo chown -R 10001:10001 /opt/lumendata/backup

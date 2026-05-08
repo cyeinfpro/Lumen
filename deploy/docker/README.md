@@ -12,7 +12,7 @@ same machine needs a different project, ports, and data root:
 
 ```bash
 mkdir -p /tmp/lumen-local/{postgres,redis,storage,backup}
-chown -R 70:70 /tmp/lumen-local/postgres
+chown -R 999:999 /tmp/lumen-local/postgres
 chown -R 999:999 /tmp/lumen-local/redis
 chown -R 10001:10001 /tmp/lumen-local/storage /tmp/lumen-local/backup
 
