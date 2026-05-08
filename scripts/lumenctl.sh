@@ -517,9 +517,22 @@ lumen_compose_status() {
     fi
 }
 
+_LUMENCTL_VALID_SERVICES="api worker web tgbot postgres redis migrate bootstrap"
+
 lumen_compose_logs() {
     lumen_require_docker_access
     local service="${1:-api}"
+    # 校验 service 名，避免用户敲错（例如 lumen-api 而非 api）后看到困惑的
+    # docker compose 错误。
+    case " ${_LUMENCTL_VALID_SERVICES} " in
+        *" ${service} "*) ;;
+        *)
+            log_error "无效服务名：'${service}'"
+            log_error "  可用：${_LUMENCTL_VALID_SERVICES}"
+            log_error "  注意：docker 容器名是 'lumen-api' 等，但 logs 命令的参数是 service 名（不带 lumen- 前缀）。"
+            exit 1
+            ;;
+    esac
     log_step "docker compose logs -f --tail=200 ${service}"
     lumenctl_compose logs -f --tail=200 "${service}"
 }
@@ -594,6 +607,20 @@ lumen_compose_restore() {
         log_error "用法：bash scripts/lumenctl.sh restore <timestamp>"
         exit 1
     fi
+    # restore 是不可逆操作：DROP database + 覆盖 redis volume。LUMEN_NONINTERACTIVE=1
+    # 或 LUMEN_RESTORE_YES=1 才跳过确认（自动化场景）；其余都要人工确认 timestamp。
+    if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] && [ "${LUMEN_RESTORE_YES:-}" != "1" ]; then
+        printf '\n'
+        log_warn "restore $1 将："
+        log_warn "  1) 停止 lumen-api / lumen-worker"
+        log_warn "  2) DROP 现有数据库并从 backup/pg/$1.pg.dump.gz 恢复"
+        log_warn "  3) 覆盖 redis volume 数据"
+        log_warn "此操作不可逆，请确认 timestamp 正确。"
+        if ! confirm "继续 restore $1？"; then
+            log_info "已取消。"
+            exit 0
+        fi
+    fi
     run_lumen_script restore.sh "$@"
 }
 
@@ -626,10 +653,20 @@ lumen_compose_rollback() {
         exit 1
     fi
 
-    log_step "rollback 到 release ${old_id}"
     if [ -f "${deploy_root}/releases/${old_id}/.image-tag" ]; then
         old_tag="$(head -n1 "${deploy_root}/releases/${old_id}/.image-tag" 2>/dev/null | tr -d '[:space:]' || true)"
     fi
+    # rollback 会切 current symlink + 改 .env LUMEN_IMAGE_TAG + compose up，
+    # 影响在线服务；自动化场景用 LUMEN_ROLLBACK_YES=1 跳过确认。
+    if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] && [ "${LUMEN_ROLLBACK_YES:-}" != "1" ]; then
+        printf '\n'
+        log_warn "rollback 将切换到 release ${old_id}（镜像 tag=${old_tag:-<未知>}），并重启 api/worker/web。"
+        if ! confirm "继续 rollback？"; then
+            log_info "已取消。"
+            exit 0
+        fi
+    fi
+    log_step "rollback 到 release ${old_id}"
     if [ -z "${old_tag}" ]; then
         log_warn "未找到 ${deploy_root}/releases/${old_id}/.image-tag；rollback 将沿用当前 LUMEN_IMAGE_TAG。"
     else
