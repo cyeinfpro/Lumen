@@ -5,9 +5,18 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import dynamic from "next/dynamic";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Check, RotateCw, ChevronDown, Brain, Sparkles } from "lucide-react";
+import {
+  BookmarkPlus,
+  Brain,
+  Check,
+  ChevronDown,
+  Copy,
+  RotateCw,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Markdown } from "../Markdown";
 import { toast } from "@/components/ui/primitives";
@@ -16,6 +25,7 @@ import type { AssistantMessage, Generation, Intent } from "@/lib/types";
 import {
   acceptMemoryStaging,
   confirmMemory,
+  createMemory,
   getMemorySettings,
   listMemoryScopes,
   markMemoryOnboardingSeen,
@@ -24,6 +34,7 @@ import {
   patchMemoryStaging,
   rejectMemoryStaging,
   undoMemory,
+  type MemoryType,
 } from "@/lib/apiClient";
 import { useChatStore } from "@/store/useChatStore";
 
@@ -53,6 +64,13 @@ export function AssistantBubble({
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [confirmationDone, setConfirmationDone] = useState(false);
+  const [selectionFab, setSelectionFab] = useState<{
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [savePrefill, setSavePrefill] = useState<string | null>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
   const currentConvId = useChatStore((s) => s.currentConvId);
   const isStreamingText = msg.status === "streaming";
   const isThinking = isStreamingText && !!msg.thinking && !msg.text;
@@ -74,6 +92,43 @@ export function AssistantBubble({
       toast.error("复制失败", { description: "浏览器拒绝了剪贴板写入" });
     }
   };
+
+  // 选中助手回答里的一段文字 → 浮 FAB "记下这条". 用户单击 FAB 弹 modal,
+  // 默认归类为 preference, 可改 type / scope / 编辑 content 后保存为 manual memory.
+  const handleSelectionChange = () => {
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      setSelectionFab(null);
+      return;
+    }
+    const text = sel.toString().trim();
+    if (text.length < 2 || text.length > 200) {
+      setSelectionFab(null);
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const bubble = bubbleRef.current;
+    if (!bubble || !bubble.contains(range.commonAncestorContainer)) {
+      setSelectionFab(null);
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) {
+      setSelectionFab(null);
+      return;
+    }
+    setSelectionFab({
+      text,
+      x: rect.left + rect.width / 2,
+      y: rect.bottom,
+    });
+  };
+  useEffect(() => {
+    if (!selectionFab) return;
+    const onScroll = () => setSelectionFab(null);
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    return () => window.removeEventListener("scroll", onScroll, true);
+  }, [selectionFab]);
 
   return (
     <motion.div
@@ -139,6 +194,9 @@ export function AssistantBubble({
         {/* 文本气泡 */}
         {(msg.text || (isChatLike && !hasGenerations)) && (
           <div
+            ref={bubbleRef}
+            onMouseUp={handleSelectionChange}
+            onTouchEnd={handleSelectionChange}
             className={cn(
               "relative px-4 py-3 md:px-5 md:py-3.5 rounded-2xl rounded-bl-md text-[0.9rem] md:text-[0.95rem] leading-relaxed",
               "bg-[var(--bg-1)]/70 border border-[var(--border)] text-[var(--fg-0)]",
@@ -318,7 +376,178 @@ export function AssistantBubble({
           </div>
         )}
       </div>
+      {selectionFab && savePrefill === null && (
+        <button
+          type="button"
+          onMouseDown={(e) => {
+            e.preventDefault(); // 别让 click 清掉 selection
+          }}
+          onClick={() => {
+            setSavePrefill(selectionFab.text);
+            setSelectionFab(null);
+            window.getSelection()?.removeAllRanges();
+          }}
+          style={{
+            position: "fixed",
+            left: selectionFab.x,
+            top: selectionFab.y + 8,
+            transform: "translate(-50%, 0)",
+            zIndex: 50,
+          }}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-white/15 bg-[var(--bg-1)] px-2.5 py-1.5 text-xs text-[var(--fg-0)] shadow-lg backdrop-blur-sm hover:bg-white/[0.08]"
+        >
+          <BookmarkPlus className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
+          记下这条
+        </button>
+      )}
+      {savePrefill !== null && (
+        <SaveSelectionModal
+          defaultContent={savePrefill}
+          onClose={() => setSavePrefill(null)}
+        />
+      )}
     </motion.div>
+  );
+}
+
+const MEMORY_TYPE_OPTIONS: Array<{ value: MemoryType; label: string }> = [
+  { value: "preference", label: "偏好" },
+  { value: "profile", label: "身份" },
+  { value: "avoid", label: "禁忌" },
+  { value: "project", label: "项目" },
+];
+
+function SaveSelectionModal({
+  defaultContent,
+  onClose,
+}: {
+  defaultContent: string;
+  onClose: () => void;
+}) {
+  const [type, setType] = useState<MemoryType>("preference");
+  const [content, setContent] = useState(defaultContent.slice(0, 200));
+  const [scopeId, setScopeId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const scopesQ = useQuery({
+    queryKey: ["me", "memory", "scopes"],
+    queryFn: listMemoryScopes,
+    staleTime: 60_000,
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const handleSave = async () => {
+    const trimmed = content.trim();
+    if (!trimmed) {
+      toast.error("内容不能为空");
+      return;
+    }
+    setSaving(true);
+    try {
+      await createMemory({
+        type,
+        content: trimmed.slice(0, 200),
+        scope_id: scopeId,
+      });
+      toast.success("已加入记忆");
+      onClose();
+    } catch {
+      toast.error("保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 px-4 sm:items-center"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-medium text-[var(--fg-0)]">
+            <BookmarkPlus className="h-4 w-4 text-[var(--color-lumen-amber)]" />
+            记下这段
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1 text-[var(--fg-2)] hover:bg-white/5"
+            aria-label="关闭"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {MEMORY_TYPE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => setType(option.value)}
+              className={cn(
+                "rounded-lg border px-2.5 py-1 text-xs transition-colors",
+                type === option.value
+                  ? "border-[var(--color-lumen-amber)]/40 bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)]"
+                  : "border-white/10 text-[var(--fg-1)] hover:bg-white/5",
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value.slice(0, 200))}
+          rows={3}
+          className="mb-2 w-full rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+          placeholder="例:偏好简洁回答"
+        />
+        <div className="mb-4 flex items-center justify-between gap-2 text-[11px] text-[var(--fg-2)]">
+          <span>{content.length}/200</span>
+          {scopesQ.data && scopesQ.data.length > 0 && (
+            <select
+              value={scopeId ?? ""}
+              onChange={(e) => setScopeId(e.target.value || null)}
+              className="h-7 rounded-md border border-white/10 bg-white/[0.03] px-1.5 text-[11px] text-[var(--fg-1)] outline-none"
+            >
+              <option value="">默认作用域</option>
+              {scopesQ.data
+                .filter((scope) => !scope.is_default)
+                .map((scope) => (
+                  <option key={scope.id} value={scope.id}>
+                    {scope.emoji ? `${scope.emoji} ` : ""}
+                    {scope.name}
+                  </option>
+                ))}
+            </select>
+          )}
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="h-9 rounded-xl border border-white/10 px-4 text-sm text-[var(--fg-1)] hover:bg-white/5 disabled:opacity-50"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={saving || !content.trim()}
+            className="inline-flex h-9 items-center justify-center rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+          >
+            {saving ? "保存中…" : "保存"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -454,6 +683,8 @@ function MemoryWriteHint({
 }) {
   const [doneLabel, setDoneLabel] = useState<string | null>(null);
   const [scopeId, setScopeId] = useState(write.scope_id ?? "");
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [editedContent, setEditedContent] = useState(write.content ?? "");
   const scopesQ = useQuery({
     queryKey: ["me", "memory", "scopes"],
     queryFn: listMemoryScopes,
@@ -483,6 +714,17 @@ function MemoryWriteHint({
   const handleAccept = async () => {
     if (!write.id) return;
     try {
+      // 用户编辑过 content (点过"详细"改了文字), 先 patch staging 再 accept;
+      // 否则跳过 patch 直接 accept.
+      const trimmed = editedContent.trim();
+      if (
+        detailOpen &&
+        trimmed &&
+        trimmed !== (write.content ?? "").trim() &&
+        trimmed.length <= 200
+      ) {
+        await patchMemoryStaging(write.id, { content: trimmed });
+      }
       await acceptMemoryStaging(write.id);
       setDoneLabel("已加入记忆");
       toast.success("已加入记忆");
@@ -553,6 +795,13 @@ function MemoryWriteHint({
           >
             否
           </button>
+          <button
+            type="button"
+            onClick={() => setDetailOpen((v) => !v)}
+            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+          >
+            {detailOpen ? "收起" : "详细"}
+          </button>
         </>
       )}
       {write.undo_token && !doneLabel && (
@@ -570,6 +819,24 @@ function MemoryWriteHint({
       >
         管理
       </a>
+      {detailOpen && write.kind === "staged" && !doneLabel && (
+        <div className="mt-1 w-full rounded-lg border border-white/10 bg-white/[0.03] p-2 text-[11px] text-[var(--fg-2)]">
+          {write.source_excerpt && (
+            <div className="mb-2 leading-5 text-[var(--fg-2)]/80">
+              来源:{write.source_excerpt}
+            </div>
+          )}
+          <input
+            value={editedContent}
+            onChange={(e) => setEditedContent(e.target.value.slice(0, 200))}
+            className="h-7 w-full rounded-md border border-white/10 bg-white/[0.04] px-2 text-[11px] text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+            placeholder="编辑后再保存"
+          />
+          <div className="mt-1 text-right text-[10px] text-[var(--fg-2)]/70">
+            改完点上面的"是"以编辑后的内容入库
+          </div>
+        </div>
+      )}
     </div>
   );
 }
