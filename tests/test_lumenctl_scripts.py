@@ -460,8 +460,10 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "emit_start migrate_db" in text
     assert "emit_start switch" in text
     assert "emit_start restart_services" in text
-    # 阶段输出协议（phase=set_image_tag / phase=migrate_db 出现在最终日志）
-    assert 'lumen_emit_step "phase=$1"' in text
+    # 阶段输出协议：emit_start/done wrapper 走 lumen_emit_step。原来用
+    # "phase=$1"，现在 wrapper 内 local _phase=$1 后用 "phase=${_phase}"
+    # （加了 phase 耗时计时逻辑，见 install.sh 同款 wrapper）。
+    assert 'lumen_emit_step "phase=${_phase}"' in text
     # docker compose 关键命令
     assert "lumen_compose_in" in text
     assert "--profile migrate run --rm migrate" in text
@@ -936,6 +938,12 @@ def test_lumenctl_direct_commands_dispatch_to_expected_handlers() -> None:
 
 
 def test_lumenctl_interactive_menu_dispatches_all_numbered_options() -> None:
+    """菜单分组重构后的项映射（commit P：运行/维护/网络/⚠ 危险）：
+       9=nginx_scan, 10=nginx_optimize, 11=install, 12=update,
+       15=install_image_job, 16=uninstall_image_job, 17=uninstall。
+       本测试只验证这 7 个 dispatch 正确，不覆盖 1-8/13-14（compose/restore/rollback
+       需更多 mock）。
+    """
     result = assert_bash_ok(
         f"""
         . {LUMENCTL}
@@ -954,7 +962,7 @@ def test_lumenctl_interactive_menu_dispatches_all_numbered_options() -> None:
         nginx_scan() {{ printf 'nginx_scan\\n'; }}
         nginx_optimize() {{ printf 'nginx_optimize\\n'; }}
 
-        printf '1\\n2\\n3\\n4\\n5\\n6\\n7\\n0\\n' | show_menu
+        printf '11\\n12\\n17\\n15\\n16\\n9\\n10\\n0\\n' | show_menu
         """
     )
     dispatch_lines = [
@@ -1472,8 +1480,8 @@ def test_update_script_emits_set_image_tag_and_migrate_db_phases() -> None:
     assert "set_image_tag" in text
     assert "migrate_db" in text
     # phase=set_image_tag 与 phase=migrate_db 在最终输出里靠 emit_start 拼出，
-    # emit_start 的展开 = lumen_emit_step "phase=$1" "status=start"
-    assert 'lumen_emit_step "phase=$1"' in text
+    # 加耗时计时后 wrapper 用 local _phase=$1 + "phase=${_phase}"。
+    assert 'lumen_emit_step "phase=${_phase}"' in text
     assert "emit_start set_image_tag" in text
     assert "emit_start migrate_db" in text
     # 必须 source lib.sh 并 set -euo pipefail

@@ -297,31 +297,41 @@ log_info "operation_id：${OPERATION_ID}"
 # ---------------------------------------------------------------------------
 # 工具函数：emit 包装 + 安全 mask
 # ---------------------------------------------------------------------------
-declare -A _UPDATE_PHASE_START_TS=()
+# 用单变量而非 declare -A 关联数组，兼容 macOS bash 3.2（CI smoke runner）。
+# update.sh 的 emit_start/done 调用是顺序成对的（不交叉），单 LAST_PHASE
+# 足够；emit_fail 顺势清空。
+_UPDATE_LAST_PHASE=""
+_UPDATE_LAST_PHASE_START_TS=""
 emit_start() {
     local _phase="$1"
-    _UPDATE_PHASE_START_TS["${_phase}"]="$(date +%s 2>/dev/null || echo 0)"
+    _UPDATE_LAST_PHASE="${_phase}"
+    _UPDATE_LAST_PHASE_START_TS="$(date +%s 2>/dev/null || echo 0)"
     lumen_emit_step "phase=${_phase}" "status=start"
 }
 emit_done()  {
     local _phase="$1" _rc="${2:-0}"
-    local _start="${_UPDATE_PHASE_START_TS[${_phase}]:-}"
     local _dur_arg=""
-    if [ -n "${_start}" ] && [ "${_start}" -gt 0 ] 2>/dev/null; then
+    if [ "${_UPDATE_LAST_PHASE}" = "${_phase}" ] \
+            && [ -n "${_UPDATE_LAST_PHASE_START_TS}" ] \
+            && [ "${_UPDATE_LAST_PHASE_START_TS}" -gt 0 ] 2>/dev/null; then
         local _end _dur
         _end="$(date +%s 2>/dev/null || echo 0)"
-        _dur=$((_end - _start))
+        _dur=$((_end - _UPDATE_LAST_PHASE_START_TS))
         if [ "${_dur}" -ge 0 ]; then
             log_info "  ✓ ${_phase} 完成（耗时 ${_dur}s）"
             _dur_arg="dur_ms=$((_dur * 1000))"
         fi
+        _UPDATE_LAST_PHASE=""
+        _UPDATE_LAST_PHASE_START_TS=""
     fi
-    unset "_UPDATE_PHASE_START_TS[${_phase}]"
     lumen_emit_step "phase=${_phase}" "status=done" "rc=${_rc}" ${_dur_arg:+"${_dur_arg}"}
 }
 emit_fail()  {
     local _phase="$1" _rc="${2:-1}"
-    unset "_UPDATE_PHASE_START_TS[${_phase}]"
+    if [ "${_UPDATE_LAST_PHASE}" = "${_phase}" ]; then
+        _UPDATE_LAST_PHASE=""
+        _UPDATE_LAST_PHASE_START_TS=""
+    fi
     lumen_emit_step "phase=${_phase}" "status=fail" "rc=${_rc}"
 }
 emit_info()  { lumen_emit_info "phase=$1" "key=$2" "value=$3"; }
