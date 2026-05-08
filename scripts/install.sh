@@ -716,8 +716,8 @@ _install_health_compose() {
 # 阶段记录 wrapper
 # 记录每个 phase 的 wall-clock 起止时间，emit_step_done 时打印耗时摘要给
 # 终端用户（lumen_emit_step 的 dur_ms 仅写入 SSE 协议，终端看不到）。
+# 用单变量而非 declare -A 关联数组，兼容 macOS bash 3.2（CI smoke runner）。
 INSTALL_PHASE_START_TS=""
-declare -A INSTALL_PHASE_DURATIONS=()  # phase -> duration_seconds (decimal)
 
 _now_seconds() {
     # 高精度 wall-clock；macOS date 不支持 +%s.%N，用 perl 兜底，再不行用秒精度。
@@ -748,7 +748,6 @@ emit_step_done() {
         dur="$(awk -v s="${INSTALL_PHASE_START_TS}" -v e="${end_ts}" \
             'BEGIN { d = e - s; if (d < 0) d = 0; printf "%.1f", d }' 2>/dev/null || true)"
         if [ -n "${dur}" ]; then
-            INSTALL_PHASE_DURATIONS["${INSTALL_PHASE}"]="${dur}"
             log_info "  ✓ ${INSTALL_PHASE} 完成（耗时 ${dur}s）"
         fi
     fi
