@@ -2146,6 +2146,54 @@ lumen_compose_in() {
     ( cd "${dir}" && lumen_compose "$@" )
 }
 
+# 按镜像分组拉取 compose 中的所有 image：先 `compose config --images` 枚举，
+# 再逐个 `lumen_docker pull`，每个镜像之前打 `[i/n] image:tag` 头部分隔。
+# docker 自身的 layer 进度（下载条/速度）保留，TTY 下原地刷新；非 TTY 下虽然
+# 会逐行输出但每个镜像之间有清晰边界，不会像 `compose pull` 那样把所有镜像的
+# layer 进度混在一起刷屏。
+# 用法：lumen_compose_pull_per_image <compose_dir>
+# 枚举失败兜底回退 `lumen_compose_in <dir> pull`，保证最差也能 work。
+lumen_compose_pull_per_image() {
+    local compose_dir="$1"
+    if [ -z "${compose_dir}" ]; then
+        log_error "lumen_compose_pull_per_image: compose_dir 参数缺失"
+        return 1
+    fi
+    local images
+    if ! images="$(lumen_compose_in "${compose_dir}" config --images 2>/dev/null | sort -u)"; then
+        log_warn "无法枚举 compose 镜像列表（${compose_dir}），回退到默认 docker compose pull。"
+        lumen_compose_in "${compose_dir}" pull
+        return $?
+    fi
+    if [ -z "${images}" ]; then
+        log_warn "compose 镜像列表为空（${compose_dir}），跳过 pull。"
+        return 0
+    fi
+
+    local total idx=0 img rc=0
+    local failed=()
+    total="$(printf '%s\n' "${images}" | sed '/^$/d' | wc -l | tr -d ' ')"
+    log_info "拉取 ${total} 个镜像（按镜像分组，docker 进度保留）"
+    while IFS= read -r img; do
+        [ -z "${img}" ] && continue
+        idx=$((idx + 1))
+        printf '\n  [%d/%d] %s\n' "${idx}" "${total}" "${img}"
+        if ! lumen_docker pull "${img}"; then
+            failed+=("${img}")
+            rc=1
+        fi
+    done <<< "${images}"
+
+    if [ "${rc}" -ne 0 ]; then
+        log_error "以下镜像拉取失败（${#failed[@]}/${total}）："
+        local f
+        for f in "${failed[@]}"; do
+            log_error "  - ${f}"
+        done
+    fi
+    return "${rc}"
+}
+
 # 把 lumen-* 容器从任意 stale compose project 迁移到 LUMEN_COMPOSE_PROJECT
 # (默认 lumen)。idempotent — 没有 stale 直接返回。
 #

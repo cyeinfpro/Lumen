@@ -634,46 +634,11 @@ _install_compose() {
     fi
 }
 
-# 按镜像分组拉取：枚举 compose 镜像列表后逐个 lumen_docker pull，每个镜像
-# 之前打一个 `[i/n] image:tag` 头部分隔，docker 自己的 layer 进度（下载条/
-# 速度/已完成）保留显示。相比 docker compose pull 默认把所有镜像 layer 混在
-# 一起，本方式提供清晰的"当前在拉哪个镜像"边界，又能看到真实下载进度。
-# 在 TTY 下 docker pull 会原地刷新 layer 行，不会无限滚屏。
-# 枚举失败兜底回退到 `_install_compose pull`，保证最差也能 work。
+# 按镜像分组拉取的薄 wrapper，调 lib.sh:lumen_compose_pull_per_image。
+# 保留 _install_compose_pull_per_image 名字向后兼容（pull_or_build_images
+# 已在用），实际工作由 lib.sh 同款函数处理；update.sh 也走 lib.sh 一份。
 _install_compose_pull_per_image() {
-    local images
-    if ! images="$(_install_compose config --images 2>/dev/null | sort -u)"; then
-        log_warn "无法枚举 compose 镜像列表，回退默认 docker compose pull。"
-        _install_compose pull
-        return $?
-    fi
-    if [ -z "${images}" ]; then
-        log_warn "compose 镜像列表为空，跳过 pull。"
-        return 0
-    fi
-
-    local total idx=0 img rc=0 failed=()
-    total="$(printf '%s\n' "${images}" | sed '/^$/d' | wc -l | tr -d ' ')"
-    log_info "拉取 ${total} 个镜像（按镜像分组，docker 进度保留）"
-    while IFS= read -r img; do
-        [ -z "${img}" ] && continue
-        idx=$((idx + 1))
-        # 头部前后各空一行让 docker 自己的 layer 行有视觉边界
-        printf '\n  [%d/%d] %s\n' "${idx}" "${total}" "${img}"
-        if ! lumen_docker pull "${img}"; then
-            failed+=("${img}")
-            rc=1
-        fi
-    done <<< "${images}"
-
-    if [ "${rc}" -ne 0 ]; then
-        log_error "以下镜像拉取失败（${#failed[@]}/${total}）："
-        local f
-        for f in "${failed[@]}"; do
-            log_error "  - ${f}"
-        done
-    fi
-    return "${rc}"
+    lumen_compose_pull_per_image "${RELEASE_DIR:-${ROOT}}"
 }
 
 # 健康检查 wrapper
