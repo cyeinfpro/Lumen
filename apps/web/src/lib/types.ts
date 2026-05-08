@@ -424,6 +424,13 @@ export type SystemSettingKey =
   | "context.compression_circuit_breaker_threshold"
   | "context.manual_compact_min_input_tokens"
   | "context.manual_compact_cooldown_seconds"
+  | "byok.mode_enabled"
+  | "auth.byok_signup_enabled"
+  | "auth.byok_signup_bypasses_allowlist"
+  | "byok.fallback_to_admin_provider"
+  | "byok.validation_model"
+  | "byok.validation_timeout_ms"
+  | "byok.pending_token_ttl_seconds"
   | "providers";
 
 export interface SystemSettingItem {
@@ -592,6 +599,123 @@ export interface ProviderStatsOut {
   items: ProviderStatsItem[];
   auto_probe_interval: number;
   auto_image_probe_interval: number;
+}
+
+// ---------- BYOK ----------
+
+export type ByokPurpose = "chat" | "image" | "embedding";
+
+export interface ByokSettingsOut {
+  mode_enabled: boolean;
+  byok_signup_enabled: boolean;
+  byok_signup_bypasses_allowlist: boolean;
+  fallback_to_admin_provider: boolean;
+  validation_model: string;
+  validation_timeout_ms: number;
+  pending_token_ttl_seconds: number;
+}
+
+export interface ByokSettingsPatchIn {
+  mode_enabled?: boolean;
+  byok_signup_enabled?: boolean;
+  byok_signup_bypasses_allowlist?: boolean;
+  fallback_to_admin_provider?: boolean;
+  validation_model?: string;
+  validation_timeout_ms?: number;
+  pending_token_ttl_seconds?: number;
+}
+
+export interface ApiSupplierTemplateOut {
+  id: string;
+  name: string;
+  slug: string;
+  base_url: string;
+  enabled: boolean;
+  public_signup_enabled: boolean;
+  user_bind_enabled: boolean;
+  purposes: ByokPurpose[];
+  validation_model: string;
+  default_chat_model: string;
+  fast_chat_model: string | null;
+  validation_timeout_ms: number;
+  proxy_name: string | null;
+  text_concurrency_per_key: number;
+  image_concurrency_per_key: number;
+  capabilities_jsonb: Record<string, unknown>;
+  active_credentials: number;
+  recent_success_rate: number | null;
+  recent_error_counts: Record<string, number>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiSupplierTemplatePublicOut {
+  id: string;
+  name: string;
+  purposes: ByokPurpose[];
+  validation_model: string;
+}
+
+export interface ApiSupplierTemplateListOut {
+  items: ApiSupplierTemplateOut[];
+}
+
+export interface ApiSupplierTemplatePublicListOut {
+  items: ApiSupplierTemplatePublicOut[];
+}
+
+export interface ApiSupplierTemplateIn {
+  name: string;
+  slug?: string | null;
+  base_url: string;
+  enabled: boolean;
+  public_signup_enabled: boolean;
+  user_bind_enabled: boolean;
+  purposes: ByokPurpose[];
+  validation_model: string;
+  default_chat_model: string;
+  fast_chat_model?: string | null;
+  validation_timeout_ms: number;
+  proxy_name?: string | null;
+  text_concurrency_per_key: number;
+  image_concurrency_per_key: number;
+  capabilities_jsonb?: Record<string, unknown>;
+}
+
+export interface ApiKeyVerifyOut {
+  ok: boolean;
+  verification_token: string;
+  supplier_id: string;
+  key_hint: string;
+  verified_at: string;
+}
+
+// 与 packages/core/lumen_core/schemas.py ApiSupplierProbeOut 对齐。
+// 管理员探活 /admin/api-suppliers/{id}/probe 的返回。
+export interface ApiSupplierProbeOut {
+  ok: boolean;
+  error_code: string | null;
+  http_status: number | null;
+  latency_ms: number;
+  key_hint: string | null;
+}
+
+export interface UserApiCredentialOut {
+  id: string;
+  supplier_id: string;
+  supplier_name: string;
+  key_hint: string;
+  status: string;
+  last_verified_at: string | null;
+  last_failed_at: string | null;
+  last_error_code: string | null;
+  rate_limited_until: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserApiCredentialListOut {
+  items: UserApiCredentialOut[];
 }
 
 export interface SessionOut {

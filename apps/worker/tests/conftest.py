@@ -22,6 +22,13 @@ TESTS_DIR = str(Path(__file__).resolve().parent)
 os.environ.setdefault(
     "STORAGE_ROOT", f"{tempfile.gettempdir()}/lumen-worker-test-storage"
 )
+# 测试环境给 BYOK master secret 一个稳定的 dev 值，避免新加的 worker config 校验
+# （dev ≥16 chars / prod ≥32 chars）让 import app.config 直接抛 ValueError。
+os.environ.setdefault(
+    "BYOK_API_KEY_MASTER_SECRET",
+    "test-byok-master-secret-0123456789-test",
+)
+os.environ.setdefault("APP_ENV", "test")
 
 
 def _switch_to_worker_app() -> None:

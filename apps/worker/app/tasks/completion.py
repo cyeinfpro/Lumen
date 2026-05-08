@@ -73,6 +73,13 @@ from lumen_core.models import (
 from .. import runtime_settings
 from ..config import settings
 from ..db import SessionLocal
+from ..byok_runtime import (
+    byok_error_message,
+    byok_error_to_generation_code,
+    classify_user_credential_error,
+    record_user_credential_runtime_error,
+    resolve_user_credential_runtime,
+)
 from ..observability import (
     get_tracer,
     safe_outcome,
@@ -2399,6 +2406,8 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     _task_outcome = "unknown"
     attempt = 0
     attempt_epoch = 0
+    user_api_credential_id: str | None = None
+    runtime_override: Any | None = None
 
     # --- 1. 读 completion 行 ---
     async with SessionLocal() as session:
@@ -2424,6 +2433,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         user_id = comp.user_id
         message_id = comp.message_id
         system_prompt = comp.system_prompt
+        user_api_credential_id = getattr(comp, "user_api_credential_id", None)
         # 关键：chat 走 /v1/responses 但要用聊天模型（gpt-5.5 等），
         # 而 UPSTREAM_MODEL 是图像模型 gpt-image-2，不能跨用
         chat_model = comp.model or DEFAULT_CHAT_MODEL
@@ -2536,6 +2546,22 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         _stream_span_cm = None
 
     try:
+        if user_api_credential_id:
+            async with SessionLocal() as session:
+                runtime_override = await resolve_user_credential_runtime(
+                    session,
+                    user_api_credential_id,
+                )
+            # purpose 守卫：completion (chat / responses) 任务要求 supplier purposes
+            # 包含 "chat"。不命中直接抛 byok_purpose_mismatch，由外层 except 走
+            # record_user_credential_runtime_error + 任务失败路径，不污染 admin pool。
+            if "chat" not in (getattr(runtime_override, "purposes", ()) or ()):
+                raise UpstreamError(
+                    "user API key supplier does not allow chat purpose",
+                    status_code=403,
+                    error_code="byok_purpose_mismatch",
+                    payload={"credential_id": user_api_credential_id},
+                )
         # --- 4. 组 body ---
         reasoning_effort: str | None = None
         fast_mode = False
@@ -2649,7 +2675,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         if lease_lost.is_set():
             raise _LeaseLost("lease lost before stream start")
         completed_response: dict[str, Any] | None = None
-        async for ev in stream_completion(body):
+        async for ev in stream_completion(body, runtime_override=runtime_override):
             if lease_lost.is_set():
                 raise _LeaseLost("lease lost during stream")
             ev_type = ev.get("type", "")
@@ -3016,6 +3042,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     except Exception as exc:  # noqa: BLE001
         upstream_calls_total.labels(kind="completion", outcome="error").inc()
         decision = _classify_exception(exc, has_partial)
+        _byok_terminal, byok_error = classify_user_credential_error(exc)
+        if user_api_credential_id and byok_error:
+            await record_user_credential_runtime_error(user_api_credential_id, exc)
+            decision = RetryDecision(False, f"byok {byok_error}")
         _err_code_log = getattr(exc, "error_code", None) or type(exc).__name__
         _http_status_log = getattr(exc, "status_code", None)
         logger.warning(
@@ -3030,8 +3060,16 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         )
         logger.debug("completion exc trace task=%s", task_id, exc_info=True)
 
-        err_code = getattr(exc, "error_code", None) or type(exc).__name__
-        err_msg = str(exc)[:2000]
+        err_code = (
+            byok_error_to_generation_code(byok_error)
+            if user_api_credential_id and byok_error
+            else getattr(exc, "error_code", None) or type(exc).__name__
+        )
+        err_msg = (
+            byok_error_message(byok_error)
+            if user_api_credential_id and byok_error
+            else str(exc)[:2000]
+        )
         _task_outcome = "retry" if (
             decision.retriable and attempt < _MAX_ATTEMPTS
         ) else "failed"

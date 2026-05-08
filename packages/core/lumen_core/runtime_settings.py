@@ -172,6 +172,76 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         max_value=86400,
     ),
     SettingSpec(
+        key="byok.mode_enabled",
+        description="BYOK 总开关。0=关闭，1=开启。关闭时隐藏 key-first 注册和用户绑定入口。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BYOK_MODE_ENABLED",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="auth.byok_signup_enabled",
+        description="是否开放未登录 key-first 注册入口。0=关闭，1=开启。",
+        sensitive=False,
+        parser=int,
+        env_fallback="AUTH_BYOK_SIGNUP_ENABLED",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="auth.byok_signup_bypasses_allowlist",
+        description="BYOK 注册是否绕过邮箱白名单或邀请链接。0=仍要求白名单/邀请，1=key 验证通过即可注册。",
+        sensitive=False,
+        parser=int,
+        env_fallback="AUTH_BYOK_SIGNUP_BYPASSES_ALLOWLIST",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="byok.fallback_to_admin_provider",
+        description="用户 key 失败或删除时是否允许回退站长全局 Provider Pool。默认 0。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BYOK_FALLBACK_TO_ADMIN_PROVIDER",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="byok.validation_model",
+        # review #33：SettingSpec 当前不支持 min_string_length；admin 把空白
+        # 提交进来时由 byok_service.read_byok_settings 在读取阶段 strip + 回退到
+        # BYOK_DEFAULT_VALIDATION_MODEL（"gpt-5.4"），不会让 worker 拿到空字符串
+        # 去构造上游请求。如果以后 SettingSpec 加上 min_string_length，就把这条
+        # 校验下沉到 parse_value 走早失败更直接。
+        description="用户 API Key 验证模型。默认 gpt-5.4。空白会在 byok_service 读取时回退到默认值。",
+        sensitive=False,
+        parser=str,
+        env_fallback="BYOK_VALIDATION_MODEL",
+    ),
+    SettingSpec(
+        key="byok.validation_timeout_ms",
+        description="用户 API Key 验证超时毫秒。默认 15000。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BYOK_VALIDATION_TIMEOUT_MS",
+        min_value=1000,
+        max_value=120000,
+    ),
+    SettingSpec(
+        key="byok.pending_token_ttl_seconds",
+        description="key 验证通过到 BYOK 注册之间的一次性 token TTL。默认 900 秒。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BYOK_PENDING_TOKEN_TTL_SECONDS",
+        min_value=60,
+        max_value=3600,
+    ),
+    SettingSpec(
         key="image.primary_route",
         description=(
             "(DEPRECATED) 旧图像主路径；已迁移为 image.channel + image.engine。"

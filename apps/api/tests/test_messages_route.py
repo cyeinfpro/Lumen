@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -111,6 +111,33 @@ def _conv() -> SimpleNamespace:
 
 def _user() -> SimpleNamespace:
     return SimpleNamespace(id="user-1", default_system_prompt_id=None)
+
+
+def _credential() -> SimpleNamespace:
+    return SimpleNamespace(id="cred-1", supplier_id="supplier-1")
+
+
+def _rate_limited_credential() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="cred-1",
+        supplier_id="supplier-1",
+        rate_limited_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+
+def _supplier(
+    *,
+    purposes: list[str] | None = None,
+    fast_chat_model: str | None = "gpt-fast",
+    default_image_model: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="supplier-1",
+        purposes=purposes or ["chat", "image"],
+        default_chat_model="gpt-custom",
+        fast_chat_model=fast_chat_model,
+        default_image_model=default_image_model,
+    )
 
 
 def test_image_upstream_request_uses_explicit_render_quality_for_4k() -> None:
@@ -354,6 +381,353 @@ async def test_post_message_persists_chat_tool_params(
         "code_interpreter": True,
         "image_generation": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_post_message_pins_chat_task_to_active_user_api_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_appended(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_assistant_task(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_get_setting(_db: Any, _spec: Any) -> str | None:
+        return None
+
+    async def noop_pending_confirmation(**_kwargs: Any) -> None:
+        return None
+
+    async def noop_explicit_memory(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=False)
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "get_setting", fake_get_setting)
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
+    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages,
+        "_apply_pending_confirmation_reply",
+        noop_pending_confirmation,
+    )
+    monkeypatch.setattr(messages, "_apply_explicit_memory_write", noop_explicit_memory)
+
+    db = _Db([
+        _Result(_conv()),
+        _Result(None),
+        _Result(None),
+        _Result((_credential(), _supplier(purposes=["chat"]))),
+    ])
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-byok-chat",
+            text="hello",
+            intent="chat",
+            chat_params=ChatParamsIn(fast=True),
+        ),
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    comp = next(item for item in db.added if item.__class__.__name__ == "Completion")
+    assert comp.user_api_credential_id == "cred-1"
+    assert comp.upstream_supplier_id == "supplier-1"
+    assert comp.model == "gpt-fast"
+
+
+@pytest.mark.asyncio
+async def test_post_message_pins_image_task_to_active_user_api_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_appended(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_assistant_task(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_get_setting(_db: Any, _spec: Any) -> str | None:
+        return None
+
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=False)
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "get_setting", fake_get_setting)
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
+    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+
+    db = _Db([
+        _Result(_conv()),
+        _Result(None),
+        _Result(None),
+        _Result((_credential(), _supplier(purposes=["image"]))),
+    ])
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-byok-image",
+            text="make an image",
+            intent="text_to_image",
+            image_params=ImageParamsIn(
+                aspect_ratio="1:1",
+                size_mode="fixed",
+                fixed_size="1024x1024",
+                fast=False,
+            ),
+        ),
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
+    assert gen.user_api_credential_id == "cred-1"
+    assert gen.upstream_supplier_id == "supplier-1"
+    assert gen.upstream_request["responses_model"] == "gpt-custom"
+
+
+@pytest.mark.asyncio
+async def test_post_message_image_task_uses_supplier_default_image_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When supplier exposes default_image_model, image generations pin to it
+    and chat completions still use default_chat_model. Guards against the
+    review #12 regression where image tasks reused chat models."""
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_appended(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_assistant_task(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_get_setting(_db: Any, _spec: Any) -> str | None:
+        return None
+
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=False)
+
+    async def noop_pending_confirmation(**_kwargs: Any) -> None:
+        return None
+
+    async def noop_explicit_memory(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "get_setting", fake_get_setting)
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
+    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages,
+        "_apply_pending_confirmation_reply",
+        noop_pending_confirmation,
+    )
+    monkeypatch.setattr(messages, "_apply_explicit_memory_write", noop_explicit_memory)
+
+    image_supplier = _supplier(
+        purposes=["image"],
+        default_image_model="gpt-image-1",
+    )
+    image_db = _Db([
+        _Result(_conv()),
+        _Result(None),
+        _Result(None),
+        _Result((_credential(), image_supplier)),
+    ])
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-byok-image-model",
+            text="generate a sunset",
+            intent="text_to_image",
+            image_params=ImageParamsIn(
+                aspect_ratio="1:1",
+                size_mode="fixed",
+                fixed_size="1024x1024",
+                fast=False,
+            ),
+        ),
+        _user(),  # type: ignore[arg-type]
+        image_db,  # type: ignore[arg-type]
+    )
+    gen = next(
+        item for item in image_db.added if item.__class__.__name__ == "Generation"
+    )
+    assert gen.upstream_request["responses_model"] == "gpt-image-1"
+
+    chat_supplier = _supplier(
+        purposes=["chat"],
+        fast_chat_model=None,
+        default_image_model="gpt-image-1",  # should be ignored for chat
+    )
+    chat_db = _Db([
+        _Result(_conv()),
+        _Result(None),
+        _Result(None),
+        _Result((_credential(), chat_supplier)),
+    ])
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-byok-chat-model",
+            text="hello",
+            intent="chat",
+        ),
+        _user(),  # type: ignore[arg-type]
+        chat_db,  # type: ignore[arg-type]
+    )
+    comp = next(
+        item for item in chat_db.added if item.__class__.__name__ == "Completion"
+    )
+    assert comp.model == "gpt-custom"
+
+
+@pytest.mark.asyncio
+async def test_user_api_credential_without_required_purpose_blocks_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=False)
+
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    db = _Db([_Result((_credential(), _supplier(purposes=["chat"])))])
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._resolve_task_credential_pin(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "image",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "user_api_key_required"
+
+
+@pytest.mark.asyncio
+async def test_user_api_credential_without_required_purpose_can_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=True)
+
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    db = _Db([_Result((_credential(), _supplier(purposes=["chat"])))])
+
+    pin = await messages._resolve_task_credential_pin(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        "user-1",
+        "image",
+    )
+
+    assert pin is None
+
+
+@pytest.mark.asyncio
+async def test_historical_user_api_credential_blocks_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=False)
+
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    db = _Db([_Result(None), _Result("cred-old")])
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._resolve_task_credential_pin(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "chat",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "user_api_key_required"
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_user_api_credential_can_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=True)
+
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    db = _Db([_Result((_rate_limited_credential(), _supplier(purposes=["chat"])))])
+
+    pin = await messages._resolve_task_credential_pin(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        "user-1",
+        "chat",
+    )
+
+    assert pin is None
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_user_api_credential_blocks_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=True, fallback_to_admin_provider=False)
+
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    db = _Db([_Result((_rate_limited_credential(), _supplier(purposes=["chat"])))])
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._resolve_task_credential_pin(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "chat",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "user_api_key_required"
+
+
+@pytest.mark.asyncio
+async def test_user_api_credential_is_ignored_when_byok_mode_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(mode_enabled=False, fallback_to_admin_provider=False)
+
+    monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
+    monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
+    db = _Db([_Result((_credential(), _supplier(purposes=["chat"])))])
+
+    pin = await messages._resolve_task_credential_pin(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        "user-1",
+        "chat",
+    )
+
+    assert pin is None
+    assert db.statements == []
 
 
 @pytest.mark.asyncio
@@ -945,3 +1319,299 @@ async def test_publish_assistant_task_does_not_rollback_on_redis_failure(
     )
 
     assert db.rolled_back is False
+
+
+# ---------------------------------------------------------------------------
+# BYOK signup branch tests (review #26).
+#
+# These exercise the privacy-sensitive paths in auth.signup_byok:
+#   - expired pending token
+#   - email already taken must return invalid_verification_token (not
+#     email_taken) per design §8.3 to prevent user enumeration
+#   - bypasses_allowlist=True path inserts AllowedEmail for consistency
+# ---------------------------------------------------------------------------
+
+from fastapi import Request as _BYOKRequest  # noqa: E402
+from starlette.responses import Response as _BYOKResponse  # noqa: E402
+
+from app.routes import auth as auth_routes  # noqa: E402
+from lumen_core.schemas import SignupByokIn  # noqa: E402
+
+
+def _byok_request() -> _BYOKRequest:
+    return _BYOKRequest(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/auth/signup/byok",
+            "headers": [(b"user-agent", b"test-byok-client/1.0")],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+
+class _BYOKDb:
+    """Minimal AsyncSession stub for auth.signup_byok unit tests.
+
+    Each call to execute() pops one queued result; flush/commit/rollback are
+    tracked but no-op. Mirrors the _Db helpers in test_auth_security.py but
+    keeps the byok-specific shape (with_for_update + scalar_one_or_none).
+    """
+
+    def __init__(self, results: list[Any] | None = None) -> None:
+        self.results: list[Any] = list(results or [])
+        self.added: list[Any] = []
+        self.committed = False
+        self.rolled_back = False
+
+    async def execute(self, _stmt: Any) -> Any:
+        value = self.results.pop(0) if self.results else None
+
+        class _R:
+            def __init__(self, v: Any) -> None:
+                self._v = v
+
+            def scalar_one_or_none(self) -> Any:
+                return self._v
+
+            def scalars(self) -> "_R":
+                return self
+
+            def first(self) -> Any:
+                return self._v
+
+        return _R(value)
+
+    def add(self, value: Any) -> None:
+        self.added.append(value)
+        if getattr(value, "id", None) is None:
+            value.id = f"new-{len(self.added)}"
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
+    async def refresh(self, _value: Any) -> None:
+        return None
+
+
+async def _patch_byok_signup_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def enabled_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            mode_enabled=True,
+            byok_signup_enabled=True,
+            byok_signup_bypasses_allowlist=False,
+            fallback_to_admin_provider=False,
+            validation_model="gpt-validate",
+            validation_timeout_ms=15_000,
+            pending_token_ttl_seconds=900,
+        )
+
+    async def fake_runtime_defaults(_db: Any) -> Any:
+        from lumen_core.schemas import RuntimeDefaultsOut
+
+        return RuntimeDefaultsOut(fast=True)
+
+    async def no_audit(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def no_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(auth_routes, "read_byok_settings", enabled_settings)
+    monkeypatch.setattr(auth_routes, "_runtime_defaults", fake_runtime_defaults)
+    monkeypatch.setattr(auth_routes, "write_audit", no_audit)
+    monkeypatch.setattr(auth_routes, "write_audit_isolated", no_audit)
+    monkeypatch.setattr(auth_routes, "verify_password", lambda _h, _p: False)
+    monkeypatch.setattr(auth_routes, "hash_password", lambda _p: "hashed-pw")
+
+
+@pytest.mark.asyncio
+async def test_signup_byok_token_expired_returns_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expired pending token → 400 invalid_verification_token, no user created."""
+
+    await _patch_byok_signup_baseline(monkeypatch)
+
+    expired_pending = SimpleNamespace(
+        consumed_at=None,
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        supplier_id="supplier-1",
+        key_ciphertext="cipher",
+        key_hash="hash",
+        key_hint="sk-x...xxxx",
+        verified_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+    )
+
+    # Order: User existence check (None) -> pending token lookup (expired)
+    db = _BYOKDb(results=[None, expired_pending])
+
+    with pytest.raises(Exception) as excinfo:
+        await auth_routes.signup_byok(
+            SignupByokIn(
+                email="newuser@example.com",
+                password="securepass123",
+                verification_token="vt-expired",
+            ),
+            _byok_request(),
+            _BYOKResponse(),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_verification_token"
+    assert db.committed is False
+    # Pending token must not be consumed on failure (set later in success path).
+    assert expired_pending.consumed_at is None
+
+
+@pytest.mark.asyncio
+async def test_signup_byok_email_taken_returns_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Email already registered must NOT reveal email_taken — that would leak
+    enumeration data per §8.3. Same generic invalid_verification_token error."""
+
+    await _patch_byok_signup_baseline(monkeypatch)
+
+    existing_user = SimpleNamespace(id="user-1", email="taken@example.com")
+    # First execute() returns the existing user; pending token is never queried
+    # because the email check now precedes it.
+    db = _BYOKDb(results=[existing_user])
+
+    with pytest.raises(Exception) as excinfo:
+        await auth_routes.signup_byok(
+            SignupByokIn(
+                email="taken@example.com",
+                password="securepass123",
+                verification_token="vt-any",
+            ),
+            _byok_request(),
+            _BYOKResponse(),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert (
+        excinfo.value.detail["error"]["code"] == "invalid_verification_token"
+    ), "must NOT leak email_taken — privacy regression"
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_signup_byok_token_consumed_returns_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Already-consumed pending token → 400 invalid_verification_token."""
+
+    await _patch_byok_signup_baseline(monkeypatch)
+
+    consumed_pending = SimpleNamespace(
+        consumed_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        supplier_id="supplier-1",
+        key_ciphertext="cipher",
+        key_hash="hash",
+        key_hint="sk-x...xxxx",
+        verified_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+    db = _BYOKDb(results=[None, consumed_pending])
+
+    with pytest.raises(Exception) as excinfo:
+        await auth_routes.signup_byok(
+            SignupByokIn(
+                email="fresh@example.com",
+                password="securepass123",
+                verification_token="vt-consumed",
+            ),
+            _byok_request(),
+            _BYOKResponse(),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_verification_token"
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_signup_byok_bypass_allowlist_inserts_allowed_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When byok_signup_bypasses_allowlist=True and the email is NOT yet in
+    AllowedEmail, signup_byok must succeed AND insert an AllowedEmail row with
+    invited_by=None — review #35: keeps the allowlist data view consistent
+    with the invite-based path so OAuth/re-signup flows see the same
+    authorization shape."""
+
+    await _patch_byok_signup_baseline(monkeypatch)
+
+    async def bypass_settings(_db: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            mode_enabled=True,
+            byok_signup_enabled=True,
+            byok_signup_bypasses_allowlist=True,
+            fallback_to_admin_provider=False,
+            validation_model="gpt-validate",
+            validation_timeout_ms=15_000,
+            pending_token_ttl_seconds=900,
+        )
+
+    monkeypatch.setattr(auth_routes, "read_byok_settings", bypass_settings)
+
+    async def fake_user_out(user: Any, _db: Any) -> Any:
+        return SimpleNamespace(id=user.id, email=user.email, role=user.role)
+
+    monkeypatch.setattr(
+        auth_routes, "_user_out_with_runtime_defaults", fake_user_out
+    )
+
+    valid_pending = SimpleNamespace(
+        consumed_at=None,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        supplier_id="supplier-1",
+        key_ciphertext="cipher",
+        key_hash="hash",
+        key_hint="sk-x...xxxx",
+        verified_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+
+    # execute() result order:
+    #   1. existing user check  -> None (email is fresh)
+    #   2. pending token lookup -> valid_pending
+    #   3. AllowedEmail lookup  -> None (NOT in allowlist; bypass exercise)
+    db = _BYOKDb(results=[None, valid_pending, None])
+
+    result = await auth_routes.signup_byok(
+        SignupByokIn(
+            email="bypass-user@example.com",
+            password="securepass123",
+            verification_token="vt-bypass",
+        ),
+        _byok_request(),
+        _BYOKResponse(),
+        db,  # type: ignore[arg-type]
+    )
+
+    from lumen_core.models import AllowedEmail
+    from lumen_core.models import User as UserModel
+    from lumen_core.models import UserApiCredential as CredModel
+
+    user_added = next((x for x in db.added if isinstance(x, UserModel)), None)
+    cred_added = next((x for x in db.added if isinstance(x, CredModel)), None)
+    allowed_added = next((x for x in db.added if isinstance(x, AllowedEmail)), None)
+
+    assert db.committed is True
+    assert valid_pending.consumed_at is not None
+    assert user_added is not None
+    assert cred_added is not None
+    assert allowed_added is not None, "AllowedEmail must be inserted on bypass path (review #35)"
+    assert allowed_added.email == "bypass-user@example.com"
+    assert allowed_added.invited_by is None
+    assert result.email == "bypass-user@example.com"

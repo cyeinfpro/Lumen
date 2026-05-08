@@ -11,11 +11,18 @@ package。pytest 同 session 收集两套测试，sys.modules 里 `app.*` 会按
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
 API_ROOT = str(Path(__file__).resolve().parents[1])
 TESTS_DIR = str(Path(__file__).resolve().parent)
+
+os.environ.setdefault(
+    "BYOK_API_KEY_MASTER_SECRET",
+    "test-byok-master-secret-0123456789-test",
+)
+os.environ.setdefault("APP_ENV", "test")
 
 
 def _switch_to_api_app() -> None:

@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     # 留空则返回 deep_link=None，前端自拼。
     telegram_bot_username: str = ""
 
+    # BYOK 用户 API Key 加密主密钥。明文 key 只在请求生命周期中出现；
+    # 数据库持久化前使用 AES-GCM 加密，HMAC-SHA256 计算 key_hash。
+    byok_api_key_master_secret: str = ""
+
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
         if self.session_ttl_min < 5:
@@ -152,7 +156,21 @@ class Settings(BaseSettings):
             except ValueError as exc:
                 raise ValueError(f"invalid TRUSTED_PROXIES CIDR: {cidr}") from exc
         env = self.app_env.strip().lower()
-        if env not in {"dev", "development", "local", "test"}:
+        is_dev = env in {"dev", "development", "local", "test"}
+        # Why: BYOK_API_KEY_MASTER_SECRET is required *in every environment* —
+        # without it AES-GCM encryption can't deterministically derive a key
+        # and every restart would silently invalidate stored credentials.
+        # Dev gets a relaxed minimum (16 chars) but cannot be empty; prod
+        # demands ≥32 chars (production-grade entropy).
+        byok_secret = self.byok_api_key_master_secret.strip()
+        byok_min_len = 16 if is_dev else 32
+        if len(byok_secret) < byok_min_len:
+            raise ValueError(
+                f"BYOK_API_KEY_MASTER_SECRET must be at least {byok_min_len} characters "
+                f"({'development' if is_dev else 'production'} mode); generate with: "
+                "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+        if not is_dev:
             secret = self.session_secret.strip()
             if not secret:
                 raise ValueError("SESSION_SECRET must be set outside development")

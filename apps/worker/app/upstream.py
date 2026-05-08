@@ -3843,6 +3843,16 @@ def _pool_release_inflight(pool: Any, name: str, endpoint_kind: str | None) -> N
         fn(name, endpoint_kind)
 
 
+def _is_byok_provider(provider: Any) -> bool:
+    """BYOK 用户凭证 runtime（``user:<slug>:<id>``）应跳过 admin pool 计数。
+
+    与 ``app.byok_runtime.is_byok_provider`` 同义，但本模块定义本地副本以避免
+    ``byok_runtime`` ↔ ``upstream`` 互相 import 形成循环依赖。
+    """
+    name = getattr(provider, "name", "") or ""
+    return isinstance(name, str) and name.startswith("user:")
+
+
 def _pool_report_image_success(
     pool: Any, name: str, *, endpoint_kind: str | None = None
 ) -> None:
@@ -3850,6 +3860,10 @@ def _pool_report_image_success(
 
     新代码 lane 调用统一走这里，避免一个旧测试桩让上线代码崩。endpoint_kind 仅
     用于 inflight 排序维度更新，缺失退回到全局 last_used_at 的旧行为。
+
+    注意：本函数本身**不识别 BYOK provider**——调用方需要在外层用
+    ``_is_byok_provider`` 守卫，避免把用户 BYOK runtime 写入 admin pool 的
+    image health/quota 维度。
     """
     fn = getattr(pool, "report_image_success", None)
     if not callable(fn):
@@ -4225,12 +4239,18 @@ async def _direct_generate_image_with_failover(
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
                 result = await _direct_generate_image_once(**kwargs)
-                _pool_report_image_success(pool, provider.name, endpoint_kind="generations")
-                await asyncio.shield(
-                    account_limiter.record_image_call(
-                        _provider_pool_redis(pool), provider.name
+                # BYOK provider 的成功 / 失败统计走 byok_runtime + UserApiCredential
+                # 字段；admin pool 的 image health / quota / inflight 维度不应被
+                # 用户 runtime 污染（review #2 强约束）。
+                if not _is_byok_provider(provider):
+                    _pool_report_image_success(
+                        pool, provider.name, endpoint_kind="generations"
                     )
-                )
+                    await asyncio.shield(
+                        account_limiter.record_image_call(
+                            _provider_pool_redis(pool), provider.name
+                        )
+                    )
                 await _emit_image_progress(
                     progress_callback,
                     "provider_used",
@@ -4271,12 +4291,13 @@ async def _direct_generate_image_with_failover(
                     )
                     raise
                 is_rl, retry_after = _is_image_rate_limit_error(exc)
-                if is_rl:
-                    pool.report_image_rate_limited(
-                        provider.name, retry_after_s=retry_after
-                    )
-                else:
-                    pool.report_image_failure(provider.name)
+                if not _is_byok_provider(provider):
+                    if is_rl:
+                        pool.report_image_rate_limited(
+                            provider.name, retry_after_s=retry_after
+                        )
+                    else:
+                        pool.report_image_failure(provider.name)
                 remaining = len(providers) - i - 1
                 if remaining > 0:
                     logger.warning(
@@ -4622,7 +4643,11 @@ async def _image_job_with_failover(
                     raise
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
-                    pool.record_endpoint_failure(provider.name, endpoint)
+                    # admin pool 的 endpoint 健康度 (per-provider/per-endpoint
+                    # latency / failure rate) 不应记录 BYOK runtime——会让 admin
+                    # endpoint_chain auto 排序被用户号污染。
+                    if not _is_byok_provider(provider):
+                        pool.record_endpoint_failure(provider.name, endpoint)
                     decision = classify_retriable(
                         getattr(exc, "error_code", None),
                         getattr(exc, "status_code", None),
@@ -4663,15 +4688,19 @@ async def _image_job_with_failover(
                 else:
                     # Success path.
                     latency_ms = (time.monotonic() - started) * 1000.0
-                    pool.record_endpoint_success(
-                        provider.name, endpoint, latency_ms=latency_ms
-                    )
-                    _pool_report_image_success(pool, provider.name, endpoint_kind=inflight_ek)
-                    await asyncio.shield(
-                        account_limiter.record_image_call(
-                            _provider_pool_redis(pool), provider.name
+                    # 同 record_endpoint_failure：BYOK provider 不写 admin pool。
+                    if not _is_byok_provider(provider):
+                        pool.record_endpoint_success(
+                            provider.name, endpoint, latency_ms=latency_ms
                         )
-                    )
+                        _pool_report_image_success(
+                            pool, provider.name, endpoint_kind=inflight_ek
+                        )
+                        await asyncio.shield(
+                            account_limiter.record_image_call(
+                                _provider_pool_redis(pool), provider.name
+                            )
+                        )
                     await _emit_image_progress(
                         progress_callback,
                         "provider_used",
@@ -4703,12 +4732,13 @@ async def _image_job_with_failover(
                 continue
             errors.append(last_exc)
             is_rl, retry_after = _is_image_rate_limit_error(last_exc)
-            if is_rl:
-                pool.report_image_rate_limited(
-                    provider.name, retry_after_s=retry_after
-                )
-            else:
-                pool.report_image_failure(provider.name)
+            if not _is_byok_provider(provider):
+                if is_rl:
+                    pool.report_image_rate_limited(
+                        provider.name, retry_after_s=retry_after
+                    )
+                else:
+                    pool.report_image_failure(provider.name)
             remaining = len(providers) - i - 1
             if remaining > 0:
                 logger.warning(
@@ -4891,12 +4921,17 @@ async def _direct_edit_image_with_failover(
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
                 result = await _direct_edit_image_once(**kwargs)
-                _pool_report_image_success(pool, provider.name, endpoint_kind="generations")
-                await asyncio.shield(
-                    account_limiter.record_image_call(
-                        _provider_pool_redis(pool), provider.name
+                # BYOK runtime 不进 admin pool；与 _direct_generate_image_with_failover
+                # 同样的隔离原则。
+                if not _is_byok_provider(provider):
+                    _pool_report_image_success(
+                        pool, provider.name, endpoint_kind="generations"
                     )
-                )
+                    await asyncio.shield(
+                        account_limiter.record_image_call(
+                            _provider_pool_redis(pool), provider.name
+                        )
+                    )
                 await _emit_image_progress(
                     progress_callback,
                     "provider_used",
@@ -4937,12 +4972,13 @@ async def _direct_edit_image_with_failover(
                     )
                     raise
                 is_rl, retry_after = _is_image_rate_limit_error(exc)
-                if is_rl:
-                    pool.report_image_rate_limited(
-                        provider.name, retry_after_s=retry_after
-                    )
-                else:
-                    pool.report_image_failure(provider.name)
+                if not _is_byok_provider(provider):
+                    if is_rl:
+                        pool.report_image_rate_limited(
+                            provider.name, retry_after_s=retry_after
+                        )
+                    else:
+                        pool.report_image_failure(provider.name)
                 remaining = len(providers) - i - 1
                 if remaining > 0:
                     logger.warning(
@@ -5047,13 +5083,20 @@ async def _responses_image_stream_with_failover(
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
                 result = await _responses_image_stream_with_retry(**kwargs)
-                _pool_report_image_success(pool, provider.name, endpoint_kind="responses")
-                # 入账：滑动窗口 + 当日计数（rate_limit/daily_quota 都为空时短路不查 Redis）
-                await asyncio.shield(
-                    account_limiter.record_image_call(
-                        _provider_pool_redis(pool), provider.name, task_id=task_id
+                # BYOK runtime 不进 admin pool；用户 credential 健康度由
+                # byok_runtime.record_user_credential_runtime_error 单独维护。
+                if not _is_byok_provider(provider):
+                    _pool_report_image_success(
+                        pool, provider.name, endpoint_kind="responses"
                     )
-                )
+                    # 入账：滑动窗口 + 当日计数（rate_limit/daily_quota 都为空时短路不查 Redis）
+                    await asyncio.shield(
+                        account_limiter.record_image_call(
+                            _provider_pool_redis(pool),
+                            provider.name,
+                            task_id=task_id,
+                        )
+                    )
                 await _emit_image_progress(
                     progress_callback,
                     "provider_used",
@@ -5087,12 +5130,13 @@ async def _responses_image_stream_with_failover(
                 # 以下都是 retriable：分流到 image_rate_limited（号没额度，定时冷却）
                 # 或 image_failure（号在抖动，3 次累计触发 image cooldown）。
                 is_rl, retry_after = _is_image_rate_limit_error(exc)
-                if is_rl:
-                    pool.report_image_rate_limited(
-                        provider.name, retry_after_s=retry_after
-                    )
-                else:
-                    pool.report_image_failure(provider.name)
+                if not _is_byok_provider(provider):
+                    if is_rl:
+                        pool.report_image_rate_limited(
+                            provider.name, retry_after_s=retry_after
+                        )
+                    else:
+                        pool.report_image_failure(provider.name)
                 remaining = len(providers) - i - 1
                 if remaining > 0:
                     logger.warning(
@@ -6600,7 +6644,11 @@ async def _iter_sse_with_runtime(
             logger.debug("failed to log upstream call meta", exc_info=True)
 
 
-async def _iter_sse(body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+async def _iter_sse(
+    body: dict[str, Any],
+    *,
+    runtime_override: Any | None = None,
+) -> AsyncIterator[dict[str, Any]]:
     """共享的 SSE 读循环。按 OpenAI Responses SSE 协议逐事件 yield。
 
     事件形状：`{ "type": "<event name>", ...payload }`。上游的事件名通常同时出现在
@@ -6614,7 +6662,7 @@ async def _iter_sse(body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     # Model 显式 pin：上层 completion.py 已经从 settings.upstream_default_model 等地方
     # 读出来，这里只做运行时断言防漏发。
     assert body.get("model"), "model must be set"
-    runtime = await _resolve_runtime()
+    runtime = runtime_override or await _resolve_runtime()
     base, api_key, proxy = _runtime_parts(runtime)
     proxy_url = await resolve_provider_proxy_url(proxy)
     async for event in _iter_sse_with_runtime(
@@ -6627,14 +6675,18 @@ async def _iter_sse(body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         yield event
 
 
-async def stream_completion(body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+async def stream_completion(
+    body: dict[str, Any],
+    *,
+    runtime_override: Any | None = None,
+) -> AsyncIterator[dict[str, Any]]:
     """流式 completion：消费者关注 `response.output_text.delta` 的 `delta` 字段，
     收到 `response.completed` 后结束。
 
     取消安全：内部 `_iter_sse_with_runtime` 的 try/except/finally 已经显式 aclose
     httpx response 并 reraise CancelledError，不 swallow。
     """
-    async for ev in _iter_sse(body):
+    async for ev in _iter_sse(body, runtime_override=runtime_override):
         yield ev
 
 

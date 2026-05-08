@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import (
+    DEFAULT_CHAT_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     EV_COMP_QUEUED,
@@ -49,7 +50,12 @@ from lumen_core.constants import (
     conv_channel,
     task_channel,
 )
+from lumen_core.memory import (
+    canonical_memory_text,
+    extract_memories,
+)
 from lumen_core.models import (
+    ApiSupplierTemplate,
     Completion,
     Conversation,
     Generation,
@@ -59,13 +65,11 @@ from lumen_core.models import (
     OutboxEvent,
     SystemPrompt,
     User,
+    UserApiCredential,
     UserMemory,
     UserMemoryScope,
 )
-from lumen_core.memory import (
-    canonical_memory_text,
-    extract_memories,
-)
+from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     ChatParamsIn,
     ImageParamsIn,
@@ -73,10 +77,13 @@ from lumen_core.schemas import (
     PostMessageIn,
     PostMessageOut,
 )
-from lumen_core.runtime_settings import get_spec
 from lumen_core.sizing import ResolvedSize, resolve_size
 
 from ..arq_pool import get_arq_pool
+# Why: read_byok_settings is re-exported here so existing tests that
+# monkeypatch `messages.read_byok_settings` keep working. Production code on
+# this path uses read_byok_settings_cached (TTL ~30 s) — see review #20.
+from ..byok_service import read_byok_settings, read_byok_settings_cached  # noqa: F401
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..intent import resolve_intent
@@ -755,6 +762,94 @@ class AssistantTaskResult:
     outbox_rows: list[OutboxEvent]
 
 
+@dataclass(frozen=True)
+class _TaskCredentialPin:
+    credential_id: str
+    supplier_id: str
+    default_chat_model: str
+    fast_chat_model: str | None
+    # Why: image tasks must NOT reuse default_chat_model. If supplier exposes
+    # a dedicated image model field (Group B migration), we pin the
+    # generation row to that; otherwise fall back to default_chat_model
+    # so existing suppliers keep working.
+    default_image_model: str | None
+
+
+async def _resolve_task_credential_pin(
+    db: AsyncSession,
+    user_id: str,
+    required_purpose: str,
+) -> _TaskCredentialPin | None:
+    byok_settings = await read_byok_settings_cached(db)
+    if not byok_settings.mode_enabled:
+        return None
+
+    active_row = (
+        await db.execute(
+            select(UserApiCredential, ApiSupplierTemplate)
+            .join(ApiSupplierTemplate, ApiSupplierTemplate.id == UserApiCredential.supplier_id)
+            .where(
+                UserApiCredential.user_id == user_id,
+                UserApiCredential.status == "active",
+                UserApiCredential.deleted_at.is_(None),
+                ApiSupplierTemplate.deleted_at.is_(None),
+                ApiSupplierTemplate.enabled.is_(True),
+            )
+            .order_by(UserApiCredential.created_at.desc())
+            .limit(1)
+            )
+    ).first()
+    if active_row is not None:
+        active, supplier = active_row
+        rate_limited_until = getattr(active, "rate_limited_until", None)
+        if rate_limited_until is not None:
+            if rate_limited_until.tzinfo is None:
+                rate_limited_until = rate_limited_until.replace(tzinfo=timezone.utc)
+            if rate_limited_until > datetime.now(timezone.utc):
+                if byok_settings.fallback_to_admin_provider:
+                    return None
+                raise _http(
+                    "user_api_key_required",
+                    "your API key is currently rate limited",
+                    409,
+                )
+        if required_purpose not in set(supplier.purposes or []):
+            if not byok_settings.fallback_to_admin_provider:
+                raise _http(
+                    "user_api_key_required",
+                    "your current API Key does not support this task type",
+                    409,
+                )
+            return None
+        return _TaskCredentialPin(
+            credential_id=active.id,
+            supplier_id=active.supplier_id,
+            default_chat_model=supplier.default_chat_model or DEFAULT_CHAT_MODEL,
+            fast_chat_model=supplier.fast_chat_model,
+            # default_image_model is added by Group B migration. getattr
+            # tolerates the pre-migration shape where the field is absent.
+            default_image_model=getattr(supplier, "default_image_model", None),
+        )
+
+    any_credential = (
+        await db.execute(
+            select(UserApiCredential.id)
+            .where(UserApiCredential.user_id == user_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if any_credential is None:
+        return None
+
+    if byok_settings.fallback_to_admin_provider:
+        return None
+    raise _http(
+        "user_api_key_required",
+        "please update your API key before starting new tasks",
+        409,
+    )
+
+
 async def _create_assistant_task(
     *,
     db: AsyncSession,
@@ -811,11 +906,24 @@ async def _create_assistant_task(
     completion_id: str | None = None
     generation_ids: list[str] = []
     outbox_payloads: list[dict[str, Any]] = []
+    credential_pin = await _resolve_task_credential_pin(
+        db,
+        user_id,
+        "image" if produces_image else "chat",
+    )
 
     if intent in (Intent.CHAT, Intent.VISION_QA):
+        task_chat_model = (
+            credential_pin.fast_chat_model
+            if credential_pin and chat_params.fast and credential_pin.fast_chat_model
+            else credential_pin.default_chat_model
+            if credential_pin
+            else DEFAULT_CHAT_MODEL
+        )
         comp = Completion(
             message_id=assistant_msg.id,
             user_id=user_id,
+            model=task_chat_model,
             input_image_ids=attachment_ids if intent == Intent.VISION_QA else [],
             system_prompt=system_prompt,
             text="",
@@ -824,6 +932,10 @@ async def _create_assistant_task(
             attempt=0,
             idempotency_key=idempotency_key,
             upstream_request=_chat_upstream_request(chat_params),
+            user_api_credential_id=(
+                credential_pin.credential_id if credential_pin else None
+            ),
+            upstream_supplier_id=credential_pin.supplier_id if credential_pin else None,
         )
         db.add(comp)
         await db.flush()
@@ -852,6 +964,15 @@ async def _create_assistant_task(
             prompt=prompt_full,
             default_output_format=default_image_output_format,
         )
+        if credential_pin:
+            # Why: image tasks must use the supplier's image model when
+            # available — chat models (e.g. gpt-5.4) cannot generate images
+            # and would produce upstream 400s. fast_chat_model is reserved
+            # for chat-only fast tier and is intentionally NOT used here.
+            upstream_request["responses_model"] = (
+                credential_pin.default_image_model
+                or credential_pin.default_chat_model
+            )
         if upstream_request.get("background") == "transparent":
             prompt_full += _transparent_background_prompt_suffix()
 
@@ -876,6 +997,12 @@ async def _create_assistant_task(
                 attempt=0,
                 idempotency_key=idem,
                 upstream_request=dict(upstream_request),
+                user_api_credential_id=(
+                    credential_pin.credential_id if credential_pin else None
+                ),
+                upstream_supplier_id=(
+                    credential_pin.supplier_id if credential_pin else None
+                ),
             )
             db.add(gen)
             await db.flush()
@@ -1464,7 +1591,7 @@ async def submit_user_message(
 # 用于重画（reroll）和放大（upscale）场景。
 # ---------------------------------------------------------------------------
 
-from pydantic import BaseModel, Field as PydanticField
+from pydantic import BaseModel, Field as PydanticField  # noqa: E402
 
 
 class SilentGenerationIn(BaseModel):

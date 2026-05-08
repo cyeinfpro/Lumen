@@ -13,6 +13,7 @@ from sqlalchemy import (
     ARRAY,
     Boolean,
     DateTime,
+    Enum as SAEnum,
     ForeignKey,
     Float,
     Index,
@@ -27,6 +28,15 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .constants import DEFAULT_CHAT_MODEL
+
+
+# review #14：BYOK 凭证状态全局唯一来源；migration / ORM / route / worker 共用。
+USER_API_CREDENTIAL_STATUSES: tuple[str, ...] = (
+    "active",
+    "invalid",
+    "replaced",
+    "revoked",
+)
 
 
 def new_uuid7() -> str:
@@ -104,6 +114,15 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_users_alive", "deleted_at"),
     )
 
+    # review #23：BYOK 凭证反向关系。lazy="raise" 强制显式 selectinload，
+    # 防止 user 序列化时无意触发 N+1。
+    api_credentials: Mapped[list["UserApiCredential"]] = relationship(
+        "UserApiCredential",
+        back_populates="user",
+        foreign_keys="UserApiCredential.user_id",
+        lazy="raise",
+    )
+
 
 class AllowedEmail(Base, TimestampMixin):
     """邮箱白名单：注册/OAuth 回调时查，命中才创建 user（DESIGN §4 users 注释）。"""
@@ -149,6 +168,197 @@ class SystemPrompt(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+# ---------- BYOK Supplier Templates / User Credentials ----------
+
+class ApiSupplierTemplate(Base, TimestampMixin, SoftDeleteMixin):
+    """Admin-managed BYOK supplier template.
+
+    This stores a trusted upstream URL and model/capability metadata only. It
+    never stores an administrator API key and is intentionally separate from
+    the global Provider Pool in ``system_settings.providers``.
+    """
+
+    __tablename__ = "api_supplier_templates"
+    # review #5：slug 全表唯一会阻塞软删后再次创建同名；改为 partial unique index
+    # `uq_api_supplier_templates_slug_active`，仅在 deleted_at IS NULL 时唯一。
+    # 该索引在 migration 0019 里维护；ORM 仅声明非唯一 helper index 用于查询。
+    __table_args__ = (
+        Index("ix_api_supplier_templates_enabled", "enabled", "deleted_at"),
+        Index(
+            "uq_api_supplier_templates_slug_active",
+            "slug",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default=text("true")
+    )
+    public_signup_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=text("false")
+    )
+    user_bind_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default=text("true")
+    )
+    purposes: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    validation_model: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="gpt-5.4", server_default="gpt-5.4"
+    )
+    default_chat_model: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="gpt-5.4", server_default="gpt-5.4"
+    )
+    # review #12：image 任务用 default_chat_model 在 chat-only supplier 上会错配。
+    # 显式独立列；nullable=True 因为并非所有 supplier 都支持 image 生成，
+    # 由 admin 在创建/编辑 supplier 时显式选填。
+    default_image_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, default=None
+    )
+    fast_chat_model: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default="gpt-5.4-mini"
+    )
+    validation_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=15_000, server_default="15000"
+    )
+    proxy_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    text_concurrency_per_key: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=4, server_default="4"
+    )
+    image_concurrency_per_key: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    capabilities_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # review #23：双向关系，避免 worker / route 手写 JOIN 时漏 deleted_at 过滤；
+    # lazy="raise" 强制显式 selectinload / joinedload，避免 N+1。
+    credentials: Mapped[list["UserApiCredential"]] = relationship(
+        "UserApiCredential",
+        back_populates="supplier",
+        lazy="raise",
+    )
+
+
+class UserApiCredential(Base, TimestampMixin, SoftDeleteMixin):
+    """Encrypted user-owned API key bound to one supplier template."""
+
+    __tablename__ = "user_api_credentials"
+    __table_args__ = (
+        Index("ix_user_api_credentials_user_status", "user_id", "status"),
+        Index("ix_user_api_credentials_supplier", "supplier_id"),
+        # review #2：上游 401 反查 / dedup 命中 key_hash 直接走索引。
+        Index("ix_user_api_credentials_key_hash", "key_hash"),
+        Index(
+            "uq_user_api_credentials_one_active",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'active' AND deleted_at IS NULL"),
+            sqlite_where=text("status = 'active' AND deleted_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # review #29：supplier 真删极少（admin UI 只软删）；保留 RESTRICT 阻止
+    # 误把活跃绑定的 supplier 物理删掉。软删走 deleted_at，FK 不会触发。
+    supplier_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("api_supplier_templates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    key_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    key_hint: Mapped[str] = mapped_column(String(64), nullable=False)
+    encryption_key_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="v1", server_default="v1"
+    )
+    # review #14：用 PG enum 类型，与 migration 同步定义。create_type=False
+    # 确保 ORM metadata create_all 不重复 CREATE TYPE（migration 已建好）。
+    status: Mapped[str] = mapped_column(
+        SAEnum(
+            *USER_API_CREDENTIAL_STATUSES,
+            name="user_api_credential_status",
+            create_type=False,
+        ),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rate_limited_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    capabilities_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+    # review #23：back_populates 双向；lazy="raise" 强制显式 eager load。
+    supplier: Mapped["ApiSupplierTemplate"] = relationship(
+        "ApiSupplierTemplate",
+        back_populates="credentials",
+    )
+    user: Mapped["User"] = relationship(
+        "User",
+        back_populates="api_credentials",
+        foreign_keys=[user_id],
+    )
+
+
+class PendingApiKeyVerification(Base, TimestampMixin):
+    """Short-lived one-time token for key-first signup."""
+
+    __tablename__ = "pending_api_key_verifications"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_pending_api_key_verifications_token_hash"),
+        Index("ix_pending_api_key_verifications_expires", "expires_at"),
+        Index("ix_pending_api_key_verifications_supplier", "supplier_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    supplier_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("api_supplier_templates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    key_hint: Mapped[str] = mapped_column(String(64), nullable=False)
+    challenge_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ua_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 # ---------- Conversations / Messages ----------
@@ -398,6 +608,16 @@ class Generation(Base, TimestampMixin):
         String(36), nullable=True
     )
     upstream_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    user_api_credential_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("user_api_credentials.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    upstream_supplier_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("api_supplier_templates.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     progress_stage: Mapped[str] = mapped_column(
         String(32), nullable=False, default="queued"
@@ -413,6 +633,14 @@ class Generation(Base, TimestampMixin):
     )
     upstream_pixels: Mapped[int | None] = mapped_column(Integer, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # review #23：方便 worker / route 通过 generation 反查 BYOK 凭证；
+    # 没有 back_populates，单向即可（避免 UserApiCredential 上挂海量任务列表）。
+    user_api_credential: Mapped["UserApiCredential | None"] = relationship(
+        "UserApiCredential",
+        foreign_keys="Generation.user_api_credential_id",
+        lazy="raise",
+    )
 
 
 class Completion(Base, TimestampMixin):
@@ -441,6 +669,16 @@ class Completion(Base, TimestampMixin):
     )
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     upstream_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    user_api_credential_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("user_api_credentials.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    upstream_supplier_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("api_supplier_templates.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -458,6 +696,14 @@ class Completion(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # review #23：与 Generation.user_api_credential 对称，方便从 completion 反查
+    # BYOK 凭证；单向，避免 UserApiCredential 挂海量历史任务列表。
+    user_api_credential: Mapped["UserApiCredential | None"] = relationship(
+        "UserApiCredential",
+        foreign_keys="Completion.user_api_credential_id",
+        lazy="raise",
+    )
 
 
 # ---------- Images ----------
@@ -952,5 +1198,9 @@ __all__ = [
     "AuditLog",
     "OutboxDeadLetter",
     "TelegramBinding",
+    "ApiSupplierTemplate",
+    "UserApiCredential",
+    "PendingApiKeyVerification",
+    "USER_API_CREDENTIAL_STATUSES",
     "new_uuid7",
 ]

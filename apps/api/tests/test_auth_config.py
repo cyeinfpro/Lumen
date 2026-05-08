@@ -12,6 +12,7 @@ def _prod_kwargs() -> dict[str, str]:
     return {
         "app_env": "prod",
         "session_secret": "x" * 32,
+        "byok_api_key_master_secret": "b" * 32,
         "database_url": "postgresql+asyncpg://lumen_prod:secret@localhost:5432/lumen",
         "redis_url": "redis://:redis-prod-password@localhost:6379/0",
     }
@@ -47,6 +48,22 @@ def test_dev_default_session_secret_is_empty(monkeypatch: pytest.MonkeyPatch) ->
 def test_non_dev_no_longer_requires_upstream_api_key() -> None:
     settings = Settings(**_prod_kwargs())
     assert settings.app_env == "prod"
+
+
+def test_non_dev_requires_byok_master_secret() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["byok_api_key_master_secret"] = ""
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_non_dev_rejects_short_byok_master_secret() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["byok_api_key_master_secret"] = "short"
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
 
 
 def test_non_dev_rejects_default_postgres_credentials() -> None:

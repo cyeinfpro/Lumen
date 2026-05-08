@@ -7,6 +7,7 @@ import {
   BarChart3,
   Brain,
   FileText,
+  KeyRound,
   LogOut,
   Lock,
   Shield,
@@ -98,6 +99,12 @@ export function AccountCenter() {
           href="/settings/privacy"
           icon={<Lock className="w-4 h-4" />}
           label="隐私 & 数据"
+          grouped
+        />
+        <AccountRow
+          href="/settings/api-key"
+          icon={<KeyRound className="w-4 h-4" />}
+          label="API Key"
           grouped
         />
         <AccountRow
