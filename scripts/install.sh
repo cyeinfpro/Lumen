@@ -581,13 +581,16 @@ validate_redis_password() {
 # 在 .env 文件里精确替换 KEY=value 行（避免全局 sed 误伤 §21.1）。
 # 用法：env_file_set <file> <key> <value>
 # 注意：value 不允许包含换行 / 单引号；用 dotenv_quote 校验。
+# 在目标文件同 fs 下 mktemp，确保 mv 是 POSIX 原子 rename。默认 mktemp 在
+# /tmp，与 /opt/lumen/shared/ 跨 fs 时退化为 copy+unlink，断电瞬间存在空文件窗口。
 env_file_set() {
     local file="$1"
     local key="$2"
     local value="$3"
     validate_dotenv_value "${key}" "${value}" || return 1
-    local tmp
-    tmp="$(mktemp)" || return 1
+    local tmp dir
+    dir="$(dirname "${file}")"
+    tmp="$(mktemp "${dir}/.lumen-env.XXXXXX" 2>/dev/null)" || tmp="$(mktemp)" || return 1
     # awk 行级精确替换：只动 ^KEY= 开头的行；其它原样保留。
     awk -v k="${key}" -v v="${value}" '
         BEGIN { replaced=0 }
@@ -1300,11 +1303,17 @@ prepare_env_file() {
     fi
 
     # 创建 release/.env -> ../../shared/.env 的相对 symlink
-    # docker compose 默认从 -f 所在目录加载 .env；让它读到 shared/.env
-    if [ -e "${RELEASE_DIR}/.env" ] || [ -L "${RELEASE_DIR}/.env" ]; then
-        rm -f "${RELEASE_DIR}/.env"
+    # docker compose 默认从 -f 所在目录加载 .env；让它读到 shared/.env。
+    # 用 lumen_atomic_replace_symlink 替代 rm -f + ln -s 的两步操作，避免
+    # 中间窗口（compose 在此瞬间读 .env 会拿到 ENOENT）。
+    if command -v lumen_atomic_replace_symlink >/dev/null 2>&1; then
+        lumen_atomic_replace_symlink "../../shared/.env" "${RELEASE_DIR}/.env"
+    else
+        if [ -e "${RELEASE_DIR}/.env" ] || [ -L "${RELEASE_DIR}/.env" ]; then
+            rm -f "${RELEASE_DIR}/.env"
+        fi
+        ln -s "../../shared/.env" "${RELEASE_DIR}/.env"
     fi
-    ln -s "../../shared/.env" "${RELEASE_DIR}/.env"
     log_info "已 symlink ${RELEASE_DIR}/.env -> ../../shared/.env"
 
     # 友善提示：PUBLIC_BASE_URL / CORS_ALLOW_ORIGINS / NEXT_PUBLIC_API_BASE 保留默认
@@ -1492,11 +1501,14 @@ run_bootstrap_admin() {
 
     # bootstrap 容器读 LUMEN_ADMIN_EMAIL / LUMEN_ADMIN_PASSWORD env（compose 已声明）
     # 不写入 .env（§10.3：不要把管理员密码写入 .env）
+    # 注意：不再把 --password 作为 CLI 位置参数传，避免密码出现在 host
+    # `ps -ef` / docker inspect Args / journalctl logs 里。bootstrap.py 已支持
+    # 读 LUMEN_ADMIN_PASSWORD env 兜底（commit G）。
     if ! LUMEN_ADMIN_EMAIL="${admin_email}" LUMEN_ADMIN_PASSWORD="${admin_pwd}" \
             _install_compose --profile bootstrap run --rm \
             -e "LUMEN_ADMIN_EMAIL=${admin_email}" \
             -e "LUMEN_ADMIN_PASSWORD=${admin_pwd}" \
-            bootstrap python -m app.scripts.bootstrap "${admin_email}" --role admin --password "${admin_pwd}"; then
+            bootstrap python -m app.scripts.bootstrap "${admin_email}" --role admin; then
         log_warn "bootstrap 返回非零。常见原因：管理员账号已存在；继续后续步骤。"
         log_warn "  如需重置密码，登录后到管理面板修改，或手动 DELETE 后重跑本脚本。"
     fi
