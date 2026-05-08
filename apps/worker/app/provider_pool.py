@@ -22,10 +22,12 @@ import httpx
 from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
+    DEFAULT_PROVIDER_PURPOSES,
     ProviderProxyDefinition,
     build_effective_provider_config,
     endpoint_kind_allowed,
     provider_supports_route,
+    route_to_purpose,
     resolve_provider_proxy_url,
 )
 
@@ -75,6 +77,7 @@ class ProviderConfig:
     priority: int = 0
     weight: int = 1
     enabled: bool = True
+    purposes: tuple[str, ...] = DEFAULT_PROVIDER_PURPOSES
     proxy_name: str | None = None
     proxy: ProviderProxyDefinition | None = field(
         default=None, repr=False, compare=False
@@ -165,6 +168,7 @@ class ResolvedProvider:
     image_jobs_base_url: str = ""
     image_edit_input_transport: str = "url"
     image_concurrency: int = 1
+    purposes: tuple[str, ...] = DEFAULT_PROVIDER_PURPOSES
     responses_supported: bool | None = None
     image_generations_supported: bool | None = None
     image_responses_supported: bool | None = None
@@ -242,6 +246,7 @@ class ProviderPool:
                 priority=p.priority,
                 weight=p.weight,
                 enabled=p.enabled,
+                purposes=p.purposes,
                 proxy_name=p.proxy_name,
                 proxy=p.proxy,
                 image_rate_limit=p.image_rate_limit,
@@ -287,6 +292,7 @@ class ProviderPool:
                             priority=p.priority,
                             weight=p.weight,
                             enabled=p.enabled,
+                            purposes=p.purposes,
                             proxy_name=p.proxy_name,
                             proxy=p.proxy,
                             image_rate_limit=p.image_rate_limit,
@@ -350,6 +356,7 @@ class ProviderPool:
         *,
         endpoint_kind: str | None = None,
         route: str = "text",
+        purpose: str | None = None,
     ) -> list[ResolvedProvider]:
         from .upstream import UpstreamError
 
@@ -362,7 +369,10 @@ class ProviderPool:
             )
 
         by_priority: dict[int, list[ProviderConfig]] = {}
+        effective_purpose = purpose or route_to_purpose(route)
         for p in enabled:
+            if effective_purpose not in p.purposes:
+                continue
             if not endpoint_kind_allowed(p, endpoint_kind):
                 continue
             # capability gate（image-stability-hardening §P2）：capability=False 显式排除；
@@ -417,6 +427,7 @@ class ProviderPool:
                         image_jobs_base_url=p.image_jobs_base_url,
                         image_edit_input_transport=p.image_edit_input_transport,
                         image_concurrency=p.image_concurrency,
+                        purposes=p.purposes,
                         responses_supported=p.responses_supported,
                         image_generations_supported=p.image_generations_supported,
                         image_responses_supported=p.image_responses_supported,
@@ -490,6 +501,7 @@ class ProviderPool:
         self,
         *,
         route: str = "text",
+        purpose: str | None = None,
         ignore_cooldown: bool = False,
         task_id: str | None = None,
         endpoint_kind: str | None = None,
@@ -513,8 +525,10 @@ class ProviderPool:
         把 sidecar 能力和 direct 能力拆开，避免把 sidecar 配置泄漏成普适过滤器。
         """
         await self._maybe_reload()
+        effective_purpose = purpose or route_to_purpose(route)
         if route == "image":
             return await self._select_for_image(
+                purpose=effective_purpose,
                 ignore_cooldown=ignore_cooldown,
                 task_id=task_id,
                 endpoint_kind=endpoint_kind,
@@ -524,6 +538,7 @@ class ProviderPool:
             )
         if route == "image_jobs":
             return await self._select_for_image(
+                purpose=effective_purpose,
                 ignore_cooldown=ignore_cooldown,
                 task_id=task_id,
                 endpoint_kind=endpoint_kind,
@@ -533,10 +548,18 @@ class ProviderPool:
             )
         if route == "text":
             endpoint_kind = endpoint_kind or "responses"
-        return self._select_ordered(endpoint_kind=endpoint_kind, route=route)
+        if effective_purpose == "embedding":
+            endpoint_kind = endpoint_kind or "responses"
+        return self._select_ordered(
+            endpoint_kind=endpoint_kind,
+            route=route,
+            purpose=effective_purpose,
+        )
 
-    async def select_one(self, *, route: str = "text") -> ResolvedProvider:
-        providers = await self.select(route=route)
+    async def select_one(
+        self, *, route: str = "text", purpose: str | None = None
+    ) -> ResolvedProvider:
+        providers = await self.select(route=route, purpose=purpose)
         return providers[0]
 
     def _record_request_stats(
@@ -555,6 +578,7 @@ class ProviderPool:
     async def _select_for_image(
         self,
         *,
+        purpose: str = "image",
         ignore_cooldown: bool = False,
         task_id: str | None = None,
         endpoint_kind: str | None = None,
@@ -586,7 +610,9 @@ class ProviderPool:
         """
         from .upstream import UpstreamError
 
-        enabled = [p for p in self._providers if p.enabled]
+        enabled = [
+            p for p in self._providers if p.enabled and purpose in p.purposes
+        ]
         if not enabled:
             raise UpstreamError(
                 "no upstream providers configured or all disabled",
@@ -773,6 +799,7 @@ class ProviderPool:
                 image_edit_input_transport=p.image_edit_input_transport,
                 image_concurrency=p.image_concurrency,
                 responses_supported=p.responses_supported,
+                purposes=p.purposes,
                 image_generations_supported=p.image_generations_supported,
                 image_responses_supported=p.image_responses_supported,
             )

@@ -54,6 +54,7 @@ import {
   patchConversation,
   patchSystemPrompt,
   patchWorkflow,
+  patchProviderEnabled,
   approveModelCandidate,
   approveProductAnalysis,
   completeWorkflowDelivery,
@@ -138,6 +139,7 @@ import type {
   InviteLinkOut,
   InviteLinkPublicOut,
   ProviderItemIn,
+  ProviderItemOut,
   ProviderProxyIn,
   ProvidersOut,
   ProvidersProbeOut,
@@ -643,6 +645,23 @@ export function useUpdateProvidersMutation(
     ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] }
   >({
     mutationFn: (payload) => updateProviders(payload),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.providers() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function usePatchProviderEnabledMutation(
+  options?: Omit<
+    UseMutationOptions<ProviderItemOut, Error, { name: string; enabled: boolean }>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<ProviderItemOut, Error, { name: string; enabled: boolean }>({
+    mutationFn: ({ name, enabled }) => patchProviderEnabled(name, enabled),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.invalidateQueries({ queryKey: qk.providers() });

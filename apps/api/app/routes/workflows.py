@@ -214,7 +214,41 @@ TEMPLATE_LABELS = {
     "social_seed": "自然种草",
 }
 
-def _template_requirement(template: str, product_analysis: dict[str, Any]) -> str:
+SCENE_ENVIRONMENT_TEMPLATES = frozenset({
+    "daily_snapshot",
+    "natural_phone_snapshot",
+    "social_seed",
+})
+
+
+def _scene_environment_outdoor_phrase(template: str, category: str) -> str:
+    """3 个生活化模板的户外变体；indoor 走原 prompt 保持原有场景锚点。"""
+    if template not in SCENE_ENVIRONMENT_TEMPLATES:
+        return ""
+    scenes = {
+        "daily_snapshot": (
+            f"户外随拍场景（街角、阳台、庭院、咖啡店外或公园），"
+            f"自然日光为主，背景与{category}搭配但不杂乱，超真实、超自然、不像棚拍"
+        ),
+        "natural_phone_snapshot": (
+            f"真实手机竖屏随手拍，平视或自然手持视角；"
+            f"户外随手拍场景（街道、公园、海边、景点或建筑前），"
+            f"氛围跟{category}搭配；自然日光带方向（侧光、逆光或斜上光）；"
+            f"少量生活细节真实但不要遮挡{category}主体，不要棚拍或亚马逊主图感"
+        ),
+        "social_seed": (
+            f"户外种草场景（街拍、橱窗、店外、景点或自然环境），"
+            f"自然日光，与{category}匹配的松弛、真实、有生活感氛围"
+        ),
+    }
+    return scenes.get(template, "")
+
+
+def _template_requirement(
+    template: str,
+    product_analysis: dict[str, Any],
+    scene_environment: str = "indoor",
+) -> str:
     category = str(product_analysis.get("category") or "服饰").strip() or "服饰"
     recommended_background = str(product_analysis.get("background_recommendation") or "").strip()
     matched_background = (
@@ -227,18 +261,32 @@ def _template_requirement(template: str, product_analysis: dict[str, Any]) -> st
         if recommended_background and recommended_background.lower() != "unknown"
         else f"与{category}风格搭配的真实生活空间"
     )
+    outdoor_phrase = (
+        _scene_environment_outdoor_phrase(template, category)
+        if scene_environment == "outdoor"
+        else ""
+    )
     requirements = {
         "white_ecommerce": "白底或近白底，柔和棚拍光",
         "premium_studio": f"{matched_background}，高级棚拍质感，柔和光影",
         "urban_commute": f"与{category}匹配的质感街拍氛围，真实自然但不杂乱",
         "lifestyle": f"与{category}匹配的精品空间氛围，克制、高级、有层次",
-        "daily_snapshot": f"与{category}匹配的日常随拍质感，手机拍摄感，超真实、超自然、不像棚拍",
-        "natural_phone_snapshot": (
-            f"真实手机竖屏随手拍，平视或自然手持视角；"
-            f"{phone_scene}，氛围跟{category}搭配；自然光或室内暖光；"
-            f"少量生活细节真实但不要遮挡{category}主体，不要棚拍或亚马逊主图感"
+        "daily_snapshot": (
+            outdoor_phrase
+            or f"与{category}匹配的日常随拍质感，手机拍摄感，超真实、超自然、不像棚拍"
         ),
-        "social_seed": f"与{category}匹配的自然种草氛围，松弛、真实、有生活感",
+        "natural_phone_snapshot": (
+            outdoor_phrase
+            or (
+                f"真实手机竖屏随手拍，平视或自然手持视角；"
+                f"{phone_scene}，氛围跟{category}搭配；自然光或室内暖光；"
+                f"少量生活细节真实但不要遮挡{category}主体，不要棚拍或亚马逊主图感"
+            )
+        ),
+        "social_seed": (
+            outdoor_phrase
+            or f"与{category}匹配的自然种草氛围，松弛、真实、有生活感"
+        ),
     }
     return requirements.get(template, TEMPLATE_LABELS.get(template, template))
 
@@ -299,7 +347,38 @@ _RENDER_DIRECTIONS: dict[str, str] = {
 }
 
 
-def _showcase_render_direction(template: str) -> str:
+_RENDER_DIRECTIONS_OUTDOOR: dict[str, str] = {
+    "daily_snapshot": (
+        "真实日常随拍质感，户外自然日光带明确方向（侧光、逆光或斜上光），"
+        "颧骨鼻梁有真实高光，半边脸略阴影，背景有真实空间深度；"
+        "皮肤保留真实毛孔和细纹，自然光泽和皮下血色，碎发自然；"
+        "有轻微痘印或鼻翼油光，毛孔深浅不均；"
+        "不要塑料感、过度磨皮、AI美颜脸、全脸均匀照明"
+    ),
+    "natural_phone_snapshot": (
+        "真实手机照片质感，户外自然日光从侧面或斜上方打来，"
+        "半边脸略阴影、颧骨鼻梁有真实高光、皮肤上有细微光斑；"
+        "服装细节可见；真实阴影、真实皮肤毛孔和细纹、自然碎发、衣服真实褶皱；"
+        "有轻微痘印或鼻翼黑头，面部非完美对称；"
+        "不要棚拍感、过度磨皮、AI网红脸、社交媒体截图界面、全脸均匀照明"
+    ),
+    "social_seed": (
+        "真实生活种草质感，户外自然日光带方向（侧光、逆光或斜上光），"
+        "颧骨鼻梁有真实高光、半边脸略阴影、建筑或绿植真实阴影投射；"
+        "服装搭配清晰；皮肤有真实毛孔细纹和自然光泽，皮下血色自然，碎发真实；"
+        "有轻微痘印或皮肤色不均，眼角真实细纹；"
+        "不要塑料感、过度磨皮、AI美颜脸、全脸均匀照明，不要画面中出现镜子或镜面"
+    ),
+}
+
+
+def _showcase_render_direction(template: str, scene_environment: str = "indoor") -> str:
+    if (
+        scene_environment == "outdoor"
+        and template in SCENE_ENVIRONMENT_TEMPLATES
+        and template in _RENDER_DIRECTIONS_OUTDOOR
+    ):
+        return _RENDER_DIRECTIONS_OUTDOOR[template]
     return _RENDER_DIRECTIONS.get(
         template,
         "真实摄影质感；皮肤保留真实毛孔细纹和自然光泽；不要塑料感、过度磨皮、AI美颜脸",
@@ -321,22 +400,62 @@ def _showcase_pose_direction(template: str) -> str:
     return _POSE_DIRECTIONS.get(template, "姿态自然舒展")
 
 
-def _showcase_framing_direction(shot_class: str, framing: str | None) -> str:
-    """按机位类 + framing tag 控制画面构图留白，避免人物顶天立地撑满整个画面。
+_LIFESTYLE_TEMPLATES = frozenset({
+    "urban_commute",
+    "lifestyle",
+    "daily_snapshot",
+    "natural_phone_snapshot",
+    "social_seed",
+})
+
+
+def _showcase_composition_direction(template: str) -> str:
+    """生活化模板加构图变化，白底/棚拍保持中心构图不动。"""
+    if template not in _LIFESTYLE_TEMPLATES:
+        return ""
+    return (
+        "三分法构图，模特竖向落在画面左或右 1/3 线，对侧留呼吸感；"
+        "可有轻微前景或景深层次，但不抢戏"
+    )
+
+
+_SQUARE_OR_LANDSCAPE_RATIOS = frozenset({"1:1", "4:3", "3:2", "16:9", "21:9"})
+
+
+def _showcase_framing_direction(
+    shot_class: str,
+    framing: str | None,
+    aspect_ratio: str = "4:5",
+) -> str:
+    """按机位类 + framing tag + 画面比例控制构图留白，避免身体被画面比例挤扁或拉长。
 
     - detail_half_body 是上半身近景，单独走"半身入镜"分支
     - tone_first 走"环境为主体、画面留白"
     - product_first（除 detail）走"全身入镜 + 上下留边"
+    - 画面方/横时下调人物占比，横向多留余白，避免 AI 为了填高度而压缩身体
     """
     if shot_class == "detail_half_body":
         return (
             "上半身或胸口以上入镜，头顶留出适度边距，"
             "肩部肘部不顶画面边缘，背景留白干净"
         )
+    is_square_or_landscape = aspect_ratio in _SQUARE_OR_LANDSCAPE_RATIOS
     if framing == "tone_first":
+        if is_square_or_landscape:
+            return (
+                "人物占画面 45-60% 高度，左右留出充足余白，"
+                "环境只作为氛围辅助，不要让背景压过服装主体，"
+                "头脚完整且透视自然，不要为了填高度压扁身体"
+            )
         return (
             "人物占画面 55-70% 高度，环境只作为氛围辅助，"
             "不要让背景压过服装主体，头脚完整且透视自然"
+        )
+    if is_square_or_landscape:
+        return (
+            "全身完整入镜，头顶上方留出 5-10% 边距，脚下完整不切断，"
+            "人物占画面 60-75% 高度，左右留宽边，"
+            "不要为了塞满画面而压缩或拉长身体比例"
         )
     return (
         "全身完整入镜，头顶上方留出 5-10% 边距，脚下完整不切断，"
@@ -371,7 +490,7 @@ def _showcase_prompt_brief(
             "不要改款、改色、改廓形、改领口袖型衣长、改图案/logo/印花/文字、改纽扣拉链口袋缝线拼接。",
             "",
             "要求：",
-            "1. 摄影执行：真实模特目录摄影，正常焦段、平视或胸口高度机位；身体重心可信，动作幅度小，避免跳跃、转圈、跪趴、后仰、大幅甩头。",
+            "1. 摄影执行：真实模特目录摄影，约 50mm 标准焦段（不要广角拉头身比、不要长焦压扁），平视或胸口高度机位；身体重心可信，动作幅度小，避免跳跃、转圈、跪趴、后仰、大幅甩头。",
             "2. 模特按产品图自然穿着这件衣服，版型贴合，褶皱合理；不要人偶感、不要时装秀台步。",
             f"3. 模特参考模特图，{model_consistency}身材和表情自然。",
             f"4. 配饰：{accessory_direction}（不得遮挡商品）。",
@@ -2598,6 +2717,8 @@ def _showcase_prompt(
     user_prompt: str = "",
     shot_variant: ShotVariant | None = None,
     age_segment: str | None = None,
+    aspect_ratio: str = "4:5",
+    scene_environment: str = "indoor",
 ) -> str:
     brief = selected_candidate.model_brief_json or {}
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
@@ -2609,8 +2730,20 @@ def _showcase_prompt(
         else []
     )
     product_preserve = "、".join(preserve_items[:8]) or fallback_preserve
+    height_cm_raw = brief.get("height_cm")
+    try:
+        height_cm = (
+            int(height_cm_raw)
+            if height_cm_raw is not None
+            else _infer_model_height_cm(" ".join(part for part in (summary, user_prompt) if part))
+        )
+    except (TypeError, ValueError):
+        height_cm = _infer_model_height_cm(
+            " ".join(part for part in (summary, user_prompt) if part)
+        )
     model_consistency = (
-        "保持同一张脸、发型、年龄感和身材比例一致，不要换人。"
+        "保持同一张脸、发型、肤色、年龄感和身材比例一致，不要换人。"
+        f"身高 {height_cm}cm，头身比和肢体长度沿用参考模特。"
         f"模特方向：{summary}。"
     )
     accessory_direction = "少量自然搭配，不要抢衣服主体；如果附件中包含已选配饰四宫格，优先参考它。"
@@ -2618,7 +2751,10 @@ def _showcase_prompt(
         shot_variant = _showcase_default_variant(template, shot_type, age_segment)
     shot_direction = shot_variant["label"] if shot_variant else shot_type
     framing = shot_variant["framing"] if shot_variant else "product_first"
-    framing_direction = _showcase_framing_direction(shot_type, framing)
+    framing_direction = _showcase_framing_direction(shot_type, framing, aspect_ratio)
+    composition_extra = _showcase_composition_direction(template)
+    if composition_extra:
+        framing_direction = f"{framing_direction}；{composition_extra}"
     pose_direction = _showcase_pose_direction(template)
     soft = _age_soft_constraint(age_segment)
     if soft:
@@ -2627,7 +2763,7 @@ def _showcase_prompt(
     style_region = _style_region_from_text(summary)
     return _showcase_prompt_brief(
         user_direction=user_prompt,
-        template_direction=_template_requirement(template, product_analysis),
+        template_direction=_template_requirement(template, product_analysis, scene_environment),
         product_preserve=product_preserve,
         accessory_direction=accessory_direction,
         model_consistency=model_consistency,
@@ -2635,7 +2771,7 @@ def _showcase_prompt(
         pose_direction=pose_direction,
         framing_direction=framing_direction,
         quality_direction=quality_direction,
-        render_direction=_showcase_render_direction(template),
+        render_direction=_showcase_render_direction(template, scene_environment),
         style_region=style_region,
     )
 
@@ -5078,6 +5214,8 @@ async def create_showcase_images(
                 age_segment=age_segment,
                 final_quality=body.final_quality,
                 user_prompt=run.user_prompt,
+                aspect_ratio=body.aspect_ratio,
+                scene_environment=body.scene_environment,
             ),
             attachment_ids=ref_ids,
             idempotency_key=f"wf:{run.id[:12]}:shot:{idx}:{new_uuid7()[:8]}",
@@ -5099,6 +5237,7 @@ async def create_showcase_images(
                 "workflow_template": body.template,
                 "workflow_age_segment": age_segment,
                 "workflow_final_quality": body.final_quality,
+                "workflow_scene_environment": body.scene_environment,
             },
         )
         task_ids.extend(gen_ids)
@@ -5117,6 +5256,7 @@ async def create_showcase_images(
         "aspect_ratio": body.aspect_ratio,
         "final_quality": body.final_quality,
         "output_count": body.output_count,
+        "scene_environment": body.scene_environment,
         "target_image_count": _showcase_target_image_count(
             existing_image_ids=existing_image_ids,
             output_count=body.output_count,

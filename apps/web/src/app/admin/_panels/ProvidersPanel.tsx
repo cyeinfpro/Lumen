@@ -32,6 +32,7 @@ import {
 
 import {
   useProbeProvidersMutation,
+  usePatchProviderEnabledMutation,
   useProvidersQuery,
   useProviderStatsQuery,
   useUpdateProvidersMutation,
@@ -41,6 +42,7 @@ import { ApiError } from "@/lib/apiClient";
 import type {
   ProviderItemIn,
   ProviderItemOut,
+  ProviderPurpose,
   ProviderProbeResult,
   ProviderProxyIn,
   ProviderProxyOut,
@@ -62,6 +64,25 @@ const WEIGHT_COLORS = [
   "#06b6d4",
   "#84cc16",
 ];
+
+const PROVIDER_PURPOSES: Array<{ value: ProviderPurpose; label: string }> = [
+  { value: "chat", label: "对话" },
+  { value: "image", label: "生图" },
+  { value: "embedding", label: "Embedding" },
+];
+
+const DEFAULT_PURPOSES: ProviderPurpose[] = ["chat", "image"];
+
+function normalizePurposes(value: ProviderPurpose[] | null | undefined): ProviderPurpose[] {
+  const next = value?.filter((purpose) =>
+    PROVIDER_PURPOSES.some((option) => option.value === purpose),
+  ) ?? [];
+  return next.length > 0 ? next : DEFAULT_PURPOSES;
+}
+
+function purposeLabel(value: ProviderPurpose): string {
+  return PROVIDER_PURPOSES.find((option) => option.value === value)?.label ?? value;
+}
 
 // ---------------------------------------------------------------------------
 // Draft 类型和工具函数
@@ -91,6 +112,7 @@ function toDraft(p: ProviderItemOut): Draft {
     priority: p.priority,
     weight: p.weight,
     enabled: p.enabled,
+    purposes: normalizePurposes(p.purposes),
     image_jobs_enabled: p.image_jobs_enabled,
     image_jobs_endpoint: p.image_jobs_endpoint ?? "auto",
     image_jobs_endpoint_lock: p.image_jobs_endpoint_lock ?? false,
@@ -110,6 +132,7 @@ function emptyDraft(): Draft {
     priority: 0,
     weight: 1,
     enabled: true,
+    purposes: [...DEFAULT_PURPOSES],
     image_jobs_enabled: false,
     image_jobs_endpoint: "auto",
     image_jobs_endpoint_lock: false,
@@ -131,6 +154,40 @@ function toProxyDraft(p: ProviderProxyOut): ProxyDraft {
     password: "",
     private_key_path: p.private_key_path ?? "",
     enabled: p.enabled,
+  };
+}
+
+function proxyOutToIn(p: ProviderProxyOut): ProviderProxyIn {
+  return {
+    name: p.name,
+    type: p.type,
+    host: p.host,
+    port: p.port,
+    username: p.username ?? null,
+    password: "",
+    private_key_path: p.private_key_path ?? null,
+    enabled: p.enabled,
+  };
+}
+
+function providerOutToIn(
+  p: ProviderItemOut,
+  patch: Partial<Pick<ProviderItemIn, "enabled" | "purposes">> = {},
+): ProviderItemIn {
+  return {
+    name: p.name,
+    base_url: p.base_url,
+    priority: p.priority,
+    weight: Math.max(1, p.weight),
+    enabled: patch.enabled ?? p.enabled,
+    purposes: patch.purposes ?? normalizePurposes(p.purposes),
+    image_jobs_enabled: p.image_jobs_enabled,
+    image_jobs_endpoint: p.image_jobs_endpoint ?? "auto",
+    image_jobs_endpoint_lock: p.image_jobs_endpoint_lock ?? false,
+    image_jobs_base_url: p.image_jobs_base_url ?? "",
+    image_edit_input_transport: p.image_edit_input_transport ?? "url",
+    image_concurrency: Math.max(1, p.image_concurrency ?? 1),
+    proxy: p.proxy ?? null,
   };
 }
 
@@ -180,6 +237,7 @@ function editTransportDisplayLabel(value: string | null | undefined): string {
 export function ProvidersPanel() {
   const q = useProvidersQuery();
   const updateMut = useUpdateProvidersMutation();
+  const enabledMut = usePatchProviderEnabledMutation();
   const probeMut = useProbeProvidersMutation();
   const statsQ = useProviderStatsQuery({ enabled: (q.data?.items.length ?? 0) > 0 });
   const settingsMut = useUpdateSystemSettingsMutation();
@@ -195,6 +253,54 @@ export function ProvidersPanel() {
   const serverItems = useMemo(() => q.data?.items ?? [], [q.data]);
   const serverProxies = useMemo(() => q.data?.proxies ?? [], [q.data]);
   const source = q.data?.source ?? "none";
+
+  const quickSavePurposes = useCallback(
+    (providerName: string, purposes: ProviderPurpose[]) => {
+      if (purposes.length === 0) {
+        setGlobalError("每个供应商至少需要一个用途");
+        return;
+      }
+      const providerPayload = serverItems.map((provider) =>
+        providerOutToIn(
+          provider,
+          provider.name === providerName ? { purposes } : {},
+        ),
+      );
+      updateMut.mutate(
+        { items: providerPayload, proxies: serverProxies.map(proxyOutToIn) },
+        {
+          onSuccess: () => setSavedAt(Date.now()),
+          onError: (err) => {
+            setGlobalError(
+              err instanceof ApiError
+                ? err.message || `保存失败 (HTTP ${err.status})`
+                : err.message || "保存失败",
+            );
+          },
+        },
+      );
+    },
+    [serverItems, serverProxies, updateMut],
+  );
+
+  const toggleProviderEnabled = useCallback(
+    (providerName: string, enabled: boolean) => {
+      enabledMut.mutate(
+        { name: providerName, enabled },
+        {
+          onSuccess: () => setSavedAt(Date.now()),
+          onError: (err) => {
+            setGlobalError(
+              err instanceof ApiError
+                ? err.message || `切换失败 (HTTP ${err.status})`
+                : err.message || "切换失败",
+            );
+          },
+        },
+      );
+    },
+    [enabledMut],
+  );
 
   const probeMap = useMemo(() => {
     const map = new Map<string, ProviderProbeResult>();
@@ -392,6 +498,11 @@ export function ProvidersPanel() {
         setEditingIdx(i);
         return;
       }
+      if (normalizePurposes(d.purposes).length === 0) {
+        setGlobalError(`「${d.name}」至少需要一个用途`);
+        setEditingIdx(i);
+        return;
+      }
     }
 
     const names = drafts.map((d) => d.name.trim());
@@ -414,6 +525,7 @@ export function ProvidersPanel() {
         priority: d.priority,
         weight: Math.max(1, d.weight),
         enabled: d.enabled,
+        purposes: normalizePurposes(d.purposes),
         image_jobs_enabled: d.image_jobs_enabled,
         image_jobs_endpoint: d.image_jobs_endpoint ?? "auto",
         image_jobs_endpoint_lock:
@@ -704,6 +816,9 @@ export function ProvidersPanel() {
               probing={probeMut.isPending}
               totalGroups={groups.length}
               onProbeSingle={onProbeSingle}
+              onToggleEnabled={toggleProviderEnabled}
+              onSavePurposes={quickSavePurposes}
+              quickSaving={enabledMut.isPending || updateMut.isPending}
             />
           ))}
         </div>
@@ -1102,6 +1217,9 @@ function PriorityGroupView({
   probing,
   totalGroups,
   onProbeSingle,
+  onToggleEnabled,
+  onSavePurposes,
+  quickSaving,
 }: {
   group: PriorityGroup;
   probeMap: Map<string, ProviderProbeResult>;
@@ -1109,6 +1227,9 @@ function PriorityGroupView({
   probing: boolean;
   totalGroups: number;
   onProbeSingle: (name: string) => void;
+  onToggleEnabled: (name: string, enabled: boolean) => void;
+  onSavePurposes: (name: string, purposes: ProviderPurpose[]) => void;
+  quickSaving: boolean;
 }) {
   return (
     <div className="space-y-3">
@@ -1137,6 +1258,9 @@ function PriorityGroupView({
           stats={statsMap.get(p.name)}
           probing={probing}
           onProbeSingle={onProbeSingle}
+          onToggleEnabled={onToggleEnabled}
+          onSavePurposes={onSavePurposes}
+          quickSaving={quickSaving}
         />
       ))}
     </div>
@@ -1150,6 +1274,9 @@ function ProviderCard({
   stats,
   probing,
   onProbeSingle,
+  onToggleEnabled,
+  onSavePurposes,
+  quickSaving,
 }: {
   provider: ProviderItemOut;
   index: number;
@@ -1157,7 +1284,20 @@ function ProviderCard({
   stats?: ProviderStatsItem;
   probing: boolean;
   onProbeSingle: (name: string) => void;
+  onToggleEnabled: (name: string, enabled: boolean) => void;
+  onSavePurposes: (name: string, purposes: ProviderPurpose[]) => void;
+  quickSaving: boolean;
 }) {
+  const purposes = normalizePurposes(p.purposes);
+
+  const togglePurpose = (purpose: ProviderPurpose) => {
+    const next = purposes.includes(purpose)
+      ? purposes.filter((item) => item !== purpose)
+      : [...purposes, purpose];
+    if (next.length === 0) return;
+    onSavePurposes(p.name, next);
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
@@ -1203,6 +1343,20 @@ function ProviderCard({
           </code>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => onToggleEnabled(p.name, !p.enabled)}
+            disabled={quickSaving}
+            className={
+              "inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors " +
+              (p.enabled
+                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
+                : "bg-neutral-500/10 border-neutral-500/30 text-neutral-400 hover:bg-neutral-500/20")
+            }
+            title={p.enabled ? "停用供应商" : "启用供应商"}
+          >
+            {p.enabled ? <Power className="w-3 h-3" /> : <PowerOff className="w-3 h-3" />}
+          </button>
           {/* 单个探活按钮 */}
           <button
             type="button"
@@ -1215,6 +1369,41 @@ function ProviderCard({
           </button>
           <ProbeStatusBadge probe={probe} probing={probing} />
         </div>
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        {PROVIDER_PURPOSES.map((option) => {
+          const checked = purposes.includes(option.value);
+          const disabled = quickSaving || (checked && purposes.length === 1);
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => togglePurpose(option.value)}
+              disabled={disabled}
+              className={
+                "inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+                (checked
+                  ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
+                  : "border-white/10 bg-white/[0.03] text-neutral-500 hover:text-neutral-300")
+              }
+              title={disabled && checked ? "至少保留一个用途" : `切换 ${option.label} 用途`}
+            >
+              <span
+                className={
+                  "h-3 w-3 rounded border flex items-center justify-center " +
+                  (checked
+                    ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)] text-black"
+                    : "border-neutral-600")
+                }
+                aria-hidden
+              >
+                {checked ? <Check className="h-2.5 w-2.5" /> : null}
+              </span>
+              {option.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* 下部：元数据 */}
@@ -1576,7 +1765,8 @@ const DraftCard = forwardRef<
           )}
           <div className="mt-1 text-[11px] text-neutral-600">
             代理：{draft.proxy || "直连"} · 异步生图：
-            {draft.image_jobs_enabled ? "支持" : "不支持"}
+            {draft.image_jobs_enabled ? "支持" : "不支持"} · 用途：
+            {normalizePurposes(draft.purposes).map(purposeLabel).join(" / ")}
           </div>
         </div>
         <div className="shrink-0 text-neutral-500">
@@ -1650,6 +1840,48 @@ const DraftCard = forwardRef<
                   autoComplete="new-password"
                   className={fieldCls(false)}
                 />
+              </Field>
+
+              <Field label="用途" hint="先按用途过滤，再按健康度与权重选号">
+                <div className="flex flex-wrap gap-2">
+                  {PROVIDER_PURPOSES.map((option) => {
+                    const purposes = normalizePurposes(draft.purposes);
+                    const checked = purposes.includes(option.value);
+                    const disabled = checked && purposes.length === 1;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => {
+                          const next = checked
+                            ? purposes.filter((item) => item !== option.value)
+                            : [...purposes, option.value];
+                          if (next.length > 0) onUpdate({ purposes: next });
+                        }}
+                        className={
+                          "inline-flex min-h-[36px] items-center gap-2 rounded-xl border px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+                          (checked
+                            ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
+                            : "border-white/10 bg-white/[0.03] text-neutral-500 hover:text-neutral-300")
+                        }
+                      >
+                        <span
+                          className={
+                            "flex h-3.5 w-3.5 items-center justify-center rounded border " +
+                            (checked
+                              ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)] text-black"
+                              : "border-neutral-600")
+                          }
+                          aria-hidden
+                        >
+                          {checked ? <Check className="h-3 w-3" /> : null}
+                        </span>
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </Field>
 
               {/* 代理选择 */}

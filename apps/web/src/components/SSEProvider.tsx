@@ -47,9 +47,11 @@ const CONV_EVENTS = [
   "message.intent_resolved",
   "conv.message.appended",
   "conv.renamed",
+  "memory.writes",
+  "conversation.memory.updated",
 ] as const;
 
-const USER_EVENTS = ["user.notice"] as const;
+const USER_EVENTS = ["user.notice", "account_settings_updated"] as const;
 
 // API accepts 64 effective channels and auto-adds user:{id} when omitted.
 // Keep the client below that ceiling; overflow tasks are still repaired by
@@ -230,6 +232,24 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     [applyStoreEvent, qc],
   );
 
+  const handleAccountSettingsUpdated = useCallback(
+    (data: unknown) => {
+      applyStoreEvent("account_settings_updated", data);
+      qc.invalidateQueries({ queryKey: ["me", "memory"] });
+      qc.invalidateQueries({ queryKey: ["conversation"] });
+    },
+    [applyStoreEvent, qc],
+  );
+
+  const handleConversationMemoryUpdated = useCallback(
+    (data: unknown) => {
+      applyStoreEvent("conversation.memory.updated", data);
+      qc.invalidateQueries({ queryKey: ["conversation"] });
+      qc.invalidateQueries({ queryKey: ["me", "memory"] });
+    },
+    [applyStoreEvent, qc],
+  );
+
   const handlers = useMemo<SSEHandlers>(() => {
     const h: SSEHandlers = {};
     for (const name of [
@@ -241,8 +261,15 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       h[name] = (data: unknown) => applyStoreEvent(name, data);
     }
     h["conv.renamed"] = handleRenamed;
+    h["account_settings_updated"] = handleAccountSettingsUpdated;
+    h["conversation.memory.updated"] = handleConversationMemoryUpdated;
     return h;
-  }, [applyStoreEvent, handleRenamed]);
+  }, [
+    applyStoreEvent,
+    handleAccountSettingsUpdated,
+    handleConversationMemoryUpdated,
+    handleRenamed,
+  ]);
 
   const recoveryInFlightRef = useRef(false);
   const runRecovery = useCallback(

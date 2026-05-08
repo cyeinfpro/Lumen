@@ -149,6 +149,20 @@ export type CreateTemplate =
 export type CreateAspectRatio = (typeof ASPECT_RATIO_LABELS)[number][0];
 export type CreateOutputCount = (typeof OUTPUT_COUNT_LABELS)[number][0];
 
+export const SCENE_ENVIRONMENT_LABELS = [
+  ["indoor", "室内"],
+  ["outdoor", "室外"],
+] as const;
+
+export type CreateSceneEnvironment = (typeof SCENE_ENVIRONMENT_LABELS)[number][0];
+
+// 仅这 3 个生活化模板支持 scene_environment 选项；其他模板忽略此字段。
+export const SCENE_ENVIRONMENT_TEMPLATES: ReadonlySet<CreateTemplate> = new Set([
+  "daily_snapshot",
+  "natural_phone_snapshot",
+  "social_seed",
+]);
+
 export function coerceOutputCount(value: unknown): CreateOutputCount {
   const numberValue = typeof value === "number" ? value : Number(value);
   return OUTPUT_COUNT_LABELS.some(([option]) => option === numberValue)

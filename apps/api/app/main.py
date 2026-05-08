@@ -26,7 +26,7 @@ from .db import SessionLocal, engine
 from .observability import init_otel, init_sentry, setup_prometheus
 from .ratelimit import _is_trusted_proxy
 from .redis_client import get_redis
-from .runtime_settings import migrate_image_primary_route
+from .runtime_settings import migrate_image_primary_route, migrate_provider_purposes
 
 
 logger = logging.getLogger(__name__)
@@ -276,6 +276,7 @@ async def lifespan(app: FastAPI):
     try:
         async with SessionLocal() as session:
             changed = await migrate_image_primary_route(session)
+            changed = await migrate_provider_purposes(session) or changed
             if changed:
                 await session.commit()
     except Exception:  # noqa: BLE001
@@ -474,6 +475,7 @@ from .routes import admin_storage as admin_storage_router  # noqa: E402
 from .routes import admin_telegram as admin_telegram_router  # noqa: E402
 from .routes import admin_update as admin_update_router  # noqa: E402
 from .routes import admin_release as admin_release_router  # noqa: E402
+from .routes import memories as memories_router  # noqa: E402
 
 app.include_router(admin_router.router)
 app.include_router(admin_backups_router.router)  # /admin/backups
@@ -495,6 +497,7 @@ app.include_router(admin_storage_router.router)  # /admin/storage
 app.include_router(admin_telegram_router.router)  # /admin/telegram/restart
 app.include_router(admin_update_router.router)  # /admin/update
 app.include_router(admin_release_router.router)  # /admin/release
+app.include_router(memories_router.router)
 
 # Prometheus /metrics（路由挂载后）
 if settings.metrics_enabled:

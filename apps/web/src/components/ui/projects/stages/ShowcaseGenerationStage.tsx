@@ -25,11 +25,14 @@ import { RunningState, StageFrame } from "../components/StageFrame";
 import {
   ASPECT_RATIO_LABELS,
   OUTPUT_COUNT_LABELS,
+  SCENE_ENVIRONMENT_LABELS,
+  SCENE_ENVIRONMENT_TEMPLATES,
   SHOT_PLAN_DEFAULT,
   TEMPLATE_LABELS,
   coerceOutputCount,
   type CreateAspectRatio,
   type CreateOutputCount,
+  type CreateSceneEnvironment,
   type CreateTemplate,
 } from "../types";
 import { candidateImages, showcaseImages, stepOf, stringValue } from "../utils";
@@ -44,6 +47,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const initialAspectRatio = coerceAspectRatio(step?.input_json?.aspect_ratio);
   const initialQuality = coerceQuality(step?.input_json?.final_quality);
   const initialOutputCount = coerceOutputCount(step?.input_json?.output_count);
+  const initialSceneEnvironment = coerceSceneEnvironment(step?.input_json?.scene_environment);
   const create = useCreateShowcaseImagesMutation(workflow.id, {
     onError: (err) =>
       toast.error("生成展示图失败", {
@@ -71,7 +75,10 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const [aspectRatio, setAspectRatio] = useState<CreateAspectRatio>(initialAspectRatio);
   const [quality, setQuality] = useState<"high" | "4k">(initialQuality);
   const [outputCount, setOutputCount] = useState<CreateOutputCount>(initialOutputCount);
-  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}`;
+  const [sceneEnvironment, setSceneEnvironment] =
+    useState<CreateSceneEnvironment>(initialSceneEnvironment);
+  const sceneEnvironmentEnabled = SCENE_ENVIRONMENT_TEMPLATES.has(template);
+  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}:${initialSceneEnvironment}`;
   const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
   const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
@@ -86,6 +93,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
     setAspectRatio(initialAspectRatio);
     setQuality(initialQuality);
     setOutputCount(initialOutputCount);
+    setSceneEnvironment(initialSceneEnvironment);
   }
   const generated = showcaseImages(workflow);
   const productImages = workflow.product_images;
@@ -105,6 +113,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       aspect_ratio: aspectRatio,
       final_quality: quality,
       output_count: outputCount,
+      scene_environment: sceneEnvironmentEnabled ? sceneEnvironment : "indoor",
     });
   };
 
@@ -162,7 +171,11 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           Output Setup
         </p>
-        <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-4">
+        <div
+          className={`mt-3 grid gap-x-6 gap-y-4 ${
+            sceneEnvironmentEnabled ? "md:grid-cols-5" : "md:grid-cols-4"
+          }`}
+        >
           <SelectField
             label="输出模板"
             value={template}
@@ -170,6 +183,15 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
             disabled={isRunning}
             options={TEMPLATE_LABELS}
           />
+          {sceneEnvironmentEnabled ? (
+            <SelectField
+              label="室内 / 室外"
+              value={sceneEnvironment}
+              onChange={(value) => setSceneEnvironment(value as CreateSceneEnvironment)}
+              disabled={isRunning}
+              options={SCENE_ENVIRONMENT_LABELS}
+            />
+          ) : null}
           <SelectField
             label="画幅比例"
             value={aspectRatio}
@@ -355,4 +377,8 @@ function coerceAspectRatio(value: unknown): CreateAspectRatio {
 
 function coerceQuality(value: unknown): "high" | "4k" {
   return value === "4k" ? "4k" : "high";
+}
+
+function coerceSceneEnvironment(value: unknown): CreateSceneEnvironment {
+  return value === "outdoor" ? "outdoor" : "indoor";
 }

@@ -23,6 +23,7 @@ from .tasks import auto_title as auto_title_tasks
 from .tasks import completion as completion_tasks
 from .tasks import context_summary as context_summary_tasks
 from .tasks import generation as generation_tasks
+from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
 from .upstream import close_client
 
@@ -60,6 +61,8 @@ class WorkerSettings:
         outbox_tasks.publish_outbox,
         auto_title_tasks.auto_title_conversation,
         context_summary_tasks.manual_compact_conversation,
+        memory_tasks.memory_extract,
+        memory_tasks.memory_reembed,
     ]
 
     # 定时任务：每 2s publisher、每 60s reconciler、每 30s 统计刷入+条件探活、
@@ -80,6 +83,19 @@ class WorkerSettings:
             probe_upstream,
             hour={i for i in range(24)},
             minute={5},
+            run_at_startup=False,
+        ),
+        cron(
+            memory_tasks.cleanup_memory,
+            hour={3},
+            minute={17},
+            run_at_startup=False,
+        ),
+        # last_used_at 批量 flush: 每分钟 0/30 秒各一次, 把 redis ZSET 累积的
+        # 最近注入时间戳写回 user_memories, 避免主对话热路径每轮 N 次 UPDATE.
+        cron(
+            memory_tasks.flush_memory_last_used,
+            second={0, 30},
             run_at_startup=False,
         ),
     ]

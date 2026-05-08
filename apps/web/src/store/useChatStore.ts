@@ -28,11 +28,13 @@ import type {
   ImageParams,
   Intent,
   MaskState,
+  MemoryWrite,
   Message,
   Quality,
   RenderQualityChoice,
   SizeMode,
   UserMessage,
+  UsedMemorySummary,
 } from "@/lib/types";
 import {
   PRESET,
@@ -588,6 +590,64 @@ function coerceCompletionToolCalls(value: unknown): CompletionToolCall[] {
   });
 }
 
+function coerceMemoryWrites(value: unknown): MemoryWrite[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): MemoryWrite[] => {
+    if (!item || typeof item !== "object") return [];
+    const raw = item as Record<string, unknown>;
+    const kind = typeof raw.kind === "string" ? raw.kind : "";
+    if (
+      kind !== "added" &&
+      kind !== "updated" &&
+      kind !== "merged" &&
+      kind !== "superseded" &&
+      kind !== "staged" &&
+      kind !== "rejected_pii"
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: typeof raw.id === "string" ? raw.id : null,
+        kind,
+        type:
+          raw.type === "profile" ||
+          raw.type === "preference" ||
+          raw.type === "avoid" ||
+          raw.type === "project"
+            ? raw.type
+            : null,
+        content: typeof raw.content === "string" ? raw.content : "",
+        source_excerpt:
+          typeof raw.source_excerpt === "string" ? raw.source_excerpt : null,
+        undo_token:
+          typeof raw.undo_token === "string" ? raw.undo_token : null,
+        scope_id: typeof raw.scope_id === "string" ? raw.scope_id : null,
+        recommended_scope_id:
+          typeof raw.recommended_scope_id === "string"
+            ? raw.recommended_scope_id
+            : null,
+      },
+    ];
+  });
+}
+
+function coerceUsedMemorySummary(value: unknown): UsedMemorySummary[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): UsedMemorySummary[] => {
+    if (!item || typeof item !== "object") return [];
+    const raw = item as Record<string, unknown>;
+    if (
+      typeof raw.id !== "string" ||
+      typeof raw.type !== "string" ||
+      typeof raw.content !== "string"
+    ) {
+      return [];
+    }
+    return [{ id: raw.id, type: raw.type, content: raw.content }];
+  });
+}
+
 function mergeCompletionToolCall(
   current: CompletionToolCall[] | undefined,
   incoming: CompletionToolCall,
@@ -618,6 +678,8 @@ function adaptBackendAssistantMessage(
   const thinking =
     typeof content.thinking === "string" ? content.thinking : undefined;
   const toolCalls = coerceCompletionToolCalls(content.tool_calls);
+  const memoryWrites = coerceMemoryWrites(content.memory_writes);
+  const usedMemorySummary = coerceUsedMemorySummary(content.used_memory_summary);
   const ids = generationIds ?? [];
   return {
     id: m.id,
@@ -631,6 +693,14 @@ function adaptBackendAssistantMessage(
     text,
     thinking,
     tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+    memory_writes: memoryWrites.length > 0 ? memoryWrites : undefined,
+    used_memory_ids: stringArray(content.used_memory_ids),
+    used_memory_summary:
+      usedMemorySummary.length > 0 ? usedMemorySummary : undefined,
+    confirmation_candidate_id:
+      typeof content.confirmation_candidate_id === "string"
+        ? content.confirmation_candidate_id
+        : undefined,
     created_at: isoToMs(m.created_at),
   };
 }
@@ -1442,6 +1512,8 @@ function buildMessageListState(
       const thinking =
         typeof content.thinking === "string" ? content.thinking : undefined;
       const toolCalls = coerceCompletionToolCalls(content.tool_calls);
+      const memoryWrites = coerceMemoryWrites(content.memory_writes);
+      const usedMemorySummary = coerceUsedMemorySummary(content.used_memory_summary);
       const asstMsg: AssistantMessage = {
         id: m.id,
         role: "assistant",
@@ -1458,6 +1530,14 @@ function buildMessageListState(
         text,
         thinking,
         tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+        memory_writes: memoryWrites.length > 0 ? memoryWrites : undefined,
+        used_memory_ids: stringArray(content.used_memory_ids),
+        used_memory_summary:
+          usedMemorySummary.length > 0 ? usedMemorySummary : undefined,
+        confirmation_candidate_id:
+          typeof content.confirmation_candidate_id === "string"
+            ? content.confirmation_candidate_id
+            : undefined,
         created_at: isoToMs(m.created_at),
       };
       messages.push(asstMsg);
@@ -3327,6 +3407,16 @@ function createChatStore() {
                 if (typeof payload.text === "string") next.text = payload.text;
                 const toolCalls = coerceCompletionToolCalls(payload.tool_calls);
                 if (toolCalls.length > 0) next.tool_calls = toolCalls;
+                const usedMemoryIds = stringArray(payload.used_memory_ids);
+                if (usedMemoryIds.length > 0) {
+                  next.used_memory_ids = usedMemoryIds;
+                  next.used_memory_summary = coerceUsedMemorySummary(
+                    payload.used_memory_summary,
+                  );
+                }
+                if (typeof payload.confirmation_candidate_id === "string") {
+                  next.confirmation_candidate_id = payload.confirmation_candidate_id;
+                }
                 next.last_delta_at = eventNow;
               }
               if (eventName === "completion.failed") {
@@ -3363,6 +3453,37 @@ function createChatStore() {
                 });
               });
           }
+          break;
+        }
+
+        case "memory.writes": {
+          const msgId =
+            get_id("assistant_message_id") ?? get_id("message_id");
+          const writes = coerceMemoryWrites(payload.memory_writes);
+          if (!msgId || writes.length === 0) return;
+          set((s) => ({
+            messages: s.messages.map((m) => {
+              if (m.role !== "assistant" || m.id !== msgId) return m;
+              const current = (m as AssistantMessage).memory_writes ?? [];
+              const seen = new Set(
+                current.map((item) => `${item.kind}:${item.id ?? item.content}`),
+              );
+              const nextWrites = [
+                ...current,
+                ...writes.filter(
+                  (item) => !seen.has(`${item.kind}:${item.id ?? item.content}`),
+                ),
+              ];
+              return {
+                ...(m as AssistantMessage),
+                memory_writes: nextWrites,
+              } as AssistantMessage;
+            }),
+          }));
+          break;
+        }
+
+        case "account_settings_updated": {
           break;
         }
 

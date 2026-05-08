@@ -175,6 +175,10 @@ export interface AssistantMessage {
   text?: string; // chat / vision_qa
   thinking?: string; // reasoning summary (streamed)
   tool_calls?: CompletionToolCall[];
+  memory_writes?: MemoryWrite[];
+  used_memory_ids?: string[];
+  used_memory_summary?: UsedMemorySummary[];
+  confirmation_candidate_id?: string | null;
   stream_started_at?: number;
   last_delta_at?: number;
   created_at: number;
@@ -196,6 +200,29 @@ export interface CompletionToolCall {
   name?: string;
   title?: string;
   error?: string;
+}
+
+export interface MemoryWrite {
+  id?: string | null;
+  kind:
+    | "added"
+    | "updated"
+    | "merged"
+    | "superseded"
+    | "staged"
+    | "rejected_pii";
+  type?: "profile" | "preference" | "avoid" | "project" | null;
+  content: string;
+  source_excerpt?: string | null;
+  undo_token?: string | null;
+  scope_id?: string | null;
+  recommended_scope_id?: string | null;
+}
+
+export interface UsedMemorySummary {
+  id: string;
+  type: "profile" | "preference" | "avoid" | "project" | string;
+  content: string;
 }
 
 // ——————————————————————————————————————————————————————————————
@@ -443,6 +470,7 @@ export interface AdminContextHealthOut {
 
 export type ImageJobsEndpoint = "auto" | "generations" | "responses";
 export type ImageEditInputTransport = "url" | "file";
+export type ProviderPurpose = "chat" | "image" | "embedding";
 
 export interface ProviderItemOut {
   name: string;
@@ -451,6 +479,7 @@ export interface ProviderItemOut {
   priority: number;
   weight: number;
   enabled: boolean;
+  purposes: ProviderPurpose[];
   proxy: string | null;
   image_jobs_enabled: boolean;
   image_jobs_endpoint: ImageJobsEndpoint;
@@ -486,6 +515,7 @@ export interface ProviderItemIn {
   priority: number;
   weight: number;
   enabled: boolean;
+  purposes: ProviderPurpose[];
   proxy?: string | null;
   image_jobs_enabled?: boolean;
   image_jobs_endpoint?: ImageJobsEndpoint;

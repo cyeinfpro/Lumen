@@ -16,13 +16,14 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any, Awaitable, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,10 +54,17 @@ from lumen_core.models import (
     Conversation,
     Generation,
     Image,
+    MemoryAudit,
     Message,
     OutboxEvent,
     SystemPrompt,
     User,
+    UserMemory,
+    UserMemoryScope,
+)
+from lumen_core.memory import (
+    canonical_memory_text,
+    extract_memories,
 )
 from lumen_core.schemas import (
     ChatParamsIn,
@@ -74,7 +82,7 @@ from ..deps import CurrentUser, verify_csrf
 from ..intent import resolve_intent
 from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
-from ..runtime_settings import get_setting
+from ..runtime_settings import embedding_provider_available, get_setting
 
 
 router = APIRouter()
@@ -117,6 +125,16 @@ _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 _IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
 _IMAGE_MODERATION_VALUES = {"auto", "low"}
 _POST_COMMIT_PUBLISH_TIMEOUT_S = 2.0
+_CONFIRM_REPLY_YES_RE = re.compile(
+    r"^\s*(对|是|嗯|可以|继续|好|yes|yep|yeah|ok|okay)\b|按.*来",
+    re.IGNORECASE,
+)
+# Why anchor: 中文 \b 不准, 不锚定开头会让"我打算继续按这个不变"里的"不"被匹中.
+# 正确含义是用户答复以否定开头.
+_CONFIRM_REPLY_NO_RE = re.compile(
+    r"^\s*(不是|不要|不用|不按|换一?[下个]?|别|no|nope|don'?t|do not)",
+    re.IGNORECASE,
+)
 _TRANSPARENT_BACKGROUND_RE = re.compile(
     r"透明(?:底|背景|底色)|去背|抠图|免抠|无背景|"
     r"transparent\s+(?:background|bg)|background\s+transparent|"
@@ -413,6 +431,307 @@ async def resolve_system_prompt_for_message(
         legacy_conversation_prompt=conv.default_system,
         global_prompt=global_prompt,
     )
+
+
+async def _default_memory_scope(db: AsyncSession, user_id: str) -> UserMemoryScope:
+    scope = (
+        await db.execute(
+            select(UserMemoryScope).where(
+                UserMemoryScope.user_id == user_id,
+                UserMemoryScope.is_default.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if scope is not None:
+        return scope
+    scope = UserMemoryScope(user_id=user_id, name="default", is_default=True)
+    db.add(scope)
+    await db.flush()
+    return scope
+
+
+async def _enqueue_memory_reembed(target: str, row_id: str) -> None:
+    try:
+        pool = await get_arq_pool()
+        await pool.enqueue_job("memory_reembed", target, row_id)
+    except Exception:
+        logger.warning(
+            "memory_reembed enqueue failed target=%s id=%s",
+            target,
+            row_id,
+            exc_info=True,
+        )
+
+
+async def _memory_undo_token(payload: dict[str, Any]) -> str | None:
+    token = secrets.token_urlsafe(24)
+    try:
+        await get_redis().setex(
+            f"memory:undo:{token}",
+            300,
+            json.dumps(payload, separators=(",", ":")),
+        )
+        return token
+    except Exception:
+        return None
+
+
+async def _disable_memory_for_conversation(conversation_id: str, memory_id: str) -> None:
+    try:
+        key = f"memory:conversation:{conversation_id}:disabled"
+        pipe = get_redis().pipeline(transaction=False)
+        pipe.sadd(key, memory_id)
+        pipe.expire(key, 30 * 24 * 60 * 60)
+        await pipe.execute()
+    except Exception:
+        return
+
+
+def _confirmation_reply_decision(text: str) -> Literal["yes", "no", "skip"] | None:
+    value = " ".join((text or "").split()).strip()
+    if not value:
+        return None
+    if _CONFIRM_REPLY_NO_RE.search(value):
+        return "no"
+    if _CONFIRM_REPLY_YES_RE.search(value):
+        return "yes"
+    return "skip"
+
+
+async def _apply_pending_confirmation_reply(
+    *,
+    db: AsyncSession,
+    user: User,
+    conv: Conversation,
+    user_msg: Message,
+    text: str,
+) -> None:
+    decision = _confirmation_reply_decision(text)
+    if decision is None:
+        return
+    prompt = (
+        await db.execute(
+            select(MemoryAudit)
+            .join(Message, MemoryAudit.source_message_id == Message.id)
+            .where(
+                MemoryAudit.user_id == user.id,
+                MemoryAudit.event_type == "confirm_prompted",
+                Message.conversation_id == conv.id,
+            )
+            .order_by(desc(MemoryAudit.created_at))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if prompt is None or not prompt.memory_id:
+        return
+    already_answered = (
+        await db.execute(
+            select(func.count(MemoryAudit.id)).where(
+                MemoryAudit.user_id == user.id,
+                MemoryAudit.memory_id == prompt.memory_id,
+                MemoryAudit.event_type.in_(
+                    (
+                        "confirm_yes",
+                        "confirm_no",
+                        "confirm_skip",
+                        "confirm_auto_yes",
+                        "confirm_auto_no",
+                        "confirm_auto_skip",
+                    )
+                ),
+                MemoryAudit.created_at > prompt.created_at,
+            )
+        )
+    ).scalar_one()
+    if int(already_answered or 0) > 0:
+        return
+    memory = await db.get(UserMemory, prompt.memory_id)
+    if memory is None or memory.user_id != user.id:
+        return
+    now = datetime.now(timezone.utc)
+    if decision == "yes":
+        memory.positive_signal += 1
+    elif decision == "no":
+        memory.negative_signal += 2
+        await _disable_memory_for_conversation(conv.id, memory.id)
+    memory.last_confirmed_at = now
+    db.add(
+        MemoryAudit(
+            user_id=user.id,
+            memory_id=memory.id,
+            event_type=f"confirm_auto_{decision}",
+            new_content=memory.content,
+            source_message_id=user_msg.id,
+            details={"conversation_id": conv.id, "prompt_audit_id": prompt.id},
+        )
+    )
+
+
+async def _apply_explicit_memory_write(
+    *,
+    db: AsyncSession,
+    user: User,
+    conv: Conversation,
+    user_msg: Message,
+    assistant_msg: Message,
+    text: str,
+    reembed_ids: list[str] | None = None,
+) -> None:
+    """Synchronous "remember X" path so the next turn can use it."""
+    if (
+        bool(getattr(user, "memory_disabled", False))
+        or bool(getattr(user, "memory_paused", False))
+        or bool(getattr(conv, "memory_disabled", False))
+    ):
+        return
+    # 没 embedding provider 时整条记忆链路都没法跑(检索阶段算 cosine 全 ≈ 0).
+    # 直接 short-circuit, 不写库不发 inline 提示, 让用户在 settings 里看到
+    # "需要 embedding provider" 的统一提示.
+    if not await embedding_provider_available(db):
+        return
+    write_now = datetime.now(timezone.utc)
+    candidates, rejected_pii = extract_memories(text, explicit_only=True)
+    explicit_reembed_ids: list[str] = reembed_ids if reembed_ids is not None else []
+    writes: list[dict[str, Any]] = []
+    if rejected_pii:
+        writes.append(
+            {
+                "id": None,
+                "kind": "rejected_pii",
+                "type": None,
+                "content": "",
+                "source_excerpt": " ".join((text or "").split())[:160],
+                "undo_token": None,
+                "scope_id": None,
+                "recommended_scope_id": None,
+            }
+        )
+    if not candidates:
+        if writes:
+            assistant_msg.content = {**(assistant_msg.content or {}), "memory_writes": writes}
+        return
+
+    default_scope = await _default_memory_scope(db, user.id)
+    scope = default_scope
+    if conv.active_scope_id:
+        active_scope = (
+            await db.execute(
+                select(UserMemoryScope).where(
+                    UserMemoryScope.id == conv.active_scope_id,
+                    UserMemoryScope.user_id == user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if active_scope is not None:
+            scope = active_scope
+    for candidate in candidates:
+        existing = (
+            await db.execute(
+                select(UserMemory).where(
+                    UserMemory.user_id == user.id,
+                    UserMemory.type == candidate.type,
+                    UserMemory.disabled.is_(False),
+                    UserMemory.superseded_by.is_(None),
+                )
+            )
+        ).scalars().all()
+        duplicate = next(
+            (
+                m
+                for m in existing
+                if canonical_memory_text(m.content)
+                == canonical_memory_text(candidate.content)
+            ),
+            None,
+        )
+        if duplicate is not None:
+            duplicate.positive_signal += 1
+            duplicate.updated_at = write_now
+            db.add(
+                MemoryAudit(
+                    user_id=user.id,
+                    memory_id=duplicate.id,
+                    event_type="merged",
+                    old_content=duplicate.content,
+                    new_content=duplicate.content,
+                    source_message_id=user_msg.id,
+                    details={"source": "explicit"},
+                )
+            )
+            # Why preserve full candidate: undo "merged" must split it back
+            # into an independent entry per design §5.4 ("撤销保留独立"),
+            # which means we need every field needed to reconstruct a row.
+            token = await _memory_undo_token(
+                {
+                    "user_id": user.id,
+                    "action": "merged",
+                    "memory_id": duplicate.id,
+                    "candidate": {
+                        "type": candidate.type,
+                        "content": candidate.content,
+                        "source_excerpt": candidate.source_excerpt,
+                        "source_message_id": user_msg.id,
+                        "scope_id": scope.id,
+                        "source": "explicit",
+                        "confidence": 1.0,
+                    },
+                }
+            )
+            writes.append(
+                {
+                    "id": duplicate.id,
+                    "kind": "merged",
+                    "type": duplicate.type,
+                    "content": duplicate.content,
+                    "source_excerpt": candidate.source_excerpt,
+                    "undo_token": token,
+                    "scope_id": duplicate.scope_id,
+                    "recommended_scope_id": scope.id,
+                }
+            )
+            continue
+        memory = UserMemory(
+            user_id=user.id,
+            type=candidate.type,
+            content=candidate.content,
+            source_message_id=user_msg.id,
+            source_excerpt=candidate.source_excerpt,
+            source="explicit",
+            embedding=None,
+            confidence=1.0,
+            scope_id=scope.id,
+            last_used_at=write_now,
+        )
+        db.add(memory)
+        await db.flush()
+        explicit_reembed_ids.append(memory.id)
+        db.add(
+            MemoryAudit(
+                user_id=user.id,
+                memory_id=memory.id,
+                event_type="added",
+                new_content=memory.content,
+                source_message_id=user_msg.id,
+                details={"source": "explicit"},
+            )
+        )
+        token = await _memory_undo_token(
+            {"user_id": user.id, "action": "added", "memory_id": memory.id}
+        )
+        writes.append(
+            {
+                "id": memory.id,
+                "kind": "added",
+                "type": memory.type,
+                "content": memory.content,
+                "source_excerpt": memory.source_excerpt,
+                "undo_token": token,
+                "scope_id": memory.scope_id,
+                "recommended_scope_id": scope.id,
+            }
+        )
+    if writes:
+        assistant_msg.content = {**(assistant_msg.content or {}), "memory_writes": writes}
 
 
 # ---------------------------------------------------------------------------
@@ -1043,6 +1362,14 @@ async def submit_user_message(
     )
     db.add(user_msg)
     await db.flush()  # need user_msg.id for parent_message_id
+    if intent in (Intent.CHAT, Intent.VISION_QA):
+        await _apply_pending_confirmation_reply(
+            db=db,
+            user=user,
+            conv=conv,
+            user_msg=user_msg,
+            text=body.text or "",
+        )
 
     result = await _create_assistant_task(
         db=db,
@@ -1059,6 +1386,17 @@ async def submit_user_message(
         default_image_output_format=default_image_output_format,
         mask_image_id=mask_image_id,
     )
+    explicit_reembed_ids: list[str] = []
+    if intent in (Intent.CHAT, Intent.VISION_QA):
+        await _apply_explicit_memory_write(
+            db=db,
+            user=user,
+            conv=conv,
+            user_msg=user_msg,
+            assistant_msg=result.assistant_msg,
+            text=body.text or "",
+            reembed_ids=explicit_reembed_ids,
+        )
 
     # bump conversation last_activity_at
     conv.last_activity_at = now
@@ -1082,6 +1420,8 @@ async def submit_user_message(
         )
     await db.refresh(user_msg)
     await db.refresh(result.assistant_msg)
+    for memory_id in explicit_reembed_ids:
+        await _enqueue_memory_reembed("memory", memory_id)
 
     # ---- best-effort publish ----
     await _await_post_commit_publish(

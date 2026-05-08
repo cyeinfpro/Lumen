@@ -174,6 +174,52 @@ async def test_provider_pool_reload_preserves_image_job_fields(
 
 
 @pytest.mark.asyncio
+async def test_provider_pool_filters_candidates_by_purpose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool, runtime_settings
+
+    values = {
+        "providers": json.dumps(
+            [
+                {
+                    "name": "chat-only",
+                    "base_url": "https://chat.example",
+                    "api_key": "sk-chat",
+                    "enabled": True,
+                    "purposes": ["chat"],
+                },
+                {
+                    "name": "embed-only",
+                    "base_url": "https://embedding.example",
+                    "api_key": "sk-embedding",
+                    "enabled": True,
+                    "purposes": ["embedding"],
+                },
+            ]
+        ),
+    }
+
+    async def fake_resolve(key: str) -> str | None:
+        return values.get(key)
+
+    async def fake_validate_provider_base_url(raw_base: str) -> str:
+        return raw_base.rstrip("/")
+
+    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(
+        provider_pool,
+        "_validate_provider_base_url",
+        fake_validate_provider_base_url,
+    )
+
+    pool = ProviderPool()
+
+    assert [p.name for p in await pool.select(route="text")] == ["chat-only"]
+    assert [p.name for p in await pool.select(purpose="embedding")] == ["embed-only"]
+
+
+@pytest.mark.asyncio
 async def test_provider_endpoint_lock_filters_text_and_image_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

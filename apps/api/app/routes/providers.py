@@ -3,6 +3,7 @@
 GET  /admin/providers       — 列出 provider（API Key 脱敏）
 PUT  /admin/providers       — 结构化保存（支持 key 保留）
 POST /admin/providers/probe — 手动探活（支持按名称过滤）
+PATCH /admin/providers/{name}/enabled — 单字段启停
 """
 
 from __future__ import annotations
@@ -17,15 +18,18 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
+    DEFAULT_PROVIDER_PURPOSES,
     ProviderProxyDefinition,
     build_legacy_provider,
     endpoint_kind_allowed,
+    normalize_provider_purposes,
     normalize_image_edit_input_transport,
     parse_proxy_item,
     resolve_provider_proxy_url,
@@ -64,6 +68,10 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
     return HTTPException(
         status_code=http, detail={"error": {"code": code, "message": msg}}
     )
+
+
+class ProviderEnabledPatchIn(BaseModel):
+    enabled: bool
 
 
 def _responses_url(base_url: str) -> str:
@@ -125,6 +133,7 @@ def _legacy_env_providers_raw() -> str | None:
                 "priority": legacy.priority,
                 "weight": legacy.weight,
                 "enabled": legacy.enabled,
+                "purposes": list(DEFAULT_PROVIDER_PURPOSES),
                 "image_jobs_enabled": False,
                 "image_jobs_endpoint": "auto",
                 "image_jobs_endpoint_lock": False,
@@ -200,6 +209,10 @@ def _normalize_capability(raw: Any) -> bool | None:
     return None
 
 
+def _normalize_purposes(raw: Any) -> list[str]:
+    return list(normalize_provider_purposes(raw))
+
+
 def _to_out(it: dict, idx: int) -> ProviderItemOut:
     endpoint = _normalize_image_jobs_endpoint(it.get("image_jobs_endpoint"))
     return ProviderItemOut(
@@ -209,6 +222,7 @@ def _to_out(it: dict, idx: int) -> ProviderItemOut:
         priority=_safe_int(it.get("priority"), 0),
         weight=_safe_int(it.get("weight"), 1, minimum=1),
         enabled=bool(it.get("enabled", True)),
+        purposes=_normalize_purposes(it.get("purposes")),
         proxy=it.get("proxy") if isinstance(it.get("proxy"), str) else None,
         image_jobs_enabled=bool(it.get("image_jobs_enabled", False)),
         image_jobs_endpoint=endpoint,
@@ -440,6 +454,7 @@ async def update_providers(
             "priority": it.priority,
             "weight": max(1, it.weight),
             "enabled": it.enabled,
+            "purposes": _normalize_purposes(it.purposes),
             "image_jobs_enabled": it.image_jobs_enabled,
             "image_jobs_endpoint": endpoint,
             "image_jobs_endpoint_lock": _normalize_image_jobs_endpoint_lock(
@@ -516,6 +531,7 @@ async def update_providers(
                 priority=it["priority"],
                 weight=it["weight"],
                 enabled=it["enabled"],
+                purposes=_normalize_purposes(it.get("purposes")),
                 proxy=it.get("proxy"),
                 image_jobs_enabled=bool(it.get("image_jobs_enabled", False)),
                 image_jobs_endpoint=endpoint,
@@ -544,6 +560,75 @@ async def update_providers(
         )
     proxies_out = [_to_proxy_out(it, i) for i, it in enumerate(proxy_arr)]
     return ProvidersOut(items=out, proxies=proxies_out, source="db")
+
+
+@router.patch(
+    "/{provider_name}/enabled",
+    response_model=ProviderItemOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def patch_provider_enabled(
+    provider_name: str,
+    body: ProviderEnabledPatchIn,
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProviderItemOut:
+    raw, _source = await _read_providers(db)
+    if not raw:
+        raise _http("not_found", "provider not found", 404)
+    items, proxies = _parse_config(raw)
+    target_idx: int | None = None
+    for idx, item in enumerate(items):
+        if str(item.get("name") or "").strip() == provider_name:
+            target_idx = idx
+            break
+    if target_idx is None:
+        raise _http("not_found", "provider not found", 404)
+
+    target = items[target_idx]
+    target["enabled"] = body.enabled
+    for item in items:
+        item["purposes"] = _normalize_purposes(item.get("purposes"))
+
+    raw_json = json.dumps(
+        {"providers": items, "proxies": proxies},
+        ensure_ascii=False,
+    )
+    if len(raw_json) > _PROVIDERS_MAX_LEN:
+        raise _http(
+            "invalid_request",
+            f"providers JSON 超过 {_PROVIDERS_MAX_LEN} 字符",
+            422,
+        )
+    try:
+        validate_providers(raw_json)
+    except ValueError as exc:
+        raise _http("invalid_request", str(exc), 422) from exc
+
+    existing = (
+        await db.execute(
+            select(SystemSetting).where(SystemSetting.key == "providers")
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        db.add(SystemSetting(key="providers", value=raw_json))
+    else:
+        existing.value = raw_json
+
+    await write_audit(
+        db,
+        event_type="admin.providers.enabled",
+        user_id=admin.id,
+        actor_email_hash=hash_email(admin.email),
+        actor_ip_hash=request_ip_hash(request),
+        details={"name": provider_name, "enabled": body.enabled},
+    )
+    await db.commit()
+    from .admin_models import invalidate_admin_models_cache
+
+    invalidate_admin_models_cache()
+    return _to_out(target, target_idx)
 
 
 # ---------------------------------------------------------------------------

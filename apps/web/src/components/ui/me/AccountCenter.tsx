@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import {
   BarChart3,
+  Brain,
   FileText,
   LogOut,
   Lock,
@@ -15,6 +16,7 @@ import {
 import { ActionSheet } from "@/components/ui/primitives/mobile";
 import {
   getMe,
+  listMemoryStaging,
   logout,
   type AuthUser,
 } from "@/lib/apiClient";
@@ -50,6 +52,13 @@ export function AccountCenter() {
 
   const promptsQuery = useSystemPromptsQuery();
   const promptCount = promptsQuery.data?.items?.length ?? 0;
+  const stagingQuery = useQuery({
+    queryKey: ["me", "memory", "staging"],
+    queryFn: listMemoryStaging,
+    retry: false,
+    staleTime: 30_000,
+  });
+  const stagingCount = stagingQuery.data?.items?.length ?? 0;
 
   const storeFast = useChatStore((s) => s.composer?.fast ?? false);
   const setStoreFast = useChatStore((s) => s.setFast);
@@ -89,6 +98,13 @@ export function AccountCenter() {
           href="/settings/privacy"
           icon={<Lock className="w-4 h-4" />}
           label="隐私 & 数据"
+          grouped
+        />
+        <AccountRow
+          href="/settings/memory"
+          icon={<Brain className="w-4 h-4" />}
+          label="记忆"
+          badge={stagingCount > 0 ? stagingCount : undefined}
           grouped
         />
         <AccountRow

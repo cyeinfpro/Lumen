@@ -107,6 +107,11 @@ try:
 except Exception:  # noqa: BLE001
     context_summary = None  # type: ignore[assignment]
 
+try:
+    from . import memory_extraction
+except Exception:  # noqa: BLE001
+    memory_extraction = None  # type: ignore[assignment]
+
 
 _LEASE_TTL_S = 300
 _LEASE_RENEW_S = 30
@@ -2218,6 +2223,98 @@ def _context_metadata(packed: PackedContext) -> dict[str, Any]:
     }
 
 
+def _append_text_to_first_system(
+    input_list: list[dict[str, Any]],
+    text: str,
+) -> None:
+    if not text:
+        return
+    for item in input_list:
+        if item.get("role") != "system":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list) or not content:
+            continue
+        first = content[0]
+        if isinstance(first, dict) and first.get("type") == "input_text":
+            old = first.get("text") if isinstance(first.get("text"), str) else ""
+            first["text"] = f"{old.rstrip()}\n\n{text}" if old else text
+            return
+    input_list.insert(
+        0,
+        {"role": "system", "content": [{"type": "input_text", "text": text}]},
+    )
+
+
+def _insert_user_context_after_summary(
+    input_list: list[dict[str, Any]],
+    text: str,
+) -> None:
+    if not text:
+        return
+    item = {"role": "user", "content": [{"type": "input_text", "text": text}]}
+    insert_at = 1
+    for idx, existing in enumerate(input_list):
+        content = existing.get("content")
+        if not isinstance(content, list):
+            continue
+        joined = "\n".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") in {"input_text", "output_text"}
+        )
+        if "CONVERSATION SUMMARY" in joined or "会话摘要" in joined:
+            insert_at = idx + 1
+    input_list.insert(insert_at, item)
+
+
+async def _inject_user_memory_context(
+    session: Any,
+    *,
+    input_list: list[dict[str, Any]],
+    user_id: str,
+    conversation_id: str | None,
+    parent_user_message_id: str | None,
+    redis: Any | None = None,
+) -> dict[str, Any]:
+    if memory_extraction is None or conversation_id is None or not parent_user_message_id:
+        return {"used_memory_ids": [], "used_memory_summary": []}
+    parent = await session.get(Message, parent_user_message_id)
+    if parent is None:
+        return {"used_memory_ids": [], "used_memory_summary": []}
+    parent_content = parent.content if isinstance(parent.content, dict) else {}
+    user_text = parent_content.get("text") if isinstance(parent_content, dict) else ""
+    if not isinstance(user_text, str):
+        user_text = ""
+    assembled = await memory_extraction.assemble_user_memory_prompt(
+        session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        user_text=user_text,
+        redis=redis,
+        parent_user_message_id=parent_user_message_id,
+    )
+    head_sections = "\n\n".join(
+        section
+        for section in (
+            assembled.scope_hint_text,
+            assembled.profile_text,
+            assembled.constraints_text,
+            assembled.confirmation_instruction,
+        )
+        if section
+    )
+    if head_sections:
+        _append_text_to_first_system(input_list, head_sections)
+    if assembled.context_text:
+        _insert_user_context_after_summary(input_list, assembled.context_text)
+    return {
+        "used_memory_ids": assembled.used_memory_ids,
+        "used_memory_summary": assembled.used_memory_summary,
+        "confirmation_candidate_id": assembled.confirmation_candidate_id,
+    }
+
+
 async def _record_completion_context_metadata(
     session: Any,
     *,
@@ -2443,6 +2540,10 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         reasoning_effort: str | None = None
         fast_mode = False
         chat_tools: list[dict[str, Any]] = []
+        memory_meta_for_event: dict[str, Any] = {
+            "used_memory_ids": [],
+            "used_memory_summary": [],
+        }
         # instructions 必须保持稳定（prompt cache 命中前提）。
         # 上游 cache 按请求前缀逐字节比对，instructions 是头部字段；这里只允许：
         # ① comp.system_prompt（DB 持久化的用户/会话级 prompt，按消息固定）
@@ -2453,6 +2554,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # user message 里（不参与 cache key）。
         instructions = system_prompt or DEFAULT_CHAT_INSTRUCTIONS
         async with SessionLocal() as session:
+            target_msg = await session.get(Message, message_id)
             if conversation_id is None:
                 input_list = []
                 if system_prompt:
@@ -2480,15 +2582,34 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     system_prompt,
                     enabled=packed.summary_used or packed.sticky_used,
                 )
+                memory_meta = await _inject_user_memory_context(
+                    session,
+                    input_list=input_list,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    parent_user_message_id=(
+                        getattr(target_msg, "parent_message_id", None)
+                        if target_msg is not None
+                        else None
+                    ),
+                    redis=redis,
+                )
+                memory_meta_for_event = memory_meta
                 await _record_completion_context_metadata(
                     session,
                     task_id=task_id,
                     attempt_epoch=attempt_epoch,
                     packed=packed,
                 )
+                if memory_meta.get("used_memory_ids"):
+                    comp_row = await session.get(Completion, task_id)
+                    if comp_row is not None and comp_row.attempt == attempt_epoch:
+                        upstream_request = dict(comp_row.upstream_request or {})
+                        upstream_request["memory"] = memory_meta
+                        comp_row.upstream_request = upstream_request
+                        await session.commit()
 
             # assistant.parent_message_id → user message.content.{reasoning_effort, fast, tools}
-            target_msg = await session.get(Message, message_id)
             if target_msg is not None and target_msg.parent_message_id:
                 parent = await session.get(Message, target_msg.parent_message_id)
                 if parent is not None and isinstance(parent.content, dict):
@@ -2755,6 +2876,17 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 tool_calls = tool_tracker.content()
                 if tool_calls:
                     content["tool_calls"] = tool_calls
+                if memory_meta_for_event.get("used_memory_ids"):
+                    content["used_memory_ids"] = memory_meta_for_event.get(
+                        "used_memory_ids", []
+                    )
+                    content["used_memory_summary"] = memory_meta_for_event.get(
+                        "used_memory_summary", []
+                    )
+                    if memory_meta_for_event.get("confirmation_candidate_id"):
+                        content["confirmation_candidate_id"] = memory_meta_for_event.get(
+                            "confirmation_candidate_id"
+                        )
                 msg.content = content
                 msg.status = MessageStatus.SUCCEEDED
             await session.commit()
@@ -2777,6 +2909,13 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
                 "tool_calls": tool_tracker.content(),
+                "used_memory_ids": memory_meta_for_event.get("used_memory_ids", []),
+                "used_memory_summary": memory_meta_for_event.get(
+                    "used_memory_summary", []
+                ),
+                "confirmation_candidate_id": memory_meta_for_event.get(
+                    "confirmation_candidate_id"
+                ),
             },
         )
         _task_outcome = "succeeded"
@@ -2786,6 +2925,33 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         if conversation_id:
             from .auto_title import maybe_enqueue_auto_title
             await maybe_enqueue_auto_title(redis, conversation_id)
+            if memory_extraction is not None:
+                try:
+                    # Best effort: extraction is intentionally off the critical
+                    # response path. Prefer arq enqueue when available; fall back
+                    # to in-process deterministic extraction for tests.
+                    arq_pool = ctx.get("arq_pool")
+                    if arq_pool is not None:
+                        await arq_pool.enqueue_job(
+                            "memory_extract",
+                            conversation_id,
+                            getattr(msg, "parent_message_id", None) if msg is not None else "",
+                            message_id,
+                        )
+                    elif msg is not None and msg.parent_message_id:
+                        await memory_extraction.memory_extract(
+                            ctx,
+                            conversation_id,
+                            msg.parent_message_id,
+                            message_id,
+                        )
+                except Exception:
+                    logger.warning(
+                        "memory extraction enqueue failed conversation=%s message=%s",
+                        conversation_id,
+                        message_id,
+                        exc_info=True,
+                    )
 
     except _CompletionEpochSuperseded as exc:
         logger.info("completion worker superseded task=%s err=%s", task_id, exc)

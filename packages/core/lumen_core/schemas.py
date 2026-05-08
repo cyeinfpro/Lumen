@@ -88,6 +88,8 @@ class ConversationOut(BaseOut):
     title: str
     pinned: bool
     archived: bool
+    memory_disabled: bool = False
+    active_scope_id: str | None = None
     last_activity_at: datetime
     default_params: dict[str, Any]
     default_system: str | None = None
@@ -698,6 +700,7 @@ class ShowcaseImagesCreateIn(BaseModel):
     aspect_ratio: AspectRatioLiteral = "4:5"
     final_quality: Literal["standard", "high", "4k"] = "high"
     output_count: Literal[1, 2, 4, 8, 16] = 4
+    scene_environment: Literal["indoor", "outdoor"] = "indoor"
 
 
 class ImageRevisionIn(BaseModel):
@@ -942,6 +945,9 @@ class ProviderItemOut(BaseModel):
     priority: int
     weight: int
     enabled: bool
+    purposes: list[Literal["chat", "image", "embedding"]] = Field(
+        default_factory=lambda: ["chat", "image"]
+    )
     proxy: str | None = None
     image_jobs_enabled: bool = False
     image_jobs_endpoint: str = "auto"
@@ -996,6 +1002,9 @@ class ProviderItemIn(BaseModel):
     priority: int = 0
     weight: int = 1
     enabled: bool = True
+    purposes: list[Literal["chat", "image", "embedding"]] = Field(
+        default_factory=lambda: ["chat", "image"], min_length=1
+    )
     proxy: str | None = None
     image_jobs_enabled: bool = False
     image_jobs_endpoint: str = "auto"
