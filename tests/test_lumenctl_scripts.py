@@ -1035,6 +1035,19 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
     printf 'cid-%s\\n' "${svc}"
     exit 0
   fi
+  # Mock alembic heads / current（update.sh migrate_db 阶段会比对）。
+  # 真 alembic 会输出 "<rev_id> (head)"；mock 给同 rev_id 让 verify 通过。
+  rest="$*"
+  case "${rest}" in
+    *"alembic heads"*)
+      printf '0021_test_head\\n'
+      exit 0
+      ;;
+    *"alembic current"*)
+      printf '0021_test_head\\n'
+      exit 0
+      ;;
+  esac
   exit 0
 fi
 if [ "$#" -ge 1 ] && [ "$1" = "inspect" ]; then
