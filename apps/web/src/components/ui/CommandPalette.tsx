@@ -20,6 +20,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ComponentType,
   type KeyboardEvent as ReactKeyboardEvent,
   type SVGProps,
@@ -45,6 +46,9 @@ interface Command {
 function normalizeSearchValue(value: string) {
   return value.toLocaleLowerCase("zh-CN").replace(/\s+/g, " ").trim();
 }
+
+const MODIFIER_SUBSCRIBE_NOOP = (): (() => void) => () => {};
+const MODIFIER_SERVER_SNAPSHOT = (): "Ctrl" => "Ctrl";
 
 function detectModifierLabel(): "⌘" | "Ctrl" {
   if (typeof navigator === "undefined") return "Ctrl";
@@ -143,14 +147,15 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
-  // SSR/CSR 一致：首屏一律 "Ctrl"，挂载后再用 navigator.platform 探测（避免 React 19 hydration mismatch）。
-  const [modifierLabel, setModifierLabel] = useState<string>("Ctrl");
+  // SSR/CSR 一致：getServerSnapshot=Ctrl，getClientSnapshot 探测 navigator。
+  // 用 useSyncExternalStore 避免 hydration mismatch + 不踩 react-hooks/set-state-in-effect。
+  const modifierLabel = useSyncExternalStore<string>(
+    MODIFIER_SUBSCRIBE_NOOP,
+    detectModifierLabel,
+    MODIFIER_SERVER_SNAPSHOT,
+  );
   // SSR safe：首屏视为桌面，挂载后由 matchMedia 修正。
   const [isDesktop, setIsDesktop] = useState(true);
-
-  useEffect(() => {
-    setModifierLabel(detectModifierLabel());
-  }, []);
 
   const filteredCommands = useMemo(() => {
     const tokens = normalizeSearchValue(query).split(" ").filter(Boolean);

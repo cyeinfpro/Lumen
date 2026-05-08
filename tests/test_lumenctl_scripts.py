@@ -466,7 +466,11 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "lumen_compose_in" in text
     assert "--profile migrate run --rm migrate" in text
     assert "up -d --wait --force-recreate postgres redis" in text
-    assert "up -d --wait --force-recreate api worker web" in text
+    # restart_services: api 必须最后启动（lumen-api 在跑 update.sh 自身的进度
+    # SSE，先重 api 会让前端断流）。形态：for _svc in worker web api; do up -d
+    # --wait --force-recreate "${_svc}"; done
+    assert "for _svc in worker web api" in text
+    assert 'up -d --wait --force-recreate "${_svc}"' in text
     # release 切换走 atomic switch
     assert 'lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"' in text
     # 反断言：脚本注释里可以提"不再 uv sync / npm ci"，但实际可执行命令必须不包含。
