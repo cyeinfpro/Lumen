@@ -27,7 +27,7 @@ import {
   type SVGProps,
 } from "react";
 
-import { Kbd } from "@/components/ui/primitives";
+import { IconButton, Kbd } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { cn } from "@/lib/utils";
 
@@ -325,18 +325,15 @@ export function CommandPalette() {
         <Kbd>{modifierLabel}</Kbd>
         <Kbd>K</Kbd>
       </div>
-      <button
-        type="button"
+      <IconButton
+        variant="ghost"
+        size="lg"
         aria-label="关闭命令面板"
-        className={cn(
-          "inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md",
-          "text-[var(--fg-2)] transition-colors hover:bg-white/8 hover:text-[var(--fg-0)]",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-        )}
+        className="rounded-[var(--radius-control)]"
         onClick={() => closePalette()}
       >
         <X className="h-4 w-4" aria-hidden />
-      </button>
+      </IconButton>
     </div>
   );
 
@@ -361,7 +358,8 @@ export function CommandPalette() {
               : pathname === item.href || pathname.startsWith(`${item.href}/`);
 
           return (
-            <button
+            /* @list-item-ok: combobox option, role + aria-selected + 多列布局 */
+<button
               key={item.id}
               id={optionId(item.id)}
               type="button"
@@ -372,7 +370,7 @@ export function CommandPalette() {
               onFocus={() => setSelectedIndex(index)}
               onClick={() => runCommand(item)}
               className={cn(
-                "flex min-h-[58px] w-full items-center gap-3 rounded-md px-3 py-2.5 text-left",
+                "flex min-h-[58px] w-full items-center gap-3 rounded-[var(--radius-control)] px-3 py-2.5 text-left",
                 "transition-colors focus-visible:outline-none",
                 selected
                   ? "bg-white/10 text-[var(--fg-0)]"
@@ -453,7 +451,8 @@ export function CommandPalette() {
 
   return (
     <div className="fixed inset-0 z-[95] flex items-start justify-center px-3 pt-[12vh] sm:pt-[16vh]">
-      <button
+      {/* @backdrop-button: dialog backdrop button，需要 click 但不能用 Button primitive 样式 */}
+<button
         type="button"
         aria-label="关闭命令面板"
         className="absolute inset-0 cursor-default bg-black/45 backdrop-blur-sm"

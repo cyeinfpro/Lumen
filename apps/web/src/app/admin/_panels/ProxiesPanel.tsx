@@ -42,6 +42,8 @@ import type {
   ProxyHealthOut,
   ProxyTestOut,
 } from "@/lib/types";
+import { Button, IconButton } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import { EmptyBlock, ErrorBlock } from "../page";
 
 // ———————————————— Draft 类型 ————————————————
@@ -141,7 +143,7 @@ export function ProxiesPanel() {
         { key: "proxies.cooldown_seconds", value: draftCooldown.trim() },
       ]);
     } catch (err) {
-      setBulkError(err instanceof Error ? err.message : "保存失败");
+      setBulkError(err instanceof Error ? err.message : copy.error.unknown);
     }
   };
 
@@ -211,7 +213,7 @@ export function ProxiesPanel() {
       await updateProxiesMut.mutateAsync(payload);
       setDrafts(null);
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "保存失败";
+      const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : copy.error.unknown;
       setEditError(msg);
     }
   };
@@ -222,7 +224,7 @@ export function ProxiesPanel() {
       const res = await testOne.mutateAsync({ name, target: draftTarget.trim() || undefined });
       setTestResultOf((m) => ({ ...m, [name]: res }));
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "测试失败";
+      const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : copy.error.unknown;
       setTestResultOf((m) => ({
         ...m,
         [name]: {
@@ -248,21 +250,21 @@ export function ProxiesPanel() {
       });
       setTestResultOf(m);
     } catch (err) {
-      setBulkError(err instanceof Error ? err.message : "批量测试失败");
+      setBulkError(err instanceof Error ? err.message : copy.error.unknown);
     }
   };
 
   return (
     <section className="space-y-5">
       {/* 全局参数 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl p-4 md:p-5 space-y-4">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
-            <Network className="w-4 h-4 text-neutral-400" />
+          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+            <Network className="w-4 h-4 text-[var(--fg-2)]" />
           </div>
           <div className="min-w-0">
-            <h2 className="text-sm font-medium text-neutral-100">代理池</h2>
-            <p className="text-xs text-neutral-500 mt-0.5">
+            <h2 className="type-card-title">代理池</h2>
+            <p className="type-caption text-[var(--fg-2)] mt-0.5">
               供应商和 Telegram 机器人共用这套代理。可以在这里增加、修改或删除代理；
               连续失败后会暂停一段时间。
             </p>
@@ -293,16 +295,17 @@ export function ProxiesPanel() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="md"
             onClick={onSaveSettings}
             disabled={!settingsDirty || updateSettingsMut.isPending}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
+            loading={updateSettingsMut.isPending}
           >
-            {updateSettingsMut.isPending ? "保存中…" : "保存这三项"}
-          </button>
+            {updateSettingsMut.isPending ? copy.state.saving : "保存这三项"}
+          </Button>
           {bulkError && (
-            <span className="inline-flex items-center gap-1 text-xs text-red-300">
+            <span className="inline-flex items-center gap-1 type-caption text-danger">
               <AlertCircle className="w-3 h-3" /> {bulkError}
             </span>
           )}
@@ -313,58 +316,64 @@ export function ProxiesPanel() {
       <div className="flex items-center gap-2 flex-wrap">
         {!isEditing ? (
           <>
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="md"
               onClick={startEdit}
-              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium transition-all"
+              leftIcon={<Edit3 className="w-3.5 h-3.5" />}
             >
-              <Edit3 className="w-3.5 h-3.5" /> 编辑代理列表
-            </button>
-            <button
-              type="button"
+              编辑代理列表
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
               onClick={onTestAll}
               disabled={testAll.isPending || (q.data?.items ?? []).length === 0}
-              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
+              loading={testAll.isPending}
+              leftIcon={!testAll.isPending ? <Zap className="w-3.5 h-3.5" /> : undefined}
             >
-              <Zap className="w-3.5 h-3.5" />
-              {testAll.isPending ? "全部测试中…" : "全部测一遍"}
-            </button>
-            <button
-              type="button"
+              {testAll.isPending ? "全部测试中" : "全部测一遍"}
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
               onClick={() => void q.refetch()}
-              className="inline-flex min-h-11 items-center gap-1.5 px-3 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-sm transition-colors"
+              leftIcon={<RefreshCw className="w-3.5 h-3.5" />}
             >
-              <RefreshCw className="w-3.5 h-3.5" /> 刷新
-            </button>
+              刷新
+            </Button>
           </>
         ) : (
           <>
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="md"
               onClick={onSaveProxies}
               disabled={updateProxiesMut.isPending}
-              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 text-black text-sm font-medium disabled:opacity-50 transition-all"
+              loading={updateProxiesMut.isPending}
+              leftIcon={!updateProxiesMut.isPending ? <Save className="w-3.5 h-3.5" /> : undefined}
             >
-              <Save className="w-3.5 h-3.5" />
-              {updateProxiesMut.isPending ? "保存中…" : "保存代理列表"}
-            </button>
-            <button
-              type="button"
+              {updateProxiesMut.isPending ? copy.state.saving : "保存代理列表"}
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
               onClick={cancelEdit}
               disabled={updateProxiesMut.isPending}
-              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
+              leftIcon={<RotateCcw className="w-3.5 h-3.5" />}
             >
-              <RotateCcw className="w-3.5 h-3.5" /> 取消
-            </button>
-            <button
-              type="button"
+              {copy.action.cancel}
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
               onClick={addProxy}
-              className="inline-flex min-h-11 items-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm transition-colors"
+              leftIcon={<Plus className="w-3.5 h-3.5" />}
             >
-              <Plus className="w-3.5 h-3.5" /> 加一个代理
-            </button>
+              加一个代理
+            </Button>
             {editError && (
-              <span className="inline-flex items-center gap-1 text-xs text-red-300">
+              <span className="inline-flex items-center gap-1 type-caption text-danger">
                 <AlertCircle className="w-3 h-3" /> {editError}
               </span>
             )}
@@ -373,11 +382,11 @@ export function ProxiesPanel() {
       </div>
 
       {/* 列表（只读 / 编辑） */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] overflow-hidden">
         {q.isLoading ? (
           <div className="p-6 space-y-3">
             {[1, 2].map((i) => (
-              <div key={i} className="h-16 bg-white/5 rounded-xl animate-pulse" />
+              <div key={i} className="h-16 bg-white/5 rounded-[var(--radius-card)] animate-pulse" />
             ))}
           </div>
         ) : q.isError ? (
@@ -467,41 +476,42 @@ function ProxyViewRow({
       <div className="flex flex-col md:flex-row md:items-center gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium text-neutral-100">{proxy.name}</span>
-            <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/5 text-neutral-400 border border-white/10">
+            <span className="type-body-sm font-medium text-[var(--fg-0)]">{proxy.name}</span>
+            <span className="type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-2)] border border-white/10">
               {proxy.type}
             </span>
             {proxy.enabled ? (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+              <span className="inline-flex items-center gap-1 type-overline px-1.5 py-0.5 rounded bg-success-soft text-success border border-success-border">
                 <Power className="w-2.5 h-2.5" /> 启用
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/5 text-neutral-500 border border-white/10">
+              <span className="inline-flex items-center gap-1 type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-3)] border border-white/10">
                 <PowerOff className="w-2.5 h-2.5" /> 禁用
               </span>
             )}
             {proxy.in_cooldown && (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/30">
+              <span className="inline-flex items-center gap-1 type-overline px-1.5 py-0.5 rounded bg-info-soft text-info border border-info-border">
                 <Snowflake className="w-2.5 h-2.5" /> 冷静中
               </span>
             )}
           </div>
-          <p className="text-xs text-neutral-500 font-mono mt-1 break-all">
+          <p className="type-caption text-[var(--fg-2)] font-mono mt-1 break-all">
             {proxy.host}:{proxy.port}
             {proxy.username ? ` (${proxy.username})` : ""}
           </p>
         </div>
         <div className="flex items-center gap-3 md:gap-5 flex-wrap">
           <LatencyBadge tested={tested} testing={testing} />
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={onTest}
             disabled={testing}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 px-3 sm:h-8 sm:min-h-0 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-xs disabled:opacity-50 transition-colors"
+            loading={testing}
+            leftIcon={!testing ? <Zap className="w-3 h-3" /> : undefined}
           >
-            <Zap className="w-3 h-3" />
-            {testing ? "测试中…" : "测试"}
-          </button>
+            {testing ? "测试中" : "测试"}
+          </Button>
         </div>
       </div>
     </motion.li>
@@ -568,7 +578,7 @@ function ProxyEditRow({
             mono
           />
           <div className="flex flex-col gap-1.5 col-span-2">
-            <span className="text-[11px] text-neutral-400">
+            <span className="text-[11px] text-[var(--fg-2)]">
               密码{draft.has_password_on_server ? "（留空保留旧值）" : ""}
             </span>
             <div className="relative">
@@ -578,16 +588,17 @@ function ProxyEditRow({
                 onChange={(e) => onChange({ password: e.target.value })}
                 autoComplete="new-password"
                 placeholder={draft.has_password_on_server ? "已设置（留空不改）" : "代理需要鉴权时填"}
-                className="w-full h-9 pr-9 pl-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm font-mono transition-colors"
+                className="w-full h-9 pr-9 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm font-mono transition-colors"
               />
-              <button
-                type="button"
+              <IconButton
+                variant="ghost"
+                size="sm"
                 onClick={() => setShowPwd((s) => !s)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center w-7 h-7 rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 transition-colors"
                 aria-label={showPwd ? "隐藏" : "显示"}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-white/5 hover:bg-white/10"
               >
                 {showPwd ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              </button>
+              </IconButton>
             </div>
           </div>
           {draft.type === "ssh" && (
@@ -602,26 +613,19 @@ function ProxyEditRow({
         </div>
 
         <div className="flex flex-col items-end gap-2 shrink-0">
-          <button
-            type="button"
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => onChange({ enabled: !draft.enabled })}
+            leftIcon={draft.enabled ? <Power className="w-3 h-3" /> : <PowerOff className="w-3 h-3" />}
             className={
-              "inline-flex min-h-11 items-center gap-1.5 px-3 sm:h-8 sm:min-h-0 rounded-lg text-xs border transition-colors " +
-              (draft.enabled
-                ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                : "bg-white/5 text-neutral-400 border-white/10")
+              draft.enabled
+                ? "bg-success-soft text-success border-success-border"
+                : "bg-white/5 text-[var(--fg-2)] border-white/10"
             }
           >
-            {draft.enabled ? (
-              <>
-                <Power className="w-3 h-3" /> 启用
-              </>
-            ) : (
-              <>
-                <PowerOff className="w-3 h-3" /> 禁用
-              </>
-            )}
-          </button>
+            {draft.enabled ? "启用" : "禁用"}
+          </Button>
           <AnimatePresence mode="wait">
             {confirmingDelete ? (
               <motion.div
@@ -631,34 +635,40 @@ function ProxyEditRow({
                 exit={{ opacity: 0, scale: 0.96 }}
                 className="inline-flex items-center gap-1"
               >
-                <button
-                  type="button"
+                <Button
+                  variant="danger"
+                  size="sm"
                   onClick={onDelete}
-                  className="inline-flex min-h-11 items-center gap-1 px-2.5 sm:h-8 sm:min-h-0 rounded-lg text-xs bg-red-500/80 hover:bg-red-500 text-white transition-colors"
+                  leftIcon={<Trash2 className="w-3 h-3" />}
                 >
-                  <Trash2 className="w-3 h-3" /> 确认删除
-                </button>
-                <button
-                  type="button"
+                  确认删除
+                </Button>
+                <IconButton
+                  variant="secondary"
+                  size="sm"
                   onClick={() => onConfirmDelete(false)}
-                  className="inline-flex min-h-11 min-w-11 items-center justify-center sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 rounded-lg bg-white/5 hover:bg-white/10 text-neutral-300 transition-colors"
-                  aria-label="取消"
+                  aria-label={copy.action.cancel}
                 >
                   <X className="w-3.5 h-3.5" />
-                </button>
+                </IconButton>
               </motion.div>
             ) : (
-              <motion.button
+              <motion.div
                 key="del"
-                type="button"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                onClick={() => onConfirmDelete(true)}
-                className="inline-flex min-h-11 items-center gap-1 px-2.5 sm:h-8 sm:min-h-0 rounded-lg text-xs text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors"
               >
-                <Trash2 className="w-3 h-3" /> 删除
-              </motion.button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onConfirmDelete(true)}
+                  leftIcon={<Trash2 className="w-3 h-3" />}
+                  className="text-danger hover:bg-danger-soft"
+                >
+                  {copy.action.delete}
+                </Button>
+              </motion.div>
             )}
           </AnimatePresence>
         </div>
@@ -678,14 +688,14 @@ function LatencyBadge({
 }) {
   if (testing) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-neutral-400">
+      <span className="inline-flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
         <RefreshCw className="w-3 h-3 animate-spin" /> 测试中
       </span>
     );
   }
   if (!tested) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-neutral-500">
+      <span className="inline-flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
         <Clock className="w-3 h-3" /> 还未测过
       </span>
     );
@@ -693,7 +703,7 @@ function LatencyBadge({
   if (!tested.ok) {
     return (
       <span
-        className="inline-flex items-center gap-1.5 text-xs text-red-300"
+        className="inline-flex items-center gap-1.5 type-caption text-danger"
         title={tested.error ?? ""}
       >
         <XCircle className="w-3.5 h-3.5" /> 不通
@@ -702,9 +712,9 @@ function LatencyBadge({
   }
   const ms = Math.max(0, tested.latency_ms);
   const color =
-    ms < 200 ? "text-emerald-300" : ms < 600 ? "text-amber-300" : "text-orange-300";
+    ms < 200 ? "text-success" : ms < 600 ? "text-warning" : "text-danger";
   return (
-    <span className={"inline-flex items-center gap-1.5 text-xs " + color}>
+    <span className={"inline-flex items-center gap-1.5 type-caption " + color}>
       <CheckCircle2 className="w-3.5 h-3.5" />
       <span className="font-mono tabular-nums">{ms.toFixed(0)} ms</span>
     </span>
@@ -726,15 +736,15 @@ function Field({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-xs text-neutral-300">{label}</span>
+      <span className="type-caption text-[var(--fg-1)]">{label}</span>
       <input
         type="text"
         value={value}
         inputMode={inputMode}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
+        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
       />
-      <span className="text-[11px] text-neutral-500 leading-relaxed">{hint}</span>
+      <span className="text-[11px] text-[var(--fg-2)] leading-relaxed">{hint}</span>
     </label>
   );
 }
@@ -756,7 +766,7 @@ function FieldInline({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-[11px] text-neutral-400">{label}</span>
+      <span className="text-[11px] text-[var(--fg-2)]">{label}</span>
       <input
         type="text"
         value={value}
@@ -765,7 +775,7 @@ function FieldInline({
         inputMode={inputMode}
         autoComplete="off"
         className={
-          "h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
+          "h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
           (mono ? "font-mono" : "")
         }
       />
@@ -786,11 +796,11 @@ function FieldSelect({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-[11px] text-neutral-400">{label}</span>
+      <span className="text-[11px] text-[var(--fg-2)]">{label}</span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
+        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

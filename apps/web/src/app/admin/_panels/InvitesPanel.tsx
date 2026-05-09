@@ -14,7 +14,6 @@ import {
   Check,
   Copy,
   Link as LinkIcon,
-  Loader2,
   UserCog,
   Users as UsersIcon,
   X,
@@ -27,6 +26,8 @@ import {
 } from "@/lib/queries";
 import { ApiError } from "@/lib/apiClient";
 import type { InviteLinkOut } from "@/lib/types";
+import { Button, IconButton } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import { EmptyBlock, ErrorBlock, ListSkeleton } from "../page";
 
 type InviteStatus = "valid" | "used" | "revoked" | "expired";
@@ -61,10 +62,10 @@ export function InvitesPanel() {
     onError: (err) => {
       if (err instanceof ApiError) {
         if (err.status === 409) setFormError("已存在相同邮箱的有效邀请");
-        else if (err.status === 422) setFormError(err.message || "参数无效");
-        else setFormError(err.message || "创建失败");
+        else if (err.status === 422) setFormError(err.message || copy.error.invalid);
+        else setFormError(err.message || copy.error.unknown);
       } else {
-        setFormError(err.message || "创建失败");
+        setFormError(err.message || copy.error.unknown);
       }
     },
   });
@@ -79,7 +80,7 @@ export function InvitesPanel() {
     const trimmed = email.trim();
     const safeDays = Math.max(1, Math.min(365, Math.floor(days || 0)));
     if (!Number.isFinite(safeDays) || safeDays < 1) {
-      setFormError("有效期天数必须是 1–365 之间的整数");
+      setFormError("天数需在 1–365");
       return;
     }
     createMut.mutate({
@@ -124,11 +125,11 @@ export function InvitesPanel() {
       {/* —— 生成表单 —— */}
       <form
         onSubmit={onSubmit}
-        className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl p-5 space-y-4"
+        className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-5 space-y-4"
       >
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2">
-          <h2 className="text-sm font-medium text-neutral-100">生成邀请链接</h2>
-          <p className="text-xs text-neutral-500">
+          <h2 className="type-card-title">生成邀请链接</h2>
+          <p className="type-caption text-[var(--fg-2)]">
             邮箱留空表示任何人均可使用
           </p>
         </div>
@@ -141,7 +142,7 @@ export function InvitesPanel() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@示例.com"
               autoComplete="off"
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors"
+              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors"
             />
           </FormField>
           <FormField id="invite-new-days" label="有效期（天）">
@@ -153,7 +154,7 @@ export function InvitesPanel() {
               inputMode="numeric"
               value={days}
               onChange={(e) => setDays(Number(e.target.value))}
-              className="w-full sm:w-24 min-h-[44px] sm:h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 text-sm font-mono tabular-nums focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
+              className="w-full sm:w-24 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 text-sm font-mono tabular-nums focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
             />
           </FormField>
           <FormField id="invite-new-role" label="角色">
@@ -161,32 +162,27 @@ export function InvitesPanel() {
               id="invite-new-role"
               value={role}
               onChange={(e) => setRole(e.target.value as "member" | "admin")}
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
+              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
             >
               <option value="member">成员</option>
               <option value="admin">管理员</option>
             </select>
           </FormField>
           <div className="self-end">
-            <button
+            <Button
               type="submit"
-              disabled={createMut.isPending}
-              className="inline-flex items-center justify-center gap-1.5 w-full min-h-[44px] sm:h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
+              variant="primary"
+              size="md"
+              fullWidth
+              loading={createMut.isPending}
+              leftIcon={!createMut.isPending ? <LinkIcon className="w-3.5 h-3.5" /> : undefined}
             >
-              {createMut.isPending ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> 生成中
-                </>
-              ) : (
-                <>
-                  <LinkIcon className="w-3.5 h-3.5" /> 生成链接
-                </>
-              )}
-            </button>
+              {createMut.isPending ? "生成中" : "生成链接"}
+            </Button>
           </div>
         </div>
         {formError && (
-          <p className="flex items-center gap-1.5 text-xs text-red-300">
+          <p className="flex items-center gap-1.5 type-caption text-danger">
             <AlertCircle className="w-3.5 h-3.5" /> {formError}
           </p>
         )}
@@ -199,40 +195,39 @@ export function InvitesPanel() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.2 }}
-              className="rounded-xl border border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/[0.06] p-4 space-y-3"
+              className="rounded-[var(--radius-card)] border border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/[0.06] p-4 space-y-3"
             >
               <div className="flex items-center justify-between">
-                <span className="inline-flex items-center gap-1.5 text-xs uppercase tracking-wider text-[var(--color-lumen-amber)]">
+                <span className="inline-flex items-center gap-1.5 type-overline text-[var(--color-lumen-amber)]">
                   <Check className="w-3.5 h-3.5" /> 新邀请已生成
                 </span>
-                <button
-                  type="button"
+                <IconButton
+                  variant="ghost"
+                  size="sm"
                   onClick={() => setCreated(null)}
-                  className="text-neutral-400 hover:text-neutral-100 transition-colors"
-                  aria-label="关闭"
+                  aria-label={copy.action.close}
                 >
                   <X className="w-4 h-4" />
-                </button>
+                </IconButton>
               </div>
               <div className="flex items-stretch gap-2">
-                <code className="flex-1 px-3 py-2 rounded-lg bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all">
+                <code className="flex-1 px-3 py-2 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all">
                   {created.url}
                 </code>
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => onCopy(`new:${created.id}`, created.url)}
-                  className="inline-flex items-center gap-1.5 px-3 rounded-lg bg-white/10 hover:bg-white/15 border border-white/10 text-xs whitespace-nowrap transition-colors"
+                  leftIcon={
+                    copiedKey === `new:${created.id}` ? (
+                      <Check className="w-3.5 h-3.5 text-success" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )
+                  }
                 >
-                  {copiedKey === `new:${created.id}` ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-300" /> 已复制
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5" /> 复制
-                    </>
-                  )}
-                </button>
+                  {copiedKey === `new:${created.id}` ? copy.state.copied : copy.action.copy}
+                </Button>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                 <Field label="令牌">
@@ -262,7 +257,7 @@ export function InvitesPanel() {
       </form>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] overflow-hidden">
         {q.isLoading ? (
           <ListSkeleton rows={5} />
         ) : q.isError ? (
@@ -286,28 +281,28 @@ export function InvitesPanel() {
               return (
                 <li
                   key={row.id}
-                  className="p-3 border border-white/10 rounded-lg space-y-3"
+                  className="p-3 border border-white/10 rounded-[var(--radius-card)] space-y-3"
                 >
                   <div className="flex flex-col gap-2">
                     <code className="w-full min-w-0 px-2 py-2 rounded-md bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all leading-relaxed">
                       {row.url}
                     </code>
-                    <button
-                      type="button"
+                    <Button
+                      variant="secondary"
+                      size="md"
+                      fullWidth
                       onClick={() => onCopy(`row:${row.id}`, row.url)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 min-h-[40px] px-3 rounded-md text-sm text-neutral-200 hover:text-neutral-100 bg-white/5 hover:bg-white/10 border border-white/10 transition-colors"
                       aria-label="复制链接"
+                      leftIcon={
+                        copiedKey === `row:${row.id}` ? (
+                          <Check className="w-3.5 h-3.5 text-success" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )
+                      }
                     >
-                      {copiedKey === `row:${row.id}` ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-emerald-300" /> 已复制
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3.5 h-3.5" /> 复制链接
-                        </>
-                      )}
-                    </button>
+                      {copiedKey === `row:${row.id}` ? copy.state.copied : "复制链接"}
+                    </Button>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div>
@@ -353,39 +348,39 @@ export function InvitesPanel() {
                   </div>
                   <div className="flex justify-end pt-1">
                     {!canRevoke ? (
-                      <span className="text-xs text-neutral-600">—</span>
+                      <span className="type-caption text-[var(--fg-3)]">—</span>
                     ) : isConfirming ? (
                       <div className="inline-flex items-center gap-2">
-                        <span className="text-xs text-neutral-400 hidden sm:inline">
+                        <span className="type-caption text-[var(--fg-2)] hidden sm:inline">
                           撤销?
                         </span>
-                        <button
-                          type="button"
+                        <Button
+                          variant="danger"
+                          size="sm"
                           onClick={() => revokeMut.mutate(row.id)}
                           disabled={revokeMut.isPending}
-                          aria-disabled={revokeMut.isPending}
-                          className="text-xs px-3 min-h-[36px] rounded-md bg-red-500/80 hover:bg-red-500 text-white disabled:opacity-50 transition-colors"
+                          loading={revokeMut.isPending}
                         >
                           {revokeMut.isPending ? "撤销中" : "确认撤销"}
-                        </button>
-                        <button
-                          type="button"
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           onClick={() => setPendingRevokeId(null)}
                           disabled={revokeMut.isPending}
-                          aria-disabled={revokeMut.isPending}
-                          className="text-xs px-3 min-h-[36px] rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 disabled:opacity-50 transition-colors"
                         >
-                          取消
-                        </button>
+                          {copy.action.cancel}
+                        </Button>
                       </div>
                     ) : (
-                      <button
-                        type="button"
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => setPendingRevokeId(row.id)}
-                        className="text-xs px-3 min-h-[36px] rounded-md text-red-300 hover:text-red-200 hover:bg-red-500/10 transition-colors"
+                        className="text-danger hover:bg-danger-soft"
                       >
                         撤销
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </li>
@@ -427,6 +422,7 @@ export function InvitesPanel() {
                           <code className="text-xs font-mono text-neutral-300 truncate">
                             {row.url}
                           </code>
+                          {/* 24px 紧凑内联按钮无法用 Button primitive sm（h-8 太大） */}
                           <button
                             type="button"
                             onClick={() => onCopy(`row:${row.id}`, row.url)}
@@ -435,13 +431,13 @@ export function InvitesPanel() {
                           >
                             {copiedKey === `row:${row.id}` ? (
                               <>
-                                <Check className="w-3 h-3 text-emerald-300" />
-                                已复制
+                                <Check className="w-3 h-3 text-success" />
+                                {copy.state.copied}
                               </>
                             ) : (
                               <>
                                 <Copy className="w-3 h-3" />
-                                复制
+                                {copy.action.copy}
                               </>
                             )}
                           </button>
@@ -464,41 +460,43 @@ export function InvitesPanel() {
                       </td>
                       <td className="py-3 px-4 text-right">
                         {!canRevoke ? (
-                          <span className="text-xs text-neutral-600">—</span>
+                          <span className="type-caption text-[var(--fg-3)]">—</span>
                         ) : isConfirming ? (
                           <motion.div
                             initial={{ opacity: 0, scale: 0.96 }}
                             animate={{ opacity: 1, scale: 1 }}
                             className="inline-flex items-center gap-2"
                           >
-                            <span className="text-xs text-neutral-400">
+                            <span className="type-caption text-[var(--fg-2)]">
                               撤销?
                             </span>
-                            <button
-                              type="button"
+                            <Button
+                              variant="danger"
+                              size="sm"
                               onClick={() => revokeMut.mutate(row.id)}
                               disabled={revokeMut.isPending}
-                              className="text-xs px-2 py-1 rounded-md bg-red-500/80 hover:bg-red-500 text-white disabled:opacity-50 transition-colors"
+                              loading={revokeMut.isPending}
                             >
                               {revokeMut.isPending ? "撤销中" : "撤销"}
-                            </button>
-                            <button
-                              type="button"
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
                               onClick={() => setPendingRevokeId(null)}
                               disabled={revokeMut.isPending}
-                              className="text-xs px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 disabled:opacity-50 transition-colors"
                             >
-                              取消
-                            </button>
+                              {copy.action.cancel}
+                            </Button>
                           </motion.div>
                         ) : (
-                          <button
-                            type="button"
+                          <Button
+                            variant="ghost"
+                            size="sm"
                             onClick={() => setPendingRevokeId(row.id)}
-                            className="text-xs text-red-300 hover:text-red-200 transition-colors"
+                            className="text-danger hover:bg-danger-soft"
                           >
                             撤销
-                          </button>
+                          </Button>
                         )}
                       </td>
                     </motion.tr>
@@ -512,9 +510,9 @@ export function InvitesPanel() {
       </div>
 
       {revokeMut.isError && (
-        <p className="flex items-center gap-1.5 text-sm text-red-300">
+        <p className="flex items-center gap-1.5 type-body-sm text-danger">
           <AlertCircle className="w-4 h-4" />
-          撤销失败：{revokeMut.error?.message ?? "未知错误"}
+          撤销失败：{revokeMut.error?.message ?? copy.error.unknown}
         </p>
       )}
     </section>
@@ -586,8 +584,8 @@ function StatusBadge({
 }) {
   if (status === "valid") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_currentColor]" />
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-success-soft text-success border border-success-border">
+        <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_6px_currentColor]" />
         valid
       </span>
     );
@@ -595,25 +593,25 @@ function StatusBadge({
   if (status === "used") {
     return (
       <span
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-sky-500/10 text-sky-300 border border-sky-500/30"
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-info-soft text-info border border-info-border"
         title={usedBy ? `被 ${usedBy} 使用` : undefined}
       >
-        <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+        <span className="w-1.5 h-1.5 rounded-full bg-info" />
         used
       </span>
     );
   }
   if (status === "revoked") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-red-500/10 text-red-300 border border-red-500/30">
-        <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-danger-soft text-danger border border-danger-border">
+        <span className="w-1.5 h-1.5 rounded-full bg-danger" />
         revoked
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-neutral-500/10 text-neutral-400 border border-neutral-500/30">
-      <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" />
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
+      <span className="w-1.5 h-1.5 rounded-full bg-[var(--fg-3)]" />
       expired
     </span>
   );

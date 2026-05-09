@@ -26,10 +26,11 @@ import {
   useState,
 } from "react";
 
-import { Button, Textarea } from "@/components/ui/primitives";
+import { Button, IconButton, Textarea, Tooltip } from "@/components/ui/primitives";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { logError } from "@/lib/logger";
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
+import { nearestAspectRatio } from "@/lib/sizing";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/store/useChatStore";
 import { useInpaintStore } from "@/store/useInpaintStore";
@@ -212,6 +213,11 @@ function InpaintModalInner() {
 
   const promptText = prompt.trim();
   const promptValid = promptText.length > 0;
+  // 提交时会按这个比例生成（submitInpaintTask 用 nearestAspectRatio 推断），让用户在涂抹前就知情
+  const derivedAspect =
+    source && source.width && source.height
+      ? nearestAspectRatio(source.width, source.height)
+      : null;
   const promptOverSoftLimit = prompt.length > SOFT_PROMPT_LIMIT;
   const promptOverHardLimit = prompt.length > MAX_PROMPT_CHARS;
   const canSubmit =
@@ -283,16 +289,16 @@ function InpaintModalInner() {
       m = await boardRef.current?.exportMask();
     } catch (err) {
       logError(err, { scope: "inpaint", code: "mask_export_failed" });
-      setWarning("导出蒙版失败，请重试");
+      setWarning("蒙版导出失败");
       return;
     }
     if (!m) {
-      setWarning("画布尚未就绪或未涂抹任何区域");
+      setWarning("画布未就绪或未涂抹");
       return;
     }
     if (m.coverage > FULL_COVERAGE_WARN) {
       setWarning(
-        `已涂抹约 ${(m.coverage * 100).toFixed(0)}%，几乎是整图重画 — 可继续，或撤销几笔后再试`,
+        `涂抹 ${(m.coverage * 100).toFixed(0)}%，接近整图重画`,
       );
     }
     setSubmitting(true);
@@ -300,13 +306,15 @@ function InpaintModalInner() {
       await submitInpaintTask({
         sourceImageId: source.imageId,
         sourceSrc: source.src,
-        sourceWidth: source.width,
-        sourceHeight: source.height,
+        // source.width/height 是入口透传的（imagesById），缺失时退到 mask 导出回带的实测尺寸
+        // —— 后者从 imgEl.naturalWidth/Height 取，必定有值（exportMask 早返回了）
+        sourceWidth: source.width ?? m.width,
+        sourceHeight: source.height ?? m.height,
         maskBlob: m.blob,
         maskPreviewDataUrl: m.preview_data_url,
         prompt: promptText,
       });
-      pushMobileToast("已开始局部修改…", "success");
+      pushMobileToast("已加入生成 · 在对话中查看进度", "success");
       // 提交成功：清掉 prompt + mask 草稿，再关闭 modal
       clearDraft(source.imageId);
       clearMaskDraft(source.imageId);
@@ -319,7 +327,7 @@ function InpaintModalInner() {
     } catch (err) {
       logError(err, { scope: "inpaint", code: "submit_failed" });
       const msg = err instanceof Error ? err.message : "提交失败";
-      setWarning(`提交失败：${msg}`);
+      setWarning(`提交失败 · ${msg}`);
       setSubmitting(false);
     }
   }, [
@@ -384,9 +392,9 @@ function InpaintModalInner() {
   const promptCounterClass = cn(
     "tabular-nums",
     promptOverHardLimit
-      ? "text-[var(--danger)]"
+      ? "text-danger"
       : promptOverSoftLimit
-        ? "text-[var(--amber-400)]"
+        ? "text-warning"
         : "text-[var(--fg-1)]/80",
   );
 
@@ -462,24 +470,16 @@ function InpaintModalInner() {
               </p>
             </div>
           </div>
-          <button
-            type="button"
+          <IconButton
+            variant={inConfirmClose ? "danger" : "ghost"}
             onClick={handleClose}
             disabled={submitting}
             aria-label={inConfirmClose ? "确认放弃涂抹" : "关闭"}
-            title={inConfirmClose ? "再点一次确认放弃" : "关闭 (Esc)"}
-            className={cn(
-              "shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-full",
-              "transition-colors",
-              inConfirmClose
-                ? "text-[var(--danger)] bg-[var(--danger)]/12 hover:bg-[var(--danger)]/20"
-                : "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-              "disabled:opacity-40 disabled:cursor-not-allowed",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-            )}
+            tooltip={inConfirmClose ? "再点一次确认放弃" : "关闭 (Esc)"}
+            className="rounded-full"
           >
             <X className="w-4 h-4" />
-          </button>
+          </IconButton>
         </div>
 
         {/* Body：桌面左右分栏，移动上下分栏 */}
@@ -498,9 +498,9 @@ function InpaintModalInner() {
             onPointerDown={cancelConfirmClose}
           >
             {!source ? (
-              <div className="flex h-full items-center justify-center text-sm text-[var(--fg-1)]">
+              <div className="flex h-full items-center justify-center type-body-sm text-[var(--fg-1)]">
                 <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                正在准备图片…
+                图片加载中
               </div>
             ) : (
               <MaskBoard
@@ -524,12 +524,27 @@ function InpaintModalInner() {
             )}
           >
             <div>
-              <label
-                htmlFor="inpaint-prompt"
-                className="block text-[12px] font-medium text-[var(--fg-1)] mb-1.5"
-              >
-                把涂抹区域改成什么？
-              </label>
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <label
+                  htmlFor="inpaint-prompt"
+                  className="block text-[12px] font-medium text-[var(--fg-1)]"
+                >
+                  把涂抹区域改成什么？
+                </label>
+                {derivedAspect && (
+                  <span
+                    className={cn(
+                      "shrink-0 inline-flex items-center gap-1 px-2 h-5 rounded-full",
+                      "text-[10px] tabular-nums",
+                      "bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border-subtle)]",
+                    )}
+                    title="按原图比例生成（避免构图变形）"
+                  >
+                    <span className="text-[var(--fg-2)]">比例</span>
+                    {derivedAspect}
+                  </span>
+                )}
+              </div>
               <Textarea
                 id="inpaint-prompt"
                 ref={promptRef}
@@ -538,7 +553,7 @@ function InpaintModalInner() {
                   setPrompt(e.target.value.slice(0, MAX_PROMPT_CHARS));
                   cancelConfirmClose();
                 }}
-                placeholder="例：把这里改成一只白色短毛猫，与原图光线一致"
+                placeholder="描述涂抹区域要变成什么"
                 rows={3}
                 className={cn(
                   "resize-none min-h-[84px] md:min-h-[120px]",
@@ -557,7 +572,15 @@ function InpaintModalInner() {
             {/* 引导提示：保持简短，移动端隐藏省空间 */}
             <div className="hidden md:block rounded-md border border-[var(--border-subtle)] bg-[var(--bg-1)]/40 p-2.5 text-[11.5px] leading-relaxed text-[var(--fg-1)]/90">
               <strong className="font-medium text-[var(--fg-0)]">提示</strong>
-              ：只描述涂抹区域要替换成什么，不要描述整张图。指令越具体越准确。
+              ：仅描述涂抹区域，越具体越准。
+              <Tooltip
+                content="不要描述整张图；只写涂抹区域要变成什么。"
+                side="top"
+              >
+                <span className="ml-1 text-[var(--info)] underline decoration-dotted cursor-help">
+                  详解
+                </span>
+              </Tooltip>
             </div>
 
             {warning && (
@@ -568,7 +591,7 @@ function InpaintModalInner() {
                 transition={{ duration: 0.18 }}
                 className={cn(
                   "rounded-md p-2 text-[11.5px]",
-                  "bg-[var(--amber-400)]/10 text-[var(--amber-400)]",
+                  "bg-warning-soft text-warning",
                 )}
                 role="status"
                 aria-live="polite"
@@ -613,9 +636,9 @@ function InpaintModalInner() {
                 className="min-w-[112px]"
               >
                 {!hasStroke ? (
-                  "请先涂抹"
+                  "未涂抹"
                 ) : !promptValid ? (
-                  "请输入指令"
+                  "指令为空"
                 ) : promptOverHardLimit ? (
                   "字数超限"
                 ) : (
@@ -631,7 +654,7 @@ function InpaintModalInner() {
             <div className="md:hidden -mt-1 text-[11px] text-[var(--fg-1)]/70 text-right">
               {hasStroke
                 ? `已涂抹 ${Math.round(coverage * 100)}%`
-                : "尚未涂抹"}
+                : "未涂抹"}
             </div>
           </div>
         </div>

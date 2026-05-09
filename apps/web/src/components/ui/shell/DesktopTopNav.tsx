@@ -9,8 +9,9 @@ import { motion } from "framer-motion";
 import { Menu } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useMemo, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, type KeyboardEvent, type ReactNode } from "react";
 
+import { IconButton } from "@/components/ui/primitives";
 import { SPRING } from "@/lib/motion";
 
 export type DesktopNavTab = "studio" | "projects" | "stream" | "me";
@@ -57,50 +58,65 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
     [pathname, router],
   );
 
+  const tabsRef = useRef<HTMLUListElement | null>(null);
+  const onTabsKeyDown = useCallback((e: KeyboardEvent<HTMLUListElement>) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const root = tabsRef.current;
+    if (!root) return;
+    const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>("button"));
+    if (buttons.length === 0) return;
+    const idx = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const base = idx < 0 ? 0 : idx;
+    const delta = e.key === "ArrowRight" ? 1 : -1;
+    const next = (base + delta + buttons.length) % buttons.length;
+    e.preventDefault();
+    buttons[next]?.focus();
+  }, []);
+
   return (
     <header
       className={[
-        "sticky top-0 z-30 w-full h-11 flex items-center justify-between px-3 md:px-5",
+        "sticky top-0 z-30 grid w-full h-11 items-center gap-2 px-3 md:px-5",
+        "grid-cols-[auto_minmax(0,1fr)_auto]",
         "backdrop-blur-xl bg-[var(--bg-0)]/70 border-b border-white/[0.04]",
       ].join(" ")}
     >
       {/* Left: sidebar toggle + Logo */}
       <div className="flex items-center gap-3 md:gap-4 min-w-0">
         {onToggleSidebar && (
-          <button
-            type="button"
-            onClick={onToggleSidebar}
+          <IconButton
+            size="sm"
             aria-label="切换侧栏"
             title="切换侧栏 (⌘K)"
-            className={[
-              "inline-flex items-center justify-center w-8 h-8 rounded-full",
-              "text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/8",
-              "cursor-pointer active:scale-[0.94] transition-all duration-150",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-            ].join(" ")}
+            tooltip="切换侧栏 (⌘K)"
+            onClick={onToggleSidebar}
+            className="rounded-full"
           >
             <Menu className="w-4.5 h-4.5" />
-          </button>
+          </IconButton>
         )}
         <Link href="/" className="flex items-center gap-2 shrink-0" aria-label="Lumen 首页">
+          {/* Lumen 品牌徽标渐变：琥珀→orange，非状态色，token 化无意义 */}
+          {/* eslint-disable-next-line no-restricted-syntax */}
           <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-[var(--amber-400)] to-orange-200 shadow-[var(--shadow-amber)]" />
-          <span className="text-[13px] font-medium tracking-tight text-[var(--fg-0)]">Lumen</span>
+          <span className="hidden sm:inline text-[13px] font-medium tracking-tight text-[var(--fg-0)]">Lumen</span>
         </Link>
       </div>
 
-      {/* Middle: Tabs */}
-      <nav aria-label="主导航" className="absolute left-1/2 -translate-x-1/2">
-        <ul className="flex items-center gap-1">
+      {/* Middle: Tabs — 占据中间 1fr，居中显示，可挤压 */}
+      <nav aria-label="主导航" className="flex justify-center min-w-0 overflow-hidden">
+        <ul ref={tabsRef} onKeyDown={onTabsKeyDown} className="flex items-center gap-1">
           {TABS.map((tab) => {
             const isActive = tab.key === currentActive;
             return (
               <li key={tab.key} className="relative">
+                {/* 顶部导航 Tab：内嵌 layoutId 动画下划线 + tabsRef 键盘导航需要原生 button */}
                 <button
                   type="button"
                   onClick={() => onTap(tab)}
                   aria-current={isActive ? "page" : undefined}
                   className={[
-                    "relative px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors cursor-pointer",
+                    "relative px-2.5 py-1.5 rounded-md text-[13px] font-medium transition-colors cursor-pointer whitespace-nowrap",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                     isActive
                       ? "text-[var(--fg-0)]"
@@ -124,7 +140,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
       </nav>
 
       {/* Right: slot */}
-      <div className="flex items-center gap-1.5 text-sm text-[var(--fg-2)] md:gap-2 min-w-0">
+      <div className="flex items-center justify-end gap-1.5 text-sm text-[var(--fg-2)] md:gap-2 min-w-0">
         {right}
       </div>
     </header>

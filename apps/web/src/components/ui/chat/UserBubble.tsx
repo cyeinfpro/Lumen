@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Copy, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "@/components/ui/primitives";
+import { copy as ui } from "@/lib/copy";
 import type { UserMessage } from "@/lib/types";
 
 interface UserBubbleProps {
@@ -84,19 +85,20 @@ export function UserBubble({ msg }: UserBubbleProps) {
             )}
           >
             {msg.text}
+            {/* 24px 气泡角浮动 icon 按钮：使用紧凑原生 button 以贴合气泡内边距 */}
             <button
               type="button"
               onClick={() => void handleCopy()}
-              aria-label={copied ? "已复制" : "复制"}
-              title={copied ? "已复制" : "复制"}
+              aria-label={copied ? ui.state.copied : ui.action.copy}
+              title={copied ? ui.state.copied : ui.action.copy}
               className={cn(
-                "absolute right-2 bottom-2 p-1 rounded-md",
+                "absolute right-2 bottom-2 p-1 rounded-[var(--radius-control)]",
                 "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10",
                 "transition-all duration-150 active:scale-[0.92]",
               )}
             >
               {copied ? (
-                <Check className="w-3.5 h-3.5 text-[var(--ok,#30A46C)]" />
+                <Check className="w-3.5 h-3.5 text-[var(--success)]" />
               ) : (
                 <Copy className="w-3.5 h-3.5" />
               )}

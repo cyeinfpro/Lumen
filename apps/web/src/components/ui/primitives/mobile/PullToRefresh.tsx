@@ -191,7 +191,7 @@ export function PullToRefresh({
         >
           <div
             role="status"
-            aria-label={loading ? "正在刷新" : progress >= 1 ? "释放刷新" : "下拉刷新"}
+            aria-label={loading ? "刷新中" : progress >= 1 ? "释放刷新" : "下拉刷新"}
             className="h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]"
             style={{
               opacity: progress,

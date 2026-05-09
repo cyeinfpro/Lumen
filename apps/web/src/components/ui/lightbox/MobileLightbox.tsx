@@ -1334,7 +1334,7 @@ export function MobileLightbox() {
             "pointer-events-none absolute left-1/2 top-[calc(env(safe-area-inset-top)+4.25rem)]",
             "-translate-x-1/2 rounded-full border px-3 py-1.5",
             "bg-black/62 text-[12px] text-white/86 shadow-lg",
-            actionNotice?.kind === "error" ? "border-red-400/35" : "border-white/12",
+            actionNotice?.kind === "error" ? "border-danger-border" : "border-white/12",
           )}
         >
           {boundaryHint === "first"

@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { Spinner } from "./Spinner";
 import { motion, HTMLMotionProps } from "framer-motion";
 
-type Variant = "primary" | "secondary" | "ghost" | "danger" | "outline";
+type Variant = "primary" | "secondary" | "ghost" | "danger" | "outline" | "glass" | "link";
 type Size = "sm" | "md" | "lg";
 
 export interface ButtonProps extends Omit<HTMLMotionProps<"button">, "transition" | "children"> {
@@ -29,8 +29,8 @@ const BASE =
 
 const VARIANTS: Record<Variant, string> = {
   primary:
-    "bg-[var(--accent)] text-black hover:bg-[#F6B755] " +
-    "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_rgba(242,169,58,0.55)]",
+    "bg-[var(--accent)] text-black hover:bg-[var(--amber-300)] " +
+    "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_var(--amber-glow-strong)]",
   secondary:
     "bg-white/8 text-[var(--fg-0)] hover:bg-white/12 " +
     "border border-[var(--border)] hover:border-[var(--border-strong)] backdrop-blur-sm",
@@ -39,10 +39,20 @@ const VARIANTS: Record<Variant, string> = {
     "border border-transparent",
   danger:
     "bg-[var(--danger)] text-white hover:brightness-110 " +
+    // shadow 内部 rgba 是 --danger 同源色（暂无 token），保留硬编码不引用 Tailwind 强调色。
     "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_rgba(229,72,77,0.55)]",
   outline:
     "bg-transparent text-[var(--fg-0)] border border-[var(--border)] " +
     "hover:border-[var(--border-strong)] hover:bg-white/4",
+  // glass: 浮层透明按钮（用于图片卡片浮动操作、AttachmentTray 等）。
+  glass:
+    "bg-black/55 backdrop-blur-md text-[var(--fg-0)] hover:bg-black/65 " +
+    "border border-white/15 hover:border-white/25",
+  // link: 看起来像链接的按钮（替代裸 <a> 风格按钮）。
+  // 走 LINK_SIZES 而非 SIZES，避免 twMerge 让 SIZES 的 h/p 覆盖 link 的 h-auto/p-0。
+  link:
+    "bg-transparent text-[var(--info)] underline underline-offset-2 " +
+    "hover:opacity-80 border-0 p-0 h-auto",
 };
 
 // 尺寸策略：桌面保持紧凑视觉；移动端 (max-sm) 通过 min-h-11 / 更宽的横向 padding
@@ -52,6 +62,13 @@ const SIZES: Record<Size, string> = {
   sm: "h-8 px-3 text-xs max-sm:min-h-10 max-sm:px-3.5",
   md: "h-9 px-4 text-sm max-sm:min-h-11 max-sm:text-[15px]",
   lg: "h-11 px-6 text-[15px] rounded-[var(--radius-card)] max-sm:min-h-12 max-sm:px-5",
+};
+
+// link variant 专用尺寸：仅控制字号与 inline 行高，绝不引入 h-/px- 让 cn() 覆盖 p-0/h-auto。
+const LINK_SIZES: Record<Size, string> = {
+  sm: "text-xs",
+  md: "text-sm",
+  lg: "text-[15px]",
 };
 
 export function Button({
@@ -79,7 +96,7 @@ export function Button({
       className={cn(
         BASE,
         VARIANTS[variant],
-        SIZES[size],
+        variant === "link" ? LINK_SIZES[size] : SIZES[size],
         fullWidth && "w-full",
         className,
       )}

@@ -12,7 +12,6 @@ import {
   ChevronDown,
   Globe,
   KeyRound,
-  Loader2,
   Lock,
   Pencil,
   Plus,
@@ -40,6 +39,8 @@ import type {
   ByokSettingsOut,
   ByokSettingsPatchIn,
 } from "@/lib/types";
+import { Button } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 
 type SupplierDraft = ApiSupplierTemplateIn & { probe_key: string };
 
@@ -397,23 +398,25 @@ export function ByokPanel() {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="md"
             onClick={() => saveSettingsMut.mutate()}
             disabled={settingsBusy || !settingsDirty}
-            className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+            loading={settingsBusy}
+            leftIcon={!settingsBusy ? <Save className="w-4 h-4" /> : undefined}
           >
-            {settingsBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             保存系统设置
-          </button>
+          </Button>
           {settingsDirty && (
-            <button
-              type="button"
+            <Button
+              variant="link"
+              size="sm"
               onClick={() => setSettingsDraft({})}
-              className="text-xs text-[var(--fg-2)] underline-offset-2 hover:underline"
+              className="text-[var(--fg-2)] no-underline hover:underline"
             >
               丢弃改动
-            </button>
+            </Button>
           )}
         </div>
       </section>
@@ -424,32 +427,32 @@ export function ByokPanel() {
             <Plus className="w-3.5 h-3.5" />
             新供应商
           </div>
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => setNewSupplierOpen((v) => !v)}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-xs text-neutral-300 hover:bg-white/[0.07]"
+            rightIcon={<ChevronDown className={"w-3.5 h-3.5 transition-transform " + (newSupplierOpen ? "rotate-180" : "")} />}
           >
             {newSupplierOpen ? "收起" : "展开表单"}
-            <ChevronDown className={"w-3.5 h-3.5 transition-transform " + (newSupplierOpen ? "rotate-180" : "")} />
-          </button>
+          </Button>
         </header>
 
         {newSupplierOpen && (
           <div className="space-y-4">
             <div className="flex gap-2 flex-wrap">
               {SUPPLIER_PRESETS.map((preset) => (
-                <button
+                <Button
                   key={preset.value}
-                  type="button"
+                  variant="secondary"
+                  size="sm"
                   onClick={() => {
                     setNewSupplier(preset.apply());
                     setNewSupplierUrlError(null);
                   }}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-xs text-neutral-200 hover:bg-white/[0.08]"
+                  leftIcon={<Sparkles className="w-3 h-3" />}
                 >
-                  <Sparkles className="w-3 h-3" />
                   {preset.label}
-                </button>
+                </Button>
               ))}
             </div>
 
@@ -461,8 +464,9 @@ export function ByokPanel() {
               showProbe={false}
             />
 
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="md"
               onClick={() => {
                 const urlErr = validateBaseUrl(newSupplier.base_url);
                 if (urlErr) {
@@ -476,11 +480,11 @@ export function ByokPanel() {
                 createMut.mutate();
               }}
               disabled={createMut.isPending}
-              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+              loading={createMut.isPending}
+              leftIcon={!createMut.isPending ? <Server className="w-4 h-4" /> : undefined}
             >
-              {createMut.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Server className="w-4 h-4" />}
               创建模板
-            </button>
+            </Button>
           </div>
         )}
       </section>
@@ -531,24 +535,24 @@ export function ByokPanel() {
       </section>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300">
+        <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
           <AlertCircle className="mt-0.5 w-4 h-4 shrink-0" />
           <span className="flex-1">{error}</span>
-          <button type="button" onClick={() => setError(null)} className="text-xs text-red-200/70 hover:text-red-200">
-            关闭
+          <button type="button" onClick={() => setError(null)} className="type-caption text-danger/80 hover:text-danger">
+            {copy.action.close}
           </button>
         </div>
       )}
       {saved && (
-        <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-300">
+        <div className="flex items-center gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-3 py-2 type-body-sm text-success">
           <Check className="w-4 h-4" />
           <span className="flex-1">{saved}</span>
           <button
             type="button"
             onClick={() => setSaved(null)}
-            className="text-xs text-emerald-200/70 hover:text-emerald-200"
+            className="type-caption text-success/80 hover:text-success"
           >
-            关闭
+            {copy.action.close}
           </button>
         </div>
       )}
@@ -659,11 +663,11 @@ function SupplierRow({
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-sm text-neutral-100 truncate">{supplier.name}</h3>
             {supplier.enabled ? (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-success-soft text-success border border-success-border">
                 <Check className="w-3 h-3" /> 启用
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-white/5 text-neutral-400 border border-white/10">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-white/5 text-[var(--fg-2)] border border-white/10">
                 已禁用
               </span>
             )}
@@ -679,15 +683,15 @@ function SupplierRow({
           <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-neutral-400">
             验证模型 {supplier.validation_model}
           </span>
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={onToggle}
             aria-expanded={open}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.05] px-3 text-xs text-neutral-200 hover:bg-white/[0.1]"
+            leftIcon={<Pencil className="w-3.5 h-3.5" />}
           >
-            <Pencil className="w-3.5 h-3.5" />
-            {open ? "收起" : "编辑"}
-          </button>
+            {open ? "收起" : copy.action.edit}
+          </Button>
         </div>
       </header>
 
@@ -702,25 +706,26 @@ function SupplierRow({
         <div className="border-t border-white/10 p-4 space-y-4 bg-white/[0.02]">
           <SupplierForm draft={draft} urlError={urlError} onChange={onChange} onUrlBlur={onUrlBlur} showProbe />
           <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="md"
               onClick={onSave}
               disabled={busy}
-              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+              loading={busy}
+              leftIcon={!busy ? <Save className="w-4 h-4" /> : undefined}
             >
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              保存
-            </button>
-            <button
-              type="button"
+              {copy.action.save}
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
               onClick={onProbe}
               disabled={busy || !draft.probe_key.trim()}
-              className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] px-4 text-sm disabled:opacity-50"
+              leftIcon={<TestTube2 className="w-4 h-4" />}
             >
-              <TestTube2 className="w-4 h-4" />
               探活
-            </button>
-            {probeLabel && <span className="text-xs text-neutral-400">{probeLabel}</span>}
+            </Button>
+            {probeLabel && <span className="type-caption text-[var(--fg-2)]">{probeLabel}</span>}
           </div>
         </div>
       )}
@@ -877,12 +882,12 @@ function FieldText({
         onBlur={onBlur ? (e) => onBlur(e.target.value) : undefined}
         placeholder={placeholder}
         className={
-          "h-10 rounded-xl bg-[var(--bg-0)] px-3 text-sm border focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors " +
-          (error ? "border-red-500/60" : "border-[var(--border)]")
+          "h-10 rounded-[var(--radius-control)] bg-[var(--bg-0)] px-3 text-sm border focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-3)] transition-colors " +
+          (error ? "border-danger-border" : "border-[var(--border)]")
         }
       />
       {error ? (
-        <span className="text-[11px] text-red-300">{error}</span>
+        <span className="text-[11px] text-danger">{error}</span>
       ) : hint ? (
         <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>
       ) : null}

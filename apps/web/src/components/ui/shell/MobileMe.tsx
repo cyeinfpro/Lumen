@@ -13,6 +13,7 @@ import { getMe, type AuthUser } from "@/lib/apiClient";
 import { useCreateConversationMutation } from "@/lib/queries";
 import { useChatStore } from "@/store/useChatStore";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { cn } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 
@@ -30,7 +31,7 @@ export function MobileMe() {
     },
     onError: (err) => {
       pushMobileToast(
-        err?.message ? `新建失败：${err.message}` : "新建失败，请稍后重试",
+        err?.message ? `新建失败：${err.message}` : "新建失败，稍后重试",
         "danger",
       );
     },
@@ -76,16 +77,18 @@ export function MobileMe() {
         <div className="mx-auto max-w-[640px]">
           {/* 紧凑用户卡：整卡可点 → 打开设置 sheet（iOS"个人中心"模式） */}
           <div className="px-4 pt-2 pb-3">
-            <button
-              type="button"
-              onClick={openSettings}
+            <Pressable
+              size="default"
+              minHit={false}
+              pressScale="soft"
+              haptic="light"
+              onPress={openSettings}
               aria-label="打开账户与设置"
               className={cn(
-                "w-full flex items-center gap-3 p-3 rounded-2xl",
+                "w-full flex items-center gap-3 p-3 rounded-[var(--radius-dialog)]",
                 "bg-[var(--bg-1)] border border-[var(--border-subtle)]",
                 "shadow-[var(--shadow-1)]",
-                "text-left active:bg-[var(--bg-2)] active:scale-[0.995]",
-                "transition-[background-color,transform] duration-150",
+                "text-left",
               )}
             >
               <div
@@ -123,7 +126,7 @@ export function MobileMe() {
                 className="w-4 h-4 text-[var(--fg-2)]/70 shrink-0"
                 aria-hidden
               />
-            </button>
+            </Pressable>
           </div>
 
           <ConversationList query={query} />

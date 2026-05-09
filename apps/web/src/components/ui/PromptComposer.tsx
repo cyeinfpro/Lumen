@@ -12,7 +12,9 @@ import { Globe2, Paperclip, Send, Sparkles, Loader2, Undo2, X } from "lucide-rea
 import { useChatStore } from "@/store/useChatStore";
 import { enhancePrompt } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
 import { logError } from "@/lib/logger";
+import { Button, IconButton } from "./primitives";
 import { AttachmentTray } from "./AttachmentTray";
 import { AspectRatioPicker } from "./AspectRatioPicker";
 import { ModeSwitcher } from "./ModeSwitcher";
@@ -147,8 +149,8 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
     !isSending && (text.trim().length > 0 || attachments.length > 0);
   const disabledTitle = !canSubmit
     ? isSending
-      ? "发送中…"
-      : "请先输入文字或添加参考图"
+      ? "发送中"
+      : "输入文字或添加参考图"
     : undefined;
 
   const ingestFile = async (file: File): Promise<boolean> => {
@@ -391,16 +393,17 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               transition={{ duration: 0.18 }}
               className="overflow-hidden"
             >
-              <div className="mx-4 mb-1 flex items-center gap-2 px-2.5 py-1.5 text-[11px] rounded-lg bg-red-500/15 border border-red-500/30 text-red-200">
+              <div className="mx-4 mb-1 flex items-center gap-2 px-2.5 py-1.5 text-[11px] rounded-[var(--radius-card)] bg-danger-soft border border-danger-border text-danger">
                 <span className="flex-1">附件上传失败：{uploadError}</span>
-                <button
-                  type="button"
+                <IconButton
+                  variant="ghost"
+                  size="sm"
                   aria-label="关闭提示"
                   onClick={() => setUploadError(null)}
-                  className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md hover:bg-red-500/30 transition-colors"
+                  className="shrink-0 w-5 h-5 hover:bg-danger-soft text-danger"
                 >
                   <X className="w-3 h-3" />
-                </button>
+                </IconButton>
               </div>
             </motion.div>
           )}
@@ -412,17 +415,18 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               transition={{ duration: 0.18 }}
               className="overflow-hidden"
             >
-              <div className="mx-4 mb-1 flex items-start gap-2 px-2.5 py-1.5 text-[11px] rounded-lg bg-red-500/15 border border-red-500/30 text-red-200">
+              <div className="mx-4 mb-1 flex items-start gap-2 px-2.5 py-1.5 text-[11px] rounded-[var(--radius-card)] bg-danger-soft border border-danger-border text-danger">
                 <span className="flex-1 break-words">{composerError}</span>
-                <button
-                  type="button"
+                <IconButton
+                  variant="ghost"
+                  size="sm"
                   aria-label="关闭错误提示"
-                  title="关闭"
+                  title={copy.action.close}
                   onClick={() => setComposerError(null)}
-                  className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md text-red-300 hover:text-red-100 hover:bg-red-500/30 transition-colors"
+                  className="shrink-0 w-5 h-5 text-danger hover:opacity-80 hover:bg-danger-soft"
                 >
                   <X className="w-3 h-3" />
-                </button>
+                </IconButton>
               </div>
             </motion.div>
           )}
@@ -445,17 +449,17 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               transition={{ duration: 0.18 }}
               className="overflow-hidden"
             >
-              <div className="mx-4 mt-2 flex items-center gap-2 px-2.5 py-1 text-[11px] rounded-lg bg-[var(--color-lumen-amber)]/10 border border-[var(--color-lumen-amber)]/25 text-[var(--color-lumen-amber)]">
+              <div className="mx-4 mt-2 flex items-center gap-2 px-2.5 py-1 text-[11px] rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)]/10 border border-[var(--color-lumen-amber)]/25 text-[var(--color-lumen-amber)]">
                 <Sparkles className="w-3 h-3 shrink-0" />
                 <span className="flex-1">提示词已润色</span>
-                <button
-                  type="button"
+                <Button
+                  variant="link"
                   onClick={handleUndoEnhance}
-                  className="inline-flex items-center gap-1 text-[11px] underline decoration-dotted hover:text-[var(--fg-0)] transition-colors"
+                  className="text-[11px] decoration-dotted text-[var(--color-lumen-amber)] hover:text-[var(--fg-0)] inline-flex items-center gap-1"
+                  leftIcon={<Undo2 className="w-3 h-3" />}
                 >
-                  <Undo2 className="w-3 h-3" />
                   撤销
-                </button>
+                </Button>
               </div>
             </motion.div>
           )}
@@ -503,7 +507,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
 
         {/* 底部工具条（MED #8：小屏允许换行，同时保底横向滚动） */}
         <div className="scrollbar-thin flex flex-wrap items-center gap-2 md:gap-3 overflow-x-auto overscroll-x-contain px-3 pb-2.5 pt-2">
-          <IconButton
+          <ComposerIcon
             label="添加参考图"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading}
@@ -513,7 +517,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
             ) : (
               <Paperclip className="w-4 h-4" />
             )}
-          </IconButton>
+          </ComposerIcon>
           <input
             ref={fileInputRef}
             type="file"
@@ -523,8 +527,8 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
             onChange={handleFileInputChange}
           />
 
-          <IconButton
-            label={isEnhancing ? "润色中..." : "润色提示词"}
+          <ComposerIcon
+            label={isEnhancing ? "润色中" : "润色提示词"}
             onClick={() => void handleEnhance()}
             disabled={isEnhancing || !text.trim()}
           >
@@ -533,7 +537,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
             ) : (
               <Sparkles className="w-4 h-4" />
             )}
-          </IconButton>
+          </ComposerIcon>
 
           {/* 分隔竖线，提升工具条层级感 */}
           <div className="w-px h-5 bg-white/10 mx-0.5" aria-hidden />
@@ -595,7 +599,10 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
 
 // ——————————————————— 子原语 ———————————————————
 
-function IconButton({
+// Composer 工具条专用：圆形 icon 按钮 + motion.spring 反馈。
+// 比 primitives/IconButton 多一份 motion 物理动效，所以不直接走 primitive。
+// 用 ComposerIcon 名字避免与 import 的 IconButton 冲突。
+function ComposerIcon({
   label,
   onClick,
   disabled,
@@ -646,7 +653,7 @@ function FastToggle() {
         "text-xs font-medium border",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         fast
-          ? "bg-emerald-500/12 border-emerald-500/40 text-emerald-400"
+          ? "bg-success-soft border-success-border text-success"
           : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10 hover:text-[var(--fg-0)]",
       )}
     >
@@ -675,7 +682,7 @@ function WebSearchToggle() {
         "text-xs font-medium border",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         webSearch
-          ? "bg-sky-500/12 border-sky-500/40 text-sky-300"
+          ? "bg-info-soft border-info-border text-info"
           : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10 hover:text-[var(--fg-0)]",
       )}
     >

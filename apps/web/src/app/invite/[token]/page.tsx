@@ -54,6 +54,7 @@ export default function InvitePage({
           className="w-full max-w-md"
         >
           <header className="mb-8 flex items-center gap-3">
+            {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
             <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_24px_-4px_var(--color-lumen-amber)]" />
             <div>
               <p className="text-lg font-medium tracking-tight leading-none">
@@ -145,7 +146,7 @@ function SignupForm({
 
     const trimmedEmail = email.trim();
     if (!trimmedEmail) {
-      setError("请输入邮箱");
+      setError("邮箱未填");
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
@@ -279,7 +280,7 @@ function SignupForm({
             className={
               "mt-1.5 text-[11px] " +
               (password.length > 0 && passwordTooShort
-                ? "text-red-300"
+                ? "text-danger"
                 : "text-[var(--fg-2)]")
             }
           >
@@ -304,12 +305,12 @@ function SignupForm({
             className={
               "w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border text-base md:text-sm focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors " +
               (confirmMismatch
-                ? "border-red-500/40 focus:border-red-500/60 focus:ring-red-500/20"
+                ? "border-danger-border focus:border-danger focus:ring-danger/20"
                 : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
             }
           />
           {confirmMismatch && (
-            <p className="flex items-center gap-1 text-xs text-red-300 mt-1.5">
+            <p className="flex items-center gap-1 type-caption text-danger mt-1.5">
               <AlertCircle className="w-3 h-3" /> 两次输入不一致
             </p>
           )}
@@ -321,7 +322,7 @@ function SignupForm({
               initial={{ opacity: 0, y: -2 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
-              className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300"
+              className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
             >
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
               {error}
@@ -434,7 +435,7 @@ function ErrorView({ error }: { error: unknown }) {
           {isNotFound ? "邀请不存在" : "加载邀请失败"}
         </h1>
         {!isNotFound && (
-          <p className="flex items-center justify-center gap-1.5 text-xs text-red-300">
+          <p className="flex items-center justify-center gap-1.5 type-caption text-danger">
             <AlertCircle className="w-3.5 h-3.5" /> {message}
           </p>
         )}
@@ -530,11 +531,11 @@ function passwordStrength(pw: string): Strength {
   const clamped = Math.min(4, score) as 0 | 1 | 2 | 3 | 4;
   const labels = ["太弱", "较弱", "一般", "良好", "强"];
   const colors = [
-    "bg-red-500/70",
-    "bg-orange-400/70",
-    "bg-amber-400/70",
-    "bg-emerald-400/70",
-    "bg-emerald-400",
+    "bg-danger/70",
+    "bg-warning/70",
+    "bg-warning/70",
+    "bg-success/70",
+    "bg-success",
   ];
   return { score: clamped, label: labels[clamped], color: colors[clamped] };
 }

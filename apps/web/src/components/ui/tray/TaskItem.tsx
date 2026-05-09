@@ -77,7 +77,7 @@ export const TaskItem = memo(function TaskItem({
         "flex gap-2.5 sm:gap-3 items-center p-2 rounded-xl border transition-all",
         "active:scale-[0.98] active:bg-white/5",
         failed
-          ? "bg-red-500/5 border-red-500/30"
+          ? "bg-danger-soft border-danger-border"
           : "bg-white/[0.03] border-[var(--border)]",
       )}
     >
@@ -112,7 +112,7 @@ export const TaskItem = memo(function TaskItem({
             )}
           >
             {failed && (
-              <span className="text-red-400 text-lg leading-none">!</span>
+              <span className="text-danger text-lg leading-none">!</span>
             )}
           </div>
         )}
@@ -137,7 +137,7 @@ export const TaskItem = memo(function TaskItem({
           className={cn(
             // 窄屏允许换行，避免进度/状态/百分比被 truncate 挤断
             "text-[11px] mt-0.5 break-words sm:truncate",
-            failed ? "text-red-300/90" : "text-neutral-500",
+            failed ? "text-danger" : "text-[var(--fg-2)]",
           )}
         >
           {running && (

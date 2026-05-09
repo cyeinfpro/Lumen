@@ -31,6 +31,7 @@ import {
   OPEN_EVENT,
   type LightboxItem,
 } from "@/components/ui/lightbox/types";
+import { Button } from "@/components/ui/primitives";
 import { EmptyBlock, ErrorBlock, ListSkeleton } from "../page";
 
 type EventKindFilter = "all" | "generation" | "completion";
@@ -89,27 +90,27 @@ const STATUS_META: Record<
   },
   running: {
     label: "生成中",
-    badge: "bg-sky-400/10 text-sky-200 border-sky-300/20",
-    dot: "bg-sky-300",
-    row: "border-l-sky-300/55",
+    badge: "bg-info-soft text-info border-info-border",
+    dot: "bg-info",
+    row: "border-l-info/55",
   },
   streaming: {
     label: "回复中",
-    badge: "bg-sky-400/10 text-sky-200 border-sky-300/20",
-    dot: "bg-sky-300",
-    row: "border-l-sky-300/55",
+    badge: "bg-info-soft text-info border-info-border",
+    dot: "bg-info",
+    row: "border-l-info/55",
   },
   succeeded: {
     label: "成功",
-    badge: "bg-emerald-400/10 text-emerald-200 border-emerald-300/20",
-    dot: "bg-emerald-300",
-    row: "border-l-emerald-300/55",
+    badge: "bg-success-soft text-success border-success-border",
+    dot: "bg-success",
+    row: "border-l-success/55",
   },
   failed: {
     label: "失败",
-    badge: "bg-red-400/10 text-red-200 border-red-300/25",
-    dot: "bg-red-300",
-    row: "border-l-red-300/55",
+    badge: "bg-danger-soft text-danger border-danger-border",
+    dot: "bg-danger",
+    row: "border-l-danger/55",
   },
   canceled: {
     label: "已取消",
@@ -598,43 +599,35 @@ export function RequestEventsPanel() {
                 </option>
               ))}
             </select>
-            <button
-              type="button"
+            <Button
+              variant={autoRefresh ? "primary" : "secondary"}
+              size="sm"
               onClick={() => setAutoRefresh((value) => !value)}
               aria-pressed={autoRefresh}
-              className={cn(
-                "inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border px-3 sm:h-10 sm:min-h-0 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25",
-                autoRefresh
-                  ? "border-[var(--color-lumen-amber)]/30 bg-[var(--color-lumen-amber)]/12 text-[var(--color-lumen-amber)]"
-                  : "border-white/10 bg-white/[0.04] text-neutral-300 hover:bg-white/[0.08] hover:text-neutral-100",
-              )}
+              leftIcon={<TimerReset className="h-3.5 w-3.5" />}
             >
-              <TimerReset className="h-3.5 w-3.5" />
               自动刷新
-            </button>
+            </Button>
             {hasActiveFilters && (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={resetFilters}
-                className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 sm:h-10 sm:min-h-0 text-xs text-neutral-300 transition-colors hover:bg-white/[0.08] hover:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                leftIcon={<X className="h-3.5 w-3.5" />}
               >
-                <X className="h-3.5 w-3.5" />
                 重置
-              </button>
+              </Button>
             )}
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => void q.refetch()}
               disabled={q.isFetching}
-              className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 sm:h-10 sm:min-h-0 text-xs text-neutral-300 transition-colors hover:bg-white/[0.08] hover:text-neutral-100 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+              loading={q.isFetching}
+              leftIcon={!q.isFetching ? <RefreshCw className="h-3.5 w-3.5" /> : undefined}
             >
-              {q.isFetching ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5" />
-              )}
               刷新
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -863,9 +856,9 @@ function StatTile({
 }) {
   const toneClass = {
     amber: "text-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/12 border-[var(--color-lumen-amber)]/20",
-    emerald: "text-emerald-200 bg-emerald-400/10 border-emerald-300/20",
-    red: "text-red-200 bg-red-400/10 border-red-300/20",
-    sky: "text-sky-200 bg-sky-400/10 border-sky-300/20",
+    emerald: "text-success bg-success-soft border-success-border",
+    red: "text-danger bg-danger-soft border-danger-border",
+    sky: "text-info bg-info-soft border-info-border",
   }[tone];
 
   return (
@@ -966,10 +959,10 @@ function LiveLaneRow({ lane }: { lane: AdminRequestEventLiveLane }) {
   const isFailover = lane.status === "failover";
   const provider = lane.provider?.trim();
   const dotClass = isFailover
-    ? "bg-amber-400 animate-pulse"
+    ? "bg-warning animate-pulse"
     : provider
-      ? "bg-emerald-400 animate-pulse"
-      : "bg-neutral-500";
+      ? "bg-success animate-pulse"
+      : "bg-[var(--fg-3)]";
   const labelText = lane.label || "lane";
   let providerText: string;
   if (provider) {
@@ -998,7 +991,7 @@ function LiveLaneRow({ lane }: { lane: AdminRequestEventLiveLane }) {
       <span
         className={cn(
           "truncate",
-          isFailover ? "text-amber-200" : "text-neutral-200",
+          isFailover ? "text-warning" : "text-[var(--fg-1)]",
         )}
       >
         {providerText}
@@ -1167,10 +1160,10 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {event.error_message && (
         <div>
-          <div className="mb-1.5 text-[11px] uppercase tracking-wider text-red-300/80">
+          <div className="mb-1.5 type-overline text-danger">
             错误信息
           </div>
-          <p className="max-h-28 overflow-auto whitespace-pre-wrap rounded-lg border border-red-400/20 bg-red-500/5 p-3 text-xs leading-relaxed text-red-100">
+          <p className="max-h-28 overflow-auto whitespace-pre-wrap rounded-[var(--radius-control)] border border-danger-border bg-danger-soft p-3 text-xs leading-relaxed text-danger">
             {event.error_message}
           </p>
         </div>

@@ -17,7 +17,6 @@ import {
   Clock,
   Database,
   HardDriveDownload,
-  Loader2,
   RotateCcw,
   X,
 } from "lucide-react";
@@ -29,6 +28,8 @@ import {
   restoreBackup,
   type BackupItem,
 } from "@/lib/apiClient";
+import { Button } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import { EmptyBlock, ErrorBlock, ListSkeleton } from "../page";
 
 function formatBytes(n: number): string {
@@ -114,17 +115,15 @@ export function BackupsPanel() {
   return (
     <section className="space-y-5">
       {/* —— 顶部：立即备份 + 说明 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl p-4 md:p-5">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-start gap-3 min-w-0">
-            <div className="w-9 h-9 rounded-xl bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25 flex items-center justify-center shrink-0">
+            <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25 flex items-center justify-center shrink-0">
               <Archive className="w-4 h-4 text-[var(--color-lumen-amber)]" />
             </div>
             <div className="min-w-0">
-              <p className="text-sm text-neutral-100 font-medium">
-                备份与恢复
-              </p>
-              <p className="text-xs text-neutral-500 mt-1 leading-relaxed break-words">
+              <p className="type-card-title">备份与恢复</p>
+              <p className="type-caption text-[var(--fg-2)] mt-1 leading-relaxed break-words">
                 系统每 4 小时自动备份数据库和缓存到
                 <code className="mx-1 px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[11px] break-all">
                   /opt/lumendata/backup
@@ -133,22 +132,15 @@ export function BackupsPanel() {
               </p>
             </div>
           </div>
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="md"
             onClick={() => backupMut.mutate()}
-            disabled={backupMut.isPending}
-            className="inline-flex items-center justify-center gap-1.5 w-full sm:w-auto min-h-[44px] sm:h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
+            loading={backupMut.isPending}
+            leftIcon={!backupMut.isPending ? <HardDriveDownload className="w-3.5 h-3.5" /> : undefined}
           >
-            {backupMut.isPending ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> 备份中
-              </>
-            ) : (
-              <>
-                <HardDriveDownload className="w-3.5 h-3.5" /> 立即备份
-              </>
-            )}
-          </button>
+            {backupMut.isPending ? "备份中" : "立即备份"}
+          </Button>
         </div>
       </div>
 
@@ -160,19 +152,19 @@ export function BackupsPanel() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             className={
-              "flex items-start gap-3 px-4 py-3 rounded-xl border " +
+              "flex items-start gap-3 px-4 py-3 rounded-[var(--radius-card)] border " +
               (banner.kind === "success"
-                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200"
+                ? "bg-success-soft border-success-border text-success"
                 : banner.kind === "error"
-                  ? "bg-red-500/10 border-red-500/30 text-red-200"
-                  : "bg-sky-500/10 border-sky-500/30 text-sky-200")
+                  ? "bg-danger-soft border-danger-border text-danger"
+                  : "bg-info-soft border-info-border text-info")
             }
           >
-            <p className="text-sm flex-1 break-words">{banner.text}</p>
+            <p className="type-body-sm flex-1 break-words">{banner.text}</p>
             <button
               type="button"
               onClick={() => setBanner(null)}
-              aria-label="关闭提示"
+              aria-label={copy.action.close}
               className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md hover:bg-white/10 transition-colors"
             >
               <X className="w-3 h-3" />
@@ -182,7 +174,7 @@ export function BackupsPanel() {
       </AnimatePresence>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] overflow-hidden">
         {q.isLoading ? (
           <ListSkeleton rows={4} />
         ) : q.isError ? (
@@ -241,13 +233,15 @@ export function BackupsPanel() {
                         {formatBytes(b.redis_size)}
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <button
-                          type="button"
+                        <Button
+                          variant="ghost"
+                          size="sm"
                           onClick={() => setRestoreTarget(b)}
-                          className="inline-flex items-center gap-1 px-2 py-1 text-xs text-[var(--color-lumen-amber)] hover:brightness-110 transition-colors rounded-md hover:bg-[var(--color-lumen-amber)]/10"
+                          leftIcon={<RotateCcw className="w-3 h-3" />}
+                          className="text-[var(--color-lumen-amber)] hover:bg-[var(--color-lumen-amber)]/10"
                         >
-                          <RotateCcw className="w-3 h-3" /> 恢复
-                        </button>
+                          恢复
+                        </Button>
                       </td>
                     </motion.tr>
                   ))}
@@ -266,18 +260,20 @@ export function BackupsPanel() {
                       <div className="text-sm text-neutral-100 font-mono tabular-nums break-all">
                         {formatTs(b.timestamp, b.created_at)}
                       </div>
-                      <div className="text-xs text-neutral-500 inline-flex items-center gap-1 mt-1">
+                      <div className="type-caption text-[var(--fg-2)] inline-flex items-center gap-1 mt-1">
                         <Clock className="w-3 h-3" />
                         {relativeFromIso(b.created_at)}
                       </div>
                     </div>
-                    <button
-                      type="button"
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => setRestoreTarget(b)}
-                      className="shrink-0 inline-flex items-center gap-1 text-sm px-3 min-h-[40px] rounded-md bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)] hover:brightness-110 transition-colors"
+                      leftIcon={<RotateCcw className="w-3.5 h-3.5" />}
+                      className="shrink-0 bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
                     >
-                      <RotateCcw className="w-3.5 h-3.5" /> 恢复
-                    </button>
+                      恢复
+                    </Button>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div className="rounded-md bg-white/[0.03] border border-white/5 px-2 py-1.5">
@@ -348,34 +344,34 @@ function RestoreModal({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.97 }}
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-2xl bg-[var(--bg-1)]/98 p-5 backdrop-blur-xl sm:rounded-2xl border border-[var(--border)] border-b-0 sm:border-b shadow-2xl sm:pb-5"
+        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-[var(--radius-dialog)] bg-[var(--bg-1)]/98 p-5 backdrop-blur-xl sm:rounded-[var(--radius-dialog)] border border-[var(--border)] border-b-0 sm:border-b shadow-[var(--shadow-3)] sm:pb-5"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="restore-title"
       >
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center shrink-0">
-            <AlertTriangle className="w-4 h-4 text-red-300" />
+          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-danger-soft border border-danger-border flex items-center justify-center shrink-0">
+            <AlertTriangle className="w-4 h-4 text-danger" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 id="restore-title" className="text-base font-semibold text-[var(--fg-0)]">
+            <h3 id="restore-title" className="type-card-title">
               恢复备份？
             </h3>
-            <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
+            <p className="type-caption text-[var(--fg-2)] mt-1 leading-relaxed">
               将把数据库与缓存还原到{" "}
               <span className="text-[var(--fg-0)] font-mono">
                 {formatTs(target.timestamp, target.created_at)}
               </span>{" "}
               的快照。
               <br />
-              <span className="text-red-300">
+              <span className="text-[var(--danger-fg)]">
                 此后的对话、生成记录会被丢弃；服务会短暂不可用（约 30–60 秒），完成后需刷新页面。
               </span>
             </p>
             <div className="mt-4 space-y-2">
               <label
                 htmlFor="restore-confirm"
-                className="block text-xs text-[var(--fg-1)]"
+                className="block type-caption text-[var(--fg-1)]"
               >
                 输入 <span className="font-semibold text-[var(--fg-0)]">&ldquo;恢复&rdquo;</span> 二字后点击确认
               </label>
@@ -386,33 +382,28 @@ function RestoreModal({
                 onChange={(e) => setConfirmText(e.target.value)}
                 disabled={pending}
                 autoFocus
-                className="w-full h-9 px-3 rounded-lg bg-[var(--bg-0)]/60 border border-[var(--border)] focus:outline-none focus:border-red-500/40 focus:ring-2 focus:ring-red-500/20 text-sm text-[var(--fg-0)] disabled:opacity-50"
+                className="w-full h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:outline-none focus:border-danger-border focus:ring-2 focus:ring-danger/20 text-sm text-[var(--fg-0)] disabled:opacity-50"
                 placeholder="恢复"
               />
             </div>
             <div className="mt-5 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 sm:gap-2">
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="md"
                 onClick={onCancel}
                 disabled={pending}
-                className="min-h-[44px] sm:h-9 px-4 rounded-lg bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm text-[var(--fg-0)] disabled:opacity-50 transition-colors"
               >
-                取消
-              </button>
-              <button
-                type="button"
+                {copy.action.cancel}
+              </Button>
+              <Button
+                variant="danger"
+                size="md"
                 onClick={onConfirm}
                 disabled={!canConfirm}
-                className="inline-flex items-center justify-center gap-1.5 min-h-[44px] sm:h-9 px-4 rounded-lg bg-red-500 hover:brightness-110 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                loading={pending}
               >
-                {pending ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> 触发中
-                  </>
-                ) : (
-                  "确认恢复"
-                )}
-              </button>
+                {pending ? "触发中" : "确认恢复"}
+              </Button>
             </div>
           </div>
         </div>

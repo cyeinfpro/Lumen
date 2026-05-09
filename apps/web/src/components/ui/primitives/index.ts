@@ -14,3 +14,4 @@ export { Tooltip } from "./Tooltip";
 export { ConfirmDialog } from "./ConfirmDialog";
 export { ToastViewport, toast, useToastStore } from "./Toast";
 export { Badge } from "./Badge";
+export { Card } from "./Card";

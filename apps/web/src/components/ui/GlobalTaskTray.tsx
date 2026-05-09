@@ -20,6 +20,7 @@ import { logWarn } from "@/lib/logger";
 import type { Generation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
+import { IconButton } from "@/components/ui/primitives";
 import { SPRING } from "@/lib/motion";
 import { TaskItem } from "./tray/TaskItem";
 
@@ -206,14 +207,15 @@ export function GlobalTaskTray() {
                   className="sm:hidden text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 rounded-md"
                 />
                 {/* 桌面端折叠按钮 */}
-                <button
-                  type="button"
+                <IconButton
+                  variant="ghost"
+                  size="sm"
                   onClick={() => setTaskTrayMinimized(true)}
                   aria-label="折叠任务面板"
-                  className="hidden sm:inline-flex w-6 h-6 items-center justify-center rounded-md text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 active:scale-[0.95] transition-all outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60"
+                  className="hidden sm:inline-flex"
                 >
                   <ChevronDown className="w-3.5 h-3.5" />
-                </button>
+                </IconButton>
               </header>
 
               <ul

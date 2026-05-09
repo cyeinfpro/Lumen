@@ -35,10 +35,9 @@ export interface SwipeRowProps {
 function colorClass(c: SwipeAction["color"]) {
   switch (c) {
     case "danger":
-      return "bg-[var(--danger)] text-white";
+      return "bg-danger text-white";
     case "warning":
-      // 令牌没有 --warning；使用琥珀 500 + 暗底配色，保持"提醒但非破坏"语义
-      return "bg-[var(--amber-500)] text-[#2a1a00]";
+      return "bg-warning text-black";
     default:
       return "bg-[var(--bg-3)] text-[var(--fg-0)]";
   }
@@ -140,7 +139,7 @@ export function SwipeRow({
               className={[
                 "flex-col h-full text-xs gap-1",
                 colorClass(a.color),
-                confirming ? "bg-[var(--danger)] text-white" : "",
+                confirming ? "bg-danger text-white" : "",
               ].join(" ")}
               style={{ width: buttonWidth }}
             >

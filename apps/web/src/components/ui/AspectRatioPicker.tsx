@@ -113,7 +113,7 @@ export function AspectRatioPicker() {
     params.size_mode === "fixed" && params.fixed_size === PRESET_4K_PORTRAIT;
 
   const submitLabel = !resolved
-    ? "提交：尺寸非法，请重新选择"
+    ? "提交：尺寸非法"
     : is4KLandscape
       ? "提交：4K 横图 3840×2160"
         : is4KPortrait
@@ -166,6 +166,7 @@ export function AspectRatioPicker() {
 
   return (
     <>
+      {/* @picker-widget: 自定义 popover 触发器 + 网格选择器，所有内部 button 是 radio/segment 角色，刻意不走 Button primitive */}
       <button
         type="button"
         onClick={openDialog}
@@ -174,7 +175,7 @@ export function AspectRatioPicker() {
         aria-label="选择宽高比与尺寸模式"
         className={cn(
           "inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 md:h-7 md:min-h-0 md:px-2.5",
-          "text-xs font-medium text-neutral-300",
+          "text-xs font-medium text-[var(--fg-1)]",
           "bg-white/5 hover:bg-white/10 border border-[var(--border)]",
           "hover:text-[var(--fg-0)] active:scale-[0.96]",
           "transition-all duration-150",
@@ -212,8 +213,8 @@ export function AspectRatioPicker() {
         className={cn(
           "m-auto w-[min(22rem,calc(100vw-1.5rem))] max-h-[min(80dvh,560px)] overflow-y-auto p-3",
           "mobile-dialog-scroll max-sm:fixed max-sm:inset-x-0 max-sm:bottom-[var(--mobile-dialog-bottom-gap)] max-sm:top-auto max-sm:m-0 max-sm:max-h-[var(--mobile-dialog-sheet-max-height)] max-sm:w-full max-sm:rounded-b-none max-sm:p-4 max-sm:pb-4",
-          "rounded-2xl bg-[var(--bg-1)]/96 backdrop-blur-xl",
-          "border border-[var(--border)] shadow-2xl shadow-black/25",
+          "rounded-[var(--radius-dialog)] bg-[var(--bg-1)]/96 backdrop-blur-xl",
+          "border border-[var(--border)] shadow-[var(--shadow-3)]",
           "text-[var(--fg-0)]",
           "backdrop:bg-black/40 backdrop:backdrop-blur-[2px]",
         )}
@@ -406,7 +407,7 @@ export function AspectRatioPicker() {
           className={cn(
             "mt-3 pt-2.5 border-t border-[var(--border)]",
             "text-[11px] leading-snug",
-            resolved ? "text-neutral-400" : "text-red-300",
+            resolved ? "text-[var(--fg-2)]" : "text-danger",
           )}
         >
           {submitLabel}

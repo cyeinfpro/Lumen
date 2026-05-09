@@ -6,6 +6,8 @@
 import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { IconButton } from "@/components/ui/primitives";
+
 const KEY = "lumen.landscape-banner.dismissed";
 
 export function LandscapeBanner() {
@@ -30,12 +32,12 @@ export function LandscapeBanner() {
   return (
     <div
       role="status"
-      className="sticky top-0 left-0 right-0 flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-1)]/92 border-b border-[var(--border-subtle)] text-xs text-[var(--fg-1)] backdrop-blur-xl safe-x"
+      className="sticky top-0 left-0 right-0 flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-1)]/92 border-b border-[var(--border-subtle)] type-caption text-[var(--fg-1)] backdrop-blur-xl safe-x"
       style={{ zIndex: "var(--z-header, 10)" as unknown as number }}
     >
       <span className="flex-1 truncate">竖屏更好用</span>
-      <button
-        type="button"
+      <IconButton
+        size="sm"
         aria-label="关闭提示"
         onClick={() => {
           try {
@@ -45,10 +47,10 @@ export function LandscapeBanner() {
           }
           setShow(false);
         }}
-        className="inline-flex items-center justify-center w-8 h-8 -mr-1 rounded-full text-[var(--fg-2)] active:bg-[var(--bg-2)]"
+        className="-mr-1 rounded-full"
       >
         <X className="w-3.5 h-3.5" />
-      </button>
+      </IconButton>
     </div>
   );
 }

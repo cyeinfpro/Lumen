@@ -19,7 +19,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Markdown } from "../Markdown";
-import { toast } from "@/components/ui/primitives";
+import { Button, IconButton, toast } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import { IntentBadge } from "./IntentBadge";
 import type { AssistantMessage, Generation, Intent } from "@/lib/types";
 import {
@@ -142,20 +143,21 @@ export function AssistantBubble({
       <div className="max-w-[96%] md:max-w-[96%] w-full min-w-0 flex flex-col gap-2">
         {/* Thinking 折叠区：默认收起；点击后展开 */}
         {msg.thinking && (
-          <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] overflow-hidden">
+          <div className="rounded-[var(--radius-card)] border border-white/[0.06] bg-white/[0.03] overflow-hidden">
+            {/* 全宽折叠头：内嵌 chevron + 状态点，不匹配标准 Button variant */}
             <button
               type="button"
               onClick={() => setThinkingOpen((v) => !v)}
               className={cn(
-                "flex w-full items-center gap-2 px-4 py-2 text-xs text-neutral-400",
-                "hover:text-neutral-300 transition-colors",
+                "flex w-full items-center gap-2 px-4 py-2 type-caption text-[var(--fg-2)]",
+                "hover:text-[var(--fg-1)] transition-colors",
               )}
             >
               <span className={cn(
                 "inline-block w-1.5 h-1.5 rounded-full",
                 isThinking
                   ? "bg-[var(--color-lumen-amber)] animate-pulse"
-                  : "bg-neutral-500",
+                  : "bg-[var(--fg-3)]",
               )} />
               <span>{isThinking ? "思考中…" : "思考过程"}</span>
               <ChevronDown
@@ -174,12 +176,12 @@ export function AssistantBubble({
                   transition={{ duration: 0.2 }}
                   className="overflow-hidden"
                 >
-                  <div className="px-4 pb-3 text-xs leading-relaxed text-neutral-500 max-h-60 overflow-y-auto">
+                  <div className="px-4 pb-3 type-caption leading-relaxed text-[var(--fg-3)] max-h-60 overflow-y-auto">
                     <Markdown>{msg.thinking}</Markdown>
                     {isThinking && (
                       <span
                         aria-hidden
-                        className="inline-block w-[0.4ch] ml-0.5 animate-pulse text-neutral-500"
+                        className="inline-block w-[0.4ch] ml-0.5 animate-pulse text-[var(--fg-3)]"
                       >
                         ▍
                       </span>
@@ -202,13 +204,13 @@ export function AssistantBubble({
               "bg-[var(--bg-1)]/70 border border-[var(--border)] text-[var(--fg-0)]",
               "backdrop-blur-sm shadow-sm min-w-0 break-words [overflow-wrap:anywhere]",
               "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_img]:max-w-full [&_img]:h-auto",
-              isFailedText && "border-red-400/30 bg-red-500/5",
+              isFailedText && "border-danger-border bg-danger-soft",
             )}
           >
             {msg.text ? (
               <Markdown>{msg.text}</Markdown>
             ) : (
-              <span className="text-neutral-400">
+              <span className="text-[var(--fg-2)]">
                 {isStreamingText ? "" : "…"}
               </span>
             )}
@@ -230,19 +232,22 @@ export function AssistantBubble({
             )}
             {msg.used_memory_summary && msg.used_memory_summary.length > 0 && (
               <div className="mt-3 border-t border-white/8 pt-2">
-                <button
-                  type="button"
+                <Button
+                  size="sm"
+                  variant="secondary"
                   onClick={() => setMemoryOpen((v) => !v)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-[var(--fg-1)] hover:bg-white/[0.07]"
+                  leftIcon={<Brain className="h-3 w-3" />}
+                  rightIcon={
+                    <ChevronDown
+                      className={cn("h-3 w-3 transition-transform", memoryOpen && "rotate-180")}
+                    />
+                  }
+                  className="h-7 px-2 text-[11px]"
                 >
-                  <Brain className="h-3 w-3" />
                   用了 {msg.used_memory_summary.length} 条记忆
-                  <ChevronDown
-                    className={cn("h-3 w-3 transition-transform", memoryOpen && "rotate-180")}
-                  />
-                </button>
+                </Button>
                 {memoryOpen && (
-                  <div className="mt-2 space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2">
+                  <div className="mt-2 space-y-1.5 rounded-[var(--radius-control)] border border-white/10 bg-black/20 p-2">
                     {msg.used_memory_summary.map((memory) => (
                       <div
                         key={memory.id}
@@ -252,13 +257,14 @@ export function AssistantBubble({
                           {memory.content}
                           <span className="ml-1 text-[var(--fg-2)]">({memory.type})</span>
                         </span>
-                        <button
-                          type="button"
+                        <Button
+                          size="sm"
+                          variant="ghost"
                           onClick={() => void disableMemory(memory.id)}
-                          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--fg-2)] hover:bg-white/10 hover:text-[var(--fg-0)]"
+                          className="shrink-0 h-6 px-1.5 text-[10px] text-[var(--fg-2)]"
                         >
                           停用
-                        </button>
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -315,19 +321,20 @@ export function AssistantBubble({
               className="absolute -top-2.5 right-2"
             />
             {canCopy && (
+              /* 24px 气泡角浮动 icon 按钮：使用紧凑原生 button 以贴合气泡内边距 */
               <button
                 type="button"
                 onClick={() => void handleCopy()}
-                aria-label={copied ? "已复制" : "复制"}
-                title={copied ? "已复制" : "复制"}
+                aria-label={copied ? copy.state.copied : copy.action.copy}
+                title={copied ? copy.state.copied : copy.action.copy}
                 className={cn(
-                  "absolute right-2 bottom-2 p-1 rounded-md",
+                  "absolute right-2 bottom-2 p-1 rounded-[var(--radius-control)]",
                   "text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/10",
                   "transition-all duration-150 active:scale-[0.92]",
                 )}
               >
                 {copied ? (
-                  <Check className="w-3.5 h-3.5 text-[var(--ok,#30A46C)]" />
+                  <Check className="w-3.5 h-3.5 text-[var(--success)]" />
                 ) : (
                   <Copy className="w-3.5 h-3.5" />
                 )}
@@ -377,8 +384,10 @@ export function AssistantBubble({
         )}
       </div>
       {selectionFab && savePrefill === null && (
-        <button
-          type="button"
+        <Button
+          size="sm"
+          variant="secondary"
+          leftIcon={<BookmarkPlus className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />}
           onMouseDown={(e) => {
             e.preventDefault(); // 别让 click 清掉 selection
           }}
@@ -394,11 +403,10 @@ export function AssistantBubble({
             transform: "translate(-50%, 0)",
             zIndex: 50,
           }}
-          className="inline-flex items-center gap-1.5 rounded-xl border border-white/15 bg-[var(--bg-1)] px-2.5 py-1.5 text-xs text-[var(--fg-0)] shadow-lg backdrop-blur-sm hover:bg-white/[0.08]"
+          className="bg-[var(--bg-1)] shadow-[var(--shadow-2)]"
         >
-          <BookmarkPlus className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
           记下这条
-        </button>
+        </Button>
       )}
       {savePrefill !== null && (
         <SaveSelectionModal
@@ -467,45 +475,46 @@ function SaveSelectionModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-5 shadow-2xl"
+        className="w-full max-w-md rounded-[var(--radius-dialog)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-5 shadow-[var(--shadow-3)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between gap-2">
-          <h3 className="flex items-center gap-2 text-sm font-medium text-[var(--fg-0)]">
+          <h3 className="flex items-center gap-2 type-card-title">
             <BookmarkPlus className="h-4 w-4 text-[var(--color-lumen-amber)]" />
             记下这段
           </h3>
-          <button
-            type="button"
+          <IconButton
+            size="sm"
+            variant="ghost"
             onClick={onClose}
-            className="rounded-md p-1 text-[var(--fg-2)] hover:bg-white/5"
-            aria-label="关闭"
+            aria-label={copy.action.close}
           >
             <X className="h-4 w-4" />
-          </button>
+          </IconButton>
         </div>
         <div className="mb-3 flex flex-wrap gap-1.5">
           {MEMORY_TYPE_OPTIONS.map((option) => (
-            <button
+            <Button
               key={option.value}
-              type="button"
+              size="sm"
+              variant={type === option.value ? "secondary" : "ghost"}
               onClick={() => setType(option.value)}
               className={cn(
-                "rounded-lg border px-2.5 py-1 text-xs transition-colors",
+                "h-7 px-2.5 text-[11px]",
                 type === option.value
                   ? "border-[var(--color-lumen-amber)]/40 bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)]"
-                  : "border-white/10 text-[var(--fg-1)] hover:bg-white/5",
+                  : "border border-white/10 text-[var(--fg-1)]",
               )}
             >
               {option.label}
-            </button>
+            </Button>
           ))}
         </div>
         <textarea
           value={content}
           onChange={(e) => setContent(e.target.value.slice(0, 200))}
           rows={3}
-          className="mb-2 w-full rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+          className="mb-2 w-full rounded-[var(--radius-card)] border border-white/10 bg-white/[0.03] px-3 py-2 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
           placeholder="例:偏好简洁回答"
         />
         <div className="mb-4 flex items-center justify-between gap-2 text-[11px] text-[var(--fg-2)]">
@@ -514,7 +523,7 @@ function SaveSelectionModal({
             <select
               value={scopeId ?? ""}
               onChange={(e) => setScopeId(e.target.value || null)}
-              className="h-7 rounded-md border border-white/10 bg-white/[0.03] px-1.5 text-[11px] text-[var(--fg-1)] outline-none"
+              className="h-7 rounded-[var(--radius-control)] border border-white/10 bg-white/[0.03] px-1.5 text-[11px] text-[var(--fg-1)] outline-none"
             >
               <option value="">默认作用域</option>
               {scopesQ.data
@@ -529,22 +538,23 @@ function SaveSelectionModal({
           )}
         </div>
         <div className="flex justify-end gap-2">
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={onClose}
             disabled={saving}
-            className="h-9 rounded-xl border border-white/10 px-4 text-sm text-[var(--fg-1)] hover:bg-white/5 disabled:opacity-50"
           >
-            取消
-          </button>
-          <button
+            {copy.action.cancel}
+          </Button>
+          <Button
             type="button"
+            variant="primary"
             onClick={() => void handleSave()}
-            disabled={saving || !content.trim()}
-            className="inline-flex h-9 items-center justify-center rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-50"
+            disabled={!content.trim()}
+            loading={saving}
           >
-            {saving ? "保存中…" : "保存"}
-          </button>
+            {saving ? copy.state.saving : copy.action.save}
+          </Button>
         </div>
       </div>
     </div>
@@ -578,13 +588,15 @@ async function confirmMemoryDecision(
 
 function ConfirmButton({ label, onClick }: { label: string; onClick: () => void }) {
   return (
-    <button
+    <Button
       type="button"
+      size="sm"
+      variant="ghost"
       onClick={onClick}
-      className="rounded px-1.5 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+      className="h-6 px-1.5 text-[11px] text-[var(--fg-1)]"
     >
       {label}
-    </button>
+    </Button>
   );
 }
 
@@ -604,16 +616,18 @@ function MemoryOnboardingTip({ flag, text }: { flag: number; text: string }) {
   const seen = ((settingsQ.data?.onboarding_seen ?? 0) & (1 << flag)) !== 0;
   if (seen || settingsQ.isPending) return null;
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-md border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/8 px-2 py-1 text-[11px] text-[var(--fg-1)]">
+    <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/8 px-2 py-1 text-[11px] text-[var(--fg-1)]">
       <Brain className="h-3 w-3 text-[var(--color-lumen-amber)]" />
       <span>{text}</span>
-      <button
+      <Button
         type="button"
+        size="sm"
+        variant="ghost"
         onClick={() => mut.mutate(flag)}
-        className="rounded px-1 py-0.5 text-[var(--color-lumen-amber)] hover:bg-white/10"
+        className="h-6 px-1.5 text-[11px] text-[var(--color-lumen-amber)]"
       >
         知道了
-      </button>
+      </Button>
     </div>
   );
 }
@@ -636,13 +650,15 @@ function MemoryWriteHints({
         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--fg-2)]">
           <Brain className="h-3 w-3 text-[var(--color-lumen-amber)]" />
           <span>已记下 {compactable.length} 条{memoryTypeLabel(type)}</span>
-          <button
+          <Button
             type="button"
+            size="sm"
+            variant="ghost"
             onClick={() => setExpanded(true)}
-            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+            className="h-6 px-1.5 text-[11px] text-[var(--fg-1)]"
           >
             查看
-          </button>
+          </Button>
         </div>
         <MemoryOnboardingTip
           flag={1}
@@ -781,46 +797,54 @@ function MemoryWriteHint({
       )}
       {write.kind === "staged" && write.id && !doneLabel && (
         <>
-          <button
+          <Button
             type="button"
+            size="sm"
+            variant="ghost"
             onClick={() => void handleAccept()}
-            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+            className="h-6 px-1.5 text-[11px] text-[var(--fg-1)]"
           >
             是
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            size="sm"
+            variant="ghost"
             onClick={() => void handleReject()}
-            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+            className="h-6 px-1.5 text-[11px] text-[var(--fg-1)]"
           >
             否
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            size="sm"
+            variant="ghost"
             onClick={() => setDetailOpen((v) => !v)}
-            className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+            className="h-6 px-1.5 text-[11px] text-[var(--fg-1)]"
           >
             {detailOpen ? "收起" : "详细"}
-          </button>
+          </Button>
         </>
       )}
       {write.undo_token && !doneLabel && (
-        <button
+        <Button
           type="button"
+          size="sm"
+          variant="ghost"
           onClick={() => void handleUndo()}
-          className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+          className="h-6 px-1.5 text-[11px] text-[var(--fg-1)]"
         >
           撤销
-        </button>
+        </Button>
       )}
       <a
         href="/settings/memory"
-        className="rounded px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
+        className="rounded-[var(--radius-control)] px-1 py-0.5 text-[var(--fg-1)] hover:bg-white/10"
       >
         管理
       </a>
       {detailOpen && write.kind === "staged" && !doneLabel && (
-        <div className="mt-1 w-full rounded-lg border border-white/10 bg-white/[0.03] p-2 text-[11px] text-[var(--fg-2)]">
+        <div className="mt-1 w-full rounded-[var(--radius-card)] border border-white/10 bg-white/[0.03] p-2 text-[11px] text-[var(--fg-2)]">
           {write.source_excerpt && (
             <div className="mb-2 leading-5 text-[var(--fg-2)]/80">
               来源:{write.source_excerpt}
@@ -829,7 +853,7 @@ function MemoryWriteHint({
           <input
             value={editedContent}
             onChange={(e) => setEditedContent(e.target.value.slice(0, 200))}
-            className="h-7 w-full rounded-md border border-white/10 bg-white/[0.04] px-2 text-[11px] text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+            className="h-7 w-full rounded-[var(--radius-control)] border border-white/10 bg-white/[0.04] px-2 text-[11px] text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
             placeholder="编辑后再保存"
           />
           <div className="mt-1 text-right text-[10px] text-[var(--fg-2)]/70">
@@ -862,7 +886,7 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-// 通用小工具按钮：36px 触控目标在子元素 padding 内得到
+// 通用小工具按钮：36px 触控目标
 function ToolbarButton({
   onClick,
   label,
@@ -873,19 +897,14 @@ function ToolbarButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
+    <IconButton
+      size="md"
+      variant="ghost"
       onClick={onClick}
       aria-label={label}
       title={label}
-      className={cn(
-        "inline-flex items-center justify-center w-9 h-9 rounded-md",
-        "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10",
-        "active:scale-[0.92] transition-all duration-150",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
-      )}
     >
       {children}
-    </button>
+    </IconButton>
   );
 }

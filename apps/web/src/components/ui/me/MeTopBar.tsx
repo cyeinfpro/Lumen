@@ -4,6 +4,7 @@ import { Plus, Search, Settings, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { MobileTopBar } from "@/components/ui/shell/MobileTopBar";
+import { IconButton } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 
 export interface MeTopBarProps {
@@ -51,6 +52,12 @@ export function MeTopBar({
               ref={inputRef}
               value={query}
               onChange={(e) => onQueryChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  onQueryChange("");
+                  setExpanded(false);
+                }
+              }}
               placeholder="搜索会话"
               aria-label="搜索会话"
               className={cn(
@@ -58,20 +65,21 @@ export function MeTopBar({
                 "placeholder:text-[var(--fg-2)] outline-none",
               )}
             />
-            <button
-              type="button"
+            <IconButton
+              size="sm"
+              variant="ghost"
               aria-label="关闭搜索"
               onClick={() => {
                 onQueryChange("");
                 setExpanded(false);
               }}
-              className="inline-flex items-center justify-center w-7 h-7 -mr-1 rounded-full text-[var(--fg-2)] active:bg-[var(--bg-3)]"
+              className="w-7 h-7 max-sm:min-h-7 max-sm:min-w-7 -mr-1 rounded-full"
             >
               <X className="w-3.5 h-3.5" />
-            </button>
+            </IconButton>
           </div>
         ) : (
-          <span className="text-[18px] font-semibold text-[var(--fg-0)] pl-0.5 tracking-tight">
+          <span className="type-section-title pl-0.5 tracking-tight">
             我的
           </span>
         )
@@ -79,48 +87,38 @@ export function MeTopBar({
       right={
         !expanded ? (
           <>
-            <button
-              type="button"
+            <IconButton
+              size="md"
+              variant="ghost"
               onClick={() => setExpanded(true)}
               aria-label="搜索会话"
-              className={cn(
-                "inline-flex items-center justify-center w-9 h-9 rounded-full",
-                "text-[var(--fg-1)] active:bg-[var(--bg-2)] active:scale-[0.94]",
-                "transition-[background-color,transform] duration-150",
-              )}
+              className="rounded-full"
             >
               <Search className="w-[18px] h-[18px]" />
-            </button>
+            </IconButton>
             {onCreateConversation && (
-              <button
-                type="button"
+              <IconButton
+                size="md"
+                variant="ghost"
                 onClick={onCreateConversation}
                 disabled={createPending}
                 aria-label="新建会话"
-                className={cn(
-                  "inline-flex items-center justify-center w-9 h-9 rounded-full",
-                  "text-[var(--amber-400)] active:bg-[var(--bg-2)] active:scale-[0.94]",
-                  "transition-[background-color,transform] duration-150",
-                  "disabled:opacity-50",
-                )}
+                className="rounded-full text-[var(--amber-400)] hover:text-[var(--amber-400)]"
                 style={{ filter: "drop-shadow(0 0 6px var(--amber-glow))" }}
               >
                 <Plus className="w-[18px] h-[18px]" strokeWidth={2.4} />
-              </button>
+              </IconButton>
             )}
             {onSettingsTap && (
-              <button
-                type="button"
+              <IconButton
+                size="md"
+                variant="ghost"
                 onClick={onSettingsTap}
                 aria-label="账户与设置"
-                className={cn(
-                  "inline-flex items-center justify-center w-9 h-9 rounded-full",
-                  "text-[var(--fg-1)] active:bg-[var(--bg-2)] active:scale-[0.94]",
-                  "transition-[background-color,transform] duration-150",
-                )}
+                className="rounded-full"
               >
                 <Settings className="w-[18px] h-[18px]" />
-              </button>
+              </IconButton>
             )}
           </>
         ) : undefined

@@ -79,11 +79,11 @@ export default function SignupPage() {
   const onVerify = async () => {
     setError(null);
     if (!activeSupplierId) {
-      setError("请选择供应商");
+      setError("供应商未选");
       return;
     }
     if (!apiKey.trim()) {
-      setError("请输入 API Key");
+      setError("API Key 未填");
       return;
     }
     setVerifying(true);
@@ -104,7 +104,7 @@ export default function SignupPage() {
     e.preventDefault();
     setError(null);
     if (!verificationToken) {
-      setError("请先验证 API Key");
+      setError("API Key 未验证");
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
@@ -164,7 +164,7 @@ export default function SignupPage() {
             {suppliersQ.isError && (
               <div
                 role="alert"
-                className="flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300"
+                className="flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
               >
                 <span>供应商列表加载失败</span>
                 <button
@@ -225,7 +225,7 @@ export default function SignupPage() {
               {verifying ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : verificationToken ? (
-                <Check className="w-4 h-4 text-emerald-400" />
+                <Check className="w-4 h-4 text-success" />
               ) : (
                 <KeyRound className="w-4 h-4" />
               )}
@@ -275,7 +275,7 @@ export default function SignupPage() {
             />
 
             {error && (
-              <div role="alert" className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300">
+              <div role="alert" className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>{error}</span>
               </div>

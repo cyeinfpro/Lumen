@@ -59,7 +59,8 @@ import {
 } from "@/lib/apiClient";
 import type { SystemSettingItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { ConfirmDialog } from "@/components/ui/primitives";
+import { Button, ConfirmDialog, IconButton } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import { ErrorBlock } from "../page";
 
 type Op = { kind: "set"; value: string } | { kind: "clear" };
@@ -209,8 +210,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "site",
     title: "站点域名",
     summary: "生成邀请链接和分享链接时使用的对外访问地址。",
-    detail:
-      "填写 web 根地址，例如 https://your-domain.example.com。不要带 /api、/invite 或其它路径；留空时后端会按当前访问域名自动生成。",
+    detail: "公开访问域名，含 https://",
     kind: "url",
     icon: Globe,
     recommended: "生产环境建议显式填写真实 HTTPS 域名。",
@@ -220,7 +220,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "site",
     title: "分享链接有效期",
     summary: "新生成图片分享链接默认多久后失效。",
-    detail: "只影响保存后新生成的分享链接；已经生成的旧链接保持原来的过期时间。设为 0 表示永久有效。",
+    detail: "0 表示永久",
     kind: "integer",
     icon: Timer,
     unit: "天",
@@ -234,7 +234,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "image",
     title: "生图引擎",
     summary: "决定图片生成使用原生通道、直连通道还是双路竞速。",
-    detail: "不确定时选“原生通道”。双路竞速会同时消耗两条路径的配额，默认收起。",
+    detail: "渲染后端",
     kind: "enum",
     icon: ImageIcon,
     defaultValue: "responses",
@@ -246,7 +246,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "image",
     title: "异步通道",
     summary: "控制是否把支持异步任务的供应商分发到任务通道。",
-    detail: "自动混合会按供应商能力分发；强制流式会完全关闭异步任务；强制异步会严格要求供应商支持异步任务。",
+    detail: "通道策略",
     kind: "enum",
     icon: Activity,
     defaultValue: "auto",
@@ -258,8 +258,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "image",
     title: "输出格式",
     summary: "设置新生成图片默认使用 JPG 格式还是 PNG 格式。",
-    detail:
-      "JPG 格式体积更小；PNG 格式更接近无损画质但文件更大。透明背景请求始终使用 PNG，不受这里影响。",
+    detail: "默认输出格式（透明仍走 PNG）",
     kind: "enum",
     icon: ImageIcon,
     defaultValue: "jpeg",
@@ -271,7 +270,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "image",
     title: "异步任务服务",
     summary: "sub2api 图片异步任务服务地址，仅在异步通道启用时使用。",
-    detail: "默认 https://image-job.example.com。可填写服务根地址，也可填写以 /v1 结尾的地址。",
+    detail: "服务根地址或 /v1 地址",
     kind: "text",
     icon: ImageIcon,
     defaultValue: "https://image-job.example.com",
@@ -282,7 +281,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "image",
     title: "自动尺寸像素上限",
     summary: "只影响“自动尺寸”时系统怎么推导图片大小。",
-    detail: "手动选择 4K 或固定尺寸时，不受这个值限制。",
+    detail: "仅影响自动尺寸",
     kind: "integer",
     icon: Gauge,
     unit: "像素",
@@ -306,8 +305,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "upstream",
     title: "快速模式默认开启",
     summary: "控制全站新对话和新生图的快速模式初始状态。",
-    detail:
-      "开启后，普通用户进入对话框时快速模式默认打开；关闭后默认关闭。用户仍可在当前对话框里临时切换。",
+    detail: "全站默认值，用户可临时切换",
     kind: "toggle",
     icon: Zap,
     defaultValue: "1",
@@ -318,7 +316,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "upstream",
     title: "同时请求上游的数量",
     summary: "控制全站最多同时向上游发多少个请求。",
-    detail: "调太高可能触发上游限流；调太低会让排队变长。",
+    detail: "并发数（4–8 通常够用）",
     kind: "integer",
     icon: Activity,
     min: 1,
@@ -331,7 +329,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "upstream",
     title: "连接等待时间",
     summary: "建立上游连接最多等多久。",
-    detail: "网络正常时不用改；如果经常连接超时，可以适当加大。",
+    detail: "上游连接超时（秒）",
     kind: "decimal",
     icon: Timer,
     unit: "秒",
@@ -346,7 +344,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "upstream",
     title: "生成结果等待时间",
     summary: "请求发出后，等待上游返回结果的最长时间。",
-    detail: "4K 图片和复杂任务可能更慢，需要给足时间。",
+    detail: "上游读超时（秒）",
     kind: "decimal",
     icon: Timer,
     unit: "秒",
@@ -361,6 +359,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "upstream",
     title: "上传请求等待时间",
     summary: "上传图片或较大请求体时，最多等多久。",
+    detail: "上传写超时（秒）",
     kind: "decimal",
     icon: Timer,
     unit: "秒",
@@ -375,7 +374,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "providers",
     title: "文字探活间隔",
     summary: "定时用一道简单算术题检查供应商是否可用。",
-    detail: "设为 0 表示关闭自动探活，只保留手动探活。",
+    detail: "0 表示只手动探活",
     kind: "integer",
     icon: Activity,
     unit: "秒",
@@ -389,7 +388,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "providers",
     title: "图片探活间隔",
     summary: "定时生成一张测试图，确认图片生成能力真的可用。",
-    detail: "每次都会消耗一次图片配额。生产环境建议关闭，或至少 30 分钟以上。",
+    detail: "自动巡检间隔（秒）",
     kind: "integer",
     icon: ImageIcon,
     unit: "秒",
@@ -397,14 +396,14 @@ const SETTING_META: Record<string, SettingMeta> = {
     max: 86400,
     defaultValue: "0",
     recommended: "默认：0，先关闭。",
-    warning: "会消耗上游图片配额。",
+    warning: "每次都消耗一次图片配额；生产建议关闭或 ≥ 30 分钟。",
     keywords: ["provider", "image", "probe", "图片探活"],
   },
   [UPDATE_USE_PROXY_POOL_KEY]: {
     group: "update",
     title: "更新时使用代理池",
     summary: "一键更新 Lumen 时，让 git、uv 和 npm 的出站请求走代理池。",
-    detail: "关闭时直接更新；开启后会使用下面选中的代理。这个设置只影响管理后台触发的一键更新。",
+    detail: "仅影响一键更新",
     kind: "toggle",
     icon: Rocket,
     defaultValue: "0",
@@ -415,7 +414,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "update",
     title: "更新代理",
     summary: "选择一键更新时使用代理池里的哪一个代理。",
-    detail: "留空时后端会使用代理池中第一个启用代理。代理列表在“代理池”标签页维护。",
+    detail: "留空走第一个启用代理",
     kind: "text",
     icon: Rocket,
     recommended: "优先选择已测试成功、延迟稳定的代理。",
@@ -425,7 +424,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "library",
     title: "模特库同步使用代理池",
     summary: "同步模特库预设时，让 GitHub 文件列表和图片下载走代理池。",
-    detail: "关闭时直连 GitHub；开启后使用下面选中的代理。这个设置只影响模特库里的同步按钮。",
+    detail: "仅影响模特库同步",
     kind: "toggle",
     icon: ImageIcon,
     defaultValue: "0",
@@ -436,7 +435,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "library",
     title: "模特库同步代理",
     summary: "选择模特库同步时使用代理池里的哪一个代理。",
-    detail: "留空时后端会使用代理池中第一个启用代理。代理列表在“代理池”标签页维护。",
+    detail: "留空走第一个启用代理",
     kind: "text",
     icon: ImageIcon,
     recommended: "优先选择能稳定访问 GitHub 的代理。",
@@ -446,7 +445,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_auto",
     title: "自动压缩长对话",
     summary: "对话快超过上下文时，自动把较早内容整理成摘要。",
-    detail: "长对话会更稳，但摘要质量取决于所选模型。",
+    detail: "效果取决于摘要模型",
     kind: "toggle",
     icon: BrainCircuit,
     defaultValue: "0",
@@ -457,7 +456,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_auto",
     title: "触发压缩的上下文占用",
     summary: "对话占用达到这个比例后，才会尝试自动压缩。",
-    detail: "数值越低，越早压缩；数值越高，越接近上限才压缩。",
+    detail: "压缩触发阈值（%）",
     kind: "integer",
     icon: Gauge,
     unit: "%",
@@ -471,7 +470,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_auto",
     title: "摘要保留长度",
     summary: "压缩后的摘要大概保留多少 token。",
-    detail: "越大越完整，但会占用更多上下文；越小越省空间，但信息可能损失。",
+    detail: "摘要 token 上限",
     kind: "integer",
     icon: SlidersHorizontal,
     unit: "token",
@@ -495,7 +494,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_auto",
     title: "最近原文保留条数",
     summary: "即使发生压缩，也至少保留最近这些消息的原文。",
-    detail: "保留越多，当前话题越不容易断；但会占用更多上下文。",
+    detail: "保底原文条数",
     kind: "integer",
     icon: ShieldCheck,
     unit: "条",
@@ -509,7 +508,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_auto",
     title: "自动压缩冷却时间",
     summary: "同一会话两次自动压缩至少间隔多久。",
-    detail: "用来避免对话在阈值附近反复压缩。",
+    detail: "防抖间隔（秒）",
     kind: "integer",
     icon: Timer,
     unit: "秒",
@@ -523,7 +522,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_auto",
     title: "单次摘要输入上限",
     summary: "一次摘要调用最多处理多少输入 token。",
-    detail: "超过上限时，系统会分段汇总，避免单次请求过大。",
+    detail: "超出会分段汇总",
     kind: "integer",
     icon: SlidersHorizontal,
     unit: "token",
@@ -557,7 +556,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_auto",
     title: "摘要失败保护阈值",
     summary: "最近摘要失败比例超过这个值时，会暂停自动摘要一段时间。",
-    detail: "暂停期间系统会改用保守截断，避免连续失败影响对话。",
+    detail: "失败率阈值（%）",
     kind: "integer",
     icon: ShieldCheck,
     unit: "%",
@@ -571,6 +570,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_manual",
     title: "允许手动压缩的门槛",
     summary: "会话输入量达到这个值后，用户才可以手动压缩。",
+    detail: "门槛 token",
     kind: "integer",
     icon: BrainCircuit,
     unit: "token",
@@ -584,6 +584,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "context_manual",
     title: "手动压缩冷却时间",
     summary: "同一会话两次手动压缩至少间隔多久。",
+    detail: "冷却时长（秒）",
     kind: "integer",
     icon: Timer,
     unit: "秒",
@@ -893,16 +894,16 @@ export function SettingsPanel() {
       const raw = op.value.trim();
       if (meta.kind === "integer" || meta.kind === "decimal") {
         if (raw === "") {
-          errors[key] = "请填写一个数值";
+          errors[key] = "需填数值";
           continue;
         }
         const n = Number(raw);
         if (!Number.isFinite(n)) {
-          errors[key] = "请填写有效数字";
+          errors[key] = "数字格式错误";
           continue;
         }
         if (meta.kind === "integer" && !Number.isInteger(n)) {
-          errors[key] = "请填写整数，不要带小数";
+          errors[key] = "不支持小数";
           continue;
         }
         if (meta.min != null && n < meta.min) {
@@ -922,7 +923,7 @@ export function SettingsPanel() {
 
       if (meta.kind === "toggle") {
         if (raw !== "0" && raw !== "1") {
-          errors[key] = "请选择开启或关闭";
+          errors[key] = "需选开启/关闭";
           continue;
         }
         payload.push({ key, value: raw });
@@ -931,7 +932,7 @@ export function SettingsPanel() {
 
       if (meta.kind === "enum") {
         if (!meta.choices?.some((option) => option.value === raw)) {
-          errors[key] = "请选择一个有效选项";
+          errors[key] = "无效选项";
           continue;
         }
         payload.push({ key, value: raw });
@@ -941,7 +942,7 @@ export function SettingsPanel() {
       if (meta.kind === "url") {
         const normalized = normalizePublicBaseUrlInput(raw);
         if (!normalized) {
-          errors[key] = "请填写完整的 http(s) 根域名，不要带路径、参数或 /api";
+          errors[key] = "需 http(s) 根域名，无路径";
           continue;
         }
         payload.push({ key, value: normalized });
@@ -949,7 +950,7 @@ export function SettingsPanel() {
       }
 
       if (raw === "") {
-        errors[key] = "不能为空";
+        errors[key] = copy.error.required;
         continue;
       }
       payload.push({ key, value: raw });
@@ -964,7 +965,7 @@ export function SettingsPanel() {
     setSavedAt(null);
     const { ok, payload } = validateAll();
     if (!ok) {
-      setGlobalError("还有设置没有填对，请先修正红色提示。");
+      setGlobalError("存在错误项");
       return;
     }
     if (payload.length === 0) return;
@@ -1050,7 +1051,7 @@ export function SettingsPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            className="flex items-start gap-2 rounded-xl border border-red-500/35 bg-red-500/8 px-4 py-3 text-sm text-red-200"
+            className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-danger"
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             双并发会同时启动两条生图路径，成功率和速度更激进，但单次任务可能消耗双倍配额。
@@ -1061,7 +1062,7 @@ export function SettingsPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-300"
+            className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-danger"
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             {globalError}
@@ -1072,9 +1073,9 @@ export function SettingsPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-300"
+            className="flex items-center gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-4 py-3 type-body-sm text-success"
           >
-            <Check className="h-4 w-4" /> 已保存
+            <Check className="h-4 w-4" /> {copy.state.saved}
           </motion.div>
         )}
       </AnimatePresence>
@@ -1236,30 +1237,25 @@ export function SettingsPanel() {
                 <span>项待保存</span>
               </span>
               <div className="flex-1 sm:flex-none" />
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={onResetAll}
                 disabled={updateMut.isPending}
-                className="inline-flex min-h-[40px] cursor-pointer items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 sm:h-8"
+                leftIcon={<RotateCcw className="h-3 w-3" />}
               >
-                <RotateCcw className="h-3 w-3" /> 放弃
-              </button>
-              <button
-                type="button"
+                放弃
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={onSave}
                 disabled={updateMut.isPending}
-                className="inline-flex min-h-[40px] cursor-pointer items-center gap-1.5 rounded-lg bg-[var(--color-lumen-amber)] px-4 text-xs font-medium text-black transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 sm:h-8"
+                loading={updateMut.isPending}
+                leftIcon={!updateMut.isPending ? <Save className="h-3 w-3" /> : undefined}
               >
-                {updateMut.isPending ? (
-                  <>
-                    <Loader2 className="h-3 w-3 animate-spin" /> 保存中
-                  </>
-                ) : (
-                  <>
-                    <Save className="h-3 w-3" /> 保存全部
-                  </>
-                )}
-              </button>
+                {updateMut.isPending ? copy.state.saving : "保存全部"}
+              </Button>
             </div>
           </motion.div>
         )}
@@ -1394,22 +1390,25 @@ function SettingCard({
             </p>
           </div>
         </div>
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setShowDetails((value) => !value)}
-          className="inline-flex min-h-[32px] w-fit cursor-pointer items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 text-xs text-neutral-300 transition-colors hover:bg-white/10"
+          leftIcon={
+            showDetails ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )
+          }
+          className="w-fit"
         >
-          {showDetails ? (
-            <ChevronDown className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
-          )}
           详情
-        </button>
+        </Button>
       </div>
 
       {meta.warning && (
-        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs leading-5 text-amber-200">
+        <div className="mt-3 flex items-start gap-2 rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-3 py-2 type-caption leading-5 text-warning">
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           {meta.warning}
         </div>
@@ -1427,9 +1426,9 @@ function SettingCard({
         />
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-neutral-500">
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--fg-2)]">
         {meta.recommended && (
-          <span className="rounded-md border border-emerald-500/20 bg-emerald-500/8 px-2 py-1 text-emerald-300/90">
+          <span className="rounded-md border border-success-border bg-success-soft px-2 py-1 text-success">
             {meta.recommended}
           </span>
         )}
@@ -1466,7 +1465,7 @@ function SettingCard({
       </AnimatePresence>
 
       {fieldError && (
-        <p className="mt-3 flex items-center gap-1.5 text-xs text-red-300">
+        <p className="mt-3 flex items-center gap-1.5 type-caption text-danger">
           <AlertCircle className="h-3.5 w-3.5" /> {fieldError}
         </p>
       )}
@@ -1553,9 +1552,9 @@ function SettingControl({
                 aria-checked={selected}
                 onClick={() => onChange({ kind: "set", value: option.value })}
                 className={cn(
-                  "min-h-[72px] cursor-pointer rounded-lg border px-3 py-2 text-left transition-colors",
+                  "min-h-[72px] cursor-pointer rounded-[var(--radius-control)] border px-3 py-2 text-left transition-colors",
                   option.value === "dual_race"
-                    ? "border-red-500/35 bg-red-500/8"
+                    ? "border-danger-border bg-danger-soft"
                     : selected
                       ? "border-[var(--color-lumen-amber)]/60 bg-[var(--color-lumen-amber)]/10 text-[var(--fg-0)]"
                       : "border-[var(--border)] bg-[var(--bg-0)]/60 text-[var(--fg-1)] hover:bg-white/5",
@@ -1568,15 +1567,15 @@ function SettingControl({
                       className={cn(
                         "rounded-full border px-2 py-0.5 text-[10px]",
                         option.value === "dual_race"
-                          ? "border-red-500/35 bg-red-500/10 text-red-200"
-                          : "border-amber-500/25 bg-amber-500/10 text-amber-200",
+                          ? "border-danger-border bg-danger-soft text-danger"
+                          : "border-warning-border bg-warning-soft text-warning",
                       )}
                     >
                       {option.badge}
                     </span>
                   )}
                 </span>
-                <span className="mt-1 block text-xs leading-5 text-neutral-500">
+                <span className="mt-1 block text-xs leading-5 text-[var(--fg-2)]">
                   {option.description}
                 </span>
               </button>
@@ -1587,7 +1586,7 @@ function SettingControl({
           <button
             type="button"
             onClick={() => setShowAdvancedEngine(true)}
-            className="inline-flex min-h-[32px] cursor-pointer items-center gap-1 rounded-lg border border-red-500/25 bg-red-500/5 px-2 text-xs text-red-200 transition-colors hover:bg-red-500/10"
+            className="inline-flex min-h-[32px] cursor-pointer items-center gap-1 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-2 type-caption text-danger transition-colors hover:bg-danger/15"
           >
             <ChevronRight className="h-3.5 w-3.5" />
             显示进阶路径
@@ -1645,16 +1644,17 @@ function SettingControl({
           aria-label={`${meta.title} ${checked ? "关闭" : "开启"}`}
           onClick={() => onChange({ kind: "set", value: checked ? "0" : "1" })}
           className={cn(
-            "relative h-8 w-14 shrink-0 cursor-pointer rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/30",
+            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/30",
             checked
               ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]"
               : "border-white/15 bg-white/10",
           )}
         >
           <span
+            aria-hidden
             className={cn(
-              "absolute top-1 h-6 w-6 rounded-full bg-white shadow-sm transition-transform",
-              checked ? "translate-x-7" : "translate-x-1",
+              "inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+              checked ? "translate-x-[22px]" : "translate-x-0.5",
             )}
           />
         </button>
@@ -1662,8 +1662,8 @@ function SettingControl({
           className={cn(
             "inline-flex rounded-md border px-2 py-1 text-xs",
             checked
-              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-              : "border-white/10 bg-white/5 text-neutral-400",
+              ? "border-success-border bg-success-soft text-success"
+              : "border-white/10 bg-white/5 text-[var(--fg-2)]",
           )}
         >
           {checked ? "开启" : "关闭"}
@@ -1746,14 +1746,14 @@ function SettingControl({
         className="h-11 w-full flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 font-mono text-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
       />
       {meta.kind === "url" && browserOrigin && (
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => onChange({ kind: "set", value: browserOrigin })}
-          className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 md:h-11"
+          leftIcon={<Globe className="h-3.5 w-3.5" />}
         >
-          <Globe className="h-3.5 w-3.5" />
           填入当前域名
-        </button>
+        </Button>
       )}
       <ResetEditButton
         dirty={!!op}
@@ -1816,7 +1816,7 @@ function ModelSelectControl({
             }
           />
         </div>
-        <p className="text-xs text-amber-200">
+        <p className="type-caption text-warning">
           模型列表读取失败，已切换为手动输入
           {modelsQuery.errorMessage ? `：${modelsQuery.errorMessage}` : ""}
         </p>
@@ -1855,13 +1855,13 @@ function ModelSelectControl({
         </select>
       )}
       {customMode && (
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setCustomMode(false)}
-          className="inline-flex min-h-[40px] cursor-pointer items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 md:h-11"
         >
           返回列表
-        </button>
+        </Button>
       )}
       <ResetEditButton
         dirty={!!op}
@@ -1936,7 +1936,7 @@ function UpdateProxySelectControl({
         />
       </div>
       {enabledProxies.length === 0 ? (
-        <p className="text-xs text-amber-200">
+        <p className="type-caption text-warning">
           代理池没有启用代理；开启“{proxyFeatureLabel}”后，请求会被后端拒绝。
         </p>
       ) : (
@@ -2001,26 +2001,26 @@ function ResetEditButton({
 }) {
   if (dirty) {
     return (
-      <button
-        type="button"
+      <Button
+        variant="secondary"
+        size="sm"
         onClick={onReset}
-        className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 md:h-11"
+        leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
       >
-        <RotateCcw className="h-3.5 w-3.5" />
         撤销修改
-      </button>
+      </Button>
     );
   }
   if (!defaultValue || !showDefaultAction) return null;
   return (
-    <button
-      type="button"
+    <Button
+      variant="secondary"
+      size="sm"
       onClick={() => onUseDefault(defaultValue)}
-      className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 md:h-11"
+      leftIcon={<Check className="h-3.5 w-3.5" />}
     >
-      <Check className="h-3.5 w-3.5" />
       填入默认值
-    </button>
+    </Button>
   );
 }
 
@@ -2492,35 +2492,26 @@ function LumenUpdateBlock({
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={onRefresh}
             disabled={loading}
-            className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 md:h-10"
+            loading={loading}
+            leftIcon={!loading ? <RotateCcw className="h-3.5 w-3.5" /> : undefined}
           >
-            {loading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RotateCcw className="h-3.5 w-3.5" />
-            )}
             刷新状态
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             onClick={onTrigger}
             disabled={disabled}
-            className="inline-flex min-h-[40px] cursor-pointer items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-xs font-medium text-black transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 md:h-10"
+            loading={triggering || running}
+            leftIcon={!(triggering || running) ? <Rocket className="h-3.5 w-3.5" /> : undefined}
           >
-            {triggering || running ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> 更新中
-              </>
-            ) : (
-              <>
-                <Rocket className="h-3.5 w-3.5" /> 一键更新
-              </>
-            )}
-          </button>
+            {triggering || running ? "更新中" : "一键更新"}
+          </Button>
         </div>
       </div>
 
@@ -2531,11 +2522,11 @@ function LumenUpdateBlock({
             "rounded-md border px-2 py-1",
             running
               ? isRollingBack
-                ? "border-amber-500/25 bg-amber-500/10 text-amber-200"
-                : "border-sky-500/25 bg-sky-500/10 text-sky-200"
+                ? "border-warning-border bg-warning-soft text-warning"
+                : "border-info-border bg-info-soft text-info"
               : failed
-                ? "border-red-500/25 bg-red-500/10 text-red-200"
-                : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300",
+                ? "border-danger-border bg-danger-soft text-danger"
+                : "border-success-border bg-success-soft text-success",
           )}
         >
           {running
@@ -2556,12 +2547,12 @@ function LumenUpdateBlock({
             className={cn(
               "rounded-md border px-2 py-1",
               streamStatus === "open"
-                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+                ? "border-success-border bg-success-soft text-success"
                 : streamStatus === "connecting"
-                  ? "border-sky-500/25 bg-sky-500/10 text-sky-200"
+                  ? "border-info-border bg-info-soft text-info"
                   : streamStatus === "broken"
-                    ? "border-red-500/25 bg-red-500/10 text-red-200"
-                    : "border-white/10 bg-white/[0.04] text-neutral-400",
+                    ? "border-danger-border bg-danger-soft text-danger"
+                    : "border-white/10 bg-white/[0.04] text-[var(--fg-2)]",
             )}
           >
             实时流：
@@ -2579,7 +2570,7 @@ function LumenUpdateBlock({
       </div>
 
       {error && (
-        <p className="mt-3 text-xs text-red-300">
+        <p className="mt-3 type-caption text-danger">
           更新状态读取失败：{error.message}
         </p>
       )}
@@ -2587,49 +2578,51 @@ function LumenUpdateBlock({
       {effectiveBanner && (
         <div
           className={cn(
-            "mt-3 flex items-start justify-between gap-3 rounded-xl border px-3 py-2 text-sm",
+            "mt-3 flex items-start justify-between gap-3 rounded-[var(--radius-card)] border px-3 py-2 type-body-sm",
             effectiveBanner.kind === "success"
-              ? "border-emerald-500/30 bg-emerald-500/8 text-emerald-200"
+              ? "border-success-border bg-success-soft text-success"
               : effectiveBanner.kind === "error"
-                ? "border-red-500/30 bg-red-500/8 text-red-200"
-                : "border-sky-500/30 bg-sky-500/8 text-sky-200",
+                ? "border-danger-border bg-danger-soft text-danger"
+                : "border-info-border bg-info-soft text-info",
           )}
         >
           <span className="min-w-0 break-words">{effectiveBanner.text}</span>
-          <button
-            type="button"
+          <IconButton
+            variant="ghost"
+            size="sm"
             onClick={onClearBanner}
-            className="shrink-0 rounded p-0.5 hover:bg-white/8"
-            aria-label="关闭提示"
+            aria-label={copy.action.close}
+            className="shrink-0"
           >
             <X className="h-3.5 w-3.5" />
-          </button>
+          </IconButton>
         </div>
       )}
 
       {/* —— 完成后自动刷新倒计时 —— */}
       {reloadCountdown != null && (
-        <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-100">
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-3 py-2.5 type-body-sm text-success">
           <div className="flex min-w-0 items-center gap-2">
-            <Check className="h-4 w-4 shrink-0 text-emerald-300" />
+            <Check className="h-4 w-4 shrink-0 text-success" />
             <span className="min-w-0">
               更新成功 ·{" "}
-              <span className="font-mono text-emerald-200">{reloadCountdown}s</span>{" "}
+              <span className="font-mono">{reloadCountdown}s</span>{" "}
               后自动刷新页面以加载新版本
             </span>
           </div>
           <div className="flex shrink-0 gap-1.5">
+            {/* 24px 紧凑内联按钮，复用 Button 会过宽 */}
             <button
               type="button"
               onClick={cancelReload}
-              className="rounded-md border border-white/15 bg-white/[0.04] px-2 py-1 text-[11px] text-neutral-200 transition-colors hover:bg-white/8"
+              className="rounded-md border border-white/15 bg-white/[0.04] px-2 py-1 text-[11px] text-[var(--fg-1)] transition-colors hover:bg-white/8"
             >
-              取消
+              {copy.action.cancel}
             </button>
             <button
               type="button"
               onClick={reloadNow}
-              className="rounded-md bg-emerald-500/80 px-2 py-1 text-[11px] font-medium text-black transition-[filter] hover:brightness-110"
+              className="rounded-md bg-success px-2 py-1 text-[11px] font-medium text-black transition-[filter] hover:brightness-110"
             >
               立即刷新
             </button>
@@ -2643,21 +2636,21 @@ function LumenUpdateBlock({
           <div className="flex items-center gap-3">
             <div
               className={cn(
-                "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border",
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
                 running
-                  ? "border-sky-400/40 bg-sky-500/12"
+                  ? "border-info-border bg-info-soft"
                   : failed
-                    ? "border-red-500/40 bg-red-500/12"
-                    : "border-emerald-500/30 bg-emerald-500/12",
+                    ? "border-danger-border bg-danger-soft"
+                    : "border-success-border bg-success-soft",
               )}
               aria-hidden="true"
             >
               {running ? (
-                <Loader2 className="h-4 w-4 animate-spin text-sky-300" />
+                <Loader2 className="h-4 w-4 animate-spin text-info" />
               ) : failed ? (
-                <X className="h-4 w-4 text-red-300" />
+                <X className="h-4 w-4 text-danger" />
               ) : (
-                <Check className="h-4 w-4 text-emerald-300" />
+                <Check className="h-4 w-4 text-success" />
               )}
             </div>
             <div className="min-w-0 flex-1">
@@ -2678,10 +2671,10 @@ function LumenUpdateBlock({
                   className={cn(
                     "h-full transition-[width] duration-500 ease-out",
                     failed
-                      ? "bg-red-500/80"
+                      ? "bg-danger/80"
                       : running
-                        ? "bg-sky-400/90"
-                        : "bg-emerald-400/90",
+                        ? "bg-info/80"
+                        : "bg-success/80",
                   )}
                   style={{ width: `${progressPct}%` }}
                 />
@@ -2719,19 +2712,21 @@ function LumenUpdateBlock({
 
       {/* —— 实时 Log —— */}
       <div className="mt-3">
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={onLogToggle}
-          className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-neutral-300 transition-colors hover:bg-white/8"
+          leftIcon={<Terminal className="h-3.5 w-3.5" />}
+          rightIcon={
+            logBuffer.length > 0 ? (
+              <span className="rounded-full bg-white/8 px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-2)]">
+                {logBuffer.length}
+              </span>
+            ) : undefined
+          }
         >
-          <Terminal className="h-3.5 w-3.5" />
           {logOpen ? "收起实时输出" : "查看实时输出"}
-          {logBuffer.length > 0 && (
-            <span className="rounded-full bg-white/8 px-1.5 py-0.5 font-mono text-[10px] text-neutral-400">
-              {logBuffer.length}
-            </span>
-          )}
-        </button>
+        </Button>
         <AnimatePresence initial={false}>
           {logOpen && (
             <motion.div
@@ -2766,7 +2761,7 @@ function LumenUpdateBlock({
           <span className="text-[11px] text-neutral-500">最近 10 个版本</span>
         </div>
         {releasesError ? (
-          <p className="px-3 py-3 text-xs text-red-300">
+          <p className="px-3 py-3 type-caption text-danger">
             读取 release 列表失败：{releasesError.message}
           </p>
         ) : releasesLoading && !releases ? (
@@ -2846,12 +2841,12 @@ function PhaseRow({
         className={cn(
           "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px]",
           isRunning
-            ? "border-sky-400/40 bg-sky-500/15 text-sky-200"
+            ? "border-info-border bg-info-soft text-info"
             : isOk
-              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-300"
+              ? "border-success-border bg-success-soft text-success"
               : isFailed
-                ? "border-red-500/40 bg-red-500/15 text-red-300"
-                : "border-white/15 bg-white/[0.03] text-neutral-500",
+                ? "border-danger-border bg-danger-soft text-danger"
+                : "border-white/15 bg-white/[0.03] text-[var(--fg-2)]",
         )}
         aria-hidden="true"
       >
@@ -2871,19 +2866,19 @@ function PhaseRow({
             className={cn(
               "text-xs",
               isRunning
-                ? "text-sky-200"
+                ? "text-info"
                 : isFailed
-                  ? "text-red-200"
+                  ? "text-danger"
                   : isOk
-                    ? "text-neutral-200"
-                    : "text-neutral-500",
+                    ? "text-[var(--fg-1)]"
+                    : "text-[var(--fg-2)]",
             )}
           >
             {phaseLabel(phase)}
           </span>
-          <span className="font-mono text-[10px] text-neutral-600">{phase}</span>
+          <span className="font-mono text-[10px] text-[var(--fg-3)]">{phase}</span>
           {isFailed && rc != null && (
-            <span className="rounded-md border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 font-mono text-[10px] text-red-300">
+            <span className="rounded-md border border-danger-border bg-danger-soft px-1.5 py-0.5 font-mono text-[10px] text-danger">
               rc={rc}
             </span>
           )}
@@ -2928,7 +2923,7 @@ function ReleaseRow({
             {shortReleaseId(release.id)}
           </span>
           {release.is_current && (
-            <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+            <span className="rounded-md border border-success-border bg-success-soft px-1.5 py-0.5 text-[10px] text-success">
               当前
             </span>
           )}
@@ -2952,22 +2947,17 @@ function ReleaseRow({
         </div>
       </div>
       {showRollback && (
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={onRollback}
           disabled={disabled}
-          className="inline-flex min-h-[34px] shrink-0 cursor-pointer items-center justify-center gap-1.5 self-start rounded-md border border-white/10 bg-white/5 px-2.5 text-[11px] text-neutral-300 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 sm:self-center"
+          loading={rollingBack}
+          leftIcon={!rollingBack ? <Undo2 className="h-3 w-3" /> : undefined}
+          className="self-start sm:self-center"
         >
-          {rollingBack ? (
-            <>
-              <Loader2 className="h-3 w-3 animate-spin" /> 回滚中
-            </>
-          ) : (
-            <>
-              <Undo2 className="h-3 w-3" /> 回滚到此版本
-            </>
-          )}
-        </button>
+          {rollingBack ? "回滚中" : "回滚到此版本"}
+        </Button>
       )}
     </li>
   );
@@ -3011,22 +3001,23 @@ function ContextHealthBlock({
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> 读取中
           </span>
         ) : error ? (
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={onRetry}
-            className="inline-flex min-h-[36px] cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 text-xs text-neutral-300 transition-colors hover:bg-white/10"
+            leftIcon={<RotateCcw className="h-3 w-3" />}
           >
-            <RotateCcw className="h-3 w-3" /> 重试
-          </button>
+            {copy.action.retry}
+          </Button>
         ) : (
           <span
             className={cn(
               "inline-flex items-center rounded-md border px-2 py-0.5 text-xs",
               state.tone === "danger"
-                ? "border-red-500/30 bg-red-500/10 text-red-300"
+                ? "border-danger-border bg-danger-soft text-danger"
                 : state.tone === "warning"
-                  ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
-                  : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+                  ? "border-warning-border bg-warning-soft text-warning"
+                  : "border-success-border bg-success-soft text-success",
             )}
           >
             {state.label}
@@ -3061,7 +3052,7 @@ function ContextHealthBlock({
       ) : null}
 
       {data?.circuit_breaker_until && (
-        <p className="mt-3 text-xs text-amber-300">
+        <p className="mt-3 type-caption text-warning">
           自动摘要预计恢复时间：{data.circuit_breaker_until}
         </p>
       )}
@@ -3138,7 +3129,7 @@ function SourceBadge({
   }
   if (hasAnyValue) {
     return (
-      <span className="rounded-md border border-sky-500/20 bg-sky-500/8 px-2 py-0.5 text-[11px] text-sky-300">
+      <span className="rounded-md border border-info-border bg-info-soft px-2 py-0.5 text-[11px] text-info">
         使用环境变量
       </span>
     );

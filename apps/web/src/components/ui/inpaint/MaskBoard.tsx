@@ -34,6 +34,7 @@ import {
 import { Image as KonvaImage, Layer, Line, Stage } from "react-konva";
 import type Konva from "konva";
 
+import { Button, IconButton } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 
 import type { Stroke, Tool } from "./types";
@@ -148,6 +149,14 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
   ) {
     const stageRef = useRef<Konva.Stage | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
+    const boardAreaRef = useRef<HTMLDivElement | null>(null);
+    // 画板区域实测尺寸；ResizeObserver 维护，让画布严格 fit 容器避免溢出滚动
+    // —— 旧实现固定 MAX_DISPLAY=768 + overflow-auto，导致：图大于容器时要滚动看全貌，
+    // 但 wheel 又被 handleWheel 吃掉调画笔，用户根本滚不动 → 死锁。fit 之后 wheel 完全归画笔，无冲突。
+    const [containerDims, setContainerDims] = useState<{
+      w: number;
+      h: number;
+    } | null>(null);
     const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
     const [imgError, setImgError] = useState<string | null>(null);
     // retryAttempt 直接作为 effect 的 reload signal + retry 计数：每次 onerror +1，达 max 后停。
@@ -206,7 +215,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
             if (alive) setRetryAttempt(retryAttempt + 1);
           }, delay);
         } else {
-          setImgError("无法加载图片,请检查网络后重试");
+          setImgError("图片加载失败");
         }
       };
       el.src = imageSrc;
@@ -226,18 +235,46 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
     const cursorStroke = isDarkBg ? CURSOR_CYAN_STROKE : CURSOR_RED_STROKE;
     const cursorFill = isDarkBg ? CURSOR_CYAN_FILL : CURSOR_RED_FILL;
 
-    // ———— 显示尺寸：把原图缩放到长边 MAX_DISPLAY ————
+    // ———— 容器尺寸监听：让画板严格 fit 容器（不溢出） ————
+    // ResizeObserver 在 observe() 后会自动派发一次首帧 callback（spec 行为），
+    // 不需要在 effect 同步 setState（避免 React 19 编译器的 effect-setstate lint 风险）。
+    useEffect(() => {
+      const el = boardAreaRef.current;
+      if (!el) return;
+      const ro = new ResizeObserver((entries) => {
+        const e = entries[0];
+        if (!e) return;
+        const cr = e.contentRect;
+        if (cr.width <= 0 || cr.height <= 0) return;
+        setContainerDims({
+          w: Math.floor(cr.width),
+          h: Math.floor(cr.height),
+        });
+      });
+      ro.observe(el);
+      return () => ro.disconnect();
+    }, []);
+
+    // ———— 显示尺寸：原图按容器实测尺寸 fit + 长边 ≤ MAX_DISPLAY ————
     const displayDims = useMemo(() => {
       if (!imgEl) return { width: 0, height: 0, scale: 1 };
       const { naturalWidth: w, naturalHeight: h } = imgEl;
       if (!w || !h) return { width: 0, height: 0, scale: 1 };
-      const scale = Math.min(1, MAX_DISPLAY / Math.max(w, h));
+      // 容器未测到（首帧）走 MAX_DISPLAY；测到后用容器尺寸（已扣 padding）
+      const availW = containerDims ? containerDims.w : MAX_DISPLAY;
+      const availH = containerDims ? containerDims.h : MAX_DISPLAY;
+      const scale = Math.min(
+        1,
+        availW / w,
+        availH / h,
+        MAX_DISPLAY / Math.max(w, h),
+      );
       return {
         width: Math.round(w * scale),
         height: Math.round(h * scale),
         scale,
       };
-    }, [imgEl]);
+    }, [imgEl, containerDims]);
 
     const hasStroke = strokes.length > 0;
 
@@ -557,31 +594,31 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
         style={style}
         onPointerDown={onContainerPointerDown}
       >
-        {/* 画板区域 */}
+        {/* 画板区域：ResizeObserver 测内容尺寸 → displayDims fit；不再 overflow-auto */}
         <div
-          className="relative flex-1 min-h-0 overflow-auto rounded-lg bg-[var(--bg-0)]"
+          ref={boardAreaRef}
+          className={cn(
+            "relative flex-1 min-h-0 rounded-lg bg-[var(--bg-0)]",
+            "p-2 sm:p-4 overflow-hidden",
+            "flex items-center justify-center",
+          )}
           onWheel={handleWheel}
         >
-          <div className="flex items-center justify-center min-h-full p-2 sm:p-4">
+          <div className="flex items-center justify-center w-full h-full">
             {imgError ? (
-              <div className="flex flex-col items-center gap-2 text-sm text-[var(--danger)]">
+              <div className="flex flex-col items-center gap-2 type-body-sm text-[var(--danger-fg)]">
                 <span>{imgError}</span>
-                <button
-                  type="button"
+                <Button
+                  variant="link"
                   onClick={handleManualRetry}
-                  className={cn(
-                    "text-[12px] underline decoration-dotted",
-                    "hover:text-[var(--fg-0)] transition-colors",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 rounded-sm",
-                  )}
                 >
-                  重新加载
-                </button>
+                  重试
+                </Button>
               </div>
             ) : !imgEl ? (
-              <div className="flex items-center gap-2 text-sm text-[var(--fg-1)]">
+              <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                正在载入图片…
+                加载中
               </div>
             ) : (
               <div
@@ -671,37 +708,27 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
             isDarkBg={isDarkBg}
           />
 
-          <button
-            type="button"
+          <IconButton
+            variant="ghost"
             onClick={handleUndo}
             disabled={!hasStroke || disabled}
             aria-label="撤销 (Z)"
-            title="撤销 (Z)"
-            className={cn(
-              "inline-flex items-center justify-center w-9 h-9 rounded-full",
-              "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-              "disabled:opacity-40 disabled:cursor-not-allowed",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-            )}
+            tooltip="撤销 (Z)"
+            className="rounded-full"
           >
             <Undo2 className="w-4 h-4" />
-          </button>
+          </IconButton>
 
-          <button
-            type="button"
+          <IconButton
+            variant="ghost"
             onClick={handleReset}
             disabled={!hasStroke || disabled}
             aria-label="清除全部"
-            title="清除全部"
-            className={cn(
-              "inline-flex items-center justify-center w-9 h-9 rounded-full",
-              "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-              "disabled:opacity-40 disabled:cursor-not-allowed",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-            )}
+            tooltip="清除全部"
+            className="rounded-full"
           >
             <RotateCcw className="w-4 h-4" />
-          </button>
+          </IconButton>
 
           {/* 实时覆盖率 */}
           <CoverageBadge
@@ -826,12 +853,12 @@ function CoverageBadge({
 }) {
   if (strokeCount === 0) return null;
   const pct = Math.round(coverage * 100);
-  // 颜色分档：< 5% 灰，5-30% green（合适），> 50% amber 警示
+  // 颜色分档：< 5% 中性，5-30% success（合适），>= 50% warning（警示）
   const tone =
     pct >= 50
-      ? "bg-[var(--amber-400)]/15 text-[var(--amber-400)] border-[var(--amber-400)]/30"
+      ? "bg-warning-soft text-warning border-warning-border"
       : pct >= 5
-        ? "bg-[var(--green-400,#22c55e)]/15 text-[var(--green-400,#22c55e)] border-[var(--green-400,#22c55e)]/30"
+        ? "bg-success-soft text-success border-success-border"
         : "bg-[var(--bg-2)] text-[var(--fg-1)] border-[var(--border-subtle)]";
   return (
     <span

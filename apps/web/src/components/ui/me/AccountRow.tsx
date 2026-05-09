@@ -91,6 +91,7 @@ export function AccountRow({
   );
 
   if (toggle) {
+    /* 全宽设置行：跨 icon/label/badge/toggle 多列布局，不匹配标准 Button */
     return (
       <button
         type="button"
@@ -111,6 +112,7 @@ export function AccountRow({
     );
   }
 
+  /* 全宽设置行：同上 */
   return (
     <button type="button" onClick={onClick} className={baseClass}>
       {content}

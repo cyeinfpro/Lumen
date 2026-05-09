@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
+import { Button, IconButton } from "./primitives";
 import type { ConversationSummary, SystemPrompt } from "@/lib/apiClient";
 import {
   useCreateSystemPromptMutation,
@@ -99,25 +101,19 @@ export function SystemPromptManager({
   return (
     <>
       {!hideTrigger && (
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size={compact ? "sm" : "md"}
           onClick={() => setOpen(true)}
-          className={cn(
-            "inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-white/5",
-            "text-[var(--fg-1)] hover:border-[var(--accent)]/45 hover:text-[var(--fg-0)] hover:bg-white/8",
-            "cursor-pointer active:scale-[0.97] transition-all duration-150",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
-            compact ? "h-8 px-2.5 text-xs" : "h-9 px-3 text-sm",
-            "max-sm:min-h-11 max-sm:px-3",
-          )}
+          className="rounded-full"
           aria-label="管理系统提示词"
           title="系统提示词"
+          leftIcon={<Settings2 className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />}
         >
-          <Settings2 className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
           <span className={compact ? "hidden sm:inline" : "hidden md:inline"}>
             {activePrompt ? activePrompt.name : "系统提示词"}
           </span>
-        </button>
+        </Button>
       )}
       {dialogOpen && typeof document !== "undefined"
         ? createPortal(dialog, document.body)
@@ -211,9 +207,9 @@ function SystemPromptDialog({
     patchConversationMutation.isPending;
 
   const validate = () => {
-    if (!name.trim()) return "请填写提示词名称";
-    if (!content.trim()) return "请填写系统提示词内容";
-    if (content.length > 10000) return "系统提示词不能超过 10000 字";
+    if (!name.trim()) return "名称必填";
+    if (!content.trim()) return "内容必填";
+    if (content.length > 10000) return "超过 10000 字";
     return null;
   };
 
@@ -248,7 +244,7 @@ function SystemPromptDialog({
     try {
       const text = await file.text();
       if (text.length > 10000) {
-        setLocalError("MD 内容超过 10000 字，请精简后再导入");
+        setLocalError("MD 内容超过 10000 字");
         return;
       }
       setContent(text);
@@ -298,7 +294,8 @@ function SystemPromptDialog({
       }
     >
       {!embedded && (
-        <button
+        /* @backdrop-button: 全屏 dialog backdrop，需要 button role 让 a11y 拿到 click & focus 但样式不能走 Button primitive */
+<button
           type="button"
           className="absolute inset-0 bg-black/60 backdrop-blur-sm"
           aria-label="关闭系统提示词管理"
@@ -319,11 +316,11 @@ function SystemPromptDialog({
         className={cn(
           "relative grid w-full overflow-hidden",
           embedded
-            ? "min-h-[620px] h-[calc(100dvh-14rem)] rounded-2xl max-sm:min-h-0 max-sm:h-[calc(100dvh-10rem)]"
-            : "h-[760px] max-h-[calc(100dvh-1.5rem)] max-w-5xl rounded-t-3xl sm:rounded-3xl max-sm:h-auto max-sm:max-h-[var(--mobile-dialog-max-height)] max-sm:border-b-0",
+            ? "min-h-[620px] h-[calc(100dvh-14rem)] rounded-[var(--radius-dialog)] max-sm:min-h-0 max-sm:h-[calc(100dvh-10rem)]"
+            : "h-[760px] max-h-[calc(100dvh-1.5rem)] max-w-5xl rounded-t-[var(--radius-sheet)] sm:rounded-[var(--radius-sheet)] max-sm:h-auto max-sm:max-h-[var(--mobile-dialog-max-height)] max-sm:border-b-0",
           "grid-rows-[minmax(180px,240px)_minmax(0,1fr)] md:grid-rows-1",
           "border border-[var(--border)] bg-[var(--bg-0)]/95 backdrop-blur-2xl",
-          !embedded && "shadow-[0_32px_120px_-40px_rgba(0,0,0,0.9)]",
+          !embedded && "shadow-[var(--shadow-3)]",
           "md:grid-cols-[280px_minmax(0,1fr)]",
         )}
       >
@@ -341,20 +338,21 @@ function SystemPromptDialog({
               </p>
             </div>
             {!embedded && (
-              /* @hit-area-ok: system prompt manager mobile close button, tightly packed in modal header */
-              <button
-                type="button"
+              <IconButton
+                variant="ghost"
+                size="lg"
                 onClick={onClose}
-                className="inline-flex h-11 w-11 items-center justify-center rounded-full text-[var(--fg-1)] hover:bg-white/8 hover:text-[var(--fg-0)] md:hidden"
-                aria-label="关闭"
+                className="rounded-full md:hidden"
+                aria-label={copy.action.close}
               >
                 <X className="h-4 w-4" />
-              </button>
+              </IconButton>
             )}
           </div>
 
           <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-3 pb-3 scrollbar-thin">
-            <button
+            {/* @list-item-ok: PromptRow 风格的菜单项，特化的 active/inactive 边框 + 行高，不走 Button primitive */}
+<button
               type="button"
               onClick={() => {
                 setSelectedId("new");
@@ -363,7 +361,7 @@ function SystemPromptDialog({
                 setLocalError(null);
               }}
               className={cn(
-                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm transition-colors",
+                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-[var(--radius-dialog)] border px-3 py-2 text-left type-body-sm transition-colors",
                 selectedId === "new"
                   ? "border-[var(--accent)]/45 bg-[var(--accent)]/10 text-[var(--fg-0)]"
                   : "border-[var(--border)] bg-white/[0.03] text-[var(--fg-1)] hover:bg-white/[0.06] hover:text-[var(--fg-0)]",
@@ -374,12 +372,12 @@ function SystemPromptDialog({
             </button>
 
             {loading ? (
-              <div className="flex items-center gap-2 px-3 py-8 text-sm text-neutral-500">
+              <div className="flex items-center gap-2 px-3 py-8 type-body-sm text-[var(--fg-2)]">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                加载中
+                {copy.state.loading}
               </div>
             ) : error ? (
-              <p className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+              <p className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
                 加载失败：{error}
               </p>
             ) : prompts.length === 0 ? (
@@ -418,15 +416,15 @@ function SystemPromptDialog({
               {selectedPrompt ? "编辑提示词方案" : "创建提示词方案"}
             </div>
             {!embedded && (
-              /* @hit-area-ok: desktop-only close button (md:flex), desktop-only context */
-              <button
-                type="button"
+              <IconButton
+                variant="ghost"
+                size="sm"
                 onClick={onClose}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[var(--fg-1)] hover:bg-white/8 hover:text-[var(--fg-0)]"
-                aria-label="关闭"
+                className="rounded-full"
+                aria-label={copy.action.close}
               >
                 <X className="h-4 w-4" />
-              </button>
+              </IconButton>
             )}
           </div>
 
@@ -464,7 +462,7 @@ function SystemPromptDialog({
               deleteMutation.error ||
               setDefaultMutation.error ||
               patchConversationMutation.error) && (
-              <p className="mt-3 rounded-xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+              <p className="mt-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
                 {localError ||
                   createMutation.error?.message ||
                   patchMutation.error?.message ||
@@ -488,42 +486,45 @@ function SystemPromptDialog({
 
           <div className="mobile-dialog-footer flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/72 p-3 sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:pb-3">
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--border)] bg-white/5 px-3 text-xs text-[var(--fg-0)] hover:bg-white/8 sm:h-9 sm:min-h-0"
+                className="rounded-full"
+                leftIcon={<Upload className="h-3.5 w-3.5" />}
               >
-                <Upload className="h-3.5 w-3.5" />
-                导入 MD
-              </button>
+                {copy.action.import} MD
+              </Button>
               {selectedPrompt && (
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => deleteMutation.mutate(selectedPrompt.id)}
                   disabled={busy}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-red-500/20 bg-red-500/10 px-3 text-xs text-red-200 hover:bg-red-500/15 disabled:opacity-50 sm:h-9 sm:min-h-0"
+                  className="rounded-full border-danger-border bg-danger-soft text-danger hover:opacity-90"
+                  leftIcon={<Trash2 className="h-3.5 w-3.5" />}
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  删除
-                </button>
+                  {copy.action.delete}
+                </Button>
               )}
             </div>
 
             <div className="flex flex-wrap gap-2 sm:justify-end">
               {selectedPrompt && currentConversation && (
-                // @hit-area-ok: desktop system prompt modal action button, desktop modal context
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={applyToCurrentConversation}
                   disabled={busy || Boolean(isAppliedToCurrent)}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--border)] bg-white/5 px-3 text-xs text-[var(--fg-0)] hover:bg-white/8 disabled:opacity-50 sm:h-9 sm:min-h-0"
+                  className="rounded-full"
+                  leftIcon={<CheckCircle2 className="h-3.5 w-3.5" />}
                 >
-                  <CheckCircle2 className="h-3.5 w-3.5" />
                   {isAppliedToCurrent ? "已应用当前会话" : "应用当前会话"}
-                </button>
+                </Button>
               )}
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={setSelectedAsDefault}
                 disabled={busy || Boolean(isDefault && selectedPrompt)}
                 aria-disabled={
@@ -531,37 +532,33 @@ function SystemPromptDialog({
                 }
                 aria-busy={setDefaultMutation.isPending || undefined}
                 className={cn(
-                  "inline-flex h-9 items-center gap-1.5 rounded-full border border-[var(--accent)]/35 bg-[var(--accent)]/10 px-3 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/15 disabled:opacity-50",
-                  "max-sm:min-h-11",
+                  "rounded-full border-[var(--accent)]/35 bg-[var(--accent)]/10 text-[var(--accent)] hover:bg-[var(--accent)]/15",
                   busy && "pointer-events-none",
                 )}
+                leftIcon={<Star className="h-3.5 w-3.5" />}
               >
-                <Star className="h-3.5 w-3.5" />
                 {isDefault
                   ? "全局默认"
                   : selectedPrompt
                     ? "设为默认"
                     : "保存并设默认"}
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={() => savePrompt(false)}
                 disabled={busy}
                 aria-disabled={busy || undefined}
                 aria-busy={busy || undefined}
+                loading={busy}
                 className={cn(
-                  "inline-flex h-9 items-center gap-1.5 rounded-full bg-[var(--accent)] px-4 text-xs font-medium text-black hover:brightness-110 disabled:opacity-50",
-                  "max-sm:min-h-11",
+                  "rounded-full",
                   busy && "pointer-events-none",
                 )}
+                leftIcon={!busy ? <Save className="h-3.5 w-3.5" /> : undefined}
               >
-                {busy ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Save className="h-3.5 w-3.5" />
-                )}
-                保存
-              </button>
+                {copy.action.save}
+              </Button>
             </div>
           </div>
         </div>
@@ -584,19 +581,20 @@ function PromptRow({
   onClick: () => void;
 }) {
   return (
-    <button
+    /* @list-item-ok: 多行 list-item 含 badge + 描述行，不适合 Button primitive 的 inline 排版 */
+<button
       type="button"
       onClick={onClick}
       aria-current={active ? "true" : undefined}
       className={cn(
-        "group min-h-11 w-full rounded-xl border px-3 py-2 text-left transition-colors",
+        "group min-h-11 w-full rounded-[var(--radius-dialog)] border px-3 py-2 text-left transition-colors",
         active
           ? "border-[var(--accent)]/50 bg-[var(--accent)]/10"
           : "border-[var(--border-subtle)] bg-white/[0.025] hover:border-[var(--border)] hover:bg-white/[0.05]",
       )}
     >
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--fg-0)]">
+        <span className="min-w-0 flex-1 truncate type-body-sm font-medium text-[var(--fg-0)]">
           {prompt.name}
         </span>
         {isDefault && (
@@ -605,12 +603,12 @@ function PromptRow({
           </span>
         )}
         {current && (
-          <span className="rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[10px] text-emerald-300">
+          <span className="rounded-full bg-success-soft px-1.5 py-0.5 text-[10px] text-success">
             当前
           </span>
         )}
       </div>
-      <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-neutral-500">
+      <p className="mt-1 line-clamp-2 type-caption leading-relaxed text-[var(--fg-2)]">
         {prompt.content || "空提示词"}
       </p>
     </button>

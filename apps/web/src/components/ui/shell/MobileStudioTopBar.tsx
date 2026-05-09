@@ -1,11 +1,13 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronDown, PanelLeft, Plus, Zap } from "lucide-react";
+import { ChevronDown, PanelLeft, Plus, Settings, Zap } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { MobileTopBar } from "./MobileTopBar";
 import { MobileConversationDrawer } from "./MobileConversationDrawer";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
 import {
@@ -35,7 +37,7 @@ export function MobileStudioTopBar() {
     },
     onError: (err) => {
       pushMobileToast(
-        err?.message ? `新建失败：${err.message}` : "新建失败，请稍后重试",
+        err?.message ? `新建失败：${err.message}` : "新建失败，稍后重试",
         "danger",
       );
     },
@@ -86,52 +88,68 @@ export function MobileStudioTopBar() {
       <MobileTopBar
         left={
           <div className="flex items-center gap-1 min-w-0">
-            <button
-              type="button"
-              onClick={() => setDrawerOpen(true)}
+            <Pressable
+              size="default"
+              minHit={true}
+              pressScale="tight"
+              haptic="light"
+              onPress={() => setDrawerOpen(true)}
               aria-label="打开会话列表"
-              className="inline-flex items-center justify-center w-9 h-9 -ml-1 rounded-full text-[var(--fg-1)] active:bg-[var(--bg-2)] active:scale-[0.94] transition-[background-color,transform] duration-150"
+              className="rounded-full w-9 h-9 -ml-1 text-[var(--fg-1)]"
             >
               <PanelLeft className="w-[18px] h-[18px]" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setDrawerOpen(true)}
-              className="flex items-center gap-1 min-w-0 cursor-pointer pl-1 pr-1.5 -mx-1 h-9 rounded-md active:bg-[var(--bg-2)]"
+            </Pressable>
+            <Pressable
+              size="default"
+              minHit={false}
+              pressScale="soft"
+              haptic="light"
+              onPress={() => setDrawerOpen(true)}
               aria-label="切换会话"
+              className="flex items-center gap-1 min-w-0 pl-1 pr-1.5 -mx-1 h-9 rounded-[var(--radius-control)]"
             >
               <span className="truncate text-[15px] font-medium text-[var(--fg-0)] max-w-[55vw]">
                 {currentTitle}
               </span>
               <ChevronDown className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
-            </button>
+            </Pressable>
           </div>
         }
         right={
           <>
-            <button
-              type="button"
-              onClick={() => setFast(!fast)}
+            <Pressable
+              size="default"
+              minHit={true}
+              pressScale="tight"
+              haptic="light"
+              onPress={() => setFast(!fast)}
               aria-label={fast ? "关闭 Fast 模式" : "开启 Fast 模式"}
-              className="inline-flex items-center justify-center w-9 h-9 rounded-full active:bg-[var(--bg-2)] cursor-pointer"
+              className="rounded-full w-9 h-9"
             >
               <FastLamp on={fast} />
-            </button>
+            </Pressable>
             <ContextWindowMeter stats={contextStats} compact />
             <ConversationMemoryButton compact />
             <AnimatePresence>
               {running.any && (
-                <motion.button
-                  type="button"
+                <motion.div
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.8 }}
-                  onClick={() => setTaskTrayMinimized(false)}
-                  aria-label={`生成中 ${running.total} 张，点击查看任务面板`}
-                  className="ml-0.5 inline-flex items-center justify-center w-9 h-9 rounded-full active:bg-[var(--bg-2)] cursor-pointer"
+                  className="ml-0.5"
                 >
-                  <GenerationRing pct={running.pct} total={running.total} />
-                </motion.button>
+                  <Pressable
+                    size="default"
+                    minHit={true}
+                    pressScale="tight"
+                    haptic="light"
+                    onPress={() => setTaskTrayMinimized(false)}
+                    aria-label={`生成中 ${running.total} 张，点击查看任务面板`}
+                    className="rounded-full w-9 h-9"
+                  >
+                    <GenerationRing pct={running.pct} total={running.total} />
+                  </Pressable>
+                </motion.div>
               )}
             </AnimatePresence>
             <MobileIconButton
@@ -141,6 +159,13 @@ export function MobileStudioTopBar() {
               disabled={createMut.isPending}
               className="ml-0.5 disabled:opacity-50"
             />
+            <Link
+              href="/me"
+              aria-label="设置"
+              className="inline-flex items-center justify-center w-9 h-9 rounded-full text-[var(--fg-1)] active:bg-[var(--bg-2)]"
+            >
+              <Settings className="w-[18px] h-[18px]" />
+            </Link>
           </>
         }
       />

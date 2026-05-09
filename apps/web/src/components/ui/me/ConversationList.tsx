@@ -13,7 +13,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Inbox, Search } from "lucide-react";
 
 import { SegmentedControl } from "@/components/ui/primitives/mobile";
-import { Spinner } from "@/components/ui/primitives";
+import { Button, Spinner } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import type { ConversationSummary } from "@/lib/apiClient";
 import {
   useDeleteConversationMutation,
@@ -202,15 +203,17 @@ export function ConversationList({ query }: ConversationListProps) {
         {isInitialLoading && <ListSkeleton />}
 
         {!isInitialLoading && list.isError && (
-          <div className="mx-4 my-4 px-3 py-2 rounded-lg bg-[var(--danger)]/10 border border-[var(--danger)]/20 text-[12px] text-[var(--danger)]">
+          <div className="mx-4 my-4 px-3 py-2 rounded-[var(--radius-control)] bg-danger-soft border border-danger-border type-caption text-danger">
             加载失败
-            <button
+            <Button
               type="button"
+              size="sm"
+              variant="link"
               onClick={() => list.refetch()}
-              className="ml-2 underline"
+              className="ml-2 text-danger"
             >
-              重试
-            </button>
+              {copy.action.retry}
+            </Button>
           </div>
         )}
 

@@ -14,6 +14,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowUp, Filter, Loader2, RefreshCw, Search } from "lucide-react";
 
 import { DesktopTopNav } from "@/components/ui/shell";
+import { IconButton } from "@/components/ui/primitives";
 import {
   FilterBar,
   GenerationMasonry,
@@ -77,53 +78,46 @@ function StreamToolbar({
 }: ToolbarProps) {
   return (
     <div className="flex items-center gap-2">
-      <span className="mr-1 text-[12px] tabular-nums text-[var(--fg-2)]">
+      <span className="mr-1 type-caption tabular-nums">
         {total} 张
       </span>
-      <button
-        type="button"
+      <IconButton
+        size="sm"
         aria-label="搜索"
         aria-pressed={searchActive}
         onClick={onToggleSearch}
         className={cn(
-          "inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full",
-          "border border-[var(--border-subtle)] transition-colors",
+          "rounded-full",
           searchActive
             ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
-            : "bg-[var(--bg-2)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+            : "bg-[var(--bg-2)]",
         )}
       >
         <Search className="w-4 h-4" />
-      </button>
-      <button
-        type="button"
+      </IconButton>
+      <IconButton
+        size="sm"
         aria-label="筛选"
         aria-pressed={filterActive}
         onClick={onToggleFilter}
         className={cn(
-          "inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full",
-          "border border-[var(--border-subtle)] transition-colors",
+          "rounded-full",
           filterActive
             ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
-            : "bg-[var(--bg-2)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+            : "bg-[var(--bg-2)]",
         )}
       >
         <Filter className="w-4 h-4" />
-      </button>
-      <button
-        type="button"
+      </IconButton>
+      <IconButton
+        size="sm"
         aria-label="刷新"
         onClick={onRefresh}
         disabled={refreshing}
-        className={cn(
-          "inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full",
-          "border border-[var(--border-subtle)]",
-          "bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]",
-          "disabled:opacity-50",
-        )}
+        className="rounded-full bg-[var(--bg-2)]"
       >
         <RefreshCw className={cn("w-4 h-4", refreshing && "animate-spin")} />
-      </button>
+      </IconButton>
     </div>
   );
 }
@@ -412,28 +406,28 @@ export function DesktopStream() {
           {isFetchingNextPage && (
             <div className="flex items-center justify-center gap-2 py-4 text-[var(--fg-2)]">
               <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="text-[12px]">加载更多</span>
+              <span className="type-caption">加载更多</span>
             </div>
           )}
         </div>
       </main>
 
-      <button
-        type="button"
+      <IconButton
+        size="lg"
         aria-label="回到顶部"
         onClick={scrollToTop}
         className={cn(
-          "fixed bottom-8 right-8 z-30 flex h-10 w-10 cursor-pointer items-center justify-center rounded-full",
-          "border border-[var(--border-subtle)] bg-[var(--bg-1)]/80 text-[var(--fg-1)] shadow-lg backdrop-blur-md",
+          "fixed bottom-8 right-8 z-30 rounded-full",
+          "bg-[var(--bg-1)]/80 backdrop-blur-md shadow-[var(--shadow-2)]",
+          "border border-[var(--border-subtle)]",
           "transition-[opacity,transform] duration-200",
-          "hover:text-[var(--fg-0)] active:scale-95",
           showScrollTop
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-2 opacity-0",
         )}
       >
         <ArrowUp className="h-4 w-4" />
-      </button>
+      </IconButton>
     </div>
   );
 }

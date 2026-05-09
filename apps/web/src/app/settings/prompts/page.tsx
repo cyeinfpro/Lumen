@@ -23,7 +23,7 @@ export default function PromptsPage() {
           </div>
           <Link
             href="/me"
-            className="inline-flex items-center gap-1.5 text-sm text-neutral-400 transition-colors hover:text-neutral-100"
+            className="inline-flex items-center gap-1.5 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
           >
             <ArrowLeft className="h-4 w-4" />
             返回我的
