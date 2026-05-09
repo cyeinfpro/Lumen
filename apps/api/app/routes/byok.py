@@ -278,6 +278,9 @@ async def patch_api_supplier(
         autocommit=False,
     )
     await db.commit()
+    # ORM UPDATE 不带 RETURNING，server onupdate=func.now() 让 updated_at 被 expire；
+    # 不显式 refresh 的话 supplier_to_out 读它会触发同步懒加载 → AsyncSession MissingGreenlet → 500
+    await db.refresh(supplier, ["updated_at"])
     return await supplier_to_out(db, supplier)
 
 
