@@ -26,7 +26,7 @@ export function OfflineBanner() {
     <div
       role="status"
       aria-live="assertive"
-      className="fixed inset-x-0 top-0 z-[var(--z-toast,100)] flex items-center justify-center gap-2 border-b border-red-500/30 bg-red-950/95 px-4 py-2 text-sm text-red-100 shadow-lg backdrop-blur-md"
+      className="fixed inset-x-0 top-0 z-[var(--z-toast,100)] flex items-center justify-center gap-2 border-b border-danger-border bg-danger/95 px-4 py-2 type-body-sm text-white shadow-[var(--shadow-2)] backdrop-blur-md"
     >
       <WifiOff className="h-4 w-4" aria-hidden />
       <span>网络已断开，恢复后会自动重连。</span>

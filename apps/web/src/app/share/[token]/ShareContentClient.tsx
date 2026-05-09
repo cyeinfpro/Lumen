@@ -900,7 +900,7 @@ function ShareNotice({ notice }: { notice: Notice | null }) {
           notice.kind === "success" &&
             "border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/18 text-[var(--fg-0)]",
           notice.kind === "error" &&
-            "border-red-400/[0.25] bg-red-500/[0.16] text-red-100",
+            "border-danger-border bg-danger-soft text-danger",
           notice.kind === "info" &&
             "border-white/[0.12] bg-black/[0.68] text-white/[0.86]",
         )}

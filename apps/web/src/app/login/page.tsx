@@ -60,7 +60,7 @@ function LoginInner() {
 
     const trimmedEmail = email.trim();
     if (!trimmedEmail) {
-      setError("请输入邮箱");
+      setError("邮箱未填");
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
@@ -68,7 +68,7 @@ function LoginInner() {
       return;
     }
     if (!password) {
-      setError("请输入密码");
+      setError("密码未填");
       return;
     }
 
@@ -113,6 +113,7 @@ function LoginInner() {
           >
             {/* 移动端品牌头 */}
             <header className="mb-8 md:mb-10 flex items-center gap-3 md:hidden">
+              {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
               <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_20px_-4px_var(--color-lumen-amber)]" />
               <span className="text-lg font-medium tracking-tight">Lumen</span>
             </header>
@@ -190,7 +191,7 @@ function LoginInner() {
                     animate={{ opacity: 1, y: 0 }}
                     role="alert"
                     aria-live="assertive"
-                    className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300"
+                    className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
                   >
                     <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                     {error}
@@ -307,6 +308,7 @@ function BrandPanel() {
       {/* 背景装饰 */}
       <div className="absolute inset-0 pointer-events-none">
         <div className="absolute -top-20 -left-20 w-80 h-80 rounded-full bg-[var(--color-lumen-amber)]/10 blur-3xl" />
+        {/* eslint-disable-next-line no-restricted-syntax -- 品牌装饰 blur，非状态色 */}
         <div className="absolute bottom-0 right-0 w-96 h-96 rounded-full bg-orange-500/5 blur-3xl" />
         <div
           className="absolute inset-0 opacity-[0.04]"
@@ -325,6 +327,7 @@ function BrandPanel() {
           transition={{ duration: 0.3 }}
           className="flex items-center gap-3"
         >
+          {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
           <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_24px_-4px_var(--color-lumen-amber)]" />
           <span className="text-xl font-semibold tracking-tight">Lumen</span>
         </motion.div>

@@ -39,6 +39,7 @@ import type {
 import {
   PRESET,
   defaultOutputCompression,
+  nearestAspectRatio,
   qualityToFixedSize,
 } from "@/lib/sizing";
 import {
@@ -2774,8 +2775,8 @@ function createChatStore() {
     }) {
       const text = prompt.trim();
       if (!text) {
-        set({ composerError: "请输入要修改的内容" });
-        throw new Error("请输入要修改的内容");
+        set({ composerError: "修改内容未填" });
+        throw new Error("修改内容未填");
       }
       if (isPromptTooLong(text)) {
         set({ composerError: PROMPT_TOO_LONG_MESSAGE });
@@ -2815,6 +2816,14 @@ function createChatStore() {
         source_image_id: sourceImageId,
       };
 
+      // inpaint 必须按原图比例生成，否则后端会按 composer 的 aspect_ratio（默认 16:9）出图，
+      // 16:9 的 mask 套到 4:3 原图上构图被拉变形 / 涂抹区错位 — 是用户高频反馈的体验崩溃点。
+      // 优先用 source 传入的尺寸，缺失（旧入口/历史数据）才退到 composer.params.aspect_ratio。
+      const inferredAspect =
+        sourceWidth && sourceHeight
+          ? nearestAspectRatio(sourceWidth, sourceHeight)
+          : null;
+
       set((s) => ({
         composer: {
           ...s.composer,
@@ -2827,8 +2836,13 @@ function createChatStore() {
             preview_data_url: maskPreviewDataUrl,
             target_attachment_id: tempAttId,
           },
-          // 局部修改强制单张，避免继承 composer 上次设置的 4/8/16 张
-          params: { ...s.composer.params, count: 1 },
+          // 局部修改强制单张 + 跟随原图比例（fallback：保留 composer 偏好）
+          // size_mode/fixed_size 由 sendMessage 按 quality + aspect_ratio 重算，无需在此覆盖
+          params: {
+            ...s.composer.params,
+            aspect_ratio: inferredAspect ?? s.composer.params.aspect_ratio,
+            count: 1,
+          },
         },
       }));
 

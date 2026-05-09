@@ -12,6 +12,7 @@ import {
   patchConversationActiveScope,
   patchConversationMemoryDisabled,
 } from "@/lib/apiClient";
+import { Button } from "@/components/ui/primitives";
 import { useChatStore } from "@/store/useChatStore";
 
 export function ConversationMemoryButton({ compact = false }: { compact?: boolean }) {
@@ -62,6 +63,7 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
 
   return (
     <div className="relative">
+      {/* 紧凑顶栏触发按钮：自带 Brain icon + chevron + 可选 label，需要紧凑节奏 */}
       <button
         type="button"
         disabled={!currentConvId}
@@ -70,7 +72,7 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
           "inline-flex items-center justify-center gap-1 rounded-full transition-colors disabled:opacity-40",
           compact ? "h-9 w-9" : "h-7 px-2",
           disabled
-            ? "text-neutral-500 hover:bg-white/8"
+            ? "text-[var(--fg-3)] hover:bg-white/8"
             : "text-[var(--fg-2)] hover:bg-white/8 hover:text-[var(--fg-0)]",
         ].join(" ")}
         aria-label="本会话记忆"
@@ -79,7 +81,7 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
         <Brain className={compact ? "h-4.5 w-4.5" : "h-4 w-4"} />
         {!compact && (
           <>
-            <span className="hidden text-xs lg:inline">
+            <span className="hidden type-caption lg:inline">
               {disabled ? "记忆关" : activeScope ? activeScope.name : "记忆"}
             </span>
             <ChevronDown className="h-3 w-3" />
@@ -88,35 +90,36 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-2 w-[310px] overflow-hidden rounded-[var(--radius-card)] border border-white/10 bg-[var(--bg-1)]/95 shadow-2xl backdrop-blur-xl">
+        <div className="absolute right-0 top-full z-50 mt-2 w-[310px] overflow-hidden rounded-[var(--radius-panel)] border border-white/10 bg-[var(--bg-1)]/95 shadow-[var(--shadow-3)] backdrop-blur-xl">
           <div className="border-b border-white/5 p-3">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <div className="text-sm font-medium text-neutral-100">本会话记忆</div>
-                <div className="mt-0.5 text-xs text-neutral-500">
+                <div className="type-card-title">本会话记忆</div>
+                <div className="mt-0.5 type-caption">
                   控制下一轮是否注入账号记忆。
                 </div>
               </div>
-              <button
+              <Button
                 type="button"
+                size="sm"
+                variant={disabled ? "outline" : "secondary"}
                 disabled={toggleMut.isPending || !currentConvId}
                 onClick={() => toggleMut.mutate(!disabled)}
-                className={[
-                  "inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs transition-colors",
+                leftIcon={<Power className="h-3.5 w-3.5" />}
+                className={
                   disabled
-                    ? "border-neutral-500/25 bg-neutral-500/10 text-neutral-400"
-                    : "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]",
-                ].join(" ")}
+                    ? "h-8 text-xs text-[var(--fg-2)]"
+                    : "h-8 text-xs border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
+                }
               >
-                <Power className="h-3.5 w-3.5" />
                 {disabled ? "已关闭" : "已开启"}
-              </button>
+              </Button>
             </div>
           </div>
 
           <div className="space-y-3 p-3">
             <div>
-              <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-neutral-400">
+              <div className="mb-2 flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
                 <SlidersHorizontal className="h-3.5 w-3.5" />
                 作用域
               </div>
@@ -124,7 +127,7 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
                 value={activeScopeId ?? ""}
                 disabled={scopeMut.isPending || scopes.length === 0 || !currentConvId}
                 onChange={(e) => scopeMut.mutate(e.target.value || null)}
-                className="h-9 w-full rounded-xl border border-white/10 bg-white/[0.03] px-3 text-sm text-neutral-100 outline-none focus:border-[var(--color-lumen-amber)]/60"
+                className="h-9 w-full rounded-[var(--radius-control)] border border-white/10 bg-white/[0.03] px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
               >
                 <option value="">默认</option>
                 {scopes
@@ -139,11 +142,11 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
             </div>
 
             <div>
-              <div className="mb-2 text-xs font-medium text-neutral-400">
+              <div className="mb-2 type-caption text-[var(--fg-2)]">
                 最近参考
               </div>
               {used.length === 0 ? (
-                <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 text-xs text-neutral-500">
+                <div className="rounded-[var(--radius-card)] border border-white/5 bg-white/[0.02] p-3 type-caption">
                   最近一轮没有使用记忆。
                 </div>
               ) : (
@@ -151,11 +154,11 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
                   {used.slice(0, 6).map((memory) => (
                     <div
                       key={memory.id}
-                      className="rounded-lg border border-white/5 bg-white/[0.02] px-2 py-1.5 text-xs"
+                      className="rounded-[var(--radius-control)] border border-white/5 bg-white/[0.02] px-2 py-1.5 type-caption"
                     >
-                      <span className="text-neutral-500">{memory.type}</span>
-                      <span className="mx-1 text-neutral-700">·</span>
-                      <span className="text-neutral-200">{memory.content}</span>
+                      <span className="text-[var(--fg-2)]">{memory.type}</span>
+                      <span className="mx-1 text-[var(--fg-3)]">·</span>
+                      <span className="text-[var(--fg-1)]">{memory.content}</span>
                     </div>
                   ))}
                 </div>
@@ -165,7 +168,7 @@ export function ConversationMemoryButton({ compact = false }: { compact?: boolea
             <Link
               href="/settings/memory"
               onClick={() => setOpen(false)}
-              className="block rounded-xl border border-white/10 px-3 py-2 text-center text-sm text-neutral-300 transition-colors hover:bg-white/[0.04] hover:text-neutral-100"
+              className="block rounded-[var(--radius-control)] border border-white/10 px-3 py-2 text-center type-body-sm text-[var(--fg-1)] transition-colors hover:bg-white/[0.04] hover:text-[var(--fg-0)]"
             >
               管理全部记忆
             </Link>

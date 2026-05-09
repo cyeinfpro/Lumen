@@ -49,6 +49,7 @@ import {
   Input,
   toast,
 } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 
 // ————————————————————————————————————————————
 // 常量
@@ -115,8 +116,8 @@ export function StoragePanel() {
   if (q.isLoading && !cfg) {
     return (
       <section className="space-y-5">
-        <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-6 backdrop-blur-sm">
-          <div className="flex items-center gap-3 text-sm text-[var(--fg-1)]">
+        <div className="rounded-[var(--radius-dialog)] border border-white/10 bg-[var(--bg-1)]/60 p-6 backdrop-blur-sm">
+          <div className="flex items-center gap-3 type-body-sm text-[var(--fg-1)]">
             <Loader2 className="h-4 w-4 animate-spin" /> 加载存储配置中
           </div>
         </div>
@@ -127,12 +128,12 @@ export function StoragePanel() {
   if (q.isError && !cfg) {
     return (
       <section className="space-y-5">
-        <div className="rounded-2xl border border-red-500/30 bg-red-500/5 p-6 text-sm text-red-200">
+        <div className="rounded-[var(--radius-dialog)] border border-danger-border bg-danger-soft p-6 type-body-sm text-danger">
           <div className="flex items-start gap-3">
-            <ShieldAlert className="h-5 w-5 shrink-0 text-red-300" />
+            <ShieldAlert className="h-5 w-5 shrink-0 text-danger" />
             <div className="min-w-0">
               <p className="font-medium">读取存储配置失败</p>
-              <p className="mt-1 text-xs text-red-300/80">
+              <p className="mt-1 type-caption text-[var(--danger-fg)]">
                 {q.error?.message ?? "未知错误"}
               </p>
               <Button
@@ -142,7 +143,7 @@ export function StoragePanel() {
                 onClick={() => void q.refetch()}
                 leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
               >
-                重试
+                {copy.action.retry}
               </Button>
             </div>
           </div>
@@ -192,14 +193,14 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
   const formError = useMemo(() => {
     if (form.backend === "local") {
       const root = form.localRoot.trim();
-      if (!root) return "请填写本机目录";
-      if (!root.startsWith("/")) return "本机目录必须是绝对路径，以 / 开头";
+      if (!root) return "需填本机目录";
+      if (!root.startsWith("/")) return "需绝对路径，/ 开头";
       return null;
     }
-    if (!form.host.trim()) return "请填写 SMB host";
-    if (!form.share.trim()) return "请填写 share 名";
-    if (!form.username.trim()) return "请填写用户名";
-    if (!cfg.smb.has_password && !form.password) return "请输入密码";
+    if (!form.host.trim()) return "需填 SMB host";
+    if (!form.share.trim()) return "需填 share 名";
+    if (!form.username.trim()) return "需填用户名";
+    if (!cfg.smb.has_password && !form.password) return "需填密码";
     return null;
   }, [
     cfg.smb.has_password,
@@ -401,19 +402,17 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
     <section className="space-y-5 pb-12">
       <StatusCard cfg={cfg} applying={isApplying} />
 
-      <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5">
+      <div className="rounded-[var(--radius-dialog)] border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="flex min-w-0 items-start gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
               <HardDrive className="h-4 w-4 text-[var(--color-lumen-amber)]" />
             </div>
             <div className="min-w-0">
-              <h3 className="text-sm font-medium text-neutral-100">
-                存储后端
-              </h3>
-              <p className="mt-1 text-xs leading-5 text-neutral-500">
+              <h3 className="type-card-title">存储后端</h3>
+              <p className="mt-1 type-caption text-[var(--fg-2)] leading-5">
                 Lumen 用户上传 / 生成的图片落到这里。切换后会重启 API 容器，
-                <span className="text-neutral-300">不会自动迁移历史数据</span>。
+                <span className="text-[var(--fg-1)]">不会自动迁移历史数据</span>。
               </p>
             </div>
           </div>
@@ -448,15 +447,15 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
 
         {/* —— 操作区 —— */}
         <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs text-neutral-500">
+          <div className="type-caption text-[var(--fg-2)]">
             {formError ? (
-              <span className="inline-flex items-center gap-1.5 text-red-300">
+              <span className="inline-flex items-center gap-1.5 text-danger">
                 <AlertTriangle className="h-3.5 w-3.5" /> {formError}
               </span>
             ) : isApplying ? (
-              <span className="inline-flex items-center gap-1.5 text-sky-300">
+              <span className="inline-flex items-center gap-1.5 text-info">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                应用中，API 重启中…
+                应用中，API 重启中
               </span>
             ) : (
               "确认无误后点击右侧按钮提交"
@@ -506,7 +505,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
               </span>
               ，约 10–30 秒不可访问。
             </p>
-            <p className="text-[var(--danger)]/90">
+            <p className="text-[var(--danger-fg)]">
               切换不会自动迁移已有数据。请确认目标位置上的内容是你需要的。
             </p>
           </div>
@@ -546,9 +545,9 @@ function StatusCard({
         : "warning";
 
   const toneClasses: Record<typeof tone, string> = {
-    ok: "border-emerald-500/30 bg-emerald-500/8 text-emerald-200",
-    warning: "border-amber-500/30 bg-amber-500/8 text-amber-200",
-    pending: "border-sky-500/30 bg-sky-500/8 text-sky-200",
+    ok: "border-success-border bg-success-soft text-success",
+    warning: "border-warning-border bg-warning-soft text-warning",
+    pending: "border-info-border bg-info-soft text-info",
   };
 
   const headLine = applying
@@ -571,7 +570,7 @@ function StatusCard({
   return (
     <div
       className={cn(
-        "rounded-2xl border bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5",
+        "rounded-[var(--radius-dialog)] border bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5",
         "border-white/10",
       )}
     >
@@ -579,12 +578,12 @@ function StatusCard({
         <div className="flex min-w-0 items-start gap-3">
           <div
             className={cn(
-              "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border",
+              "flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
               tone === "ok"
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                ? "border-success-border bg-success-soft text-success"
                 : tone === "warning"
-                  ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
-                  : "border-sky-500/30 bg-sky-500/10 text-sky-300",
+                  ? "border-warning-border bg-warning-soft text-warning"
+                  : "border-info-border bg-info-soft text-info",
             )}
           >
             {tone === "ok" ? (
@@ -609,7 +608,7 @@ function StatusCard({
                 {modeLabel}
               </span>
               {status?.disabled && (
-                <span className="rounded-md border border-amber-500/30 bg-amber-500/8 px-2 py-0.5 text-[11px] text-amber-200">
+                <span className="rounded-md border border-warning-border bg-warning-soft px-2 py-0.5 text-[11px] text-warning">
                   禁用 flag 已生效
                 </span>
               )}
@@ -665,11 +664,11 @@ function StatusCard({
             <SubLine
               icon={
                 lastApply.status === "ok" ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-300" />
+                  <CheckCircle2 className="h-3.5 w-3.5 text-success" />
                 ) : lastApply.status === "fail" ? (
-                  <XCircle className="h-3.5 w-3.5 text-red-300" />
+                  <XCircle className="h-3.5 w-3.5 text-danger" />
                 ) : (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-300" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-info" />
                 )
               }
               label="上次应用"
@@ -681,9 +680,9 @@ function StatusCard({
             <SubLine
               icon={
                 lastTest.status === "ok" ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-300" />
+                  <CheckCircle2 className="h-3.5 w-3.5 text-success" />
                 ) : (
-                  <XCircle className="h-3.5 w-3.5 text-red-300" />
+                  <XCircle className="h-3.5 w-3.5 text-danger" />
                 )
               }
               label="上次测试"
@@ -733,12 +732,12 @@ function Badge({
 }) {
   const cls =
     tone === "ok"
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+      ? "border-success-border bg-success-soft text-success"
       : tone === "fail"
-        ? "border-red-500/30 bg-red-500/10 text-red-200"
+        ? "border-danger-border bg-danger-soft text-danger"
         : tone === "info"
-          ? "border-sky-500/30 bg-sky-500/10 text-sky-200"
-          : "border-white/10 bg-white/[0.04] text-neutral-400";
+          ? "border-info-border bg-info-soft text-info"
+          : "border-white/10 bg-white/[0.04] text-[var(--fg-2)]";
   return (
     <span className={cn("inline-flex items-center rounded-md border px-2 py-0.5", cls)}>
       {children}
@@ -782,6 +781,7 @@ function BackendSwitch({
       {opts.map((o) => {
         const active = value === o.key;
         return (
+          // 二选一卡片含图标+描述，多行内容不适合 Button primitive
           <button
             key={o.key}
             type="button"
@@ -790,7 +790,7 @@ function BackendSwitch({
             disabled={disabled}
             onClick={() => onChange(o.key)}
             className={cn(
-              "flex items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors",
+              "flex items-start gap-3 rounded-[var(--radius-card)] border px-3 py-2.5 text-left transition-colors",
               "disabled:cursor-not-allowed disabled:opacity-60",
               active
                 ? "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/8"
@@ -922,18 +922,18 @@ function SmbForm({
 
 function RecoveryHints() {
   return (
-    <div className="rounded-2xl border border-white/8 bg-white/[0.02] p-4 text-xs leading-relaxed text-neutral-400">
+    <div className="rounded-[var(--radius-dialog)] border border-white/8 bg-white/[0.02] p-4 type-caption leading-relaxed text-[var(--fg-2)]">
       <div className="flex items-start gap-2">
-        <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+        <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
         <div className="space-y-1.5">
           <p>
             如果 SMB 挂不上，SSH 到 host 上创建{" "}
-            <code className="rounded bg-white/8 px-1 py-0.5 font-mono text-[11px] text-neutral-200">
+            <code className="rounded bg-white/8 px-1 py-0.5 font-mono text-[11px] text-[var(--fg-1)]">
               /var/lib/lumen-storage/disabled
             </code>{" "}
             文件可强制回退到本地默认路径并恢复服务。
           </p>
-          <p className="text-neutral-500">
+          <p className="text-[var(--fg-3)]">
             推荐 CIFS 参数已固化为{" "}
             <span className="font-mono">
               vers=3.1.1, soft, retrans=3, noperm, mfsymlinks, mapposix

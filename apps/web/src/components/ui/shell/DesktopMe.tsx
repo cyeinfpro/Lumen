@@ -7,6 +7,7 @@ import { Mail, Search, X } from "lucide-react";
 import { DesktopTopNav } from "@/components/ui/shell";
 import { AccountCenter } from "@/components/ui/me/AccountCenter";
 import { ConversationList } from "@/components/ui/me/ConversationList";
+import { Card, IconButton } from "@/components/ui/primitives";
 import { getMe, type AuthUser } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 
@@ -45,7 +46,7 @@ export function DesktopMe() {
             <div
               className={cn(
                 "flex items-center gap-2 h-10 px-3.5 mb-5",
-                "rounded-xl bg-[var(--bg-1)] border border-[var(--border-subtle)]",
+                "rounded-[var(--radius-card)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",
                 "focus-within:border-[var(--amber-400)]/40",
                 "transition-colors",
               )}
@@ -63,14 +64,15 @@ export function DesktopMe() {
                 )}
               />
               {query && (
-                <button
-                  type="button"
+                <IconButton
+                  size="sm"
+                  variant="ghost"
                   onClick={() => setQuery("")}
                   aria-label="清空"
-                  className="inline-flex items-center justify-center w-6 h-6 rounded-full text-[var(--fg-2)] hover:text-[var(--fg-0)]"
+                  className="w-6 h-6 max-sm:min-h-6 max-sm:min-w-6 rounded-full"
                 >
                   <X className="w-3.5 h-3.5" />
-                </button>
+                </IconButton>
               )}
             </div>
             <ConversationList query={query} />
@@ -78,32 +80,32 @@ export function DesktopMe() {
 
           {/* 右列：用户信息 + 账号中心 */}
           <aside aria-label="账号中心" className="min-w-0">
-            <div className="lg:sticky lg:top-[72px]">
+            <div className="lg:sticky lg:top-11">
               {/* 用户信息卡 */}
-              <div
-                className={cn(
-                  "flex flex-col items-center gap-3 p-6 mb-4 rounded-2xl",
-                  "bg-[var(--bg-1)] border border-[var(--border-subtle)]",
-                )}
+              <Card
+                variant="default"
+                padding="lg"
+                className="flex flex-col items-center gap-3 mb-4"
               >
                 <div
                   className={cn(
                     "w-16 h-16 rounded-full",
                     "bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)]",
                     "flex items-center justify-center",
-                    "text-[24px] font-semibold text-[var(--bg-0)]",
+                    "type-card-title text-[var(--bg-0)]",
                     "shadow-[var(--shadow-amber)]",
                   )}
+                  style={{ fontSize: "24px" }}
                 >
                   {avatarChar}
                 </div>
                 {meQuery.data?.name && (
-                  <p className="text-[16px] font-semibold text-[var(--fg-0)] truncate max-w-full">
+                  <p className="type-card-title truncate max-w-full">
                     {meQuery.data.name}
                   </p>
                 )}
                 {meQuery.data?.email && (
-                  <p className="flex items-center gap-1.5 text-[13px] text-[var(--fg-2)] truncate max-w-full">
+                  <p className="flex items-center gap-1.5 type-body-sm truncate max-w-full">
                     <Mail className="w-3 h-3 shrink-0" />
                     {meQuery.data.email}
                   </p>
@@ -114,7 +116,7 @@ export function DesktopMe() {
                     <div className="h-3 w-32 rounded bg-[var(--bg-2)] animate-pulse" />
                   </div>
                 )}
-              </div>
+              </Card>
 
               <AccountCenter />
             </div>

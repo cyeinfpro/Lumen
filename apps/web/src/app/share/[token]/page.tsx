@@ -212,6 +212,7 @@ function ShareShell({ children }: { children: React.ReactNode }) {
             href="/"
             className="inline-flex items-center gap-2 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors"
           >
+            {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
             <span className="w-6 h-6 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_16px_-4px_var(--color-lumen-amber)]" />
             <span className="font-medium tracking-tight">Lumen</span>
             <span className="hidden sm:inline text-xs text-[var(--fg-2)]">
@@ -283,7 +284,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
             </p>
           )}
           {!isNotFound && !isGone && (
-            <p className="flex items-center justify-center gap-1.5 text-xs text-red-300">
+            <p className="flex items-center justify-center gap-1.5 type-caption text-danger">
               <AlertCircle className="w-3.5 h-3.5" />
               {error.message}
             </p>

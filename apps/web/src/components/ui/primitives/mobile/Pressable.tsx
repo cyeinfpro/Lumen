@@ -6,7 +6,6 @@ import {
   forwardRef,
   useCallback,
   useState,
-  type PointerEvent,
 } from "react";
 import { useHaptic, type HapticKind } from "@/hooks/useHaptic";
 import { PRESS_SCALE, type PressScaleName } from "@/lib/motion";
@@ -25,17 +24,21 @@ type BaseProps = {
   className?: string;
 };
 
+// onPress 不带 event 参数：键盘 (Enter/Space) / 鼠标 click / 触屏 / 屏幕阅读器
+// 都能触发。需要 event 信息的场景请直接用 onClick / onKeyDown。
+type PressHandler = () => void;
+
 type AsButton = BaseProps &
   Omit<ButtonHTMLAttributes<HTMLButtonElement>, keyof BaseProps | "type"> & {
     as?: "button";
-    onPress?: (e: PointerEvent<HTMLButtonElement>) => void;
+    onPress?: PressHandler;
   };
 
 type AsAnchor = BaseProps &
   Omit<AnchorHTMLAttributes<HTMLAnchorElement>, keyof BaseProps> & {
     as: "a";
     href: string;
-    onPress?: (e: PointerEvent<HTMLAnchorElement>) => void;
+    onPress?: PressHandler;
   };
 
 export type PressableProps = AsButton | AsAnchor;
@@ -43,8 +46,10 @@ export type PressableProps = AsButton | AsAnchor;
 /**
  * 统一按压反馈模板。对外屏蔽 scale / opacity / haptic / focus ring 细节。
  * 行为：
- *  - pointerdown → data-pressed=true + haptic
+ *  - pointerdown → data-pressed=true + haptic（仅物理反馈，不触发 onPress）
  *  - pointerup / cancel / leave → data-pressed=false
+ *  - onPress 触发：原生 click 事件（覆盖鼠标 / 触屏 / 屏幕阅读器 / button 键盘 Enter+Space）
+ *  - 额外：as="a" 时 keydown Space 触发 onPress（anchor 默认只响应 Enter）
  *  - disabled → opacity-40 + 禁用 haptic + 禁用 onPress
  *  - size: inline 不强制命中区；default = h-11 min-w-11；large = h-14
  *  - focus-visible → box-shadow var(--ring)
@@ -63,7 +68,7 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
     children,
     onPress,
     ...rest
-  } = props as BaseProps & { onPress?: (e: PointerEvent<HTMLElement>) => void; as?: "button" | "a" };
+  } = props as BaseProps & { onPress?: PressHandler; as?: "button" | "a" };
 
   const [pressed, setPressed] = useState(false);
   const { haptic } = useHaptic();
@@ -80,13 +85,23 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
 
   const clearPressed = useCallback(() => setPressed(false), []);
 
-  const handlePointerUp = useCallback(
-    (e: PointerEvent<HTMLElement>) => {
-      clearPressed();
-      if (disabled) return;
-      onPress?.(e);
+  // onPress 桥接：原生 click 已覆盖鼠标/触屏/屏幕阅读器 + button 键盘 Enter/Space。
+  // pointerup 仅清按压 state，不再触发 onPress（避免双触发）。
+  const handleClick = useCallback(() => {
+    if (disabled) return;
+    onPress?.();
+  }, [disabled, onPress]);
+
+  // anchor 默认只响应 Enter；Space 默认不触发 click，需手动桥接。button 跳过。
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLElement>) => {
+      if (disabled || as !== "a") return;
+      if (e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        onPress?.();
+      }
     },
-    [clearPressed, disabled, onPress],
+    [as, disabled, onPress],
   );
 
   const scale = disabled ? 1 : (pressed ? PRESS_SCALE[pressScale] : 1);
@@ -124,10 +139,12 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
         aria-disabled={disabled || undefined}
         className={baseClasses}
         style={commonStyle}
-        onPointerDown={onPointerDown as (e: PointerEvent<HTMLAnchorElement>) => void}
-        onPointerUp={handlePointerUp as (e: PointerEvent<HTMLAnchorElement>) => void}
+        onPointerDown={onPointerDown}
+        onPointerUp={clearPressed}
         onPointerCancel={clearPressed}
         onPointerLeave={clearPressed}
+        onClick={handleClick}
+        onKeyDown={handleKeyDown}
         {...anchorProps}
       >
         {children}
@@ -144,10 +161,11 @@ export const Pressable = forwardRef<HTMLElement, PressableProps>(function Pressa
       disabled={disabled}
       className={baseClasses}
       style={commonStyle}
-      onPointerDown={onPointerDown as (e: PointerEvent<HTMLButtonElement>) => void}
-      onPointerUp={handlePointerUp as (e: PointerEvent<HTMLButtonElement>) => void}
+      onPointerDown={onPointerDown}
+      onPointerUp={clearPressed}
       onPointerCancel={clearPressed}
       onPointerLeave={clearPressed}
+      onClick={handleClick}
       {...buttonProps}
     >
       {children}

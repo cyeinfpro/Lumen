@@ -16,7 +16,6 @@ import {
   Copy,
   Eye,
   EyeOff,
-  Loader2,
   Network,
   RotateCw,
   Save,
@@ -31,6 +30,8 @@ import {
   useSystemSettingsQuery,
   useUpdateSystemSettingsMutation,
 } from "@/lib/queries";
+import { Button, IconButton } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 
 const SETTINGS_KEYS = [
   "telegram.bot_enabled",
@@ -148,7 +149,7 @@ export function TelegramPanel() {
       // 保存成功 → 弹窗问是否立即重启 bot
       setRestartPrompt(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "保存失败");
+      setError(err instanceof Error ? err.message : copy.error.unknown);
     }
   };
 
@@ -164,7 +165,7 @@ export function TelegramPanel() {
         setRestartHint(`已发送重启指令，机器人会在数秒内自动重新启动。`);
       }
     } catch (err) {
-      setRestartHint(err instanceof Error ? err.message : "重启失败");
+      setRestartHint(err instanceof Error ? err.message : copy.error.unknown);
     } finally {
       setRestartPrompt(false);
     }
@@ -177,21 +178,21 @@ export function TelegramPanel() {
   return (
     <section className="space-y-5">
       {/* 提示条 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl p-4 md:p-5">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
-            <Bot className="w-4 h-4 text-neutral-400" />
+          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+            <Bot className="w-4 h-4 text-[var(--fg-2)]" />
           </div>
-          <div className="min-w-0 text-xs text-neutral-400 leading-relaxed">
-            <p className="text-sm font-medium text-neutral-100 mb-1">Telegram 机器人</p>
+          <div className="min-w-0 type-caption text-[var(--fg-2)] leading-relaxed">
+            <p className="type-card-title mb-1">Telegram 机器人</p>
             保存后可直接重启机器人。代理切换不需要重启；发送失败时会自动换下一个。
           </div>
         </div>
       </div>
 
       {/* 基本 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl p-4 md:p-5 space-y-4">
-        <h3 className="text-sm font-medium text-neutral-100">基本设置</h3>
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
+        <h3 className="type-card-title">基本设置</h3>
 
         <ToggleField
           label="启用机器人"
@@ -220,16 +221,18 @@ export function TelegramPanel() {
           mono
           rightSlot={
             deepLink ? (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => {
                   void navigator.clipboard.writeText(deepLink + "<code>");
                 }}
-                className="inline-flex items-center gap-1 text-[11px] px-2 h-7 rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 border border-white/10 transition-colors"
                 title={deepLink + "<code>"}
+                leftIcon={<Copy className="w-3 h-3" />}
+                className="h-7 text-[11px]"
               >
-                <Copy className="w-3 h-3" /> 复制绑定链接
-              </button>
+                复制绑定链接
+              </Button>
             ) : null
           }
         />
@@ -244,27 +247,28 @@ export function TelegramPanel() {
       </div>
 
       {/* 代理 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl p-4 md:p-5 space-y-4">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
         <div>
-          <h3 className="text-sm font-medium text-neutral-100">代理设置</h3>
-          <p className="text-xs text-neutral-500 mt-0.5">
+          <h3 className="type-card-title">代理设置</h3>
+          <p className="type-caption text-[var(--fg-2)] mt-0.5">
             设置机器人发消息时使用哪些代理，以及选择顺序。代理本身在
             「代理池」标签页查看。
           </p>
         </div>
 
         <div>
-          <p className="text-xs text-neutral-300 mb-2">使用哪些代理</p>
-          <p className="text-[11px] text-neutral-500 mb-3">
+          <p className="type-caption text-[var(--fg-1)] mb-2">使用哪些代理</p>
+          <p className="text-[11px] text-[var(--fg-2)] mb-3">
             勾选要用的代理；一个都不勾表示用所有「启用」的代理。
           </p>
           {allProxies.length === 0 ? (
-            <p className="text-xs text-neutral-500">代理池为空，请先到供应商标签页添加代理。</p>
+            <p className="type-caption text-[var(--fg-2)]">代理池为空，请先到供应商标签页添加代理。</p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {allProxies.map((p) => {
                 const sel = selectedProxyNames.has(p.name);
                 return (
+                  // pill 形态多选 chip（rounded-full + 多语义），不适合 Button primitive
                   <button
                     key={p.name}
                     type="button"
@@ -273,7 +277,7 @@ export function TelegramPanel() {
                       "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border text-xs transition-colors " +
                       (sel
                         ? "bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
-                        : "bg-white/5 border-white/10 text-neutral-300 hover:bg-white/10")
+                        : "bg-white/5 border-white/10 text-[var(--fg-1)] hover:bg-white/10")
                     }
                     disabled={!p.enabled}
                     title={p.enabled ? p.host + ":" + p.port : "（已禁用，不能选）"}
@@ -289,35 +293,36 @@ export function TelegramPanel() {
         </div>
 
         <div>
-          <p className="text-xs text-neutral-300 mb-2">挑选策略</p>
+          <p className="type-caption text-[var(--fg-1)] mb-2">挑选策略</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {STRATEGIES.map((s) => {
               const Icon = s.icon;
               const active = form.proxy_strategy === s.value;
               return (
+                // 4 选 1 卡片选项，多行内容不适合 Button primitive
                 <button
                   key={s.value}
                   type="button"
                   onClick={() => setForm((f) => ({ ...f, proxy_strategy: s.value }))}
                   className={
-                    "text-left p-3 rounded-xl border text-xs transition-colors " +
+                    "text-left p-3 rounded-[var(--radius-card)] border text-xs transition-colors " +
                     (active
                       ? "bg-[var(--color-lumen-amber)]/10 border-[var(--color-lumen-amber)]/40"
                       : "bg-white/[0.02] border-white/10 hover:bg-white/[0.05]")
                   }
                 >
                   <div className="flex items-center gap-2 mb-1">
-                    <Icon className="w-3.5 h-3.5 text-neutral-300" />
+                    <Icon className="w-3.5 h-3.5 text-[var(--fg-1)]" />
                     <span
                       className={
                         "text-sm " +
-                        (active ? "text-[var(--color-lumen-amber)] font-medium" : "text-neutral-100")
+                        (active ? "text-[var(--color-lumen-amber)] font-medium" : "text-[var(--fg-0)]")
                       }
                     >
                       {s.label}
                     </span>
                   </div>
-                  <p className="text-[11px] text-neutral-500 leading-relaxed">{s.hint}</p>
+                  <p className="text-[11px] text-[var(--fg-2)] leading-relaxed">{s.hint}</p>
                 </button>
               );
             })}
@@ -327,31 +332,32 @@ export function TelegramPanel() {
 
       {/* 保存 */}
       <div className="flex items-center gap-3 flex-wrap">
-        <button
-          type="button"
+        <Button
+          variant="primary"
+          size="md"
           onClick={onSave}
           disabled={!dirty || updateMut.isPending}
-          className="inline-flex min-h-11 items-center justify-center gap-1.5 px-4 sm:h-9 sm:min-h-0 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
+          loading={updateMut.isPending}
+          leftIcon={!updateMut.isPending ? <Save className="w-3.5 h-3.5" /> : undefined}
         >
-          <Save className="w-3.5 h-3.5" />
-          {updateMut.isPending ? "保存中…" : dirty ? "保存修改" : "无修改"}
-        </button>
+          {updateMut.isPending ? copy.state.saving : dirty ? "保存修改" : "无修改"}
+        </Button>
         {savedAt && !restartPrompt && (
           <motion.span
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-1 text-xs text-emerald-300"
+            className="inline-flex items-center gap-1 type-caption text-success"
           >
-            <Check className="w-3 h-3" /> 已保存
+            <Check className="w-3 h-3" /> {copy.state.saved}
           </motion.span>
         )}
         {restartHint && (
-          <span className="inline-flex items-center gap-1 text-xs text-sky-300">
+          <span className="inline-flex items-center gap-1 type-caption text-info">
             <RotateCw className="w-3 h-3" /> {restartHint}
           </span>
         )}
         {error && (
-          <span className="inline-flex items-center gap-1 text-xs text-red-300">
+          <span className="inline-flex items-center gap-1 type-caption text-danger">
             <AlertCircle className="w-3 h-3" /> {error}
           </span>
         )}
@@ -408,44 +414,39 @@ function RestartConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="restart-telegram-title"
-        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-2xl border border-b-0 border-[var(--border)] bg-[var(--bg-1)] p-5 shadow-[var(--shadow-3)] sm:rounded-2xl sm:border-b sm:pb-5"
+        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-[var(--radius-dialog)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] p-5 shadow-[var(--shadow-3)] sm:rounded-[var(--radius-dialog)] sm:border-b sm:pb-5"
       >
         <div className="flex items-start gap-3">
-          <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0">
-            <AlertTriangle className="w-5 h-5 text-amber-300" />
+          <div className="w-10 h-10 rounded-[var(--radius-card)] bg-warning-soft border border-warning-border flex items-center justify-center shrink-0">
+            <AlertTriangle className="w-5 h-5 text-warning" />
           </div>
           <div className="min-w-0 flex-1">
-            <h3 id="restart-telegram-title" className="text-base font-medium text-[var(--fg-0)]">设置已保存，是否立即重启机器人？</h3>
-            <p className="text-sm text-neutral-400 mt-1.5 leading-relaxed">
+            <h3 id="restart-telegram-title" className="type-card-title">设置已保存，是否立即重启机器人？</h3>
+            <p className="type-body-sm text-[var(--fg-2)] mt-1.5 leading-relaxed">
               重启大约需要 3 秒。期间机器人会暂时无响应；进行中的任务可在重启后通过任务列表查看。
             </p>
           </div>
         </div>
         <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="md"
             onClick={onCancel}
             disabled={pending}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-[var(--border)] bg-white/[0.06] px-4 text-sm transition-colors hover:bg-white/[0.1] disabled:opacity-50 sm:h-9 sm:min-h-0"
+            leftIcon={<X className="w-3.5 h-3.5" />}
           >
-            <X className="w-3.5 h-3.5" /> 暂不重启
-          </button>
-          <button
-            type="button"
+            暂不重启
+          </Button>
+          <Button
+            variant="primary"
+            size="md"
             onClick={onConfirm}
             disabled={pending}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 disabled:opacity-50 sm:h-9 sm:min-h-0"
+            loading={pending}
+            leftIcon={!pending ? <RotateCw className="w-3.5 h-3.5" /> : undefined}
           >
-            {pending ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> 正在重启…
-              </>
-            ) : (
-              <>
-                <RotateCw className="w-3.5 h-3.5" /> 立即重启
-              </>
-            )}
-          </button>
+            {pending ? "正在重启" : "立即重启"}
+          </Button>
         </div>
       </motion.div>
     </motion.div>
@@ -473,7 +474,7 @@ function Field({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-xs text-neutral-300">{label}</span>
+      <span className="type-caption text-[var(--fg-1)]">{label}</span>
       <div className="relative">
         <input
           type={masked ? "password" : "text"}
@@ -481,23 +482,24 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           autoComplete="off"
           className={
-            "w-full h-9 pr-20 pl-3 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
+            "w-full h-9 pr-20 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
             (mono ? "font-mono" : "")
           }
         />
         {onToggleMask && (
-          <button
-            type="button"
+          <IconButton
+            variant="ghost"
+            size="sm"
             onClick={onToggleMask}
-            className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center w-7 h-7 rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 transition-colors"
             aria-label={masked ? "显示" : "隐藏"}
+            className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-white/5 hover:bg-white/10"
           >
             {masked ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-          </button>
+          </IconButton>
         )}
       </div>
       <div className="flex items-start gap-2">
-        <span className="text-[11px] text-neutral-500 leading-relaxed flex-1">{hint}</span>
+        <span className="text-[11px] text-[var(--fg-2)] leading-relaxed flex-1">{hint}</span>
         {rightSlot}
       </div>
     </label>
@@ -517,6 +519,7 @@ function ToggleField({
 }) {
   return (
     <div className="flex items-start gap-3">
+      {/* 自定义 switch primitive，不在 IconButton/Button 范围内 */}
       <button
         type="button"
         role="switch"
@@ -537,8 +540,8 @@ function ToggleField({
         />
       </button>
       <div className="min-w-0">
-        <p className="text-sm text-neutral-100">{label}</p>
-        <p className="text-[11px] text-neutral-500 leading-relaxed">{hint}</p>
+        <p className="type-body-sm text-[var(--fg-0)]">{label}</p>
+        <p className="text-[11px] text-[var(--fg-2)] leading-relaxed">{hint}</p>
       </div>
     </div>
   );

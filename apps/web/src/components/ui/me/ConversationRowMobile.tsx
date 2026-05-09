@@ -23,6 +23,8 @@ import {
   BottomSheet,
   SwipeRow,
 } from "@/components/ui/primitives/mobile";
+import { Button } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import type { ConversationSummary } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 
@@ -142,6 +144,7 @@ export function ConversationRowMobile({
             />
           )}
 
+          {/* 全宽会话行：跨 icon + 标题 + 元数据多行布局，不匹配标准 Button */}
           <button
             type="button"
             onClick={onSelect}
@@ -187,6 +190,7 @@ export function ConversationRowMobile({
             </span>
           </button>
 
+          {/* 紧贴会话行右侧的纵向 11px 触控目标，使用紧凑原生 button 以匹配行高 */}
           <button
             type="button"
             onClick={(e) => {
@@ -244,7 +248,7 @@ export function ConversationRowMobile({
         ariaLabel="重命名会话"
       >
         <div className="px-4 pt-2 pb-6">
-          <h3 className="text-[15px] font-medium text-[var(--fg-0)] mb-3">
+          <h3 className="type-card-title mb-3">
             重命名会话
           </h3>
           <input
@@ -261,28 +265,32 @@ export function ConversationRowMobile({
             }}
             placeholder="输入新标题"
             className={cn(
-              "w-full h-11 px-3 rounded-xl text-[15px]",
+              "w-full h-11 px-3 rounded-[var(--radius-control)] text-[15px]",
               "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
               "text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
               "outline-none focus:border-[var(--amber-400)]/60",
             )}
           />
           <div className="mt-4 flex gap-2">
-            <button
+            <Button
               type="button"
+              size="lg"
+              variant="outline"
               onClick={() => setRenameOpen(false)}
-              className="flex-1 h-11 rounded-xl bg-[var(--bg-2)] border border-[var(--border-subtle)] text-[14px] text-[var(--fg-1)] active:bg-[var(--bg-3)]"
+              fullWidth
             >
-              取消
-            </button>
-            <button
+              {copy.action.cancel}
+            </Button>
+            <Button
               type="button"
+              size="lg"
+              variant="primary"
               onClick={submitRename}
               disabled={!renameValue.trim()}
-              className="flex-1 h-11 rounded-xl bg-[var(--amber-400)] text-black text-[14px] font-medium active:brightness-95 disabled:opacity-50"
+              fullWidth
             >
-              确定
-            </button>
+              {copy.action.confirm}
+            </Button>
           </div>
         </div>
       </BottomSheet>

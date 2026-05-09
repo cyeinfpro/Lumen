@@ -37,7 +37,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
 
   const submit = () => {
     if (!stylePrompt.trim()) {
-      toast.warning("请填写风格方向");
+      toast.warning("风格方向未填");
       return;
     }
     create.mutate({

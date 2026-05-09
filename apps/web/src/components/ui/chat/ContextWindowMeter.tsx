@@ -12,6 +12,7 @@ import {
 } from "@/app/(chat)/_hooks/useCompactConversation";
 import { CompactionToast } from "@/components/ui/chat/CompactionToast";
 import { RollingTokenCounter } from "@/components/ui/chat/RollingTokenCounter";
+import { Button, IconButton } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
   type CompactionEvent,
@@ -414,16 +415,16 @@ export function ContextWindowMeter({
               reducedMotion={reducedMotion}
             />
           </span>
-        <button
-            type="button"
+        <IconButton
+            size="sm"
+            variant="secondary"
             aria-label={buttonTitle}
             title={buttonTitle}
             disabled={buttonDisabled || retryCompact.isPending}
             onClick={startBackgroundCompact}
             className={cn(
-              "inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border-subtle)]",
-              "bg-[var(--bg-1)]/70 text-[var(--fg-1)] transition-colors hover:bg-white/8 hover:text-[var(--fg-0)]",
-              "disabled:pointer-events-none disabled:opacity-45",
+              "rounded-[var(--radius-control)] border-[var(--border-subtle)]",
+              "bg-[var(--bg-1)]/70 text-[var(--fg-1)]",
             )}
           >
             {isCompacting ? (
@@ -431,7 +432,7 @@ export function ContextWindowMeter({
             ) : (
               <Archive className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-          </button>
+          </IconButton>
         <CompactionToast
           event={latestCompaction}
           conversationId={convId}
@@ -478,25 +479,27 @@ export function ContextWindowMeter({
             reducedMotion={reducedMotion}
           />
         </span>
-        <button
+        <Button
           type="button"
+          size="sm"
+          variant="secondary"
           title={buttonTitle}
           disabled={buttonDisabled || retryCompact.isPending}
           onClick={startBackgroundCompact}
+          leftIcon={
+            isCompacting ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Archive className="h-3.5 w-3.5" aria-hidden="true" />
+            )
+          }
           className={cn(
-            "inline-flex h-8 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[11px] font-medium",
-            "border border-[var(--border-subtle)] bg-[var(--bg-1)]/70 text-[var(--fg-1)]",
-            "transition-colors hover:bg-white/8 hover:text-[var(--fg-0)]",
-            "disabled:pointer-events-none disabled:opacity-45",
+            "h-8 px-2.5 text-[11px] rounded-[var(--radius-control)]",
+            "border-[var(--border-subtle)] bg-[var(--bg-1)]/70 text-[var(--fg-1)]",
           )}
         >
-          {isCompacting ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-          ) : (
-            <Archive className="h-3.5 w-3.5" aria-hidden="true" />
-          )}
-          <span>{isCompacting ? "压缩中" : benefitLabel ?? "压缩历史"}</span>
-        </button>
+          {isCompacting ? "压缩中" : benefitLabel ?? "压缩历史"}
+        </Button>
       <CompactionToast
         event={latestCompaction}
         conversationId={convId}

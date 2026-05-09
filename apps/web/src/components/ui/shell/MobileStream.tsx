@@ -14,6 +14,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowUp, Loader2 } from "lucide-react";
 import { MobileTabBar } from "./MobileTabBar";
 import { PullToRefresh, pushMobileToast } from "@/components/ui/primitives/mobile";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import {
   flattenFeed,
   feedTotal,
@@ -33,6 +34,7 @@ import {
   StreamTopBar,
 } from "@/components/ui/stream";
 import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
 import { shareOrCopyLink } from "@/lib/shareLink";
 
 function parseFilters(sp: URLSearchParams): StreamFeedFilters {
@@ -205,9 +207,9 @@ export function MobileStream() {
       });
       const result = await shareOrCopyLink(share.url, "Lumen 图片分享");
       if (result === "failed") {
-        pushMobileToast("分享链接复制失败", "danger");
+        pushMobileToast("链接复制失败", "danger");
       } else if (result !== "cancelled") {
-        pushMobileToast(result === "shared" ? "已打开分享菜单" : "分享链接已复制", "success");
+        pushMobileToast(result === "shared" ? "已打开分享菜单" : "链接已复制", "success");
         clearSelection();
       }
     } catch {
@@ -345,22 +347,25 @@ export function MobileStream() {
             {isFetchingNextPage && (
               <div className="flex items-center justify-center gap-2.5 py-5 text-[var(--fg-2)]">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span className="text-body-sm">加载更多</span>
+                <span className="type-body-sm">{copy.state.loading}</span>
               </div>
             )}
           </div>
         </PullToRefresh>
       </div>
 
-      <button
-        type="button"
+      <Pressable
+        size="default"
+        minHit={true}
+        pressScale="tight"
+        haptic="light"
         aria-label="回到顶部"
-        onClick={scrollToTop}
+        onPress={scrollToTop}
         className={cn(
-          "fixed right-4 z-30 flex h-11 w-11 cursor-pointer items-center justify-center rounded-full",
-          "border border-[var(--border-subtle)] bg-[var(--bg-1)]/85 text-[var(--fg-1)] shadow-lg backdrop-blur-xl",
+          "fixed right-4 z-30 flex h-11 w-11 items-center justify-center rounded-full",
+          "border border-[var(--border-subtle)] bg-[var(--bg-1)]/85 text-[var(--fg-1)] shadow-[var(--shadow-2)] backdrop-blur-xl",
           "transition-[opacity,transform] duration-200",
-          "hover:text-[var(--fg-0)] active:scale-95",
+          "hover:text-[var(--fg-0)]",
           showScrollTop
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-3 opacity-0",
@@ -368,7 +373,7 @@ export function MobileStream() {
         style={{ bottom: "calc(72px + env(safe-area-inset-bottom, 0px))" }}
       >
         <ArrowUp className="h-[18px] w-[18px]" />
-      </button>
+      </Pressable>
 
       <MobileTabBar />
     </div>

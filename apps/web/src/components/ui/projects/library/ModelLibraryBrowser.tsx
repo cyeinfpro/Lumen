@@ -1072,7 +1072,7 @@ function UploadDialog({
 
   const submit = async () => {
     if (!uploadFile) {
-      toast.warning("请选择模特图");
+      toast.warning("未选模特图");
       return;
     }
     const title = form.title.trim() || uploadFile.name.replace(/\.[^.]+$/, "");

@@ -48,6 +48,8 @@ import type {
   ProviderProxyOut,
   ProviderStatsItem,
 } from "@/lib/types";
+import { Button, IconButton } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import { EmptyBlock, ErrorBlock } from "../page";
 
 // ---------------------------------------------------------------------------
@@ -647,29 +649,24 @@ export function ProvidersPanel() {
           </div>
           {!isEditing && (
             <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={onProbeAll}
                 disabled={probeMut.isPending || serverItems.length === 0}
-                className="inline-flex items-center gap-1.5 min-h-[40px] sm:h-8 px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300 disabled:opacity-40 transition-colors"
+                loading={probeMut.isPending}
+                leftIcon={!probeMut.isPending ? <Activity className="w-3 h-3" /> : undefined}
               >
-                {probeMut.isPending ? (
-                  <>
-                    <Loader2 className="w-3 h-3 animate-spin" /> 探活中
-                  </>
-                ) : (
-                  <>
-                    <Activity className="w-3 h-3" /> 手动探活
-                  </>
-                )}
-              </button>
-              <button
-                type="button"
+                {probeMut.isPending ? "探活中" : "手动探活"}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={startEdit}
-                className="inline-flex items-center gap-1.5 min-h-[40px] sm:h-8 px-3 rounded-lg bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-xs font-medium transition-all"
+                leftIcon={<Pencil className="w-3 h-3" />}
               >
-                <Pencil className="w-3 h-3" /> 编辑
-              </button>
+                {copy.action.edit}
+              </Button>
             </div>
           )}
         </div>
@@ -694,17 +691,19 @@ export function ProvidersPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            className="rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-300 flex items-start gap-2"
+            className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-danger flex items-start gap-2"
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span className="flex-1">{globalError}</span>
-            <button
-              type="button"
+            <IconButton
+              variant="ghost"
+              size="sm"
               onClick={() => setGlobalError(null)}
-              className="shrink-0 p-0.5 rounded hover:bg-white/10 transition-colors"
+              aria-label={copy.action.close}
+              className="shrink-0"
             >
               <X className="w-3.5 h-3.5" />
-            </button>
+            </IconButton>
           </motion.div>
         )}
         {savedAt && (
@@ -712,9 +711,9 @@ export function ProvidersPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-300 flex items-center gap-2"
+            className="rounded-[var(--radius-card)] border border-success-border bg-success-soft px-4 py-3 type-body-sm text-success flex items-center gap-2"
           >
-            <Check className="w-4 h-4" /> 已保存
+            <Check className="w-4 h-4" /> {copy.state.saved}
           </motion.div>
         )}
       </AnimatePresence>
@@ -782,27 +781,28 @@ export function ProvidersPanel() {
           />
         </div>
       ) : serverItems.length === 0 ? (
-        <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl py-16 text-center">
+        <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] py-16 text-center">
           <div className="flex flex-col items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center">
-              <CloudOff className="w-6 h-6 text-neutral-500" />
+            <div className="w-14 h-14 rounded-[var(--radius-dialog)] bg-white/5 border border-white/10 flex items-center justify-center">
+              <CloudOff className="w-6 h-6 text-[var(--fg-2)]" />
             </div>
             <div>
-              <p className="text-sm text-neutral-200">还没有供应商</p>
-              <p className="text-xs text-neutral-500 mt-1">
+              <p className="type-body-sm text-[var(--fg-1)]">还没有供应商</p>
+              <p className="type-caption text-[var(--fg-2)] mt-1">
                 添加至少一个供应商后，请求会从池里选择可用账号。
               </p>
             </div>
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="md"
               onClick={() => {
                 startEdit();
                 setTimeout(addProvider, 50);
               }}
-              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium transition-all"
+              leftIcon={<Plus className="w-3.5 h-3.5" />}
             >
-              <Plus className="w-3.5 h-3.5" /> 添加首个供应商
-            </button>
+              添加首个供应商
+            </Button>
           </div>
         </div>
       ) : (
@@ -834,12 +834,12 @@ export function ProvidersPanel() {
             transition={{ duration: 0.2 }}
             className="fixed bottom-0 left-0 right-0 sm:bottom-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:w-auto z-40 max-w-full sm:max-w-[calc(100vw-2rem)] px-4 pb-[env(safe-area-inset-bottom)] sm:pb-4 sm:px-0"
           >
-            <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2.5 rounded-2xl bg-[var(--bg-1)]/95 backdrop-blur-xl border border-[var(--color-lumen-amber)]/40 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)]">
-              <span className="text-xs text-neutral-300 whitespace-nowrap">
+            <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2.5 rounded-[var(--radius-dialog)] bg-[var(--bg-1)]/95 backdrop-blur-xl border border-[var(--color-lumen-amber)]/40 shadow-[var(--shadow-3)]">
+              <span className="type-caption text-[var(--fg-1)] whitespace-nowrap">
                 <span className="inline-flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[0_0_8px_currentColor]" />
                   编辑中
-                  <span className="text-neutral-500">·</span>
+                  <span className="text-[var(--fg-2)]">·</span>
                   <span className="font-mono tabular-nums">
                     {drafts?.length ?? 0}
                   </span>
@@ -847,39 +847,34 @@ export function ProvidersPanel() {
                 </span>
               </span>
               <div className="flex-1 sm:flex-none" />
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={addProvider}
                 disabled={updateMut.isPending}
-                className="inline-flex items-center gap-1 min-h-[40px] sm:h-8 px-2.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300 disabled:opacity-50 transition-colors"
+                leftIcon={<Plus className="w-3 h-3" />}
               >
-                <Plus className="w-3 h-3" />
                 <span className="hidden sm:inline">添加</span>
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={cancelEdit}
                 disabled={updateMut.isPending}
-                className="inline-flex items-center gap-1.5 min-h-[40px] sm:h-8 px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-300 disabled:opacity-50 transition-colors"
+                leftIcon={<RotateCcw className="w-3 h-3" />}
               >
-                <RotateCcw className="w-3 h-3" /> 放弃
-              </button>
-              <button
-                type="button"
+                放弃
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={validateAndSave}
                 disabled={updateMut.isPending}
-                className="inline-flex items-center gap-1.5 min-h-[40px] sm:h-8 px-4 rounded-lg bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-xs font-medium disabled:opacity-50 transition-all"
+                loading={updateMut.isPending}
+                leftIcon={!updateMut.isPending ? <Save className="w-3 h-3" /> : undefined}
               >
-                {updateMut.isPending ? (
-                  <>
-                    <Loader2 className="w-3 h-3 animate-spin" /> 保存中
-                  </>
-                ) : (
-                  <>
-                    <Save className="w-3 h-3" /> 保存
-                  </>
-                )}
-              </button>
+                {updateMut.isPending ? copy.state.saving : copy.action.save}
+              </Button>
             </div>
           </motion.div>
         )}
@@ -932,11 +927,11 @@ function StatsRow({
         value={enabled}
         sub={
           enabled < total ? (
-            <span className="text-neutral-500">
+            <span className="text-[var(--fg-2)]">
               {total - enabled} 已禁用
             </span>
           ) : (
-            <span className="text-emerald-400/80">全部启用</span>
+            <span className="text-success">全部启用</span>
           )
         }
         accent={enabled === total ? "green" : undefined}
@@ -986,9 +981,9 @@ function StatCard({
 }) {
   const ring =
     accent === "green"
-      ? "border-emerald-500/20"
+      ? "border-success-border"
       : accent === "red"
-        ? "border-red-500/20"
+        ? "border-danger-border"
         : accent === "amber"
           ? "border-[var(--color-lumen-amber)]/20"
           : "border-white/10";
@@ -1174,10 +1169,10 @@ function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
                   <span
                     className={`tabular-nums ${
                       rate >= 95
-                        ? "text-emerald-400"
+                        ? "text-success"
                         : rate >= 80
                           ? "text-[var(--color-lumen-amber)]"
-                          : "text-red-400"
+                          : "text-danger"
                     }`}
                   >
                     成功 {Math.round(rate)}%
@@ -1187,13 +1182,13 @@ function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
               <div className="flex rounded-md overflow-hidden h-1.5 bg-white/5">
                 {s.success > 0 && (
                   <div
-                    className="h-full bg-emerald-500/70"
+                    className="h-full bg-success/70"
                     style={{ width: `${(s.success / s.total) * 100}%` }}
                   />
                 )}
                 {s.fail > 0 && (
                   <div
-                    className="h-full bg-red-500/70"
+                    className="h-full bg-danger/70"
                     style={{ width: `${(s.fail / s.total) * 100}%` }}
                   />
                 )}
@@ -1328,7 +1323,7 @@ function ProviderCard({
               </span>
             )}
             {p.image_jobs_enabled && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-sky-500/10 text-sky-300 border border-sky-500/30">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-info-soft text-info border border-info-border">
                 <ImageIcon className="w-2.5 h-2.5" /> 异步生图
               </span>
             )}
@@ -1343,26 +1338,29 @@ function ProviderCard({
           </code>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {/* 24px tight icon-only button — IconButton sm 高度过大 */}
           <button
             type="button"
             onClick={() => onToggleEnabled(p.name, !p.enabled)}
             disabled={quickSaving}
             className={
-              "inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors " +
+              "inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-control)] border transition-colors " +
               (p.enabled
-                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
-                : "bg-neutral-500/10 border-neutral-500/30 text-neutral-400 hover:bg-neutral-500/20")
+                ? "bg-success-soft border-success-border text-success hover:bg-success/20"
+                : "bg-white/10 border-white/20 text-[var(--fg-2)] hover:bg-white/15")
             }
+            aria-label={p.enabled ? "停用供应商" : "启用供应商"}
             title={p.enabled ? "停用供应商" : "启用供应商"}
           >
             {p.enabled ? <Power className="w-3 h-3" /> : <PowerOff className="w-3 h-3" />}
           </button>
-          {/* 单个探活按钮 */}
+          {/* 单个探活按钮 — 24px tight + opacity hover 行为 */}
           <button
             type="button"
             onClick={() => onProbeSingle(p.name)}
             disabled={probing || !p.enabled}
-            className="opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex items-center justify-center w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-400 disabled:opacity-30 transition-all"
+            className="opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-control)] bg-white/5 hover:bg-white/10 border border-white/10 text-[var(--fg-2)] disabled:opacity-30 transition-all"
+            aria-label="探活此供应商"
             title="探活此供应商"
           >
             <Activity className="w-3 h-3" />
@@ -1442,8 +1440,8 @@ function ProviderCard({
               color={
                 p.image_jobs_endpoint_lock &&
                 p.image_jobs_endpoint !== "auto"
-                  ? "text-amber-300"
-                  : "text-sky-300"
+                  ? "text-warning"
+                  : "text-info"
               }
             />
             {p.image_jobs_base_url && (
@@ -1453,7 +1451,7 @@ function ProviderCard({
                   label="旁路地址"
                   value={p.image_jobs_base_url}
                   mono
-                  color="text-sky-300"
+                  color="text-info"
                 />
               </>
             )}
@@ -1466,8 +1464,8 @@ function ProviderCard({
                   mono
                   color={
                     (p.image_edit_input_transport ?? "url") === "file"
-                      ? "text-amber-300"
-                      : "text-sky-300"
+                      ? "text-warning"
+                      : "text-info"
                   }
                 />
               </>
@@ -1483,10 +1481,10 @@ function ProviderCard({
               mono
               color={
                 probe.latency_ms < 500
-                  ? "text-emerald-400"
+                  ? "text-success"
                   : probe.latency_ms < 2000
                     ? "text-[var(--color-lumen-amber)]"
-                    : "text-red-400"
+                    : "text-danger"
               }
             />
           </>
@@ -1502,10 +1500,10 @@ function ProviderCard({
               mono
               color={
                 stats.success_rate >= 0.95
-                  ? "text-emerald-400"
+                  ? "text-success"
                   : stats.success_rate >= 0.8
                     ? "text-[var(--color-lumen-amber)]"
-                    : "text-red-400"
+                    : "text-danger"
               }
             />
             <MetaSep />
@@ -1577,11 +1575,11 @@ function ProbeStatusBadge({
   }
   if (probe.ok) {
     return (
-      <span className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]" />
+      <span className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-success-soft text-success border border-success-border">
+        <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_6px_currentColor]" />
         健康
         {probe.latency_ms != null && (
-          <span className="tabular-nums text-emerald-400/70">
+          <span className="tabular-nums text-success/80">
             {probe.latency_ms}ms
           </span>
         )}
@@ -1590,10 +1588,10 @@ function ProbeStatusBadge({
   }
   return (
     <span
-      className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-red-500/10 text-red-300 border border-red-500/30"
+      className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-danger-soft text-danger border border-danger-border"
       title={probe.error ?? undefined}
     >
-      <span className="w-1.5 h-1.5 rounded-full bg-red-400 shadow-[0_0_6px_theme(colors.red.400)]" />
+      <span className="w-1.5 h-1.5 rounded-full bg-danger shadow-[0_0_6px_currentColor]" />
       异常
     </span>
   );
@@ -1717,10 +1715,10 @@ const DraftCard = forwardRef<
       layout="position"
       transition={{ duration: 0.18 }}
       className={
-        "rounded-2xl border backdrop-blur-sm transition-colors overflow-hidden " +
+        "rounded-[var(--radius-dialog)] border backdrop-blur-sm transition-colors overflow-hidden " +
         (expanded
           ? hasErrors
-            ? "border-red-500/30 bg-red-500/[0.03]"
+            ? "border-danger-border bg-danger-soft"
             : "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/[0.04]"
           : "border-white/10 bg-[var(--bg-1)]/60")
       }
@@ -1748,12 +1746,12 @@ const DraftCard = forwardRef<
               </span>
             )}
             {hasErrors && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-red-500/10 text-red-400 border border-red-500/30 shrink-0">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-danger-soft text-danger border border-danger-border shrink-0">
                 <AlertCircle className="w-2.5 h-2.5" />
               </span>
             )}
             {!isExisting && draft.name.trim() !== "" && (
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/30 shrink-0">
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] bg-info-soft text-info border border-info-border shrink-0">
                 新增
               </span>
             )}
@@ -1953,10 +1951,10 @@ const DraftCard = forwardRef<
                     type="button"
                     onClick={() => onUpdate({ enabled: !draft.enabled })}
                     className={
-                      "flex-1 inline-flex items-center gap-1.5 min-h-[44px] sm:h-9 px-3 rounded-xl border text-xs transition-colors justify-center " +
+                      "flex-1 inline-flex items-center gap-1.5 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] border text-xs transition-colors justify-center " +
                       (draft.enabled
-                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
-                        : "bg-neutral-500/10 border-neutral-500/30 text-neutral-400 hover:bg-neutral-500/20")
+                        ? "bg-success-soft border-success-border text-success hover:bg-success/20"
+                        : "bg-white/10 border-white/20 text-[var(--fg-2)] hover:bg-white/15")
                     }
                   >
                     {draft.enabled ? (
@@ -1982,10 +1980,10 @@ const DraftCard = forwardRef<
                       })
                     }
                     className={
-                      "flex-1 inline-flex items-center gap-1.5 min-h-[44px] sm:h-9 px-3 rounded-xl border text-xs transition-colors justify-center " +
+                      "flex-1 inline-flex items-center gap-1.5 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] border text-xs transition-colors justify-center " +
                       (draft.image_jobs_enabled
-                        ? "bg-sky-500/10 border-sky-500/30 text-sky-300 hover:bg-sky-500/20"
-                        : "bg-white/[0.03] border-white/10 text-neutral-500 hover:bg-white/[0.06]")
+                        ? "bg-info-soft border-info-border text-info hover:bg-info/20"
+                        : "bg-white/[0.03] border-white/10 text-[var(--fg-2)] hover:bg-white/[0.06]")
                     }
                   >
                     <ImageIcon className="w-3 h-3" />
@@ -2010,7 +2008,7 @@ const DraftCard = forwardRef<
                           (e.target.value as "auto" | "generations" | "responses") || "auto",
                       })
                     }
-                    className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-sky-500/50"
+                    className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-white/10 text-xs text-[var(--fg-1)] focus:outline-none focus:border-info-border"
                   >
                     <option value="auto">自动（按健康度自适应）</option>
                     <option value="generations">生成接口（/v1/images/generations · /v1/images/edits）</option>
@@ -2029,10 +2027,10 @@ const DraftCard = forwardRef<
                         })
                       }
                       className={
-                        "mt-2 inline-flex items-center gap-1.5 min-h-[36px] sm:h-8 px-3 rounded-xl border text-xs transition-colors justify-center " +
+                        "mt-2 inline-flex items-center gap-1.5 min-h-[36px] sm:h-8 px-3 rounded-[var(--radius-control)] border text-xs transition-colors justify-center " +
                         (draft.image_jobs_endpoint_lock
-                          ? "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20"
-                          : "bg-white/[0.03] border-white/10 text-neutral-400 hover:bg-white/[0.06]")
+                          ? "bg-warning-soft border-warning-border text-warning hover:bg-warning/20"
+                          : "bg-white/[0.03] border-white/10 text-[var(--fg-2)] hover:bg-white/[0.06]")
                       }
                     >
                       {draft.image_jobs_endpoint_lock
@@ -2058,7 +2056,7 @@ const DraftCard = forwardRef<
                       onChange={(e) =>
                         onUpdate({ image_jobs_base_url: e.target.value })
                       }
-                      className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 placeholder:text-neutral-700 focus:outline-none focus:border-sky-500/50"
+                      className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-white/10 text-xs text-[var(--fg-1)] placeholder:text-[var(--fg-3)] focus:outline-none focus:border-info-border"
                     />
                     <span className="mt-1 text-[11px] leading-4 text-neutral-600">
                       支持给不同供应商指定独立的图片任务旁路服务，例如多区域部署时按供应商路由。
@@ -2078,7 +2076,7 @@ const DraftCard = forwardRef<
                             (e.target.value as "url" | "file") || "url",
                         })
                       }
-                      className="min-h-[44px] sm:h-9 px-3 rounded-xl bg-white/[0.03] border border-white/10 text-xs text-neutral-200 focus:outline-none focus:border-sky-500/50"
+                      className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-white/10 text-xs text-[var(--fg-1)] focus:outline-none focus:border-info-border"
                     >
                       <option value="url">链接（JSON image_url）</option>
                       <option value="file">文件（multipart image[]）</option>
@@ -2115,32 +2113,34 @@ const DraftCard = forwardRef<
                     animate={{ opacity: 1, scale: 1 }}
                     className="inline-flex items-center gap-2"
                   >
-                    <span className="text-xs text-neutral-400">
+                    <span className="type-caption text-[var(--fg-2)]">
                       确认移除?
                     </span>
-                    <button
-                      type="button"
+                    <Button
+                      variant="danger"
+                      size="sm"
                       onClick={onRemove}
-                      className="inline-flex items-center gap-1 min-h-[32px] px-3 rounded-lg bg-red-500/80 hover:bg-red-500 text-white text-xs transition-colors"
                     >
                       移除
-                    </button>
-                    <button
-                      type="button"
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       onClick={() => onDeleteConfirm(false)}
-                      className="inline-flex items-center gap-1 min-h-[32px] px-3 rounded-lg bg-white/5 hover:bg-white/10 text-neutral-300 text-xs transition-colors"
                     >
-                      取消
-                    </button>
+                      {copy.action.cancel}
+                    </Button>
                   </motion.div>
                 ) : (
-                  <button
-                    type="button"
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={() => onDeleteConfirm(true)}
-                    className="inline-flex items-center gap-1 min-h-[36px] sm:h-7 px-2.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-xs text-red-300 transition-colors"
+                    leftIcon={<Trash2 className="w-3 h-3" />}
+                    className="bg-danger-soft border-danger-border text-danger hover:bg-danger/20"
                   >
-                    <Trash2 className="w-3 h-3" /> 移除
-                  </button>
+                    移除
+                  </Button>
                 )}
               </div>
             </div>
@@ -2157,9 +2157,9 @@ const DraftCard = forwardRef<
 
 function fieldCls(hasError: boolean): string {
   const base =
-    "w-full min-h-[44px] sm:h-9 px-3 rounded-xl bg-[var(--bg-0)]/70 border text-sm font-mono text-[var(--fg-0)] focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors";
+    "w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border text-sm font-mono text-[var(--fg-0)] focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors";
   if (hasError) {
-    return `${base} border-red-500/50 focus:border-red-500/50 focus:ring-red-500/25`;
+    return `${base} border-danger-border focus:border-danger-border focus:ring-danger/25`;
   }
   return `${base} border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25`;
 }
@@ -2180,15 +2180,15 @@ function Field({
   return (
     <div>
       <div className="flex items-baseline gap-1.5 mb-1.5">
-        <span className="text-xs text-neutral-300 font-medium">
+        <span className="type-caption text-[var(--fg-1)] font-medium">
           {label}
-          {required && <span className="text-red-400 ml-0.5">*</span>}
+          {required && <span className="text-danger ml-0.5">*</span>}
         </span>
         {hint && !error && (
-          <span className="text-[10px] text-neutral-600">{hint}</span>
+          <span className="text-[10px] text-[var(--fg-3)]">{hint}</span>
         )}
         {error && (
-          <span className="text-[10px] text-red-400 flex items-center gap-0.5">
+          <span className="text-[10px] text-danger flex items-center gap-0.5">
             <AlertCircle className="w-2.5 h-2.5" /> {error}
           </span>
         )}

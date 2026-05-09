@@ -102,7 +102,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
 
           {done ? (
             <div className="space-y-4">
-              <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-5 text-sm text-emerald-200">
+              <div className="rounded-[var(--radius-dialog)] border border-success-border bg-success-soft p-5 type-body-sm text-success">
                 <div className="flex items-start gap-2">
                   <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
                   密码已更新，请重新登录。
@@ -148,7 +148,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                   className={
                     "mt-1.5 text-[11px] " +
                     (password.length > 0 && passwordTooShort
-                      ? "text-red-300"
+                      ? "text-danger"
                       : "text-[var(--fg-2)]")
                   }
                 >
@@ -173,19 +173,19 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                   className={
                     "h-10 w-full rounded-xl border bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
                     (confirmMismatch
-                      ? "border-red-500/40 focus:border-red-500/60 focus:ring-red-500/20"
+                      ? "border-danger-border focus:border-danger focus:ring-danger/20"
                       : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
                   }
                 />
                 {confirmMismatch && (
-                  <p className="mt-1.5 flex items-center gap-1 text-xs text-red-300">
+                  <p className="mt-1.5 flex items-center gap-1 type-caption text-danger">
                     <AlertCircle className="h-3 w-3" /> 两次输入不一致
                   </p>
                 )}
               </Field>
 
               {error && (
-                <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300">
+                <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   {error}
                 </div>
@@ -257,11 +257,11 @@ function passwordStrength(pw: string): Strength {
   const clamped = Math.min(4, score) as 0 | 1 | 2 | 3 | 4;
   const labels = ["太弱", "较弱", "一般", "良好", "强"];
   const colors = [
-    "bg-red-500/70",
-    "bg-orange-400/70",
-    "bg-amber-400/70",
-    "bg-emerald-400/70",
-    "bg-emerald-400",
+    "bg-danger/70",
+    "bg-warning/70",
+    "bg-warning/70",
+    "bg-success/70",
+    "bg-success",
   ];
   return { score: clamped, label: labels[clamped], color: colors[clamped] };
 }

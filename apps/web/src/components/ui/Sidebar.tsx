@@ -31,6 +31,8 @@ import {
 import type { ConversationSummary } from "@/lib/apiClient";
 import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
+import { Button, IconButton } from "./primitives";
 import { ConversationItem, titleOf } from "./sidebar/ConversationItem";
 import { SearchBox } from "./sidebar/SearchBox";
 
@@ -335,6 +337,8 @@ export function Sidebar() {
         {/* ——— 品牌栏 ——— */}
         <div className="px-4 pt-4 pb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
+            {/* Lumen 品牌徽标渐变：琥珀→orange，非状态色，token 化无意义 */}
+            {/* eslint-disable-next-line no-restricted-syntax */}
             <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--accent)] to-orange-300 flex items-center justify-center shadow-[0_0_12px_rgba(242,169,58,0.4)]">
               <Sparkles className="w-3 h-3 text-black/70" strokeWidth={2.5} />
             </span>
@@ -342,15 +346,16 @@ export function Sidebar() {
               Lumen
             </span>
           </div>
-          <button
-            type="button"
+          <IconButton
+            variant="ghost"
+            size="sm"
             onClick={toggleSidebar}
             aria-label="收起侧栏"
-            title="收起侧栏"
-            className="md:hidden w-7 h-7 inline-flex items-center justify-center rounded-md text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/5 active:scale-[0.95] transition-all"
+            tooltip="收起侧栏"
+            className="md:hidden"
           >
             <PanelLeftClose className="w-4 h-4" />
-          </button>
+          </IconButton>
         </div>
 
         {/* ——— 主 CTA：新建会话 ——— */}
@@ -385,7 +390,7 @@ export function Sidebar() {
             </kbd>
           </motion.button>
           {createMut.isError && (
-            <p className="mt-2 text-[11px] text-red-300/80 leading-snug">
+            <p className="mt-2 text-[11px] text-danger leading-snug">
               新建失败：{createMut.error?.message ?? "未知错误"}
             </p>
           )}
@@ -421,17 +426,17 @@ export function Sidebar() {
               id="sidebar-tab-images"
             />
             <div ref={archiveMenuRef} className="relative">
-              <button
-                type="button"
+              <IconButton
+                variant="ghost"
+                size="sm"
                 aria-label="更多会话入口"
                 aria-haspopup="menu"
                 aria-expanded={archiveMenuOpen}
                 onClick={() => setArchiveMenuOpen((open) => !open)}
                 className={cn(
-                  "relative h-8 w-9 rounded-md inline-flex items-center justify-center text-xs transition-colors",
-                  "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
+                  "relative h-8 w-9 rounded-[var(--radius-control)]",
                   studioView === "chat" && tab === "archived"
-                    ? "bg-white/10 text-[var(--fg-0)] shadow-sm"
+                    ? "bg-white/10 text-[var(--fg-0)]"
                     : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                 )}
               >
@@ -439,7 +444,7 @@ export function Sidebar() {
                 {archivedTotal > 0 && (
                   <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
                 )}
-              </button>
+              </IconButton>
               <AnimatePresence>
                 {archiveMenuOpen && (
                   <motion.div
@@ -450,11 +455,12 @@ export function Sidebar() {
                     exit={{ opacity: 0, y: -4, scale: 0.98 }}
                     transition={{ duration: 0.14 }}
                     className={cn(
-                      "absolute right-0 top-10 z-20 min-w-40 overflow-hidden rounded-lg",
+                      "absolute right-0 top-10 z-20 min-w-40 overflow-hidden rounded-[var(--radius-card)]",
                       "border border-[var(--border-subtle)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]",
                     )}
                   >
-                    <button
+                    {/* @list-item-ok: menu item, 行内 a11y role + 横向布局 */}
+<button
                       type="button"
                       role="menuitem"
                       onClick={() => {
@@ -463,7 +469,7 @@ export function Sidebar() {
                         setArchiveMenuOpen(false);
                       }}
                       className={cn(
-                        "flex h-10 w-full items-center gap-2 px-3 text-left text-xs",
+                        "flex h-10 w-full items-center gap-2 px-3 text-left type-caption",
                         "text-[var(--fg-0)] hover:bg-[var(--bg-2)] transition-colors",
                         "focus-visible:outline-none focus-visible:bg-[var(--bg-2)]",
                       )}
@@ -495,15 +501,15 @@ export function Sidebar() {
           {isInitialLoading && <ListSkeleton />}
 
           {!list.isLoading && list.isError && (
-            <div className="mx-2 px-2 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-300">
+            <div className="mx-2 px-2 py-2 rounded-[var(--radius-card)] bg-danger-soft border border-danger-border type-caption text-danger">
               加载失败
-              <button
-                type="button"
+              <Button
+                variant="link"
                 onClick={() => list.refetch()}
-                className="ml-2 underline hover:text-red-200"
+                className="ml-2 text-danger no-underline underline hover:opacity-80"
               >
-                重试
-              </button>
+                {copy.action.retry}
+              </Button>
             </div>
           )}
 
@@ -579,26 +585,27 @@ export function Sidebar() {
           {list.hasNextPage && (
             <div className="px-4 pt-1">
               {list.isFetchNextPageError ? (
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  fullWidth
                   onClick={() => list.fetchNextPage()}
                   disabled={list.isFetchingNextPage}
-                  className="w-full h-8 text-xs text-red-300 hover:text-red-200 rounded-lg bg-red-500/10 border border-red-500/20 transition-colors disabled:opacity-50"
+                  className="bg-danger-soft border-danger-border text-danger hover:opacity-90"
                 >
-                  {list.isFetchingNextPage ? "重试中…" : "加载失败,重试"}
-                </button>
+                  {list.isFetchingNextPage ? "重试中" : "加载失败,重试"}
+                </Button>
               ) : (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  fullWidth
                   onClick={() => list.fetchNextPage()}
                   disabled={list.isFetchingNextPage}
-                  className="w-full h-8 text-xs text-[var(--fg-1)] hover:text-[var(--fg-0)] rounded-lg hover:bg-white/5 transition-colors disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+                  loading={list.isFetchingNextPage}
                 >
-                  {list.isFetchingNextPage && (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  )}
-                  {list.isFetchingNextPage ? "加载中…" : "加载更多"}
-                </button>
+                  {list.isFetchingNextPage ? copy.state.loading : "加载更多"}
+                </Button>
               )}
             </div>
           )}
@@ -800,7 +807,8 @@ function TabButton({
   id?: string;
 }) {
   return (
-    <button
+    /* @list-item-ok: tab 按钮，role="tab" + 等宽 flex-1 + 内嵌 badge，不适合 Button primitive */
+<button
       type="button"
       role="tab"
       id={id}
@@ -808,10 +816,10 @@ function TabButton({
       aria-controls={controls}
       onClick={onClick}
       className={cn(
-        "flex-1 h-8 inline-flex items-center justify-center gap-1.5 rounded-md text-xs transition-all",
+        "flex-1 h-8 inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-control)] type-caption transition-all",
         "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
         active
-          ? "bg-white/10 text-[var(--fg-0)] shadow-sm"
+          ? "bg-white/10 text-[var(--fg-0)]"
           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
       )}
     >
@@ -822,7 +830,7 @@ function TabButton({
             "inline-flex items-center justify-center h-4 min-w-[18px] px-1 rounded-full text-[10px] font-mono",
             active
               ? "bg-[var(--accent)]/20 text-[var(--accent)]"
-              : "bg-white/5 text-neutral-500",
+              : "bg-white/5 text-[var(--fg-2)]",
           )}
         >
           {badge}
@@ -849,16 +857,16 @@ function EmptyState({
   if (query) {
     return (
       <div className="px-4 py-6 text-center">
-        <p className="text-xs text-neutral-500 mb-3">
+        <p className="type-caption text-[var(--fg-2)] mb-3">
           没有匹配「{query}」的会话
         </p>
-        <button
-          type="button"
+        <Button
+          variant="link"
           onClick={onClearQuery}
-          className="text-xs text-[var(--accent)] hover:underline"
+          className="text-[var(--accent)] no-underline hover:underline"
         >
           清除搜索
-        </button>
+        </Button>
       </div>
     );
   }
@@ -866,27 +874,27 @@ function EmptyState({
     return (
       <div className="px-4 py-8 text-center">
         <div className="mx-auto w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-2.5">
-          <Inbox className="w-4 h-4 text-neutral-500" />
+          <Inbox className="w-4 h-4 text-[var(--fg-2)]" />
         </div>
-        <p className="text-xs text-neutral-500">归档为空</p>
+        <p className="type-caption text-[var(--fg-2)]">归档为空</p>
       </div>
     );
   }
   return (
     <div className="px-4 py-8 text-center">
       <div className="mx-auto w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-2.5">
-        <Inbox className="w-4 h-4 text-neutral-500" />
+        <Inbox className="w-4 h-4 text-[var(--fg-2)]" />
       </div>
-      <p className="text-xs text-neutral-400 mb-3">还没有会话</p>
-      <button
-        type="button"
+      <p className="type-caption text-[var(--fg-2)] mb-3">还没有会话</p>
+      <Button
+        variant="link"
         onClick={onCreate}
         disabled={creating}
-        className="inline-flex items-center gap-1.5 text-xs text-[var(--accent)] hover:underline disabled:opacity-60"
+        className="text-[var(--accent)] no-underline hover:underline"
+        leftIcon={<MessageSquarePlus className="w-3.5 h-3.5" />}
       >
-        <MessageSquarePlus className="w-3.5 h-3.5" />
         开始你的第一次对话
-      </button>
+      </Button>
     </div>
   );
 }

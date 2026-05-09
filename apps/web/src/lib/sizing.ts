@@ -117,6 +117,42 @@ export function ratioInstruction(aspect: AspectRatio): string {
 }
 
 /**
+ * 给定原图宽高，返回 RATIO_MAP 中**最接近**的 AspectRatio。
+ * 用 log-ratio 距离（对横竖构图对称），避免 16:9 / 21:9 在大宽比下被误并到 1:1。
+ *
+ * 用例：局部修改（inpaint）从源图反推比例；用户上传图反推默认比例。
+ * 退化：w/h 非有效正数时返回 "1:1"（最安全的 fallback，不会引入构图偏差）。
+ */
+export function nearestAspectRatio(
+  w: number | null | undefined,
+  h: number | null | undefined,
+): AspectRatio {
+  if (
+    typeof w !== "number" ||
+    typeof h !== "number" ||
+    !Number.isFinite(w) ||
+    !Number.isFinite(h) ||
+    w <= 0 ||
+    h <= 0
+  ) {
+    return "1:1";
+  }
+  const target = Math.log(w / h);
+  let best: AspectRatio = "1:1";
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const [key, { w: rw, h: rh }] of Object.entries(RATIO_MAP) as Array<
+    [AspectRatio, { w: number; h: number }]
+  >) {
+    const dist = Math.abs(Math.log(rw / rh) - target);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = key;
+    }
+  }
+  return best;
+}
+
+/**
  * 把 "W:H" 字符串转 CSS aspect-ratio（"W / H"），无效时回退 "4 / 3"。
  * Canonical 实现：跨端（components/desktop / mobile / DevelopingCard）从此处 import，
  * 避免 3 处重复定义。

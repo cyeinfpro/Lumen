@@ -54,7 +54,7 @@ export function SegmentedControl<V extends string = string>({
             haptic="light"
             onPress={() => onChange(item.value)}
             className={[
-              "relative z-[1] h-9 flex-1 rounded-[var(--radius-md)] px-3 gap-1.5",
+              "relative z-[1] h-9 flex-1 min-w-0 rounded-[var(--radius-md)] px-2 sm:px-3 gap-1.5",
               "text-[13px] font-medium transition-colors",
               active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
             ].join(" ")}
@@ -67,10 +67,10 @@ export function SegmentedControl<V extends string = string>({
                 aria-hidden
               />
             )}
-            <span className="relative z-[1] flex w-full items-center justify-center gap-1.5">
+            <span className="relative z-[1] flex w-full min-w-0 items-center justify-center gap-1.5 whitespace-nowrap">
               {item.label}
               {item.badge != null && (
-                <span className="text-[10px] tracking-wider text-[var(--fg-2)]">
+                <span className="shrink-0 text-[10px] tracking-wider text-[var(--fg-2)]">
                   {item.badge}
                 </span>
               )}

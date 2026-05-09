@@ -111,8 +111,8 @@ export function ReasoningEffortPicker() {
         className={cn(
           "m-auto w-[min(18rem,calc(100vw-1.5rem))] max-h-[min(80dvh,420px)] overflow-y-auto p-1.5",
           "mobile-dialog-scroll max-sm:fixed max-sm:inset-x-0 max-sm:bottom-[var(--mobile-dialog-bottom-gap)] max-sm:top-auto max-sm:m-0 max-sm:max-h-[var(--mobile-dialog-sheet-max-height)] max-sm:w-full max-sm:rounded-b-none max-sm:p-2",
-          "rounded-2xl bg-[var(--bg-1)]/96 backdrop-blur-xl",
-          "border border-[var(--border)] shadow-2xl shadow-black/25",
+          "rounded-[var(--radius-dialog)] bg-[var(--bg-1)]/96 backdrop-blur-xl",
+          "border border-[var(--border)] shadow-[var(--shadow-3)]",
           "text-[var(--fg-0)]",
           // dialog 默认有 margin:auto 居中；backdrop 通过 CSS 自定义
           "backdrop:bg-black/40 backdrop:backdrop-blur-[2px]",

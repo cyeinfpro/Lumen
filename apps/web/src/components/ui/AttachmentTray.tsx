@@ -10,7 +10,7 @@ import { X } from "lucide-react";
 import { useChatStore } from "@/store/useChatStore";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState } from "react";
-import { toast } from "@/components/ui/primitives";
+import { IconButton, toast } from "@/components/ui/primitives";
 
 export function AttachmentTray() {
   const attachments = useChatStore((s) => s.composer.attachments);
@@ -66,8 +66,8 @@ export function AttachmentTray() {
               }}
               whileHover={{ scale: 1.05 }}
               className={cn(
-                "relative shrink-0 h-16 w-16 sm:h-20 sm:w-20 rounded-xl overflow-hidden snap-start",
-                "border bg-neutral-800 cursor-default",
+                "relative shrink-0 h-16 w-16 sm:h-20 sm:w-20 rounded-[var(--radius-card)] overflow-hidden snap-start",
+                "border bg-[var(--bg-2)] cursor-default",
                 "transition-[border-color,box-shadow] duration-150",
                 idx === 0
                   ? "border-[var(--color-lumen-amber)]/60 ring-1 ring-[var(--color-lumen-amber)]/40 shadow-[0_0_14px_rgba(242,169,58,0.18)]"
@@ -95,10 +95,10 @@ export function AttachmentTray() {
               {idx === 0 && (
                 <span
                   className={cn(
-                    "absolute left-1 top-1 px-1.5 py-0.5 rounded-md",
+                    "absolute left-1 top-1 px-1.5 py-0.5 rounded-[var(--radius-control)]",
                     "text-[9px] font-bold tracking-wider uppercase",
                     "bg-[var(--color-lumen-amber)] text-black",
-                    "shadow-[0_2px_6px_rgba(0,0,0,0.35)]",
+                    "shadow-[var(--shadow-1)]",
                   )}
                   aria-label="主参考图"
                 >
@@ -106,8 +106,7 @@ export function AttachmentTray() {
                 </span>
               )}
 
-              <button
-                type="button"
+              <IconButton
                 onClick={() => {
                   // 暂存被删的 attachment 以便 toast undo 还原
                   const removed = att;
@@ -121,18 +120,17 @@ export function AttachmentTray() {
                 }}
                 aria-label={`移除参考图 ${idx + 1}`}
                 title="移除"
+                size="sm"
+                variant="ghost"
                 className={cn(
                   // 移动端放大到 7×7 + 外圈 hit-area，防止误触命中附件本身
-                  "absolute right-1 top-1 h-7 w-7 sm:h-6 sm:w-6 rounded-full",
-                  "inline-flex items-center justify-center",
+                  "absolute right-1 top-1 !h-7 !w-7 sm:!h-6 sm:!w-6 max-sm:!min-h-7 max-sm:!min-w-7 rounded-full",
                   "bg-black/65 text-white backdrop-blur-sm border border-white/10",
-                  "hover:bg-red-500/85 hover:border-red-300/40",
-                  "active:scale-[0.92] transition-all duration-150",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70",
+                  "hover:bg-danger hover:border-danger-border",
                 )}
               >
                 <X className="h-3 w-3" />
-              </button>
+              </IconButton>
             </motion.div>
           ))}
         </AnimatePresence>

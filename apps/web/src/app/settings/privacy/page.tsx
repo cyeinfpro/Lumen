@@ -22,7 +22,6 @@ import {
   ArrowLeft,
   Check,
   Download,
-  Loader2,
   LogOut,
   Monitor,
   Trash2,
@@ -43,6 +42,8 @@ import type { SessionOut } from "@/lib/types";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
+import { Button } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 
 const SESSION_SKELETON_KEYS = [
   "session-skeleton-current",
@@ -76,7 +77,7 @@ export default function PrivacyPage() {
           </div>
           <Link
             href="/me"
-            className="inline-flex items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors whitespace-nowrap"
           >
             <ArrowLeft className="w-4 h-4" />
             返回我的
@@ -104,15 +105,15 @@ function SectionHeader({
     <div className="flex items-center gap-2">
       <h2
         className={
-          "text-xs font-medium uppercase tracking-wider " +
-          (tone === "danger" ? "text-red-300/90" : "text-[var(--fg-1)]")
+          "type-overline " +
+          (tone === "danger" ? "text-danger" : "text-[var(--fg-1)]")
         }
       >
         {title}
       </h2>
       <div className="flex-1 h-px bg-white/8" />
       {description && (
-        <p className="text-xs text-neutral-500">{description}</p>
+        <p className="type-caption text-[var(--fg-2)]">{description}</p>
       )}
     </div>
   );
@@ -162,14 +163,14 @@ function ExportSection() {
   return (
     <section className="space-y-3">
       <SectionHeader title="导出我的数据" />
-      <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 flex items-center justify-between gap-4 flex-wrap">
+      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-start gap-3 flex-1 min-w-[200px]">
-          <div className="shrink-0 w-9 h-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-neutral-300">
+          <div className="shrink-0 w-9 h-9 rounded-[var(--radius-control)] bg-white/5 border border-[var(--border)] flex items-center justify-center text-[var(--fg-1)]">
             <Download className="w-4 h-4" />
           </div>
           <div>
-            <p className="text-sm text-neutral-100">打包下载你的全部数据</p>
-            <p className="text-xs text-neutral-500 mt-1">
+            <p className="type-body-sm text-[var(--fg-0)]">打包下载你的全部数据</p>
+            <p className="type-caption text-[var(--fg-2)] mt-1">
               包含对话、消息和图像引用，输出为 zip（数秒至数十秒）。
             </p>
             <AnimatePresence>
@@ -178,16 +179,16 @@ function ExportSection() {
                   initial={{ opacity: 0, y: -2 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  className="flex items-center gap-1.5 text-xs text-emerald-300 mt-2"
+                  className="flex items-center gap-1.5 type-caption text-success mt-2"
                 >
-                  <Check className="w-3.5 h-3.5" /> 下载已开始，请检查浏览器下载栏
+                  <Check className="w-3.5 h-3.5" /> 下载已开始，查看浏览器下载栏
                 </motion.p>
               )}
               {error && (
                 <motion.p
                   initial={{ opacity: 0, y: -2 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="flex items-center gap-1.5 text-xs text-red-300 mt-2"
+                  className="flex items-center gap-1.5 type-caption text-danger mt-2"
                 >
                   <AlertCircle className="w-3.5 h-3.5" /> {error}
                 </motion.p>
@@ -195,22 +196,17 @@ function ExportSection() {
             </AnimatePresence>
           </div>
         </div>
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="md"
           onClick={onExport}
           disabled={busy}
-          className="inline-flex items-center justify-center gap-1.5 h-11 sm:h-9 w-full sm:w-auto px-4 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-sm disabled:opacity-50 whitespace-nowrap transition-colors"
+          loading={busy}
+          leftIcon={!busy ? <Download className="w-3.5 h-3.5" /> : undefined}
+          className="w-full sm:w-auto whitespace-nowrap"
         >
-          {busy ? (
-            <>
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> 打包中
-            </>
-          ) : (
-            <>
-              <Download className="w-3.5 h-3.5" /> 下载 zip
-            </>
-          )}
-        </button>
+          {busy ? "打包中" : "下载 zip"}
+        </Button>
       </div>
     </section>
   );
@@ -246,13 +242,13 @@ function SessionsSection() {
         title="活跃会话"
         description={items.length > 0 ? `${items.length} 个设备登录中` : undefined}
       />
-      <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 backdrop-blur-sm overflow-hidden">
+      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm overflow-hidden">
         {q.isLoading ? (
           <div className="p-5 space-y-3">
             {SESSION_SKELETON_KEYS.map((key, i) => (
               <div
                 key={key}
-                className="h-14 rounded-xl bg-white/5 animate-pulse"
+                className="h-14 rounded-[var(--radius-control)] bg-white/5 animate-pulse"
                 style={{ animationDelay: `${i * 80}ms` }}
               />
             ))}
@@ -260,25 +256,26 @@ function SessionsSection() {
         ) : q.isError ? (
           <div className="p-6 flex items-center justify-between gap-4 flex-wrap">
             <div className="flex items-start gap-3 min-w-0">
-              <AlertCircle className="w-5 h-5 text-red-300 shrink-0 mt-0.5" />
+              <AlertCircle className="w-5 h-5 text-danger shrink-0 mt-0.5" />
               <div>
-                <p className="text-sm text-red-200">加载失败</p>
-                <p className="text-xs text-neutral-400 mt-1">
+                <p className="type-body-sm text-[var(--danger-fg)]">加载失败</p>
+                <p className="type-caption text-[var(--fg-2)] mt-1">
                   {q.error?.message ?? "未知错误"}
                 </p>
               </div>
             </div>
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="md"
               onClick={() => void q.refetch()}
-              className="h-11 sm:h-9 w-full sm:w-auto px-4 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-sm transition-colors"
+              className="w-full sm:w-auto"
             >
-              重试
-            </button>
+              {copy.action.retry}
+            </Button>
           </div>
         ) : items.length === 0 ? (
-          <div className="p-10 text-center text-sm text-neutral-500">
-            没有活跃会话
+          <div className="p-10 text-center type-body-sm text-[var(--fg-2)]">
+            {copy.state.empty}
           </div>
         ) : (
           <ul className="divide-y divide-white/5">
@@ -298,7 +295,7 @@ function SessionsSection() {
         )}
       </div>
       {revokeError && (
-        <p className="flex items-center gap-1.5 text-sm text-red-300">
+        <p className="flex items-center gap-1.5 type-body-sm text-[var(--danger-fg)]">
           <AlertCircle className="w-4 h-4" /> {revokeError}
         </p>
       )}
@@ -333,22 +330,22 @@ function SessionRow({
       className="px-5 py-4 flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4 hover:bg-white/[0.02] transition-colors"
     >
       <div className="min-w-0 flex-1 flex items-start gap-3">
-        <div className="shrink-0 w-8 h-8 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center text-neutral-400">
+        <div className="shrink-0 w-8 h-8 rounded-[var(--radius-control)] bg-white/5 border border-[var(--border)] flex items-center justify-center text-[var(--fg-2)]">
           <Monitor className="w-4 h-4" />
         </div>
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm text-neutral-100 truncate">
+            <span className="type-body-sm text-[var(--fg-0)] truncate">
               {s.ua ? truncate(s.ua, 80) : "未知设备"}
             </span>
             {s.is_current && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
-                <span className="w-1 h-1 rounded-full bg-[var(--color-lumen-amber)]" />
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[10px] bg-accent-soft text-accent border border-accent-border">
+                <span className="w-1 h-1 rounded-full bg-accent" />
                 当前会话
               </span>
             )}
           </div>
-          <div className="mt-1 text-xs text-neutral-500 font-mono tabular-nums flex flex-wrap gap-x-4 gap-y-0.5">
+          <div className="mt-1 type-caption text-[var(--fg-2)] font-mono tabular-nums flex flex-wrap gap-x-4 gap-y-0.5">
             <span>IP {s.ip ?? "—"}</span>
             <span>创建 {created}</span>
             <span>到期 {expires}</span>
@@ -356,43 +353,44 @@ function SessionRow({
         </div>
       </div>
       {s.is_current ? (
-        <span className="text-xs text-neutral-600 w-full md:w-auto md:self-center">—</span>
+        <span className="type-caption text-[var(--fg-2)] w-full md:w-auto md:self-center">—</span>
       ) : confirming ? (
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           className="w-full md:w-auto inline-flex items-center gap-2 md:self-center"
         >
-          <span className="text-xs text-neutral-400">确认?</span>
-          <button
-            type="button"
+          <span className="type-caption text-[var(--fg-1)]">确认？</span>
+          <Button
+            variant="danger"
+            size="sm"
             onClick={onConfirm}
             disabled={pending}
-            aria-disabled={pending}
-            className="flex-1 md:flex-none h-7 px-2.5 rounded-md bg-red-500/80 hover:bg-red-500 text-white text-xs disabled:opacity-50 transition-colors"
+            loading={pending}
+            className="flex-1 md:flex-none"
           >
             {pending ? "踢下线中" : "踢下线"}
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={onCancel}
             disabled={pending}
-            aria-disabled={pending}
-            className="flex-1 md:flex-none h-7 px-2.5 rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 text-xs disabled:opacity-50 transition-colors"
+            className="flex-1 md:flex-none"
           >
-            取消
-          </button>
+            {copy.action.cancel}
+          </Button>
         </motion.div>
       ) : (
-        /* @hit-area-ok: settings page button, md:h-auto collapses to text-link on desktop, mobile h-9 acceptable in settings context */
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={onActivate}
-          className="w-full md:w-auto inline-flex items-center justify-center gap-1 md:self-center text-xs text-red-300 hover:text-red-200 transition-colors h-9 md:h-auto rounded-md bg-white/5 md:bg-transparent border border-white/10 md:border-0 md:p-0"
+          leftIcon={<LogOut className="w-3 h-3" />}
+          className="w-full md:w-auto md:self-center text-danger hover:text-danger"
         >
-          <LogOut className="w-3 h-3" />
           踢下线
-        </button>
+        </Button>
       )}
     </motion.li>
   );
@@ -456,15 +454,15 @@ function DangerSection({
   return (
     <section className="space-y-3">
       <SectionHeader title="危险区" tone="danger" />
-      <div className="rounded-2xl border border-red-500/30 bg-red-500/[0.04] p-5 space-y-4">
+      <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-5 space-y-4">
         <div className="flex items-start gap-3">
-          <div className="shrink-0 w-9 h-9 rounded-xl bg-red-500/10 border border-red-500/25 text-red-300 flex items-center justify-center">
+          <div className="shrink-0 w-9 h-9 rounded-[var(--radius-control)] bg-danger-soft border border-danger-border text-danger flex items-center justify-center">
             <AlertTriangle className="w-4 h-4" />
           </div>
           <div>
-            <p className="text-sm text-[var(--fg-0)]">删除我的账号</p>
-            <p className="text-xs text-[var(--fg-1)] mt-1 leading-relaxed">
-              软删账号；所有登录会话立即失效，对话与图像会被标记为删除。保留期内可申请恢复，超过后将被永久清除。
+            <p className="type-body-sm text-[var(--fg-0)]">删除我的账号</p>
+            <p className="type-caption text-[var(--fg-1)] mt-1 leading-relaxed">
+              软删账号；所有登录会话立即失效，对话与图像会被标记为删除。保留期内可申请恢复，超后永久清除。
             </p>
           </div>
         </div>
@@ -472,9 +470,9 @@ function DangerSection({
         <div>
           <label
             htmlFor="confirm-email"
-            className="block text-[11px] font-medium uppercase tracking-wider text-[var(--fg-1)] mb-1.5"
+            className="block type-overline text-[var(--fg-1)] mb-1.5"
           >
-            输入你的邮箱以确认
+            输入邮箱以确认
             {email && (
               <span className="ml-1 font-mono text-[var(--fg-1)] normal-case tracking-normal">
                 ({email})
@@ -489,65 +487,60 @@ function DangerSection({
               setConfirmEmail(e.target.value);
               setArmed(false);
             }}
-            placeholder={email ?? (loading ? "加载中…" : "请先登录")}
+            placeholder={email ?? (loading ? copy.state.loading : "未登录")}
             disabled={!email || del.isPending}
             autoComplete="off"
-            className="w-full h-9 px-3 rounded-xl bg-[var(--bg-1)]/72 border border-[var(--border)] text-sm focus:outline-none focus:border-red-400/60 focus:ring-2 focus:ring-red-400/20 placeholder:text-[var(--fg-2)] disabled:opacity-50 transition-colors"
+            className="w-full h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-1)]/72 border border-[var(--border)] text-sm focus:outline-none focus:border-danger-border focus:ring-2 focus:ring-[var(--danger)]/20 placeholder:text-[var(--fg-2)] disabled:opacity-50 transition-colors"
           />
           {confirmEmail && !matches && (
-            <p className="text-xs text-[var(--fg-2)] mt-1.5">
-              邮箱与当前账号不匹配
+            <p className="type-caption text-[var(--fg-2)] mt-1.5">
+              邮箱不匹配
             </p>
           )}
         </div>
 
         {error && (
-          <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300 flex items-start gap-2">
+          <div className="rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-[var(--danger-fg)] flex items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             {error}
           </div>
         )}
 
         {!armed ? (
-          <button
-            type="button"
+          <Button
+            variant="danger"
+            size="md"
             onClick={() => setArmed(true)}
             disabled={!matches || del.isPending}
-            className="w-full inline-flex items-center justify-center gap-1.5 h-10 px-5 rounded-xl bg-red-500/80 hover:bg-red-500 text-white text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            leftIcon={<Trash2 className="w-4 h-4" />}
+            fullWidth
           >
-            <Trash2 className="w-4 h-4" /> 准备删除账号
-          </button>
+            准备删除账号
+          </Button>
         ) : (
           <motion.div
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             className="grid grid-cols-2 gap-2"
           >
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="md"
               onClick={() => setArmed(false)}
               disabled={del.isPending}
-              className="h-10 rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm disabled:opacity-50 transition-colors"
             >
-              取消
-            </button>
-            {/* @hit-area-ok: settings danger zone confirm button, h-10 acceptable in desktop settings context */}
-            <button
-              type="button"
+              {copy.action.cancel}
+            </Button>
+            <Button
+              variant="danger"
+              size="md"
               onClick={onDelete}
               disabled={!matches || del.isPending}
-              className="h-10 inline-flex items-center justify-center gap-1.5 rounded-xl bg-red-500 hover:brightness-110 active:scale-[0.97] text-white text-sm font-medium disabled:opacity-40 transition-all"
+              loading={del.isPending}
+              leftIcon={!del.isPending ? <Trash2 className="w-4 h-4" /> : undefined}
             >
-              {del.isPending ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" /> 删除中
-                </>
-              ) : (
-                <>
-                  <Trash2 className="w-4 h-4" /> 永久删除
-                </>
-              )}
-            </button>
+              {del.isPending ? "删除中" : "永久删除"}
+            </Button>
           </motion.div>
         )}
       </div>

@@ -22,6 +22,8 @@ import {
 import { apiFetch } from "@/lib/apiClient";
 import type { UsageOut } from "@/lib/types";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
+import { Button } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 
 const PRIMARY_SKELETON_KEYS = [
   "messages",
@@ -64,7 +66,7 @@ export default function UsagePage() {
               过去 {selectedPeriod.label} 的使用记录
             </p>
             {q.data && (
-              <p className="text-xs text-neutral-500 mt-1 font-mono tabular-nums">
+              <p className="type-caption text-[var(--fg-2)] mt-1 font-mono tabular-nums">
                 {formatDay(q.data.range_start)} —{" "}
                 {formatDay(q.data.range_end)}
               </p>
@@ -74,7 +76,7 @@ export default function UsagePage() {
             <UsageRangePicker value={days} onChange={setDays} pending={q.isFetching} />
             <Link
               href="/me"
-              className="hidden items-center gap-1.5 text-sm text-neutral-400 hover:text-neutral-100 transition-colors md:inline-flex"
+              className="hidden items-center gap-1.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors md:inline-flex"
             >
               <ArrowLeft className="w-4 h-4" />
               返回我的
@@ -113,12 +115,13 @@ function UsageRangePicker({
 }) {
   return (
     <div
-      className="inline-flex items-center gap-1 rounded-xl border border-white/10 bg-white/[0.04] p-1"
+      className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-white/[0.04] p-1"
       aria-label="用量时间范围"
     >
-      <CalendarDays className="ml-2 h-3.5 w-3.5 text-neutral-500" />
+      <CalendarDays className="ml-2 h-3.5 w-3.5 text-[var(--fg-2)]" />
       {USAGE_PERIODS.map((period) => {
         const active = value === period.value;
+        // segmented control 内部按钮：保留原生 button，避免 Button 物理动效干扰相邻态
         return (
           <button
             key={period.value}
@@ -126,10 +129,10 @@ function UsageRangePicker({
             onClick={() => onChange(period.value)}
             disabled={pending && active}
             className={
-              "h-8 rounded-lg px-2.5 text-xs transition-colors " +
+              "h-8 rounded-[var(--radius-control)] px-2.5 type-caption transition-colors " +
               (active
-                ? "bg-[var(--color-lumen-amber)] text-black"
-                : "text-neutral-400 hover:bg-white/8 hover:text-neutral-100")
+                ? "bg-accent text-black"
+                : "text-[var(--fg-1)] hover:bg-white/8 hover:text-[var(--fg-0)]")
             }
           >
             {period.label}
@@ -213,14 +216,14 @@ function UsageView({ data }: { data: UsageOut }) {
               <div className="type-metric text-[24px] md:text-[28px]">
                 {formatThousands(data.total_tokens_in)}
               </div>
-              <div className="text-xs text-neutral-500 mt-0.5">输入</div>
+              <div className="type-caption text-[var(--fg-2)] mt-0.5">输入</div>
             </div>
             <div className="h-px w-full md:h-8 md:w-px bg-white/8" />
             <div>
               <div className="type-metric text-[24px] md:text-[28px]">
                 {formatThousands(data.total_tokens_out)}
               </div>
-              <div className="text-xs text-neutral-500 mt-0.5">输出</div>
+              <div className="type-caption text-[var(--fg-2)] mt-0.5">输出</div>
             </div>
           </div>
         </SecondaryCard>
@@ -233,7 +236,7 @@ function UsageView({ data }: { data: UsageOut }) {
           <div className="type-metric text-[24px] md:text-[28px]">
             {formatBytes(data.storage_bytes)}
           </div>
-          <div className="text-xs text-neutral-500 mt-0.5 font-mono tabular-nums">
+          <div className="type-caption text-[var(--fg-2)] mt-0.5 font-mono tabular-nums">
             {formatThousands(data.storage_bytes)} bytes
           </div>
         </SecondaryCard>
@@ -262,14 +265,14 @@ function StatCard({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.22, delay, ease: "easeOut" }}
-      className="group rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-all hover:-translate-y-0.5 hover:border-white/20 hover:bg-[var(--bg-1)]/80 hover:shadow-[0_12px_30px_-16px_rgba(0,0,0,0.6)]"
+      className="group rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-all hover:-translate-y-0.5 hover:border-[var(--border)] hover:bg-[var(--bg-1)]/80 hover:shadow-[var(--shadow-2)]"
     >
       <div className="flex items-center justify-between">
-        <span className="text-xs uppercase tracking-wider text-[var(--fg-1)]">
+        <span className="type-overline">
           {label}
         </span>
         {icon && (
-          <span className="w-7 h-7 rounded-lg bg-[var(--color-lumen-amber)]/12 border border-[var(--color-lumen-amber)]/20 text-[var(--color-lumen-amber)] flex items-center justify-center group-hover:bg-[var(--color-lumen-amber)]/20 transition-colors">
+          <span className="w-7 h-7 rounded-[var(--radius-control)] bg-accent-soft border border-accent-border text-accent flex items-center justify-center group-hover:bg-accent/20 transition-colors">
             {icon}
           </span>
         )}
@@ -278,7 +281,7 @@ function StatCard({
         {value}
       </div>
       {sublabel && (
-        <div className="text-xs text-neutral-500 mt-1">{sublabel}</div>
+        <div className="type-caption text-[var(--fg-2)] mt-1">{sublabel}</div>
       )}
       {ratio != null && (
         <div className="mt-3 h-1 rounded-full bg-white/5 overflow-hidden">
@@ -286,7 +289,7 @@ function StatCard({
             initial={{ width: 0 }}
             animate={{ width: `${Math.max(0, Math.min(100, ratio))}%` }}
             transition={{ duration: 0.5, delay: delay + 0.15 }}
-            className="h-full rounded-full bg-gradient-to-r from-[var(--color-lumen-amber)]/80 to-[var(--color-lumen-amber)]"
+            className="h-full rounded-full bg-gradient-to-r from-[var(--accent)]/80 to-[var(--accent)]"
           />
         </div>
       )}
@@ -310,14 +313,14 @@ function SecondaryCard({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.22, delay, ease: "easeOut" }}
-      className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-all hover:-translate-y-0.5 hover:border-white/20 hover:bg-[var(--bg-1)]/80 hover:shadow-[0_12px_30px_-16px_rgba(0,0,0,0.6)]"
+      className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-all hover:-translate-y-0.5 hover:border-[var(--border)] hover:bg-[var(--bg-1)]/80 hover:shadow-[var(--shadow-2)]"
     >
       <div className="flex items-center justify-between mb-3">
-        <div className="text-xs uppercase tracking-wider text-[var(--fg-1)]">
+        <div className="type-overline">
           {label}
         </div>
         {icon && (
-          <span className="w-7 h-7 rounded-lg bg-white/5 border border-white/10 text-neutral-400 flex items-center justify-center">
+          <span className="w-7 h-7 rounded-[var(--radius-control)] bg-white/5 border border-[var(--border)] text-[var(--fg-2)] flex items-center justify-center">
             {icon}
           </span>
         )}
@@ -334,7 +337,7 @@ function SkeletonGrid() {
         {PRIMARY_SKELETON_KEYS.map((key, i) => (
           <div
             key={key}
-            className="h-28 rounded-2xl bg-white/5 animate-pulse"
+            className="h-28 rounded-[var(--radius-card)] bg-white/5 animate-pulse"
             style={{ animationDelay: `${i * 80}ms` }}
           />
         ))}
@@ -343,7 +346,7 @@ function SkeletonGrid() {
         {SECONDARY_SKELETON_KEYS.map((key, i) => (
           <div
             key={key}
-            className="h-32 rounded-2xl bg-white/5 animate-pulse"
+            className="h-32 rounded-[var(--radius-card)] bg-white/5 animate-pulse"
             style={{ animationDelay: `${(i + 4) * 80}ms` }}
           />
         ))}
@@ -360,21 +363,23 @@ function ErrorBox({
   onRetry: () => void;
 }) {
   return (
-    <div className="rounded-2xl border border-red-500/30 bg-red-500/5 p-6 flex items-center justify-between gap-4 flex-wrap">
+    <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-6 flex items-center justify-between gap-4 flex-wrap">
       <div className="flex items-start gap-3 min-w-0">
-        <AlertCircle className="w-5 h-5 text-red-300 shrink-0 mt-0.5" />
+        <AlertCircle className="w-5 h-5 text-danger shrink-0 mt-0.5" />
         <div>
-          <p className="text-sm text-red-200">加载失败</p>
-          <p className="text-xs text-neutral-400 mt-1 break-words">{message}</p>
+          <p className="type-body-sm text-[var(--danger-fg)]">加载失败</p>
+          <p className="type-caption text-[var(--fg-2)] mt-1 break-words">{message}</p>
         </div>
       </div>
-      <button
-        type="button"
+      <Button
+        variant="secondary"
+        size="md"
         onClick={onRetry}
-        className="inline-flex items-center justify-center gap-1.5 h-11 sm:h-9 w-full sm:w-auto px-4 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-sm transition-colors"
+        leftIcon={<RefreshCw className="w-3.5 h-3.5" />}
+        className="w-full sm:w-auto"
       >
-        <RefreshCw className="w-3.5 h-3.5" /> 重试
-      </button>
+        {copy.action.retry}
+      </Button>
     </div>
   );
 }

@@ -16,7 +16,9 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
+import { Button } from "./primitives";
 import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
 import { logWarn } from "@/lib/logger";
 import { useUiStore } from "@/store/useUiStore";
 
@@ -88,25 +90,17 @@ function CodeBlock({
             {lang}
           </span>
         )}
-        <button
-          type="button"
+        <Button
+          variant="glass"
+          size="sm"
           onClick={handleCopy}
-          aria-label={copied ? "已复制" : "复制代码"}
-          title={copied ? "已复制" : "复制代码"}
-          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded-md border border-white/15 bg-black/60 text-neutral-300 hover:bg-black/80 hover:text-white active:scale-[0.97] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 transition-all"
+          aria-label={copied ? copy.state.copied : "复制代码"}
+          title={copied ? copy.state.copied : "复制代码"}
+          className="text-[11px] gap-1"
+          leftIcon={copied ? <Check className="w-3 h-3 text-[var(--ok)]" /> : <Copy className="w-3 h-3" />}
         >
-          {copied ? (
-            <>
-              <Check className="w-3 h-3 text-[var(--ok)]" />
-              已复制
-            </>
-          ) : (
-            <>
-              <Copy className="w-3 h-3" />
-              复制
-            </>
-          )}
-        </button>
+          {copied ? copy.state.copied : copy.action.copy}
+        </Button>
       </div>
     </div>
   );

@@ -10,9 +10,11 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, Brush, Download, Maximize2, Pencil, RefreshCw, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
 import { useInpaintStore } from "@/store/useInpaintStore";
+import { Button } from "./primitives";
 import { ViewportImage } from "./ViewportImage";
 
 interface PremiumImageCardProps {
@@ -184,7 +186,7 @@ export function PremiumImageCard({
       tabIndex={isStreaming ? -1 : 0}
       aria-label={`${alt}。按 Enter 查看大图，双击或使用按钮继续迭代。`}
       className={cn(
-        "relative overflow-hidden rounded-2xl cursor-pointer group select-none",
+        "relative overflow-hidden rounded-[var(--radius-dialog)] cursor-pointer group select-none",
         "bg-black/20 shadow-lumen-card ring-1 ring-white/10",
         // 兜底 aspect-ratio：父组件若已显式设定 aspect/高度，会覆盖本默认值，避免 CLS
         "aspect-[4/3]",
@@ -246,24 +248,20 @@ export function PremiumImageCard({
           transition={{ duration: 0.5 }}
           className={cn(
             "w-full h-full flex flex-col items-center justify-center gap-2",
-            "bg-neutral-900/40 border border-red-400/25 rounded-2xl",
+            "bg-[var(--bg-0)]/40 border border-danger-border rounded-[var(--radius-card)]",
           )}
         >
-          <span className="text-xs text-neutral-300">图片加载失败</span>
-          <button
-            type="button"
+          <span className="type-caption text-[var(--fg-1)]">图片加载失败</span>
+          <Button
+            variant="link"
             onClick={(e) => {
               e.stopPropagation();
               handleManualRetry();
             }}
-            className={cn(
-              "text-[11px] text-neutral-200 underline decoration-dotted",
-              "hover:text-white active:scale-[0.97] transition-all",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60 rounded-sm",
-            )}
+            className="text-[11px] decoration-dotted"
           >
-            重试
-          </button>
+            {copy.action.retry}
+          </Button>
         </motion.div>
       ) : (
         <motion.div
@@ -455,8 +453,9 @@ function HoverIconButton({
         compact
           ? "w-10 h-10 md:w-9 md:h-9"
           : "w-11 h-11 md:w-10 md:h-10",
-        "bg-black/60 backdrop-blur-md border border-white/15",
-        "text-white hover:bg-black/75 hover:border-white/25",
+        // 浮层透明按钮，遵循 Button variant="glass" 同款配色：黑/55 backdrop + 白边
+        "bg-black/55 backdrop-blur-md border border-white/15",
+        "text-white hover:bg-black/65 hover:border-white/25",
         "transition-colors duration-150",
         "disabled:opacity-40 disabled:pointer-events-none",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",

@@ -325,7 +325,7 @@ function AllowedEmailsPanel() {
     setFormError(null);
     const trimmed = email.trim();
     if (!trimmed) {
-      setFormError("请输入邮箱");
+      setFormError("邮箱未填");
       return;
     }
     addMut.mutate(trimmed);
@@ -381,7 +381,7 @@ function AllowedEmailsPanel() {
           </button>
         </form>
         {formError && (
-          <p className="flex items-center gap-1.5 text-xs text-red-300">
+          <p className="flex items-center gap-1.5 type-caption text-danger">
             <AlertCircle className="w-3.5 h-3.5" />
             {formError}
           </p>
@@ -537,7 +537,7 @@ function ConfirmInlineRemove({
       <button
         type="button"
         onClick={onActivate}
-        className="shrink-0 inline-flex items-center justify-center min-h-[32px] px-2.5 text-xs text-red-300 hover:text-red-200 transition-colors"
+        className="shrink-0 inline-flex items-center justify-center min-h-[32px] px-2.5 type-caption text-danger hover:opacity-90 transition-colors"
         aria-label={`移除 ${email}`}
       >
         移除
@@ -556,7 +556,7 @@ function ConfirmInlineRemove({
         type="button"
         onClick={onConfirm}
         disabled={pending}
-        className="text-xs px-3 py-1.5 min-h-[32px] rounded-md bg-red-500/80 hover:bg-red-500 text-white disabled:opacity-50 transition-colors"
+        className="type-caption px-3 py-1.5 min-h-[32px] rounded-[var(--radius-control)] bg-danger hover:brightness-110 text-white disabled:opacity-50 transition-colors"
       >
         {pending ? "移除中" : "移除"}
       </button>
@@ -839,12 +839,12 @@ export function ErrorBlock({
   onRetry?: () => void;
 }) {
   return (
-    <div className="p-6 flex items-center justify-between gap-4 rounded-2xl border border-red-500/30 bg-red-500/5">
+    <div className="p-6 flex items-center justify-between gap-4 rounded-[var(--radius-dialog)] border border-danger-border bg-danger-soft">
       <div className="flex items-start gap-3">
-        <AlertCircle className="w-5 h-5 text-red-300 shrink-0 mt-0.5" />
+        <AlertCircle className="w-5 h-5 text-danger shrink-0 mt-0.5" />
         <div>
-          <p className="text-sm text-red-200">加载失败</p>
-          <p className="text-xs text-neutral-400 mt-1">{message}</p>
+          <p className="type-body-sm text-danger">加载失败</p>
+          <p className="type-caption text-[var(--fg-2)] mt-1">{message}</p>
         </div>
       </div>
       {onRetry && (

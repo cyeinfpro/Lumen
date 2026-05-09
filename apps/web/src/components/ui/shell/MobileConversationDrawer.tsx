@@ -31,6 +31,7 @@ import {
   SegmentedControl,
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import { Spinner } from "@/components/ui/primitives";
 import {
   useCreateConversationMutation,
@@ -43,6 +44,7 @@ import { useChatStore } from "@/store/useChatStore";
 import { useHaptic } from "@/hooks/useHaptic";
 import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
 
 import { ConversationRowMobile } from "@/components/ui/me/ConversationRowMobile";
 
@@ -113,7 +115,7 @@ export function MobileConversationDrawer({
     },
     onError: (err) => {
       pushMobileToast(
-        err?.message ? `新建失败：${err.message}` : "新建失败，请稍后重试",
+        err?.message ? `新建失败：${err.message}` : "新建失败，稍后重试",
         "danger",
       );
     },
@@ -317,32 +319,35 @@ export function MobileConversationDrawer({
                   {activeTotal + archivedTotal || ""}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="关闭"
+              <Pressable
+                size="default"
+                minHit={true}
+                pressScale="tight"
+                haptic="light"
+                onPress={onClose}
+                aria-label={copy.action.close}
                 className={cn(
-                  "inline-flex items-center justify-center w-9 h-9 rounded-full",
-                  "text-[var(--fg-1)] active:bg-[var(--bg-2)] active:scale-[0.94]",
-                  "transition-[background-color,transform] duration-150",
+                  "rounded-full w-9 h-9 text-[var(--fg-1)]",
                 )}
               >
                 <X className="w-[18px] h-[18px]" />
-              </button>
+              </Pressable>
             </div>
 
             {/* New conversation CTA */}
             <div className="px-4 pb-3">
-              <button
-                type="button"
-                onClick={handleCreate}
+              <Pressable
+                size="default"
+                minHit={false}
+                pressScale="soft"
+                haptic="medium"
+                onPress={handleCreate}
                 disabled={createMut.isPending}
                 className={cn(
-                  "inline-flex h-12 w-full items-center justify-center gap-2 rounded-[var(--radius-card)]",
+                  "h-12 w-full gap-2 rounded-[var(--radius-card)]",
                   "bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)]",
                   "text-black text-[15px] font-medium",
                   "shadow-[0_8px_22px_-8px_var(--amber-glow-strong)]",
-                  "active:scale-[0.985] transition-transform",
                   "disabled:opacity-60 disabled:cursor-wait",
                 )}
               >
@@ -351,8 +356,8 @@ export function MobileConversationDrawer({
                 ) : (
                   <Plus className="w-[18px] h-[18px]" strokeWidth={2.4} />
                 )}
-                {createMut.isPending ? "正在新建…" : "新建会话"}
-              </button>
+                {createMut.isPending ? "新建中" : "新建会话"}
+              </Pressable>
             </div>
 
             {/* Search */}
@@ -377,14 +382,17 @@ export function MobileConversationDrawer({
                   )}
                 />
                 {query && (
-                  <button
-                    type="button"
-                    onClick={() => setQuery("")}
+                  <Pressable
+                    size="inline"
+                    minHit={false}
+                    pressScale="tight"
+                    haptic="light"
+                    onPress={() => setQuery("")}
                     aria-label="清除搜索"
-                    className="inline-flex items-center justify-center w-6 h-6 -mr-1 rounded-full text-[var(--fg-2)] active:bg-[var(--bg-3)]"
+                    className="inline-flex items-center justify-center w-6 h-6 -mr-1 rounded-full text-[var(--fg-2)]"
                   >
                     <X className="w-3 h-3" />
-                  </button>
+                  </Pressable>
                 )}
               </div>
             </div>
@@ -415,15 +423,18 @@ export function MobileConversationDrawer({
               {isInitialLoading && <ListSkeleton />}
 
               {!isInitialLoading && list.isError && (
-                <div className="mx-4 my-4 px-3 py-3 rounded-xl bg-[var(--danger)]/10 border border-[var(--danger)]/25 text-[12.5px] text-[var(--danger)]">
+                <div className="mx-4 my-4 px-3 py-3 rounded-[var(--radius-card)] bg-danger-soft border border-danger-border text-[12.5px] text-danger">
                   加载失败
-                  <button
-                    type="button"
-                    onClick={() => list.refetch()}
+                  <Pressable
+                    size="inline"
+                    minHit={false}
+                    pressScale="tight"
+                    haptic="light"
+                    onPress={() => list.refetch()}
                     className="ml-2 underline"
                   >
-                    重试
-                  </button>
+                    {copy.action.retry}
+                  </Pressable>
                 </div>
               )}
 
@@ -541,30 +552,33 @@ function EmptyState({
   if (query) {
     return (
       <div className="px-6 py-12 text-center">
-        <div className="mx-auto w-12 h-12 rounded-2xl bg-[var(--bg-2)] flex items-center justify-center mb-3">
+        <div className="mx-auto w-12 h-12 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
           <Search className="w-5 h-5 text-[var(--fg-2)]" />
         </div>
-        <p className="text-[14px] text-[var(--fg-1)]">没有匹配的会话</p>
+        <p className="text-[14px] text-[var(--fg-1)]">{copy.state.noResult}</p>
         <p className="text-[12px] text-[var(--fg-2)] mt-1">
           换个关键词试试
         </p>
-        <button
-          type="button"
-          onClick={onClearQuery}
-          className="mt-3 text-[12.5px] text-[var(--amber-400)] active:opacity-70"
+        <Pressable
+          size="default"
+          minHit={true}
+          pressScale="soft"
+          haptic="light"
+          onPress={onClearQuery}
+          className="mt-3 text-[12.5px] text-[var(--amber-400)]"
         >
           清除搜索
-        </button>
+        </Pressable>
       </div>
     );
   }
   if (tab === "archived") {
     return (
       <div className="px-6 py-12 text-center">
-        <div className="mx-auto w-12 h-12 rounded-2xl bg-[var(--bg-2)] flex items-center justify-center mb-3">
+        <div className="mx-auto w-12 h-12 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
           <Inbox className="w-5 h-5 text-[var(--fg-2)]" />
         </div>
-        <p className="text-[14px] text-[var(--fg-1)]">归档为空</p>
+        <p className="text-[14px] text-[var(--fg-1)]">{copy.state.empty}</p>
         <p className="text-[12px] text-[var(--fg-2)] mt-1">
           长按或左滑会话可归档
         </p>
@@ -573,25 +587,27 @@ function EmptyState({
   }
   return (
     <div className="px-6 py-12 text-center">
-      <div className="mx-auto w-12 h-12 rounded-2xl bg-[var(--bg-2)] flex items-center justify-center mb-3">
+      <div className="mx-auto w-12 h-12 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
         <Sparkles className="w-5 h-5 text-[var(--amber-400)]" />
       </div>
       <p className="text-[14px] text-[var(--fg-1)]">还没有会话</p>
       <p className="text-[12px] text-[var(--fg-2)] mt-1 mb-4">
         从这里开始你的第一次对话
       </p>
-      <button
-        type="button"
-        onClick={onCreate}
+      <Pressable
+        size="default"
+        minHit={true}
+        pressScale="soft"
+        haptic="medium"
+        onPress={onCreate}
         className={cn(
           "inline-flex items-center gap-1.5 h-9 px-4 rounded-full",
           "bg-[var(--amber-400)] text-black text-[13px] font-medium",
-          "active:scale-95 transition-transform",
         )}
       >
         <Plus className="w-3.5 h-3.5" />
         新建会话
-      </button>
+      </Pressable>
     </div>
   );
 }

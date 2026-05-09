@@ -258,7 +258,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             <div
               role="dialog"
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full mt-1 z-50 w-64 p-2.5 rounded-lg border border-red-500/20 bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card"
+              className="absolute right-0 top-full mt-1 z-50 w-64 p-2.5 rounded-[var(--radius-panel)] border border-danger-border bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card"
             >
               <p className="text-xs text-[var(--fg-1)] leading-snug px-0.5 mb-2">
                 确认删除会话
@@ -286,7 +286,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                     onDelete();
                     setView("closed");
                   }}
-                  className="inline-flex items-center gap-1 px-2.5 h-7 text-xs rounded-md bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-colors"
+                  className="inline-flex items-center gap-1 px-2.5 h-7 type-caption rounded-[var(--radius-control)] bg-danger-soft text-danger hover:brightness-110 transition-colors"
                 >
                   <Trash2 className="w-3 h-3" />
                   删除
@@ -320,7 +320,7 @@ function MenuButton({
         "w-full flex items-center gap-2 px-2.5 py-2.5 md:py-1.5 text-xs text-left transition-colors",
         "active:scale-[0.98]",
         danger
-          ? "text-red-300 hover:bg-red-500/10 hover:text-red-200"
+          ? "text-danger hover:bg-danger-soft hover:opacity-90"
           : "text-[var(--fg-1)] hover:bg-white/5 hover:text-[var(--fg-0)]",
       )}
     >

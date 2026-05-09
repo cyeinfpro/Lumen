@@ -21,6 +21,8 @@ import {
 } from "lucide-react";
 
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
+import { Button, IconButton } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import {
   acceptMemoryStaging,
   clearMemories,
@@ -262,7 +264,7 @@ export default function MemorySettingsPage() {
           </div>
           <Link
             href="/me"
-            className="inline-flex items-center gap-1.5 text-sm text-neutral-400 transition-colors hover:text-neutral-100"
+            className="inline-flex items-center gap-1.5 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
           >
             <ArrowLeft className="h-4 w-4" />
             返回我的
@@ -270,19 +272,19 @@ export default function MemorySettingsPage() {
         </header>
 
         {!embeddingAvailable && (
-          <section className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-amber-500/30 bg-amber-500/[0.06] p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <section className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-warning-border bg-warning-soft p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
             <div className="flex gap-3">
-              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-300" />
+              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-warning" />
               <div>
-                <div className="font-medium text-amber-100">记忆功能未启用</div>
-                <p className="mt-1 text-xs leading-5 text-amber-200/70">
-                  需要先在管理员后台为某个 provider 勾选 “embedding” 用途，记忆的写入、检索、抽取都依赖向量。
+                <div className="font-medium text-warning">记忆未启用</div>
+                <p className="mt-1 type-caption leading-5 text-warning/80">
+                  需先在管理员后台为某个 provider 勾选 “embedding”；写入、检索、抽取均依赖向量。
                 </p>
               </div>
             </div>
             <Link
               href="/admin"
-              className="inline-flex h-9 flex-shrink-0 items-center justify-center rounded-xl border border-amber-500/40 bg-amber-500/15 px-3 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-500/25"
+              className="inline-flex h-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-3 type-caption font-medium text-warning transition-colors hover:bg-warning/20"
             >
               去管理员后台 →
             </Link>
@@ -319,31 +321,31 @@ export default function MemorySettingsPage() {
         </section>
 
         {emptyFirstRun && (
-          <section className="rounded-[var(--radius-card)] border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/8 p-4">
+          <section className="rounded-[var(--radius-card)] border border-accent-border bg-accent-soft p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <div className="text-sm font-medium text-neutral-100">
+                <div className="type-body-sm font-medium text-[var(--fg-0)]">
                   Lumen 会从对话里学到稳定偏好
                 </div>
-                <p className="mt-1 text-sm text-neutral-400">
+                <p className="mt-1 type-body-sm text-[var(--fg-1)]">
                   也可以在这里手动添加，比如“偏好简洁回答”或“不要使用感叹号”。
                 </p>
               </div>
               <div className="flex gap-2">
-                <button
-                  type="button"
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => settingsMut.mutate({ paused: true })}
-                  className="rounded-xl border border-white/10 px-3 py-2 text-sm text-neutral-300 hover:bg-white/5"
                 >
                   先暂停
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
                   onClick={() => onboardingMut.mutate(0)}
-                  className="rounded-xl bg-[var(--color-lumen-amber)] px-3 py-2 text-sm font-medium text-black"
                 >
-                  知道了
-                </button>
+                  {copy.action.confirm}
+                </Button>
               </div>
             </div>
           </section>
@@ -373,22 +375,22 @@ export default function MemorySettingsPage() {
             </div>
 
             <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-3">
-              <div className="mb-2 text-xs font-medium text-neutral-400">新作用域</div>
+              <div className="mb-2 type-caption font-medium text-[var(--fg-1)]">新作用域</div>
               <div className="flex gap-2">
                 <input
                   value={newScopeEmoji}
                   onChange={(e) => setNewScopeEmoji(e.target.value.slice(0, 4))}
                   placeholder="图标"
-                  className="h-9 w-14 rounded-xl border border-white/10 bg-white/[0.03] px-2 text-sm text-neutral-100 outline-none focus:border-[var(--color-lumen-amber)]/60"
+                  className="h-9 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
                 />
                 <input
                   value={newScopeName}
                   onChange={(e) => setNewScopeName(e.target.value)}
                   placeholder="工作"
-                  className="h-9 min-w-0 flex-1 rounded-xl border border-white/10 bg-white/[0.03] px-3 text-sm text-neutral-100 outline-none focus:border-[var(--color-lumen-amber)]/60"
+                  className="h-9 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
                 />
-                <button
-                  type="button"
+                <IconButton
+                  variant="primary"
                   disabled={!newScopeName.trim() || createScopeMut.isPending}
                   onClick={() =>
                     createScopeMut.mutate({
@@ -396,11 +398,10 @@ export default function MemorySettingsPage() {
                       emoji: newScopeEmoji.trim() || null,
                     })
                   }
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--color-lumen-amber)] text-black disabled:opacity-40"
                   aria-label="创建作用域"
                 >
                   <Plus className="h-4 w-4" />
-                </button>
+                </IconButton>
               </div>
             </div>
           </aside>
@@ -409,12 +410,12 @@ export default function MemorySettingsPage() {
             <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-sm font-medium text-neutral-100">手动添加</h2>
-                  <p className="mt-1 text-xs text-neutral-500">
-                    手动记忆会以 1.0 置信度写入。
+                  <h2 className="type-card-title">手动添加</h2>
+                  <p className="mt-1 type-caption text-[var(--fg-2)]">
+                    手动记忆按 1.0 置信度写入。
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-1.5 text-[11px] text-neutral-500">
+                <div className="flex flex-wrap gap-1.5 text-[11px] text-[var(--fg-2)]">
                   {TYPE_OPTIONS.map((option) => (
                     <span key={option.value}>
                       {option.label} {typeCounts[option.value] ?? 0}
@@ -426,7 +427,7 @@ export default function MemorySettingsPage() {
                 <select
                   value={newMemoryType}
                   onChange={(e) => setNewMemoryType(e.target.value as MemoryType)}
-                  className="h-10 rounded-xl border border-white/10 bg-white/[0.03] px-3 text-sm text-neutral-100 outline-none focus:border-[var(--color-lumen-amber)]/60"
+                  className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
                 >
                   {TYPE_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -439,11 +440,13 @@ export default function MemorySettingsPage() {
                   onChange={(e) => setNewMemoryContent(e.target.value)}
                   placeholder="例如：偏好 200 字以内的回答"
                   maxLength={200}
-                  className="h-10 rounded-xl border border-white/10 bg-white/[0.03] px-3 text-sm text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-[var(--color-lumen-amber)]/60"
+                  className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60"
                 />
-                <button
-                  type="button"
+                <Button
+                  variant="primary"
+                  size="md"
                   disabled={!newMemoryContent.trim() || createMemoryMut.isPending}
+                  loading={createMemoryMut.isPending}
                   onClick={() =>
                     createMemoryMut.mutate({
                       type: newMemoryType,
@@ -451,11 +454,10 @@ export default function MemorySettingsPage() {
                       scope_id: selectedScope === "all" ? defaultScope?.id ?? null : selectedScope,
                     })
                   }
-                  className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black disabled:opacity-40"
+                  leftIcon={!createMemoryMut.isPending ? <Plus className="h-4 w-4" /> : undefined}
                 >
-                  <Plus className="h-4 w-4" />
                   添加
-                </button>
+                </Button>
               </div>
             </section>
 
@@ -465,37 +467,38 @@ export default function MemorySettingsPage() {
                 suffix={`${filteredMemories.length}/${memories.length} 条`}
                 actions={
                   <>
-                    <button
-                      type="button"
+                    <IconButton
+                      variant="outline"
+                      size="sm"
                       onClick={() => void memoriesQ.refetch()}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
                       aria-label="刷新记忆"
+                      tooltip="刷新"
                     >
                       <RefreshCw className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
+                    </IconButton>
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => void exportJson()}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 text-xs text-neutral-300 hover:bg-white/5"
+                      leftIcon={<Download className="h-3.5 w-3.5" />}
                     >
-                      <Download className="h-3.5 w-3.5" />
-                      导出
-                    </button>
+                      {copy.action.export}
+                    </Button>
                   </>
                 }
               />
               <div className="flex flex-col gap-2 border-t border-white/5 p-3 sm:flex-row sm:items-center sm:justify-between">
                 <label className="relative min-w-0 flex-1">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-neutral-600" />
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
                   <input
                     value={memorySearch}
                     onChange={(event) => setMemorySearch(event.target.value)}
                     placeholder={selectedScope === "all" ? "跨作用域搜索" : "搜索当前作用域"}
-                    className="h-9 w-full rounded-xl border border-white/10 bg-white/[0.03] pl-9 pr-3 text-sm text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-[var(--color-lumen-amber)]/60"
+                    className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60"
                   />
                 </label>
                 {selectedScope === "all" && selectedMemoryIds.size > 0 ? (
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
+                  <div className="flex flex-wrap items-center gap-2 type-caption text-[var(--fg-1)]">
                     <span>已选 {selectedMemoryIds.size} 条</span>
                     <select
                       disabled={bulkScopeMut.isPending}
@@ -508,7 +511,7 @@ export default function MemorySettingsPage() {
                         });
                         event.currentTarget.value = "";
                       }}
-                      className="h-9 rounded-xl border border-white/10 bg-white/[0.03] px-2 text-xs text-neutral-200 outline-none"
+                      className="h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none"
                       defaultValue=""
                     >
                       <option value="" disabled>
@@ -586,10 +589,10 @@ export default function MemorySettingsPage() {
                     <div key={item.id} className="p-4">
                       <div className="mb-2 flex flex-wrap items-center gap-2">
                         <TypeBadge type={item.type} />
-                        <span className="text-xs text-neutral-500">
+                        <span className="type-caption text-[var(--fg-2)]">
                           置信度 {Math.round(item.confidence * 100)}%
                         </span>
-                        <span className="text-xs text-neutral-600">
+                        <span className="type-caption text-[var(--fg-2)]">
                           {formatTime(item.created_at)}
                         </span>
                       </div>
@@ -601,7 +604,7 @@ export default function MemorySettingsPage() {
                             [item.id]: e.target.value,
                           }))
                         }
-                        className="mb-3 h-10 w-full rounded-xl border border-white/10 bg-white/[0.03] px-3 text-sm text-neutral-100 outline-none focus:border-[var(--color-lumen-amber)]/60"
+                        className="mb-3 h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
                       />
                       <div className="flex flex-wrap gap-2">
                         <select
@@ -612,7 +615,7 @@ export default function MemorySettingsPage() {
                               body: { scope_id: event.target.value },
                             })
                           }
-                          className="h-8 rounded-lg border border-white/10 bg-white/[0.03] px-2 text-xs text-neutral-300 outline-none"
+                          className="h-8 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-1)] outline-none"
                         >
                           {scopes.map((scope) => (
                             <option key={scope.id} value={scope.id}>
@@ -621,22 +624,23 @@ export default function MemorySettingsPage() {
                             </option>
                           ))}
                         </select>
-                        <button
-                          type="button"
+                        <Button
+                          variant="ghost"
+                          size="sm"
                           onClick={() => acceptMut.mutate(item)}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-emerald-500/15 px-3 text-xs text-emerald-300 hover:bg-emerald-500/25"
+                          leftIcon={<Check className="h-3.5 w-3.5" />}
+                          className="bg-success-soft text-success hover:bg-success/20"
                         >
-                          <Check className="h-3.5 w-3.5" />
                           接受
-                        </button>
-                        <button
-                          type="button"
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
                           onClick={() => rejectMut.mutate(item.id)}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 px-3 text-xs text-neutral-400 hover:bg-white/5"
+                          leftIcon={<X className="h-3.5 w-3.5" />}
                         >
-                          <X className="h-3.5 w-3.5" />
                           拒绝
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   ))}
@@ -655,14 +659,14 @@ export default function MemorySettingsPage() {
                   <div className="divide-y divide-white/5">
                     {timelineQ.data?.items.map((event) => (
                       <div key={event.id} className="grid gap-1 p-4 sm:grid-cols-[100px_minmax(0,1fr)]">
-                        <span className="text-xs text-neutral-500">
+                        <span className="type-caption text-[var(--fg-2)]">
                           {formatTime(event.created_at)}
                         </span>
                         <div className="min-w-0">
-                          <div className="text-xs font-mono text-neutral-400">
+                          <div className="type-caption font-mono text-[var(--fg-1)]">
                             {event.event_type}
                           </div>
-                          <div className="mt-1 truncate text-sm text-neutral-200">
+                          <div className="mt-1 truncate type-body-sm text-[var(--fg-0)]">
                             {event.new_content ?? event.old_content ?? "设置变更"}
                           </div>
                         </div>
@@ -672,26 +676,29 @@ export default function MemorySettingsPage() {
                 )}
               </div>
 
-              <div className="rounded-[var(--radius-card)] border border-red-500/20 bg-red-500/[0.03] p-4">
-                <h2 className="text-sm font-medium text-red-200">清空记忆</h2>
-                <p className="mt-1 text-xs leading-5 text-red-200/60">
-                  输入“清空”后会软删除全部记忆，30 天后清理任务会物理删除。
+              <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-4">
+                <h2 className="type-card-title text-[var(--danger-fg)]">清空记忆</h2>
+                <p className="mt-1 type-caption leading-5 text-[var(--danger-fg)]/70">
+                  输入“清空”后软删全部，30 天后物理删除。
                 </p>
                 <input
                   value={clearText}
                   onChange={(e) => setClearText(e.target.value)}
                   placeholder="清空"
-                  className="mt-3 h-10 w-full rounded-xl border border-red-500/25 bg-black/20 px-3 text-sm text-red-100 outline-none placeholder:text-red-200/30 focus:border-red-400"
+                  className="mt-3 h-10 w-full rounded-[var(--radius-control)] border border-danger-border bg-black/20 px-3 text-sm text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/30 focus:border-danger"
                 />
-                <button
-                  type="button"
+                <Button
+                  variant="danger"
+                  size="md"
                   disabled={clearText !== "清空" || clearMut.isPending}
+                  loading={clearMut.isPending}
                   onClick={() => clearMut.mutate()}
-                  className="mt-3 inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-xl bg-red-500/20 text-sm font-medium text-red-200 disabled:opacity-40"
+                  leftIcon={!clearMut.isPending ? <Trash2 className="h-4 w-4" /> : undefined}
+                  fullWidth
+                  className="mt-3"
                 >
-                  <Trash2 className="h-4 w-4" />
                   清空全部
-                </button>
+                </Button>
               </div>
             </section>
           </div>
@@ -711,31 +718,24 @@ function CapabilityModal({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-5 shadow-2xl"
+        className="w-full max-w-md surface-dialog rounded-[var(--radius-dialog)] p-5"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="mb-2 flex items-center gap-2">
-          <AlertTriangle className="h-5 w-5 text-amber-300" />
-          <h3 className="text-base font-medium text-neutral-100">
-            需要 embedding provider
-          </h3>
+          <AlertTriangle className="h-5 w-5 text-warning" />
+          <h3 className="type-card-title">需要 embedding provider</h3>
         </div>
-        <p className="text-sm leading-6 text-neutral-400">
-          启用记忆功能前,需要管理员在后台为某个 provider 勾选 “embedding”
-          用途。记忆的写入、检索、抽取都依赖真实向量,缺少这一步整个链路无法工作。
+        <p className="type-body-sm leading-6 text-[var(--fg-1)]">
+          启用前需在管理员后台为某个 provider 勾选 “embedding” 用途；记忆的写入、检索、抽取均依赖向量。
         </p>
         <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-9 rounded-xl border border-white/10 px-4 text-sm text-neutral-300 hover:bg-white/5"
-          >
-            知道了
-          </button>
+          <Button variant="outline" size="md" onClick={onClose}>
+            {copy.action.confirm}
+          </Button>
           <Link
             href="/admin"
             onClick={onClose}
-            className="inline-flex h-9 items-center justify-center rounded-xl bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black"
+            className="inline-flex h-9 items-center justify-center rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-black"
           >
             去管理员后台
           </Link>
@@ -757,8 +757,8 @@ function SectionHeader({
   return (
     <div className="flex items-center justify-between gap-3 border-b border-white/5 p-4">
       <div className="flex items-baseline gap-2">
-        <h2 className="text-sm font-medium text-neutral-100">{title}</h2>
-        {suffix ? <span className="text-xs text-neutral-500">{suffix}</span> : null}
+        <h2 className="type-card-title">{title}</h2>
+        {suffix ? <span className="type-caption text-[var(--fg-2)]">{suffix}</span> : null}
       </div>
       {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
     </div>
@@ -788,31 +788,31 @@ function SettingToggle({
       className={[
         "flex min-h-[112px] items-start gap-3 rounded-[var(--radius-card)] border p-4 text-left transition-colors disabled:opacity-60",
         checked
-          ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10"
+          ? "border-accent-border bg-accent-soft"
           : "border-[var(--border-subtle)] bg-[var(--bg-1)]/60 hover:bg-white/[0.03]",
       ].join(" ")}
     >
-      <span className="mt-0.5 text-[var(--color-lumen-amber)]">{icon}</span>
+      <span className="mt-0.5 text-accent">{icon}</span>
       <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-neutral-100">{title}</span>
-        <span className="mt-1 block text-xs leading-5 text-neutral-500">
+        <span className="block type-body-sm font-medium text-[var(--fg-0)]">{title}</span>
+        <span className="mt-1 block type-caption leading-5 text-[var(--fg-2)]">
           {description}
         </span>
       </span>
       <span
         className={[
-          "mt-1 h-5 w-9 rounded-full border transition-colors",
+          "mt-1 inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
           checked
-            ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]"
+            ? "border-accent bg-accent"
             : "border-white/15 bg-white/5",
         ].join(" ")}
+        aria-hidden
       >
         <span
           className={[
-            "block h-4 w-4 rounded-full bg-black/80 transition-transform",
+            "inline-block h-4 w-4 rounded-full bg-black/80 transition-transform",
             checked ? "translate-x-4" : "translate-x-0.5",
           ].join(" ")}
-          style={{ marginTop: 1 }}
         />
       </span>
     </button>
@@ -840,18 +840,18 @@ function ScopeButton({
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          className="h-8 min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-2 text-xs text-neutral-100 outline-none"
+          className="h-8 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none"
         />
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => {
             onRename(name.trim() || scope.name);
             setEditing(false);
           }}
-          className="h-8 rounded-lg bg-white/10 px-2 text-xs text-neutral-200"
         >
-          保存
-        </button>
+          {copy.action.save}
+        </Button>
       </div>
     );
   }
@@ -869,14 +869,14 @@ function ScopeButton({
           <button
             type="button"
             onClick={() => setEditing(true)}
-            className="h-7 rounded-lg px-1.5 text-[11px] text-neutral-500 hover:text-neutral-200"
+            className="h-7 rounded-[var(--radius-control)] px-1.5 text-[11px] text-[var(--fg-2)] hover:text-[var(--fg-0)]"
           >
             改
           </button>
           <button
             type="button"
             onClick={onDelete}
-            className="h-7 rounded-lg px-1.5 text-[11px] text-red-300/70 hover:text-red-200"
+            className="h-7 rounded-[var(--radius-control)] px-1.5 text-[11px] text-danger/70 hover:text-danger"
           >
             删
           </button>
@@ -888,10 +888,10 @@ function ScopeButton({
 
 function scopeButtonClass(active: boolean): string {
   return [
-    "flex h-9 min-w-0 flex-1 items-center justify-between gap-2 rounded-xl px-3 text-sm transition-colors",
+    "flex h-9 min-w-0 flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 text-sm transition-colors",
     active
-      ? "bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)]"
-      : "text-neutral-400 hover:bg-white/[0.04] hover:text-neutral-200",
+      ? "bg-accent-soft text-accent"
+      : "text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",
   ].join(" ");
 }
 
@@ -934,10 +934,10 @@ function MemoryRow({
           />
         ) : null}
         <TypeBadge type={memory.type} />
-        <span className="text-xs text-neutral-600">{memory.source}</span>
-        <span className="text-xs text-neutral-600">{formatTime(memory.updated_at)}</span>
+        <span className="type-caption text-[var(--fg-2)]">{memory.source}</span>
+        <span className="type-caption text-[var(--fg-2)]">{formatTime(memory.updated_at)}</span>
         {memory.pinned ? (
-          <span className="inline-flex items-center gap-1 rounded-md bg-[var(--color-lumen-amber)]/10 px-1.5 py-0.5 text-[10px] text-[var(--color-lumen-amber)]">
+          <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent">
             <Pin className="h-2.5 w-2.5" />
             pinned
           </span>
@@ -948,59 +948,39 @@ function MemoryRow({
           <input
             value={editingValue}
             onChange={(e) => onEditValue(e.target.value)}
-            className="h-10 rounded-xl border border-white/10 bg-white/[0.03] px-3 text-sm text-neutral-100 outline-none focus:border-[var(--color-lumen-amber)]/60"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
           />
           <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={onSaveEdit}
-              className="h-10 rounded-xl bg-[var(--color-lumen-amber)] px-3 text-sm font-medium text-black"
-            >
-              保存
-            </button>
-            <button
-              type="button"
-              onClick={onCancelEdit}
-              className="h-10 rounded-xl border border-white/10 px-3 text-sm text-neutral-400"
-            >
-              取消
-            </button>
+            <Button variant="primary" size="md" onClick={onSaveEdit}>
+              {copy.action.save}
+            </Button>
+            <Button variant="outline" size="md" onClick={onCancelEdit}>
+              {copy.action.cancel}
+            </Button>
           </div>
         </div>
       ) : (
-        <p className="text-sm leading-6 text-neutral-100">{memory.content}</p>
+        <p className="type-body-sm leading-6 text-[var(--fg-0)]">{memory.content}</p>
       )}
       {memory.source_excerpt ? (
-        <p className="mt-2 truncate text-xs text-neutral-600">
+        <p className="mt-2 truncate type-caption text-[var(--fg-2)]">
           来源：{memory.source_excerpt}
         </p>
       ) : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onEditValue(memory.content)}
-          className="h-8 rounded-lg border border-white/10 px-2.5 text-xs text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
-        >
-          编辑
-        </button>
-        <button
-          type="button"
-          onClick={() => onPatch({ pinned: !memory.pinned })}
-          className="h-8 rounded-lg border border-white/10 px-2.5 text-xs text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
-        >
+        <Button variant="outline" size="sm" onClick={() => onEditValue(memory.content)}>
+          {copy.action.edit}
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => onPatch({ pinned: !memory.pinned })}>
           {memory.pinned ? "取消 Pin" : "Pin"}
-        </button>
-        <button
-          type="button"
-          onClick={() => onPatch({ disabled: !memory.disabled })}
-          className="h-8 rounded-lg border border-white/10 px-2.5 text-xs text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
-        >
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => onPatch({ disabled: !memory.disabled })}>
           {memory.disabled ? "启用" : "停用"}
-        </button>
+        </Button>
         <select
           value={memory.scope_id}
           onChange={(e) => onPatch({ scope_id: e.target.value })}
-          className="h-8 rounded-lg border border-white/10 bg-white/[0.03] px-2 text-xs text-neutral-300 outline-none"
+          className="h-8 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-1)] outline-none"
         >
           {scopes.map((scope) => (
             <option key={scope.id} value={scope.id}>
@@ -1008,13 +988,14 @@ function MemoryRow({
             </option>
           ))}
         </select>
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="sm"
           onClick={onDelete}
-          className="h-8 rounded-lg border border-white/10 px-2.5 text-xs text-red-300/80 hover:bg-white/5 hover:text-red-200"
+          className="text-danger hover:text-danger"
         >
-          删除
-        </button>
+          {copy.action.delete}
+        </Button>
       </div>
     </div>
   );
@@ -1022,7 +1003,7 @@ function MemoryRow({
 
 function TypeBadge({ type }: { type: MemoryType | string }) {
   return (
-    <span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] text-neutral-300">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.04] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)]">
       {typeLabel(type)}
     </span>
   );
@@ -1030,13 +1011,13 @@ function TypeBadge({ type }: { type: MemoryType | string }) {
 
 function LoadingBlock() {
   return (
-    <div className="flex items-center justify-center gap-2 p-8 text-sm text-neutral-500">
+    <div className="flex items-center justify-center gap-2 p-8 type-body-sm text-[var(--fg-2)]">
       <Loader2 className="h-4 w-4 animate-spin" />
-      加载中
+      {copy.state.loading}
     </div>
   );
 }
 
 function EmptyBlock({ text }: { text: string }) {
-  return <div className="p-8 text-center text-sm text-neutral-500">{text}</div>;
+  return <div className="p-8 text-center type-body-sm text-[var(--fg-2)]">{text}</div>;
 }

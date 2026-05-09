@@ -3,6 +3,7 @@
 import { Filter, Search } from "lucide-react";
 import { type ReactNode } from "react";
 import { MobileTopBar } from "./MobileTopBar";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 
 export function MobileStreamTopBar({
   compact,
@@ -39,7 +40,7 @@ export function MobileStreamTopBar({
               图库
             </div>
             {countLabel && (
-              <div className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono mt-0.5">
+              <div className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono mt-0.5 truncate">
                 {countLabel}
               </div>
             )}
@@ -72,19 +73,22 @@ function IconToggle({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <Pressable
+      size="default"
+      minHit={true}
+      pressScale="tight"
+      haptic="light"
+      onPress={onClick}
       aria-label={label}
       aria-pressed={active}
       className={[
-        "inline-flex items-center justify-center w-9 h-9 rounded-full",
+        "rounded-full w-9 h-9",
         active
           ? "text-[var(--amber-400)] bg-[var(--accent-soft)]"
           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
       ].join(" ")}
     >
       {children}
-    </button>
+    </Pressable>
   );
 }

@@ -6,7 +6,6 @@ export { MobileTopBar } from "./MobileTopBar";
 export type { MobileTopBarProps } from "./MobileTopBar";
 export { MobileStudioTopBar } from "./MobileStudioTopBar";
 export { MobileStreamTopBar } from "./MobileStreamTopBar";
-export { MobileMeTopBar } from "./MobileMeTopBar";
 export { MobileStudio } from "./MobileStudio";
 export { MobileStream } from "./MobileStream";
 export { MobileMe } from "./MobileMe";

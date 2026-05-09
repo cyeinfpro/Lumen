@@ -4,6 +4,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { CompactionEvent } from "@/hooks/useContextCompactionEvents";
+import { Button } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { lumenMotion, reducedMotionTransition, usePrefersReducedMotion } from "@/styles/motion";
 import { RollingTokenCounter } from "./RollingTokenCounter";
@@ -164,21 +166,19 @@ export function CompactionToast({
               ) : null}
 
               {failed && onRetry ? (
-                <button
+                <Button
                   type="button"
+                  size="sm"
+                  variant="secondary"
                   onClick={() => {
                     if (eventKey) setDismissedKey(eventKey);
                     onRetry();
                   }}
-                  className={cn(
-                    "mt-2 inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11px] font-medium",
-                    "bg-white/8 text-[var(--fg-0)] hover:bg-white/12 focus-visible:outline-none",
-                    "focus-visible:ring-2 focus-visible:ring-[var(--warning)]/60",
-                  )}
+                  leftIcon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
+                  className="mt-2 h-7 px-2 text-[11px]"
                 >
-                  <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
-                  重试
-                </button>
+                  {copy.action.retry}
+                </Button>
               ) : null}
             </div>
           </div>

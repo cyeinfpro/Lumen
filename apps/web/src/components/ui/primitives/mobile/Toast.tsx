@@ -145,11 +145,11 @@ export function MobileToastViewport() {
 function kindClass(k: MobileToastKind) {
   switch (k) {
     case "success":
-      return "bg-[var(--bg-1)]/90 text-[var(--success)] border-[rgba(48,164,108,0.4)]";
+      return "bg-[var(--bg-1)]/90 text-success border-success-border";
     case "warning":
-      return "bg-[var(--bg-1)]/90 text-[var(--amber-300)] border-[var(--border-amber)]";
+      return "bg-[var(--bg-1)]/90 text-warning border-warning-border";
     case "danger":
-      return "bg-[var(--bg-1)]/90 text-[var(--danger)] border-[rgba(229,72,77,0.4)]";
+      return "bg-[var(--bg-1)]/90 text-danger border-danger-border";
     default:
       return "bg-[var(--bg-1)]/90 text-[var(--fg-0)] border-[var(--border-subtle)]";
   }

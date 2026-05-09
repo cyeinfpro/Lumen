@@ -58,7 +58,7 @@ export function StageTicker({ gen, className }: StageTickerProps) {
           </span>
           <span>{copy}</span>
           {running && typeof gen.elapsed === "number" && gen.elapsed > 0 && (
-            <span className="text-neutral-500 font-mono tabular-nums">
+            <span className="text-[var(--fg-2)] font-mono tabular-nums">
               · {Math.floor(gen.elapsed / 1000)}s
             </span>
           )}

@@ -37,7 +37,7 @@ function ResetPasswordInner() {
 
     const trimmedEmail = email.trim();
     if (!trimmedEmail) {
-      setError("请输入邮箱");
+      setError("邮箱未填");
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
@@ -100,14 +100,14 @@ function ResetPasswordInner() {
             </Field>
 
             {sentTo && (
-              <div className="flex items-start gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+              <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-3 py-2 type-body-sm text-success">
                 <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
                 如果该邮箱存在，重置链接会发送到 {sentTo}。
               </div>
             )}
 
             {error && (
-              <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-300">
+              <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                 {error}
               </div>

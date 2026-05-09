@@ -15,6 +15,8 @@ import {
   Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/primitives";
+import { copy } from "@/lib/copy";
 import type { Intent } from "@/lib/types";
 
 type Resolved = Exclude<Intent, "auto">;
@@ -109,6 +111,7 @@ export function IntentBadge({
 
   return (
     <div ref={wrapRef} className={cn("relative", className)}>
+      {/* 意图徽章触发器：极小尺寸 + pill 边框，不匹配标准 Button */}
       <button
         type="button"
         onClick={() => {
@@ -149,7 +152,7 @@ export function IntentBadge({
             aria-label="切换意图"
             className={cn(
               "absolute right-0 top-[calc(100%+6px)] z-50 min-w-[220px]",
-              "rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/95 backdrop-blur-xl",
+              "rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/95 backdrop-blur-xl",
               "shadow-[var(--shadow-3)] overflow-hidden",
             )}
             style={{ transformOrigin: "top right" }}
@@ -164,46 +167,31 @@ export function IntentBadge({
                   重新生成？
                 </p>
                 <div className="flex gap-2">
-                  <button
+                  <Button
                     type="button"
+                    size="sm"
+                    variant="primary"
                     onClick={() => void handleConfirm()}
-                    disabled={busy}
-                    aria-disabled={busy}
-                    aria-busy={busy}
-                    className={cn(
-                      "flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium",
-                      "bg-[var(--color-lumen-amber)] text-black",
-                      "hover:brightness-110 active:scale-[0.97]",
-                      "shadow-[0_0_12px_rgba(242,169,58,0.35)]",
-                      "disabled:opacity-60 disabled:cursor-wait transition-all duration-150",
-                      "aria-disabled:pointer-events-none",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
-                    )}
+                    loading={busy}
+                    fullWidth
+                    className="h-7 text-[11px]"
                   >
-                    {busy && (
-                      <Loader2
-                        className="w-3 h-3 animate-spin"
-                        aria-hidden
-                      />
-                    )}
-                    <span>{busy ? "切换中…" : "确认"}</span>
-                  </button>
-                  <button
+                    {busy ? "切换中" : copy.action.confirm}
+                  </Button>
+                  <Button
                     type="button"
+                    size="sm"
+                    variant="outline"
                     onClick={() => {
                       setPendingIntent(null);
                       setError(null);
                     }}
                     disabled={busy}
-                    className={cn(
-                      "flex-1 px-2.5 py-1 rounded-md text-xs",
-                      "bg-white/5 hover:bg-white/10 border border-[var(--border)] text-[var(--fg-0)]",
-                      "active:scale-[0.97] transition-all duration-150 disabled:opacity-50",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30",
-                    )}
+                    fullWidth
+                    className="h-7 text-[11px]"
                   >
-                    取消
-                  </button>
+                    {copy.action.cancel}
+                  </Button>
                 </div>
               </div>
             )}
@@ -214,37 +202,37 @@ export function IntentBadge({
                 const M = INTENT_META[opt];
                 const OptIcon = M.icon;
                 return (
-                  <button
+                  <Button
                     key={opt}
                     type="button"
+                    size="sm"
+                    variant="ghost"
                     role="menuitem"
                     disabled={isCurrent || busy}
                     onClick={() => handlePick(opt)}
+                    leftIcon={<OptIcon className="w-3.5 h-3.5 shrink-0" aria-hidden />}
+                    rightIcon={
+                      isCurrent ? (
+                        <Check className="w-3.5 h-3.5 text-[var(--color-lumen-amber)]" aria-hidden />
+                      ) : undefined
+                    }
                     className={cn(
-                      "w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors",
-                      "focus-visible:outline-none focus-visible:bg-white/10",
+                      "w-full justify-start h-auto px-3 py-1.5 text-xs rounded-none",
                       isCurrent
-                        ? "text-[var(--color-lumen-amber)] cursor-default"
+                        ? "text-[var(--color-lumen-amber)] cursor-default disabled:opacity-100"
                         : isPending
                           ? "text-[var(--fg-0)] bg-white/5"
-                          : "text-[var(--fg-1)] hover:bg-white/5 hover:text-[var(--fg-0)] cursor-pointer",
+                          : "text-[var(--fg-1)] hover:bg-white/5 hover:text-[var(--fg-0)]",
                       busy && !isCurrent && "opacity-50 cursor-wait",
                     )}
                   >
-                    <OptIcon className="w-3.5 h-3.5 shrink-0" aria-hidden />
-                    <span className="flex-1">{M.label}</span>
-                    {isCurrent && (
-                      <Check
-                        className="w-3.5 h-3.5 text-[var(--color-lumen-amber)]"
-                        aria-hidden
-                      />
-                    )}
-                  </button>
+                    <span className="flex-1 text-left">{M.label}</span>
+                  </Button>
                 );
               })}
             </div>
             {error && (
-              <p className="px-3 pt-1.5 pb-2 text-[10px] text-red-300 border-t border-white/10">
+              <p className="px-3 pt-1.5 pb-2 text-[10px] text-danger border-t border-white/10">
                 {error}
               </p>
             )}

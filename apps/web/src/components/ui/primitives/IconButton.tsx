@@ -32,7 +32,7 @@ const BASE =
 
 const VARIANTS: Record<Variant, string> = {
   primary:
-    "bg-[var(--accent)] text-black hover:bg-[#F6B755]",
+    "bg-[var(--accent)] text-black hover:bg-[var(--amber-300)]",
   secondary:
     "bg-white/6 text-[var(--fg-0)] hover:bg-white/12 " +
     "border border-[var(--border)] hover:border-[var(--border-strong)]",

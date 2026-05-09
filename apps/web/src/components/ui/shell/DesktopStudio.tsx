@@ -23,6 +23,7 @@ import { Sidebar } from "@/components/ui/Sidebar";
 import { SystemPromptManager } from "@/components/ui/SystemPromptManager";
 import { Onboarding } from "@/components/Onboarding";
 import { DesktopComposerPill } from "@/components/ui/composer/desktop";
+import { IconButton } from "@/components/ui/primitives";
 import {
   ConversationImageGallery,
   ContextWindowMeter,
@@ -211,17 +212,19 @@ export function DesktopStudio() {
 
   const topNavRight = (
     <>
-      <button
-        type="button"
+      <IconButton
+        size="sm"
+        variant="ghost"
         onClick={() => setFast(!fast)}
         aria-label={fast ? "关闭快速模式" : "开启快速模式"}
         title={fast ? "快速模式 · 已开启" : "快速模式 · 点击开启"}
-        className="inline-flex items-center justify-center w-7 h-7 rounded-full hover:bg-white/8 cursor-pointer transition-colors"
+        className="w-7 h-7 max-sm:min-h-7 max-sm:min-w-7 rounded-full"
       >
         <FastLamp on={fast} />
-      </button>
+      </IconButton>
       <AnimatePresence initial={false}>
         {running.any && (
+          /* 28×28 任务环：framer-motion 进出场需要 motion.button，保留原生 */
           <motion.button
             key="gen-ring"
             type="button"
@@ -236,8 +239,18 @@ export function DesktopStudio() {
           </motion.button>
         )}
       </AnimatePresence>
-      <ContextWindowMeter stats={contextStats} />
-      <ConversationMemoryButton />
+      <span className="hidden lg:inline-flex">
+        <ContextWindowMeter stats={contextStats} />
+      </span>
+      <span className="inline-flex lg:hidden">
+        <ContextWindowMeter stats={contextStats} compact />
+      </span>
+      <span className="hidden lg:inline-flex">
+        <ConversationMemoryButton />
+      </span>
+      <span className="inline-flex lg:hidden">
+        <ConversationMemoryButton compact />
+      </span>
       <SystemPromptManager compact />
       {isAdmin && (
         <Link
@@ -247,20 +260,17 @@ export function DesktopStudio() {
           管理
         </Link>
       )}
-      <button
-        type="button"
+      <IconButton
+        size="sm"
+        variant="ghost"
         onClick={() => !createMut.isPending && createMut.mutate({})}
         aria-label="新建对话"
         title="新建对话"
         disabled={createMut.isPending}
-        className={[
-          "inline-flex items-center justify-center w-7 h-7 rounded-full",
-          "text-[var(--fg-2)] hover:text-[var(--fg-0)] hover:bg-white/8",
-          "cursor-pointer disabled:opacity-50 transition-colors",
-        ].join(" ")}
+        className="w-7 h-7 max-sm:min-h-7 max-sm:min-w-7 rounded-full"
       >
         <Plus className="w-4 h-4" />
-      </button>
+      </IconButton>
       <Link
         href="/me"
         className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-full bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
