@@ -202,7 +202,15 @@ overlay_repo_into_existing() {
 bootstrap_from_raw_script() {
     local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
     local branch="${LUMEN_BRANCH:-main}"
-    local install_dir="${LUMEN_INSTALL_DIR:-${HOME:-$PWD}/Lumen}"
+    # root 用户走 /opt/lumen（系统级部署，update.sh / lumen-storage-* systemd unit
+    # 都期望 LUMEN_DEPLOY_ROOT=/opt/lumen）；非 root 才回 $HOME/Lumen 个人目录。
+    local default_dir
+    if [ "${EUID:-$(id -u)}" = "0" ]; then
+        default_dir="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
+    else
+        default_dir="${HOME:-$PWD}/Lumen"
+    fi
+    local install_dir="${LUMEN_INSTALL_DIR:-${default_dir}}"
 
     printf '[INFO] 当前脚本不是在完整 Lumen 仓库内运行，将进入远程 bootstrap 模式。\n'
     printf '[INFO] 仓库：%s\n' "${repo_url}"
