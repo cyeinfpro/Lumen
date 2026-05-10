@@ -633,6 +633,16 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         env_fallback="LUMEN_STORAGE_SMB_SUBPATH",
     ),
     SettingSpec(
+        key="storage.smb.port",
+        description=(
+            "SMB 服务器端口（可选）。默认 445（标准 SMB-over-TCP）。"
+            "NAS 端口被改过或走特殊网关时填这里；否则留空走默认。"
+        ),
+        sensitive=False,
+        parser=str,
+        env_fallback="LUMEN_STORAGE_SMB_PORT",
+    ),
+    SettingSpec(
         key="storage.smb.username",
         description="SMB 登录用户名。",
         sensitive=False,

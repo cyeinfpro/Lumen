@@ -883,6 +883,7 @@ class StorageLocalConfigOut(BaseModel):
 
 class StorageSmbConfigOut(BaseModel):
     host: str = ""
+    port: int = 0  # 0 = 留空走默认 445；非零时 mount.cifs 用 -o port=N
     share: str = ""
     subpath: str = "/"
     username: str = ""
@@ -904,6 +905,8 @@ class StorageLocalConfigIn(BaseModel):
 
 class StorageSmbConfigIn(BaseModel):
     host: str = Field(..., min_length=1, max_length=255)
+    # 0 / 不传 = 走 mount.cifs 默认 445；其他值 1-65535 写入 -o port=
+    port: int = Field(0, ge=0, le=65535)
     share: str = Field(..., min_length=1, max_length=255)
     subpath: str = Field("/", max_length=512)
     username: str = Field(..., min_length=1, max_length=255)
@@ -919,6 +922,7 @@ class StorageConfigUpdateIn(BaseModel):
 
 class StorageTestIn(BaseModel):
     host: str = Field(..., min_length=1, max_length=255)
+    port: int = Field(0, ge=0, le=65535)
     share: str = Field(..., min_length=1, max_length=255)
     subpath: str = Field("/", max_length=512)
     username: str = Field(..., min_length=1, max_length=255)
