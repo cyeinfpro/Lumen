@@ -1619,12 +1619,15 @@ _last_probe_at: float = 0.0
 _last_image_probe_at: float = 0.0
 
 
-async def probe_providers(ctx: dict[str, Any]) -> int:
+async def probe_providers(ctx: dict[str, Any]) -> int | None:
     """cron 入口：按 runtime setting 决定是否探活，同时刷统计到 Redis。
 
     两类探活独立调度：
     - 文本算术 probe：providers.auto_probe_interval（默认 120s）
     - image probe：providers.auto_image_probe_interval（默认 3600s）
+
+    返回值：本轮跑了文本 probe 时返回 healthy 数（int）；跳过时返回 None
+    （旧版返回 -1 看起来像错误码，arq cron 完成日志里会刷 `● -1` 噪音）。
     """
     global _last_probe_at, _last_image_probe_at
 
@@ -1655,7 +1658,7 @@ async def probe_providers(ctx: dict[str, Any]) -> int:
     )
 
     now = time.monotonic()
-    healthy = -1  # -1 表示本轮跳过文本 probe；保持函数返回语义不变
+    healthy: int | None = None
 
     # ---- 文本算术 probe ----
     if text_interval > 0 and now - _last_probe_at >= text_interval:
