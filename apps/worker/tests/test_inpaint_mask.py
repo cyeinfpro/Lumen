@@ -32,9 +32,19 @@ def _make_png(size: tuple[int, int] = (8, 8), color: tuple[int, int, int] = (200
 
 
 def _make_mask_png(size: tuple[int, int] = (8, 8)) -> bytes:
-    """RGBA mask；alpha 表示要替换的区域。"""
+    """RGBA mask；OpenAI 约定 alpha=0 是要重画的区域，alpha=255 是保留区域。
+
+    用 alpha=0 全图是测试 fast path（同尺寸 + 二值 alpha → 直返字节）的最小输入。
+    """
     buf = _io.BytesIO()
-    _PILImage.new("RGBA", size, color=(255, 255, 255, 128)).save(buf, format="PNG")
+    _PILImage.new("RGBA", size, color=(0, 0, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _make_partial_alpha_mask_png(size: tuple[int, int] = (8, 8), alpha: int = 128) -> bytes:
+    """RGBA mask 但 alpha 为 partial（1-254 之间）；用于测试 worker 兜底二值化。"""
+    buf = _io.BytesIO()
+    _PILImage.new("RGBA", size, color=(255, 255, 255, alpha)).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -47,6 +57,14 @@ def test_wrap_inpaint_prompt_keeps_user_intent_inside() -> None:
     assert wrapped.startswith("Inside the masked region, add a red hat")
     assert "Preserve everything outside the mask exactly" in wrapped
     assert "Do not add anything outside the masked area." in wrapped
+
+
+def test_wrap_inpaint_prompt_includes_blend_directive() -> None:
+    """第四行 fill-context 让 remove/replace 类指令下模型用周围像素自然过渡填充，
+    避免"Inside the masked region, remove the apple." 类 prompt 模型填黑/灰。
+    """
+    wrapped = upstream._wrap_inpaint_prompt("remove the apple")
+    assert "Blend the result seamlessly with the surrounding unchanged area." in wrapped
 
 
 def test_wrap_inpaint_prompt_strips_user_intent() -> None:
@@ -295,9 +313,9 @@ async def test_pool_select_compat_legacy_mock_mask_transport_false_no_filter() -
 
 
 def test_resize_mask_keeps_bytes_when_already_aligned() -> None:
-    """同尺寸 + 合法 mask 形态 → 字节直返（避免无谓重编码）。"""
+    """同尺寸 + 合法 mask 形态 + alpha 已二值 → 字节直返（避免无谓重编码）。"""
     ref = _make_png(size=(64, 64))
-    mask = _make_mask_png(size=(64, 64))
+    mask = _make_mask_png(size=(64, 64))  # alpha=0 全图，已二值
     out = generation._resize_mask_to_reference(mask, ref)
     assert out is mask or out == mask
 
@@ -318,6 +336,117 @@ def test_resize_mask_rejects_invalid_bytes() -> None:
     with pytest.raises(upstream.UpstreamError) as ei:
         generation._resize_mask_to_reference(b"not-a-png", ref)
     assert ei.value.error_code == EC.BAD_REFERENCE_IMAGE.value
+
+
+def test_resize_mask_binarizes_partial_alpha_same_size() -> None:
+    """同尺寸但 alpha=128 (partial) → fast path miss，要二值化兜底。
+
+    OpenAI /v1/images/edits 只在 alpha=0/255 时定义；前端 destination-out 描线
+    1-px 抗锯齿会留 partial alpha，worker 必须压回二值。
+    """
+    ref = _make_png(size=(32, 32))
+    mask = _make_partial_alpha_mask_png(size=(32, 32), alpha=128)
+
+    out = generation._resize_mask_to_reference(mask, ref)
+    # 不能直返原字节（alpha 不二值，必须重编码）
+    assert out != mask
+
+    with _PILImage.open(_io.BytesIO(out)) as resized:
+        alpha = resized.getchannel("A")
+        lo, hi = alpha.getextrema()
+        # alpha=128 经阈值化（>= 128 → 255），全图 alpha=255
+        assert (lo, hi) == (255, 255), (
+            f"alpha must be binarized (128 → 255 since >= threshold), got {(lo, hi)}"
+        )
+
+
+def test_resize_mask_binarizes_partial_alpha_below_threshold() -> None:
+    """alpha=64 < 128 阈值 → 全部归 0（"重画整张"——是 mask 全涂的合法语义）。"""
+    ref = _make_png(size=(32, 32))
+    mask = _make_partial_alpha_mask_png(size=(32, 32), alpha=64)
+
+    out = generation._resize_mask_to_reference(mask, ref)
+
+    with _PILImage.open(_io.BytesIO(out)) as resized:
+        alpha = resized.getchannel("A")
+        lo, hi = alpha.getextrema()
+        assert (lo, hi) == (0, 0), (
+            f"alpha=64 (< 128) must binarize to 0 everywhere, got {(lo, hi)}"
+        )
+
+
+def test_resize_mask_uses_nearest_keeps_binary_after_upsample() -> None:
+    """4x4 半涂 mask（左 alpha=0，右 alpha=255）放大到 8x8 后边界仍是 {0, 255}。
+
+    LANCZOS 旧实现会在边界引入 alpha=128 灰带；改 NEAREST + 二值化后保证不会。
+    """
+    halved = _PILImage.new("RGBA", (4, 4))
+    for y in range(4):
+        for x in range(4):
+            halved.putpixel((x, y), (255, 255, 255, 0 if x < 2 else 255))
+    buf = _io.BytesIO()
+    halved.save(buf, format="PNG")
+    mask = buf.getvalue()
+
+    ref = _make_png(size=(8, 8))
+    out = generation._resize_mask_to_reference(mask, ref)
+
+    with _PILImage.open(_io.BytesIO(out)) as resized:
+        alpha = resized.getchannel("A")
+        for y in range(resized.height):
+            for x in range(resized.width):
+                a = alpha.getpixel((x, y))
+                assert a in (0, 255), (
+                    f"non-binary alpha at ({x},{y}): {a} — NEAREST + binarize broken"
+                )
+
+
+# --- _inpaint_size_from_reference -----------------------------------------
+
+
+def test_inpaint_size_from_reference_uses_ref_dims_when_valid() -> None:
+    """1024x768 已经 16-aligned + 像素 / 长宽比 / 长边都合法 → 直接拿 ref 尺寸用。"""
+    assert generation._inpaint_size_from_reference(1024, 768) == "1024x768"
+
+
+def test_inpaint_size_from_reference_aligns_to_16() -> None:
+    """1023x767 → 最近 16 倍数 1024x768。"""
+    assert generation._inpaint_size_from_reference(1023, 767) == "1024x768"
+
+
+def test_inpaint_size_from_reference_clamps_long_side_and_pixel_budget() -> None:
+    """长边 > 3840 OR 总像素 > 8.29M → 双重缩到合法区间；4096x3072 (4:3) 受像素
+    预算限制（3840x2880 = 11M 超 budget）→ 进一步缩到 3312x2480 ≈ 8.2M。"""
+    out = generation._inpaint_size_from_reference(4096, 3072)
+    assert out is not None
+    w, h = map(int, out.split("x"))
+    assert max(w, h) <= 3840
+    assert w * h <= 8_294_400
+    assert w % 16 == 0 and h % 16 == 0
+    # 比例和原图相近（≤ 1%）
+    assert abs((w / h) - (4096 / 3072)) / (4096 / 3072) < 0.01
+
+
+def test_inpaint_size_from_reference_scales_up_below_min_pixels() -> None:
+    """像素 < 655360 → 等比放大到刚好 ≥ 阈值；100x100 → 832x832（16-aligned）。"""
+    out = generation._inpaint_size_from_reference(100, 100)
+    assert out is not None
+    w, h = map(int, out.split("x"))
+    assert w * h >= 655_360
+    assert w == h  # 1:1 比例保持
+    assert w % 16 == 0 and h % 16 == 0
+
+
+def test_inpaint_size_from_reference_returns_none_for_extreme_aspect() -> None:
+    """长宽比 > 21:9 (~2.33) → 返回 None 让 caller 回退到 resolved.size。"""
+    assert generation._inpaint_size_from_reference(3000, 100) is None
+
+
+def test_inpaint_size_from_reference_returns_none_for_zero_dims() -> None:
+    """非法 0/负数 dim → None。"""
+    assert generation._inpaint_size_from_reference(0, 100) is None
+    assert generation._inpaint_size_from_reference(100, 0) is None
+    assert generation._inpaint_size_from_reference(-1, 100) is None
 
 
 # --- edit_image top-level mask + prompt wrap ------------------------------

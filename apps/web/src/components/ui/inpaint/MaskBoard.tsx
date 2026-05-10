@@ -47,8 +47,7 @@ const BRUSH_STEP = 4;
 const DEFAULT_BRUSH_DESKTOP = 36;
 const DEFAULT_BRUSH_TOUCH = 56;
 const STROKE_MIN_DELTA_SQ = 1.44; // 1.2px 平方；同笔内距离过近的点抽稀掉
-const COVERAGE_SAMPLE_MAX_PIXELS = 1024 * 1024; // 100 万像素以上走采样
-const COVERAGE_SAMPLE_STRIDE = 3; // 每 3x3 取 1 个像素
+const COVERAGE_SAMPLE_STRIDE = 3; // 每 3x3 取 1 个像素（仅 liveCoverage 使用）
 const IMAGE_RETRY_DELAYS = [120, 320, 1000] as const;
 const STROKES_DEBOUNCE_MS = 380; // onStrokesChange 去抖：避免逐点触发存储
 
@@ -489,7 +488,8 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
     }, [liveCoverage, strokes.length, onStatsChange]);
 
     // ———— 导出 ————
-    // 大图（>= COVERAGE_SAMPLE_MAX_PIXELS）的 coverage 走采样，保留近似精度。
+    // exportMask 全分辨率扫描一次（同时阈值化 alpha + 算精确 coverage）；不采样。
+    // 实时显示用的 liveCoverage 才走 stride 采样（频繁 strokes 触发，要便宜）。
     const exportMask = useCallback(async (): Promise<MaskExport | null> => {
       if (!imgEl) return null;
       const { naturalWidth: W, naturalHeight: H } = imgEl;
@@ -526,30 +526,26 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
       }
       ctx.globalCompositeOperation = "source-over";
 
-      // 覆盖率：大图采样，小图全像素
-      let coverage = 0;
+      // 阈值化 alpha 到 {0, 255} + 同时算 coverage（一次扫描搞定）。
+      // destination-out 圆笔头描线在边缘会留 1-px 抗锯齿灰带（alpha 1-254）；
+      // OpenAI /v1/images/edits 只在 alpha=0/255 时行为明确，partial alpha 会让上游
+      // inpaint 边界模糊，模型把它当"半重画半保留"。前端就压成二值后，worker 端
+      // _resize_mask_to_reference 的兜底阈值化变 no-op，少一次 PIL 重编码。
+      // 4K (~16M px) 全走 ~64M ops，V8 上 < 100ms，远低于网络 upload 时间。
+      const imgData = ctx.getImageData(0, 0, W, H);
+      const data = imgData.data;
+      let transparentCount = 0;
       const total = W * H;
-      if (total > COVERAGE_SAMPLE_MAX_PIXELS) {
-        const stride = COVERAGE_SAMPLE_STRIDE;
-        const data = ctx.getImageData(0, 0, W, H).data;
-        let transparent = 0;
-        let count = 0;
-        for (let y = 0; y < H; y += stride) {
-          for (let x = 0; x < W; x += stride) {
-            const idx = (y * W + x) * 4 + 3;
-            if (data[idx] === 0) transparent += 1;
-            count += 1;
-          }
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] < 128) {
+          data[i] = 0;
+          transparentCount += 1;
+        } else {
+          data[i] = 255;
         }
-        coverage = count === 0 ? 0 : transparent / count;
-      } else {
-        const data = ctx.getImageData(0, 0, W, H).data;
-        let transparent = 0;
-        for (let i = 3; i < data.length; i += 4) {
-          if (data[i] === 0) transparent += 1;
-        }
-        coverage = transparent / total;
       }
+      ctx.putImageData(imgData, 0, 0);
+      const coverage = total === 0 ? 0 : transparentCount / total;
 
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob((b) => resolve(b), "image/png"),
@@ -590,7 +586,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
     return (
       <div
         ref={containerRef}
-        className={cn("flex flex-col gap-3", className)}
+        className={cn("flex flex-col gap-3 h-full min-h-0", className)}
         style={style}
         onPointerDown={onContainerPointerDown}
       >

@@ -1428,14 +1428,18 @@ def _wrap_inpaint_prompt(user_intent: str) -> str:
     OpenAI /v1/images/edits + mask 字段必须用 invariant 模板才能正确 inpaint：
     否则 mask 区会被填黑、prompt 内容画到别处。本地 spike 已验证（mean diff 1.9）。
 
-    前缀（"Inside the masked region,"）和后缀（preserve / do not add 两条）都稳定，
-    user_intent 夹在中间——这样 prompt cache prefix 在多次 retry 间保持稳定。
+    前缀（"Inside the masked region,"）和后缀（preserve / do not add / blend 三条）
+    都稳定，user_intent 夹在中间——这样 prompt cache prefix 在多次 retry 间保持稳定。
     只在 mask 不为空时调用；mask 为空时直接发原始 prompt（保持 i2i 行为不变）。
+
+    第四行 "Blend ..." 让模型在 remove / replace 类指令下知道用周围像素自然过渡填充
+    （否则 "Inside the masked region, remove the apple." 模型常困惑该填什么 → 填黑/灰色）。
     """
     return (
         f"Inside the masked region, {user_intent.strip()}.\n"
         "Preserve everything outside the mask exactly: colors, geometry, lighting.\n"
-        "Do not add anything outside the masked area."
+        "Do not add anything outside the masked area.\n"
+        "Blend the result seamlessly with the surrounding unchanged area."
     )
 
 

@@ -27,6 +27,7 @@ import binascii
 import hashlib
 import io
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -46,6 +47,11 @@ from lumen_core.constants import (
     DEFAULT_CHAT_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
+    EXPLICIT_ALIGN,
+    MAX_EXPLICIT_ASPECT,
+    MAX_EXPLICIT_PIXELS,
+    MAX_EXPLICIT_SIDE,
+    MIN_EXPLICIT_PIXELS,
     CompletionStage,
     CompletionStatus,
     EV_GEN_ATTACHED,
@@ -83,7 +89,7 @@ from lumen_core.model_image_metadata import (
     model_image_filename,
     save_image_with_model_metadata,
 )
-from lumen_core.sizing import resolve_size
+from lumen_core.sizing import resolve_size, validate_explicit_size
 
 from ..config import settings
 from ..db import SessionLocal
@@ -1246,19 +1252,62 @@ async def _load_mask_image(
     return raw
 
 
+def _mask_alpha_is_binary(im: PILImage.Image) -> bool:
+    """RGBA / LA mask 的 alpha 通道是否只含 0 和 255。
+
+    OpenAI /v1/images/edits 文档定义"alpha=0 → 重画区域，其他 → 保留"，非 0/255
+    的中间 alpha 行为未指定。前端 destination-out 描线在圆笔头边会留 1-px 抗锯齿
+    灰带；LANCZOS 上下采样也会引入 partial alpha — 都需要兜底阈值化。
+    """
+    try:
+        bands = im.getbands()
+    except Exception:  # noqa: BLE001
+        return False
+    if "A" not in bands:
+        # 没有 alpha 通道（如纯 L mode）→ 调用方会 convert("RGBA")，再阈值化兜底。
+        return False
+    try:
+        alpha = im.getchannel("A")
+        extrema = alpha.getextrema()
+    except Exception:  # noqa: BLE001
+        return False
+    if extrema is None:
+        return True
+    lo, hi = extrema
+    return lo in (0, 255) and hi in (0, 255)
+
+
+def _binarize_mask_alpha(im: PILImage.Image) -> PILImage.Image:
+    """把 RGBA mask 的 alpha 阈值化到 {0, 255}（< 128 → 0，否则 → 255）。
+
+    输入若不是 RGBA 自动 convert；输出永远 RGBA。
+    """
+    if im.mode != "RGBA":
+        im = im.convert("RGBA")
+    alpha = im.getchannel("A")
+    binarized = alpha.point(lambda v: 255 if v >= 128 else 0)
+    out = im.copy()
+    out.putalpha(binarized)
+    return out
+
+
 def _resize_mask_to_reference(
     mask_bytes: bytes,
     reference_bytes: bytes,
 ) -> bytes:
-    """把 mask 缩放到第一张参考图的像素尺寸（LANCZOS）。
+    """把 mask 对齐到第一张参考图的像素尺寸 + 阈值化 alpha 到 {0, 255}。
 
     上游 /v1/images/edits + mask 字段要求 mask 与 image 等尺寸；前端裁切时已经做过
     一次但移动端 / DPR 偶尔会偏 1-2px，worker 兜底再 normalize 一次。
 
-    - 已经等尺寸 → 原 PNG 字节直接返回（避免无谓 PIL 重编码改 bytes，prompt cache
-      key 可读）。
-    - 不等尺寸 → 转 RGBA + LANCZOS resize + 保存 PNG（保持透明通道；mask 通常用
-      alpha 表示"要替换的区域"）。
+    OpenAI 文档：alpha=0 → 重画区，alpha=255 → 保留区，中间值未定义。所以这里：
+    - resize 用 NEAREST（不引入 partial alpha；mask 通常是较大块面，NEAREST 上下
+      采样的边缘锯齿在 16-px+ 块面下肉眼看不出来）。
+    - resize 后阈值化 alpha 到 {0, 255}，把前端 destination-out 圆笔头的 1-px
+      抗锯齿灰带也压成二值。
+
+    - 已经等尺寸 + 合法形态 + alpha 已经二值 → 原 PNG 字节直接返回（避免无谓 PIL 重编码）。
+    - 否则 → 转 RGBA + （需要时）NEAREST resize + 阈值化 + 保存 PNG。
     - mask 解码失败 → terminal bad_reference_image（用户输入问题，重试无效）。
     """
     try:
@@ -1274,17 +1323,22 @@ def _resize_mask_to_reference(
         ) from exc
     try:
         with PILImage.open(io.BytesIO(mask_bytes)) as mask_im:
-            if mask_im.size == ref_size and mask_im.mode in ("RGBA", "L", "LA"):
-                # 同尺寸 + 已经是合法 mask 形态 → 直接返回原字节，避免无谓编码。
+            same_size = mask_im.size == ref_size
+            mode_legit = mask_im.mode in ("RGBA", "L", "LA")
+            if same_size and mode_legit and _mask_alpha_is_binary(mask_im):
+                # 同尺寸 + 已经是合法 mask 形态 + alpha 已二值 → 直接返回原字节。
                 return mask_bytes
             target_mode = "RGBA"
             mask_normalized = (
                 mask_im if mask_im.mode == target_mode else mask_im.convert(target_mode)
             )
             if mask_normalized.size != ref_size:
+                # NEAREST 而非 LANCZOS：避免在 mask 边引入 1-254 的 partial alpha
+                # 让上游 inpaint 区分不出"重画 vs 保留"。
                 mask_normalized = mask_normalized.resize(
-                    ref_size, resample=PILImage.LANCZOS
+                    ref_size, resample=PILImage.NEAREST
                 )
+            mask_normalized = _binarize_mask_alpha(mask_normalized)
             out = io.BytesIO()
             mask_normalized.save(out, format="PNG")
             return out.getvalue()
@@ -1296,6 +1350,82 @@ def _resize_mask_to_reference(
             error_code=EC.BAD_REFERENCE_IMAGE.value,
             status_code=400,
         ) from exc
+
+
+def _reference_pixel_size(reference_bytes: bytes) -> tuple[int, int] | None:
+    """读出参考图的 (W, H)；解码失败返回 None（让调用方走 fallback）。
+
+    与 ``_resize_mask_to_reference`` 共用同份 reference_bytes 但独立打开 PIL；
+    PIL.Image.open 只读 header，不 decode 像素，开销可忽略。
+    """
+    try:
+        with PILImage.open(io.BytesIO(reference_bytes)) as ref_im:
+            return ref_im.size
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _inpaint_size_from_reference(ref_w: int, ref_h: int) -> str | None:
+    """局部 inpaint 时按参考图像素尺寸推导 gpt-image-2 合法 size。
+
+    强制让输出尺寸 = 输入尺寸（取最近合法 16-aligned），避免 1024x768 输入要被
+    "顺手升采到 4K 输出"——那种叠加场景实测会让模型把 mask 外的区域也重画，
+    甚至把 mask 错位 — 用户的"局部修改"瞬间退化成"整张重生成"。
+
+    Scaling：先按长边 ≤ MAX_EXPLICIT_SIDE 缩，再按总像素 ≤ MAX_EXPLICIT_PIXELS 二次缩，
+    最后按总像素 ≥ MIN_EXPLICIT_PIXELS 反向放。三个 16-aligned 候选（nearest / floor /
+    ceil）依次试 validate；都失败才返回 None（让 caller 回退原 resolved.size）。
+
+    返回 None 的极端场景：aspect > 21:9 / 短边过小同时长宽比偏极端 / 解码失败 /
+    16-aligned 候选都 validate 不过（罕见）。
+    """
+    if ref_w <= 0 or ref_h <= 0:
+        return None
+    long_side = max(ref_w, ref_h)
+    short_side = min(ref_w, ref_h)
+    if short_side <= 0:
+        return None
+    if long_side / short_side > MAX_EXPLICIT_ASPECT:
+        return None  # 太极端的长宽比，validate 也不会过，让 caller 走 resolved.size
+
+    # Upper bounds：长边 + 总像素
+    scale = 1.0
+    if long_side > MAX_EXPLICIT_SIDE:
+        scale = MAX_EXPLICIT_SIDE / long_side
+    pixels_at_scale = ref_w * ref_h * scale * scale
+    if pixels_at_scale > MAX_EXPLICIT_PIXELS:
+        scale *= math.sqrt(MAX_EXPLICIT_PIXELS / pixels_at_scale)
+
+    # Lower bound：总像素（在不超长边的前提下放大；否则放弃）
+    pixels_at_scale = ref_w * ref_h * scale * scale
+    if pixels_at_scale < MIN_EXPLICIT_PIXELS:
+        scale_up = math.sqrt(MIN_EXPLICIT_PIXELS / pixels_at_scale)
+        if max(ref_w, ref_h) * scale * scale_up > MAX_EXPLICIT_SIDE:
+            return None
+        scale *= scale_up
+
+    target_w = ref_w * scale
+    target_h = ref_h * scale
+
+    # 三个 16-aligned 候选：nearest（边界附近 ok）/ floor（max 边界用）/ ceil（min 边界用）
+    candidates: list[tuple[int, int]] = []
+    for align in (
+        lambda v: max(EXPLICIT_ALIGN, int(round(v / EXPLICIT_ALIGN)) * EXPLICIT_ALIGN),
+        lambda v: max(EXPLICIT_ALIGN, int(v // EXPLICIT_ALIGN) * EXPLICIT_ALIGN),
+        lambda v: max(EXPLICIT_ALIGN, int(math.ceil(v / EXPLICIT_ALIGN)) * EXPLICIT_ALIGN),
+    ):
+        candidates.append((align(target_w), align(target_h)))
+    seen: set[tuple[int, int]] = set()
+    for w, h in candidates:
+        if (w, h) in seen:
+            continue
+        seen.add((w, h))
+        try:
+            validate_explicit_size(w, h)
+            return f"{w}x{h}"
+        except ValueError:
+            continue
+    return None
 
 
 def _bounded_next_attempt(current_attempt: int | None) -> tuple[int, bool]:
@@ -3080,10 +3210,18 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 在 _normalize_reference_image 还会再过一遍（统一 WebP 编码），所以这里只
         # 用第一张原字节量像素尺寸即可，不重复重编码。
         mask_bytes: bytes | None = None
+        # inpaint 输出 size 强制对齐参考图像素尺寸——否则 1024x768 输入要被升采样
+        # 到 4K 输出时，gpt-image-2 实测会把 mask 外区域重画 / mask 错位，"局部修改"
+        # 退化成"整张重生成"。失败（参考图比例太极端 / 解码失败）保持 None，调用方
+        # 走原 resolved.size 兜底。
+        inpaint_size_override: str | None = None
         if mask_bytes_raw is not None and ref_for_body:
             mask_bytes = _resize_mask_to_reference(
                 mask_bytes_raw, ref_for_body[0][1]
             )
+            ref_size = _reference_pixel_size(ref_for_body[0][1])
+            if ref_size is not None:
+                inpaint_size_override = _inpaint_size_from_reference(*ref_size)
 
         # 即将调用上游（同步 HTTP，20-60s），先推一条 rendering progress 让前端切指示。
         # substage=stream_started 让 DevelopingCard 显影扫光从"占位"切到"真在工作"。
@@ -3280,7 +3418,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 try:
                     _span.set_attribute("lumen.task_id", task_id)
                     _span.set_attribute("lumen.action", action)
-                    _span.set_attribute("lumen.size", resolved.size)
+                    # inpaint 路径用对齐参考图的 size override；observability 看到的 size
+                    # 才和实际下发到 /v1/images/edits 的一致（不然 admin 排查时会困惑）。
+                    _span.set_attribute(
+                        "lumen.size", inpaint_size_override or resolved.size
+                    )
+                    if inpaint_size_override:
+                        _span.set_attribute("lumen.size_requested", resolved.size)
                     if reserved_provider_name:
                         _span.set_attribute("lumen.provider", reserved_provider_name)
                 except Exception:  # noqa: BLE001
@@ -3306,7 +3450,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 )
                             image_iter = edit_image(
                                 prompt=prompt,
-                                size=resolved.size,
+                                # mask 不为 None 时优先用对齐到参考图尺寸的 inpaint
+                                # override；否则走 user resolved.size（普通 i2i 行为）。
+                                size=inpaint_size_override or resolved.size,
                                 images=[raw for _sha, raw in ref_for_body],
                                 mask=mask_bytes,
                                 quality=str(image_request_options["render_quality"]),

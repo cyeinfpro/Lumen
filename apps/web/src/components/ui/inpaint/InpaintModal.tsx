@@ -435,7 +435,9 @@ function InpaintModalInner() {
         className={cn(
           "w-full max-w-[1100px]",
           // dvh = 浏览器栏 + 键盘动态视口；svh fallback 在更小视口
-          "h-[calc(100dvh-1rem)] sm:h-auto sm:max-h-[calc(100dvh-3rem)]",
+          // 桌面给固定高度（760px clamp 到视口），让 body flex-1 链路有撑开依据；
+          // 之前 sm:h-auto 内容驱动 + MaskBoard fit 模式互相塌缩，整个弹窗缩成只有 header
+          "h-[calc(100dvh-1rem)] sm:h-[760px] sm:max-h-[calc(100dvh-3rem)]",
           "flex flex-col overflow-hidden",
           "rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]",
           "shadow-[var(--shadow-2)]",
@@ -492,7 +494,8 @@ function InpaintModalInner() {
           {/* 画板区域 */}
           <div
             className={cn(
-              "flex-1 min-h-0 overflow-auto p-3 sm:p-4 bg-[var(--bg-1)]",
+              // MaskBoard 内 ResizeObserver fit 容器，外层不需要 overflow-auto
+              "flex-1 min-w-0 min-h-0 overflow-hidden p-3 sm:p-4 bg-[var(--bg-1)]",
               "md:border-r md:border-[var(--border-subtle)]",
             )}
             onPointerDown={cancelConfirmClose}
