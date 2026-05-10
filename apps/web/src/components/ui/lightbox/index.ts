@@ -11,11 +11,13 @@ export {
   buildLightboxMetadataSections,
   extensionFromMime,
   extensionFromSrc,
+  fetchImageBlob,
   formatImageDimensions,
   formatLightboxDate,
   getLightboxDownloadFilename,
   getLightboxMimeType,
   inferLightboxFileExtension,
+  triggerImageDownload,
   type LightboxMetadataRow,
   type LightboxMetadataSection,
 } from "./utils";

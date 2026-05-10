@@ -170,3 +170,45 @@ function compactRows(
 ): LightboxMetadataRow[] {
   return rows.filter((row): row is LightboxMetadataRow => Boolean(row?.value));
 }
+
+export async function fetchImageBlob(src: string): Promise<Blob> {
+  const response = src.startsWith("data:")
+    ? await fetch(src)
+    : await fetch(src, { credentials: "include" });
+  if (!response.ok) {
+    throw new Error(`Image download failed: ${response.status}`);
+  }
+  return response.blob();
+}
+
+// 触发"另存为"行为：data: 直接走 a.download；http(s) 先 fetch 成 Blob
+// 再用 ObjectURL，避免浏览器把 image/* 直接打开预览。
+export async function triggerImageDownload(
+  src: string,
+  filename: string,
+): Promise<void> {
+  if (typeof document === "undefined") return;
+  if (src.startsWith("data:")) {
+    const a = document.createElement("a");
+    a.href = src;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return;
+  }
+  const blob = await fetchImageBlob(src);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  }
+}

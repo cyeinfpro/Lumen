@@ -10,7 +10,7 @@
 - runtime_settings: 可调系统设置元数据与校验
 """
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 from . import (  # noqa: F401
     constants,

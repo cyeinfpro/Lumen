@@ -56,6 +56,7 @@ import { imageBinaryUrl, imageVariantUrl } from "@/lib/apiClient";
 import { prewarmImage } from "@/lib/imagePreload";
 import { aspectRatioToCss } from "@/lib/sizing";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
+import { triggerImageDownload } from "@/components/ui/lightbox/utils";
 import { DevelopingCard } from "@/components/ui/chat/mobile";
 import { DesktopSceneDivider } from "./DesktopSceneDivider";
 
@@ -1080,11 +1081,15 @@ function ImageContextMenuInner({
     },
     {
       key: "save",
-      label: "保存",
+      label: "下载原图",
       icon: <Download className="w-4 h-4" />,
       onSelect: () => {
-        const url = imageVariantUrl(info.imageId, "preview1024");
-        window.open(url, "_blank", "noopener,noreferrer");
+        const url = imageBinaryUrl(info.imageId);
+        const filename = `lumen-${info.imageId}.png`;
+        void triggerImageDownload(url, filename).catch(() => {
+          toast.error("下载失败,已在新标签页打开");
+          window.open(url, "_blank", "noopener,noreferrer");
+        });
       },
     },
     {
