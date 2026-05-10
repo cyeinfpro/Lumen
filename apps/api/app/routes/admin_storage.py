@@ -165,6 +165,11 @@ async def _load_config(db: AsyncSession) -> StorageConfigOut:
     backend = await get_setting(db, _spec("storage.backend")) or ""
     local_root = await get_setting(db, _spec("storage.local.root")) or DEFAULT_LOCAL_ROOT
     smb_host = await get_setting(db, _spec("storage.smb.host")) or ""
+    smb_port_raw = await get_setting(db, _spec("storage.smb.port")) or ""
+    try:
+        smb_port = int(smb_port_raw) if smb_port_raw else 0
+    except ValueError:
+        smb_port = 0
     smb_share = await get_setting(db, _spec("storage.smb.share")) or ""
     smb_subpath = await get_setting(db, _spec("storage.smb.subpath")) or "/"
     smb_username = await get_setting(db, _spec("storage.smb.username")) or ""
@@ -191,6 +196,7 @@ async def _load_config(db: AsyncSession) -> StorageConfigOut:
         local=StorageLocalConfigOut(root=local_root),
         smb=StorageSmbConfigOut(
             host=smb_host,
+            port=smb_port,
             share=smb_share,
             subpath=smb_subpath,
             username=smb_username,
@@ -266,6 +272,8 @@ def _build_storage_conf(cfg: StorageConfigOut, smb_password: str) -> str:
         "MODE": cfg.backend or "local",
         "LOCAL_ROOT": cfg.local.root,
         "SMB_HOST": cfg.smb.host,
+        # 0 / 空 → 让 mount.cifs 走默认 445；其余值由脚本拼到 -o port=
+        "SMB_PORT": str(cfg.smb.port) if cfg.smb.port else "",
         "SMB_SHARE": cfg.smb.share,
         "SMB_SUBPATH": cfg.smb.subpath or "/",
         "SMB_USERNAME": cfg.smb.username,
@@ -322,6 +330,8 @@ async def test_storage_endpoint(
     call_id = uuid.uuid4().hex
     fields = {
         "SMB_HOST": host,
+        # 0 → 走默认 445；脚本检测空字符串就不加 -o port=
+        "SMB_PORT": str(body.port) if body.port else "",
         "SMB_SHARE": share,
         "SMB_SUBPATH": subpath,
         "SMB_USERNAME": body.username.strip(),
@@ -398,6 +408,8 @@ async def put_storage_endpoint(
             raise _http("invalid_smb_username", "username 不能为空", 422)
         pairs.extend([
             ("storage.smb.host", host),
+            # smb.port == 0 表示用默认 445，存空字符串
+            ("storage.smb.port", str(smb.port) if smb.port else ""),
             ("storage.smb.share", share),
             ("storage.smb.subpath", subpath),
             ("storage.smb.username", username),

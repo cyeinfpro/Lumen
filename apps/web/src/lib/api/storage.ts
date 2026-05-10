@@ -24,6 +24,8 @@ export interface StorageLocalConfig {
 
 export interface StorageSmbConfig {
   host: string;
+  /** 0 / 不传 = 走 mount.cifs 默认 445；非 0 = 自定义端口 */
+  port: number;
   share: string;
   subpath: string;
   username: string;
@@ -71,6 +73,8 @@ export interface StorageConfigOut {
 
 export interface StorageTestIn {
   host: string;
+  /** 0 = 默认 445 */
+  port: number;
   share: string;
   subpath: string;
   username: string;
@@ -91,6 +95,8 @@ export interface StorageLocalUpdateIn {
 
 export interface StorageSmbUpdateIn {
   host: string;
+  /** 0 = 默认 445 */
+  port: number;
   share: string;
   subpath: string;
   username: string;

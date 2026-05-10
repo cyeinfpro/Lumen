@@ -129,7 +129,7 @@ load_conf() {
   if [[ ! -f "$CONF_FILE" ]]; then
     MODE="local"
     LOCAL_ROOT="$DEFAULT_LOCAL_ROOT"
-    SMB_HOST=""; SMB_SHARE=""; SMB_SUBPATH="/"; SMB_USERNAME=""; SMB_PASSWORD=""
+    SMB_HOST=""; SMB_PORT=""; SMB_SHARE=""; SMB_SUBPATH="/"; SMB_USERNAME=""; SMB_PASSWORD=""
     return 0
   fi
   # shellcheck disable=SC1090
@@ -137,6 +137,8 @@ load_conf() {
   MODE="${MODE:-local}"
   LOCAL_ROOT="${LOCAL_ROOT:-$DEFAULT_LOCAL_ROOT}"
   SMB_HOST="${SMB_HOST:-}"
+  # 空 → 走 mount.cifs 默认 445；其他值（数字字符串）拼到 -o port=
+  SMB_PORT="${SMB_PORT:-}"
   SMB_SHARE="${SMB_SHARE:-}"
   SMB_SUBPATH="${SMB_SUBPATH:-/}"
   SMB_USERNAME="${SMB_USERNAME:-}"
@@ -188,6 +190,9 @@ mount_smb() {
   trap "rm -f '$cred'" RETURN
   write_smb_credentials "$SMB_USERNAME" "$SMB_PASSWORD" "$cred"
   opts="credentials=${cred},uid=${LUMEN_UID},gid=${LUMEN_GID},forceuid,forcegid,file_mode=0664,dir_mode=0775,${CIFS_OPTS_BASE}"
+  if [[ -n "$SMB_PORT" ]]; then
+    opts="${opts},port=${SMB_PORT}"
+  fi
   mkdir -p "$TARGET"
   if mountpoint -q "$TARGET"; then
     log "target $TARGET already mounted; unmounting first"
@@ -298,6 +303,9 @@ cmd_test() {
   trap "rm -f '$cred'" RETURN
   write_smb_credentials "$SMB_USERNAME" "$SMB_PASSWORD" "$cred"
   opts="credentials=${cred},uid=${LUMEN_UID},gid=${LUMEN_GID},forceuid,forcegid,file_mode=0664,dir_mode=0775,${CIFS_OPTS_BASE}"
+  if [[ -n "${SMB_PORT:-}" ]]; then
+    opts="${opts},port=${SMB_PORT}"
+  fi
   mkdir -p "$TEST_TARGET"
   mountpoint -q "$TEST_TARGET" && umount -l "$TEST_TARGET" 2>/dev/null || true
   if msg="$(mount -t cifs "$source" "$TEST_TARGET" -o "$opts" 2>&1)"; then

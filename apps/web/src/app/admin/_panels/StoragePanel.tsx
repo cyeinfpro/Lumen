@@ -61,12 +61,20 @@ const POLL_DELAY_MS = 6_000;
 const POLL_INTERVAL_MS = 3_000;
 const POLL_TIMEOUT_MS = 90_000;
 
+// 表单字符串端口 → 后端 number；非数字 / 空 / 越界统一回 0（走默认 445）
+function parsePortValue(raw: string): number {
+  const v = parseInt(raw, 10);
+  if (!Number.isFinite(v) || v < 1 || v > 65535) return 0;
+  return v;
+}
+
 type Backend = "local" | "smb";
 
 interface FormState {
   backend: Backend;
   localRoot: string;
   host: string;
+  port: string; // 字符串方便控件；提交时转 number；空 = 走默认 445
   share: string;
   subpath: string;
   username: string;
@@ -82,6 +90,7 @@ function deriveInitialForm(cfg: StorageConfigOut | undefined): FormState {
     localRoot:
       cfg?.local?.root || cfg?.status?.target || DEFAULT_LOCAL_ROOT,
     host: cfg?.smb?.host ?? "",
+    port: cfg?.smb?.port ? String(cfg.smb.port) : "",
     share: cfg?.smb?.share ?? "",
     subpath: cfg?.smb?.subpath ?? "",
     username: cfg?.smb?.username ?? "",
@@ -331,6 +340,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
             local: null,
             smb: {
               host: form.host.trim(),
+              port: parsePortValue(form.port),
               share: form.share.trim(),
               subpath: form.subpath.trim(),
               username: form.username.trim(),
@@ -366,6 +376,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
     if (!canTestSmb) return;
     const body: StorageTestIn = {
       host: form.host.trim(),
+      port: parsePortValue(form.port),
       share: form.share.trim(),
       subpath: form.subpath.trim(),
       username: form.username.trim(),
@@ -873,6 +884,15 @@ function SmbForm({
         disabled={disabled}
         placeholder="nas.local 或 10.10.10.5"
         leftIcon={<Network className="h-3.5 w-3.5" />}
+      />
+      <Input
+        label="端口（可选）"
+        value={form.port}
+        onChange={(e) => onChange({ port: e.target.value.replace(/[^0-9]/g, "") })}
+        disabled={disabled}
+        placeholder="445"
+        inputMode="numeric"
+        hint="留空走 SMB 默认 445。"
       />
       <Input
         label="Share"
