@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { useRef, useState } from "react";
 import { RotateCw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { cancelTask, imageBinaryUrl } from "@/lib/apiClient";
+import { cancelTask, imageBinaryUrl, imageVariantUrl } from "@/lib/apiClient";
 import { errorCodeToMessage } from "@/lib/errors";
 import { getErrorMessage, hasErrorMessage } from "@/lib/errorMessages";
 import { PremiumImageCard } from "../PremiumImageCard";
@@ -243,12 +243,18 @@ export function GenerationView({
     );
   }
 
+  // image 对象缺失（仅有 image_id）时构造 variant URL，让卡片优先拉 preview1024（~80KB）
+  // 而不是 binary 原图（1-2MB）。PremiumImageCard 在 preview 加载失败时会回退到 src。
   const fallbackSrc = imageBinaryUrl(fallbackImageId);
+  const fallbackPreview = imageVariantUrl(fallbackImageId, "preview1024");
+  const fallbackLightboxPreview = imageVariantUrl(fallbackImageId, "display2048");
   return (
     <div className="flex flex-col gap-2.5 relative">
       <PremiumImageCard
         id={fallbackImageId}
         src={fallbackSrc}
+        previewSrc={fallbackPreview}
+        lightboxPreviewSrc={fallbackLightboxPreview}
         alt={gen.prompt}
         className={cn(
           "w-full",

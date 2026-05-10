@@ -14,8 +14,9 @@ import { copy } from "@/lib/copy";
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
 import { useInpaintStore } from "@/store/useInpaintStore";
-import { Button } from "./primitives";
+import { Button, toast } from "./primitives";
 import { ViewportImage } from "./ViewportImage";
+import { extensionFromSrc, triggerImageDownload } from "./lightbox/utils";
 
 interface PremiumImageCardProps {
   id: string;
@@ -57,8 +58,6 @@ export function PremiumImageCard({
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const openLightbox = useUiStore((s) => s.openLightbox);
-  // 隐藏的 <a> 用于 data: URL 下载（浏览器安全模型不允许 window.open 直接触发下载）
-  const downloadAnchorRef = useRef<HTMLAnchorElement>(null);
 
   // React 19 推荐：prop 变化时在 render 阶段用 prev-check 同步 state，
   // 避免 useEffect+setState 触发的级联渲染。refs 清理放到下方 effect 的 cleanup 里处理。
@@ -142,20 +141,24 @@ export function PremiumImageCard({
     });
   };
 
-  // data: URL 用隐藏 <a download>；http(s) URL 用新标签页
+  // 触发"下载"：data: 走 a.download；http(s) 先 fetch+Blob 再 a.download，
+  // 否则浏览器把 image/* MIME 直接打开预览而不是下载。失败兜底新标签页。
+  const [isDownloading, setIsDownloading] = useState(false);
   const handleDownload = () => {
-    if (src.startsWith("data:")) {
-      const a = downloadAnchorRef.current;
-      if (a) {
-        a.href = src;
-        const mimeMatch = src.match(/^data:([^;]+);/);
-        const ext = mimeMatch ? mimeMatch[1].split("/")[1] || "png" : "png";
-        a.download = `lumen-${id}.${ext}`;
-        a.click();
+    if (isDownloading) return;
+    const ext = extensionFromSrc(src) ?? "png";
+    const filename = `lumen-${id}.${ext}`;
+    setIsDownloading(true);
+    void (async () => {
+      try {
+        await triggerImageDownload(src, filename);
+      } catch {
+        toast.error("下载失败,已在新标签页打开");
+        window.open(src, "_blank", "noopener,noreferrer");
+      } finally {
+        setIsDownloading(false);
       }
-    } else {
-      window.open(src);
-    }
+    })();
   };
 
   const handleOpenLightbox = () => {
@@ -292,9 +295,6 @@ export function PremiumImageCard({
         </motion.div>
       )}
 
-      {/* 隐藏下载触发器 */}
-      <a ref={downloadAnchorRef} className="hidden" aria-hidden="true" />
-
       {/* 触控设备首次提示：底部轻淡入的操作提示 */}
       <AnimatePresence>
         {showTouchHint && (
@@ -390,15 +390,20 @@ export function PremiumImageCard({
               </HoverIconButton>,
               <HoverIconButton
                 key="download"
-                label="下载"
+                label={isDownloading ? "下载中…" : "下载原图"}
                 delay={0.09}
                 compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleDownload();
                 }}
+                disabled={isDownloading}
               >
-                <Download className="w-4 h-4" />
+                {isDownloading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
               </HoverIconButton>,
               <HoverIconButton
                 key="lightbox"

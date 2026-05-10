@@ -26,9 +26,12 @@ DEFAULT_LOCAL_ROOT="${LUMEN_STORAGE_DEFAULT_LOCAL_ROOT:-/var/lib/lumen-data}"
 #   handles retries internally; cifs has no NFS-style `retrans` option — adding
 #   it triggers `Unknown mount option` and aborts with mount error(22)).
 # rsize/wsize=4M — large-block IO friendly (4K image task pattern).
+# actimeo=60 — Lumen images are sha256-content-addressed and immutable once
+#   stored; attribute cache TTL of 60s avoids per-request stat round-trips to
+#   the SMB server (default actimeo=1 was hurting hot-path image reads).
 # noperm — client trusts server permissions (matches our chmod EPERM tolerance).
 # mfsymlinks / mapposix — symlinks + reserved-char filenames work transparently.
-CIFS_OPTS_BASE="vers=3.0,soft,rsize=4194304,wsize=4194304,actimeo=1,cache=strict,echo_interval=60,noperm,mfsymlinks,mapposix,nounix,serverino,_netdev"
+CIFS_OPTS_BASE="vers=3.0,soft,rsize=4194304,wsize=4194304,actimeo=60,cache=strict,echo_interval=60,noperm,mfsymlinks,mapposix,nounix,serverino,_netdev"
 
 LUMEN_UID="${LUMEN_APP_UID:-995}"
 LUMEN_GID="${LUMEN_APP_GID:-994}"
