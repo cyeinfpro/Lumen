@@ -16,8 +16,9 @@
 #   F. docker compose pull && 起 PG/Redis -> migrate -> 可选 bootstrap -> api/worker/web (+tgbot)
 #   G. 切 current symlink
 #   H. HTTP + compose 健康检查
-#   I. systemd 旧服务残留提示（不自动 disable）
-#   J. 打印汇总
+#   I. 安装/刷新一键更新 systemd runner（Linux systemd）
+#   J. systemd 旧服务残留提示（不自动 disable）
+#   K. 打印汇总
 #
 # 重复执行安全（幂等）。失败时清理已起容器（不删数据卷），打印恢复命令。
 # 兼容 LUMEN_NONINTERACTIVE=1：所有 read 跳过，从 LUMEN_ADMIN_EMAIL/LUMEN_ADMIN_PASSWORD env 读。
@@ -1123,6 +1124,42 @@ prepare_data_dirs() {
     emit_step_done
 }
 
+_sed_replacement_escape() {
+    printf '%s' "$1" | sed 's/[\/&#]/\\&/g'
+}
+
+_render_update_runner_units() {
+    local src_path="$1"
+    local src_runner="$2"
+    local out_dir="$3"
+    local data_root="$4"
+    local backup_root="$5"
+    local deploy_root="$6"
+    local data_root_esc backup_root_esc deploy_root_esc
+    data_root_esc="$(_sed_replacement_escape "${data_root}")"
+    backup_root_esc="$(_sed_replacement_escape "${backup_root}")"
+    deploy_root_esc="$(_sed_replacement_escape "${deploy_root}")"
+
+    # Render through placeholders first. The template paths overlap
+    # (/opt/lumen is a prefix of /opt/lumendata), so direct chained sed
+    # replacements can corrupt custom data roots such as /opt/lumen-data.
+    sed \
+        -e 's#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g' \
+        "${src_path}" \
+        | sed -e "s#__LUMEN_BACKUP_ROOT__#${backup_root_esc}#g" \
+        > "${out_dir}/lumen-update.path"
+    sed \
+        -e 's#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g' \
+        -e 's#/opt/lumendata#__LUMEN_DATA_ROOT__#g' \
+        -e 's#/opt/lumen#__LUMEN_DEPLOY_ROOT__#g' \
+        "${src_runner}" \
+        | sed \
+            -e "s#__LUMEN_BACKUP_ROOT__#${backup_root_esc}#g" \
+            -e "s#__LUMEN_DATA_ROOT__#${data_root_esc}#g" \
+            -e "s#__LUMEN_DEPLOY_ROOT__#${deploy_root_esc}#g" \
+        > "${out_dir}/lumen-update-runner.service"
+}
+
 # ---------------------------------------------------------------------------
 # C. 准备 release 布局
 #   ${LUMEN_DEPLOY_ROOT}/
@@ -1632,7 +1669,73 @@ switch_current_symlink() {
 }
 
 # ---------------------------------------------------------------------------
-# H. 健康检查（HTTP + Compose 状态）
+# H. 安装/刷新一键更新 systemd runner
+# ---------------------------------------------------------------------------
+install_update_runner_units() {
+    emit_step_start prepare "安装一键更新 runner（systemd path）"
+    if [ "${OS}" != "linux" ] || ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+        log_warn "未检测到 Linux systemd，跳过一键更新 runner 安装；命令行 update-lumen 不受影响。"
+        emit_step_done
+        return 0
+    fi
+
+    local src_dir="${RELEASE_DIR}/deploy/systemd"
+    local src_path="${src_dir}/lumen-update.path"
+    local src_runner="${src_dir}/lumen-update-runner.service"
+    if [ ! -f "${src_path}" ] || [ ! -f "${src_runner}" ]; then
+        log_warn "找不到 update runner unit 模板（${src_dir}），跳过一键更新 runner 安装。"
+        emit_step_done
+        return 0
+    fi
+
+    local data_root deploy_root backup_root tmp_dir
+    data_root="${LUMEN_DATA_ROOT%/}"
+    deploy_root="${DEPLOY_ROOT%/}"
+    backup_root="${LUMEN_BACKUP_ROOT:-${data_root}/backup}"
+    backup_root="${backup_root%/}"
+    tmp_dir="$(mktemp -d)"
+
+    _render_update_runner_units \
+        "${src_path}" \
+        "${src_runner}" \
+        "${tmp_dir}" \
+        "${data_root}" \
+        "${backup_root}" \
+        "${deploy_root}"
+
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" /etc/systemd/system/lumen-update.path; then
+        log_warn "安装 lumen-update.path 失败，面板一键更新将不可用。"
+        rm -rf "${tmp_dir}"
+        emit_step_done
+        return 0
+    fi
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-runner.service" /etc/systemd/system/lumen-update-runner.service; then
+        log_warn "安装 lumen-update-runner.service 失败，面板一键更新将不可用。"
+        rm -rf "${tmp_dir}"
+        emit_step_done
+        return 0
+    fi
+    if ! lumen_run_as_root systemctl daemon-reload; then
+        log_warn "systemctl daemon-reload 失败，面板一键更新可能不可用。"
+        rm -rf "${tmp_dir}"
+        emit_step_done
+        return 0
+    fi
+    if ! lumen_run_as_root systemctl enable --now lumen-update.path; then
+        log_warn "启用 lumen-update.path 失败，面板一键更新将不可用；可稍后手动执行 systemctl enable --now lumen-update.path。"
+        rm -rf "${tmp_dir}"
+        emit_step_done
+        return 0
+    fi
+    rm -rf "${tmp_dir}"
+
+    log_info "一键更新 runner 已启用：监听 ${backup_root}/.update.trigger"
+    emit_info "key=update_trigger" "value=${backup_root}/.update.trigger"
+    emit_step_done
+}
+
+# ---------------------------------------------------------------------------
+# I. 健康检查（HTTP + Compose 状态）
 # ---------------------------------------------------------------------------
 run_health_checks() {
     emit_step_start health_post "健康检查（HTTP + compose service 状态）"
@@ -1666,7 +1769,7 @@ run_health_checks() {
 }
 
 # ---------------------------------------------------------------------------
-# I. systemd 处理（不自动 disable，仅提示）
+# J. systemd 处理（不自动 disable，仅提示）
 # ---------------------------------------------------------------------------
 warn_about_legacy_systemd() {
     if ! command -v systemctl >/dev/null 2>&1; then
@@ -1689,7 +1792,7 @@ warn_about_legacy_systemd() {
 }
 
 # ---------------------------------------------------------------------------
-# J. 输出汇总
+# K. 输出汇总
 # ---------------------------------------------------------------------------
 print_summary() {
     emit_step_start cleanup "安装完成汇总"
@@ -1787,6 +1890,7 @@ run_migration
 run_bootstrap_admin
 start_application_services
 switch_current_symlink
+install_update_runner_units
 run_health_checks
 warn_about_legacy_systemd
 print_summary

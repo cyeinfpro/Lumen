@@ -152,6 +152,89 @@ env_key_present() {
     grep -qE "^${key}=.+" "${file}"
 }
 
+sed_replacement_escape() {
+    printf '%s' "$1" | sed 's/[\/&#]/\\&/g'
+}
+
+render_update_runner_unit() {
+    local src="$1"
+    local dst="$2"
+    local data_root="$3"
+    local backup_root="$4"
+    local deploy_root="$5"
+    local data_root_esc backup_root_esc deploy_root_esc
+    data_root_esc="$(sed_replacement_escape "${data_root}")"
+    backup_root_esc="$(sed_replacement_escape "${backup_root}")"
+    deploy_root_esc="$(sed_replacement_escape "${deploy_root}")"
+
+    sed \
+        -e 's#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g' \
+        -e 's#/opt/lumendata#__LUMEN_DATA_ROOT__#g' \
+        -e 's#/opt/lumen#__LUMEN_DEPLOY_ROOT__#g' \
+        "${src}" \
+        | sed \
+            -e "s#__LUMEN_BACKUP_ROOT__#${backup_root_esc}#g" \
+            -e "s#__LUMEN_DATA_ROOT__#${data_root_esc}#g" \
+            -e "s#__LUMEN_DEPLOY_ROOT__#${deploy_root_esc}#g" \
+        > "${dst}"
+}
+
+refresh_update_runner_units() {
+    if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+        log_info "[refresh_update_runner] 未检测到 Linux systemd，跳过。"
+        emit_info refresh_update_runner status "skipped_no_systemd"
+        return 0
+    fi
+
+    local src_dir="${ROOT}/current/deploy/systemd"
+    if [ ! -d "${src_dir}" ] && [ -n "${NEW_RELEASE:-}" ] && [ -d "${NEW_RELEASE}/deploy/systemd" ]; then
+        src_dir="${NEW_RELEASE}/deploy/systemd"
+    fi
+    local src_path="${src_dir}/lumen-update.path"
+    local src_runner="${src_dir}/lumen-update-runner.service"
+    if [ ! -f "${src_path}" ] || [ ! -f "${src_runner}" ]; then
+        log_warn "[refresh_update_runner] 找不到 update runner unit 模板（${src_dir}），跳过。"
+        emit_warn refresh_update_runner "unit_templates_missing"
+        return 0
+    fi
+
+    local data_root backup_root deploy_root tmp_dir
+    data_root="${LUMEN_DATA_ROOT%/}"
+    backup_root="${LUMEN_BACKUP_ROOT:-${data_root}/backup}"
+    backup_root="${backup_root%/}"
+    deploy_root="${ROOT%/}"
+    tmp_dir="$(mktemp -d "${UPDATE_LOG_DIR:-/tmp}/lumen-update-runner.XXXXXX" 2>/dev/null || mktemp -d)"
+
+    render_update_runner_unit "${src_path}" "${tmp_dir}/lumen-update.path" "${data_root}" "${backup_root}" "${deploy_root}"
+    render_update_runner_unit "${src_runner}" "${tmp_dir}/lumen-update-runner.service" "${data_root}" "${backup_root}" "${deploy_root}"
+
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" /etc/systemd/system/lumen-update.path; then
+        log_warn "[refresh_update_runner] 安装 lumen-update.path 失败，面板一键更新可能不可用。"
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+    if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-runner.service" /etc/systemd/system/lumen-update-runner.service; then
+        log_warn "[refresh_update_runner] 安装 lumen-update-runner.service 失败，面板一键更新可能不可用。"
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+    if ! lumen_run_as_root systemctl daemon-reload; then
+        log_warn "[refresh_update_runner] systemctl daemon-reload 失败，面板一键更新可能不可用。"
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+    if ! lumen_run_as_root systemctl enable --now lumen-update.path; then
+        log_warn "[refresh_update_runner] 启用 lumen-update.path 失败，面板一键更新将不可用；可稍后手动执行 systemctl enable --now lumen-update.path。"
+        rm -rf "${tmp_dir}"
+        return 0
+    fi
+    rm -rf "${tmp_dir}"
+
+    log_info "一键更新 runner 已刷新：监听 ${backup_root}/.update.trigger"
+    emit_info refresh_update_runner update_trigger "${backup_root}/.update.trigger"
+    return 0
+}
+
 # 计算磁盘可用 GB（取 /opt 所在 fs）。失败回 -1。
 disk_free_gb_opt() {
     local out
@@ -1046,6 +1129,7 @@ SWITCHED=1
 emit_info switch from "${CURRENT_ID:-<none>}"
 emit_info switch to   "${NEW_ID}"
 emit_done switch 0
+refresh_update_runner_units
 
 # ---------------------------------------------------------------------------
 # Phase: check_storage

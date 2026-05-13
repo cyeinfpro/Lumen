@@ -26,7 +26,9 @@ UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
 
 
-def run_bash(script: str, *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+def run_bash(
+    script: str, *, input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["LC_ALL"] = "C"
     return subprocess.run(
@@ -88,8 +90,8 @@ def test_install_bootstrap_defaults_to_menu_not_auto_update() -> None:
 
 def test_install_failure_cleanup_array_length_is_bash_safe() -> None:
     text = INSTALL.read_text(encoding="utf-8")
-    assert '${#INSTALL_STARTED_SERVICES[@]:-0}' not in text
-    assert '${#INSTALL_STARTED_SERVICES[@]}' in text
+    assert "${#INSTALL_STARTED_SERVICES[@]:-0}" not in text
+    assert "${#INSTALL_STARTED_SERVICES[@]}" in text
 
 
 def test_install_pull_failure_falls_back_to_main_for_default_tag() -> None:
@@ -143,6 +145,45 @@ def test_update_runner_docs_match_path_unit_contract() -> None:
     assert ".update-trigger" not in deploy_readme
 
 
+def test_install_refreshes_update_runner_units_for_admin_button() -> None:
+    """Fresh Docker installs must enable the host watcher used by the panel button."""
+    install = INSTALL.read_text(encoding="utf-8")
+    update = UPDATE.read_text(encoding="utf-8")
+    migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
+
+    assert "install_update_runner_units" in install
+    assert "systemctl enable --now lumen-update.path" in install
+    assert "LUMEN_BACKUP_ROOT" in install
+    assert "__LUMEN_BACKUP_ROOT__" in install
+    assert "__LUMEN_DEPLOY_ROOT__" in install
+    assert (
+        "install_update_runner_units"
+        in install[install.rindex("switch_current_symlink") :]
+    )
+
+    assert "refresh_update_runner_units" in update
+    assert "systemctl enable --now lumen-update.path" in update
+    assert "__LUMEN_BACKUP_ROOT__" in update
+    assert "__LUMEN_DEPLOY_ROOT__" in update
+
+    assert "systemctl enable --now lumen-update.path" in migrate
+    assert "__LUMEN_BACKUP_ROOT__" in migrate
+    assert "__LUMEN_DEPLOY_ROOT__" in migrate
+
+
+def test_admin_update_panel_arms_stream_after_trigger_success() -> None:
+    """The panel should live-update after a trigger without requiring Refresh status."""
+    panel = (ROOT / "apps/web/src/app/admin/_panels/SettingsPanel.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert "updateStreamArmed" in panel
+    assert "setUpdateStreamArmed(true)" in panel
+    assert "queryClient.setQueryData<AdminUpdateStatusOut | undefined>" in panel
+    assert "running: true" in panel
+    assert "updateStreamArmed ||" in panel
+
+
 def test_tgbot_service_points_at_api_via_docker_network() -> None:
     """tgbot's lumen_api_base default is 127.0.0.1:8000 — that's the tgbot
 
@@ -163,18 +204,34 @@ def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
     update = UPDATE.read_text(encoding="utf-8")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
-    assert "${LUMEN_DB_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data" in compose
+    assert (
+        "${LUMEN_DB_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data" in compose
+    )
     assert "${LUMEN_DB_ROOT:-/opt/lumendata}/redis:/data" in compose
-    assert "${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage" in compose
+    assert (
+        "${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage" in compose
+    )
     assert "${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup" in compose
     assert "LUMEN_DB_ROOT=/opt/lumendata" in env_example
     assert 'user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"' in compose
     assert '- "${LUMEN_APP_STORAGE_GID:-10001}"' in compose
     assert "LUMEN_APP_STORAGE_GID=10001" in env_example
-    assert 'env_file_set "${shared_env}" LUMEN_DB_ROOT        "${LUMEN_DB_ROOT}"' in install
-    assert 'env_file_set "${shared_env}" LUMEN_APP_STORAGE_GID "${LUMEN_APP_STORAGE_GID}"' in install
-    assert 'LUMEN_DB_ROOT="${INSTALL_DB_ROOT_OVERRIDE:-${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}}"' in install
-    assert 'LUMEN_DB_ROOT="${_LUMEN_UPDATE_INPUT_DB_ROOT:-${shared_db_root:-${LUMEN_DATA_ROOT}}}"' in update
+    assert (
+        'env_file_set "${shared_env}" LUMEN_DB_ROOT        "${LUMEN_DB_ROOT}"'
+        in install
+    )
+    assert (
+        'env_file_set "${shared_env}" LUMEN_APP_STORAGE_GID "${LUMEN_APP_STORAGE_GID}"'
+        in install
+    )
+    assert (
+        'LUMEN_DB_ROOT="${INSTALL_DB_ROOT_OVERRIDE:-${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}}"'
+        in install
+    )
+    assert (
+        'LUMEN_DB_ROOT="${_LUMEN_UPDATE_INPUT_DB_ROOT:-${shared_db_root:-${LUMEN_DATA_ROOT}}}"'
+        in update
+    )
     assert 'shared_db_root="$(lumen_env_value LUMEN_DB_ROOT "${SHARED_ENV}"' in update
     assert '"${LUMEN_DB_ROOT}/postgres"' in update
     assert '"${LUMEN_DATA_ROOT}/storage"' in update
@@ -200,8 +257,12 @@ def test_update_migrates_old_web_bind_and_proxy_env() -> None:
     assert "config_changed_redeploy" in update
     assert 'emit_info check reason "missing_shared_env"' in update
     assert 'emit_info check reason "target_tag_empty"' in update
-    assert 'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"' in update
-    assert 'emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"' in update
+    assert (
+        'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"' in update
+    )
+    assert (
+        'emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"' in update
+    )
     assert "LUMEN_HTTP_PROXY HTTPS_PROXY HTTP_PROXY" in lib
     assert 'export HTTP_PROXY="${proxy_url}"' in lib
     assert 'export HTTPS_PROXY="${proxy_url}"' in lib
@@ -248,9 +309,14 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     assert "rsync_repo_to_release" in text
     assert "sync_repo_to_release" in text
     assert "git archive" in text
-    assert 'elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then' in text
+    assert (
+        'elif [ -n "${CURRENT_RELEASE}" ] && [ -d "${CURRENT_RELEASE}" ]; then' in text
+    )
     assert 'REPO_DIR="${CURRENT_RELEASE}"' in text
-    assert 'LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续' in text
+    assert (
+        "LUMEN_UPDATE_GIT_PULL=1 但 ${REPO_DIR} 不是 git 仓库；使用当前发布物快照继续"
+        in text
+    )
     assert "--exclude='/releases/'" in text
     assert "--exclude='/shared/'" in text
     # release/.env 是 -> shared/.env 的 symlink，docker compose 自动识别
@@ -299,7 +365,9 @@ def test_compose_db_env_vars_fail_without_database_url(tmp_path: Path) -> None:
     assert "无法从 DATABASE_URL 推导" in result.stderr
 
 
-def test_container_url_migration_dry_run_and_apply_are_allowlisted(tmp_path: Path) -> None:
+def test_container_url_migration_dry_run_and_apply_are_allowlisted(
+    tmp_path: Path,
+) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
@@ -346,7 +414,9 @@ def test_container_url_migration_dry_run_and_apply_are_allowlisted(tmp_path: Pat
     assert list(tmp_path.glob(".env.bak.*"))
 
 
-def test_container_url_migration_rejects_unclassified_localhost_keys(tmp_path: Path) -> None:
+def test_container_url_migration_rejects_unclassified_localhost_keys(
+    tmp_path: Path,
+) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
         "DATABASE_URL=postgresql+asyncpg://alice:secret@localhost:5432/lumen\n"
@@ -367,8 +437,8 @@ def test_container_url_migration_rejects_unclassified_localhost_keys(tmp_path: P
 
 def test_install_existing_env_container_url_check_defaults_to_dry_run() -> None:
     text = INSTALL.read_text(encoding="utf-8")
-    assert 'LUMEN_ENV_MIGRATE_CONTAINER_URLS:-dry-run' in text
-    assert 'apply|--apply)' in text
+    assert "LUMEN_ENV_MIGRATE_CONTAINER_URLS:-dry-run" in text
+    assert "apply|--apply)" in text
     assert "migrate-env-apply" in text
     assert "检测到旧 .env 仍需要容器地址迁移" in text
     assert "LUMEN_ENV_MIGRATE_CONTAINER_URLS=apply" in text
@@ -378,7 +448,9 @@ def test_release_shared_env_recovers_from_root_env(tmp_path: Path) -> None:
     deploy_root = tmp_path / "lumen"
     (deploy_root / "shared").mkdir(parents=True)
     root_env = deploy_root / ".env"
-    root_env.write_text("DB_USER=lumen_app\nDB_PASSWORD='secret'\nDB_NAME=lumen\n", encoding="utf-8")
+    root_env.write_text(
+        "DB_USER=lumen_app\nDB_PASSWORD='secret'\nDB_NAME=lumen\n", encoding="utf-8"
+    )
 
     result = assert_bash_ok(
         f"""
@@ -415,7 +487,10 @@ def test_rollback_script_validates_compose_env_before_compose_up() -> None:
     text = ADMIN_RELEASE.read_text(encoding="utf-8")
     assert '. "$ROOT/current/scripts/lib.sh"' in text
     assert 'lumen_ensure_compose_db_env_vars "$ROOT/current/.env"' in text
-    assert "compose env validation failed; rollback continues but containers may be stale" in text
+    assert (
+        "compose env validation failed; rollback continues but containers may be stale"
+        in text
+    )
     assert 'cd "$ROOT/current" && docker compose up -d --wait' in text
 
 
@@ -450,7 +525,7 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     """
     docker cutover: update.sh 改为 docker compose pull -> start_infra -> migrate_db
     -> switch -> restart_services。不再 systemctl restart lumen-* /
-    uv sync / npm ci / 写 systemd unit。
+    uv sync / npm ci；systemd 只允许刷新一键更新 path runner，不负责业务进程。
     """
     text = UPDATE.read_text(encoding="utf-8")
     # 关键阶段（::lumen-step:: phase=...）必须存在
@@ -572,7 +647,7 @@ def test_update_script_skips_tag_name_noop_for_rolling_channels() -> None:
     assert "target_tag=${TARGET_TAG}" in code
     # Operator-visible action key used by the SSE dashboard to explain why a
     # repeat click on a rolling tag still ran the full update.
-    assert 'rolling_force_redeploy' in code
+    assert "rolling_force_redeploy" in code
 
 
 def test_update_script_supports_optional_local_build_when_env_set() -> None:
@@ -581,11 +656,11 @@ def test_update_script_supports_optional_local_build_when_env_set() -> None:
     """
     text = UPDATE.read_text(encoding="utf-8")
     # build 路径必须由 env 显式开启
-    assert 'LUMEN_UPDATE_BUILD:-0' in text
+    assert "LUMEN_UPDATE_BUILD:-0" in text
     assert "build api worker web" in text
     # build 路径仍走 lumen_compose_in（不直接 systemctl）
     assert 'lumen_compose_in "${NEW_RELEASE}" build api worker web' in text
-    assert 'LUMEN_UPDATE_BUILD=1 已完成本地 build，跳过远程 pull' in text
+    assert "LUMEN_UPDATE_BUILD=1 已完成本地 build，跳过远程 pull" in text
 
 
 @pytest.mark.skip(
@@ -602,7 +677,7 @@ def test_shared_runtime_health_helpers_cover_api_web_worker() -> None:
     assert "http://127.0.0.1:3000/" in text
     assert "lumen_systemd_unit_active lumen-worker.service" in text
     assert "lumen_start_local_runtime()" in text
-    assert "lumen_tail_runtime_log \"Worker\"" in text
+    assert 'lumen_tail_runtime_log "Worker"' in text
 
 
 def test_local_runtime_stops_persisted_pids_before_port_scan() -> None:
@@ -611,7 +686,7 @@ def test_local_runtime_stops_persisted_pids_before_port_scan() -> None:
     persisted = text.index('lumen_stop_persisted_runtime "${root}"', start)
     api_port_scan = text.index('lumen_prepare_port_for_runtime 8000 "API"', start)
     assert persisted < api_port_scan
-    assert 'LUMEN_RUNTIME_STOP_WAIT_SECONDS:-15' in text[persisted:api_port_scan]
+    assert "LUMEN_RUNTIME_STOP_WAIT_SECONDS:-15" in text[persisted:api_port_scan]
 
 
 def test_shared_root_resolver_handles_release_current_symlink(tmp_path: Path) -> None:
@@ -650,7 +725,10 @@ def test_lumenctl_runs_lumen_updates_from_resolved_root_with_sudo_on_linux() -> 
         # 旧形式 "sudo:bash <path>" 也接受（无 LUMEN_* env 时）。
         update_path = ROOT / "scripts" / "update.sh"
         assert "sudo:" in result.stdout
-        assert f"bash {update_path}" in result.stdout or f"bash:{update_path}" in result.stdout
+        assert (
+            f"bash {update_path}" in result.stdout
+            or f"bash:{update_path}" in result.stdout
+        )
 
 
 def test_lumenctl_resolves_scripts_from_current_release(tmp_path: Path) -> None:
@@ -677,7 +755,9 @@ def test_lumenctl_resolves_scripts_from_current_release(tmp_path: Path) -> None:
     assert f"{deploy_root / 'scripts' / 'update.sh'}" not in result.stderr
 
 
-def test_lumenctl_install_bootstraps_from_github_when_install_script_missing(tmp_path: Path) -> None:
+def test_lumenctl_install_bootstraps_from_github_when_install_script_missing(
+    tmp_path: Path,
+) -> None:
     deploy_root = tmp_path / "Lumen"
     downloaded = tmp_path / "downloaded-install.sh"
     deploy_root.mkdir()
@@ -700,7 +780,10 @@ def test_lumenctl_install_bootstraps_from_github_when_install_script_missing(tmp
         """
     )
 
-    assert "raw.githubusercontent.com/cyeinfpro/Lumen/main/scripts/install.sh" in result.stdout
+    assert (
+        "raw.githubusercontent.com/cyeinfpro/Lumen/main/scripts/install.sh"
+        in result.stdout
+    )
     assert f"bash:{downloaded} --install --image-tag=main" in result.stdout
     assert f"install_dir:{deploy_root}" in result.stdout
 
@@ -939,10 +1022,10 @@ def test_lumenctl_direct_commands_dispatch_to_expected_handlers() -> None:
 
 def test_lumenctl_interactive_menu_dispatches_all_numbered_options() -> None:
     """菜单分组重构后的项映射（commit P：运行/维护/网络/⚠ 危险）：
-       9=nginx_scan, 10=nginx_optimize, 11=install, 12=update,
-       15=install_image_job, 16=uninstall_image_job, 17=uninstall。
-       本测试只验证这 7 个 dispatch 正确，不覆盖 1-8/13-14（compose/restore/rollback
-       需更多 mock）。
+    9=nginx_scan, 10=nginx_optimize, 11=install, 12=update,
+    15=install_image_job, 16=uninstall_image_job, 17=uninstall。
+    本测试只验证这 7 个 dispatch 正确，不覆盖 1-8/13-14（compose/restore/rollback
+    需更多 mock）。
     """
     result = assert_bash_ok(
         f"""
@@ -968,7 +1051,9 @@ def test_lumenctl_interactive_menu_dispatches_all_numbered_options() -> None:
     dispatch_lines = [
         line
         for line in result.stdout.splitlines()
-        if line.startswith(("run_lumen_script:", "install_image_job", "uninstall_image_job", "nginx_"))
+        if line.startswith(
+            ("run_lumen_script:", "install_image_job", "uninstall_image_job", "nginx_")
+        )
     ]
     assert dispatch_lines == [
         "run_lumen_script:install.sh --install",
@@ -998,7 +1083,9 @@ def test_lumenctl_install_lumen_preserves_explicit_install_flag() -> None:
     ]
 
 
-def test_lumenctl_install_update_uninstall_smoke_with_fake_docker(tmp_path: Path) -> None:
+def test_lumenctl_install_update_uninstall_smoke_with_fake_docker(
+    tmp_path: Path,
+) -> None:
     """
     Runs the real lumenctl -> install.sh / update.sh / uninstall.sh entrypoints
     against a temp release layout with fake docker/curl/sudo functions. This
@@ -1179,9 +1266,13 @@ esac
 """,
         encoding="utf-8",
     )
-    (fakebin / "systemctl").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    (fakebin / "systemctl").write_text(
+        "#!/usr/bin/env bash\nexit 1\n", encoding="utf-8"
+    )
     (fakebin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    (fakebin / "uname").write_text("#!/usr/bin/env bash\nprintf 'Linux\\n'\n", encoding="utf-8")
+    (fakebin / "uname").write_text(
+        "#!/usr/bin/env bash\nprintf 'Linux\\n'\n", encoding="utf-8"
+    )
     for path in fakebin.iterdir():
         path.chmod(0o755)
 
@@ -1209,8 +1300,8 @@ esac
     export LUMEN_RELEASE_KEEP=3
     export LUMEN_BACKUP_RESTORE_LOCKFILE="${{DATA_ROOT}}/backup/backup-restore.lock"
     export LUMEN_BACKUP_ROOT="${{DATA_ROOT}}/backup"
-    # update.sh 的 check_storage phase 检查 /opt/lumendata 是否挂载；CI 临时目录里
-    # 这个路径不存在（也跟测试无关），跳过避免 false fail。
+    # update.sh 的 check_storage phase 检查 LUMEN_DATA_ROOT 是否挂载；CI 临时目录
+    # 跟测试无关，跳过避免 false fail。
     export SKIP_STORAGE_CHECK=1
     # update.sh 的 image-extract fallback (try_image_extract_release) 会真去
     # docker pull GHCR；CI runner 里那个 image 真的能拉到，会让本测试本意的
@@ -1346,7 +1437,9 @@ def test_probe_sub2api_upstream_fails_when_unreachable() -> None:
     assert "无法连接 sub2api/OpenAI 兼容上游" in result.stderr
 
 
-def test_lumen_nginx_config_contains_sse_api_and_security_defaults(tmp_path: Path) -> None:
+def test_lumen_nginx_config_contains_sse_api_and_security_defaults(
+    tmp_path: Path,
+) -> None:
     out = tmp_path / "lumen.conf"
     assert_bash_ok(
         f"""
@@ -1359,12 +1452,16 @@ def test_lumen_nginx_config_contains_sse_api_and_security_defaults(tmp_path: Pat
     assert "location /events" in config
     assert "proxy_buffering off;" in config
     assert "location /api/" in config
-    assert "limit_req_zone $binary_remote_addr zone=lumen_api_lumen_example_com" in config
+    assert (
+        "limit_req_zone $binary_remote_addr zone=lumen_api_lumen_example_com" in config
+    )
     assert "add_header X-Content-Type-Options" in config
     assert "client_max_body_size 60m;" in config
 
 
-def test_sub2api_nginx_configs_have_long_timeouts_and_buffering_off(tmp_path: Path) -> None:
+def test_sub2api_nginx_configs_have_long_timeouts_and_buffering_off(
+    tmp_path: Path,
+) -> None:
     sub2api = tmp_path / "sub2api.conf"
     outer = tmp_path / "outer.conf"
     assert_bash_ok(
@@ -1436,20 +1533,28 @@ server {
 """,
         encoding="utf-8",
     )
-    tmp1 = assert_bash_ok(
-        f"""
+    tmp1 = (
+        assert_bash_ok(
+            f"""
         . {LUMENCTL}
         optimize_nginx_file {nginx_conf} http://127.0.0.1:8091 /opt/image-job/data example.com
         """
-    ).stdout.strip().splitlines()[-1]
+        )
+        .stdout.strip()
+        .splitlines()[-1]
+    )
     first = Path(tmp1).read_text(encoding="utf-8")
     nginx_conf.write_text(first, encoding="utf-8")
-    tmp2 = assert_bash_ok(
-        f"""
+    tmp2 = (
+        assert_bash_ok(
+            f"""
         . {LUMENCTL}
         optimize_nginx_file {nginx_conf} http://127.0.0.1:8091 /opt/image-job/data example.com
         """
-    ).stdout.strip().splitlines()[-1]
+        )
+        .stdout.strip()
+        .splitlines()[-1]
+    )
     second = Path(tmp2).read_text(encoding="utf-8")
 
     assert first == second
@@ -1481,7 +1586,7 @@ def test_install_script_uses_lumen_compose_helpers_from_lib() -> None:
     # set -euo pipefail 必须保留
     assert "set -euo pipefail" in text
     # source lib.sh
-    assert ". \"${SCRIPT_DIR}/lib.sh\"" in text
+    assert '. "${SCRIPT_DIR}/lib.sh"' in text
 
 
 def test_update_script_emits_set_image_tag_and_migrate_db_phases() -> None:
@@ -1509,7 +1614,7 @@ def test_update_script_runner_default_pull_not_build() -> None:
     """
     text = UPDATE.read_text(encoding="utf-8")
     # build 路径必须 gated by env
-    assert 'LUMEN_UPDATE_BUILD:-0' in text
+    assert "LUMEN_UPDATE_BUILD:-0" in text
     runner_unit = (
         ROOT / "deploy" / "systemd" / "lumen-update-runner.service"
     ).read_text(encoding="utf-8")
@@ -1566,7 +1671,9 @@ def test_image_tag_resolve_uses_channel_and_env_file_for_pinned(tmp_path: Path) 
     assert result.stdout.strip() == "v1.2.3"
 
 
-def test_image_tag_resolve_supports_main_minor_and_major_channels(tmp_path: Path) -> None:
+def test_image_tag_resolve_supports_main_minor_and_major_channels(
+    tmp_path: Path,
+) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("LUMEN_IMAGE_TAG=v1.2.3\n", encoding="utf-8")
 
@@ -1656,7 +1763,14 @@ def test_deploy_docker_helper_files_exist() -> None:
 
 def test_admin_update_checklist_uses_docker_phases() -> None:
     panel = (
-        ROOT / "apps" / "web" / "src" / "app" / "admin" / "_panels" / "SettingsPanel.tsx"
+        ROOT
+        / "apps"
+        / "web"
+        / "src"
+        / "app"
+        / "admin"
+        / "_panels"
+        / "SettingsPanel.tsx"
     ).read_text(encoding="utf-8")
     for phase in (
         "lock",
