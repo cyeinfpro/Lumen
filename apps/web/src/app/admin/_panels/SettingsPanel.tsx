@@ -677,6 +677,7 @@ const SETTINGS_SKELETON_KEYS = [
 ] as const;
 
 export function SettingsPanel() {
+  const queryClient = useQueryClient();
   const q = useSystemSettingsQuery();
   const updateMut = useUpdateSystemSettingsMutation();
   const adminModelsQ = useAdminModelsQuery({ retry: false });
@@ -709,8 +710,24 @@ export function SettingsPanel() {
     kind: "success" | "error" | "info";
     text: string;
   } | null>(null);
+  const [updateStreamArmed, setUpdateStreamArmed] = useState(false);
   const triggerUpdateMut = useTriggerAdminUpdateMutation({
     onSuccess: (result) => {
+      setUpdateStreamArmed(true);
+      queryClient.setQueryData<AdminUpdateStatusOut | undefined>(
+        qk.adminUpdateStatus(),
+        (prev) => ({
+          running: true,
+          pid: result.pid ?? prev?.pid ?? null,
+          unit: result.unit ?? prev?.unit ?? null,
+          started_at: result.started_at,
+          log_tail: prev?.log_tail ?? "",
+          phases: prev?.phases ?? [],
+          current_release: prev?.current_release ?? null,
+          previous_release: prev?.previous_release ?? null,
+          releases: prev?.releases ?? [],
+        }),
+      );
       const target = result.unit ? `任务 ${result.unit}` : `进程 ${result.pid ?? "-"}`;
       setUpdateBanner({
         kind: "success",
@@ -718,18 +735,35 @@ export function SettingsPanel() {
       });
     },
     onError: (err) => {
+      setUpdateStreamArmed(false);
       const msg = err instanceof ApiError ? err.message : err.message || "触发更新失败";
       setUpdateBanner({ kind: "error", text: `触发更新失败：${msg}` });
     },
   });
   const rollbackMut = useRollbackReleaseMutation({
     onSuccess: (result) => {
+      setUpdateStreamArmed(true);
+      queryClient.setQueryData<AdminUpdateStatusOut | undefined>(
+        qk.adminUpdateStatus(),
+        (prev) => ({
+          running: true,
+          pid: prev?.pid ?? null,
+          unit: prev?.unit ?? null,
+          started_at: result.started_at,
+          log_tail: prev?.log_tail ?? "",
+          phases: prev?.phases ?? [],
+          current_release: prev?.current_release ?? null,
+          previous_release: prev?.previous_release ?? null,
+          releases: prev?.releases ?? [],
+        }),
+      );
       setUpdateBanner({
         kind: "success",
         text: `回滚已启动，目标 release ${result.target.id}`,
       });
     },
     onError: (err) => {
+      setUpdateStreamArmed(false);
       const msg = err instanceof ApiError ? err.message : err.message || "触发回滚失败";
       setUpdateBanner({ kind: "error", text: `触发回滚失败：${msg}` });
     },
@@ -738,10 +772,12 @@ export function SettingsPanel() {
   // SSE 实时流：跑动时打开，连接 /admin/update/stream
   // 该 hook 直接管理 status query data + 本地 log buffer（done 事件触发 invalidate）。
   // running 端为 true → 开流；false 时不打开（避免没必要的连接）。
-  // 用户主动触发更新/回滚后，前端把 banner 设了，但 status 还是旧的（异步轮询），
-  // 所以 enable 条件除了 running 还看 mutation pending，确保点击后立刻开流。
+  // 用户主动触发更新/回滚后先乐观写入 running，并保持 armed 状态，
+  // 确保不用手动点"刷新状态"也能自动接上实时流。
+  const updateRunning = Boolean(updateStatusQ.data?.running);
   const sseEnabled =
-    Boolean(updateStatusQ.data?.running) ||
+    updateRunning ||
+    updateStreamArmed ||
     triggerUpdateMut.isPending ||
     rollbackMut.isPending;
   const { logBuffer, streamStatus, clearLogs } = useAdminUpdateStream(sseEnabled);
@@ -751,6 +787,18 @@ export function SettingsPanel() {
   useEffect(() => {
     streamConnectedRef.current = streamStatus === "open";
   }, [streamStatus]);
+
+  useEffect(() => {
+    if (!updateStreamArmed) return;
+    if (triggerUpdateMut.isPending || rollbackMut.isPending || updateRunning) return;
+    const t = setTimeout(() => setUpdateStreamArmed(false), 0);
+    return () => clearTimeout(t);
+  }, [
+    rollbackMut.isPending,
+    triggerUpdateMut.isPending,
+    updateRunning,
+    updateStreamArmed,
+  ]);
 
   useEffect(() => {
     if (savedAt == null) return;
@@ -2029,6 +2077,7 @@ function ResetEditButton({
 // 顺序对齐 update.sh 实际执行顺序；rollback 默认隐藏，只在 status.phases 出现时显示。
 const PHASE_ORDER: readonly string[] = [
   "lock",
+  "self_update_scripts",
   "check",
   "preflight",
   "backup_preflight",
@@ -2038,13 +2087,16 @@ const PHASE_ORDER: readonly string[] = [
   "start_infra",
   "migrate_db",
   "switch",
+  "check_storage",
   "restart_services",
+  "refresh_update_runner",
   "health_check",
   "cleanup",
 ];
 
 const PHASE_LABEL: Record<string, string> = {
   lock: "获取锁",
+  self_update_scripts: "刷新脚本",
   check: "检查版本",
   preflight: "预检查",
   backup_preflight: "更新前备份",
@@ -2054,7 +2106,9 @@ const PHASE_LABEL: Record<string, string> = {
   start_infra: "启动基础设施",
   migrate_db: "数据库迁移",
   switch: "原子切换",
+  check_storage: "检查存储",
   restart_services: "重启服务",
+  refresh_update_runner: "刷新更新入口",
   health_check: "健康检查",
   health_post: "健康检查",
   cleanup: "清理旧版本",
@@ -2251,16 +2305,20 @@ function useAdminUpdateStream(enabled: boolean): AdminUpdateStreamHandle {
       });
 
       es.addEventListener("log", (ev: MessageEvent) => {
-        const payload = parseData<{ line?: string }>(ev.data);
-        if (!payload || typeof payload.line !== "string") return;
-        const line = payload.line;
+        const payload = parseData<{ line?: string; lines?: string[] }>(ev.data);
+        if (!payload) return;
+        const lines = Array.isArray(payload.lines)
+          ? payload.lines.filter((line): line is string => typeof line === "string")
+          : typeof payload.line === "string"
+            ? [payload.line]
+            : [];
+        if (lines.length === 0) return;
         setLogBuffer((prev) => {
           const next =
             prev.length >= LOG_BUFFER_MAX
               ? prev.slice(-(LOG_BUFFER_MAX - 1))
               : prev.slice();
-          next.push(line);
-          return next;
+          return [...next, ...lines].slice(-LOG_BUFFER_MAX);
         });
       });
 

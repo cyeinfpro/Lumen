@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 import { imageSrc } from "../utils";
 
 const MAX_CANVAS_PX = 1024; // 内部画布上限；上传 mask 会按显示尺寸生成
+const FALLBACK_CONTAINER_PX = 720; // RO 测到容器前的兜底尺寸（外层 overflow-hidden 兜底）
 const BRUSH_DEFAULT = 36;
 const BRUSH_MIN = 8;
 const BRUSH_MAX = 128;
@@ -60,6 +61,46 @@ export function PosterInpaintDialog({
       height: Math.round(h * ratio),
     };
   }, [image.width, image.height]);
+
+  // 容器实测尺寸：原写死 `width: min(100%, 720px)` + aspect-ratio + max-h-full 在矮容器 /
+  // 高瘦图（9:16 等）下会被夹成"指甲盖"。改 ResizeObserver fit 容器算 displayDims。
+  const [containerDims, setContainerDims] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setContainerDims({ w: Math.floor(rect.width), h: Math.floor(rect.height) });
+      }
+    };
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      if (!cr || cr.width <= 0 || cr.height <= 0) return;
+      setContainerDims({ w: Math.floor(cr.width), h: Math.floor(cr.height) });
+    });
+    ro.observe(el);
+    const raf = window.requestAnimationFrame(measure);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [open]);
+
+  // contain fit：按 canvasSize 比例缩到容器内（不超出，不强行铺满）
+  const displayDims = useMemo(() => {
+    const w = canvasSize.width;
+    const h = canvasSize.height;
+    if (!w || !h) return { width: 0, height: 0 };
+    const availW = containerDims ? containerDims.w : FALLBACK_CONTAINER_PX;
+    const availH = containerDims ? containerDims.h : FALLBACK_CONTAINER_PX;
+    const scale = Math.min(availW / w, availH / h, 1);
+    return {
+      width: Math.max(1, Math.round(w * scale)),
+      height: Math.max(1, Math.round(h * scale)),
+    };
+  }, [canvasSize.width, canvasSize.height, containerDims]);
 
   // 打开 / canvas 尺寸变化时重置 canvas + 表单
   useEffect(() => {
@@ -278,13 +319,13 @@ export function PosterInpaintDialog({
           <div className="relative flex min-h-0 min-w-0 flex-col bg-[var(--bg-1)]">
             <div
               ref={containerRef}
-              className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto p-4"
+              className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-4"
             >
               <div
-                className="relative inline-block max-h-full max-w-full"
+                className="relative"
                 style={{
-                  aspectRatio: `${canvasSize.width} / ${canvasSize.height}`,
-                  width: "min(100%, 720px)",
+                  width: displayDims.width,
+                  height: displayDims.height,
                 }}
               >
                 <Image

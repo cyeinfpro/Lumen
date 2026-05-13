@@ -27,6 +27,33 @@ ROOT="${LUMEN_ROOT:-/opt/lumen}"
 TMP_ROOT="${ROOT}.tmp"
 INITIAL_ID="${LUMEN_MIGRATION_INITIAL_ID:-initial}"
 
+sed_replacement_escape() {
+    printf '%s' "$1" | sed 's/[\/&#]/\\&/g'
+}
+
+render_update_runner_unit() {
+    local src="$1"
+    local dst="$2"
+    local data_root="$3"
+    local backup_root="$4"
+    local deploy_root="$5"
+    local data_root_esc backup_root_esc deploy_root_esc
+    data_root_esc="$(sed_replacement_escape "${data_root}")"
+    backup_root_esc="$(sed_replacement_escape "${backup_root}")"
+    deploy_root_esc="$(sed_replacement_escape "${deploy_root}")"
+
+    sed \
+        -e 's#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g' \
+        -e 's#/opt/lumendata#__LUMEN_DATA_ROOT__#g' \
+        -e 's#/opt/lumen#__LUMEN_DEPLOY_ROOT__#g' \
+        "${src}" \
+        | sed \
+            -e "s#__LUMEN_BACKUP_ROOT__#${backup_root_esc}#g" \
+            -e "s#__LUMEN_DATA_ROOT__#${data_root_esc}#g" \
+            -e "s#__LUMEN_DEPLOY_ROOT__#${deploy_root_esc}#g" \
+        > "${dst}"
+}
+
 # 必须 root（或 ROOT 已经是当前用户写得动的）。
 require_root_or_writable() {
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
@@ -209,7 +236,12 @@ deploy_systemd_units() {
         return 0
     fi
     log_info "复制最新 systemd unit 到 /etc/systemd/system/"
-    local f
+    local data_root backup_root tmp_dir
+    data_root="${LUMEN_DATA_ROOT%/}"
+    backup_root="${LUMEN_BACKUP_ROOT:-${data_root}/backup}"
+    backup_root="${backup_root%/}"
+    tmp_dir="$(mktemp -d)"
+    local f src dst
     for f in lumen-api.service lumen-web.service lumen-worker.service \
              lumen-tgbot.service lumen-update-runner.service \
              lumen-update.path lumen-backup.service lumen-backup.timer \
@@ -218,9 +250,23 @@ deploy_systemd_units() {
              lumen-storage-apply.service lumen-storage-apply.path \
              lumen-storage-test.service lumen-storage-test.path; do
         if [ -f "${src_dir}/${f}" ]; then
-            cp -f "${src_dir}/${f}" "/etc/systemd/system/${f}"
+            src="${src_dir}/${f}"
+            dst="${tmp_dir}/${f}"
+            case "${f}" in
+                lumen-update.path)
+                    render_update_runner_unit "${src}" "${dst}" "${data_root}" "${backup_root}" "${ROOT%/}"
+                    ;;
+                lumen-update-runner.service)
+                    render_update_runner_unit "${src}" "${dst}" "${data_root}" "${backup_root}" "${ROOT%/}"
+                    ;;
+                *)
+                    cp -f "${src}" "${dst}"
+                    ;;
+            esac
+            cp -f "${dst}" "/etc/systemd/system/${f}"
         fi
     done
+    rm -rf "${tmp_dir}"
     # storage mount 控制脚本部署到 /usr/local/sbin（unit 通过绝对路径调用）
     local storage_script="${ROOT}/current/deploy/scripts/lumen_storage_mount.sh"
     if [ -f "${storage_script}" ]; then
@@ -238,6 +284,8 @@ deploy_systemd_units() {
     # 启用 storage path-watcher（admin UI 通过 trigger 文件触发 apply/test）
     systemctl enable --now lumen-storage-apply.path lumen-storage-test.path 2>/dev/null \
         || log_warn "启用 lumen-storage-{apply,test}.path 失败（继续）"
+    systemctl enable --now lumen-update.path 2>/dev/null \
+        || log_warn "启用 lumen-update.path 失败（继续；面板一键更新可能不可用）"
 }
 
 # 修正 ownership：所有迁移产物归 lumen:lumen（如该用户存在）。

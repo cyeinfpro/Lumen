@@ -69,13 +69,16 @@ _STEP_LINE_RE = re.compile(
 _INFO_LINE_RE = re.compile(
     r"^::lumen-info::\s+phase=(?P<phase>[A-Za-z0-9_]+)\s+key=(?P<key>[A-Za-z0-9_]+)\s+value=(?P<value>.*)$"
 )
-_TRIGGER_DELIMITER_RE = re.compile(r"^=== update (?:trigger|unit started) ", re.MULTILINE)
+_TRIGGER_DELIMITER_RE = re.compile(
+    r"^=== update (?:trigger|unit started) ", re.MULTILINE
+)
 
 # SSE knobs — keep in sync with nginx idle / proxy_read_timeout.
 _SSE_HEARTBEAT_SEC = 15.0
 _SSE_MAX_DURATION_SEC = 60 * 60  # 1h hard cap to prevent leaks
 _SSE_LOG_POLL_SEC = 0.3  # tail-F poll interval
 _SSE_LOG_BATCH_WINDOW_SEC = 0.2  # coalesce raw log lines into bursts
+_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC = 15.0
 
 
 @dataclass(frozen=True)
@@ -123,7 +126,7 @@ def _read_dotenv_value(path: Path, key: str) -> str | None:
         line = raw.strip()
         if not line or line.startswith("#") or not line.startswith(prefix):
             continue
-        value = line[len(prefix):].strip()
+        value = line[len(prefix) :].strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
         return value or None
@@ -285,8 +288,11 @@ def _read_marker() -> UpdateMarker | None:
             started_at = value.strip() or None
         elif key == "unit":
             unit = value.strip() or None
-    if unit and _unit_is_running(unit):
-        return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
+    if unit:
+        if _runner_trigger_only_mode() and not _marker_is_stale(started_at):
+            return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
+        if _unit_is_running(unit):
+            return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
     if pid and _pid_is_running(pid) and not _marker_is_stale(started_at):
         return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
     try:
@@ -563,7 +569,10 @@ printf '=== rollback unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "${L
 
 
 def _systemd_run_available() -> bool:
-    return shutil.which("systemd-run") is not None and shutil.which("systemctl") is not None
+    return (
+        shutil.which("systemd-run") is not None
+        and shutil.which("systemctl") is not None
+    )
 
 
 def _run_systemd_command(
@@ -687,6 +696,11 @@ def _start_update_via_path_unit(
     """
     backup_root = Path(settings.backup_root).expanduser()
     backup_root.mkdir(parents=True, exist_ok=True)
+    log_path = _update_log_path()
+    try:
+        initial_log_size = log_path.stat().st_size
+    except OSError:
+        initial_log_size = 0
     env_path = _update_runner_env_path()
     trigger_path = _update_trigger_path()
     unit = _UPDATE_RUNNER_UNIT
@@ -713,10 +727,28 @@ def _start_update_via_path_unit(
     #    < 1s; allow generous slack so a busy host doesn't return a misleading
     #    failure. Exit early as soon as we observe the unit active.
     if _runner_trigger_only_mode():
-        # Containerised lumen-api can't query systemctl on the host. The path
-        # unit is enabled on the host (verified at deploy time); the SSE
-        # endpoint and .update.running marker give the user real status.
-        return 0, unit
+        # Containerised lumen-api can't query host systemd. The only reliable
+        # in-container confirmation is that the host runner appended output to
+        # the bind-mounted update log after the trigger file changed.
+        if _wait_for_log_append(
+            log_path,
+            initial_size=initial_log_size,
+            timeout_sec=_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC,
+        ):
+            return 0, unit
+        log_fh.write(
+            f"\n[{unit}] trigger file was written, but the host runner did not "
+            f"append output within {int(_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC)}s. "
+            "Check that lumen-update.path is installed, enabled, and watching "
+            "the same backup directory mounted into lumen-api.\n"
+        )
+        log_fh.flush()
+        for path in (trigger_path, env_path, _update_marker_path()):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return None
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if _unit_is_running(unit):
@@ -805,20 +837,32 @@ async def _resolve_update_proxy(
 
     proxies = [proxy for proxy in await _load_proxies(db) if proxy.enabled]
     if not proxies:
-        raise _http("proxy_unavailable", "update proxy pool is enabled but has no enabled proxies", 409)
+        raise _http(
+            "proxy_unavailable",
+            "update proxy pool is enabled but has no enabled proxies",
+            409,
+        )
 
     name_raw = await get_setting(db, name_spec) if name_spec is not None else None
     target_name = str(name_raw or "").strip()
     if target_name:
         proxy = next((p for p in proxies if p.name == target_name), None)
         if proxy is None:
-            raise _http("proxy_not_found", f"update proxy '{target_name}' not found or disabled", 409)
+            raise _http(
+                "proxy_not_found",
+                f"update proxy '{target_name}' not found or disabled",
+                409,
+            )
     else:
         proxy = proxies[0]
 
     proxy_url = await resolve_provider_proxy_url(proxy)
     if not proxy_url:
-        raise _http("proxy_resolve_failed", f"update proxy '{proxy.name}' could not be resolved", 409)
+        raise _http(
+            "proxy_resolve_failed",
+            f"update proxy '{proxy.name}' could not be resolved",
+            409,
+        )
     return proxy, proxy_url
 
 
@@ -855,7 +899,7 @@ def _truncate_to_last_run(log_text: str) -> str:
     matches = list(_TRIGGER_DELIMITER_RE.finditer(log_text))
     if not matches:
         return log_text
-    return log_text[matches[-1].start():]
+    return log_text[matches[-1].start() :]
 
 
 def _parse_steps(log_text: str) -> list[StepRecord]:
@@ -1060,7 +1104,12 @@ def _resolve_release(lumen_root: Path, release_id: str) -> Path | None:
     Returns ``None`` for missing or path-traversal attempts (any id containing
     ``..`` / ``/`` / leading dot is rejected).
     """
-    if not release_id or "/" in release_id or ".." in release_id or release_id.startswith("."):
+    if (
+        not release_id
+        or "/" in release_id
+        or ".." in release_id
+        or release_id.startswith(".")
+    ):
         return None
     target = lumen_root / "releases" / release_id
     try:
@@ -1210,6 +1259,24 @@ def _read_incremental(path: Path, last_pos: int) -> tuple[str, int]:
     return chunk.decode("utf-8", errors="replace"), size
 
 
+def _wait_for_log_append(
+    path: Path,
+    *,
+    initial_size: int,
+    timeout_sec: float,
+) -> bool:
+    """Wait until the host-side update runner appends output to the shared log."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            if path.stat().st_size > initial_size:
+                return True
+        except OSError:
+            pass
+        time.sleep(0.25)
+    return False
+
+
 async def _stream_update_events(request: Request) -> AsyncIterator[str]:
     """Async generator powering ``GET /admin/update/stream``.
 
@@ -1327,7 +1394,9 @@ async def _stream_update_events(request: Request) -> AsyncIterator[str]:
                         {
                             "final_status": {
                                 "running": final.running,
-                                "phases": [p.model_dump(mode="json") for p in final.phases],
+                                "phases": [
+                                    p.model_dump(mode="json") for p in final.phases
+                                ],
                                 "current_release": (
                                     final.current_release.model_dump(mode="json")
                                     if final.current_release
@@ -1388,8 +1457,14 @@ async def trigger_update(
     marker = await asyncio.to_thread(_read_marker)
     if marker is not None:
         if marker.unit:
-            raise _http("update_running", f"Lumen update is already running ({marker.unit})", 409)
-        raise _http("update_running", f"Lumen update is already running (pid {marker.pid})", 409)
+            raise _http(
+                "update_running",
+                f"Lumen update is already running ({marker.unit})",
+                409,
+            )
+        raise _http(
+            "update_running", f"Lumen update is already running (pid {marker.pid})", 409
+        )
 
     proxy, proxy_url = await _resolve_update_proxy(db)
     started_at = datetime.now(timezone.utc)
@@ -1428,13 +1503,21 @@ async def trigger_update(
         # by lumen-update.path. Trigger via a file write — PID 1 starts the
         # runner, so we sidestep lumen-api's sandbox completely.
         if await asyncio.to_thread(_runner_unit_available):
-            outcome = _start_update_via_path_unit(
+            outcome = await asyncio.to_thread(
+                _start_update_via_path_unit,
                 env=env,
                 log_fh=log_fh,
                 started_at=started_at,
             )
             if outcome is not None:
                 pid, unit = outcome
+            elif _runner_trigger_only_mode():
+                raise _http(
+                    "update_runner_not_started",
+                    "已写入一键更新触发文件，但宿主机 lumen-update-runner.service 未开始执行；"
+                    "请确认 lumen-update.path 已安装并启用，且监听的数据目录与当前 LUMEN_DATA_ROOT 一致。",
+                    503,
+                )
         if unit is None and _systemd_run_available():
             outcome = _start_update_systemd_unit(
                 script=script,
@@ -1475,7 +1558,11 @@ async def trigger_update(
         request,
         admin,
         event_type="admin.update.trigger",
-        details={"pid": pid or None, "unit": unit, "proxy_name": proxy.name if proxy else None},
+        details={
+            "pid": pid or None,
+            "unit": unit,
+            "proxy_name": proxy.name if proxy else None,
+        },
     )
 
     if proc is not None:

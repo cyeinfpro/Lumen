@@ -111,7 +111,9 @@ def test_update_trigger_note_mentions_restart_and_health_check() -> None:
     assert "重启运行进程并执行健康检查" in source
 
 
-def test_systemd_run_command_uses_separate_unit_and_marker_cleanup(tmp_path: Path) -> None:
+def test_systemd_run_command_uses_separate_unit_and_marker_cleanup(
+    tmp_path: Path,
+) -> None:
     command = admin_update._systemd_run_command(
         unit="lumen-update-test.service",
         root=tmp_path / "lumen",
@@ -121,7 +123,12 @@ def test_systemd_run_command_uses_separate_unit_and_marker_cleanup(tmp_path: Pat
         marker_path=tmp_path / ".update.running",
     )
 
-    assert command[:4] == ["systemd-run", "--unit", "lumen-update-test.service", "--collect"]
+    assert command[:4] == [
+        "systemd-run",
+        "--unit",
+        "lumen-update-test.service",
+        "--collect",
+    ]
     assert f"WorkingDirectory={tmp_path / 'lumen'}" in command
     assert any(part.startswith("User=") for part in command)
     assert any(part.startswith("Group=") for part in command)
@@ -140,7 +147,11 @@ def test_start_update_systemd_unit_writes_marker_and_env(
     script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     backup_root = tmp_path / "backup"
     monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
-    monkeypatch.setattr(admin_update, "_systemd_unit_name", lambda _started_at: "lumen-update-test.service")
+    monkeypatch.setattr(
+        admin_update,
+        "_systemd_unit_name",
+        lambda _started_at: "lumen-update-test.service",
+    )
 
     captured: dict[str, object] = {}
 
@@ -274,6 +285,34 @@ def test_read_marker_drops_stale_pid_only_marker(
     assert not marker.exists()
 
 
+def test_read_marker_keeps_unit_marker_in_trigger_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Containerised API cannot query host systemd, so the marker is authoritative."""
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
+
+    def _boom(_unit: str) -> bool:  # pragma: no cover - guard
+        raise AssertionError("must not query host systemd in trigger-only mode")
+
+    monkeypatch.setattr(admin_update, "_unit_is_running", _boom)
+    marker = backup_root / ".update.running"
+    started_at = datetime.now(timezone.utc).isoformat()
+    marker.write_text(
+        f"pid=0\nstarted_at={started_at}\nunit=lumen-update-runner.service\n",
+        encoding="utf-8",
+    )
+
+    read = admin_update._read_marker()
+
+    assert read is not None
+    assert read.unit == "lumen-update-runner.service"
+    assert marker.exists()
+
+
 def test_start_update_via_path_unit_tolerates_chmod_eperm_for_env_and_trigger(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -291,6 +330,11 @@ def test_start_update_via_path_unit_tolerates_chmod_eperm_for_env_and_trigger(
         raise PermissionError(1, "Operation not permitted")
 
     monkeypatch.setattr(admin_update.os, "chmod", fake_chmod_eperm)
+    monkeypatch.setattr(
+        admin_update,
+        "_wait_for_log_append",
+        lambda *args, **kwargs: True,
+    )
 
     log_path = backup_root / ".update.log"
     log_path.parent.mkdir(parents=True)
@@ -329,24 +373,30 @@ def test_runner_unit_available_short_circuits_in_trigger_only_mode(
     assert admin_update._runner_unit_available() is True
 
 
-def test_start_update_via_path_unit_returns_immediately_in_trigger_only_mode(
+def test_start_update_via_path_unit_uses_log_confirmation_in_trigger_only_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Containerised lumen-api can't poll _unit_is_running.
 
-    With LUMEN_UPDATE_VIA_TRIGGER=1 set, writing the trigger file is enough —
-    the host's path watcher takes over. The function must not block 15 s on
-    a wait loop that will never observe the unit going active.
+    With LUMEN_UPDATE_VIA_TRIGGER=1 set, the function confirms the host path
+    watcher started by waiting for update.sh output to appear in the shared log.
+    It must not call systemctl or rely on _unit_is_running.
     """
     backup_root = tmp_path / "backup"
     monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
     monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
 
-    def _boom_sleep(_seconds: float) -> None:  # pragma: no cover - guard
-        raise AssertionError("must not sleep when waiting is short-circuited")
-
-    monkeypatch.setattr(admin_update.time, "sleep", _boom_sleep)
+    monkeypatch.setattr(
+        admin_update,
+        "_wait_for_log_append",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        admin_update,
+        "_unit_is_running",
+        lambda _unit: pytest.fail("must not poll host systemd in trigger-only mode"),
+    )
 
     log_path = backup_root / ".update.log"
     log_path.parent.mkdir(parents=True)
@@ -361,6 +411,41 @@ def test_start_update_via_path_unit_returns_immediately_in_trigger_only_mode(
     assert (backup_root / ".update.trigger").is_file()
     assert (backup_root / ".update.env").is_file()
     assert (backup_root / ".update.running").is_file()
+
+
+def test_start_update_via_path_unit_cleans_up_when_trigger_only_runner_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A missing/misconfigured host path unit must not look like success.
+
+    Previously trigger-only mode returned accepted immediately after writing
+    .update.trigger. If lumen-update.path was not installed, the UI stayed
+    "running" while no update process existed.
+    """
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
+    monkeypatch.setattr(
+        admin_update,
+        "_wait_for_log_append",
+        lambda *args, **kwargs: False,
+    )
+
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        outcome = admin_update._start_update_via_path_unit(
+            env={"LUMEN_UPDATE_NONINTERACTIVE": "1"},
+            log_fh=log_fh,
+            started_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
+        )
+
+    assert outcome is None
+    assert not (backup_root / ".update.trigger").exists()
+    assert not (backup_root / ".update.env").exists()
+    assert not (backup_root / ".update.running").exists()
+    assert "host runner did not append output" in log_path.read_text(encoding="utf-8")
 
 
 def test_start_update_via_path_unit_cleans_up_when_runner_does_not_activate(
@@ -414,7 +499,9 @@ async def test_cleanup_marker_when_done_uses_marker_dataclass(
         "_read_marker",
         lambda: admin_update.UpdateMarker(pid=1234, started_at="2026-05-02T00:00:00Z"),
     )
-    monkeypatch.setattr(admin_update, "_update_marker_path", lambda: Mock(unlink=unlinked))
+    monkeypatch.setattr(
+        admin_update, "_update_marker_path", lambda: Mock(unlink=unlinked)
+    )
 
     await admin_update._cleanup_marker_when_done(proc)
 

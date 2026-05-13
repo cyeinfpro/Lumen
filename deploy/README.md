@@ -99,7 +99,8 @@ bash scripts/lumenctl.sh restore <ts>     # 等价 scripts/restore.sh <timestamp
 
 `systemd/lumen-update-runner.service` 是后台 "一键更新" 按钮的执行端，行为：
 
-- 触发链：管理后台写入 `/opt/lumendata/backup/.update.trigger` -> `lumen-update.path` 监听变化 -> 启动 `lumen-update-runner.service`
+- 触发链：管理后台写入 `${LUMEN_DATA_ROOT:-/opt/lumendata}/backup/.update.trigger` -> `lumen-update.path` 监听变化 -> 启动 `lumen-update-runner.service`
+- `install.sh` / `update.sh` / `migrate_to_releases.sh` 会按实际 `LUMEN_DATA_ROOT` 渲染并启用 `lumen-update.path`；如果手工复制模板，默认监听 `/opt/lumendata/backup/.update.trigger`
 - runner 默认 `LUMEN_UPDATE_BUILD=0` —— **优先 `docker compose pull` GHCR 预构建镜像**，仅当外部 `EnvironmentFile` 显式置 1 时才本地构建
 - runner 用宿主机用户身份调用 `scripts/update.sh`，按阶段输出 `phase=check / backup_preflight / fetch_release / set_image_tag / pull_images / start_infra / migrate_db / switch / restart_services / health_check / cleanup`
 - 后台 API 解析这些阶段并实时推送到前端
