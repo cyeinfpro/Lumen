@@ -1,0 +1,11 @@
+{
+  "preset_id": "minimal_typography",
+  "title": "极简排版",
+  "category": "minimal",
+  "prompt_template": "minimal poster design, generous negative space, single dominant color block, restrained geometric accents, swiss design influence, premium and clean composition",
+  "palette": ["#F5F1EA", "#1A1A1A", "#D4A574", "#8B7355"],
+  "mood": "极简、克制、高级",
+  "recommended_aspects": ["1:1", "3:4", "9:16"],
+  "tags": ["极简", "留白", "排版", "奢华"],
+  "version": 1
+}

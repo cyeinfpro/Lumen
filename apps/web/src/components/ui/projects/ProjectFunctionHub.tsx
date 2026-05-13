@@ -5,7 +5,7 @@
 // - Feature 卡：工作流缩略区 + 清晰标题 + 描述
 // - 不可用卡：低对比度 + Soon label
 
-import { ArrowUpRight, Film, Image as ImageIcon, Shirt } from "lucide-react";
+import { ArrowUpRight, Film, Image as ImageIcon, Palette, Shirt } from "lucide-react";
 import Link from "next/link";
 
 import { cn } from "@/lib/utils";
@@ -25,8 +25,9 @@ const FEATURES = [
     title: "海报制作",
     en: "Poster",
     description: "为商品、活动和品牌场景生成海报版式。",
+    href: "/projects/poster-design/new",
     icon: ImageIcon,
-    available: false,
+    available: true,
   },
   {
     title: "分镜制作",
@@ -34,6 +35,14 @@ const FEATURES = [
     description: "将商品卖点拆成镜头脚本与画面分镜。",
     icon: Film,
     available: false,
+  },
+  {
+    title: "风格库",
+    en: "Style Library",
+    description: "管理海报视觉风格预设。内置 6 款样板 + 自建风格 + 一键生成样图。",
+    href: "/poster-styles",
+    icon: Palette,
+    available: true,
   },
 ] as const;
 

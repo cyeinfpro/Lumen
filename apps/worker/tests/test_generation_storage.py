@@ -736,6 +736,194 @@ async def test_model_library_generate_hook_completes_after_all_tasks() -> None:
     assert run.current_step == "model_library_generate"
 
 
+class _PosterStyleLibraryHookSession:
+    """Session mock：按 execute 顺序返回 run / step / existing_item 结果。"""
+
+    def __init__(self, *, run, step, existing_item=None) -> None:
+        self.run = run
+        self.step = step
+        self.existing_item = existing_item
+        self.added: list = []
+        self.flush_calls = 0
+        self._scalar_queue = [run, step, existing_item]
+
+    async def execute(self, _statement):
+        value = self._scalar_queue.pop(0) if self._scalar_queue else None
+        return _ScalarResult(value)
+
+    def add(self, item) -> None:
+        self.added.append(item)
+
+    async def flush(self) -> None:
+        self.flush_calls += 1
+
+
+def _poster_style_generation(task_id: str = "task-2") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=task_id,
+        upstream_request={
+            "workflow_action": "poster_style_library_generate",
+            "workflow_step_key": "poster_style_library_generate",
+            "workflow_run_id": "run-1",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_poster_style_library_hook_inserts_item_and_keeps_step_running() -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=["img-1"],
+        input_json={
+            "title": "复古印刷波普",
+            "category": "retro",
+            "style_tags": ["复古", "波普"],
+            "palette": ["#FF6B35", "#1A1A1A"],
+            "recommended_aspects": ["1:1", "9:16"],
+            "mood": "撞色印刷感",
+            "prompt": "retro pop print poster",
+            "prompt_template": None,
+            "count": 4,
+            "auto_tag": False,
+        },
+        output_json={},
+        task_ids=["task-1", "task-2", "task-3", "task-4"],
+        status="running",
+    )
+    session = _PosterStyleLibraryHookSession(run=run, step=step, existing_item=None)
+
+    await generation._maybe_record_poster_style_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=_poster_style_generation(),
+        image_id="img-2",
+    )
+
+    assert step.image_ids == ["img-1", "img-2"]
+    assert step.status == "running"
+    assert run.status == "running"
+    assert len(session.added) == 1
+    inserted = session.added[0]
+    assert inserted.cover_image_id == "img-2"
+    assert inserted.sample_image_ids == ["img-2"]
+    assert inserted.title == "复古印刷波普"
+    assert inserted.category == "retro"
+    assert inserted.palette == ["#FF6B35", "#1A1A1A"]
+    assert inserted.source == "generated"
+    assert inserted.user_id == "user-1"
+    assert inserted.id.startswith("user:")
+    assert inserted.metadata_jsonb["workflow_run_id"] == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_poster_style_library_hook_completes_step_when_all_tasks_done() -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=["img-1", "img-2", "img-3"],
+        input_json={
+            "title": "极简",
+            "category": "minimal",
+            "style_tags": [],
+            "palette": [],
+            "recommended_aspects": [],
+            "mood": None,
+            "prompt": "minimal poster",
+            "prompt_template": None,
+            "count": 4,
+            "auto_tag": False,
+        },
+        output_json={},
+        task_ids=["task-1", "task-2", "task-3", "task-4"],
+        status="running",
+    )
+    session = _PosterStyleLibraryHookSession(run=run, step=step, existing_item=None)
+
+    await generation._maybe_record_poster_style_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=_poster_style_generation("task-4"),
+        image_id="img-4",
+    )
+
+    assert step.image_ids == ["img-1", "img-2", "img-3", "img-4"]
+    assert step.status == "succeeded"
+    assert run.status == "completed"
+    assert run.current_step == "poster_style_library_generate"
+    assert len(session.added) == 1
+    assert session.added[0].cover_image_id == "img-4"
+    assert session.added[0].recommended_aspects == ["1:1", "9:16", "16:9", "3:4"]
+
+
+@pytest.mark.asyncio
+async def test_poster_style_library_hook_no_op_for_unrelated_workflow_action() -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=[],
+        input_json={"count": 2, "auto_tag": False},
+        output_json={},
+        task_ids=[],
+        status="running",
+    )
+    session = _PosterStyleLibraryHookSession(run=run, step=step)
+    unrelated = SimpleNamespace(
+        id="task-x",
+        upstream_request={"workflow_action": "model_library_generate"},
+    )
+
+    await generation._maybe_record_poster_style_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=unrelated,
+        image_id="img-99",
+    )
+
+    assert step.image_ids == []
+    assert step.status == "running"
+    assert run.status == "running"
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_poster_style_library_hook_skips_duplicate_cover_image() -> None:
+    run = SimpleNamespace(id="run-1", status="running", current_step="")
+    step = SimpleNamespace(
+        image_ids=["img-1"],
+        input_json={
+            "title": "试样",
+            "category": "minimal",
+            "count": 2,
+            "auto_tag": False,
+        },
+        output_json={},
+        task_ids=["task-1", "task-2"],
+        status="running",
+    )
+    existing = SimpleNamespace(
+        id="user:existing",
+        cover_image_id="img-1",
+        sample_image_ids=["img-1"],
+        category="minimal",
+        style_tags=[],
+        palette=[],
+        mood=None,
+        auto_tagged_at=None,
+        auto_tag_notes=None,
+        metadata_jsonb={},
+    )
+    session = _PosterStyleLibraryHookSession(run=run, step=step, existing_item=existing)
+
+    await generation._maybe_record_poster_style_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=_poster_style_generation("task-1"),
+        image_id="img-1",
+    )
+
+    # existing 已存在则不应新插入；image_ids 也不重复
+    assert step.image_ids == ["img-1"]
+    assert session.added == []
+
+
 @pytest.mark.asyncio
 async def test_await_with_lease_guard_aborts_work() -> None:
     lease_lost = asyncio.Event()

@@ -1,0 +1,11 @@
+{
+  "preset_id": "flat_illustration",
+  "title": "商业扁平插画",
+  "category": "illustration",
+  "prompt_template": "modern flat vector illustration poster, bold geometric color blocks, clean shapes, soft drop shadow, dribbble-style aesthetic, professional and friendly, no real text in foreground",
+  "palette": ["#FF6B6B", "#4ECDC4", "#FFE66D", "#1A1A2E", "#FFFFFF"],
+  "mood": "现代、轻快、专业",
+  "recommended_aspects": ["1:1", "9:16", "16:9", "3:4"],
+  "tags": ["扁平", "矢量", "插画", "商务"],
+  "version": 1
+}

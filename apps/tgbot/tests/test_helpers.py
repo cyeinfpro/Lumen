@@ -12,9 +12,9 @@ for module_name in list(sys.modules):
     if module_name == "app" or module_name.startswith("app."):
         del sys.modules[module_name]
 
-from aiogram.types import Message
+from aiogram.types import Message  # noqa: E402
 
-from app.handlers._helpers import (
+from app.handlers._helpers import (  # noqa: E402
     mime_extension,
     require_message,
     resolution_from_size,

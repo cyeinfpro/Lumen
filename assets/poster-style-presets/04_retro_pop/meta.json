@@ -1,0 +1,11 @@
+{
+  "preset_id": "retro_pop",
+  "title": "复古印刷波普",
+  "category": "retro",
+  "prompt_template": "retro pop print poster, halftone dot patterns, bold thick outlines, contrasting orange and black, paper grain texture, vintage screen-print aesthetic, riso print feel",
+  "palette": ["#FF6B35", "#1A1A1A", "#FFF5EE", "#FFD23F"],
+  "mood": "复古、撞色、印刷感",
+  "recommended_aspects": ["1:1", "3:4", "9:16"],
+  "tags": ["复古", "波普", "印刷", "撞色"],
+  "version": 1
+}

@@ -1,8 +1,22 @@
 # 海报制作工作流方案
 
-> 状态：方案设计中（V1 MVP 待实现）
+> 状态：V1 实施中（2026-05-12 开工）
 > 适用范围：Lumen 项目工作流扩展功能（继 apparel-model-showcase 之后第二个结构化工作流模板）
 > 用户决策：风格库为主 + 参考图为辅；文字层独立 Canvas 渲染避免 AI 错字；多尺寸走 fixed preset 直出，复用 4K 能力；多变体走多任务 stagger 入队，不依赖上游 `n>1`。
+
+## V1 实施决策（2026-05-12 调整）
+
+下列决策在动工时与产品对齐，与本文原方案有出入，以**本节为准**：
+
+1. **全 AI 出图，砍掉文字层独立 Canvas 渲染**。gpt-image-2 在短中文（3-8 字标题/CTA/价格）上已可用，错字走"局部 inpaint 返修"兜底。
+   - 影响：§2.3 / §3.7 / §4.5 / §10.6 的"文字层编辑器"方案 V1 不做；§8 的母版 prompt 模板要把 main_title/subtitle/cta/price 当字段塞进 prompt 而非 negative。
+2. **删除"文字层编辑"与"自动质检"步骤**。POSTER_WORKFLOW_STEPS 简化为：`copy_input → style_selection → copy_analysis → master_generation → master_approval → multi_size_generation → delivery`。
+   - 影响：§4.2 的 9 阶段降为 7 阶段；§3.8 / §9 的自动质检 V1 不做；§13 验收标准 6-7 取消。
+3. **风格库与模特库同构**。GitHub 预设拉取 + 用户自建 + 收藏入库，但元数据从 `meta.json` 解析（不是文件名），因为 prompt_template 太长无法编进文件名。
+4. **V1 内置 6 个预设视觉风格**：flat_illustration（商业扁平插画）、3d_render（3D 立体渲染）、minimal_typography（极简排版）、retro_pop（复古印刷波普）、chinese_traditional（国潮中式）、editorial_photo（杂志大片摄影）。
+5. **inpaint 作为返修工具暴露**。用户在多尺寸成品阶段可对单张框 mask + 写编辑意图触发 gpt-image-2 mask inpaint，prompt 走 `_wrap_inpaint_prompt` OpenAI invariant 模板（已实测）。
+
+---
 
 ## 1. 背景与目标
 

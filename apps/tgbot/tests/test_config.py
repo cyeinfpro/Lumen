@@ -11,8 +11,8 @@ for module_name in list(sys.modules):
     if module_name == "app" or module_name.startswith("app."):
         del sys.modules[module_name]
 
-from app.config import Settings
-from app import main
+from app.config import Settings  # noqa: E402
+from app import main  # noqa: E402
 
 
 def test_settings_allow_db_managed_bot_token() -> None:

@@ -446,6 +446,7 @@ async def readyz(
 # 路由挂载
 from .routes import auth, conversations, events, images, messages, tasks, workflows  # noqa: E402
 from .routes import generations as generations_router  # noqa: E402
+from .routes import poster_styles as poster_styles_router  # noqa: E402
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(conversations.router, prefix="/conversations", tags=["conversations"])
@@ -457,6 +458,9 @@ app.include_router(tasks.router, tags=["tasks"])
 app.include_router(images.router, prefix="/images", tags=["images"])
 app.include_router(events.router, tags=["events"])
 app.include_router(workflows.router)
+# Poster Style Library（V1.1 海报工作流）。挂在 workflows.router 之后，
+# 路径前缀 /poster-styles 与 workflows 的 /apparel-model-library 不冲突。
+app.include_router(poster_styles_router.router)
 
 from .routes import admin as admin_router  # noqa: E402
 from .routes import admin_backups as admin_backups_router  # noqa: E402
