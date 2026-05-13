@@ -1,0 +1,11 @@
+{
+  "preset_id": "chinese_traditional",
+  "title": "国潮中式",
+  "category": "traditional",
+  "prompt_template": "modern chinese traditional poster, ink wash textures, gold foil accents, traditional motifs subtly integrated, generous breathing space, refined oriental aesthetic",
+  "palette": ["#8B0000", "#D4AF37", "#1A1A1A", "#F5F1EA"],
+  "mood": "传统、雅致、节庆",
+  "recommended_aspects": ["1:1", "3:4", "9:16"],
+  "tags": ["国潮", "中式", "水墨", "烫金"],
+  "version": 1
+}

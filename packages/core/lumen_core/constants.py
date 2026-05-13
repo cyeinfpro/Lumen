@@ -336,6 +336,74 @@ UPSTREAM_CODE_TO_CODE: dict[str, GenerationErrorCode] = {
 }
 
 
+# --- Poster Style Library（V1.1 海报工作流） ---
+# 风格库 = 模特库的"风格"孪生版：每条 PosterStyleItem 一个 prompt_template + N 张样图。
+# 与模特库同样的 source / sync mode / cooldown 语义，但 metadata 来自 meta.json 而非文件名。
+
+# 资产仓库根目录（assets/<root>/）—— 与模特库 apparel-model-presets 对齐
+POSTER_STYLE_PRESET_ROOT = "poster-style-presets"
+
+# storage_root 下 cached preset 二进制 + index.json 的目录名
+POSTER_STYLE_LIBRARY_FOLDER = "poster-style-library"
+
+# 用户每次"生成 N 张样图"按钮默认值
+POSTER_STYLE_DEFAULT_SAMPLE_COUNT = 2
+
+# 用户每次"生成 N 张样图"允许的上限（前端按钮组）
+POSTER_STYLE_GENERATE_MAX_COUNT = 4
+
+# 同步预设的成功 cooldown：5 分钟内不重复打 GitHub Contents API
+POSTER_STYLE_SYNC_COOLDOWN_S = 300
+
+# 同步预设的失败重试 cooldown：避免临时网络故障被 300s 锁死，但也别狂打
+POSTER_STYLE_SYNC_FAILURE_COOLDOWN_S = 30
+
+# 预设 schema_version：preset_items JSON / 同步 state 数据结构变更时 bump
+POSTER_STYLE_SCHEMA_VERSION = 1
+
+# 单文件二进制上限：防止超大封面/样图把带宽打爆（与模特库 50MB 同档）
+POSTER_STYLE_MAX_BINARY_BYTES = 50 * 1024 * 1024
+
+# GitHub Contents API 单次请求超时
+POSTER_STYLE_FETCH_TIMEOUT_S = 30.0
+
+# 与 meta.json 的 category 字段对齐：preset_id 没有的就归 "other"
+POSTER_STYLE_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "all",  # list 接口"不限"语义；DB 列不存这个值
+        "user_favorites",  # 用户收藏（沿用模特库 00_user_favorites 文件夹约定）
+        "illustration",
+        "3d",
+        "minimal",
+        "retro",
+        "traditional",
+        "photo",
+        "other",
+    }
+)
+
+# 库条目来源：与模特库 4 类对齐
+POSTER_STYLE_SOURCES: frozenset[str] = frozenset(
+    {"all", "preset", "favorite", "user_upload", "generated"}
+)
+
+# 同步权限模式：与模特库 SettingSpec 完全对齐（admin_only/any_authenticated/disabled）
+POSTER_STYLE_SYNC_MODES: frozenset[str] = frozenset(
+    {"admin_only", "any_authenticated", "disabled"}
+)
+
+# 单条 PosterStyleItem 允许的样图张数上限（cover + N 个 sample）
+POSTER_STYLE_MAX_SAMPLES = 8
+
+# 默认推荐 aspect_ratio：海报最常见 4 比例。meta.json 可覆盖。
+POSTER_STYLE_DEFAULT_ASPECTS: tuple[str, ...] = ("1:1", "9:16", "16:9", "3:4")
+
+# 图片后缀白名单：仅接受这些格式作为 preset sample
+POSTER_STYLE_IMAGE_SUFFIXES: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp"}
+)
+
+
 def classify_upstream_error(
     error_type: str | None,
     status_code: int | None,

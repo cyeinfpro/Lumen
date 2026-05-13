@@ -21,6 +21,10 @@ echo "==> scripts/uninstall"
 bash -n scripts/lib.sh scripts/uninstall.sh scripts/test_uninstall.sh
 bash scripts/test_uninstall.sh
 
+echo
+echo "==> python ruff"
+uv run ruff check packages/core apps/api apps/worker apps/tgbot image-job tests
+
 ensure_web_deps() {
     if [ -x "apps/web/node_modules/.bin/eslint" ] &&
        [ -x "apps/web/node_modules/.bin/tsc" ] &&

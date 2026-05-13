@@ -1136,6 +1136,165 @@ class ModelLibraryHiddenPreset(Base):
     )
 
 
+# ---------- Poster Style Library（V1.1 海报工作流） ----------
+
+class PosterStyleItem(Base, TimestampMixin):
+    """User-owned saved/favorited/generated poster visual style.
+
+    Mirrors ModelLibraryItem but for visual styles rather than human models.
+    Each row is an independent style entry whose ``cover_image_id`` points to
+    a rendered preview demonstrating the style. ``prompt_template`` is
+    injected into poster generation as a hard style constraint.
+    """
+
+    __tablename__ = "poster_style_items"
+    __table_args__ = (
+        Index("ix_poster_style_items_user_category", "user_id", "category"),
+        Index("ix_poster_style_items_user_source", "user_id", "source"),
+        Index("ix_poster_style_items_user_created", "user_id", "created_at"),
+        Index("ix_poster_style_items_cover_image", "cover_image_id"),
+        Index(
+            "ix_poster_style_items_style_tags",
+            "style_tags",
+            postgresql_using="gin",
+            postgresql_ops={"style_tags": "jsonb_path_ops"},
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    cover_image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    sample_image_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(String(36)),
+        nullable=False,
+        default=list,
+        server_default=text("ARRAY[]::varchar[]"),
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    category: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="user_favorites"
+    )
+    mood: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    palette: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    recommended_aspects: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    style_tags: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    library_folder: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    auto_tagged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_tag_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+
+class PosterStyleHiddenPreset(Base):
+    """Per-user hidden poster-style preset list."""
+
+    __tablename__ = "poster_style_hidden_presets"
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    preset_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    hidden_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PosterMaster(Base, TimestampMixin):
+    """Master candidate for a poster design workflow.
+
+    Generated as N candidates per master step. Each candidate is a square
+    image capturing the visual style; the user selects one and the remaining
+    aspect ratios are re-rendered using the selected master as reference.
+    """
+
+    __tablename__ = "poster_masters"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_run_id", "candidate_index", name="uq_poster_masters_run_index"
+        ),
+        Index("ix_poster_masters_run_status", "workflow_run_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    candidate_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    style_summary_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    task_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(String(36)),
+        nullable=False,
+        default=list,
+        server_default=text("ARRAY[]::varchar[]"),
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    selected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class PosterRender(Base, TimestampMixin):
+    """Final poster render at a target aspect ratio.
+
+    Created during multi_size_generation step; each row corresponds to one
+    aspect ratio output rendered from the selected master as reference.
+    """
+
+    __tablename__ = "poster_renders"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_run_id", "aspect_ratio", name="uq_poster_renders_run_aspect"
+        ),
+        Index("ix_poster_renders_run_status", "workflow_run_id", "status"),
+        Index("ix_poster_renders_master", "master_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    master_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("poster_masters.id", ondelete="SET NULL"), nullable=True
+    )
+    aspect_ratio: Mapped[str] = mapped_column(String(16), nullable=False)
+    size: Mapped[str] = mapped_column(String(16), nullable=False)
+    image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    task_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(String(36)),
+        nullable=False,
+        default=list,
+        server_default=text("ARRAY[]::varchar[]"),
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+
 # ---------- Outbox Dead Letter（V1.0 收尾） ----------
 
 class OutboxDeadLetter(Base):
@@ -1190,6 +1349,10 @@ __all__ = [
     "ModelCandidate",
     "ModelLibraryItem",
     "ModelLibraryHiddenPreset",
+    "PosterStyleItem",
+    "PosterStyleHiddenPreset",
+    "PosterMaster",
+    "PosterRender",
     "QualityReport",
     "Share",
     "OutboxEvent",

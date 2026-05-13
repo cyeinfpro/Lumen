@@ -80,6 +80,9 @@ from lumen_core.models import (
     ImageVariant,
     Message,
     OutboxEvent,
+    PosterMaster,
+    PosterRender,
+    PosterStyleItem,
     WorkflowRun,
     WorkflowStep,
     new_uuid7,
@@ -1751,6 +1754,173 @@ async def _maybe_record_model_library_generate_image(
     step.output_json = output_json
 
 
+async def _maybe_record_poster_style_library_generate_image(
+    *,
+    session: Any,
+    user_id: str,
+    generation: Generation,
+    image_id: str,
+) -> None:
+    """风格库独立生成 worker 钩子。
+
+    与 ``_maybe_record_model_library_generate_image`` 同构，差异是：
+    每张样图入一条 PosterStyleItem（source=generated, cover_image_id=image_id,
+    sample_image_ids=[image_id]），属性从 step.input_json 复制。
+
+    auto_tag 调用 ``poster_style_tagging.auto_tag_poster_style_image``，把识别
+    出的 category / mood / style_tags / palette 合并到刚入库的 item。
+    """
+    req = (
+        generation.upstream_request
+        if isinstance(generation.upstream_request, dict)
+        else {}
+    )
+    if req.get("workflow_action") != "poster_style_library_generate":
+        return
+    if req.get("workflow_step_key") != "poster_style_library_generate":
+        return
+    run_id = req.get("workflow_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+
+    run = (
+        await session.execute(
+            select(WorkflowRun).where(
+                WorkflowRun.id == run_id,
+                WorkflowRun.user_id == user_id,
+                WorkflowRun.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        return
+    step = (
+        await session.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run.id,
+                WorkflowStep.step_key == "poster_style_library_generate",
+            )
+        )
+    ).scalar_one_or_none()
+    if step is None:
+        return
+
+    image_ids = list(step.image_ids or [])
+    if image_id not in image_ids:
+        image_ids.append(image_id)
+    step.image_ids = list(dict.fromkeys(image_ids))
+
+    input_json = step.input_json if isinstance(step.input_json, dict) else {}
+    title = str(input_json.get("title") or "未命名风格")[:255]
+    category_raw = str(input_json.get("category") or "user_favorites")
+    category = category_raw if category_raw else "user_favorites"
+    mood_raw = input_json.get("mood")
+    mood = (
+        str(mood_raw)[:128]
+        if isinstance(mood_raw, str) and mood_raw.strip()
+        else None
+    )
+    prompt_template_raw = input_json.get("prompt_template")
+    prompt_value = str(input_json.get("prompt") or "")[:4000]
+    if isinstance(prompt_template_raw, str) and prompt_template_raw.strip():
+        prompt_template: str | None = prompt_template_raw[:2000]
+    elif prompt_value:
+        prompt_template = prompt_value[:2000]
+    else:
+        prompt_template = None
+    palette = [c for c in (input_json.get("palette") or []) if isinstance(c, str)][:8]
+    aspects = [
+        a for a in (input_json.get("recommended_aspects") or []) if isinstance(a, str)
+    ][:8]
+    style_tags = [
+        t for t in (input_json.get("style_tags") or []) if isinstance(t, str)
+    ][:8]
+    auto_tag = bool(input_json.get("auto_tag", False))
+
+    existing = (
+        await session.execute(
+            select(PosterStyleItem).where(
+                PosterStyleItem.user_id == user_id,
+                PosterStyleItem.cover_image_id == image_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        item = PosterStyleItem(
+            id=f"user:{new_uuid7()}",
+            user_id=user_id,
+            source="generated",
+            cover_image_id=image_id,
+            sample_image_ids=[image_id],
+            title=title,
+            category=category,
+            mood=mood,
+            prompt_template=prompt_template,
+            palette=list(palette),
+            recommended_aspects=list(aspects) or ["1:1", "9:16", "16:9", "3:4"],
+            style_tags=list(style_tags),
+            library_folder=None,
+            metadata_jsonb={
+                "workflow_run_id": run.id,
+                "prompt": prompt_value,
+            },
+        )
+        session.add(item)
+        await session.flush()
+        target_item = item
+    else:
+        target_item = existing
+
+    if auto_tag:
+        try:
+            from .poster_style_tagging import auto_tag_poster_style_image
+
+            result = await auto_tag_poster_style_image(
+                session,
+                image_id=image_id,
+                user_id=user_id,
+            )
+            if result.category and target_item.category in (None, "", "user_favorites"):
+                target_item.category = result.category
+            if result.mood and not target_item.mood:
+                target_item.mood = result.mood[:128]
+            if result.style_tags:
+                merged_tags = list(dict.fromkeys([*target_item.style_tags, *result.style_tags]))[:8]
+                target_item.style_tags = merged_tags
+            if result.palette and not target_item.palette:
+                target_item.palette = list(result.palette)[:8]
+            target_item.auto_tagged_at = datetime.now(timezone.utc)
+            target_item.auto_tag_notes = result.notes
+            meta = dict(target_item.metadata_jsonb or {})
+            meta["auto_tag_raw"] = {
+                "category": result.category,
+                "mood": result.mood,
+                "style_tags": list(result.style_tags or []),
+                "palette": list(result.palette or []),
+                "notes": result.notes,
+            }
+            target_item.metadata_jsonb = meta
+        except (TimeoutError, asyncio.CancelledError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "poster_style_library_generate tagging skipped run=%s image=%s err=%s",
+                run.id,
+                image_id,
+                exc,
+            )
+
+    requested = int(input_json.get("count") or 0)
+    if requested <= 0:
+        requested = max(len(step.task_ids or []), len(step.image_ids or []))
+    finished_count = len(step.image_ids or [])
+    if finished_count >= requested and requested > 0:
+        if step.status == "running":
+            step.status = "succeeded"
+            run.status = "completed"
+            run.current_step = "poster_style_library_generate"
+
+
 async def _maybe_record_model_library_candidate_image(
     *,
     session: Any,
@@ -1800,6 +1970,67 @@ async def _maybe_record_model_library_candidate_image(
         bonus_ids.append(bonus_image_id)
     output_json["dual_race_bonus_image_ids"] = bonus_ids
     step.output_json = output_json
+
+
+async def _maybe_record_poster_workflow_image(
+    *,
+    session: Any,
+    user_id: str,
+    generation: Generation,
+    image_id: str,
+) -> None:
+    """海报工作流任务成功后把 image_id 实时回填到 PosterMaster / PosterRender 行。
+
+    设计点：
+    - 只是把单张图绑定到行；step 状态机推进交给 API 侧 _sync_poster_workflow_outputs。
+    - 一切异常 graceful——poster hook 失败不能把 succeeded 翻成 failed。
+    - 识别条件：upstream_request.workflow_type=poster_design 且 workflow_action 在
+      {poster_master, poster_render, poster_revise, poster_inpaint} 内。
+    """
+    req = (
+        generation.upstream_request
+        if isinstance(generation.upstream_request, dict)
+        else {}
+    )
+    if req.get("workflow_type") != "poster_design":
+        return
+    action = req.get("workflow_action")
+    if action not in {"poster_master", "poster_render", "poster_revise", "poster_inpaint"}:
+        return
+    run_id = req.get("workflow_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+    run = (
+        await session.execute(
+            select(WorkflowRun).where(
+                WorkflowRun.id == run_id,
+                WorkflowRun.user_id == user_id,
+                WorkflowRun.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        return
+
+    if action == "poster_master":
+        master_id = req.get("workflow_master_id")
+        if isinstance(master_id, str) and master_id:
+            master = await session.get(PosterMaster, master_id)
+            if master is not None and master.workflow_run_id == run.id:
+                if not master.image_id:
+                    master.image_id = image_id
+                if master.status == "generating":
+                    master.status = "ready"
+    else:
+        # poster_render / poster_revise / poster_inpaint → 都指向同一个 render 行
+        render_id = req.get("workflow_render_id")
+        if isinstance(render_id, str) and render_id:
+            render = await session.get(PosterRender, render_id)
+            if render is not None and render.workflow_run_id == run.id:
+                # revise/inpaint 把最新 image 覆盖上去；前端只看最新一张
+                render.image_id = image_id
+                if render.status in {"generating", "revising"}:
+                    render.status = "ready"
 
 
 def _primary_input_image_id_valid(
@@ -3845,6 +4076,40 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     # 模特库 hook 任何异常都不能让主生成任务从 succeeded 翻成 failed
                     logger.warning(
                         "model_library_generate post-success hook failed task=%s err=%s",
+                        task_id,
+                        exc,
+                    )
+
+                try:
+                    await _maybe_record_poster_workflow_image(
+                        session=session,
+                        user_id=user_id,
+                        generation=gen,
+                        image_id=image_id,
+                    )
+                except (TimeoutError, asyncio.CancelledError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # poster hook 任何异常都不能把 succeeded 翻成 failed
+                    logger.warning(
+                        "poster_workflow post-success hook failed task=%s err=%s",
+                        task_id,
+                        exc,
+                    )
+
+                try:
+                    await _maybe_record_poster_style_library_generate_image(
+                        session=session,
+                        user_id=user_id,
+                        generation=gen,
+                        image_id=image_id,
+                    )
+                except (TimeoutError, asyncio.CancelledError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # 风格库 hook 任何异常都不能把 succeeded 翻成 failed
+                    logger.warning(
+                        "poster_style_library_generate post-success hook failed task=%s err=%s",
                         task_id,
                         exc,
                     )

@@ -1,0 +1,11 @@
+{
+  "preset_id": "3d_render",
+  "title": "3D 立体渲染",
+  "category": "3d",
+  "prompt_template": "high-quality 3D render poster, glossy plastic and chrome surfaces, soft studio lighting, blob shapes, candy color palette, octane render style, modern e-commerce aesthetic",
+  "palette": ["#FF80AB", "#82B1FF", "#FFD180", "#B388FF", "#FFFFFF"],
+  "mood": "潮流、立体、糖果感",
+  "recommended_aspects": ["1:1", "9:16", "3:4"],
+  "tags": ["3D", "C4D", "潮流", "数码"],
+  "version": 1
+}

@@ -6,3 +6,5 @@ export { ProjectFunctionHub } from "./ProjectFunctionHub";
 export { ProjectsIndex } from "./ProjectsIndex";
 export { ApparelWorkflowNewPage } from "./ApparelWorkflowNewPage";
 export { ApparelWorkflowDetail } from "./ApparelWorkflowDetail";
+export { PosterWorkflowNewPage } from "./PosterWorkflowNewPage";
+export { PosterWorkflowDetail } from "./PosterWorkflowDetail";

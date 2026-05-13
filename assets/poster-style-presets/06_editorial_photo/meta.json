@@ -1,0 +1,11 @@
+{
+  "preset_id": "editorial_photo",
+  "title": "杂志大片摄影",
+  "category": "photo",
+  "prompt_template": "editorial fashion photography poster, cinematic lighting, shallow depth of field, premium product placement, magazine-cover composition, refined color grading, photorealistic",
+  "palette": ["#1A1A1A", "#F5F1EA", "#8B7355", "#D4A574"],
+  "mood": "高级、电影感、时尚",
+  "recommended_aspects": ["3:4", "9:16", "1:1"],
+  "tags": ["摄影", "杂志", "时尚", "电影感"],
+  "version": 1
+}

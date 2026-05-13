@@ -130,6 +130,21 @@ import {
   type WorkflowRun,
   type WorkflowRunListResponse,
   type UploadedImage,
+  approveCopyAnalysis,
+  approvePosterMaster,
+  createPosterDesignWorkflow,
+  createPosterMasters,
+  createPosterRenders,
+  inpaintPosterRender,
+  revisePosterRender,
+  type CopyAnalysisApproveIn,
+  type PosterDesignWorkflowCreateIn,
+  type PosterDesignWorkflowCreateOut,
+  type PosterInpaintIn,
+  type PosterMasterApproveIn,
+  type PosterMastersCreateIn,
+  type PosterRendersCreateIn,
+  type PosterReviseIn,
 } from "./apiClient";
 import type {
   AdminUserOut,
@@ -1587,5 +1602,417 @@ export function usePutAdminStorageMutation(
   return useMutation<StorageApplyResponseOut, Error, StorageConfigUpdateIn>({
     mutationFn: (body) => putAdminStorage(body),
     ...options,
+  });
+}
+
+// ============================================================================
+// Poster Style Library hooks（V1.1）
+// ============================================================================
+
+import {
+  batchDeletePosterStyles,
+  createPosterStyle,
+  deletePosterStyle,
+  generatePosterStyle,
+  getPosterStyle,
+  listPosterStyleJobs,
+  listPosterStyles,
+  patchPosterStyle,
+  syncPosterStylePresets,
+  triggerPosterStyleAutoTag,
+  type PosterStyleAutoTagOut,
+  type PosterStyleBatchDeleteOut,
+  type PosterStyleCategoryFilter,
+  type PosterStyleCreateIn,
+  type PosterStyleGenerateIn,
+  type PosterStyleGenerateOut,
+  type PosterStyleItem,
+  type PosterStyleJobsOpts,
+  type PosterStyleJobsOut,
+  type PosterStyleListOpts,
+  type PosterStyleListOut,
+  type PosterStylePatchIn,
+  type PosterStyleSourceFilter,
+  type PosterStyleSyncOut,
+} from "./apiClient";
+
+// Query keys（与 apparelModelLibrary 命名风格对齐）
+export const posterStyleKeys = {
+  all: () => ["poster-styles"] as const,
+  list: (params?: PosterStyleListOpts) =>
+    ["poster-styles", "list", params ?? {}] as const,
+  detail: (id: string) => ["poster-styles", "detail", id] as const,
+  jobs: (params?: PosterStyleJobsOpts) =>
+    ["poster-styles", "jobs", params ?? {}] as const,
+};
+
+export function usePosterStylesQuery(
+  params: {
+    category?: PosterStyleCategoryFilter;
+    source?: PosterStyleSourceFilter;
+    q?: string;
+    tags?: string[];
+    limit?: number;
+    offset?: number;
+  } = {},
+  options?: Omit<UseQueryOptions<PosterStyleListOut>, "queryKey" | "queryFn">,
+) {
+  return useQuery<PosterStyleListOut>({
+    queryKey: posterStyleKeys.list(params),
+    queryFn: () => listPosterStyles(params),
+    // keep previous data 由 React Query v5 通过 placeholderData 实现
+    placeholderData: (prev) => prev,
+    staleTime: 15_000,
+    ...options,
+  });
+}
+
+export function usePosterStyleQuery(
+  id: string,
+  options?: Omit<UseQueryOptions<PosterStyleItem>, "queryKey" | "queryFn">,
+) {
+  return useQuery<PosterStyleItem>({
+    queryKey: posterStyleKeys.detail(id),
+    queryFn: () => getPosterStyle(id),
+    enabled: Boolean(id),
+    staleTime: 30_000,
+    ...options,
+  });
+}
+
+export function usePosterStyleJobsQuery(
+  params: PosterStyleJobsOpts = {},
+  options?: Omit<UseQueryOptions<PosterStyleJobsOut>, "queryKey" | "queryFn">,
+) {
+  return useQuery<PosterStyleJobsOut>({
+    queryKey: posterStyleKeys.jobs(params),
+    queryFn: () => listPosterStyleJobs(params),
+    // 智能轮询：jobs 列表里只要有 running/queued 就 5s 刷一次，否则 30s
+    refetchInterval: (query) => {
+      const data = query.state.data as PosterStyleJobsOut | undefined;
+      const hasRunning =
+        data?.items?.some(
+          (job) => job.status === "queued" || job.status === "running",
+        ) ?? false;
+      return hasRunning ? 5_000 : 30_000;
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    staleTime: 2_000,
+    ...options,
+  });
+}
+
+export function useCreatePosterStyleMutation(
+  options?: Omit<
+    UseMutationOptions<PosterStyleItem, Error, PosterStyleCreateIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<PosterStyleItem, Error, PosterStyleCreateIn>({
+    mutationFn: createPosterStyle,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function usePatchPosterStyleMutation(
+  options?: Omit<
+    UseMutationOptions<
+      PosterStyleItem,
+      Error,
+      { id: string; body: PosterStylePatchIn }
+    >,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<
+    PosterStyleItem,
+    Error,
+    { id: string; body: PosterStylePatchIn }
+  >({
+    mutationFn: ({ id, body }) => patchPosterStyle(id, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(posterStyleKeys.detail(vars.id), data);
+      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useDeletePosterStyleMutation(
+  options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: deletePosterStyle,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useBatchDeletePosterStylesMutation(
+  options?: Omit<
+    UseMutationOptions<PosterStyleBatchDeleteOut, Error, string[]>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<PosterStyleBatchDeleteOut, Error, string[]>({
+    mutationFn: batchDeletePosterStyles,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useSyncPosterStylePresetsMutation(
+  options?: Omit<UseMutationOptions<PosterStyleSyncOut, Error, void>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<PosterStyleSyncOut, Error, void>({
+    mutationFn: () => syncPosterStylePresets(),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: posterStyleKeys.all() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useGeneratePosterStyleMutation(
+  options?: Omit<
+    UseMutationOptions<PosterStyleGenerateOut, Error, PosterStyleGenerateIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<PosterStyleGenerateOut, Error, PosterStyleGenerateIn>({
+    mutationFn: generatePosterStyle,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: posterStyleKeys.jobs() });
+      qc.invalidateQueries({ queryKey: posterStyleKeys.list() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useTriggerPosterStyleAutoTagMutation(
+  itemId: string,
+  options?: Omit<UseMutationOptions<PosterStyleAutoTagOut, Error, void>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<PosterStyleAutoTagOut, Error, void>({
+    mutationFn: () => triggerPosterStyleAutoTag(itemId),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: posterStyleKeys.detail(itemId) });
+      qc.invalidateQueries({ queryKey: posterStyleKeys.list() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+// ============================================================================
+// Poster Design Workflow hooks
+// 与 useWorkflowQuery 共用 qk.workflow，只是聚合层用 alias 暴露给海报 detail 页。
+// ============================================================================
+
+// 智能轮询：running 5s / needs_review 30s。逻辑等同 useWorkflowQuery。
+export function usePosterWorkflowQuery(
+  id: string | null | undefined,
+  options?: Omit<UseQueryOptions<WorkflowRun>, "queryKey" | "queryFn">,
+) {
+  return useQuery<WorkflowRun>({
+    queryKey: qk.workflow(id ?? ""),
+    queryFn: () => getWorkflow(id as string),
+    enabled: typeof id === "string" && id.length > 0,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status === "running") return 5_000;
+      if (status === "needs_review") return 30_000;
+      return false;
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    ...options,
+  });
+}
+
+export function useCreatePosterDesignWorkflowMutation(
+  options?: Omit<
+    UseMutationOptions<
+      PosterDesignWorkflowCreateOut,
+      Error,
+      PosterDesignWorkflowCreateIn
+    >,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<
+    PosterDesignWorkflowCreateOut,
+    Error,
+    PosterDesignWorkflowCreateIn
+  >({
+    mutationFn: createPosterDesignWorkflow,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useApproveCopyAnalysisMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<WorkflowRun, Error, CopyAnalysisApproveIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, CopyAnalysisApproveIn>({
+    mutationFn: (body) => approveCopyAnalysis(workflowId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCreatePosterMastersMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<WorkflowRun, Error, PosterMastersCreateIn | void>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, PosterMastersCreateIn | void>({
+    mutationFn: (body) => createPosterMasters(workflowId, body ?? {}),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useApprovePosterMasterMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<
+      WorkflowRun,
+      Error,
+      PosterMasterApproveIn & { master_id: string }
+    >,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<
+    WorkflowRun,
+    Error,
+    PosterMasterApproveIn & { master_id: string }
+  >({
+    mutationFn: ({ master_id, ...body }) =>
+      approvePosterMaster(workflowId, master_id, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCreatePosterRendersMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<WorkflowRun, Error, PosterRendersCreateIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<WorkflowRun, Error, PosterRendersCreateIn>({
+    mutationFn: (body) => createPosterRenders(workflowId, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useRevisePosterRenderMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<
+      WorkflowRun,
+      Error,
+      PosterReviseIn & { render_id: string }
+    >,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<
+    WorkflowRun,
+    Error,
+    PosterReviseIn & { render_id: string }
+  >({
+    mutationFn: ({ render_id, ...body }) =>
+      revisePosterRender(workflowId, render_id, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useInpaintPosterRenderMutation(
+  workflowId: string,
+  options?: Omit<
+    UseMutationOptions<
+      WorkflowRun,
+      Error,
+      PosterInpaintIn & { render_id: string }
+    >,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<
+    WorkflowRun,
+    Error,
+    PosterInpaintIn & { render_id: string }
+  >({
+    mutationFn: ({ render_id, ...body }) =>
+      inpaintPosterRender(workflowId, render_id, body),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.workflow(workflowId), data);
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
   });
 }

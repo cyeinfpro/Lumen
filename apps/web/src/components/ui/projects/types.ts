@@ -5,6 +5,9 @@ import {
   Check,
   Download,
   FileText,
+  Grid3x3,
+  Palette,
+  PenLine,
   Scissors,
   Shirt,
   Sparkles,
@@ -179,3 +182,66 @@ export const SHOT_PLAN_DEFAULT = [
   "detail_half_body",
   "side_or_back",
 ] as const;
+
+// ============================================================================
+// 海报工作流（poster_design）共享常量
+// 后端 step 来源：apps/api/app/routes/workflows.py 中 POSTER_WORKFLOW_STEPS
+// 与 apparel 互不重叠；详情页按 workflow.type 选择对应 STEPS 表。
+// ============================================================================
+
+export type PosterStepKey =
+  | "copy_input"
+  | "style_selection"
+  | "copy_analysis"
+  | "master_generation"
+  | "master_approval"
+  | "multi_size_generation"
+  | "delivery";
+
+export interface PosterStepDef {
+  key: PosterStepKey;
+  label: string;
+  short: string;
+  Icon: typeof Upload;
+}
+
+export const POSTER_STEPS: PosterStepDef[] = [
+  { key: "copy_input", label: "录入文案", short: "文案", Icon: PenLine },
+  { key: "style_selection", label: "选择风格", short: "风格", Icon: Palette },
+  { key: "copy_analysis", label: "切分确认", short: "切分", Icon: FileText },
+  { key: "master_generation", label: "母版生成", short: "母版", Icon: Sparkles },
+  { key: "master_approval", label: "母版选定", short: "选定", Icon: Check },
+  { key: "multi_size_generation", label: "多尺寸成品", short: "多尺寸", Icon: Grid3x3 },
+  { key: "delivery", label: "交付", short: "交付", Icon: Download },
+];
+
+export const POSTER_STEP_INDEX: Record<string, number> = POSTER_STEPS.reduce<
+  Record<string, number>
+>((acc, step, index) => {
+  acc[step.key] = index;
+  return acc;
+}, {});
+
+export const POSTER_ASPECT_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ["1:1", "1:1 方图"],
+  ["9:16", "9:16 竖屏"],
+  ["16:9", "16:9 横图"],
+  ["3:4", "3:4 竖版"],
+  ["2:3", "2:3 杂志"],
+  ["3:2", "3:2 横版"],
+  ["4:3", "4:3 横图"],
+  ["4:5", "4:5 主图"],
+] as const;
+
+export const POSTER_DEFAULT_TARGET_ASPECTS = [
+  "1:1",
+  "9:16",
+  "16:9",
+  "3:4",
+] as const;
+
+export const POSTER_REVISION_SCOPE_LABEL: Record<string, string> = {
+  background: "背景重生",
+  style: "风格调整",
+  inpaint: "局部修复",
+};

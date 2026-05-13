@@ -356,6 +356,33 @@ export interface QualityReport {
   updated_at: string;
 }
 
+export interface PosterMaster {
+  id: string;
+  workflow_run_id: string;
+  candidate_index: number;
+  image_id: string | null;
+  style_summary_json: Record<string, unknown>;
+  task_ids: string[];
+  status: string;
+  selected_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PosterRender {
+  id: string;
+  workflow_run_id: string;
+  master_id: string | null;
+  aspect_ratio: string;
+  size: string;
+  image_id: string | null;
+  task_ids: string[];
+  status: string;
+  metadata_jsonb: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkflowRun {
   id: string;
   conversation_id: string | null;
@@ -373,6 +400,9 @@ export interface WorkflowRun {
   steps: WorkflowStep[];
   model_candidates: ModelCandidate[];
   quality_reports: QualityReport[];
+  // 海报工作流（type=poster_design）使用；apparel 类型保持空数组。
+  poster_masters?: PosterMaster[];
+  poster_renders?: PosterRender[];
   product_images: BackendImageMeta[];
   generated_images: BackendImageMeta[];
   generations: BackendGeneration[];
@@ -2472,4 +2502,549 @@ export async function exportMyData(): Promise<Blob> {
   }
 
   return res.blob();
+}
+
+// ============================================================================
+// Poster Style Library（V1.1 海报工作流）
+// 与 ApparelModelLibrary* 同构：DB 表 + GitHub 同步 + 用户生成。
+// 后端路由：apps/api/app/routes/poster_styles.py（前缀 /poster-styles）
+// schemas：packages/core/lumen_core/schemas.py 的 PosterStyle* 类
+// ============================================================================
+
+export type PosterStyleSource =
+  | "preset"
+  | "favorite"
+  | "user_upload"
+  | "generated";
+export type PosterStyleVisibilityScope = "global_preset" | "user_private";
+export type PosterStyleCategory =
+  | "user_favorites"
+  | "illustration"
+  | "3d"
+  | "minimal"
+  | "retro"
+  | "traditional"
+  | "photo"
+  | "other";
+// list / filter 用：含 "all"
+export type PosterStyleCategoryFilter = "all" | PosterStyleCategory;
+export type PosterStyleSourceFilter = "all" | PosterStyleSource;
+// 风格库生成允许的张数档位（对齐后端 POSTER_STYLE_GENERATE_MAX_COUNT=4）
+export type PosterStyleGenerateCount = 1 | 2 | 3 | 4;
+export type PosterStyleJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "partial";
+
+// 类目中英映射（卡片徽标、tabs、筛选）
+export const POSTER_STYLE_CATEGORY_LABEL: Record<PosterStyleCategoryFilter, string> = {
+  all: "全部",
+  user_favorites: "收藏",
+  illustration: "商业扁平插画",
+  "3d": "3D",
+  minimal: "极简",
+  retro: "复古",
+  traditional: "中式",
+  photo: "杂志摄影",
+  other: "其他",
+};
+
+// 来源中英映射
+export const POSTER_STYLE_SOURCE_LABEL: Record<PosterStyleSourceFilter, string> = {
+  all: "全部",
+  preset: "预设",
+  favorite: "收藏",
+  user_upload: "上传",
+  generated: "生成",
+};
+
+// 类目下拉用选项（用户编辑/创建时可选项，排除 "all"）
+export const POSTER_STYLE_CATEGORY_OPTIONS: PosterStyleCategory[] = [
+  "user_favorites",
+  "illustration",
+  "3d",
+  "minimal",
+  "retro",
+  "traditional",
+  "photo",
+  "other",
+];
+
+// 推荐宽高比可选项（与生成 aspect_ratio 一致）
+export const POSTER_STYLE_ASPECT_OPTIONS: string[] = [
+  "1:1",
+  "4:5",
+  "3:4",
+  "9:16",
+  "16:9",
+];
+
+export interface PosterStyleSample {
+  index: number;
+  image_id: string | null;
+  image_url: string;
+  display_url: string | null;
+  thumb_url: string | null;
+}
+
+export interface PosterStyleSyncState {
+  last_success_at: string | null;
+  last_error: string | null;
+  can_sync: boolean;
+  github_contents_url?: string | null;
+}
+
+export interface PosterStyleItem {
+  id: string;
+  source: PosterStyleSource;
+  visibility_scope: PosterStyleVisibilityScope;
+  title: string;
+  category: PosterStyleCategory;
+  mood: string | null;
+  prompt_template: string | null;
+  palette: string[];
+  recommended_aspects: string[];
+  style_tags: string[];
+  cover_image_url: string;
+  display_url: string | null;
+  thumb_url: string | null;
+  cover_image_id: string | null;
+  sample_image_ids: string[];
+  samples: PosterStyleSample[];
+  preset_id?: string | null;
+  version?: number | null;
+  library_folder?: string | null;
+  download_filename?: string | null;
+  auto_tagged_at: string | null;
+  auto_tag_notes?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface PosterStyleListOut {
+  items: PosterStyleItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  sync: PosterStyleSyncState;
+}
+
+export interface PosterStyleSyncOut {
+  status: "ok" | "failed" | "skipped";
+  added: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+  last_success_at: string | null;
+  last_error: string | null;
+}
+
+export interface PosterStyleCreateIn {
+  source?: "favorite" | "user_upload" | "generated";
+  visibility_scope?: "user_private";
+  cover_image_id: string;
+  sample_image_ids?: string[];
+  title: string;
+  category?: PosterStyleCategory;
+  mood?: string | null;
+  prompt_template?: string | null;
+  palette?: string[];
+  recommended_aspects?: string[];
+  style_tags?: string[];
+  auto_tag?: boolean;
+}
+
+export interface PosterStylePatchIn {
+  title?: string;
+  category?: PosterStyleCategory;
+  mood?: string | null;
+  prompt_template?: string | null;
+  palette?: string[];
+  recommended_aspects?: string[];
+  style_tags?: string[];
+}
+
+export interface PosterStyleBatchDeleteOut {
+  ok: boolean;
+  deleted: number;
+  not_found: string[];
+}
+
+export interface PosterStyleGenerateIn {
+  title: string;
+  category?: PosterStyleCategory;
+  prompt: string;
+  prompt_template?: string | null;
+  style_tags?: string[];
+  palette?: string[];
+  recommended_aspects?: string[];
+  mood?: string | null;
+  aspect_ratio?: string;
+  count: PosterStyleGenerateCount;
+  auto_tag?: boolean;
+}
+
+export interface PosterStyleGenerateOut {
+  job_id: string;
+  workflow_run_id: string;
+  status: "queued" | "running";
+  requested_count: number;
+  task_ids: string[];
+  created_at: string;
+}
+
+export interface PosterStyleJobOut {
+  job_id: string;
+  workflow_run_id: string;
+  title: string;
+  category: PosterStyleCategory;
+  status: PosterStyleJobStatus;
+  requested_count: number;
+  finished_count: number;
+  prompt: string | null;
+  style_tags: string[];
+  image_ids: string[];
+  saved_item_id: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface PosterStyleJobsOut {
+  items: PosterStyleJobOut[];
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface PosterStyleAutoTagOut {
+  item_id: string;
+  style_tags: string[];
+  category: PosterStyleCategory | null;
+  mood: string | null;
+  palette: string[];
+  notes: string | null;
+}
+
+export interface PosterStyleListOpts {
+  category?: PosterStyleCategoryFilter;
+  source?: PosterStyleSourceFilter;
+  q?: string;
+  tags?: string[];
+  limit?: number;
+  offset?: number;
+}
+
+// item_id 可能含 ":"（preset:xxx:v1 / user:uuid），需 encode
+function encodePosterStyleId(id: string): string {
+  return encodeURIComponent(id);
+}
+
+export function listPosterStyles(
+  opts: PosterStyleListOpts = {},
+): Promise<PosterStyleListOut> {
+  const qs = new URLSearchParams();
+  if (opts.category) qs.set("category", opts.category);
+  if (opts.source) qs.set("source", opts.source);
+  if (opts.q) qs.set("q", opts.q);
+  if (opts.tags && opts.tags.length > 0) {
+    for (const tag of opts.tags) qs.append("tags", tag);
+  }
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  if (opts.offset != null) qs.set("offset", String(opts.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<PosterStyleListOut>(`/poster-styles${suffix}`);
+}
+
+export function getPosterStyle(itemId: string): Promise<PosterStyleItem> {
+  return apiFetch<PosterStyleItem>(
+    `/poster-styles/${encodePosterStyleId(itemId)}`,
+  );
+}
+
+export function createPosterStyle(
+  body: PosterStyleCreateIn,
+): Promise<PosterStyleItem> {
+  return apiFetch<PosterStyleItem>("/poster-styles/items", {
+    method: "POST",
+    body: JSON.stringify({
+      visibility_scope: "user_private",
+      style_tags: [],
+      palette: [],
+      recommended_aspects: [],
+      sample_image_ids: [],
+      auto_tag: true,
+      ...body,
+    }),
+  });
+}
+
+export function patchPosterStyle(
+  itemId: string,
+  body: PosterStylePatchIn,
+): Promise<PosterStyleItem> {
+  return apiFetch<PosterStyleItem>(
+    `/poster-styles/items/${encodePosterStyleId(itemId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function deletePosterStyle(itemId: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/poster-styles/items/${encodePosterStyleId(itemId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function batchDeletePosterStyles(
+  itemIds: string[],
+): Promise<PosterStyleBatchDeleteOut> {
+  return apiFetch<PosterStyleBatchDeleteOut>(
+    "/poster-styles/items/batch-delete",
+    {
+      method: "POST",
+      body: JSON.stringify({ item_ids: itemIds }),
+    },
+  );
+}
+
+export function syncPosterStylePresets(): Promise<PosterStyleSyncOut> {
+  return apiFetch<PosterStyleSyncOut>("/poster-styles/sync-presets", {
+    method: "POST",
+  });
+}
+
+export function generatePosterStyle(
+  body: PosterStyleGenerateIn,
+): Promise<PosterStyleGenerateOut> {
+  return apiFetch<PosterStyleGenerateOut>("/poster-styles/generate", {
+    method: "POST",
+    body: JSON.stringify({
+      category: "user_favorites",
+      style_tags: [],
+      palette: [],
+      recommended_aspects: [],
+      aspect_ratio: "1:1",
+      auto_tag: true,
+      ...body,
+    }),
+  });
+}
+
+export interface PosterStyleJobsOpts {
+  limit?: number;
+  offset?: number;
+}
+
+export function listPosterStyleJobs(
+  opts: PosterStyleJobsOpts = {},
+): Promise<PosterStyleJobsOut> {
+  const qs = new URLSearchParams();
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  if (opts.offset != null) qs.set("offset", String(opts.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<PosterStyleJobsOut>(`/poster-styles/jobs${suffix}`);
+}
+
+export function triggerPosterStyleAutoTag(
+  itemId: string,
+): Promise<PosterStyleAutoTagOut> {
+  return apiFetch<PosterStyleAutoTagOut>(
+    `/poster-styles/items/${encodePosterStyleId(itemId)}/auto-tag`,
+    { method: "POST" },
+  );
+}
+
+// ============================================================================
+// Poster Design Workflow（V1.1 海报工作流详情页）
+// 后端路由：apps/api/app/routes/workflows.py 中 POSTER_WORKFLOW_TYPE = "poster_design"
+// schemas：packages/core/lumen_core/schemas.py 的 PosterDesignWorkflow* / PosterMaster* / PosterRender* 类
+// 7 step：copy_input → style_selection → copy_analysis → master_generation
+//        → master_approval → multi_size_generation → delivery
+// ============================================================================
+
+export type PosterAspectRatio =
+  | "1:1"
+  | "9:16"
+  | "16:9"
+  | "3:4"
+  | "4:3"
+  | "2:3"
+  | "3:2"
+  | "4:5";
+export type PosterRevisionScope = "background" | "inpaint" | "style";
+
+export interface PosterBrandAssetsIn {
+  logo_image_id?: string | null;
+  product_image_id?: string | null;
+  primary_color?: string | null;
+  font_family?: string | null;
+}
+
+export interface PosterDesignWorkflowCreateIn {
+  conversation_id?: string | null;
+  copy_text: string;
+  style_id: string;
+  target_aspects?: PosterAspectRatio[];
+  brand_assets?: PosterBrandAssetsIn;
+  quality_mode?: "standard" | "premium";
+  title?: string | null;
+}
+
+export interface PosterDesignWorkflowCreateOut {
+  workflow_run_id: string;
+  status: string;
+  current_step: string;
+}
+
+export interface CopyAnalysisCorrections {
+  main_title?: string | null;
+  subtitle?: string | null;
+  selling_points?: string[] | null;
+  cta?: string | null;
+  price?: string | null;
+  tone?: string | null;
+  info_density?: "high" | "medium" | "low" | string | null;
+  // 兜底：用户额外字段；后端 corrections 是 Dict[str, Any]
+  [key: string]: unknown;
+}
+
+export interface CopyAnalysisApproveIn {
+  corrections: CopyAnalysisCorrections;
+}
+
+export interface PosterMastersCreateIn {
+  candidate_count?: number;
+  size_mode?: "auto" | "fixed";
+  size?: string | null;
+}
+
+export interface PosterMasterApproveIn {
+  adjustments?: string;
+}
+
+export interface PosterRendersCreateIn {
+  aspects: PosterAspectRatio[];
+  use_master_as_reference?: boolean;
+  quality_mode?: "standard" | "premium";
+}
+
+export interface PosterReviseIn {
+  scope: PosterRevisionScope;
+  instruction: string;
+  mask_image_id?: string | null;
+}
+
+export interface PosterInpaintIn {
+  instruction: string;
+  mask_image_id: string;
+}
+
+// 创建海报工作流
+export function createPosterDesignWorkflow(
+  body: PosterDesignWorkflowCreateIn,
+): Promise<PosterDesignWorkflowCreateOut> {
+  return apiFetch<PosterDesignWorkflowCreateOut>("/workflows/poster-design", {
+    method: "POST",
+    body: JSON.stringify({
+      target_aspects: ["1:1", "9:16", "16:9", "3:4"],
+      quality_mode: "premium",
+      ...body,
+    }),
+  });
+}
+
+// 文案分析确认
+export function approveCopyAnalysis(
+  workflowId: string,
+  body: CopyAnalysisApproveIn = { corrections: {} },
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/steps/copy-analysis/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ corrections: body.corrections ?? {} }),
+    },
+  );
+}
+
+// 生成母版候选
+export function createPosterMasters(
+  workflowId: string,
+  body: PosterMastersCreateIn = {},
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/masters`, {
+    method: "POST",
+    body: JSON.stringify({
+      candidate_count: 4,
+      size_mode: "fixed",
+      ...body,
+    }),
+  });
+}
+
+// 选定母版
+export function approvePosterMaster(
+  workflowId: string,
+  masterId: string,
+  body: PosterMasterApproveIn = {},
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/masters/${masterId}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ adjustments: "", ...body }),
+    },
+  );
+}
+
+// 生成多尺寸成品
+export function createPosterRenders(
+  workflowId: string,
+  body: PosterRendersCreateIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/renders`, {
+    method: "POST",
+    body: JSON.stringify({
+      use_master_as_reference: true,
+      quality_mode: "premium",
+      ...body,
+    }),
+  });
+}
+
+// 单张返修（背景重生/风格调整/inpaint）
+export function revisePosterRender(
+  workflowId: string,
+  renderId: string,
+  body: PosterReviseIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/renders/${renderId}/revise`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+// 局部 inpaint（mask 必填）
+export function inpaintPosterRender(
+  workflowId: string,
+  renderId: string,
+  body: PosterInpaintIn,
+): Promise<WorkflowRun> {
+  return apiFetch<WorkflowRun>(
+    `/workflows/${workflowId}/renders/${renderId}/inpaint`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 }
