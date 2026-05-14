@@ -814,8 +814,8 @@ async def _reserve_image_queue_slot(
                 msg = str(exc)
                 # 兼容老 mock：依次去掉新增 kwargs（requires_mask、acquire_inflight）。
                 # requires_mask=True 但 mock 不识别时，select 出来的候选可能含 url 模式
-                # provider；upstream 层已经在 _direct_edit_image_with_failover /
-                # _image_job_with_failover 入口再加守卫，能把误选号兜成 NO_MASK_CAPABLE_PROVIDER。
+                # provider；真实 ProviderPool 会优先 file-mode，file-mode 耗尽时允许
+                # url-mode 兜底，避免 inpaint 因单一 transport 池耗尽直接失败。
                 if "requires_mask" not in msg and "acquire_inflight" not in msg:
                     raise
                 kwargs = {
@@ -3238,9 +3238,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             image_route = "responses"
     is_dual_race = image_route == "dual_race"
     endpoint_kind = None if is_dual_race else _image_endpoint_kind_for_engine(image_route)
-    # mask 不为空 → 选号必须走 transport=file 候选；reserve 阶段就过滤，避免后面
-    # _direct_edit_image_with_failover / _image_job_with_failover 再被迫拒绝
-    # provider_override 引发 NO_MASK_CAPABLE_PROVIDER（terminal）。
+    # mask 不为空 → reserve 阶段把任务标记给 ProviderPool：sidecar 路径优先
+    # file-mode provider，file-mode 候选耗尽时允许 url-mode 兜底；direct 路径本身
+    # 是 multipart，不依赖 provider 的 image_edit_input_transport 配置。
     requires_mask_provider = bool(mask_image_id) and action == GenerationAction.EDIT
     try:
         reserved_provider = await _reserve_image_queue_slot(
@@ -3252,7 +3252,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             provider_override=user_runtime_provider,
         )
     except UpstreamError as exc:
-        # NO_MASK_CAPABLE_PROVIDER：terminal，直接抛给 task 主循环走 _record_failure。
+        # 兼容旧代码路径：如果仍有老 guard 抛 NO_MASK_CAPABLE_PROVIDER，按 terminal 处理。
         if getattr(exc, "error_code", None) == EC.NO_MASK_CAPABLE_PROVIDER.value:
             raise
         if getattr(exc, "error_code", None) != EC.ALL_ACCOUNTS_FAILED.value:
@@ -3696,6 +3696,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 provider_override=(
                                     None if is_dual_race else reserved_provider
                                 ),
+                                user_id=user_id,
                             )
                         else:
                             image_iter = generate_image(
@@ -3711,6 +3712,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 provider_override=(
                                     None if is_dual_race else reserved_provider
                                 ),
+                                user_id=user_id,
                             )
                         first_pair = await _anext_image_with_guards(
                             image_iter, lease_lost, redis=redis, task_id=task_id,
