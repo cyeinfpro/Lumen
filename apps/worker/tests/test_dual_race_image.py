@@ -148,6 +148,38 @@ async def test_dual_race_both_lanes_fail_merges_errors(
     assert exc_info.value.error_code == "fallback_lanes_failed"
 
 
+def test_truncate_lane_summary_keeps_core_fields_and_drops_payload_html() -> None:
+    raw_html = "<!DOCTYPE html>" + ("x" * 5000)
+    exc = UpstreamError(
+        "m" * 300,
+        error_code="upstream_error",
+        status_code=502,
+        payload={
+            "trace_id": "trace-1",
+            "x_trace_id": "xtrace-2",
+            "url": "https://example.test/error",
+            "path": "/v1/responses",
+            "method": "POST",
+            "raw": raw_html,
+        },
+    )
+
+    summary = upstream._truncate_lane_summary("responses", exc)
+
+    assert summary["lane"] == "responses"
+    assert summary["type"] == "UpstreamError"
+    assert summary["status_code"] == 502
+    assert summary["error_code"] == "upstream_error"
+    assert summary["message"] == "m" * 200
+    assert summary["trace_id"] == "trace-1"
+    assert summary["x_trace_id"] == "xtrace-2"
+    assert summary["url"] == "https://example.test/error"
+    assert summary["path"] == "/v1/responses"
+    assert summary["method"] == "POST"
+    assert "payload" not in summary
+    assert "raw" not in summary
+
+
 @pytest.mark.asyncio
 async def test_dual_race_caller_cancel_propagates(
     monkeypatch: pytest.MonkeyPatch,

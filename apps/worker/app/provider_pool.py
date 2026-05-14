@@ -515,9 +515,9 @@ class ProviderPool:
         ``image_edit_input_transport=file`` 过滤候选，由 ``mask_transport_required``
         决定：
 
-        - ``mask_transport_required=True``（默认，sidecar 路径调用方）：过滤掉
-          transport != "file" 的号——sidecar url 模式不会透传 mask 字段，会静默
-          退化成普通 i2i；过滤后无候选时抛 ``NO_MASK_CAPABLE_PROVIDER``。
+        - ``mask_transport_required=True``（默认，sidecar 路径调用方）：优先返回
+          ``image_edit_input_transport=file`` 的号；如果 file-mode 候选全部耗尽，
+          再退回 url-mode 候选，避免 inpaint 在 file-only 号池清空时直接终态。
         - ``mask_transport_required=False``（direct edits 路径调用方）：跳过
           transport 过滤——direct multipart 自身就是 multipart，不依赖 sidecar
           的 transport 字段；该路径下任意 provider 都能携带 mask。
@@ -649,6 +649,8 @@ class ProviderPool:
                 avoided = set()
 
         candidates: list[tuple[ProviderConfig, float]] = []
+        mask_file_candidates: list[tuple[ProviderConfig, float]] = []
+        mask_url_candidates: list[tuple[ProviderConfig, float]] = []
         skipped: list[tuple[str, str]] = []
 
         for p in enabled:
@@ -663,21 +665,6 @@ class ProviderPool:
                 p, route="image", endpoint_kind=endpoint_kind
             ):
                 skipped.append((p.name, "capability_unsupported"))
-                continue
-            # mask 能力门：仅在 sidecar 路径调用方（mask_transport_required=True）
-            # 才按 transport=file 过滤。direct edits 调用方传 False，因为 direct
-            # multipart 自身处理 image+mask binary，与 sidecar 的 transport 字段无关。
-            # 这一层是核心解耦点：sidecar url 模式 = 真不能携带 mask；direct 任何
-            # transport = 都能携带 mask（multipart 自己发）。误把它当普适过滤器会
-            # 把可用号当成 NO_MASK_CAPABLE_PROVIDER 错杀。
-            if (
-                requires_mask
-                and mask_transport_required
-                and p.image_edit_input_transport != "file"
-            ):
-                skipped.append(
-                    (p.name, f"mask_requires_file_transport(got={p.image_edit_input_transport})")
-                )
                 continue
             h = self._health.setdefault(p.name, ProviderHealth())
             if p.name in avoided:
@@ -736,7 +723,25 @@ class ProviderPool:
             last_used_key = (
                 last_used if last_used is not None else float("-inf")
             )
-            candidates.append((p, (inflight, last_used_key)))
+            target_bucket = candidates
+            if requires_mask and mask_transport_required:
+                if p.image_edit_input_transport == "file":
+                    target_bucket = mask_file_candidates
+                else:
+                    target_bucket = mask_url_candidates
+            target_bucket.append((p, (inflight, last_used_key)))
+
+        if requires_mask and mask_transport_required:
+            if mask_file_candidates:
+                candidates = mask_file_candidates
+            elif mask_url_candidates:
+                candidates = mask_url_candidates
+                logger.info(
+                    "image mask file-mode exhausted; falling back to url transport "
+                    "task=%s candidates=%d",
+                    task_id,
+                    len(mask_url_candidates),
+                )
 
         if not candidates:
             # P1-8: 若所有 enabled provider 都在 avoid set 里，退化为忽略 avoid
@@ -761,17 +766,6 @@ class ProviderPool:
                     mask_transport_required=mask_transport_required,
                 )
             detail = ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
-            # 全部候选都被 mask 过滤掉 → NO_MASK_CAPABLE_PROVIDER（terminal，不重试）。
-            # 区别于 ALL_ACCOUNTS_FAILED（短期 quota / cooldown，应重试）。
-            if requires_mask and skipped and all(
-                reason.startswith("mask_requires_file_transport") for _, reason in skipped
-            ):
-                raise UpstreamError(
-                    f"no providers support inpaint mask (need image_edit_input_transport=file): {detail}",
-                    error_code=EC.NO_MASK_CAPABLE_PROVIDER.value,
-                    status_code=503,
-                    payload={"skipped": skipped, "requires_mask": True},
-                )
             raise UpstreamError(
                 f"all accounts unavailable for image: {detail}",
                 error_code=EC.ALL_ACCOUNTS_FAILED.value,

@@ -218,12 +218,12 @@ _SSE_MAX_LINE_BYTES = 32 * 1024 * 1024
 _FALLBACK_MAX_ATTEMPTS = 2
 # GEN-P1-9: fallback 层重试预算按错误码 / HTTP 状态分类动态选择，避免 5xx
 # 一次就放弃 / 4xx 还在烧配额。_FALLBACK_MAX_ATTEMPTS 仍是兜底硬上限。
-_FALLBACK_MAX_ATTEMPTS_5XX = 5
+_FALLBACK_MAX_ATTEMPTS_5XX = 3
 _FALLBACK_MAX_ATTEMPTS_429 = 5
 _FALLBACK_MAX_ATTEMPTS_4XX = 1  # 401/403/404/422 等终态错误，重试无意义
-# GEN-P0-9: fallback 层重试指数退避。base*2^attempt，最大 8s 避免叠加 race*lane 预算爆炸。
+# GEN-P0-9: fallback 层重试指数退避。base*2^attempt，最大 4s 避免叠加 race*lane 预算爆炸。
 _FALLBACK_RETRY_BACKOFF_BASE_S = 1.0
-_FALLBACK_RETRY_BACKOFF_MAX_S = 8.0
+_FALLBACK_RETRY_BACKOFF_MAX_S = 4.0
 # 429 没有 retry-after 头时按这个保底等；多数上游建议 5–15s。
 _FALLBACK_429_DEFAULT_WAIT_S = 10.0
 _FALLBACK_429_MAX_WAIT_S = 30.0
@@ -235,6 +235,13 @@ _FALLBACK_RETRY_ERROR_CODES = {
     "stream_too_large",
 }
 _RACE_CANCEL_WAIT_S = 5.0
+
+# reference URL cache：每个 user 一份 hash + LRU zset，TTL 30min，容量 10。
+_REFERENCE_CACHE_TTL_S = 30 * 60
+_REFERENCE_CACHE_MAX_ENTRIES = 10
+_REFERENCE_CACHE_HEAD_TIMEOUT_S = 5.0
+_REFERENCE_CACHE_KEY_PREFIX = "lumen:ref_cache:"
+_REFERENCE_CACHE_LRU_SUFFIX = ":lru"
 
 
 # 单例 client——进程内复用连接池
@@ -2065,13 +2072,20 @@ async def _image_job_generate_once(
     )
 
 
-def _image_job_reference_image_entries(images: list[bytes]) -> list[dict[str, str]]:
-    entries: list[dict[str, str]] = []
-    for raw in images:
-        ref_bytes, mime = _normalize_reference_image(raw)
-        image_b64 = base64.b64encode(ref_bytes).decode("ascii")
-        entries.append({"image_url": f"data:{mime};base64,{image_b64}"})
-    return entries
+async def _image_job_reference_image_entries(
+    images: list[bytes],
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    user_id: str | None = None,
+) -> list[dict[str, str]]:
+    image_urls = await _resolve_reference_image_urls(
+        images,
+        base_url=base_url,
+        api_key=api_key,
+        user_id=user_id,
+    )
+    return [{"image_url": url} for url in image_urls]
 
 
 async def _image_job_edit_once(
@@ -2091,7 +2105,14 @@ async def _image_job_edit_once(
     proxy_override: ProviderProxyDefinition | None = None,
     image_edit_input_transport: str = "url",
     progress_callback: ImageProgressCallback | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
+    sidecar_base_url: str | None = base_url_override
+    if sidecar_base_url is None:
+        try:
+            sidecar_base_url = await _resolve_image_job_base_url()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reference push base_url resolve fallback err=%s", exc)
     body = _image_job_body_base(
         prompt=prompt,
         size=size,
@@ -2102,16 +2123,18 @@ async def _image_job_edit_once(
         background=background,
         moderation=moderation,
     )
-    body["images"] = _image_job_reference_image_entries(images)
-    # inpaint mask 透传给 image-job sidecar：与 images[] entry 同款 data URL，sidecar
-    # 按 image_edit_input_transport=file 时挂到 multipart 字段 `mask`，url 模式时挂
-    # 到 body 的 mask 字段。mask 为 None → 不带，保持现有 i2i 调用形态。
-    # 注意：本路径只在 _image_job_with_failover 选号阶段已校验 transport=file 时才
-    # 应被携带 mask；调用方（generation.py）通过 requires_mask=True 保证选号正确，
-    # 这里只负责 transport 透传。
+    body["images"] = await _image_job_reference_image_entries(
+        images,
+        base_url=sidecar_base_url,
+        api_key=api_key_override,
+        user_id=user_id,
+    )
+    # inpaint mask 透传给 image-job sidecar：mask 仍用 data URL 即可。images[] 先走
+    # refs cache / sidecar URL，mask 则保持单次任务内最短路径，避免额外 cache 写放大。
     if mask is not None:
         mask_b64 = base64.b64encode(mask).decode("ascii")
         body["mask"] = {"image_url": f"data:image/png;base64,{mask_b64}"}
+    submit_base_url = base_url_override or sidecar_base_url or await _resolve_image_job_base_url()
     return await _submit_and_wait_image_job(
         payload=_image_job_payload(
             request_type="edits",
@@ -2119,7 +2142,7 @@ async def _image_job_edit_once(
             body=body,
             image_edit_input_transport=image_edit_input_transport,
         ),
-        base_url=base_url_override or await _resolve_image_job_base_url(),
+        base_url=submit_base_url,
         api_key=api_key_override,
         proxy=proxy_override,
         progress_callback=progress_callback,
@@ -2143,6 +2166,7 @@ async def _image_job_responses_once(
     base_url_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
     progress_callback: ImageProgressCallback | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Submit an image job that points the sidecar at ``/v1/responses``.
 
@@ -2155,7 +2179,10 @@ async def _image_job_responses_once(
     # 先 push reference 到 image-job sidecar 拿短 URL；失败时 image_urls=[] 让 build 走 base64 fallback。
     # api_key 用同一个（image-job sidecar /v1/refs 和 /v1/image-jobs 共用 Bearer）。
     image_urls = await _resolve_reference_image_urls(
-        images, base_url=sidecar_base_url, api_key=api_key_override
+        images,
+        base_url=sidecar_base_url,
+        api_key=api_key_override,
+        user_id=user_id,
     )
     body = _build_responses_image_body(
         action=action,
@@ -3116,6 +3143,162 @@ def _normalize_reference_image(raw: bytes) -> tuple[bytes, str]:
 _REFERENCE_PUSH_TIMEOUT_S = 30.0
 
 
+def _reference_cache_keys(user_id: str) -> tuple[str, str]:
+    cache_key = f"{_REFERENCE_CACHE_KEY_PREFIX}{user_id}"
+    return cache_key, f"{cache_key}{_REFERENCE_CACHE_LRU_SUFFIX}"
+
+
+def _redis_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+async def _reference_cache_get(
+    redis: Any,
+    *,
+    user_id: str,
+    digest: str,
+) -> str | None:
+    cache_key, lru_key = _reference_cache_keys(user_id)
+    try:
+        raw = await redis.hget(cache_key, digest)
+        text = _redis_text(raw)
+        if not text:
+            return None
+        item = json.loads(text)
+        if not isinstance(item, dict):
+            return None
+        expires_at = float(item.get("expires_at") or 0.0)
+        url = item.get("upload_url")
+        if not isinstance(url, str) or not url:
+            return None
+        if expires_at <= time.time():
+            await _reference_cache_delete(redis, user_id=user_id, digest=digest)
+            return None
+        await redis.zadd(lru_key, {digest: time.time()})
+        await redis.expire(cache_key, _REFERENCE_CACHE_TTL_S)
+        await redis.expire(lru_key, _REFERENCE_CACHE_TTL_S)
+        return url
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("reference cache get skipped digest=%s err=%r", digest[:12], exc)
+        return None
+
+
+async def _reference_cache_store(
+    redis: Any,
+    *,
+    user_id: str,
+    digest: str,
+    url: str,
+    size: int,
+) -> None:
+    cache_key, lru_key = _reference_cache_keys(user_id)
+    now = time.time()
+    item = {
+        "upload_url": url,
+        "expires_at": now + _REFERENCE_CACHE_TTL_S,
+        "size": size,
+    }
+    try:
+        await redis.hset(cache_key, digest, json.dumps(item, separators=(",", ":")))
+        await redis.zadd(lru_key, {digest: now})
+        await redis.expire(cache_key, _REFERENCE_CACHE_TTL_S)
+        await redis.expire(lru_key, _REFERENCE_CACHE_TTL_S)
+        await _reference_cache_trim(redis, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("reference cache store skipped digest=%s err=%r", digest[:12], exc)
+
+
+async def _reference_cache_delete(
+    redis: Any,
+    *,
+    user_id: str,
+    digest: str,
+) -> None:
+    cache_key, lru_key = _reference_cache_keys(user_id)
+    try:
+        await redis.hdel(cache_key, digest)
+        await redis.zrem(lru_key, digest)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("reference cache delete skipped digest=%s err=%r", digest[:12], exc)
+
+
+async def _reference_cache_trim(redis: Any, *, user_id: str) -> None:
+    cache_key, lru_key = _reference_cache_keys(user_id)
+    try:
+        total = await redis.zcard(lru_key)
+        overflow = int(total) - _REFERENCE_CACHE_MAX_ENTRIES
+        if overflow <= 0:
+            return
+        stale = await redis.zrange(lru_key, 0, overflow - 1)
+        digests = [_redis_text(item) for item in stale or []]
+        digests = [item for item in digests if item]
+        if not digests:
+            return
+        await redis.hdel(cache_key, *digests)
+        await redis.zrem(lru_key, *digests)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("reference cache trim skipped err=%r", exc)
+
+
+async def _reference_url_is_live(url: str) -> bool:
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(_REFERENCE_CACHE_HEAD_TIMEOUT_S),
+        ) as client:
+            resp = await client.head(url)
+        return 200 <= resp.status_code < 400
+    except (httpx.HTTPError, OSError) as exc:
+        logger.debug("reference cache HEAD failed url=%s err=%r", url, exc)
+        return False
+
+
+async def _get_or_upload_reference(
+    ref_bytes: bytes,
+    mime: str,
+    *,
+    base_url: str,
+    api_key: str,
+    user_id: str | None,
+) -> str | None:
+    redis: Any | None = None
+    digest = hashlib.sha256(ref_bytes).hexdigest()
+    if user_id:
+        try:
+            pool = await provider_pool.get_pool()
+            redis = _provider_pool_redis(pool)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reference cache redis unavailable err=%r", exc)
+
+    if redis is not None and user_id:
+        cached = await _reference_cache_get(redis, user_id=user_id, digest=digest)
+        if cached:
+            if await _reference_url_is_live(cached):
+                return cached
+            await _reference_cache_delete(redis, user_id=user_id, digest=digest)
+
+    uploaded = await _push_reference_to_image_job(
+        ref_bytes, mime, base_url=base_url, api_key=api_key
+    )
+    if uploaded and redis is not None and user_id:
+        await _reference_cache_store(
+            redis,
+            user_id=user_id,
+            digest=digest,
+            url=uploaded,
+            size=len(ref_bytes),
+        )
+    return uploaded
+
+
 async def _push_reference_to_image_job(
     raw: bytes,
     mime: str,
@@ -3171,6 +3354,7 @@ async def _resolve_reference_image_urls(
     *,
     base_url: str | None = None,
     api_key: str | None = None,
+    user_id: str | None = None,
 ) -> list[str]:
     """把 reference bytes 列表转换成给上游用的 image_url 字符串列表。
 
@@ -3187,8 +3371,12 @@ async def _resolve_reference_image_urls(
         ref_bytes, mime = _normalize_reference_image(raw)
         ref_url: str | None = None
         if base_url and api_key:
-            ref_url = await _push_reference_to_image_job(
-                ref_bytes, mime, base_url=base_url, api_key=api_key
+            ref_url = await _get_or_upload_reference(
+                ref_bytes,
+                mime,
+                base_url=base_url,
+                api_key=api_key,
+                user_id=user_id,
             )
         if ref_url:
             out.append(ref_url)
@@ -3261,6 +3449,7 @@ async def _responses_image_stream(
     base_url_override: str | None = None,
     api_key_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Use `/v1/responses` + `image_generation` as streaming image fallback.
 
@@ -3338,7 +3527,10 @@ async def _responses_image_stream(
         except Exception as exc:  # noqa: BLE001
             logger.debug("reference push base_url resolve fallback err=%s", exc)
         ref_urls = await _resolve_reference_image_urls(
-            images, base_url=sidecar_base_url, api_key=api_key
+            images,
+            base_url=sidecar_base_url,
+            api_key=api_key,
+            user_id=user_id,
         )
         for url in ref_urls:
             if isinstance(url, str) and url:
@@ -3612,6 +3804,24 @@ def _summarize_exception(exc: BaseException) -> dict[str, Any]:
     return item
 
 
+def _truncate_lane_summary(lane: str, exc: BaseException) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "lane": lane,
+        "type": type(exc).__name__,
+        "message": str(exc)[:200],
+    }
+    if isinstance(exc, UpstreamError):
+        out["status_code"] = exc.status_code
+        out["error_code"] = exc.error_code
+        payload = exc.payload or {}
+        if isinstance(payload, dict):
+            for key in ("trace_id", "x_trace_id", "url", "path", "method"):
+                value = payload.get(key)
+                if value is not None:
+                    out[key] = value
+    return out
+
+
 def _is_retryable_fallback_exception(exc: BaseException) -> bool:
     if isinstance(exc, UpstreamError):
         if exc.status_code in _RETRY_STATUS:
@@ -3622,10 +3832,17 @@ def _is_retryable_fallback_exception(exc: BaseException) -> bool:
     return isinstance(exc, _RETRY_HTTPX_EXC)
 
 
+def _fallback_retry_backoff_seconds(attempt: int) -> float:
+    return min(
+        _FALLBACK_RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1)),
+        _FALLBACK_RETRY_BACKOFF_MAX_S,
+    )
+
+
 def _max_attempts_for_exception(exc: BaseException) -> int:
     """GEN-P1-9: 按错误形态决定 fallback 层重试预算。
 
-    - 5xx / 网络错：5 次（高价值——网关抖动 / 后端冷启动多见）
+    - 5xx / 网络错：3 次（网关抖动可恢复，但不再让慢 lane 长时间空等）
     - 429：5 次（搭配 _retry_after_seconds 等到限速窗口过去）
     - 4xx (401/403/404/422)：1 次（token / param 错——重试只会再 4xx）
     - 其他可重试 error_code（no_image_returned / sse_curl_failed 等）：fallback 默认值
@@ -3944,11 +4161,12 @@ async def _responses_image_stream_with_retry(
     base_url_override: str | None = None,
     api_key_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     """GEN-P1-9: 重试预算按上游错误码动态调整。
 
     第一次尝试不 backoff；之后按错误形态决定剩余次数 + 等待时长。
-    硬上限：_FALLBACK_MAX_ATTEMPTS_5XX（=5）。
+    硬上限：动态预算里的最大值，避免 5xx 降到 3 次后误伤 429 的 5 次预算。
 
     Retry 打散：每次内层 retry 把 ContextVar 累加到 outer_attempt + inner_attempt - 1，
     底层 body 构造点读到 >1 就注入 prompt_cache_key / 切换 reasoning.effort / 关掉
@@ -3958,7 +4176,12 @@ async def _responses_image_stream_with_retry(
     """
     errors: list[BaseException] = []
     attempt = 0
-    hard_cap = _FALLBACK_MAX_ATTEMPTS_5XX
+    hard_cap = max(
+        _FALLBACK_MAX_ATTEMPTS,
+        _FALLBACK_MAX_ATTEMPTS_5XX,
+        _FALLBACK_MAX_ATTEMPTS_429,
+        _FALLBACK_MAX_ATTEMPTS_4XX,
+    )
     # Outer attempt 从 ContextVar 取——可能是 generation.py 设置的 task 级 retry 编号。
     # 内层 retry 在它基础上累加，确保每次 attempt 都给 body 构造点不同的 cache 打散种子。
     outer_attempt = _image_retry_attempt_ctx.get()
@@ -3990,6 +4213,8 @@ async def _responses_image_stream_with_retry(
                 kwargs["background"] = background
             if moderation is not None:
                 kwargs["moderation"] = moderation
+            if user_id is not None:
+                kwargs["user_id"] = user_id
             return await _responses_image_stream(**kwargs)
         except (asyncio.CancelledError, UpstreamCancelled):
             # GEN-P1-4: 用户取消信号——立即抛，不进 fallback retry。
@@ -4021,10 +4246,7 @@ async def _responses_image_stream_with_retry(
             ):
                 backoff = min(_FALLBACK_429_DEFAULT_WAIT_S, _FALLBACK_429_MAX_WAIT_S)
             else:
-                backoff = min(
-                    _FALLBACK_RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1)),
-                    _FALLBACK_RETRY_BACKOFF_MAX_S,
-                )
+                backoff = _fallback_retry_backoff_seconds(attempt)
             logger.warning(
                 "responses fallback retrying action=%s size=%s attempt=%d/%d "
                 "backoff=%.1fs err=%r",
@@ -4085,23 +4307,16 @@ async def _pool_select_compat(
 
     def _filter_for_mask(providers: list[Any]) -> list[Any]:
         """老 mock 不识别 requires_mask 时本地兜一层过滤——只在 sidecar 调用方
-        （mask_transport_required=True）才执行；direct 路径下任意 transport 可用。"""
+        （mask_transport_required=True）才执行；direct 路径下任意 transport 可用。
+        file-mode 仍然优先，url-mode 仅在 file-mode 候选耗尽后兜底。"""
         if not requires_mask or not mask_transport_required:
             return list(providers)
-        filtered = [
+        file_mode = [
             provider
             for provider in providers
             if getattr(provider, "image_edit_input_transport", "url") == "file"
         ]
-        if not filtered and providers:
-            raise UpstreamError(
-                "no providers support inpaint mask "
-                "(need image_edit_input_transport=file)",
-                error_code=EC.NO_MASK_CAPABLE_PROVIDER.value,
-                status_code=503,
-                payload={"requires_mask": True},
-            )
-        return filtered
+        return file_mode or list(providers)
 
     try:
         providers = await selector(**kwargs)
@@ -4405,6 +4620,7 @@ async def _image_job_run_once(
     proxy: ProviderProxyDefinition | None,
     progress_callback: ImageProgressCallback | None,
     image_edit_input_transport: str = "url",
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Single image-job submit dispatched by (action, endpoint).
 
@@ -4436,6 +4652,7 @@ async def _image_job_run_once(
         return await _image_job_responses_once(
             action=action,
             images=images,
+            user_id=user_id,
             model=model,
             **common,
         )
@@ -4450,6 +4667,7 @@ async def _image_job_run_once(
             images=images,
             mask=mask,
             image_edit_input_transport=image_edit_input_transport,
+            user_id=user_id,
             **common,
         )
     return await _image_job_generate_once(**common)
@@ -4471,6 +4689,7 @@ async def _image_job_with_failover(
     model: str | None = None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None = None,
+    user_id: str | None = None,
     endpoint_override: str | None = None,
     endpoint_preference: str | None = None,
 ) -> tuple[str, str | None]:
@@ -4530,21 +4749,6 @@ async def _image_job_with_failover(
             requires_mask=requires_mask,
         )
     )
-    # provider_override + inpaint：上层（generation.py）按 requires_mask 选过 reserved
-    # provider，理论上 transport=file；这里再校一次，配错时直接抛 NO_MASK_CAPABLE_PROVIDER。
-    if requires_mask and provider_override is not None:
-        if getattr(provider_override, "image_edit_input_transport", "url") != "file":
-            raise UpstreamError(
-                f"provider {getattr(provider_override, 'name', 'unknown')} does not "
-                "support mask (image_edit_input_transport != 'file')",
-                error_code=EC.NO_MASK_CAPABLE_PROVIDER.value,
-                status_code=503,
-                payload={
-                    "provider": getattr(provider_override, "name", "unknown"),
-                    "reason": "transport_not_file",
-                    "requires_mask": True,
-                },
-            )
     errors: list[BaseException] = []
 
     source_label = "image_jobs" if action == "generate" else "image_jobs_edit"
@@ -4642,6 +4846,7 @@ async def _image_job_with_failover(
                         proxy=_provider_proxy(provider),
                         image_edit_input_transport=provider.image_edit_input_transport,
                         progress_callback=progress_callback,
+                        user_id=user_id,
                     )
                 except (asyncio.CancelledError, UpstreamCancelled):
                     raise
@@ -4790,6 +4995,7 @@ async def _image_job_generate_with_failover(
     model: str | None = None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     return await _image_job_with_failover(
         action="generate",
@@ -4805,6 +5011,7 @@ async def _image_job_generate_with_failover(
         model=model,
         progress_callback=progress_callback,
         provider_override=provider_override,
+        user_id=user_id,
     )
 
 
@@ -4823,6 +5030,7 @@ async def _image_job_edit_with_failover(
     model: str | None = None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     return await _image_job_with_failover(
         action="edit",
@@ -4839,6 +5047,7 @@ async def _image_job_edit_with_failover(
         model=model,
         progress_callback=progress_callback,
         provider_override=provider_override,
+        user_id=user_id,
     )
 
 
@@ -5028,6 +5237,7 @@ async def _responses_image_stream_with_failover(
     use_httpx: bool,
     task_id: str = "",
     provider_override: Any | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     """Layer 2: provider failover。retriable/策略差异错误立即切下一个 provider（零延迟）。
 
@@ -5086,6 +5296,8 @@ async def _responses_image_stream_with_failover(
                 proxy = _provider_proxy(provider)
                 if proxy is not None:
                     kwargs["proxy_override"] = proxy
+                if user_id is not None:
+                    kwargs["user_id"] = user_id
                 result = await _responses_image_stream_with_retry(**kwargs)
                 # BYOK runtime 不进 admin pool；用户 credential 健康度由
                 # byok_runtime.record_user_credential_runtime_error 单独维护。
@@ -5220,6 +5432,7 @@ async def _race_responses_image(
     lanes: int,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, str | None]:
     """按 lanes 数并发 /v1/responses SSE 请求，first-win cancel 其他。
 
@@ -5253,6 +5466,7 @@ async def _race_responses_image(
             progress_callback=progress_callback,
             use_httpx=False,
             provider_override=provider_override,
+            user_id=user_id,
         )
 
     async def _metadata_only_progress(event: dict[str, Any]) -> None:
@@ -5285,6 +5499,7 @@ async def _race_responses_image(
             progress_callback=cb,
             use_httpx=use_httpx,
             provider_override=provider_override,
+            user_id=user_id,
         )
 
     tasks: list[asyncio.Task[tuple[str, str | None]]] = [
@@ -5386,6 +5601,7 @@ async def _dual_race_image_action(
     model: str | None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None,
+    user_id: str | None = None,
     allow_provider_override_race: bool = False,
 ) -> AsyncIterator[tuple[str, str | None]]:
     """dual_race: image2 直连 + responses 两条路径同时跑（async generator）。
@@ -5424,6 +5640,7 @@ async def _dual_race_image_action(
             progress_callback=progress_callback,
             use_httpx=False,
             provider_override=provider_override,
+            user_id=user_id,
         )
         yield result
         return
@@ -5490,6 +5707,7 @@ async def _dual_race_image_action(
             progress_callback=_metadata_only_progress,
             use_httpx=False,
             provider_override=provider_override,
+            user_id=user_id,
         )
 
     pixels = _parse_size_pixels(size)
@@ -5540,7 +5758,7 @@ async def _dual_race_image_action(
                 "%s dual_race: both lanes failed; summaries=%s",
                 action,
                 json.dumps(
-                    [{"lane": ln, **_summarize_exception(e)} for ln, e in errors],
+                    [_truncate_lane_summary(ln, e) for ln, e in errors],
                     ensure_ascii=False,
                 )[:2000],
             )
@@ -5636,6 +5854,7 @@ async def _dual_race_image_jobs_action(
     model: str | None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None = None,
+    user_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str | None]]:
     """号池版 dual_race：两条 lane 都通过 image-job sidecar 提交，但 endpoint
     一个 ``generations`` 一个 ``responses``。
@@ -5709,6 +5928,7 @@ async def _dual_race_image_jobs_action(
             model=model,
             progress_callback=lane_progress,
             provider_override=provider_override,
+            user_id=user_id,
             endpoint_override=endpoint,
         )
 
@@ -5759,7 +5979,7 @@ async def _dual_race_image_jobs_action(
                 "%s image_jobs dual_race: both lanes failed; summaries=%s",
                 action,
                 json.dumps(
-                    [{"lane": ln, **_summarize_exception(e)} for ln, e in errors],
+                    [_truncate_lane_summary(ln, e) for ln, e in errors],
                     ensure_ascii=False,
                 )[:2000],
             )
@@ -5905,6 +6125,7 @@ async def _run_image_once_for_provider(
     moderation: str | None,
     model: str | None,
     progress_callback: ImageProgressCallback | None,
+    user_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str | None]]:
     use_jobs = _should_use_image_jobs(channel, provider)
     provider_name = getattr(provider, "name", "unknown")
@@ -5956,6 +6177,7 @@ async def _run_image_once_for_provider(
                 provider_override=provider,
                 # 锁定 generations，禁止内部切到 responses（responses 不带 mask）
                 endpoint_override="generations",
+                user_id=user_id,
             )
             return
         yield await _direct_edit_image_with_failover(
@@ -5991,6 +6213,7 @@ async def _run_image_once_for_provider(
                 model=model,
                 progress_callback=progress_callback,
                 provider_override=provider,
+                user_id=user_id,
             ):
                 yield item
             return
@@ -6009,6 +6232,7 @@ async def _run_image_once_for_provider(
             model=model,
             progress_callback=progress_callback,
             provider_override=provider,
+            user_id=user_id,
             allow_provider_override_race=True,
         ):
             yield item
@@ -6031,6 +6255,7 @@ async def _run_image_once_for_provider(
             progress_callback=progress_callback,
             provider_override=provider,
             endpoint_preference=_image_jobs_endpoint_for_engine(engine),
+            user_id=user_id,
         )
         return
 
@@ -6106,6 +6331,7 @@ async def _run_image_once_for_provider(
                     lanes=max(1, int(settings.edit_race_lanes)),
                     progress_callback=progress_callback,
                     provider_override=provider,
+                    user_id=user_id,
                 )
             except (asyncio.CancelledError, UpstreamCancelled):
                 raise
@@ -6135,6 +6361,7 @@ async def _run_image_once_for_provider(
             lanes=lanes,
             progress_callback=progress_callback,
             provider_override=provider,
+            user_id=user_id,
         )
         return
     except (asyncio.CancelledError, UpstreamCancelled):
@@ -6232,6 +6459,7 @@ async def _dispatch_image(
     model: str | None,
     progress_callback: ImageProgressCallback | None,
     provider_override: Any | None,
+    user_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str | None]]:
     from .retry import is_retriable as classify_retriable
 
@@ -6281,6 +6509,7 @@ async def _dispatch_image(
                     moderation=moderation,
                     model=model,
                     progress_callback=progress_callback,
+                    user_id=user_id,
                 ):
                     any_yielded = True
                     yield item
@@ -6354,6 +6583,7 @@ async def generate_image(
     model: str | None = None,
     progress_callback: ImageProgressCallback | None = None,
     provider_override: Any | None = None,
+    user_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str | None]]:
     """Text-to-image dispatch using image.channel + image.engine."""
     async for item in _dispatch_image(
@@ -6371,6 +6601,7 @@ async def generate_image(
         model=model,
         progress_callback=progress_callback,
         provider_override=provider_override,
+        user_id=user_id,
     ):
         yield item
 
@@ -6390,14 +6621,15 @@ async def edit_image(
     model: str | None = None,
     progress_callback: ImageProgressCallback | None = None,
     provider_override: Any | None = None,
+    user_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str | None]]:
     """Image-to-image dispatch using image.channel + image.engine.
 
     mask 不为空时本路径走局部 inpaint：
     - prompt 自动包成 ``Inside the masked region, ...`` invariant 模板（OpenAI
       推荐写法，否则 mask 区会被填黑、prompt 内容画到别处——已 spike 验证）。
-    - 调用方（generation.py）应该已经在 reserved_provider 阶段保证 transport=file，
-      也可以靠 _image_job_with_failover 内部的 NO_MASK_CAPABLE_PROVIDER 守卫兜底。
+    - image-job sidecar 路径优先使用 file-mode provider；file-mode 候选耗尽时
+      允许 url-mode 兜底，reference URL 会尽量复用同用户短 TTL cache。
     - mask 字节本身不参与 prompt cache key（前缀稳定 = "Inside the masked region,"），
       retry 时 mask 不变就不会污染 cache，与现有 i2i retry 行为对齐。
     """
@@ -6432,6 +6664,7 @@ async def edit_image(
         model=model,
         progress_callback=progress_callback,
         provider_override=provider_override,
+        user_id=user_id,
     ):
         yield item
 

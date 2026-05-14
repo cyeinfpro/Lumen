@@ -1626,7 +1626,7 @@ async def test_fallback_stream_error_includes_path_diagnostics(
     assert exc_info.value.payload["path"] == "responses"
     assert exc_info.value.payload["primary_path"] == "responses"
     assert exc_info.value.payload["fallback_path"] == "image2"
-    assert len(client.streams) == 5
+    assert len(client.streams) == 3
     assert len(client.posts) == 1
     errors = exc_info.value.payload["path_errors"]
     assert errors[0]["path"] == "responses"

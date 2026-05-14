@@ -1,11 +1,11 @@
-"""Inpaint mask tests covering upstream multipart, prompt wrap, provider filter,
+"""Inpaint mask tests covering upstream multipart, prompt wrap, provider ordering,
 and generation.py mask resize.
 
 Layered:
 - ``_wrap_inpaint_prompt`` 模板包装（OpenAI 推荐 invariant 写法，spike 已验证）。
 - ``_direct_edit_image_once`` multipart 字段名 ``mask``（不是 ``mask[]``）。
-- ``ProviderPool.select(requires_mask=True)`` 过滤 transport != "file"，
-  全部不可用时抛 ``NO_MASK_CAPABLE_PROVIDER``。
+- ``ProviderPool.select(requires_mask=True)`` 优先 file transport，
+  file 候选耗尽时回退 url transport。
 - ``_resize_mask_to_reference`` LANCZOS 缩放对齐。
 - ``edit_image()`` 顶层透传 mask + prompt wrap。
 """
@@ -203,7 +203,7 @@ def _cfg(name: str, *, transport: str = "url") -> ProviderConfig:
 
 
 @pytest.mark.asyncio
-async def test_select_requires_mask_filters_url_transport_providers() -> None:
+async def test_select_requires_mask_prefers_file_transport_providers() -> None:
     pool = _make_pool(
         _cfg("url-only", transport="url"),
         _cfg("file-capable", transport="file"),
@@ -211,20 +211,19 @@ async def test_select_requires_mask_filters_url_transport_providers() -> None:
     providers = await pool.select(route="image", requires_mask=True)
     names = {p.name for p in providers}
     assert names == {"file-capable"}, (
-        f"requires_mask=True should drop url-transport providers, got {names}"
+        f"requires_mask=True should prefer file-transport providers, got {names}"
     )
 
 
 @pytest.mark.asyncio
-async def test_select_requires_mask_raises_when_all_transport_url() -> None:
-    """全部候选 transport=url → 抛 NO_MASK_CAPABLE_PROVIDER（terminal，不重试）。"""
+async def test_select_requires_mask_falls_back_to_url_transport() -> None:
+    """全部候选 transport=url → 返回 url 候选，避免 file 池耗尽时直接终态。"""
     pool = _make_pool(
         _cfg("url-a", transport="url"),
         _cfg("url-b", transport="url"),
     )
-    with pytest.raises(upstream.UpstreamError) as ei:
-        await pool.select(route="image", requires_mask=True)
-    assert ei.value.error_code == EC.NO_MASK_CAPABLE_PROVIDER.value
+    providers = await pool.select(route="image", requires_mask=True)
+    assert {p.name for p in providers} == {"url-a", "url-b"}
 
 
 @pytest.mark.asyncio
@@ -259,7 +258,7 @@ async def test_select_mask_transport_not_required_keeps_url_providers() -> None:
 
 @pytest.mark.asyncio
 async def test_select_mask_transport_required_default_filters() -> None:
-    """sidecar 路径默认 mask_transport_required=True：保留现有过滤行为。"""
+    """sidecar 路径默认 mask_transport_required=True：file-mode 优先。"""
     pool = _make_pool(
         _cfg("url-a", transport="url"),
         _cfg("file-a", transport="file"),

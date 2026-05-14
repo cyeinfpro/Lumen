@@ -87,6 +87,31 @@ def test_image_job_provider_wrapper_is_retriable() -> None:
     assert decision.retriable is True
 
 
+def test_direct_image_request_failed_is_retriable() -> None:
+    decision = is_retriable("direct_image_request_failed", 0)
+    assert decision.retriable is True
+    assert "retriable" in decision.reason
+
+
+def test_reference_download_timeout_is_retriable_even_if_wrapped_invalid_value() -> None:
+    decision = is_retriable(
+        "invalid_value",
+        400,
+        error_message="Timeout while downloading https://flux.infpro.me/refs/abc.webp.",
+    )
+    assert decision.retriable is True
+    assert "reference_download" in decision.reason
+
+
+def test_invalid_value_without_download_marker_still_terminal() -> None:
+    decision = is_retriable(
+        "invalid_value",
+        400,
+        error_message="Requested resolution exceeds the current pixel budget",
+    )
+    assert decision.retriable is False
+
+
 def test_is_moderation_block_by_error_code() -> None:
     assert is_moderation_block("moderation_blocked") is True
     assert is_moderation_block("content_policy_violation") is True

@@ -98,6 +98,8 @@ _RETRIABLE_ERROR_CODES: frozenset[str] = frozenset(
         # path saw retriable image failures. Keep outer provider dispatch moving
         # even when the wrapped failure was a 200/no_image.
         EC.ALL_DIRECT_IMAGE_PROVIDERS_FAILED.value,
+        # direct edit / image job download wrappers on network faults.
+        EC.DIRECT_IMAGE_REQUEST_FAILED.value,
     }
 )
 
@@ -125,6 +127,15 @@ def is_retriable(
         error_message: 原始错误消息，便于抓关键词（e.g. "Concurrency limit exceeded"）
     """
     msg = (error_message or "").lower()
+
+    # 上游 reference 下载超时通常会被包装成 invalid_value，但本质是网络/供应链抖动。
+    # 命中后应换 provider / endpoint 重试，而不是把用户输入判成终态错误。
+    if (
+        "timeout while downloading" in msg
+        or "failed to download" in msg
+        or "could not download" in msg
+    ):
+        return RetryDecision(True, "retriable upstream_reference_download_timeout")
 
     # 1) terminal 优先于 retriable（pixel budget / 上传图超限 / 参数错）
     if err_code in _TERMINAL_ERROR_CODES:
