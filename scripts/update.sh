@@ -171,6 +171,11 @@ release_version_for_target() {
     local release_dir="${1:-}"
     local target_tag="${2:-}"
     local version=""
+    if tag_version="$(semver_from_image_tag "${target_tag}" 2>/dev/null || true)" \
+            && [ -n "${tag_version}" ]; then
+        printf '%s\n' "${tag_version}"
+        return 0
+    fi
     if [ -n "${release_dir}" ] && [ -f "${release_dir}/VERSION" ]; then
         version="$(head -n1 "${release_dir}/VERSION" 2>/dev/null | tr -d '[:space:]')"
     fi
@@ -178,7 +183,7 @@ release_version_for_target() {
         printf '%s\n' "${version}"
         return 0
     fi
-    semver_from_image_tag "${target_tag}"
+    return 1
 }
 
 render_update_runner_unit() {
@@ -1011,6 +1016,11 @@ export LUMEN_IMAGE_TAG="${TARGET_TAG}"
 
 TARGET_VERSION="$(release_version_for_target "${NEW_RELEASE}" "${TARGET_TAG}" 2>/dev/null || true)"
 if [ -n "${TARGET_VERSION}" ]; then
+    if ! printf '%s\n' "${TARGET_VERSION}" > "${NEW_RELEASE}/VERSION"; then
+        log_error "[set_image_tag] 写入新 release 的 VERSION=${TARGET_VERSION} 失败。"
+        emit_fail set_image_tag 1
+        exit 1
+    fi
     if ! lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"; then
         log_error "[set_image_tag] 写入 shared/.env 的 LUMEN_VERSION=${TARGET_VERSION} 失败。"
         emit_fail set_image_tag 1
