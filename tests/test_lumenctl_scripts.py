@@ -31,6 +31,11 @@ def run_bash(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["LC_ALL"] = "C"
+    # Tests must exercise the working tree under test. The real lumenctl entry
+    # point self-updates scripts/ from GitHub raw; leaving that enabled lets a
+    # test mutate this checkout underneath later assertions.
+    env.setdefault("LUMEN_SELF_UPDATE", "0")
+    env.setdefault("LUMEN_LUMENCTL_SELF_UPDATE", "0")
     return subprocess.run(
         ["bash", "-lc", script],
         cwd=ROOT,
@@ -1691,6 +1696,53 @@ def test_image_tag_resolve_supports_main_minor_and_major_channels(
     assert "minor=v1.2" in result.stdout
     assert "major=v1" in result.stdout
     assert "literal=v9.8.7" in result.stdout
+
+
+def test_image_tag_resolve_stable_falls_back_to_main_not_current_when_latest_unavailable(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("LUMEN_IMAGE_TAG=v1.1.17\n", encoding="utf-8")
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    curl = fakebin / "curl"
+    curl.write_text("#!/usr/bin/env bash\nexit 28\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        PATH={shlex.quote(str(fakebin))}:$PATH
+        hash -r
+        lumen_image_tag_resolve stable {env_file}
+        """
+    )
+
+    assert result.stdout.strip() == "main"
+    assert "不能沿用旧 LUMEN_IMAGE_TAG=v1.1.17" in result.stderr
+
+
+def test_image_tag_resolve_pinned_is_only_channel_that_keeps_current_tag(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("LUMEN_IMAGE_TAG=v1.1.17\n", encoding="utf-8")
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    curl = fakebin / "curl"
+    curl.write_text("#!/usr/bin/env bash\nexit 28\n", encoding="utf-8")
+    curl.chmod(0o755)
+
+    result = assert_bash_ok(
+        f"""
+        . {LIB}
+        PATH={shlex.quote(str(fakebin))}:$PATH
+        hash -r
+        lumen_image_tag_resolve pinned {env_file}
+        """
+    )
+
+    assert result.stdout.strip() == "v1.1.17"
 
 
 def test_image_tag_is_rolling_matches_main_and_semver_aliases() -> None:
