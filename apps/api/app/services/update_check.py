@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from lumen_core import __version__ as lumen_core_version
 from pydantic import BaseModel, Field
 
 from ..redis_client import get_redis
@@ -170,17 +171,33 @@ def _current_release_info(root: Path) -> tuple[str | None, str | None, str | Non
 def _build_type(root: Path) -> str:
     if (root / "current" / "docker-compose.yml").is_file():
         return "docker"
+    if os.environ.get("LUMEN_UPDATE_VIA_TRIGGER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return "docker"
+    if Path("/app/docker-compose.yml").is_file():
+        return "docker"
     if (root / "current" / "pyproject.toml").is_file():
+        return "source"
+    if (root / "pyproject.toml").is_file():
         return "source"
     return "unknown"
 
 
 def _current_version(root: Path) -> str:
-    version_file = root / "VERSION"
-    try:
-        return version_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        return "0.0.0"
+    for version_file in (root / "current" / "VERSION", root / "VERSION"):
+        try:
+            value = version_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    env_version = os.environ.get("LUMEN_VERSION", "").strip()
+    if env_version:
+        return env_version[1:] if env_version.startswith("v") else env_version
+    return lumen_core_version or "0.0.0"
 
 
 def _current_image_tag(root: Path) -> str:
@@ -188,6 +205,9 @@ def _current_image_tag(root: Path) -> str:
     value = _read_dotenv_value(env, "LUMEN_IMAGE_TAG")
     if value:
         return value
+    env_value = os.environ.get("LUMEN_IMAGE_TAG", "").strip()
+    if env_value:
+        return env_value
     version = _current_version(root)
     return f"v{version}"
 

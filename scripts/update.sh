@@ -156,6 +156,31 @@ sed_replacement_escape() {
     printf '%s' "$1" | sed 's/[\/&#]/\\&/g'
 }
 
+semver_from_image_tag() {
+    local tag="${1:-}"
+    case "${tag}" in
+        v[0-9]*.[0-9]*.[0-9]*)
+            printf '%s\n' "${tag#v}"
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+release_version_for_target() {
+    local release_dir="${1:-}"
+    local target_tag="${2:-}"
+    local version=""
+    if [ -n "${release_dir}" ] && [ -f "${release_dir}/VERSION" ]; then
+        version="$(head -n1 "${release_dir}/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    if printf '%s\n' "${version}" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$'; then
+        printf '%s\n' "${version}"
+        return 0
+    fi
+    semver_from_image_tag "${target_tag}"
+}
+
 render_update_runner_unit() {
     local src="$1"
     local dst="$2"
@@ -647,10 +672,31 @@ if [ -z "${TARGET_TAG}" ]; then
     emit_fail check 1
     exit 1
 fi
+export LUMEN_IMAGE_TAG="${TARGET_TAG}"
+if TARGET_VERSION_FROM_TAG="$(semver_from_image_tag "${TARGET_TAG}" 2>/dev/null || true)" \
+        && [ -n "${TARGET_VERSION_FROM_TAG}" ]; then
+    export LUMEN_VERSION="${TARGET_VERSION_FROM_TAG}"
+fi
+
+RUNNING_API_TAG=""
+if command -v docker >/dev/null 2>&1; then
+    RUNNING_API_IMAGE="$(docker inspect lumen-api --format '{{.Config.Image}}' 2>/dev/null || true)"
+    case "${RUNNING_API_IMAGE}" in
+        *:*) RUNNING_API_TAG="${RUNNING_API_IMAGE##*:}" ;;
+    esac
+fi
+IMAGE_TAG_DRIFT=0
+if [ -n "${RUNNING_API_TAG}" ] \
+        && [ -n "${CURRENT_TAG}" ] \
+        && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] \
+        && [ "${RUNNING_API_TAG}" != "${TARGET_TAG}" ]; then
+    IMAGE_TAG_DRIFT=1
+fi
 
 emit_info check channel       "${LUMEN_UPDATE_CHANNEL}"
 emit_info check current_tag   "${CURRENT_TAG:-<none>}"
 emit_info check target_tag    "${TARGET_TAG}"
+emit_info check running_api_tag "${RUNNING_API_TAG:-<unknown>}"
 emit_info check current_id    "${CURRENT_ID:-<none>}"
 emit_info check data_root     "${LUMEN_DATA_ROOT}"
 emit_info check db_root       "${LUMEN_DB_ROOT}"
@@ -676,6 +722,7 @@ if [ "${LUMEN_UPDATE_FORCE_REDEPLOY}" != "1" ] \
         && [ -n "${CURRENT_TAG}" ] \
         && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] \
         && [ "${CONFIG_CHANGED}" -eq 0 ] \
+        && [ "${IMAGE_TAG_DRIFT}" -eq 0 ] \
         && [ "${NOOP_BY_TAG_NAME}" -eq 1 ]; then
     log_info "[check] 当前 tag ${CURRENT_TAG} 已是目标版本，跳过中间阶段，仅做 cleanup。"
     emit_info check action "noop_already_latest"
@@ -690,6 +737,9 @@ else
     elif [ -n "${CURRENT_TAG}" ] && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${CONFIG_CHANGED}" -eq 1 ]; then
         log_info "[check] 当前 tag ${CURRENT_TAG} 已是目标版本，但配置已变更，继续重建 release 并重启服务。"
         emit_info check action "config_changed_redeploy"
+    elif [ "${IMAGE_TAG_DRIFT}" -eq 1 ]; then
+        log_warn "[check] shared/.env 已是 ${TARGET_TAG}，但运行中的 api 镜像是 ${RUNNING_API_TAG}，继续重建容器修复漂移。"
+        emit_info check action "image_tag_drift_redeploy"
     fi
     SKIP_TO_CLEANUP=0
     emit_done check 0
@@ -957,6 +1007,18 @@ if ! lumen_set_image_tag_in_env "${SHARED_ENV}" "${TARGET_TAG}"; then
     emit_fail set_image_tag 1
     exit 1
 fi
+export LUMEN_IMAGE_TAG="${TARGET_TAG}"
+
+TARGET_VERSION="$(release_version_for_target "${NEW_RELEASE}" "${TARGET_TAG}" 2>/dev/null || true)"
+if [ -n "${TARGET_VERSION}" ]; then
+    if ! lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"; then
+        log_error "[set_image_tag] 写入 shared/.env 的 LUMEN_VERSION=${TARGET_VERSION} 失败。"
+        emit_fail set_image_tag 1
+        exit 1
+    fi
+    export LUMEN_VERSION="${TARGET_VERSION}"
+    emit_info set_image_tag version "${TARGET_VERSION}"
+fi
 
 # 防御：再次 grep 校验 ==1
 TAG_LINE_CNT="$(grep -cE '^LUMEN_IMAGE_TAG=' "${SHARED_ENV}" 2>/dev/null || echo 0)"
@@ -1010,6 +1072,7 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
             log_warn "[pull_images] docker compose pull tag=${TARGET_TAG} 失败，自动回退到 main 后重试。"
             emit_info pull_images target_tag_fallback "main"
             TARGET_TAG="main"
+            export LUMEN_IMAGE_TAG="${TARGET_TAG}"
             if ! lumen_set_image_tag_in_env "${SHARED_ENV}" "${TARGET_TAG}"; then
                 log_error "[pull_images] 回退 main 时写入 shared/.env 失败。"
                 emit_fail pull_images 1
@@ -1165,6 +1228,9 @@ if ! lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"; then
     log_error "[switch] symlink 切换失败。"
     emit_fail switch 1
     exit 1
+fi
+if [ -f "${ROOT}/current/VERSION" ]; then
+    ln -sfn current/VERSION "${ROOT}/VERSION" 2>/dev/null || cp "${ROOT}/current/VERSION" "${ROOT}/VERSION"
 fi
 SWITCHED=1
 emit_info switch from "${CURRENT_ID:-<none>}"

@@ -134,6 +134,10 @@ def test_api_service_mounts_release_scripts_for_admin_update() -> None:
         "lumen-api container must mount the release scripts directory or "
         "admin_update preflight will fail with `missing update.sh`"
     )
+    assert "${LUMEN_UPDATE_ROOT:-/opt/lumen}:/opt/lumen:ro" in compose, (
+        "lumen-api must see host release metadata so admin_update reports the "
+        "real current version/build instead of 0.0.0/unknown"
+    )
     assert 'LUMEN_UPDATE_VIA_TRIGGER: "1"' in compose, (
         "lumen-api needs LUMEN_UPDATE_VIA_TRIGGER=1 to skip systemctl probes "
         "(systemctl is not present inside the api container)"
@@ -552,6 +556,10 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "lumen_compose_in" in text
     assert "--profile migrate run --rm migrate" in text
     assert "up -d --wait --force-recreate postgres redis" in text
+    assert 'export LUMEN_IMAGE_TAG="${TARGET_TAG}"' in text
+    assert 'lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"' in text
+    assert "image_tag_drift_redeploy" in text
+    assert 'ln -sfn current/VERSION "${ROOT}/VERSION"' in text
     # restart_services: api 必须最后启动（lumen-api 在跑 update.sh 自身的进度
     # SSE，先重 api 会让前端断流）。形态：for _svc in worker web api; do up -d
     # --wait --force-recreate "${_svc}"; done

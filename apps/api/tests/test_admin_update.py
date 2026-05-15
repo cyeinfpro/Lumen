@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from app.routes import admin_update
+from app.services import update_check
 from app.services.update_check import GitHubReleasesClient, UpdateCheckService
 
 
@@ -78,6 +79,37 @@ def test_update_proxy_can_be_loaded_from_shared_env_file(
     assert env["HTTP_PROXY"] == "http://127.0.0.1:7890"
     assert env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
     assert env["NO_PROXY"] == "localhost,127.0.0.1,::1,10.0.0.0/8"
+
+
+def test_update_check_version_falls_back_to_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "missing-deploy-root"
+    monkeypatch.setenv("LUMEN_VERSION", "1.2.4")
+    monkeypatch.setenv("LUMEN_IMAGE_TAG", "v1.2.4")
+    monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
+    monkeypatch.delenv("LUMEN_SHARED_ENV", raising=False)
+
+    assert update_check._current_version(root) == "1.2.4"
+    assert update_check._current_image_tag(root) == "v1.2.4"
+    assert update_check._build_type(root) == "docker"
+
+
+def test_update_runner_env_forces_target_tag_and_version() -> None:
+    env = {
+        "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
+        "LUMEN_IMAGE_TAG": "v1.2.4",
+        "LUMEN_VERSION": "1.2.4",
+    }
+
+    lines = admin_update._runner_env_lines(env)
+
+    assert "LUMEN_UPDATE_RESOLVED_TAG=v1.2.4" in lines
+    assert "LUMEN_IMAGE_TAG=v1.2.4" in lines
+    assert "LUMEN_VERSION=1.2.4" in lines
+    assert admin_update._version_from_update_tag("v1.2.4") == "1.2.4"
+    assert admin_update._version_from_update_tag("main") is None
 
 
 def test_update_step_fail_lines_are_reported_as_failed_done_steps() -> None:

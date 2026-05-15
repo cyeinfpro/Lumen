@@ -89,6 +89,7 @@ _SSE_MAX_DURATION_SEC = 60 * 60  # 1h hard cap to prevent leaks
 _SSE_LOG_POLL_SEC = 0.3  # tail-F poll interval
 _SSE_LOG_BATCH_WINDOW_SEC = 0.2  # coalesce raw log lines into bursts
 _TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC = 15.0
+_SEMVER_UPDATE_TAG_RE = re.compile(r"^v(?P<version>[0-9]+(?:\.[0-9]+){2}(?:-[0-9A-Za-z.-]+)?)$")
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,11 @@ class UpdateMarker:
 
 def _update_script() -> Path:
     return _discover_scripts_dir() / "update.sh"
+
+
+def _version_from_update_tag(tag: str) -> str | None:
+    match = _SEMVER_UPDATE_TAG_RE.fullmatch((tag or "").strip())
+    return match.group("version") if match else None
 
 
 def _update_log_path() -> Path:
@@ -217,6 +223,7 @@ def _runner_env_lines(env: dict[str, str]) -> list[str]:
         "LUMEN_REPO_DIR",
         "LUMEN_SOURCE_ROOT",
         "LUMEN_HTTP_PROXY",
+        "LUMEN_VERSION",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -1716,6 +1723,10 @@ async def trigger_update(
         env["LUMEN_UPDATE_CHANNEL"] = channel
         env["LUMEN_UPDATE_RESOLVED_TAG"] = target_tag
         env["LUMEN_UPDATE_IDEMPOTENCY_KEY"] = idempotency_key
+        env["LUMEN_IMAGE_TAG"] = target_tag
+        target_version = _version_from_update_tag(target_tag)
+        if target_version:
+            env["LUMEN_VERSION"] = target_version
         if body.force_redeploy:
             env["LUMEN_UPDATE_FORCE_REDEPLOY"] = "1"
 
