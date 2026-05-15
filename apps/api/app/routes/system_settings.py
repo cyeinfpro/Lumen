@@ -6,11 +6,15 @@ type-check int/float 失败即 422。
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.models import PricingRule, RedemptionCode
 from lumen_core.runtime_settings import get_spec, parse_value
 from lumen_core.schemas import (
     SystemSettingsOut,
@@ -20,7 +24,7 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
-from ..runtime_settings import get_settings_view, update_settings
+from ..runtime_settings import get_setting, get_settings_view, update_settings
 
 
 router = APIRouter(prefix="/admin/settings", tags=["admin-settings"])
@@ -31,6 +35,34 @@ def _http(code: str, msg: str, http: int = 400, **details) -> HTTPException:
     if details:
         err["details"] = details
     return HTTPException(status_code=http, detail={"error": err})
+
+
+async def _validate_threshold_pricing_alignment(
+    db: AsyncSession,
+    raw_thresholds: str,
+) -> None:
+    parsed = json.loads(raw_thresholds)
+    enabled_keys = set(
+        (
+            await db.execute(
+                select(PricingRule.key).where(
+                    PricingRule.scope == "image_size",
+                    PricingRule.unit == "per_image",
+                    PricingRule.enabled.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    missing = sorted(str(key) for key in parsed if str(key) not in enabled_keys)
+    if missing:
+        raise _http(
+            "THRESHOLDS_PRICING_MISMATCH",
+            "every image size threshold must have an enabled pricing rule",
+            422,
+            missing=missing,
+        )
 
 
 @router.get("", response_model=SystemSettingsOut)
@@ -94,6 +126,19 @@ async def put_settings_endpoint(
             errors=invalid,
         )
 
+    pair_map = {key: value for key, value in pairs}
+    if "billing.image_size_thresholds" in pair_map:
+        await _validate_threshold_pricing_alignment(
+            db, pair_map["billing.image_size_thresholds"]
+        )
+
+    secret_spec = get_spec("billing.redemption_code_secret")
+    old_secret = (
+        await get_setting(db, secret_spec)
+        if secret_spec is not None and "billing.redemption_code_secret" in pair_map
+        else None
+    )
+
     try:
         await update_settings(db, pairs)
     except ValueError as exc:
@@ -106,7 +151,34 @@ async def put_settings_endpoint(
         actor_email_hash=hash_email(admin.email),
         actor_ip_hash=request_ip_hash(request),
         details={"keys": [k for k, _ in pairs]},
+        autocommit=False,
     )
+    new_secret = pair_map.get("billing.redemption_code_secret")
+    if new_secret and new_secret != old_secret:
+        revoked_count = 0
+        if old_secret:
+            result = await db.execute(
+                update(RedemptionCode)
+                .where(
+                    RedemptionCode.revoked_at.is_(None),
+                    RedemptionCode.redeemed_count < RedemptionCode.max_redemptions,
+                )
+                .values(revoked_at=func.now())
+            )
+            revoked_count = int(result.rowcount or 0)
+        secret_hash8 = hashlib.sha256(new_secret.encode("utf-8")).hexdigest()[:8]
+        await write_audit(
+            db,
+            event_type="billing.secret.rotate" if old_secret else "billing.secret.configure",
+            user_id=admin.id,
+            actor_email_hash=hash_email(admin.email),
+            actor_ip_hash=request_ip_hash(request),
+            details={
+                "secret_hash8": secret_hash8,
+                "revoked_unredeemed_count": revoked_count,
+            },
+            autocommit=False,
+        )
     await db.commit()
 
     items = await get_settings_view(db)

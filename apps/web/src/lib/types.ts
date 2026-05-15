@@ -438,6 +438,8 @@ export type SystemSettingKey =
   | "billing.image_size_thresholds"
   | "billing.redemption_code_secret"
   | "billing.low_balance_warn_micro"
+  | "billing.bootstrap_completed"
+  | "billing.show_estimate_in_composer"
   | "providers";
 
 export interface SystemSettingItem {
@@ -783,6 +785,8 @@ export interface PricingRuleOut {
 export interface PricingRulesOut {
   items: PricingRuleOut[];
   image_size_thresholds?: Record<string, number> | null;
+  billing_enabled?: boolean | null;
+  show_estimate_in_composer?: boolean | null;
 }
 
 export interface PricingRuleUpsertIn {
@@ -818,6 +822,8 @@ export interface AdminRedemptionCodeOut {
   amount: MoneyOut;
   max_redemptions: number;
   redeemed_count: number;
+  usable_count: number;
+  status: "active" | "revoked" | "expired" | "exhausted";
   batch_id: string | null;
   note: string | null;
   expires_at: string | null;
@@ -853,6 +859,7 @@ export interface AdminRedemptionCodeCreateOut {
   count: number;
   amount: MoneyOut;
   download_token: string;
+  plaintext_codes: string[];
   expires_at: string | null;
 }
 
@@ -861,9 +868,73 @@ export interface AdminWalletOut {
   email: string;
   account_mode: "wallet" | "byok";
   wallet: WalletOut;
+  last_topup_at?: string | null;
+  last_charge_at?: string | null;
 }
 
 export interface AdminWalletListOut {
   items: AdminWalletOut[];
   next_cursor?: string | null;
+}
+
+export interface AdminWalletDetailOut extends AdminWalletOut {
+  last_redemption_at?: string | null;
+  transactions: WalletTransactionOut[];
+  redemptions: AdminRedemptionUsageOut[];
+}
+
+export interface AdminBillingAuditEventOut {
+  id: string;
+  event_type: string;
+  user_id: string | null;
+  target_user_id: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AdminBillingOverviewOut {
+  billing_enabled: boolean;
+  redemption_secret_configured: boolean;
+  bootstrap_completed: boolean;
+  wallet_total_balance: MoneyOut;
+  active_holds_count: number;
+  active_holds: MoneyOut;
+  codes_active: number;
+  codes_redeemed_24h: number;
+  codes_redeemed_24h_amount: MoneyOut;
+  charges_24h: MoneyOut;
+  thresholds_pricing_aligned: boolean;
+  thresholds_missing_prices: string[];
+  recent_audit_events: AdminBillingAuditEventOut[];
+}
+
+export interface AdminWalletAuditOut {
+  ok: boolean;
+  transactions: number;
+  users: number;
+  mismatch_count: number;
+  mismatches: string[];
+}
+
+export interface AdminOrphanHoldOut {
+  tx: WalletTransactionOut;
+  user_id: string;
+  age_seconds: number;
+}
+
+export interface AdminBillingBootstrapIn {
+  redemption_code_secret: string;
+  enabled?: boolean;
+  usd_to_rmb_rate?: number;
+  low_balance_warn_rmb?: string;
+  image_size_thresholds?: Record<string, number>;
+  image_prices_rmb?: Record<string, string>;
+}
+
+export interface AdminRedemptionBatchRedownloadOut {
+  batch_id: string;
+  count: number;
+  download_token: string;
+  plaintext_codes: string[];
+  expires_in_seconds: number;
 }

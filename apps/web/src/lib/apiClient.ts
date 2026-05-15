@@ -38,9 +38,16 @@ import type {
   ByokSettingsPatchIn,
   UserApiCredentialListOut,
   UserApiCredentialOut,
+  AdminBillingAuditEventOut,
+  AdminBillingBootstrapIn,
+  AdminBillingOverviewOut,
+  AdminOrphanHoldOut,
+  AdminWalletAuditOut,
+  AdminRedemptionBatchRedownloadOut,
   AdminRedemptionCodeCreateOut,
   AdminRedemptionCodeListOut,
   AdminRedemptionUsageListOut,
+  AdminWalletDetailOut,
   AdminWalletListOut,
   PricingRuleUpsertIn,
   PricingRulesOut,
@@ -2118,11 +2125,12 @@ export function getMyWallet(): Promise<WalletOut> {
 }
 
 export function listMyWalletTransactions(
-  opts: { cursor?: string | null; limit?: number } = {},
+  opts: { cursor?: string | null; limit?: number; kind?: string | null } = {},
 ): Promise<WalletTransactionListOut> {
   const qs = new URLSearchParams();
   if (opts.cursor) qs.set("cursor", opts.cursor);
   if (opts.limit != null) qs.set("limit", String(opts.limit));
+  if (opts.kind) qs.set("kind", opts.kind);
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch<WalletTransactionListOut>(`/me/wallet/transactions${suffix}`);
 }
@@ -2134,8 +2142,14 @@ export function redeemCode(code: string): Promise<RedemptionOut> {
   });
 }
 
-export function listMyRedemptions(): Promise<RedemptionUsageListOut> {
-  return apiFetch<RedemptionUsageListOut>("/me/redemptions");
+export function listMyRedemptions(
+  opts: { cursor?: string | null; limit?: number } = {},
+): Promise<RedemptionUsageListOut> {
+  const qs = new URLSearchParams();
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<RedemptionUsageListOut>(`/me/redemptions${suffix}`);
 }
 
 export function getPricing(): Promise<PricingRulesOut> {
@@ -2146,10 +2160,55 @@ export function getAdminPricing(): Promise<PricingRulesOut> {
   return apiFetch<PricingRulesOut>("/admin/pricing");
 }
 
-export function updateAdminPricing(items: PricingRuleUpsertIn[]): Promise<PricingRulesOut> {
+export function getAdminBillingOverview(): Promise<AdminBillingOverviewOut> {
+  return apiFetch<AdminBillingOverviewOut>("/admin/billing/overview");
+}
+
+export function listAdminBillingAudit(
+  opts: { event_type?: string | null; limit?: number } = {},
+): Promise<AdminBillingAuditEventOut[]> {
+  const qs = new URLSearchParams();
+  if (opts.event_type) qs.set("event_type", opts.event_type);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<AdminBillingAuditEventOut[]>(`/admin/billing/audit${suffix}`);
+}
+
+export function bootstrapAdminBilling(body: AdminBillingBootstrapIn): Promise<AdminBillingOverviewOut> {
+  return apiFetch<AdminBillingOverviewOut>("/admin/billing/bootstrap", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function runAdminWalletAudit(): Promise<AdminWalletAuditOut> {
+  return apiFetch<AdminWalletAuditOut>("/admin/billing/wallet_audit");
+}
+
+export function listAdminOrphanHolds(
+  opts: { min_age_minutes?: number; limit?: number } = {},
+): Promise<AdminOrphanHoldOut[]> {
+  const qs = new URLSearchParams();
+  if (opts.min_age_minutes != null) qs.set("min_age_minutes", String(opts.min_age_minutes));
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<AdminOrphanHoldOut[]>(`/admin/billing/orphan_holds${suffix}`);
+}
+
+export function releaseAdminOrphanHold(txId: string): Promise<WalletTransactionOut> {
+  return apiFetch<WalletTransactionOut>(
+    `/admin/billing/holds/${encodeURIComponent(txId)}:release`,
+    { method: "POST" },
+  );
+}
+
+export function updateAdminPricing(
+  items: PricingRuleUpsertIn[],
+  opts: { image_size_thresholds?: Record<string, number>; force?: boolean } = {},
+): Promise<PricingRulesOut> {
   return apiFetch<PricingRulesOut>("/admin/pricing", {
     method: "PUT",
-    body: JSON.stringify({ items }),
+    body: JSON.stringify({ items, ...opts }),
   });
 }
 
@@ -2160,8 +2219,21 @@ export function importOpenAiPricing(content: string, rate = 1): Promise<PricingR
   });
 }
 
-export function listAdminRedemptionCodes(): Promise<AdminRedemptionCodeListOut> {
-  return apiFetch<AdminRedemptionCodeListOut>("/admin/redemption_codes");
+export function listAdminRedemptionCodes(opts: {
+  status?: "all" | "active" | "revoked" | "expired" | "exhausted";
+  batch_id?: string | null;
+  q?: string | null;
+  cursor?: string | null;
+  limit?: number;
+} = {}): Promise<AdminRedemptionCodeListOut> {
+  const qs = new URLSearchParams();
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.batch_id) qs.set("batch_id", opts.batch_id);
+  if (opts.q) qs.set("q", opts.q);
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<AdminRedemptionCodeListOut>(`/admin/redemption_codes${suffix}`);
 }
 
 export function createAdminRedemptionCodes(body: {
@@ -2203,12 +2275,55 @@ export function adminRedemptionBatchCsvUrl(batchId: string, token: string): stri
   return `${API_BASE}/admin/redemption_codes/batches/${encodeURIComponent(batchId)}.csv?download_token=${encodeURIComponent(token)}`;
 }
 
-export function listAdminWallets(q?: string, mode: "wallet" | "byok" | "all" = "wallet"): Promise<AdminWalletListOut> {
+export function adminRedemptionBatchTxtUrl(batchId: string, token: string): string {
+  return `${API_BASE}/admin/redemption_codes/batches/${encodeURIComponent(batchId)}.txt?download_token=${encodeURIComponent(token)}`;
+}
+
+export function redownloadAdminRedemptionBatch(batchId: string): Promise<AdminRedemptionBatchRedownloadOut> {
+  return apiFetch<AdminRedemptionBatchRedownloadOut>(
+    `/admin/redemption_codes/batches/${encodeURIComponent(batchId)}/redownload`,
+    { method: "POST" },
+  );
+}
+
+export function listAdminWallets(
+  q?: string,
+  mode: "wallet" | "byok" | "all" = "wallet",
+  opts: { cursor?: string | null; limit?: number } = {},
+): Promise<AdminWalletListOut> {
   const qs = new URLSearchParams();
   if (q) qs.set("q", q);
   qs.set("mode", mode);
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch<AdminWalletListOut>(`/admin/wallets${suffix}`);
+}
+
+export function getAdminWalletDetail(userId: string): Promise<AdminWalletDetailOut> {
+  return apiFetch<AdminWalletDetailOut>(`/admin/wallets/${encodeURIComponent(userId)}`);
+}
+
+export function listAdminWalletTransactions(
+  userId: string,
+  opts: {
+    cursor?: string | null;
+    limit?: number;
+    kind?: string | null;
+    ref_type?: string | null;
+    ref_id?: string | null;
+  } = {},
+): Promise<WalletTransactionListOut> {
+  const qs = new URLSearchParams();
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  if (opts.kind) qs.set("kind", opts.kind);
+  if (opts.ref_type) qs.set("ref_type", opts.ref_type);
+  if (opts.ref_id) qs.set("ref_id", opts.ref_id);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<WalletTransactionListOut>(
+    `/admin/wallets/${encodeURIComponent(userId)}/transactions${suffix}`,
+  );
 }
 
 export function adjustAdminWallet(

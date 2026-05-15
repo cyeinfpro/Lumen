@@ -296,6 +296,26 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         max_value=1_000_000_000_000,
     ),
     SettingSpec(
+        key="billing.bootstrap_completed",
+        description="计费首次初始化是否已完成。0=未完成，1=已完成。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BILLING_BOOTSTRAP_COMPLETED",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="billing.show_estimate_in_composer",
+        description="是否在发送框展示本次预计扣费。0=隐藏，1=显示。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BILLING_SHOW_ESTIMATE_IN_COMPOSER",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
         key="image.primary_route",
         description=(
             "(DEPRECATED) 旧图像主路径；已迁移为 image.channel + image.engine。"

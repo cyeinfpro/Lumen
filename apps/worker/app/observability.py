@@ -141,6 +141,17 @@ upstream_calls_total = Counter(
     labelnames=("kind", "outcome"),
 )
 
+wallet_overdrawn_total = Counter(
+    "wallet_overdrawn_total",
+    "Number of wallet billing operations that produced an overdrawn adjustment.",
+    labelnames=("kind",),
+)
+
+wallet_charge_lost_total = Counter(
+    "wallet_charge_lost_total",
+    "Number of completion charge attempts that failed after upstream work completed.",
+)
+
 # ---- 账号级 image 调度指标（多 provider = 多 OAuth 账号 → 每号一组时序） ----
 # 当前 image 路由的状态——每个号每个 state 一个时序；同一时刻一个号只有一个
 # state 是 1，其他 state 是 0。state 取自 ProviderHealth：closed / cooldown /
@@ -352,6 +363,8 @@ __all__ = [
     "get_tracer",
     "task_duration_seconds",
     "upstream_calls_total",
+    "wallet_overdrawn_total",
+    "wallet_charge_lost_total",
     "safe_outcome",
     "account_image_state",
     "account_image_calls_total",

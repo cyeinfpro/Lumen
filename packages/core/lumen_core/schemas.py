@@ -851,6 +851,8 @@ class PricingRuleOut(BaseOut):
 class PricingRulesOut(BaseModel):
     items: list[PricingRuleOut]
     image_size_thresholds: dict[str, int] | None = None
+    billing_enabled: bool | None = None
+    show_estimate_in_composer: bool | None = None
 
 
 class PricingRuleUpsertIn(BaseModel):
@@ -865,6 +867,8 @@ class PricingRuleUpsertIn(BaseModel):
 
 class PricingRulesUpdateIn(BaseModel):
     items: list[PricingRuleUpsertIn] = Field(min_length=1, max_length=500)
+    image_size_thresholds: dict[str, int] | None = None
+    force: bool = False
 
 
 class PricingImportIn(BaseModel):
@@ -899,6 +903,8 @@ class AdminRedemptionCodeOut(BaseOut):
     amount: MoneyOut
     max_redemptions: int
     redeemed_count: int
+    usable_count: int = 0
+    status: Literal["active", "revoked", "expired", "exhausted"] = "active"
     batch_id: str | None = None
     note: str | None = None
     expires_at: datetime | None = None
@@ -957,6 +963,7 @@ class AdminRedemptionCodeCreateOut(BaseModel):
     count: int
     amount: MoneyOut
     download_token: str
+    plaintext_codes: list[str] = Field(default_factory=list)
     expires_at: datetime | None = None
 
 
@@ -965,11 +972,79 @@ class AdminWalletOut(BaseModel):
     email: str
     account_mode: Literal["wallet", "byok"]
     wallet: WalletOut
+    last_topup_at: datetime | None = None
+    last_charge_at: datetime | None = None
 
 
 class AdminWalletListOut(BaseModel):
     items: list[AdminWalletOut]
     next_cursor: str | None = None
+
+
+class AdminWalletDetailOut(AdminWalletOut):
+    last_redemption_at: datetime | None = None
+    transactions: list[WalletTransactionOut] = Field(default_factory=list)
+    redemptions: list[AdminRedemptionUsageOut] = Field(default_factory=list)
+
+
+class AdminBillingAuditEventOut(BaseOut):
+    id: str
+    event_type: str
+    user_id: str | None = None
+    target_user_id: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AdminBillingOverviewOut(BaseModel):
+    billing_enabled: bool
+    redemption_secret_configured: bool
+    bootstrap_completed: bool
+    wallet_total_balance: MoneyOut
+    active_holds_count: int
+    active_holds: MoneyOut
+    codes_active: int
+    codes_redeemed_24h: int
+    codes_redeemed_24h_amount: MoneyOut
+    charges_24h: MoneyOut
+    thresholds_pricing_aligned: bool
+    thresholds_missing_prices: list[str] = Field(default_factory=list)
+    recent_audit_events: list[AdminBillingAuditEventOut] = Field(default_factory=list)
+
+
+class AdminWalletAuditOut(BaseModel):
+    ok: bool
+    transactions: int
+    users: int
+    mismatch_count: int
+    mismatches: list[str] = Field(default_factory=list)
+
+
+class AdminOrphanHoldOut(BaseModel):
+    tx: WalletTransactionOut
+    user_id: str
+    age_seconds: int
+
+
+class AdminBillingBootstrapIn(BaseModel):
+    redemption_code_secret: str = Field(min_length=16, max_length=2048)
+    enabled: bool = True
+    usd_to_rmb_rate: float = Field(default=1.0, gt=0, le=100)
+    low_balance_warn_rmb: str = Field(default="2")
+    image_size_thresholds: dict[str, int] = Field(
+        default_factory=lambda: {"1k": 1_572_864, "2k": 3_686_400, "4k": 8_294_400}
+    )
+    image_prices_rmb: dict[str, str] = Field(
+        default_factory=lambda: {"1k": "0.2", "2k": "0.4", "4k": "0.8"}
+    )
+
+
+class AdminRedemptionBatchRedownloadOut(BaseModel):
+    batch_id: str
+    count: int
+    download_token: str
+    plaintext_codes: list[str] = Field(default_factory=list)
+    expires_in_seconds: int = 300
 
 
 class AdminWalletAdjustIn(BaseModel):
@@ -1701,6 +1776,13 @@ __all__ = [
     "AdminRedemptionCodeCreateOut",
     "AdminWalletOut",
     "AdminWalletListOut",
+    "AdminWalletDetailOut",
+    "AdminBillingAuditEventOut",
+    "AdminBillingOverviewOut",
+    "AdminWalletAuditOut",
+    "AdminOrphanHoldOut",
+    "AdminBillingBootstrapIn",
+    "AdminRedemptionBatchRedownloadOut",
     "AdminWalletAdjustIn",
     "AdminSetAccountModeIn",
     "StorageMountStatusOut",

@@ -61,6 +61,11 @@ const CODE_TITLE: Record<string, string> = {
   CODE_EXHAUSTED: "兑换码已兑完",
   CODE_ALREADY_USED: "兑换码已使用",
   PRICING_NOT_CONFIGURED: "价格未配置",
+  REDEMPTION_SECRET_NOT_CONFIGURED: "兑换码功能未配置",
+  BOOTSTRAP_INCOMPLETE: "计费功能未初始化",
+  BILLING_DISABLED: "计费功能已关闭",
+  ALREADY_REVOKED: "兑换码已撤销",
+  THRESHOLDS_PRICING_MISMATCH: "尺寸档位和价格不一致",
 };
 
 const CODE_DESC: Record<string, string> = {
@@ -89,6 +94,11 @@ const CODE_DESC: Record<string, string> = {
   CODE_EXHAUSTED: "这张兑换码的可用次数已经用完",
   CODE_ALREADY_USED: "该账号已经兑换过这张码",
   PRICING_NOT_CONFIGURED: "管理员需要先补齐对应模型或尺寸档位的价格",
+  REDEMPTION_SECRET_NOT_CONFIGURED: "请先在管理后台配置兑换码 secret",
+  BOOTSTRAP_INCOMPLETE: "管理员需要先完成计费初始化",
+  BILLING_DISABLED: "请联系管理员开启计费功能后再兑换",
+  ALREADY_REVOKED: "这张兑换码此前已经被撤销",
+  THRESHOLDS_PRICING_MISMATCH: "请确保每个尺寸档位都有启用的价格规则",
 };
 
 const CODE_ACTION: Record<string, ErrorAction> = {
@@ -117,6 +127,11 @@ const CODE_ACTION: Record<string, ErrorAction> = {
   CODE_EXHAUSTED: "back",
   CODE_ALREADY_USED: "back",
   PRICING_NOT_CONFIGURED: "back",
+  REDEMPTION_SECRET_NOT_CONFIGURED: "back",
+  BOOTSTRAP_INCOMPLETE: "back",
+  BILLING_DISABLED: "back",
+  ALREADY_REVOKED: "back",
+  THRESHOLDS_PRICING_MISMATCH: "back",
 };
 
 const ACTION_LABEL: Record<ErrorAction, string> = {

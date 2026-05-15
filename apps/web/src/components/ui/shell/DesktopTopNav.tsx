@@ -13,7 +13,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { IconButton } from "@/components/ui/primitives";
-import { getMe, getMyWallet, type AuthUser } from "@/lib/apiClient";
+import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
 import { SPRING } from "@/lib/motion";
 
 export type DesktopNavTab = "studio" | "projects" | "stream" | "me";
@@ -165,7 +165,15 @@ function WalletBalancePill() {
     retry: false,
     staleTime: 30_000,
   });
+  const pricingQuery = useQuery({
+    queryKey: ["me", "pricing"],
+    queryFn: getPricing,
+    enabled,
+    retry: false,
+    staleTime: 60_000,
+  });
   const wallet = walletQuery.data;
+  if (pricingQuery.data?.billing_enabled === false) return null;
   if (!enabled || !wallet?.balance) return null;
   const low =
     wallet.low_balance_threshold?.micro != null &&

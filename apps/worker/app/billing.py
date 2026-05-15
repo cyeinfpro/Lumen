@@ -9,9 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.models import AuditLog, Completion, Generation, User
+from lumen_core.models import AuditLog, Completion, Generation, User, WalletTransaction
 
 from . import runtime_settings
+from .observability import wallet_charge_lost_total, wallet_overdrawn_total
 
 
 async def _setting_bool(key: str, default: bool = False) -> bool:
@@ -52,6 +53,45 @@ def _audit(
     )
 
 
+async def _existing_wallet_tx(
+    session: AsyncSession, user_id: str, idempotency_key: str
+) -> WalletTransaction | None:
+    return (
+        await session.execute(
+            select(WalletTransaction).where(
+                WalletTransaction.user_id == user_id,
+                WalletTransaction.idempotency_key == idempotency_key,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _add_replay_audit(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    tx: WalletTransaction,
+    replay_source: str,
+) -> None:
+    session.add(
+        _audit(
+            event_type=f"wallet.{tx.kind}.replay",
+            user_id=user_id,
+            details={
+                "tx_id": tx.id,
+                "kind": tx.kind,
+                "amount_micro": tx.amount_micro,
+                "balance_after": tx.balance_after,
+                "hold_after": tx.hold_after,
+                "ref_type": tx.ref_type,
+                "ref_id": tx.ref_id,
+                "idempotency_key": tx.idempotency_key,
+                "replay_source": replay_source,
+            },
+        )
+    )
+
+
 async def settle_generation(
     session: AsyncSession,
     generation: Generation,
@@ -62,6 +102,16 @@ async def settle_generation(
     if await _account_mode(session, generation.user_id) != "wallet":
         return
     if not await _billing_enabled():
+        return
+    idempotency_key = f"settle:{generation.id}"
+    existing = await _existing_wallet_tx(session, generation.user_id, idempotency_key)
+    if existing is not None:
+        _add_replay_audit(
+            session,
+            user_id=generation.user_id,
+            tx=existing,
+            replay_source="precheck",
+        )
         return
     cost, tier = await billing_core.estimate_image_cost(
         session,
@@ -89,7 +139,7 @@ async def settle_generation(
         ref_type="generation",
         ref_id=generation.id,
         actual_micro=cost,
-        idempotency_key=f"settle:{generation.id}",
+        idempotency_key=idempotency_key,
         allow_negative=await _allow_negative_balance(),
         meta={
             "tier": tier,
@@ -113,6 +163,7 @@ async def settle_generation(
             )
         )
         if int((tx.meta or {}).get("overdraw_micro") or 0) > 0:
+            wallet_overdrawn_total.labels(kind="settle").inc()
             session.add(
                 _audit(
                     event_type="wallet.overdrawn",
@@ -136,12 +187,22 @@ async def release_generation(
         return
     if not await _billing_enabled():
         return
+    idempotency_key = f"release:{generation.id}"
+    existing = await _existing_wallet_tx(session, generation.user_id, idempotency_key)
+    if existing is not None:
+        _add_replay_audit(
+            session,
+            user_id=generation.user_id,
+            tx=existing,
+            replay_source="precheck",
+        )
+        return
     tx = await billing_core.release(
         session,
         generation.user_id,
         ref_type="generation",
         ref_id=generation.id,
-        idempotency_key=f"release:{generation.id}",
+        idempotency_key=idempotency_key,
         meta={"reason": reason},
     )
     if tx is not None:
@@ -165,6 +226,16 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
         return
     if not await _billing_enabled():
         return
+    idempotency_key = f"complete:{completion.id}"
+    existing = await _existing_wallet_tx(session, completion.user_id, idempotency_key)
+    if existing is not None:
+        _add_replay_audit(
+            session,
+            user_id=completion.user_id,
+            tx=existing,
+            replay_source="precheck",
+        )
+        return
     cost = await billing_core.estimate_completion_cost(
         session,
         model=completion.model,
@@ -185,20 +256,24 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
                 },
             )
         )
-    tx = await billing_core.charge(
-        session,
-        completion.user_id,
-        cost,
-        ref_type="completion",
-        ref_id=completion.id,
-        idempotency_key=f"complete:{completion.id}",
-        allow_negative=await _allow_negative_balance(),
-        meta={
-            "model": completion.model,
-            "tokens_in": completion.tokens_in,
-            "tokens_out": completion.tokens_out,
-        },
-    )
+    try:
+        tx = await billing_core.charge(
+            session,
+            completion.user_id,
+            cost,
+            ref_type="completion",
+            ref_id=completion.id,
+            idempotency_key=idempotency_key,
+            allow_negative=await _allow_negative_balance(),
+            meta={
+                "model": completion.model,
+                "tokens_in": completion.tokens_in,
+                "tokens_out": completion.tokens_out,
+            },
+        )
+    except Exception:
+        wallet_charge_lost_total.inc()
+        raise
     if tx is not None:
         session.add(
             _audit(
@@ -213,6 +288,7 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
             )
         )
         if int((tx.meta or {}).get("overdraw_micro") or 0) > 0:
+            wallet_overdrawn_total.labels(kind="charge").inc()
             session.add(
                 _audit(
                     event_type="wallet.overdrawn",

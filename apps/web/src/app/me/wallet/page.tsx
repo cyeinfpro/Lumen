@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, CreditCard, Gift, RefreshCw } from "lucide-react";
 
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
@@ -10,6 +10,7 @@ import { Button, Card, toast } from "@/components/ui/primitives";
 import {
   getMyWallet,
   listMyWalletTransactions,
+  listMyRedemptions,
   redeemCode,
   type AuthUser,
   getMe,
@@ -36,28 +37,65 @@ function normalizeCode(value: string): string {
   return chunks.length ? `LMN-${chunks.join("-")}` : "LMN-";
 }
 
+const TX_KIND_FILTERS = [
+  { key: "all", label: "全部" },
+  { key: "topup_redeem", label: "兑换充值" },
+  { key: "hold", label: "预扣" },
+  { key: "settle", label: "结算" },
+  { key: "release", label: "释放" },
+  { key: "charge", label: "扣费" },
+] as const;
+
 export default function WalletPage() {
   const qc = useQueryClient();
   const [code, setCode] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [txKind, setTxKind] = useState("all");
 
   const meQuery = useQuery<AuthUser>({ queryKey: ["me"], queryFn: getMe, retry: false });
   const walletQ = useQuery({ queryKey: ["me", "wallet"], queryFn: getMyWallet, retry: false });
-  const txQ = useQuery({
-    queryKey: ["me", "wallet", "transactions"],
-    queryFn: () => listMyWalletTransactions(),
+  const txQ = useInfiniteQuery({
+    queryKey: ["me", "wallet", "transactions", txKind],
+    queryFn: ({ pageParam }) =>
+      listMyWalletTransactions({
+        cursor: pageParam,
+        kind: txKind === "all" ? undefined : txKind,
+        limit: 30,
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     retry: false,
-    // Why: gate on positive identification, not negation of "byok". With the
-    // negated form, the query fires while `meQuery.data` is still undefined
-    // and BYOK users get a 403 toast flash on first paint.
+    enabled: meQuery.data?.account_mode === "wallet",
+  });
+  const redemptionsQ = useInfiniteQuery({
+    queryKey: ["me", "redemptions"],
+    queryFn: ({ pageParam }) => listMyRedemptions({ cursor: pageParam, limit: 20 }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    retry: false,
     enabled: meQuery.data?.account_mode === "wallet",
   });
 
   const wallet = walletQ.data;
+  const txItems = txQ.data?.pages.flatMap((page) => page.items) ?? [];
+  const redemptionItems = redemptionsQ.data?.pages.flatMap((page) => page.items) ?? [];
   const low = useMemo(() => {
     if (!wallet?.balance || !wallet.low_balance_threshold) return false;
     return wallet.balance.micro < wallet.low_balance_threshold.micro;
   }, [wallet]);
+  const stats24h = useMemo(() => {
+    const latest = Math.max(0, ...txItems.map((tx) => Date.parse(tx.created_at)));
+    if (latest <= 0) return { topup: 0, spend: 0 };
+    const since = latest - 24 * 60 * 60 * 1000;
+    let topup = 0;
+    let spend = 0;
+    for (const tx of txItems) {
+      if (Date.parse(tx.created_at) < since) continue;
+      if (tx.amount.micro > 0) topup += tx.amount.micro;
+      if (tx.amount.micro < 0) spend += Math.abs(tx.amount.micro);
+    }
+    return { topup: topup / 1_000_000, spend: spend / 1_000_000 };
+  }, [txItems]);
 
   const redeemMut = useMutation({
     mutationFn: () => redeemCode(code),
@@ -82,7 +120,7 @@ export default function WalletPage() {
         <Card variant="subtle" padding="lg" className="space-y-3">
           <p className="type-card-title">BYOK 账号</p>
           <p className="type-body">
-            你的账号通过 BYOK 注册，费用由上游 API 账单结算。
+            你的账号由 BYOK 自助注册流程创建，所以费用直接由你在 OpenAI/Claude 等上游账单结算，Lumen 不维护钱包余额。
           </p>
           <Link
             href="/me"
@@ -112,6 +150,12 @@ export default function WalletPage() {
           </Link>
         </header>
 
+        {low && (
+          <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 text-sm text-[var(--danger-fg)]">
+            余额不足，4K 图或多图任务可能无法生成。请先兑换充值或联系管理员。
+          </div>
+        )}
+
         <div className="grid gap-4 md:grid-cols-[1fr_1.2fr]">
           <Card variant="default" padding="lg" className="space-y-4">
             <div className="flex items-center gap-3">
@@ -127,6 +171,9 @@ export default function WalletPage() {
             </div>
             <p className="type-body-sm text-[var(--fg-2)]">
               预扣 ¥{Number(wallet?.hold?.rmb ?? 0).toFixed(2)}
+            </p>
+            <p className="type-caption text-[var(--fg-2)]">
+              24h 变化 +¥{stats24h.topup.toFixed(2)} / -¥{stats24h.spend.toFixed(2)}
             </p>
           </Card>
 
@@ -178,8 +225,25 @@ export default function WalletPage() {
               刷新
             </Button>
           </div>
+          <div className="flex flex-wrap gap-2 border-b border-[var(--border-subtle)] px-4 py-3">
+            {TX_KIND_FILTERS.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setTxKind(item.key)}
+                className={[
+                  "rounded-full border px-3 py-1 text-xs",
+                  txKind === item.key
+                    ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
+                    : "border-[var(--border)] text-[var(--fg-2)]",
+                ].join(" ")}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
           <div className="divide-y divide-[var(--border-subtle)]">
-            {(txQ.data?.items ?? []).map((tx) => (
+            {txItems.map((tx) => (
               <div key={tx.id} className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3">
                 <div className="min-w-0">
                   <p className="type-body-sm text-[var(--fg-0)]">{formatKind(tx.kind)}</p>
@@ -197,12 +261,79 @@ export default function WalletPage() {
                 </div>
               </div>
             ))}
-            {!txQ.isLoading && (txQ.data?.items ?? []).length === 0 && (
+            {!txQ.isLoading && txItems.length === 0 && (
               <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
                 暂无流水
               </div>
             )}
           </div>
+          {txQ.hasNextPage && (
+            <div className="border-t border-[var(--border-subtle)] px-4 py-3 text-center">
+              <Button
+                variant="outline"
+                size="sm"
+                loading={txQ.isFetchingNextPage}
+                onClick={() => void txQ.fetchNextPage()}
+              >
+                加载更多
+              </Button>
+            </div>
+          )}
+        </Card>
+
+        <Card variant="subtle" padding="none" className="overflow-hidden">
+          <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
+            <p className="type-card-title">我的兑换历史</p>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() =>
+                navigator.clipboard
+                  .writeText(
+                    redemptionItems
+                      .map((item) => `${new Date(item.redeemed_at).toLocaleString()} ¥${Number(item.amount.rmb).toFixed(2)}`)
+                      .join("\n"),
+                  )
+                  .then(() => toast.success("兑换记录已复制"))
+                  .catch(() => toast.error("复制失败"))
+              }
+            >
+              复制记录
+            </Button>
+          </div>
+          <div className="divide-y divide-[var(--border-subtle)]">
+            {redemptionItems.map((item) => (
+              <div key={item.id} className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3">
+                <div className="min-w-0">
+                  <p className="type-body-sm text-[var(--fg-0)]">兑换码充值</p>
+                  <p className="type-caption text-[var(--fg-2)]">
+                    {new Date(item.redeemed_at).toLocaleString()}
+                  </p>
+                </div>
+                <div className="text-right tabular-nums">
+                  <p className="text-success">+¥{Number(item.amount.rmb).toFixed(2)}</p>
+                  <p className="type-caption text-[var(--fg-2)]">{item.code_id}</p>
+                </div>
+              </div>
+            ))}
+            {!redemptionsQ.isLoading && redemptionItems.length === 0 && (
+              <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
+                暂无兑换记录
+              </div>
+            )}
+          </div>
+          {redemptionsQ.hasNextPage && (
+            <div className="border-t border-[var(--border-subtle)] px-4 py-3 text-center">
+              <Button
+                variant="outline"
+                size="sm"
+                loading={redemptionsQ.isFetchingNextPage}
+                onClick={() => void redemptionsQ.fetchNextPage()}
+              >
+                加载更多
+              </Button>
+            </div>
+          )}
         </Card>
       </div>
     </SettingsShell>

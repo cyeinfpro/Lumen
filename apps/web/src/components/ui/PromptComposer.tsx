@@ -336,6 +336,8 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
   });
   const estimatedCharge = useMemo<string | null>(() => {
     if (!isWalletAccount) return null;
+    if (pricingQ.data?.billing_enabled === false) return null;
+    if (pricingQ.data?.show_estimate_in_composer === false) return null;
     if (mode === "image") {
       const q = imageParams.quality ?? "2k";
       const resolved = qualityToFixedSize(q, imageParams.aspect_ratio);
@@ -791,7 +793,7 @@ function SendButton({
               "shadow-[0_0_18px_rgba(242,169,58,0.35)] hover:shadow-[0_0_22px_rgba(242,169,58,0.5)]",
               "cursor-pointer",
             ].join(" ")
-          : "bg-white/6 text-neutral-500 cursor-not-allowed shadow-none",
+          : "bg-white/6 text-[var(--fg-2)] cursor-not-allowed shadow-none",
       )}
     >
       {isSending ? (
@@ -804,8 +806,8 @@ function SendButton({
         className={cn(
           "hidden sm:inline-flex items-center h-5 px-1 rounded font-mono text-[10px] border",
           canSubmit
-            ? "bg-black/20 border-black/20 text-black/70"
-            : "bg-white/5 border-white/10 text-neutral-500",
+            ? "bg-[var(--bg-0)]/20 border-[var(--bg-0)]/20 text-black/70"
+            : "bg-white/5 border-[var(--border-subtle)] text-[var(--fg-2)]",
         )}
         aria-hidden
       >

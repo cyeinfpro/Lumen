@@ -410,7 +410,7 @@ worker 重试时直接复用上述 key,DB 唯一约束兜底; 命中冲突时回
 ### 7.1 编码格式
 
 ```
-LMN-XXXX-XXXX-XXXX     16 位明文 (4 段 × 4 字符)
+LMN-XXXX-XXXX-XXXX-XXXX     16 位明文 body (4 段 × 4 字符)
 ```
 
 - 字符集: Crockford Base32 (去掉易混的 0/O/1/I/L) = `23456789ABCDEFGHJKMNPQRSTVWXYZ`。
@@ -428,8 +428,8 @@ def hash_code(code: str) -> str:
 ```
 
 - 数据库不存明文 code, 只存 `code_hash`。
-- 创建响应**只回传一次明文** (供管理员复制 / 下载 CSV); 后续无法找回 → 列表只显示 `code_prefix`。
-- secret 旋转: 当前 V1 不支持; 留 `code_hash` 字段加 `secret_version`,日后追加列即可。
+- 创建响应回传 `plaintext_codes` 并缓存 5 分钟 (供管理员复制 / 下载 CSV/TXT / 重新查看); 5 分钟后无法找回 → 列表只显示 `code_prefix`。
+- secret 旋转: V1 会撤销所有未兑换码并写 `billing.secret.rotate` 审计; 日后如需兼容旧码再加 `secret_version`。
 
 ### 7.3 兑换流程
 
@@ -468,10 +468,10 @@ API 端 (单事务):
 | Method | Path | 说明 |
 |---|---|---|
 | `GET` | `/me/wallet` | 余额 + 流水分页; `byok` 用户返回 `mode='byok'` 让前端隐藏入口 |
-| `GET` | `/me/wallet/transactions?cursor=&limit=` | 流水分页; `byok` 用户 → `403 ACCOUNT_MODE_FORBIDDEN` |
+| `GET` | `/me/wallet/transactions?cursor=&limit=&kind=` | 流水分页; `byok` 用户 → `403 ACCOUNT_MODE_FORBIDDEN` |
 | `POST` | `/me/redemptions` | 兑换 `{code}`; 422/404/409/410 见 §7.3; `byok` 用户 → `403 ACCOUNT_MODE_FORBIDDEN` |
 | `GET` | `/me/redemptions` | 我的兑换历史; `byok` 用户 → `403 ACCOUNT_MODE_FORBIDDEN` |
-| `GET` | `/me/pricing` | 当前可用价格表 (只回 enabled=TRUE); 两类用户都能查,前端按 `account_mode` 决定是否渲染 |
+| `GET` | `/me/pricing` | 当前可用价格表 (只回 enabled=TRUE) + `billing_enabled` / `show_estimate_in_composer`; 两类用户都能查,前端按 `account_mode` 决定是否渲染 |
 
 对 BYOK 凭证管理端点同步收紧 (`byok.py:470/518/629`):
 
@@ -508,18 +508,27 @@ API 端 (单事务):
 
 | Method | Path | 说明 |
 |---|---|---|
+| `GET` | `/admin/billing/overview` | 计费健康检查、钱包余额、活跃 hold、24h 兑换/扣费、最近审计 |
+| `GET` | `/admin/billing/audit?event_type=&limit=` | 计费相关审计事件 |
+| `POST` | `/admin/billing/bootstrap` | 首次初始化 secret / 开关 / 默认尺寸档位与价格 |
+| `GET` | `/admin/billing/wallet_audit` | 回放钱包流水并返回对账结果 |
+| `GET` | `/admin/billing/orphan_holds?min_age_minutes=&limit=` | 列出超时未 settle/release 的 hold |
+| `POST` | `/admin/billing/holds/{tx_id}:release` | 管理员强制释放孤儿 hold |
 | `GET` | `/admin/pricing` | 列价格规则 |
-| `PUT` | `/admin/pricing` | 批量 upsert (按 `(scope,key,variant,unit)` 主键; `enabled=false` 即软停) |
+| `PUT` | `/admin/pricing` | 批量 upsert (按 `(scope,key,variant,unit)` 主键; `enabled=false` 即软停); 可带 `image_size_thresholds` 原子保存 |
 | `POST` | `/admin/pricing/import_openai` | 调用 §6.3.1 脚本逻辑,接收 yaml/json 内容 |
-| `GET` | `/admin/redemption_codes?status=&batch_id=&q=` | 列表 (只展示 `code_prefix`) |
+| `GET` | `/admin/redemption_codes?status=&batch_id=&q=&cursor=` | 列表 (默认 `status=active`; 只展示 `code_prefix`) |
 | `POST` | `/admin/redemption_codes` | 创建 `{amount_rmb, count, max_redemptions?, expires_at?, note?}` |
 | `POST` | `/admin/redemption_codes/{id}:revoke` | 撤销单码 |
 | `POST` | `/admin/redemption_codes/batches/{batch_id}:revoke` | 撤销整批 |
-| `GET` | `/admin/redemption_codes/batches/{batch_id}.csv` | 下载该批次明文 (**仅在创建时返回的临时 download_token 有效期内可下载**) |
+| `POST` | `/admin/redemption_codes/batches/{batch_id}/redownload` | 5 分钟窗口内重新取回明文和 download_token |
+| `GET` | `/admin/redemption_codes/batches/{batch_id}.csv` | 下载该批次明文 CSV (download_token 5 分钟内可重复使用) |
+| `GET` | `/admin/redemption_codes/batches/{batch_id}.txt` | 下载一行一个 code 的 TXT |
 | `GET` | `/admin/wallets?q=email&mode=` | 列用户钱包 (可按 `account_mode` 过滤,默认只列 `wallet`); 行上显示 `mode` 列 |
+| `GET` | `/admin/wallets/{user_id}` | 单用户画像: 余额、最近充值/扣费、最近流水和兑换记录 |
 | `POST` | `/admin/wallets/{user_id}:adjust` | `{amount_rmb_signed, reason}`; 写 `adjust_admin` 流水; 对 `byok` 用户返回 `409 ACCOUNT_NOT_WALLET` |
 | `POST` | `/admin/users/{user_id}:set_account_mode` | `{mode, on_residual_balance: 'freeze'\|'zero'}`; 切换 `users.account_mode`,见 §3.3 (含软删 BYOK 凭证、余额处理) |
-| `GET` | `/admin/wallets/{user_id}/transactions` | 该用户流水 |
+| `GET` | `/admin/wallets/{user_id}/transactions?cursor=&kind=&ref_type=&ref_id=` | 该用户流水 |
 
 **`POST /admin/redemption_codes` 创建响应**
 
@@ -527,13 +536,14 @@ API 端 (单事务):
 {
   "batch_id": "01HX...",
   "count": 100,
-  "amount_rmb": "50.00",
+  "amount": { "micro": 50000000, "rmb": "50" },
   "download_token": "tok_...",   // 5 分钟内可调下载接口拿明文 CSV
+  "plaintext_codes": ["LMN-AAAA-BBBB-CCCC-DDDD"],
   "expires_at": "2026-06-30T00:00:00Z"
 }
 ```
 
-明文 code 列表**不直接回 JSON** (避免日志 / 浏览器历史泄漏); 强制走带 `download_token` 的下载接口,后端按 `token` 在 Redis 取一次性 buffer,取完即焚。
+响应头 `Cache-Control: no-store`; 服务端 access log 不记录 body。明文窗口 5 分钟,下载 token 可重复使用,管理员也可通过 `redownload` 在窗口内重新查看。
 
 ### 8.3 错误码
 
@@ -549,6 +559,11 @@ CODE_EXPIRED             410
 CODE_EXHAUSTED           409
 CODE_ALREADY_USED        409  (本用户已兑过此码)
 PRICING_NOT_CONFIGURED   503  (生图/对话发现对应档位/模型无 rule)
+REDEMPTION_SECRET_NOT_CONFIGURED 412  管理员尚未配置兑换码 secret
+BOOTSTRAP_INCOMPLETE    412  管理员尚未完成计费初始化
+BILLING_DISABLED        412  全局计费开关关闭,拒绝兑换码充值
+ALREADY_REVOKED          409  管理员重复撤销兑换码
+THRESHOLDS_PRICING_MISMATCH 422  尺寸阈值和启用价格规则不一致
 ```
 
 ## 9. Web UI
@@ -561,7 +576,7 @@ PRICING_NOT_CONFIGURED   503  (生图/对话发现对应档位/模型无 rule)
 
 - 顶部导航右侧 (头像左) 加 **余额胶囊**: `¥12.35` (低于阈值标红)。
 - 点击进 `/me/wallet` 页面: 余额卡片 + 流水表 + 兑换码输入框。
-- 兑换码输入框: 大字号 `LMN-XXXX-XXXX-XXXX`, 自动补连字符 / 大写; 成功后 toast `+¥50.00` 并刷新余额。
+- 兑换码输入框: 大字号 `LMN-XXXX-XXXX-XXXX-XXXX`, 自动补连字符 / 大写; 成功后 toast `+¥50.00` 并刷新余额。
 - 生图 / 对话发送前在前端按 `/me/pricing` 缓存做"本次大约扣 ¥X.XX"提示 (尤其 4K 单张 0.8 元这种); 不替代后端 hold,只为体验。
 - 设置页**不渲染** "BYOK / API Keys" 入口。
 
@@ -575,19 +590,14 @@ PRICING_NOT_CONFIGURED   503  (生图/对话发现对应档位/模型无 rule)
 
 ### 9.2 管理员侧
 
-新增两个面板 (按现有 `_panels/*.tsx` 模式):
+管理员侧是一个顶级 **计费** tab,内部四个 sub-tab:
 
-- **`BillingPanel.tsx`**
-  - Tab 1 "尺寸定价": 1k / 2k / 4k 三行 + "添加档位"; 内联编辑 `price_rmb` 直接写库。
-  - Tab 2 "对话模型定价": 按模型分组,每行展示 输入价 / 输出价 (µRMB/1K) + USD 来源价 (注释列), "从 OpenAI 价目重算" 按钮。
-  - Tab 3 "全局开关": `billing.enabled` / `usd_to_rmb_rate` / `low_balance_threshold` / `image_size_thresholds`。
-- **`RedemptionPanel.tsx`**
-  - 顶部"批量发码" → 弹窗 `面额 / 数量 / 有效期 / 备注`, 提交后给一份**只看一次**的 CSV 下载。
-  - 列表筛选: 状态 (可兑/已兑完/撤销/过期) / 批次 / 前缀搜索。
-  - 行操作: 撤销 / 复制前缀 / 查看兑换记录。
-  - 顶部"用户钱包调账" → 输 email/uuid → 看余额 + 流水 → 加减额输框 + 必填理由,提交后写 `adjust_admin`。
+- **概览**: 健康检查、余额/hold/兑换/扣费指标、最近审计、首次初始化入口。
+- **定价**: 全局开关、secret 配置/轮换、尺寸定价表、对话模型定价表、OpenAI 价目导入。
+- **兑换码**: 批量发码表单; 创建后展示明文 Modal,支持复制全部/单条、下载 CSV/TXT、5 分钟内重新查看; 列表支持状态过滤、搜索、撤销和兑换记录。
+- **用户钱包**: email/uuid 搜索、选中用户详情、余额/预扣/最近充值扣费、流水 kind 过滤、调账二次确认、账号模式切换。
 
-两个面板加入 `admin/page.tsx` 的 tab 注册表; 走主题/对话标准 (`docs/frontend-theme-dialog-standards.md`),不用硬编码深色。
+原独立“兑换码”顶级 tab 合并进“计费”; 走主题/对话标准 (`docs/frontend-theme-dialog-standards.md`),不用硬编码深色。
 
 ## 10. 集成点 (调用路径)
 
@@ -645,7 +655,7 @@ async def get_wallet(db, user_id, *, lock=False): ...
 
 所有写路径必须在 **同一事务** 内: 先 `SELECT ... FOR UPDATE` 取钱包,再 INSERT 流水,最后 UPDATE 钱包。这保证并发两条请求不会双扣或双发。
 
-`billing.enabled=false` 时所有 `hold/settle/charge` 提前 return,无任何 DB 写入 (灰度安全)。
+`billing.enabled=false` 时所有 `hold/settle/charge` 提前 return,无任何 DB 写入;用户兑换码充值也返回 `BILLING_DISABLED`。这样灰度关闭不会留下“幽灵余额”。
 
 ## 11. 并发与失败
 
@@ -730,7 +740,7 @@ INSERT INTO pricing_rules (id, scope, key, variant, unit, price_micro, enabled, 
 1. Migration 上线 → `billing.enabled=false` (默认), 等于一切照旧。
 2. 后台导入价格 + secret + 测试码; admin 自己兑一张,确认流水正确。
 3. 选一两个内部账号开 `billing.enabled=true` (per-user flag 简化为 settings JSON allow-list `billing.allow_users` 或直接发布到所有用户)。
-4. 监控 1 周: `wallet.overdrawn` 与 `wallet.charge.lost` 应为 0。
+4. 监控 1 周: `wallet_overdrawn_total` 与 `wallet_charge_lost_total` 应为 0,`wallet_hold_active` 不应长期增长。
 5. 全量开启。
 
 ### 13.3 回滚
