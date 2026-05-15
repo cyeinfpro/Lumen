@@ -1172,8 +1172,9 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ]; then
     emit_info migrate_db old_services "kept_running_blue_green"
 else
     log_info "[migrate_db] stop api/worker/tgbot 让出活跃事务,避免 schema lock 死锁"
+    emit_info migrate_db stop_timeout "${LUMEN_UPDATE_STOP_TIMEOUT:-30}"
     # stop 失败 (容器本来没起 / 无该 service 之类) 不阻塞 migrate.
-    lumen_compose_in "${NEW_RELEASE}" stop api worker tgbot >/dev/null 2>&1 || true
+    lumen_compose_in "${NEW_RELEASE}" stop -t "${LUMEN_UPDATE_STOP_TIMEOUT:-30}" api worker tgbot >/dev/null 2>&1 || true
     _stopped_old_services=1
 fi
 

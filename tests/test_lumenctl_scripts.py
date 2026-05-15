@@ -562,6 +562,7 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert 'lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"' in text
     assert "image_tag_drift_redeploy" in text
     assert 'ln -sfn current/VERSION "${ROOT}/VERSION"' in text
+    assert 'stop -t "${LUMEN_UPDATE_STOP_TIMEOUT:-30}" api worker tgbot' in text
     # restart_services: api 必须最后启动（lumen-api 在跑 update.sh 自身的进度
     # SSE，先重 api 会让前端断流）。形态：for _svc in worker web api; do up -d
     # --wait --force-recreate "${_svc}"; done
