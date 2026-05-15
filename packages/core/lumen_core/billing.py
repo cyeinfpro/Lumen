@@ -276,6 +276,16 @@ async def estimate_image_cost(
     return int(unit or 0) * max(1, int(n)), tier
 
 
+async def estimate_image_cost_for_tier(
+    db: AsyncSession,
+    *,
+    tier: str,
+    n: int = 1,
+) -> tuple[int, str]:
+    unit = await pricing_price_micro(db, scope="image_size", key=tier, unit="per_image")
+    return int(unit or 0) * max(1, int(n)), tier
+
+
 async def estimate_completion_cost(
     db: AsyncSession,
     *,

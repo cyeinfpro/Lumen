@@ -25,6 +25,7 @@ import {
   importOpenAiPricing,
   listAdminOrphanHolds,
   releaseAdminOrphanHold,
+  rotateAdminRedemptionSecret,
   runAdminWalletAudit,
   updateAdminPricing,
   updateSystemSettings,
@@ -143,7 +144,6 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
     queryFn: getAdminBillingOverview,
     retry: false,
   });
-  const [bootstrapSecret, setBootstrapSecret] = useState("");
   const [bootstrapRate, setBootstrapRate] = useState("1.0");
   const [auditResult, setAuditResult] = useState<AdminWalletAuditOut | null>(null);
 
@@ -156,12 +156,10 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
   const bootstrapMut = useMutation({
     mutationFn: () =>
       bootstrapAdminBilling({
-        redemption_code_secret: bootstrapSecret,
         enabled: true,
         usd_to_rmb_rate: Number(bootstrapRate) || 1,
       }),
     onSuccess: async () => {
-      setBootstrapSecret("");
       toast.success("计费初始化完成");
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["admin", "billing", "overview"] }),
@@ -268,14 +266,7 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
             <ShieldAlert className="h-4 w-4 text-[var(--color-lumen-amber)]" />
             <p className="type-card-title">首次启用</p>
           </div>
-          <div className="grid gap-3 md:grid-cols-[1fr_120px_auto]">
-            <input
-              value={bootstrapSecret}
-              onChange={(e) => setBootstrapSecret(e.target.value)}
-              type="password"
-              placeholder="兑换码 secret，至少 16 位"
-              className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-            />
+          <div className="grid gap-3 md:grid-cols-[120px_auto]">
             <input
               value={bootstrapRate}
               onChange={(e) => setBootstrapRate(e.target.value)}
@@ -288,7 +279,6 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
               size="md"
               onClick={() => bootstrapMut.mutate()}
               loading={bootstrapMut.isPending}
-              disabled={bootstrapSecret.trim().length < 16}
             >
               初始化计费
             </Button>
@@ -447,7 +437,6 @@ function PricingSubpanel() {
   const [allowNegativeDraft, setAllowNegativeDraft] = useState<string | null>(null);
   const [showEstimateDraft, setShowEstimateDraft] = useState<string | null>(null);
   const [lowBalanceRmbDraft, setLowBalanceRmbDraft] = useState<string | null>(null);
-  const [secretDraft, setSecretDraft] = useState("");
   const [secretConfirmed, setSecretConfirmed] = useState(false);
   const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
   const [bulkModel, setBulkModel] = useState("");
@@ -556,16 +545,14 @@ function PricingSubpanel() {
     onError: (err) => toast.error("保存失败", { description: err instanceof Error ? err.message : undefined }),
   });
 
-  const saveSecretMut = useMutation({
-    mutationFn: () =>
-      updateSystemSettings([{ key: "billing.redemption_code_secret", value: secretDraft.trim() }]),
+  const rotateSecretMut = useMutation({
+    mutationFn: rotateAdminRedemptionSecret,
     onSuccess: async () => {
-      setSecretDraft("");
       setSecretConfirmed(false);
-      toast.success(secretConfigured ? "兑换码 secret 已轮换" : "兑换码 secret 已配置");
+      toast.success(secretConfigured ? "兑换码 secret 已轮换" : "兑换码 secret 已生成");
       await invalidateBilling();
     },
-    onError: (err) => toast.error("保存 secret 失败", { description: err instanceof Error ? err.message : undefined }),
+    onError: (err) => toast.error("更新 secret 失败", { description: err instanceof Error ? err.message : undefined }),
   });
 
   const importMut = useMutation({
@@ -776,24 +763,15 @@ function PricingSubpanel() {
                 </p>
               </div>
             </div>
-            <div className="grid w-full gap-2 md:w-auto md:grid-cols-[260px_auto]">
-              <input
-                value={secretDraft}
-                onChange={(e) => setSecretDraft(e.target.value)}
-                type="password"
-                placeholder="至少 16 位"
-                className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-              />
+            <div className="w-full md:w-auto">
               <Button
                 variant={secretConfigured ? "outline" : "primary"}
                 size="md"
-                disabled={
-                  secretDraft.trim().length < 16 || (secretConfigured && !secretConfirmed)
-                }
-                loading={saveSecretMut.isPending}
-                onClick={() => saveSecretMut.mutate()}
+                disabled={secretConfigured && !secretConfirmed}
+                loading={rotateSecretMut.isPending}
+                onClick={() => rotateSecretMut.mutate()}
               >
-                {secretConfigured ? "轮换" : "保存"}
+                {secretConfigured ? "轮换" : "生成"}
               </Button>
             </div>
           </div>

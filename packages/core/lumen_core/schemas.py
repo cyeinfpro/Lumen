@@ -117,6 +117,10 @@ class ImageParamsIn(BaseModel):
     fixed_size: str | None = None
     style_preset_id: str | None = None
     count: int = Field(default=1, ge=1, le=16)
+    # UI resolution preset used for billing. fixed_size remains the actual
+    # upstream dimensions, whose pixel count can be lower than the nominal tier
+    # for wide/tall aspect ratios.
+    quality: Literal["1k", "2k", "4k"] | None = None
     # Image Fast uses the lighter responses reasoning model for image_generation:
     # gpt-5.4-mini when enabled, gpt-5.4 when disabled.
     fast: bool | None = None
@@ -1117,7 +1121,9 @@ class AdminOrphanHoldOut(BaseModel):
 
 
 class AdminBillingBootstrapIn(BaseModel):
-    redemption_code_secret: str = Field(min_length=16, max_length=2048)
+    redemption_code_secret: str | None = Field(
+        default=None, min_length=16, max_length=2048
+    )
     enabled: bool = True
     usd_to_rmb_rate: float = Field(default=1.0, gt=0, le=100)
     low_balance_warn_rmb: str = Field(default="2")

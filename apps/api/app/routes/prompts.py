@@ -18,6 +18,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core import billing as billing_core
+from lumen_core.models import new_uuid7
+from lumen_core.pricing import UsageTokens, parse_usage
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderDefinition,
@@ -30,6 +33,7 @@ from lumen_core.runtime_settings import get_spec
 
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
+from ..audit import hash_email, write_audit
 from ..ratelimit import RateLimiter
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
@@ -77,6 +81,26 @@ class _EnhanceAttempt:
     model: str
     reasoning_effort: str | None = "low"
     service_tier: str | None = "priority"
+
+
+@dataclass
+class _EnhanceBillingContext:
+    db: AsyncSession
+    user_id: str
+    user_email: str | None
+    request_id: str
+    rate_multiplier_x10000: int
+    cache_aware: bool
+    allow_negative: bool
+
+
+@dataclass
+class _EnhanceUsageCapture:
+    provider_name: str | None = None
+    model: str | None = None
+    service_tier: str = "standard"
+    response_id: str | None = None
+    usage: dict[str, Any] | None = None
 
 
 _ENHANCE_ATTEMPTS = (
@@ -145,6 +169,258 @@ def _build_enhance_body(text: str, attempt: _EnhanceAttempt) -> dict[str, Any]:
     return body
 
 
+async def _setting_raw(db: AsyncSession, key: str) -> str | None:
+    spec = get_spec(key)
+    if spec is None:
+        return None
+    try:
+        return await get_setting(db, spec)
+    except (AssertionError, IndexError):
+        if key.startswith("billing."):
+            return None
+        raise
+
+
+async def _billing_enabled(db: AsyncSession) -> bool:
+    return billing_core.parse_bool_setting(
+        await _setting_raw(db, "billing.enabled"),
+        False,
+    )
+
+
+async def _billing_cache_aware(db: AsyncSession) -> bool:
+    return billing_core.parse_bool_setting(
+        await _setting_raw(db, "billing.cache_aware"),
+        True,
+    )
+
+
+async def _billing_allow_negative(db: AsyncSession) -> bool:
+    return billing_core.parse_bool_setting(
+        await _setting_raw(db, "billing.allow_negative_balance"),
+        False,
+    )
+
+
+def _rate_multiplier_x10000(user: Any) -> int:
+    raw = getattr(user, "billing_rate_multiplier", 1)
+    try:
+        return max(0, int(float(raw if raw is not None else 1) * 10_000))
+    except (TypeError, ValueError):
+        return 10_000
+
+
+async def _prepare_prompt_enhance_billing(
+    db: AsyncSession,
+    user: Any,
+) -> _EnhanceBillingContext | None:
+    if getattr(user, "account_mode", "wallet") != "wallet":
+        return None
+    if not await _billing_enabled(db):
+        return None
+
+    wallet = await billing_core.get_wallet(db, user.id, lock=True)
+    if wallet.balance_micro < 10_000:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": {
+                    "code": "INSUFFICIENT_BALANCE",
+                    "message": "insufficient wallet balance",
+                }
+            },
+        )
+
+    preview = await billing_core.estimate_completion_cost(
+        db,
+        model=_ENHANCE_ATTEMPTS[0].model,
+        tokens_in=1,
+        tokens_out=1,
+        service_tier=_ENHANCE_ATTEMPTS[0].service_tier or "standard",
+    )
+    if preview <= 0:
+        await write_audit(
+            db,
+            event_type="pricing.not_configured",
+            user_id=user.id,
+            actor_email_hash=hash_email(getattr(user, "email", None)),
+            details={
+                "scope": "chat_model",
+                "model": _ENHANCE_ATTEMPTS[0].model,
+                "route": "prompts.enhance.preflight",
+            },
+            autocommit=False,
+        )
+    await db.commit()
+    return _EnhanceBillingContext(
+        db=db,
+        user_id=user.id,
+        user_email=getattr(user, "email", None),
+        request_id=new_uuid7(),
+        rate_multiplier_x10000=_rate_multiplier_x10000(user),
+        cache_aware=await _billing_cache_aware(db),
+        allow_negative=await _billing_allow_negative(db),
+    )
+
+
+def _capture_enhance_usage(
+    capture: _EnhanceUsageCapture | None,
+    event: dict[str, Any],
+    *,
+    provider: ProviderDefinition,
+    attempt: _EnhanceAttempt,
+) -> None:
+    if capture is None:
+        return
+    response = event.get("response")
+    response_obj = response if isinstance(response, dict) else {}
+    usage = event.get("usage")
+    if not isinstance(usage, dict):
+        usage = response_obj.get("usage")
+    if not isinstance(usage, dict):
+        return
+
+    response_id = response_obj.get("id") or event.get("response_id")
+    model = response_obj.get("model") or event.get("model") or attempt.model
+    capture.provider_name = provider.name
+    capture.model = model if isinstance(model, str) and model.strip() else attempt.model
+    capture.service_tier = attempt.service_tier or "standard"
+    capture.response_id = (
+        response_id if isinstance(response_id, str) and response_id.strip() else None
+    )
+    capture.usage = usage
+
+
+def _normalize_usage_for_billing(
+    usage: UsageTokens,
+    *,
+    cache_aware: bool,
+) -> UsageTokens:
+    if cache_aware:
+        return usage.normalized()
+    legacy_cache_input_tokens = usage.cache_read_tokens + usage.cache_creation_tokens
+    return UsageTokens(
+        input_tokens=usage.input_tokens + legacy_cache_input_tokens,
+        output_tokens=usage.output_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
+        image_output_tokens=usage.image_output_tokens,
+    ).normalized()
+
+
+async def _charge_prompt_enhance(
+    billing: _EnhanceBillingContext,
+    capture: _EnhanceUsageCapture,
+) -> None:
+    if not capture.usage:
+        return
+    model = capture.model or _ENHANCE_ATTEMPTS[0].model
+    usage = _normalize_usage_for_billing(
+        parse_usage(model, capture.usage),
+        cache_aware=billing.cache_aware,
+    )
+    if (
+        usage.input_tokens <= 0
+        and usage.output_tokens <= 0
+        and usage.cache_read_tokens <= 0
+        and usage.cache_creation_tokens <= 0
+        and usage.cache_creation_5m_tokens <= 0
+        and usage.cache_creation_1h_tokens <= 0
+        and usage.reasoning_tokens <= 0
+        and usage.image_output_tokens <= 0
+    ):
+        return
+
+    breakdown = await billing_core.estimate_completion_breakdown(
+        billing.db,
+        model=model,
+        tokens=usage,
+        rate_multiplier_x10000=billing.rate_multiplier_x10000,
+        service_tier=capture.service_tier,
+    )
+    cost = breakdown.actual_cost_micro
+    ref_id = capture.response_id or billing.request_id
+    if cost <= 0 and (usage.input_tokens > 0 or usage.output_tokens > 0):
+        await write_audit(
+            billing.db,
+            event_type=(
+                "billing.pricing.missing"
+                if breakdown.pricing_source == "missing"
+                else "pricing.not_configured"
+            ),
+            user_id=billing.user_id,
+            actor_email_hash=hash_email(billing.user_email),
+            details={
+                "scope": "chat_model",
+                "model": model,
+                "prompt_enhance_id": ref_id,
+                "usage": usage.model_dump(),
+                "pricing_source": breakdown.pricing_source,
+            },
+            autocommit=False,
+        )
+    elif breakdown.pricing_source == "fallback":
+        await write_audit(
+            billing.db,
+            event_type="billing.pricing.fallback_used",
+            user_id=billing.user_id,
+            actor_email_hash=hash_email(billing.user_email),
+            details={
+                "model": model,
+                "prompt_enhance_id": ref_id,
+                "usage": usage.model_dump(),
+            },
+            autocommit=False,
+        )
+
+    tx = await billing_core.charge(
+        billing.db,
+        billing.user_id,
+        cost,
+        ref_type="prompt_enhance",
+        ref_id=ref_id,
+        idempotency_key=f"prompt_enhance:{ref_id}",
+        allow_negative=billing.allow_negative,
+        record_zero=True,
+        kind="charge_completion",
+        meta={
+            "route": "prompts.enhance",
+            "model": model,
+            "provider": capture.provider_name,
+            "tokens_in": usage.input_tokens,
+            "tokens_out": usage.output_tokens,
+            "cache_read_tokens": usage.cache_read_tokens,
+            "cache_creation_tokens": usage.cache_creation_tokens,
+            "cache_creation_5m_tokens": usage.cache_creation_5m_tokens,
+            "cache_creation_1h_tokens": usage.cache_creation_1h_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "image_output_tokens": usage.image_output_tokens,
+            "cost_breakdown": breakdown.model_dump(),
+            "rate_multiplier_x10000": billing.rate_multiplier_x10000,
+            "service_tier": capture.service_tier,
+        },
+    )
+    if tx is not None:
+        await write_audit(
+            billing.db,
+            event_type="wallet.charge.completion",
+            user_id=billing.user_id,
+            actor_email_hash=hash_email(billing.user_email),
+            details={
+                "completion_id": ref_id,
+                "prompt_enhance_id": ref_id,
+                "route": "prompts.enhance",
+                "cost_micro": cost,
+                "usage": usage.model_dump(),
+                "cost_breakdown": breakdown.model_dump(),
+                "service_tier": capture.service_tier,
+                "amount_micro": tx.amount_micro,
+                "balance_after": tx.balance_after,
+            },
+            autocommit=False,
+        )
+    await billing.db.commit()
+
+
 def _is_retryable_upstream_error(status_code: int, raw: bytes) -> bool:
     if status_code in _RETRYABLE_HTTP_STATUS or status_code >= 500:
         return True
@@ -209,6 +485,7 @@ async def _stream_enhance_one(
     text: str,
     provider: ProviderDefinition,
     attempt: _EnhanceAttempt,
+    capture: _EnhanceUsageCapture | None = None,
 ) -> AsyncIterator[str]:
     url = _responses_url(provider.base_url)
 
@@ -250,13 +527,18 @@ async def _stream_enhance_one(
                     payloads, buf = _iter_sse_payloads_from_buffer(buf)
                     for payload in payloads:
                         if payload == "[DONE]":
-                            yield "data: [DONE]\n\n"
                             return
                         try:
                             evt = json.loads(payload)
                         except json.JSONDecodeError:
                             continue
 
+                        _capture_enhance_usage(
+                            capture,
+                            evt,
+                            provider=provider,
+                            attempt=attempt,
+                        )
                         evt_type = evt.get("type", "")
                         if evt_type == "response.output_text.delta":
                             delta = evt.get("delta", "")
@@ -273,8 +555,6 @@ async def _stream_enhance_one(
                                     "empty_response",
                                     retryable=True,
                                 )
-                            yield "data: [DONE]\n\n"
-                            return
                         elif evt_type == "response.completed":
                             if not emitted:
                                 completed_text = _extract_response_text(
@@ -288,7 +568,6 @@ async def _stream_enhance_one(
                                         "empty_response",
                                         retryable=True,
                                     )
-                            yield "data: [DONE]\n\n"
                             return
                         elif evt_type in {"response.failed", "response.incomplete", "error"}:
                             raise _EnhanceProviderError(
@@ -297,7 +576,6 @@ async def _stream_enhance_one(
                             )
 
                 if emitted:
-                    yield "data: [DONE]\n\n"
                     return
                 raise _EnhanceProviderError("empty_response", retryable=True)
 
@@ -310,7 +588,9 @@ async def _stream_enhance_one(
 
 
 async def _stream_enhance(
-    text: str, providers: list[ProviderDefinition]
+    text: str,
+    providers: list[ProviderDefinition],
+    billing: _EnhanceBillingContext | None = None,
 ) -> AsyncIterator[str]:
     last_error = "upstream_error"
     total_attempts = len(_ENHANCE_ATTEMPTS) * len(providers)
@@ -319,10 +599,24 @@ async def _stream_enhance(
         for provider in providers:
             seen_attempts += 1
             emitted = False
+            capture = _EnhanceUsageCapture()
             try:
-                async for chunk in _stream_enhance_one(text, provider, attempt):
+                async for chunk in _stream_enhance_one(
+                    text,
+                    provider,
+                    attempt,
+                    capture,
+                ):
                     emitted = True
                     yield chunk
+                if billing is not None and capture.usage:
+                    try:
+                        await _charge_prompt_enhance(billing, capture)
+                    except Exception:
+                        logger.exception("prompt enhance billing charge failed")
+                        yield f"data: {json.dumps({'error': 'billing_failed'})}\n\n"
+                        return
+                yield "data: [DONE]\n\n"
                 return
             except _EnhanceProviderError as exc:
                 last_error = "timeout" if str(exc) == "timeout" else "upstream_error"
@@ -365,9 +659,10 @@ async def enhance_prompt(
         raise HTTPException(status_code=503, detail={
             "error": {"code": "not_configured", "message": "upstream API key not set"},
         })
+    billing = await _prepare_prompt_enhance_billing(db, user)
 
     return StreamingResponse(
-        _stream_enhance(body.text, providers),
+        _stream_enhance(body.text, providers, billing),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

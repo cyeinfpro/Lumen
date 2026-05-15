@@ -80,6 +80,18 @@ def test_bulk_multiplier_converts_to_x10000() -> None:
     )
 
 
+def test_wallet_search_escapes_like_wildcards() -> None:
+    assert billing._escape_like_pattern(r"100%_\path") == r"100\%\_\\path"  # noqa: SLF001
+
+
+def test_generated_redemption_secret_is_strong_and_random() -> None:
+    first = billing._generate_redemption_secret()  # noqa: SLF001
+    second = billing._generate_redemption_secret()  # noqa: SLF001
+
+    assert len(first) >= 48
+    assert first != second
+
+
 class _Db:
     def __init__(self) -> None:
         self.added: list[Any] = []

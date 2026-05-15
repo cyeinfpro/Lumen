@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Copy,
@@ -550,7 +550,7 @@ function UserWalletsSubpanel() {
   const qc = useQueryClient();
   const [walletQText, setWalletQText] = useState("");
   const [walletSearch, setWalletSearch] = useState("");
-  const [walletMode, setWalletMode] = useState<"wallet" | "byok" | "all">("wallet");
+  const [walletMode, setWalletMode] = useState<"wallet" | "byok" | "all">("all");
   const [selectedUserId, setSelectedUserId] = useState("");
   const [adjustAmount, setAdjustAmount] = useState("");
   const [adjustReason, setAdjustReason] = useState("");
@@ -558,10 +558,16 @@ function UserWalletsSubpanel() {
   const [residualMode, setResidualMode] = useState<"freeze" | "zero">("freeze");
   const [txKind, setTxKind] = useState("all");
 
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setWalletSearch(walletQText.trim());
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [walletQText]);
+
   const walletsQ = useQuery({
     queryKey: ["admin", "wallets", walletSearch, walletMode],
-    queryFn: () => listAdminWallets(walletSearch, walletMode, { limit: 50 }),
-    enabled: walletSearch.trim().length > 0,
+    queryFn: () => listAdminWallets(walletSearch, walletMode, { limit: 100 }),
     retry: false,
   });
 
@@ -613,6 +619,7 @@ function UserWalletsSubpanel() {
   });
 
   const selected = detailQ.data;
+  const walletItems = walletsQ.data?.items ?? [];
   const transactions = txQ.data?.items ?? selected?.transactions ?? [];
 
   return (
@@ -631,7 +638,7 @@ function UserWalletsSubpanel() {
         <input
           value={walletQText}
           onChange={(e) => setWalletQText(e.target.value)}
-          placeholder="搜索 email 或 user id"
+          placeholder="邮箱 / 用户 ID"
           className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
         />
         <select
@@ -644,12 +651,17 @@ function UserWalletsSubpanel() {
           <option value="all">all</option>
         </select>
         <Button variant="outline" size="md" type="submit" leftIcon={<Search className="h-3.5 w-3.5" />}>
-          搜索
+          刷新
         </Button>
       </form>
 
       <div className="grid gap-2">
-        {(walletsQ.data?.items ?? []).map((item) => (
+        {walletsQ.isLoading && (
+          <div className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-4 text-center text-sm text-[var(--fg-2)]">
+            加载中
+          </div>
+        )}
+        {walletItems.map((item) => (
           <button
             key={item.user_id}
             type="button"
@@ -678,6 +690,11 @@ function UserWalletsSubpanel() {
             </span>
           </button>
         ))}
+        {!walletsQ.isLoading && walletItems.length === 0 && (
+          <div className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-4 text-center text-sm text-[var(--fg-2)]">
+            没有匹配用户
+          </div>
+        )}
       </div>
 
       {selected && (

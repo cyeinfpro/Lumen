@@ -242,6 +242,11 @@ async def _image_params_from_target(
             size_mode="fixed" if fixed_size else "auto",
             fixed_size=fixed_size,
             count=max(1, min(16, len(gens))),
+            quality=_str_option(
+                upstream_request.get("billing_tier"),
+                {"1k", "2k", "4k"},
+                None,
+            ),
             fast=bool(upstream_request.get("fast", False)),
             render_quality=_str_option(
                 upstream_request.get("render_quality"),

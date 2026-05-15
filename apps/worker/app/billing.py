@@ -54,6 +54,14 @@ async def _thresholds() -> dict[str, int]:
     )
 
 
+def _generation_billing_tier(generation: Generation) -> str | None:
+    upstream_request = getattr(generation, "upstream_request", None)
+    if not isinstance(upstream_request, dict):
+        return None
+    tier = upstream_request.get("billing_tier")
+    return tier if tier in {"1k", "2k", "4k"} else None
+
+
 async def _account_mode(session: AsyncSession, user_id: str) -> str:
     return (
         await session.execute(select(User.account_mode).where(User.id == user_id))
@@ -181,12 +189,22 @@ async def settle_generation(
             replay_source="precheck",
         )
         return
-    cost, tier = await billing_core.estimate_image_cost(
-        session,
-        size_px=max(0, int(width) * int(height)),
-        n=1,
-        thresholds=await _thresholds(),
-    )
+    requested_tier = _generation_billing_tier(generation)
+    if requested_tier is not None:
+        cost, tier = await billing_core.estimate_image_cost_for_tier(
+            session,
+            tier=requested_tier,
+            n=1,
+        )
+        tier_source = "request"
+    else:
+        cost, tier = await billing_core.estimate_image_cost(
+            session,
+            size_px=max(0, int(width) * int(height)),
+            n=1,
+            thresholds=await _thresholds(),
+        )
+        tier_source = "actual_pixels"
     if cost <= 0:
         session.add(
             _audit(
@@ -198,6 +216,7 @@ async def settle_generation(
                     "generation_id": generation.id,
                     "width": width,
                     "height": height,
+                    "tier_source": tier_source,
                 },
             )
         )
@@ -213,6 +232,7 @@ async def settle_generation(
             "tier": tier,
             "width": width,
             "height": height,
+            "tier_source": tier_source,
             "model": generation.model,
         },
     )
@@ -225,6 +245,8 @@ async def settle_generation(
                     "generation_id": generation.id,
                     "amount_micro": tx.amount_micro,
                     "actual_micro": cost,
+                    "tier": tier,
+                    "tier_source": tier_source,
                     "balance_after": tx.balance_after,
                     "hold_after": tx.hold_after,
                 },
