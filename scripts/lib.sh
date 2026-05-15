@@ -2303,7 +2303,10 @@ lumen_health_compose() {
     return 0
 }
 
-# 根据 LUMEN_UPDATE_CHANNEL 解析目标镜像 tag；输出到 stdout，失败回退已有 tag 或 main。
+# 根据 LUMEN_UPDATE_CHANNEL 解析目标镜像 tag；输出到 stdout。
+# 注意：stable/latest 解析失败时不能沿用 current_tag，否则 update-lumen 会因为
+# current_tag == target_tag 走 noop，造成"更新成功但仍是旧版本"。只有 pinned
+# channel 才允许明确保持当前 tag。
 # 用法：
 #   lumen_image_tag_resolve [channel] [env_file]
 # 兼容旧调用：如果第一个参数是存在的文件路径，则视为 env_file，channel 从环境读取。
@@ -2388,11 +2391,10 @@ lumen_image_tag_resolve() {
         return 0
     fi
     if [ -n "${current_tag}" ]; then
-        log_warn "GitHub Releases API 不可达，沿用 ${env_file} 中现有 LUMEN_IMAGE_TAG=${current_tag}。"
-        printf '%s\n' "${current_tag}"
-        return 0
+        log_warn "GitHub Releases API 不可达，不能沿用旧 LUMEN_IMAGE_TAG=${current_tag}；回退 main 并强制拉取 rolling digest。"
+    else
+        log_warn "GitHub Releases API 不可达且 .env 无 LUMEN_IMAGE_TAG，回退 main（§6.4 首发兜底）。"
     fi
-    log_warn "GitHub Releases API 不可达且 .env 无 LUMEN_IMAGE_TAG，回退 main（§6.4 首发兜底）。"
     printf 'main\n'
     return 0
 }
