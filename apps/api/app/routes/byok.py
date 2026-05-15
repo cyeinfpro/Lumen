@@ -50,7 +50,7 @@ from ..byok_service import (
     validate_api_key_with_supplier,
 )
 from ..db import get_db
-from ..deps import AdminUser, CurrentUser, verify_csrf
+from ..deps import AdminUser, CurrentUser, require_account_mode, verify_csrf
 from ..ratelimit import RateLimiter, require_client_ip
 from ..redis_client import get_redis
 from ..runtime_settings import update_settings
@@ -58,7 +58,11 @@ from ..runtime_settings import update_settings
 
 router_admin = APIRouter(prefix="/admin", tags=["admin-byok"])
 router_auth_public = APIRouter(prefix="/auth", tags=["auth-byok"])
-router_me = APIRouter(prefix="/me/api-credentials", tags=["me-api-credentials"])
+router_me = APIRouter(
+    prefix="/me/api-credentials",
+    tags=["me-api-credentials"],
+    dependencies=[Depends(require_account_mode("byok"))],
+)
 
 _VERIFY_IP_LIMITER = RateLimiter(capacity=5, refill_per_sec=5 / 60, always_on=True)
 _VERIFY_SUPPLIER_LIMITER = RateLimiter(capacity=60, refill_per_sec=60 / 60, always_on=True)

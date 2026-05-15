@@ -242,6 +242,60 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         max_value=3600,
     ),
     SettingSpec(
+        key="billing.enabled",
+        description="计费总开关。0=免费路径，1=启用钱包扣费。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BILLING_ENABLED",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="billing.usd_to_rmb_rate",
+        description="OpenAI USD 价折算到 RMB 的倍率。V1 默认 1.0。",
+        sensitive=False,
+        parser=float,
+        env_fallback="BILLING_USD_TO_RMB_RATE",
+        # Why: 0 would silently make all chat calls free (price_micro = 0). Force
+        # admin to use `billing.enabled=0` instead if they want free chat.
+        min_value=0.0001,
+        max_value=100,
+    ),
+    SettingSpec(
+        key="billing.allow_negative_balance",
+        description="是否允许钱包扣到负数。生产应保持 0。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BILLING_ALLOW_NEGATIVE_BALANCE",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="billing.image_size_thresholds",
+        description='像素数到生图价格档位的 JSON 映射，例如 {"1k":1572864,"2k":3686400,"4k":8294400}。',
+        sensitive=False,
+        parser=str,
+        env_fallback="BILLING_IMAGE_SIZE_THRESHOLDS",
+    ),
+    SettingSpec(
+        key="billing.redemption_code_secret",
+        description="兑换码 HMAC 盐。创建/兑换兑换码前必须配置。",
+        sensitive=True,
+        parser=str,
+        env_fallback="BILLING_REDEMPTION_CODE_SECRET",
+    ),
+    SettingSpec(
+        key="billing.low_balance_warn_micro",
+        description="低余额提示阈值，单位 micro-RMB。默认 2000000。",
+        sensitive=False,
+        parser=int,
+        env_fallback="BILLING_LOW_BALANCE_WARN_MICRO",
+        min_value=0,
+        max_value=1_000_000_000_000,
+    ),
+    SettingSpec(
         key="image.primary_route",
         description=(
             "(DEPRECATED) 旧图像主路径；已迁移为 image.channel + image.engine。"
@@ -419,7 +473,6 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         min_value=0,
         max_value=86400,
     ),
-
     # ----- 代理池（提供商 / Telegram 机器人 共用） -----
     SettingSpec(
         key="proxies.test_target",
@@ -457,7 +510,6 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         min_value=5,
         max_value=3600,
     ),
-
     # ----- Lumen 更新 -----
     SettingSpec(
         key="update.use_proxy_pool",
@@ -482,7 +534,6 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         parser=str,
         env_fallback="LUMEN_UPDATE_PROXY_NAME",
     ),
-
     # ----- 模特库同步 -----
     SettingSpec(
         key="model_library.sync_use_proxy_pool",
@@ -507,7 +558,6 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         parser=str,
         env_fallback="APPAREL_MODEL_LIBRARY_SYNC_PROXY_NAME",
     ),
-
     # ----- Telegram 机器人 -----
     SettingSpec(
         key="telegram.bot_enabled",
@@ -577,7 +627,6 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         env_fallback="TELEGRAM_PROXY_STRATEGY",
         allowed_values=("random", "latency", "failover", "round_robin"),
     ),
-
     # ----- 存储后端（/opt/lumendata 挂载来源） -----
     SettingSpec(
         key="storage.backend",
@@ -615,8 +664,7 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
     SettingSpec(
         key="storage.smb.share",
         description=(
-            "SMB 共享名（NAS 上对外公开的那个名字）。例如 Lumen。"
-            "不要带斜杠。"
+            "SMB 共享名（NAS 上对外公开的那个名字）。例如 Lumen。不要带斜杠。"
         ),
         sensitive=False,
         parser=str,
@@ -774,9 +822,7 @@ def validate_providers(raw: str) -> str:
         try:
             normalize_provider_purposes(item.get("purposes"))
         except ValueError as exc:
-            raise ValueError(
-                f"providers[{i}].purposes invalid: {exc}"
-            ) from exc
+            raise ValueError(f"providers[{i}].purposes invalid: {exc}") from exc
     return value
 
 
@@ -796,6 +842,45 @@ def validate_public_base_url(raw: str) -> str:
         raise ValueError("site.public_base_url must not include query or fragment")
     if parts.path not in {"", "/"}:
         raise ValueError("site.public_base_url must be the web root, without a path")
+    return value
+
+
+def validate_image_size_thresholds(raw: str) -> str:
+    """Validate the JSON shape of billing.image_size_thresholds.
+
+    Expect an object whose values are positive integers (pixel counts).
+    """
+    value = raw.strip()
+    if not value:
+        raise ValueError("billing.image_size_thresholds must not be empty")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"billing.image_size_thresholds is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError(
+            "billing.image_size_thresholds must be a non-empty JSON object"
+        )
+    for key, item in parsed.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(
+                "billing.image_size_thresholds keys must be non-empty strings"
+            )
+        if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+            raise ValueError(
+                f"billing.image_size_thresholds[{key!r}] must be a non-negative integer"
+            )
+    return value
+
+
+def validate_redemption_code_secret(raw: str) -> str:
+    value = raw.strip()
+    if len(value) < 16:
+        raise ValueError(
+            "billing.redemption_code_secret must be at least 16 characters"
+        )
     return value
 
 
@@ -827,6 +912,10 @@ def parse_value(spec: SettingSpec, raw: str) -> object:
         return validate_public_base_url(raw)
     if spec.key == "image.job_base_url":
         return validate_image_job_base_url(raw)
+    if spec.key == "billing.image_size_thresholds":
+        return validate_image_size_thresholds(raw)
+    if spec.key == "billing.redemption_code_secret":
+        return validate_redemption_code_secret(raw)
     if spec.parser is str:
         if spec.allowed_values is not None and raw not in spec.allowed_values:
             allowed = ", ".join(spec.allowed_values)
@@ -850,13 +939,9 @@ def parse_value(spec: SettingSpec, raw: str) -> object:
             raise ValueError(f"{spec.key} must be one of: {allowed}")
 
     if spec.min_value is not None and value < spec.min_value:
-        raise ValueError(
-            f"{spec.key}={value} below min ({spec.min_value})"
-        )
+        raise ValueError(f"{spec.key}={value} below min ({spec.min_value})")
     if spec.max_value is not None and value > spec.max_value:
-        raise ValueError(
-            f"{spec.key}={value} above max ({spec.max_value})"
-        )
+        raise ValueError(f"{spec.key}={value} above max ({spec.max_value})")
     return value
 
 
@@ -866,6 +951,8 @@ __all__ = [
     "get_spec",
     "parse_value",
     "validate_image_job_base_url",
+    "validate_image_size_thresholds",
     "validate_providers",
     "validate_public_base_url",
+    "validate_redemption_code_secret",
 ]

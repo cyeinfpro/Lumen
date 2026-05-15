@@ -62,6 +62,7 @@ import {
   type MessageListResponse,
   type PostMessageIn,
 } from "@/lib/apiClient";
+import { errorCodeToFullText } from "@/lib/errors";
 
 type ComposerMode = "image" | "chat";
 
@@ -374,35 +375,12 @@ const isHistoryRequestAbort = isAbortRequest;
 // —————————— 工具函数 ——————————
 
 // 错误码 → 用户友好文案。未命中时返回 null，由调用方决定是否回退到原始 message。
+//
+// 实际映射委托给 `lib/errors.ts` 的 CODE_TITLE / CODE_DESC 表，避免两处文案漂移。
+// 仅一个特例：`prompt_too_long` 走本地 PROMPT_TOO_LONG_MESSAGE 常量（含动态字符上限）。
 export function errorCodeToMessage(code: string): string | null {
-  switch (code) {
-    case "network_error":
-      return "网络异常，请稍后重试";
-    case "upstream_timeout":
-      return "服务繁忙，请稍后重试";
-    case "rate_limited":
-      return "操作过于频繁，请稍后再试";
-    case "unauthorized":
-      return "登录已过期，请重新登录";
-    case "forbidden":
-      return "没有访问权限";
-    case "quota_exceeded":
-      return "上游服务暂时拥挤，请稍后重试";
-    case "upstream_error":
-      return "上游服务异常，请稍后重试";
-    case "prompt_too_long":
-      return PROMPT_TOO_LONG_MESSAGE;
-    case "invalid_request":
-      return "请求内容不合法，请检查输入后重试";
-    case "validation_error":
-      return "输入内容不合法";
-    case "not_found":
-      return "请求的资源不存在";
-    case "client_exception":
-      return "客户端异常，请刷新重试";
-    default:
-      return null;
-  }
+  if (code === "prompt_too_long") return PROMPT_TOO_LONG_MESSAGE;
+  return errorCodeToFullText(code);
 }
 
 export function resolveIntent(

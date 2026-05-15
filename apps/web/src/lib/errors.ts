@@ -49,6 +49,18 @@ const CODE_TITLE: Record<string, string> = {
   email_taken: "该邮箱已被注册",
   invite_invalid: "邀请链接无效或已过期",
   conversation_not_found: "会话不存在或已删除",
+  INSUFFICIENT_BALANCE: "余额不足",
+  WALLET_FROZEN: "钱包已冻结",
+  WALLET_HAS_ACTIVE_HOLDS: "钱包有待结算任务",
+  NO_ACTIVE_API_KEY: "需要重新绑定 API Key",
+  ACCOUNT_MODE_FORBIDDEN: "当前账号模式不可用",
+  ACCOUNT_NOT_WALLET: "目标不是钱包账号",
+  CODE_NOT_FOUND: "兑换码不存在",
+  CODE_REVOKED: "兑换码已撤销",
+  CODE_EXPIRED: "兑换码已过期",
+  CODE_EXHAUSTED: "兑换码已兑完",
+  CODE_ALREADY_USED: "兑换码已使用",
+  PRICING_NOT_CONFIGURED: "价格未配置",
 };
 
 const CODE_DESC: Record<string, string> = {
@@ -65,6 +77,18 @@ const CODE_DESC: Record<string, string> = {
   validation_error: "请检查输入内容是否合规",
   not_found: "目标可能已被删除或不存在",
   client_exception: "客户端发生异常，刷新后再试",
+  INSUFFICIENT_BALANCE: "请先进入钱包兑换或联系管理员充值",
+  WALLET_FROZEN: "请充值或联系管理员处理后再继续使用",
+  WALLET_HAS_ACTIVE_HOLDS: "请先取消或等待正在进行的任务结束，再切换账号模式",
+  NO_ACTIVE_API_KEY: "请到设置里的 API Keys 重新绑定一张可用的密钥",
+  ACCOUNT_MODE_FORBIDDEN: "钱包账号和 BYOK 账号入口互斥，请切换到对应入口",
+  ACCOUNT_NOT_WALLET: "BYOK 账号不能做钱包调账",
+  CODE_NOT_FOUND: "请检查兑换码是否输入完整",
+  CODE_REVOKED: "这张兑换码已被管理员撤销",
+  CODE_EXPIRED: "这张兑换码已超过有效期",
+  CODE_EXHAUSTED: "这张兑换码的可用次数已经用完",
+  CODE_ALREADY_USED: "该账号已经兑换过这张码",
+  PRICING_NOT_CONFIGURED: "管理员需要先补齐对应模型或尺寸档位的价格",
 };
 
 const CODE_ACTION: Record<string, ErrorAction> = {
@@ -81,6 +105,18 @@ const CODE_ACTION: Record<string, ErrorAction> = {
   validation_error: "back",
   not_found: "back",
   client_exception: "refresh",
+  INSUFFICIENT_BALANCE: "back",
+  WALLET_FROZEN: "back",
+  WALLET_HAS_ACTIVE_HOLDS: "back",
+  NO_ACTIVE_API_KEY: "back",
+  ACCOUNT_MODE_FORBIDDEN: "back",
+  ACCOUNT_NOT_WALLET: "back",
+  CODE_NOT_FOUND: "back",
+  CODE_REVOKED: "back",
+  CODE_EXPIRED: "back",
+  CODE_EXHAUSTED: "back",
+  CODE_ALREADY_USED: "back",
+  PRICING_NOT_CONFIGURED: "back",
 };
 
 const ACTION_LABEL: Record<ErrorAction, string> = {
@@ -108,6 +144,17 @@ function statusToCode(status: number): string | null {
 /** 单点查询：错误码 → 用户友好文案。映射缺失时返回 null。 */
 export function errorCodeToMessage(code: string): string | null {
   return CODE_TITLE[code] ?? null;
+}
+
+/**
+ * 错误码 → 单行可直接展示的完整文案（title + description）。映射缺失时返回 null，
+ * 让调用方回退到原始 message。useChatStore.composerError 之类的单行展示场景用它。
+ */
+export function errorCodeToFullText(code: string): string | null {
+  const title = CODE_TITLE[code];
+  if (!title) return null;
+  const desc = CODE_DESC[code];
+  return desc ? `${title}：${desc}` : title;
 }
 
 /** 单点查询：错误码 → 推荐 action 标签。 */

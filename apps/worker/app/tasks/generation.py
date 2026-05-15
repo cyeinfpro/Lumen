@@ -42,6 +42,7 @@ from ..background_removal import (
     TransparentPipelineFailure,
     process_transparent_request,
 )
+from .. import billing as worker_billing
 
 from lumen_core.constants import (
     DEFAULT_CHAT_MODEL,
@@ -2187,6 +2188,14 @@ async def _mark_generation_attempt_failed(
             msg = await session.get(Message, message_id)
             if msg is not None:
                 msg.status = MessageStatus.FAILED
+            if not retriable:
+                gen = await session.get(Generation, task_id)
+                if gen is not None:
+                    await worker_billing.release_generation(
+                        session,
+                        gen,
+                        reason=error_code,
+                    )
             await session.commit()
     except _StaleGenerationAttempt as stale_exc:
         logger.info(
@@ -3010,6 +3019,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 MessageStatus.FAILED,
             ):
                 msg_deleted.status = MessageStatus.FAILED
+            await worker_billing.release_generation(
+                session,
+                gen,
+                reason=EC.CANCELLED.value,
+            )
             await session.commit()
             await publish_event(
                 redis,
@@ -3045,6 +3059,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             msg_invalid = await session.get(Message, message_id)
             if msg_invalid is not None:
                 msg_invalid.status = MessageStatus.FAILED
+            await worker_billing.release_generation(
+                session,
+                gen,
+                reason=err_code,
+            )
             await session.commit()
             await publish_event(
                 redis,
@@ -3089,6 +3108,12 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             msg_existing = await session.get(Message, message_id)
             if msg_existing is not None and msg_existing.status != MessageStatus.SUCCEEDED:
                 msg_existing.status = MessageStatus.SUCCEEDED
+            await worker_billing.settle_generation(
+                session,
+                gen,
+                width=existing_img.width,
+                height=existing_img.height,
+            )
             await session.commit()
             channel_short = task_channel(task_id)
             await publish_event(
@@ -4116,6 +4141,12 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         exc,
                     )
 
+                await worker_billing.settle_generation(
+                    session,
+                    gen,
+                    width=width,
+                    height=height,
+                )
                 await session.commit()
 
         # --- publish succeeded ---
@@ -4265,6 +4296,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     MessageStatus.FAILED,
                 ):
                     msg_c.status = MessageStatus.FAILED
+                gen_c = await session.get(Generation, task_id)
+                if gen_c is not None:
+                    await worker_billing.release_generation(
+                        session,
+                        gen_c,
+                        reason="cancelled",
+                    )
                 await session.commit()
         except _StaleGenerationAttempt as stale_exc:
             logger.info(
@@ -4500,6 +4538,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 msg = await session.get(Message, message_id)
                 if msg is not None:
                     msg.status = MessageStatus.FAILED
+                gen_failed = await session.get(Generation, task_id)
+                if gen_failed is not None:
+                    await worker_billing.release_generation(
+                        session,
+                        gen_failed,
+                        reason=err_code,
+                    )
                 await session.commit()
         except _StaleGenerationAttempt as stale_exc:
             logger.info(

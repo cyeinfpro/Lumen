@@ -11,7 +11,9 @@ from typing import Any
 
 from sqlalchemy import (
     ARRAY,
+    BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum as SAEnum,
     ForeignKey,
@@ -105,6 +107,9 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     onboarding_seen: Mapped[int] = mapped_column(
         Integer, default=0, nullable=False, server_default="0"
     )
+    account_mode: Mapped[str] = mapped_column(
+        String(16), default="wallet", nullable=False, server_default="wallet"
+    )
     confirmation_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default=text("false")
     )
@@ -112,6 +117,11 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     # requires alembic migration: create index ix_users_alive on users(deleted_at)
     __table_args__ = (
         Index("ix_users_alive", "deleted_at"),
+        Index("ix_users_account_mode", "account_mode"),
+        CheckConstraint(
+            "account_mode IN ('wallet', 'byok')",
+            name="ck_users_account_mode",
+        ),
     )
 
     # review #23：BYOK 凭证反向关系。lazy="raise" 强制显式 selectinload，
@@ -951,6 +961,151 @@ class OutboxEvent(Base, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+# ---------- Billing / Wallet ----------
+
+class UserWallet(Base, TimestampMixin):
+    __tablename__ = "user_wallets"
+    # Why: no `balance_micro >= 0` CHECK — graylist overdraw paths (admin opens
+    # `billing.allow_negative_balance=1`) legitimately need negative balances.
+    # The application-side `allow_negative=False` default is the gate.
+    __table_args__ = (
+        CheckConstraint("hold_micro >= 0", name="ck_user_wallet_hold_nonnegative"),
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    balance_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    hold_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    lifetime_topup_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    lifetime_spend_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+
+
+class WalletTransaction(Base):
+    __tablename__ = "wallet_transactions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_wallet_tx_idemp"),
+        Index("ix_wallet_tx_user_created", "user_id", "created_at"),
+        Index("ix_wallet_tx_ref", "ref_type", "ref_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    balance_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    hold_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ref_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ref_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_by_admin: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class PricingRule(Base, TimestampMixin):
+    __tablename__ = "pricing_rules"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope",
+            "key",
+            "variant",
+            "unit",
+            name="uq_pricing_scope_key_variant_unit",
+        ),
+        CheckConstraint("price_micro >= 0", name="ck_pricing_price_nonnegative"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    key: Mapped[str] = mapped_column(String(64), nullable=False)
+    variant: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="default", server_default="default"
+    )
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    price_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default=text("true")
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RedemptionCode(Base, TimestampMixin):
+    __tablename__ = "redemption_codes"
+    __table_args__ = (
+        UniqueConstraint("code_hash", name="uq_redemption_codes_code_hash"),
+        CheckConstraint("amount_micro > 0", name="ck_redemption_amount_positive"),
+        CheckConstraint("max_redemptions >= 1", name="ck_redemption_max_positive"),
+        Index("ix_redemption_codes_batch", "batch_id"),
+        Index("ix_redemption_codes_status", "revoked_at", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_prefix: Mapped[str] = mapped_column(String(8), nullable=False)
+    amount_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    max_redemptions: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    redeemed_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_by: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+
+
+class RedemptionCodeUsage(Base):
+    __tablename__ = "redemption_codes_usage"
+    __table_args__ = (
+        UniqueConstraint("code_id", "user_id", name="uq_redeem_code_user"),
+        Index("ix_redeem_user_time", "user_id", "redeemed_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    code_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("redemption_codes.id", ondelete="RESTRICT"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    amount_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    wallet_tx_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("wallet_transactions.id"), nullable=False
+    )
+    redeemed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 # ---------- Invite Links（V1.0 收尾） ----------

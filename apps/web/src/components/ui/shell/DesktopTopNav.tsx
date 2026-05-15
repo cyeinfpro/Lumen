@@ -6,12 +6,14 @@
 // 模特库 /library 不再是顶级入口，由项目页内入口跳入；停留在 /library 时高亮「项目」。
 
 import { motion } from "framer-motion";
+import { useQuery } from "@tanstack/react-query";
 import { Menu } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { IconButton } from "@/components/ui/primitives";
+import { getMe, getMyWallet, type AuthUser } from "@/lib/apiClient";
 import { SPRING } from "@/lib/motion";
 
 export type DesktopNavTab = "studio" | "projects" | "stream" | "me";
@@ -141,8 +143,47 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
 
       {/* Right: slot */}
       <div className="flex items-center justify-end gap-1.5 text-sm text-[var(--fg-2)] md:gap-2 min-w-0">
+        <WalletBalancePill />
         {right}
       </div>
     </header>
+  );
+}
+
+function WalletBalancePill() {
+  const meQuery = useQuery<AuthUser>({
+    queryKey: ["me"],
+    queryFn: getMe,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const enabled = meQuery.data?.account_mode === "wallet";
+  const walletQuery = useQuery({
+    queryKey: ["me", "wallet"],
+    queryFn: getMyWallet,
+    enabled,
+    retry: false,
+    staleTime: 30_000,
+  });
+  const wallet = walletQuery.data;
+  if (!enabled || !wallet?.balance) return null;
+  const low =
+    wallet.low_balance_threshold?.micro != null &&
+    wallet.balance.micro < wallet.low_balance_threshold.micro;
+  const balanceText = Number(wallet.balance.rmb).toFixed(2);
+  return (
+    <Link
+      href="/me/wallet"
+      aria-label={low ? `钱包余额低 ¥${balanceText}` : `钱包余额 ¥${balanceText}`}
+      title="钱包"
+      className={[
+        "hidden sm:inline-flex items-center rounded-full border px-2.5 py-1 text-[12px] font-medium tabular-nums",
+        low
+          ? "border-danger-border bg-danger-soft text-[var(--danger-fg)]"
+          : "border-[var(--border)] bg-white/5 text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+      ].join(" ")}
+    >
+      ¥{balanceText}
+    </Link>
   );
 }

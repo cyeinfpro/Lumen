@@ -17,6 +17,7 @@ import { Button, Card, ConfirmDialog } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import {
   ApiError,
+  getMe,
   listBindableApiSuppliers,
   listMyApiCredentials,
   putMyApiCredential,
@@ -39,15 +40,19 @@ const BYOK_ERROR_TEXT: Record<string, string> = {
 
 export default function ApiKeySettingsPage() {
   const qc = useQueryClient();
+  const meQ = useQuery({ queryKey: ["me"], queryFn: getMe, retry: false });
+  const isByok = meQ.data?.account_mode === "byok";
   const credentialsQ = useQuery({
     queryKey: ["me", "api-credentials"],
     queryFn: listMyApiCredentials,
     retry: false,
+    enabled: isByok,
   });
   const suppliersQ = useQuery({
     queryKey: ["me", "api-credentials", "suppliers"],
     queryFn: listBindableApiSuppliers,
     retry: false,
+    enabled: isByok,
   });
   const credentials = credentialsQ.data?.items ?? [];
   const active = credentials.find((item) => item.status === "active") ?? credentials[0];
@@ -115,6 +120,25 @@ export default function ApiKeySettingsPage() {
     revokeMut.mutate(active.id);
     setRevokeOpen(false);
   };
+
+  if (meQ.data && !isByok) {
+    return (
+      <SettingsShell title="API Key" subtitle="Wallet" maxWidth="max-w-3xl">
+        <Card variant="subtle" padding="lg" className="space-y-3">
+          <p className="type-card-title">钱包账号</p>
+          <p className="type-body">
+            当前账号使用平台供应商和钱包扣费，不支持绑定个人 API Key。
+          </p>
+          <Link
+            href="/me/wallet"
+            className="inline-flex h-8 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-white/4"
+          >
+            查看钱包
+          </Link>
+        </Card>
+      </SettingsShell>
+    );
+  }
 
   return (
     <SettingsShell title="API Key" subtitle="BYOK" maxWidth="max-w-3xl">

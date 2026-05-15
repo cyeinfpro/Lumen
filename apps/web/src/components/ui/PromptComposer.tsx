@@ -7,10 +7,13 @@
 // - 发送动作由父组件 onSubmit 触发
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import Link from "next/link";
 import { Globe2, Paperclip, Send, Sparkles, Loader2, Undo2, X } from "lucide-react";
 import { useChatStore } from "@/store/useChatStore";
-import { enhancePrompt } from "@/lib/apiClient";
+import { enhancePrompt, getMe, getPricing } from "@/lib/apiClient";
+import { qualityToFixedSize } from "@/lib/sizing";
 import { cn } from "@/lib/utils";
 import { copy } from "@/lib/copy";
 import { logError } from "@/lib/logger";
@@ -43,12 +46,14 @@ function parseSlashCommand(text: string): {
 }
 
 const LONG_TEXT_THRESHOLD = 200;
+const DEFAULT_IMAGE_SIZE_THRESHOLDS = { "1k": 1_572_864, "2k": 3_686_400, "4k": 8_294_400 } as const;
 
 export function PromptComposer({ onSubmit }: PromptComposerProps) {
   const text = useChatStore((s) => s.composer.text);
   const setText = useChatStore((s) => s.setText);
   const setForceIntent = useChatStore((s) => s.setForceIntent);
   const mode = useChatStore((s) => s.composer.mode);
+  const imageParams = useChatStore((s) => s.composer.params);
   const attachments = useChatStore((s) => s.composer.attachments);
   const addAttachment = useChatStore((s) => s.addAttachment);
   const uploadAttachment = useChatStore((s) => s.uploadAttachment);
@@ -315,6 +320,53 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
   const barActive = mode === "image";
   const charCount = text.length;
   const showCount = charCount > LONG_TEXT_THRESHOLD;
+  const meQ = useQuery({
+    queryKey: ["me"],
+    queryFn: getMe,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const isWalletAccount = meQ.data?.account_mode === "wallet";
+  const pricingQ = useQuery({
+    queryKey: ["me", "pricing"],
+    queryFn: getPricing,
+    enabled: isWalletAccount,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const estimatedCharge = useMemo<string | null>(() => {
+    if (!isWalletAccount) return null;
+    if (mode === "image") {
+      const q = imageParams.quality ?? "2k";
+      const resolved = qualityToFixedSize(q, imageParams.aspect_ratio);
+      const match = resolved.fixed_size?.match(/^(\d+)x(\d+)$/);
+      const pixels = match ? Number(match[1]) * Number(match[2]) : DEFAULT_IMAGE_SIZE_THRESHOLDS["1k"];
+      const thresholds = pricingQ.data?.image_size_thresholds ?? DEFAULT_IMAGE_SIZE_THRESHOLDS;
+      let tier = "1k";
+      for (const [name, lower] of Object.entries(thresholds).sort((a, b) => a[1] - b[1])) {
+        if (pixels >= lower) tier = name;
+      }
+      const rule = pricingQ.data?.items.find(
+        (item) => item.scope === "image_size" && item.key === tier && item.unit === "per_image",
+      );
+      // Don't render "价格未配置" while we're still fetching the price table;
+      // only show the warning once the request has settled with no row.
+      if (!pricingQ.data) return null;
+      const count = Math.max(1, Math.min(16, imageParams.count ?? 1));
+      const total = Number(rule?.price.rmb ?? 0) * count;
+      return rule ? `预计扣 ¥${total.toFixed(2)}` : "价格未配置";
+    }
+    return "按实际 token 计费";
+  }, [
+    isWalletAccount,
+    mode,
+    imageParams.quality,
+    imageParams.aspect_ratio,
+    imageParams.count,
+    pricingQ.data,
+  ]);
+  const showApiKeyAction =
+    composerError?.includes("API Key") || composerError?.includes("NO_ACTIVE_API_KEY");
 
   return (
     <>
@@ -417,6 +469,14 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
             >
               <div className="mx-4 mb-1 flex items-start gap-2 px-2.5 py-1.5 text-[11px] rounded-[var(--radius-card)] bg-danger-soft border border-danger-border text-danger">
                 <span className="flex-1 break-words">{composerError}</span>
+                {showApiKeyAction && (
+                  <Link
+                    href="/settings/api-key"
+                    className="shrink-0 rounded-[var(--radius-control)] border border-danger-border px-2 py-0.5 text-[11px] text-danger hover:bg-danger-soft"
+                  >
+                    API Keys
+                  </Link>
+                )}
                 <IconButton
                   variant="ghost"
                   size="sm"
@@ -550,6 +610,11 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           {mode !== "image" && <ReasoningEffortPicker />}
           {mode !== "image" && <WebSearchToggle />}
           <FastToggle />
+          {estimatedCharge && (
+            <span className="shrink-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/5 px-2.5 py-1 text-[11px] tabular-nums text-[var(--fg-2)]">
+              {estimatedCharge}
+            </span>
+          )}
 
           {/* 右侧发送区（弹性填充） */}
           <div className="min-w-3 flex-1" />

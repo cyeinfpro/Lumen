@@ -252,3 +252,23 @@ async def require_admin(user: CurrentUser) -> User:
 
 
 AdminUser = Annotated[User, Depends(require_admin)]
+
+
+def require_account_mode(mode: str):
+    if mode not in ("wallet", "byok"):
+        raise ValueError(f"unsupported account_mode {mode!r}")
+
+    async def _require(user: CurrentUser) -> User:
+        if getattr(user, "account_mode", "wallet") != mode:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": {
+                        "code": "ACCOUNT_MODE_FORBIDDEN",
+                        "message": "account mode does not allow this action",
+                    }
+                },
+            )
+        return user
+
+    return _require

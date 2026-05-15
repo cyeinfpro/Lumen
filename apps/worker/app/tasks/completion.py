@@ -27,6 +27,7 @@ import httpx
 from PIL import Image as PILImage
 from sqlalchemy import and_, desc, or_, select, text as sa_text, update
 
+from .. import billing as worker_billing
 from lumen_core.constants import (
     DEFAULT_CHAT_INSTRUCTIONS,
     DEFAULT_CHAT_MODEL,
@@ -2915,6 +2916,11 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         )
                 msg.content = content
                 msg.status = MessageStatus.SUCCEEDED
+            comp_for_billing = await session.get(Completion, task_id)
+            if comp_for_billing is not None:
+                comp_for_billing.tokens_in = tokens_in
+                comp_for_billing.tokens_out = tokens_out
+                await worker_billing.charge_completion(session, comp_for_billing)
             await session.commit()
 
         # publish_event 是 SSE 推送+回放写入；万一 lease 已丢，就别再以"我"的身份
@@ -3148,6 +3154,24 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     content["tool_calls"] = tool_calls
                     msg.content = content
                 msg.status = MessageStatus.FAILED
+            # Why: partial-stream failures (has_partial=True) already consumed
+            # upstream tokens; charge what the user actually used so they
+            # don't get a free response on intermittent network errors.
+            # tokens_in/out default to 0 and stay 0 if no usage frame ever
+            # arrived — `charge` short-circuits on amount<=0.
+            if has_partial and (tokens_in > 0 or tokens_out > 0):
+                comp_partial = await session.get(Completion, task_id)
+                if comp_partial is not None:
+                    comp_partial.tokens_in = tokens_in
+                    comp_partial.tokens_out = tokens_out
+                    try:
+                        await worker_billing.charge_completion(
+                            session, comp_partial
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "partial-stream charge failed comp=%s", task_id
+                        )
             await session.commit()
 
         await publish_event(

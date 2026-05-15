@@ -54,6 +54,10 @@ class FakeResult:
 
 class FakeMessage:
     status = None
+    # New release-on-failure path reads .user_id and .id; provide neutral stubs
+    # so the fake session.get() can stand in for either a Message or Generation.
+    user_id = "user-1"
+    id = "fake-1"
 
 
 class FakeScalarResult:
@@ -564,7 +568,12 @@ async def test_mark_generation_attempt_failed_publishes_failed_event(
         async def execute(self, _statement):
             return FakeResult(1)
 
-        async def get(self, _model, _message_id: str):
+        async def get(self, model, _message_id: str):
+            # Return the FakeMessage for Message lookups; return None for
+            # Generation lookups so the new release-on-failure path skips
+            # cleanly (no real Generation row to release).
+            if getattr(model, "__name__", "") == "Generation":
+                return None
             return message
 
         async def commit(self) -> None:

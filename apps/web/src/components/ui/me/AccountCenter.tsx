@@ -6,6 +6,7 @@ import { useState } from "react";
 import {
   BarChart3,
   Brain,
+  CreditCard,
   FileText,
   KeyRound,
   LogOut,
@@ -50,6 +51,7 @@ export function AccountCenter() {
     staleTime: 60_000,
   });
   const isAdmin = meQuery.data?.role === "admin";
+  const accountMode = meQuery.data?.account_mode ?? "wallet";
 
   const promptsQuery = useSystemPromptsQuery();
   const promptCount = promptsQuery.data?.items?.length ?? 0;
@@ -101,12 +103,21 @@ export function AccountCenter() {
           label="隐私 & 数据"
           grouped
         />
-        <AccountRow
-          href="/settings/api-key"
-          icon={<KeyRound className="w-4 h-4" />}
-          label="API Key"
-          grouped
-        />
+        {accountMode === "wallet" ? (
+          <AccountRow
+            href="/me/wallet"
+            icon={<CreditCard className="w-4 h-4" />}
+            label="钱包"
+            grouped
+          />
+        ) : (
+          <AccountRow
+            href="/settings/api-key"
+            icon={<KeyRound className="w-4 h-4" />}
+            label="API Key"
+            grouped
+          />
+        )}
         <AccountRow
           href="/settings/memory"
           icon={<Brain className="w-4 h-4" />}

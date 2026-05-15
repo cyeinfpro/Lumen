@@ -78,8 +78,10 @@ from lumen_core.schemas import (
     PostMessageOut,
 )
 from lumen_core.sizing import ResolvedSize, resolve_size
+from lumen_core import billing as billing_core
 
 from ..arq_pool import get_arq_pool
+from ..audit import hash_email, write_audit
 # Why: read_byok_settings is re-exported here so existing tests that
 # monkeypatch `messages.read_byok_settings` keep working. Production code on
 # this path uses read_byok_settings_cached (TTL ~30 s) — see review #20.
@@ -167,6 +169,59 @@ def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
     if extra:
         err["details"] = extra
     return HTTPException(status_code=http, detail={"error": err})
+
+
+async def _billing_setting_raw(db: AsyncSession, key: str) -> str | None:
+    spec = get_spec(key)
+    if spec is None:
+        return None
+    try:
+        return await get_setting(db, spec)
+    except (AssertionError, IndexError):
+        if key.startswith("billing."):
+            return None
+        raise
+
+
+async def _billing_enabled(db: AsyncSession) -> bool:
+    return billing_core.parse_bool_setting(
+        await _billing_setting_raw(db, "billing.enabled"),
+        False,
+    )
+
+
+async def _audit_billing_gap(
+    db: AsyncSession,
+    *,
+    event_type: str,
+    user: User,
+    details: dict[str, Any],
+) -> None:
+    await write_audit(
+        db,
+        event_type=event_type,
+        user_id=user.id,
+        actor_email_hash=hash_email(user.email),
+        details=details,
+        autocommit=False,
+    )
+
+
+async def _billing_allow_negative(db: AsyncSession) -> bool:
+    return billing_core.parse_bool_setting(
+        await _billing_setting_raw(db, "billing.allow_negative_balance"),
+        False,
+    )
+
+
+async def _billing_image_thresholds(db: AsyncSession) -> dict[str, int]:
+    return billing_core.parse_thresholds(
+        await _billing_setting_raw(db, "billing.image_size_thresholds")
+    )
+
+
+def _billing_http_error(exc: billing_core.BillingError) -> HTTPException:
+    return _http(exc.code, exc.message, exc.status_code)
 
 
 def _resolve_image_render_quality(
@@ -779,9 +834,9 @@ async def _resolve_task_credential_pin(
     db: AsyncSession,
     user_id: str,
     required_purpose: str,
+    account_mode: str,
 ) -> _TaskCredentialPin | None:
-    byok_settings = await read_byok_settings_cached(db)
-    if not byok_settings.mode_enabled:
+    if account_mode != "byok":
         return None
 
     active_row = (
@@ -806,21 +861,17 @@ async def _resolve_task_credential_pin(
             if rate_limited_until.tzinfo is None:
                 rate_limited_until = rate_limited_until.replace(tzinfo=timezone.utc)
             if rate_limited_until > datetime.now(timezone.utc):
-                if byok_settings.fallback_to_admin_provider:
-                    return None
                 raise _http(
-                    "user_api_key_required",
+                    "NO_ACTIVE_API_KEY",
                     "your API key is currently rate limited",
-                    409,
+                    412,
                 )
         if required_purpose not in set(supplier.purposes or []):
-            if not byok_settings.fallback_to_admin_provider:
-                raise _http(
-                    "user_api_key_required",
-                    "your current API Key does not support this task type",
-                    409,
-                )
-            return None
+            raise _http(
+                "NO_ACTIVE_API_KEY",
+                "your current API Key does not support this task type",
+                412,
+            )
         return _TaskCredentialPin(
             credential_id=active.id,
             supplier_id=active.supplier_id,
@@ -831,22 +882,10 @@ async def _resolve_task_credential_pin(
             default_image_model=getattr(supplier, "default_image_model", None),
         )
 
-    any_credential = (
-        await db.execute(
-            select(UserApiCredential.id)
-            .where(UserApiCredential.user_id == user_id)
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if any_credential is None:
-        return None
-
-    if byok_settings.fallback_to_admin_provider:
-        return None
     raise _http(
-        "user_api_key_required",
-        "please update your API key before starting new tasks",
-        409,
+        "NO_ACTIVE_API_KEY",
+        "please upload an active API key before starting new tasks",
+        412,
     )
 
 
@@ -854,6 +893,7 @@ async def _create_assistant_task(
     *,
     db: AsyncSession,
     user_id: str,
+    account_mode: str,
     conv: Conversation,
     user_msg: Message,
     intent: Intent,
@@ -910,6 +950,7 @@ async def _create_assistant_task(
         db,
         user_id,
         "image" if produces_image else "chat",
+        account_mode,
     )
 
     if intent in (Intent.CHAT, Intent.VISION_QA):
@@ -964,6 +1005,25 @@ async def _create_assistant_task(
             prompt=prompt_full,
             default_output_format=default_image_output_format,
         )
+        billing_enabled = account_mode == "wallet" and await _billing_enabled(db)
+        billing_thresholds = (
+            await _billing_image_thresholds(db) if billing_enabled else {}
+        )
+        size_px = (
+            (resolved_size.width or 0) * (resolved_size.height or 0)
+            if resolved_size.width and resolved_size.height
+            else billing_core.DEFAULT_IMAGE_SIZE_THRESHOLDS["1k"]
+        )
+        estimated_micro, estimated_tier = (
+            await billing_core.estimate_image_cost(
+                db,
+                size_px=size_px,
+                n=1,
+                thresholds=billing_thresholds or None,
+            )
+            if billing_enabled
+            else (0, "free")
+        )
         if credential_pin:
             # Why: image tasks must use the supplier's image model when
             # available — chat models (e.g. gpt-5.4) cannot generate images
@@ -1006,6 +1066,38 @@ async def _create_assistant_task(
             )
             db.add(gen)
             await db.flush()
+            if billing_enabled and estimated_micro > 0:
+                try:
+                    tx = await billing_core.hold(
+                        db,
+                        user_id,
+                        estimated_micro,
+                        ref_type="generation",
+                        ref_id=gen.id,
+                        idempotency_key=f"hold:{gen.id}",
+                        allow_negative=await _billing_allow_negative(db),
+                        meta={
+                            "tier": estimated_tier,
+                            "size_requested": resolved_size.size,
+                            "pixels_estimated": size_px,
+                        },
+                    )
+                except billing_core.BillingError as exc:
+                    raise _billing_http_error(exc)
+                if tx is not None:
+                    await write_audit(
+                        db,
+                        event_type="wallet.hold.image",
+                        user_id=user_id,
+                        details={
+                            "generation_id": gen.id,
+                            "amount_micro": estimated_micro,
+                            "tier": estimated_tier,
+                            "balance_after": tx.balance_after,
+                            "hold_after": tx.hold_after,
+                        },
+                        autocommit=False,
+                    )
             generation_ids.append(gen.id)
             # Stagger 多张图入队：i=0 立即跑，i>=1 延迟 i*STAGGER 秒（cap CAP）。
             # 实测同 prompt 同账号同时打 ChatGPT codex 会触发 OpenAI 内部 race（一败一成稳定模式）；
@@ -1472,6 +1564,35 @@ async def submit_user_message(
             conv=conv,
             explicit_prompt=chat_params.system_prompt,
         )
+        if getattr(user, "account_mode", "wallet") == "wallet" and await _billing_enabled(db):
+            # Why: lock=True so concurrent chat submissions from the same user
+            # serialize on the wallet row. Without the lock, N parallel chats
+            # all see the same pre-charge balance and overdraw together; design
+            # §6.3.2 tolerates a single transient overdraw but not N.
+            wallet = await billing_core.get_wallet(db, user.id, lock=True)
+            if wallet.balance_micro < 10_000:
+                raise _http(
+                    "INSUFFICIENT_BALANCE",
+                    "insufficient wallet balance",
+                    402,
+                )
+            cost_preview = await billing_core.estimate_completion_cost(
+                db,
+                model=DEFAULT_CHAT_MODEL,
+                tokens_in=1,
+                tokens_out=1,
+            )
+            if cost_preview <= 0:
+                await _audit_billing_gap(
+                    db,
+                    event_type="pricing.not_configured",
+                    user=user,
+                    details={
+                        "scope": "chat_model",
+                        "model": DEFAULT_CHAT_MODEL,
+                        "route": "messages.preflight",
+                    },
+                )
     default_image_output_format = _DEFAULT_IMAGE_OUTPUT_FORMAT
     if intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE):
         spec = get_spec("image.output_format")
@@ -1501,6 +1622,7 @@ async def submit_user_message(
     result = await _create_assistant_task(
         db=db,
         user_id=user.id,
+        account_mode=getattr(user, "account_mode", "wallet"),
         conv=conv,
         user_msg=user_msg,
         intent=intent,
@@ -1677,6 +1799,7 @@ async def create_silent_generation(
     result = await _create_assistant_task(
         db=db,
         user_id=user.id,
+        account_mode=getattr(user, "account_mode", "wallet"),
         conv=conv,
         user_msg=parent_msg,
         intent=intent,
