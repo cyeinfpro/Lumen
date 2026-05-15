@@ -2174,6 +2174,28 @@ def test_job_item_out_uses_image_gender_and_download_filename() -> None:
     assert "male" in item.download_filename
 
 
+def test_job_item_out_marks_dual_race_bonus_as_free() -> None:
+    item = workflows._job_item_out(  # noqa: SLF001
+        image_id="bonus-image-1",
+        image_out=None,
+        saved_item_id=None,
+        age_segment="adult",
+        gender="female",
+        style_tags=[],
+        appearance_direction="east_asian",
+        image_meta={
+            "is_dual_race_bonus": True,
+            "billing_free": True,
+            "billing_label": "free",
+            "billing_exempt_reason": "dual_race_loser",
+        },
+    )
+    assert item.is_dual_race_bonus is True
+    assert item.billing_free is True
+    assert item.billing_label == "free"
+    assert item.billing_exempt_reason == "dual_race_loser"
+
+
 def test_merge_library_item_fields_appends_style_tags_only() -> None:
     existing = {
         "id": "user:1",

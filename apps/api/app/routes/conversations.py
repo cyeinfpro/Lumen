@@ -1480,6 +1480,23 @@ def _image_to_out(img: Image, variant_kinds: set[str] | None = None) -> ImageOut
     # 相对同源路径，由前端 /api 反代到后端 /images/{id}/binary。
     url = f"/api/images/{img.id}/binary"
     variant_kinds = variant_kinds or set()
+    metadata = img.metadata_jsonb if isinstance(img.metadata_jsonb, dict) else {}
+    billing_label = (
+        metadata.get("billing_label")
+        if isinstance(metadata.get("billing_label"), str)
+        else None
+    )
+    billing_exempt_reason = (
+        metadata.get("billing_exempt_reason")
+        if isinstance(metadata.get("billing_exempt_reason"), str)
+        else None
+    )
+    is_dual_race_bonus = metadata.get("is_dual_race_bonus") is True
+    billing_free = (
+        metadata.get("billing_free") is True
+        or is_dual_race_bonus
+        or billing_label == "free"
+    )
     # 直接构造：ImageOut.url 是 required 但 Image model 无 url 列，不能用 model_validate
     return ImageOut(
         id=img.id,
@@ -1502,7 +1519,11 @@ def _image_to_out(img: Image, variant_kinds: set[str] | None = None) -> ImageOut
             if "thumb256" in variant_kinds
             else None
         ),
-        metadata_jsonb=img.metadata_jsonb or {},
+        metadata_jsonb=metadata,
+        is_dual_race_bonus=is_dual_race_bonus,
+        billing_free=billing_free,
+        billing_label=billing_label,
+        billing_exempt_reason=billing_exempt_reason,
     )
 
 

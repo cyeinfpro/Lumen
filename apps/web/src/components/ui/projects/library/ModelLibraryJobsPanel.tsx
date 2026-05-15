@@ -59,6 +59,14 @@ function jobItemToLightboxItem(item: ApparelModelLibraryJobItem): LightboxItem {
   };
 }
 
+function isFreeJobItem(item: ApparelModelLibraryJobItem): boolean {
+  return (
+    item.billing_free === true ||
+    item.billing_label === "free" ||
+    item.is_dual_race_bonus === true
+  );
+}
+
 function openJobLightbox(items: ApparelModelLibraryJobItem[], initialId: string) {
   if (items.length === 0) return;
   const lightboxItems = items.map(jobItemToLightboxItem);
@@ -605,6 +613,7 @@ function JobThumb({
 }) {
   const [saveOpen, setSaveOpen] = useState(false);
   const saved = item.saved_item_id != null;
+  const free = isFreeJobItem(item);
   const allowSave = !disableSaveAction;
   const canSave = Boolean(job && allowSave);
   const appearanceKey = (item.appearance_direction || job?.appearance_direction || "") as
@@ -639,8 +648,18 @@ function JobThumb({
             N°{String(order + 1).padStart(2, "0")}
           </span>
         ) : null}
+        {free ? (
+          <span className="absolute right-2 top-2 inline-flex rounded-full border border-white/20 bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
+            free
+          </span>
+        ) : null}
         {saved ? (
-          <span className="absolute right-2 top-2 inline-flex items-center gap-1 bg-[var(--success)]/90 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-white backdrop-blur">
+          <span
+            className={cn(
+              "absolute right-2 inline-flex items-center gap-1 bg-[var(--success)]/90 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-white backdrop-blur",
+              free ? "top-8" : "top-2",
+            )}
+          >
             <Bookmark className="h-3 w-3" />
             已入库
           </span>

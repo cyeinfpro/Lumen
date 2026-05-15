@@ -29,6 +29,15 @@ from ..config import settings
 from ..deps import AdminUser, verify_csrf
 from ..db import get_db
 from ..runtime_settings import get_setting
+from ..services.github_releases import validate_update_tag
+from ..services.idempotency import cache_json, derive_idempotency_key, get_cached_json
+from ..services.system_lock import LockBusy, SystemOperationLockService
+from ..services.update_check import (
+    UpdateCheckOut,
+    UpdateCheckService,
+    UpdateVersionOut,
+)
+from ..services.update_warm import maybe_warm_pull
 from ._admin_common import (
     admin_http as _http,
     cleanup_marker_when_done,
@@ -43,6 +52,7 @@ from .admin_backups import (
 
 
 router = APIRouter(prefix="/admin/update", tags=["admin"])
+router_public = APIRouter(tags=["system"])
 
 _UPDATE_LOG_NAME = ".update.log"
 _UPDATE_RUNNING_MARKER = ".update.running"
@@ -198,6 +208,9 @@ def _runner_env_lines(env: dict[str, str]) -> list[str]:
         "LUMEN_UPDATE_BUILD",
         "LUMEN_UPDATE_SYSTEMD_UNIT",
         "LUMEN_UPDATE_CHANNEL",
+        "LUMEN_UPDATE_RESOLVED_TAG",
+        "LUMEN_UPDATE_IDEMPOTENCY_KEY",
+        "LUMEN_UPDATE_FORCE_REDEPLOY",
         "LUMEN_IMAGE_TAG",
         "LUMEN_UPDATE_PROXY_URL",
         "LUMEN_UPDATE_ROOT",
@@ -1140,6 +1153,15 @@ class UpdateTriggerOut(BaseModel):
     proxy_name: str | None = None
     log_path: str
     note: str
+    target_tag: str | None = None
+    idempotency_key: str | None = None
+    replayed: bool = False
+
+
+class UpdateTriggerIn(BaseModel):
+    target_tag: str | None = None
+    force_redeploy: bool = False
+    channel: str | None = None
 
 
 class UpdateStatusOut(BaseModel):
@@ -1152,6 +1174,42 @@ class UpdateStatusOut(BaseModel):
     current_release: ReleaseInfo | None = None
     previous_release: ReleaseInfo | None = None
     releases: list[ReleaseInfo] = Field(default_factory=list)
+
+
+class SystemMaintenanceOut(BaseModel):
+    running: bool
+    phase: str | None = None
+    started_at: str | None = None
+    target_tag: str | None = None
+    estimated_remaining_min: int = 0
+
+
+async def _update_channel(db: AsyncSession) -> str:
+    spec = get_spec("update.channel")
+    if spec is None:
+        return "stable"
+    raw = await get_setting(db, spec)
+    value = (raw or "stable").strip().lower()
+    return value if value in {"stable", "main", "pinned", "minor", "major"} else "stable"
+
+
+async def _update_check_ttl(db: AsyncSession) -> int:
+    spec = get_spec("update.check_ttl_sec")
+    if spec is None:
+        return 1200
+    raw = await get_setting(db, spec)
+    try:
+        return max(0, int(raw)) if raw is not None else 1200
+    except ValueError:
+        return 1200
+
+
+async def _update_allow_prerelease(db: AsyncSession) -> bool:
+    spec = get_spec("update.allow_prerelease")
+    if spec is None:
+        return False
+    raw = await get_setting(db, spec)
+    return str(raw or "0").strip() in {"1", "true", "yes", "on"}
 
 
 def _build_status_snapshot() -> UpdateStatusOut:
@@ -1189,6 +1247,92 @@ def _build_status_snapshot() -> UpdateStatusOut:
 @router.get("/status", response_model=UpdateStatusOut)
 async def update_status(_admin: AdminUser) -> UpdateStatusOut:
     return await asyncio.to_thread(_build_status_snapshot)
+
+
+def _maintenance_snapshot() -> SystemMaintenanceOut:
+    snapshot = _build_status_snapshot()
+    phase = next(
+        (item.phase for item in snapshot.phases if item.status == "running"),
+        None,
+    )
+    target_tag = None
+    durations = [p.dur_ms for p in snapshot.phases if p.dur_ms and p.dur_ms > 0]
+    if snapshot.phases:
+        for item in snapshot.phases:
+            value = item.info.get("tag") or item.info.get("target_tag")
+            if value:
+                target_tag = value
+    if not snapshot.running:
+        return SystemMaintenanceOut(running=False)
+    median_ms = sorted(durations)[len(durations) // 2] if durations else 60_000
+    running_index = next(
+        (idx for idx, item in enumerate(snapshot.phases) if item.status == "running"),
+        max(0, len(snapshot.phases) - 1),
+    )
+    remaining = max(1, len(snapshot.phases) - running_index)
+    estimated_min = max(1, int((median_ms * remaining) / 60_000))
+    return SystemMaintenanceOut(
+        running=True,
+        phase=phase or "preparing",
+        started_at=snapshot.started_at,
+        target_tag=target_tag,
+        estimated_remaining_min=estimated_min,
+    )
+
+
+@router_public.get("/system/maintenance", response_model=SystemMaintenanceOut)
+async def system_maintenance() -> SystemMaintenanceOut:
+    return await asyncio.to_thread(_maintenance_snapshot)
+
+
+@router.get("/version", response_model=UpdateVersionOut)
+async def update_version(
+    _admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UpdateVersionOut:
+    channel = await _update_channel(db)
+    service = UpdateCheckService(root=_lumen_root(), ttl_sec=0)
+    return await service.version(channel=channel)
+
+
+@router.get("/check", response_model=UpdateCheckOut)
+async def update_check(
+    request: Request,
+    _admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+) -> UpdateCheckOut:
+    channel = await _update_channel(db)
+    allow_prerelease = await _update_allow_prerelease(db)
+    ttl_sec = await _update_check_ttl(db)
+    proxy, proxy_url = await _resolve_update_proxy(db)
+    service = UpdateCheckService(root=_lumen_root(), ttl_sec=ttl_sec)
+    out = await service.check(
+        channel=channel,
+        allow_prerelease=allow_prerelease,
+        force=force,
+        proxy_url=proxy_url,
+    )
+    warm_started = False
+    if out.has_update is True and out.resolved_image_tag:
+        warm_started = await maybe_warm_pull(out.resolved_image_tag)
+        warm_state = "started" if warm_started else "already_running_or_skipped"
+        out.warm_pull = {"state": warm_state, "tag": out.resolved_image_tag}
+    await write_admin_audit_isolated(
+        request,
+        _admin,
+        event_type="admin.update.check",
+        details={
+            "channel": channel,
+            "force": force,
+            "cache_hit": out.cache.cached,
+            "stale": out.cache.stale,
+            "target_tag": out.resolved_image_tag,
+            "proxy_name": proxy.name if proxy else None,
+            "warm_pull_started": warm_started,
+        },
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1450,10 +1594,12 @@ async def trigger_update(
     request: Request,
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: UpdateTriggerIn | None = None,
 ) -> UpdateTriggerOut:
     script = _update_script()
     if not script.is_file():
         raise _http("script_missing", f"missing {script}", 500)
+    body = body or UpdateTriggerIn()
     marker = await asyncio.to_thread(_read_marker)
     if marker is not None:
         if marker.unit:
@@ -1466,14 +1612,88 @@ async def trigger_update(
             "update_running", f"Lumen update is already running (pid {marker.pid})", 409
         )
 
+    channel = (body.channel or await _update_channel(db)).strip().lower()
+    if channel not in {"stable", "main", "pinned", "minor", "major"}:
+        raise _http("invalid_channel", "invalid update channel", 422)
+    allow_prerelease = await _update_allow_prerelease(db)
+    ttl_sec = await _update_check_ttl(db)
     proxy, proxy_url = await _resolve_update_proxy(db)
+    check_service = UpdateCheckService(root=_lumen_root(), ttl_sec=ttl_sec)
+    target_tag = (body.target_tag or "").strip()
+    if target_tag:
+        try:
+            target_tag = validate_update_tag(target_tag)
+        except ValueError as exc:
+            raise _http("invalid_target_tag", "invalid update target tag", 422) from exc
+    else:
+        check_out = await check_service.check(
+            channel=channel,
+            allow_prerelease=allow_prerelease,
+            force=body.force_redeploy,
+            proxy_url=proxy_url,
+        )
+        target_tag = check_out.resolved_image_tag
+
+    idempotency_key = request.headers.get("Idempotency-Key") or derive_idempotency_key(
+        admin.id,
+        request.url.path,
+        json.dumps(
+            {
+                "target_tag": target_tag,
+                "force_redeploy": body.force_redeploy,
+                "channel": channel,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        int(time.time() // 30),
+    )
+    cached = await get_cached_json("lumen:update:idempotency", idempotency_key)
+    if cached is not None:
+        replayed = UpdateTriggerOut.model_validate({**cached, "replayed": True})
+        await write_admin_audit_isolated(
+            request,
+            admin,
+            event_type="admin.update.trigger",
+            details={
+                "pid": replayed.pid,
+                "unit": replayed.unit,
+                "proxy_name": replayed.proxy_name,
+                "target_tag": replayed.target_tag,
+                "idempotency_key": idempotency_key,
+                "cache_hit": True,
+            },
+        )
+        return replayed
+
+    lock_service = SystemOperationLockService(
+        fallback_busy=lambda: _read_marker() is not None
+    )
+    lock = None
+    try:
+        lock = await lock_service.acquire(
+            operation="update", owner=str(admin.id), ttl_sec=1800
+        )
+    except LockBusy:
+        raise _http(
+            "update_running",
+            "Lumen update is already running; wait for it to finish first",
+            409,
+        )
+
     started_at = datetime.now(timezone.utc)
     log_fh = _open_update_log()
+    proc: subprocess.Popen[bytes] | None = None
+    unit: str | None = None
+    pid: int = 0
     try:
         log_fh.write(
             "\n=== update trigger "
             f"at={started_at.isoformat()} user={admin.id} proxy={proxy.name if proxy else 'none'} ===\n"
         )
+        log_fh.write(f"::lumen-info:: phase=check key=idempotency_key value={idempotency_key}\n")
+        log_fh.write(f"::lumen-info:: phase=check key=resolved_tag_source value={body.target_tag and 'override' or 'resolved'}\n")
+        log_fh.write(f"::lumen-info:: phase=check key=resolved_tag value={target_tag}\n")
         if proxy_url:
             log_fh.write(f"proxy_url={_mask_proxy_url(proxy_url)}\n")
         log_fh.flush()
@@ -1488,20 +1708,17 @@ async def trigger_update(
             if env_file_proxy_url:
                 log_fh.write(f"proxy_url={_mask_proxy_url(env_file_proxy_url)}\n")
                 log_fh.flush()
-        # Local-loopback exemptions so update.sh's healthz curl doesn't route
-        # 127.0.0.1 through the upstream socks5 proxy and timeout forever.
         env.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
         env.setdefault("no_proxy", "127.0.0.1,localhost,::1")
         env["LUMEN_UPDATE_NONINTERACTIVE"] = "1"
         env.setdefault("LUMEN_UPDATE_GIT_PULL", "1")
         env.setdefault("LUMEN_UPDATE_BUILD", "0")
+        env["LUMEN_UPDATE_CHANNEL"] = channel
+        env["LUMEN_UPDATE_RESOLVED_TAG"] = target_tag
+        env["LUMEN_UPDATE_IDEMPOTENCY_KEY"] = idempotency_key
+        if body.force_redeploy:
+            env["LUMEN_UPDATE_FORCE_REDEPLOY"] = "1"
 
-        proc: subprocess.Popen[bytes] | None = None
-        unit: str | None = None
-        pid: int = 0
-        # Preferred path: a system-installed lumen-update-runner.service watched
-        # by lumen-update.path. Trigger via a file write — PID 1 starts the
-        # runner, so we sidestep lumen-api's sandbox completely.
         if await asyncio.to_thread(_runner_unit_available):
             outcome = await asyncio.to_thread(
                 _start_update_via_path_unit,
@@ -1528,10 +1745,6 @@ async def trigger_update(
             if outcome is not None:
                 pid, unit = outcome
         if unit is None:
-            # systemd-run is missing or every attempt failed (often because the
-            # runtime user lacks NOPASSWD sudo and linger). Fall back to a
-            # detached subprocess so the update can still proceed; update.sh
-            # restarts lumen-api last to minimise the chance of self-killing.
             log_fh.write(
                 "\n[fallback] launching update.sh as a detached subprocess; "
                 "restart of lumen-api will be the last step. To use a transient "
@@ -1553,7 +1766,22 @@ async def trigger_update(
             _write_marker(pid, started_at.isoformat())
     finally:
         log_fh.close()
+        if lock is not None:
+            await lock_service.release(lock, succeeded=True, reason="launched")
 
+    response = UpdateTriggerOut(
+        accepted=True,
+        pid=pid or None,
+        unit=unit,
+        started_at=started_at,
+        proxy_name=proxy.name if proxy else None,
+        log_path=str(_update_log_path()),
+        note="更新已在后台启动；期间服务可能短暂不可用，脚本会在完成后重启运行进程并执行健康检查。",
+        target_tag=target_tag,
+        idempotency_key=idempotency_key,
+        replayed=False,
+    )
+    await cache_json("lumen:update:idempotency", idempotency_key, response, 86400)
     await write_admin_audit_isolated(
         request,
         admin,
@@ -1562,20 +1790,15 @@ async def trigger_update(
             "pid": pid or None,
             "unit": unit,
             "proxy_name": proxy.name if proxy else None,
+            "target_tag": target_tag,
+            "idempotency_key": idempotency_key,
+            "cache_hit": False,
         },
     )
 
     if proc is not None:
         asyncio.create_task(_cleanup_marker_when_done(proc))
-    return UpdateTriggerOut(
-        accepted=True,
-        pid=pid or None,
-        unit=unit,
-        started_at=started_at,
-        proxy_name=proxy.name if proxy else None,
-        log_path=str(_update_log_path()),
-        note="更新已在后台启动；期间服务可能短暂不可用，脚本会在完成后重启运行进程并执行健康检查。",
-    )
+    return response
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
@@ -1588,8 +1811,10 @@ async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:
 
 __all__ = [
     "router",
+    "router_public",
     "ReleaseInfo",
     "StepRecord",
+    "SystemMaintenanceOut",
     "UpdateStatusOut",
     "_apply_proxy_env",
     "_build_status_snapshot",

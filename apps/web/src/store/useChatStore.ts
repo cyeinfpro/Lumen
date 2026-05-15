@@ -459,6 +459,45 @@ function stringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string");
 }
 
+function optionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function billingMetaFromPayload(
+  payload: {
+    is_dual_race_bonus?: unknown;
+    billing_free?: unknown;
+    billing_label?: unknown;
+    billing_exempt_reason?: unknown;
+  },
+  metadata?: Record<string, unknown> | null,
+): Pick<
+  GeneratedImage,
+  "is_dual_race_bonus" | "billing_free" | "billing_label" | "billing_exempt_reason"
+> {
+  const isDualRaceBonus =
+    payload.is_dual_race_bonus === true ||
+    metadata?.is_dual_race_bonus === true;
+  const billingLabel =
+    optionalString(payload.billing_label) ??
+    optionalString(metadata?.billing_label);
+  const billingFree =
+    payload.billing_free === true ||
+    metadata?.billing_free === true ||
+    isDualRaceBonus ||
+    billingLabel === "free";
+  return {
+    is_dual_race_bonus: isDualRaceBonus || undefined,
+    billing_free: billingFree || undefined,
+    billing_label: billingLabel ?? (billingFree ? "free" : undefined),
+    billing_exempt_reason:
+      optionalString(payload.billing_exempt_reason) ??
+      optionalString(metadata?.billing_exempt_reason),
+  };
+}
+
 // 后端 BackendMessage → 前端 UserMessage / AssistantMessage 适配。
 // 后端 content 是 dict：用户消息 {text, attachments:[{image_id}]}；助手初始 {}，succeeded 后可能带 {text}。
 // created_at 是后端 datetime 的 ISO 8601 字符串 → 转 ms。字段缺失给出合理默认，避免 UI 崩。
@@ -1279,6 +1318,7 @@ function buildMessageListState(
       const meta = i as BackendImageMeta & {
         metadata_jsonb?: Record<string, unknown> | null;
       };
+      const billingMeta = billingMetaFromPayload(i, meta.metadata_jsonb);
       const metaCompletionId =
         typeof meta.metadata_jsonb?.completion_id === "string"
           ? meta.metadata_jsonb.completion_id
@@ -1303,6 +1343,13 @@ function buildMessageListState(
               ? meta.metadata_jsonb.suggested_filename
               : undefined),
           metadata_jsonb: existingImage.metadata_jsonb ?? meta.metadata_jsonb ?? null,
+          is_dual_race_bonus:
+            existingImage.is_dual_race_bonus ?? billingMeta.is_dual_race_bonus,
+          billing_free: existingImage.billing_free ?? billingMeta.billing_free,
+          billing_label: existingImage.billing_label ?? billingMeta.billing_label,
+          billing_exempt_reason:
+            existingImage.billing_exempt_reason ??
+            billingMeta.billing_exempt_reason,
         };
       } else {
         newImagesById[i.id] = {
@@ -1323,6 +1370,7 @@ function buildMessageListState(
               ? meta.metadata_jsonb.suggested_filename
               : undefined,
           metadata_jsonb: meta.metadata_jsonb ?? null,
+          ...billingMeta,
         };
       }
       setBounded(_imageConvIds, i.id, convId);
@@ -1340,6 +1388,7 @@ function buildMessageListState(
         ? newImagesById[linkedImage.id]
         : undefined;
       const existing = existingGens[g.id];
+      const generationBillingMeta = billingMetaFromPayload(g);
       const merged: Generation = {
         id: g.id,
         message_id: g.message_id,
@@ -1373,6 +1422,7 @@ function buildMessageListState(
             : (existing?.attempt ?? 0),
         started_at: isoToMs(g.started_at),
         finished_at: g.finished_at ? isoToMs(g.finished_at) : undefined,
+        ...generationBillingMeta,
       };
       const useExisting =
         existing &&
@@ -2935,6 +2985,10 @@ function createChatStore() {
                   parent_image_id?: string | null;
                   filename?: string;
                   metadata_jsonb?: Record<string, unknown> | null;
+                  is_dual_race_bonus?: boolean;
+                  billing_free?: boolean;
+                  billing_label?: string;
+                  billing_exempt_reason?: string;
                 }>
               | undefined;
             const first = Array.isArray(images) ? images[0] : undefined;
@@ -2976,6 +3030,7 @@ function createChatStore() {
               size_actual: first.actual_size ?? "unknown",
               filename: first.filename,
               metadata_jsonb: first.metadata_jsonb ?? null,
+              ...billingMetaFromPayload(first, first.metadata_jsonb),
             };
           }
           set((s) => {
@@ -3173,6 +3228,7 @@ function createChatStore() {
           const input_image_ids = Array.isArray(inputImagesRaw)
             ? (inputImagesRaw.filter((v) => typeof v === "string") as string[])
             : [];
+          const generationBillingMeta = billingMetaFromPayload(payload);
           set((s) => {
             // 去重：若已 attach 过同 id（重连/事件回放）则 no-op
             if (s.generations[rawGenId]) {
@@ -3199,6 +3255,7 @@ function createChatStore() {
               stage: "rendering",
               attempt: 0,
               started_at: eventNow,
+              ...generationBillingMeta,
             };
             const nextGenerations = s.generations[rawGenId]
               ? s.generations

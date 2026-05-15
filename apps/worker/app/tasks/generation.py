@@ -2662,6 +2662,13 @@ async def _handle_dual_race_bonus_image(
         request=parent_upstream_request,
         prompt=prompt,
     )
+    bonus_billing_meta: dict[str, Any] = {
+        "is_dual_race_bonus": True,
+        "billing_free": True,
+        "billing_label": "free",
+        "billing_exempt_reason": "dual_race_loser",
+    }
+    image_metadata: dict[str, Any] = {**model_metadata, **bonus_billing_meta}
     if model_metadata:
         try:
             with PILImage.open(io.BytesIO(raw_image)) as im:
@@ -2711,6 +2718,9 @@ async def _handle_dual_race_bonus_image(
                 bonus_upstream_req["size_actual"] = f"{width}x{height}"
                 bonus_upstream_req["mime"] = orig_mime
                 bonus_upstream_req["is_dual_race_bonus"] = True
+                bonus_upstream_req["billing_free"] = True
+                bonus_upstream_req["billing_label"] = "free"
+                bonus_upstream_req["billing_exempt_reason"] = "dual_race_loser"
                 bonus_upstream_req["parent_generation_id"] = parent_task_id
                 if upstream_provider:
                     bonus_upstream_req["provider"] = upstream_provider
@@ -2775,7 +2785,7 @@ async def _handle_dual_race_bonus_image(
                     sha256=sha,
                     blurhash=blurhash_str,
                     visibility="private",
-                    metadata_jsonb=model_metadata,
+                    metadata_jsonb=image_metadata,
                 )
                 session.add(img)
                 session.add(
@@ -2822,7 +2832,8 @@ async def _handle_dual_race_bonus_image(
                             "display_url": f"/api/images/{image_id}/variants/display2048",
                             "preview_url": f"/api/images/{image_id}/variants/preview1024",
                             "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-                            "filename": model_metadata.get("suggested_filename"),
+                            "filename": image_metadata.get("suggested_filename"),
+                            **bonus_billing_meta,
                         }
                     )
                     content["images"] = images_list
@@ -2874,6 +2885,7 @@ async def _handle_dual_race_bonus_image(
                 "aspect_ratio": aspect_ratio,
                 "input_image_ids": list(input_image_ids),
                 "primary_input_image_id": primary_input_image_id,
+                **bonus_billing_meta,
             },
         )
         await publish_event(
@@ -2894,9 +2906,12 @@ async def _handle_dual_race_bonus_image(
                         "display_url": f"/api/images/{image_id}/variants/display2048",
                         "preview_url": f"/api/images/{image_id}/variants/preview1024",
                         "thumb_url": f"/api/images/{image_id}/variants/thumb256",
+                        "filename": image_metadata.get("suggested_filename"),
+                        **bonus_billing_meta,
                     }
                 ],
                 "final_size": f"{width}x{height}",
+                **bonus_billing_meta,
             },
         )
     except Exception as exc:  # noqa: BLE001

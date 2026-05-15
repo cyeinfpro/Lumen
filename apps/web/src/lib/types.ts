@@ -92,6 +92,10 @@ export interface GeneratedImage {
   size_actual: string;
   filename?: string;
   metadata_jsonb?: Record<string, unknown> | null;
+  is_dual_race_bonus?: boolean;
+  billing_free?: boolean;
+  billing_label?: string;
+  billing_exempt_reason?: string;
 }
 
 export type GenerationStatus =
@@ -147,6 +151,10 @@ export interface Generation {
   partial_count?: number;
   started_at: number;
   finished_at?: number;
+  is_dual_race_bonus?: boolean;
+  billing_free?: boolean;
+  billing_label?: string;
+  billing_exempt_reason?: string;
 }
 
 export interface UserMessage {
@@ -769,12 +777,61 @@ export interface WalletTransactionListOut {
   next_cursor?: string | null;
 }
 
+export interface BillingWindowOut {
+  used_micro: number;
+  limit_micro: number;
+  resets_at: string | null;
+}
+
+export interface BillingUsageByKindOut {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_creation: number;
+  image: number;
+  reasoning: number;
+}
+
+export interface BillingSnapshotOut {
+  balance_micro: number;
+  billing_rate_multiplier: string;
+  windows: Record<string, BillingWindowOut>;
+  by_kind_30d: BillingUsageByKindOut;
+}
+
+export interface AdminBillingUsageOut {
+  user_id: string;
+  balance_micro: number;
+  billing_rate_multiplier: string;
+  range_start: string;
+  range_end: string;
+  windows: Record<string, BillingWindowOut>;
+  by_kind_30d: BillingUsageByKindOut;
+  total_micro: number;
+  transaction_count: number;
+}
+
 export interface PricingRuleOut {
   id: string;
   scope: "image_size" | "chat_model";
   key: string;
   variant: string;
-  unit: "per_image" | "per_1k_tokens_in" | "per_1k_tokens_out";
+  unit:
+    | "per_image"
+    | "per_1k_tokens_in"
+    | "per_1k_tokens_out"
+    | "per_1k_tokens_cache_read"
+    | "per_1k_tokens_cache_creation"
+    | "per_1k_tokens_cache_creation_5m"
+    | "per_1k_tokens_cache_creation_1h"
+    | "per_1k_tokens_image_output"
+    | "per_1k_tokens_reasoning"
+    | "per_1k_tokens_input_priority"
+    | "per_1k_tokens_output_priority"
+    | "per_1k_tokens_cache_read_priority"
+    | "long_context_threshold"
+    | "long_context_input_multiplier"
+    | "long_context_output_multiplier";
   price: MoneyOut;
   enabled: boolean;
   note: string | null;
@@ -793,8 +850,48 @@ export interface PricingRuleUpsertIn {
   scope: "image_size" | "chat_model";
   key: string;
   variant?: string;
-  unit: "per_image" | "per_1k_tokens_in" | "per_1k_tokens_out";
+  unit:
+    | "per_image"
+    | "per_1k_tokens_in"
+    | "per_1k_tokens_out"
+    | "per_1k_tokens_cache_read"
+    | "per_1k_tokens_cache_creation"
+    | "per_1k_tokens_cache_creation_5m"
+    | "per_1k_tokens_cache_creation_1h"
+    | "per_1k_tokens_image_output"
+    | "per_1k_tokens_reasoning"
+    | "per_1k_tokens_input_priority"
+    | "per_1k_tokens_output_priority"
+    | "per_1k_tokens_cache_read_priority"
+    | "long_context_threshold"
+    | "long_context_input_multiplier"
+    | "long_context_output_multiplier";
   price_rmb: string;
+  enabled?: boolean;
+  note?: string | null;
+}
+
+export interface AdminPricingBulkRatesIn {
+  input?: string | number | null;
+  output?: string | number | null;
+  cache_read?: string | number | null;
+  cache_creation?: string | number | null;
+  cache_creation_5m?: string | number | null;
+  cache_creation_1h?: string | number | null;
+  image_output?: string | number | null;
+  reasoning?: string | number | null;
+  input_priority?: string | number | null;
+  output_priority?: string | number | null;
+  cache_read_priority?: string | number | null;
+  long_context_threshold?: number | null;
+  long_context_input_multiplier?: number | null;
+  long_context_output_multiplier?: number | null;
+}
+
+export interface AdminPricingBulkIn {
+  model: string;
+  channel?: string | null;
+  rates: AdminPricingBulkRatesIn;
   enabled?: boolean;
   note?: string | null;
 }

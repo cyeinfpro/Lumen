@@ -8,6 +8,7 @@ import { ArrowLeft, Check, CreditCard, Gift, RefreshCw } from "lucide-react";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button, Card, toast } from "@/components/ui/primitives";
 import {
+  getMyBillingSnapshot,
   getMyWallet,
   listMyWalletTransactions,
   listMyRedemptions,
@@ -24,6 +25,7 @@ function formatKind(kind: string): string {
     settle: "结算",
     release: "释放",
     charge: "对话扣费",
+    charge_completion: "对话扣费",
     refund: "退款",
     adjust_admin: "管理员调账",
     grant: "赠送",
@@ -46,6 +48,10 @@ const TX_KIND_FILTERS = [
   { key: "charge", label: "扣费" },
 ] as const;
 
+function microMoney(value?: number | null): string {
+  return ((value ?? 0) / 1_000_000).toFixed(2);
+}
+
 export default function WalletPage() {
   const qc = useQueryClient();
   const [code, setCode] = useState("");
@@ -54,6 +60,12 @@ export default function WalletPage() {
 
   const meQuery = useQuery<AuthUser>({ queryKey: ["me"], queryFn: getMe, retry: false });
   const walletQ = useQuery({ queryKey: ["me", "wallet"], queryFn: getMyWallet, retry: false });
+  const snapshotQ = useQuery({
+    queryKey: ["me", "billing", "snapshot"],
+    queryFn: getMyBillingSnapshot,
+    retry: false,
+    enabled: meQuery.data?.account_mode === "wallet",
+  });
   const txQ = useInfiniteQuery({
     queryKey: ["me", "wallet", "transactions", txKind],
     queryFn: ({ pageParam }) =>
@@ -77,6 +89,7 @@ export default function WalletPage() {
   });
 
   const wallet = walletQ.data;
+  const snapshot = snapshotQ.data;
   const txItems = txQ.data?.pages.flatMap((page) => page.items) ?? [];
   const redemptionItems = redemptionsQ.data?.pages.flatMap((page) => page.items) ?? [];
   const low = useMemo(() => {
@@ -105,6 +118,7 @@ export default function WalletPage() {
       setMessage(amountText);
       toast.success("兑换成功", { description: amountText });
       await qc.invalidateQueries({ queryKey: ["me", "wallet"] });
+      await qc.invalidateQueries({ queryKey: ["me", "billing", "snapshot"] });
     },
     onError: (err) => {
       const normalized = mapError(err);
@@ -212,6 +226,81 @@ export default function WalletPage() {
             </Button>
           </form>
         </div>
+
+        {snapshot && (
+          <Card variant="subtle" padding="lg" className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="type-card-title">30 天费用构成</p>
+                <p className="type-caption text-[var(--fg-2)]">
+                  费率倍率 {snapshot.billing_rate_multiplier}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void snapshotQ.refetch()}
+                leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+              >
+                刷新
+              </Button>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {[
+                ["输入", snapshot.by_kind_30d.input],
+                ["输出", snapshot.by_kind_30d.output],
+                ["缓存读取", snapshot.by_kind_30d.cache_read],
+                ["缓存写入", snapshot.by_kind_30d.cache_creation],
+                ["图片", snapshot.by_kind_30d.image],
+                ["推理", snapshot.by_kind_30d.reasoning],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3"
+                >
+                  <p className="type-caption text-[var(--fg-2)]">{label}</p>
+                  <p className="mt-1 text-base font-semibold tabular-nums">
+                    ¥{microMoney(Number(value))}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              {(["5h", "1d", "7d"] as const).map((key) => {
+                const win = snapshot.windows[key];
+                const pct =
+                  win && win.limit_micro > 0
+                    ? Math.min(100, Math.round((win.used_micro / win.limit_micro) * 100))
+                    : 0;
+                return (
+                  <div
+                    key={key}
+                    className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3"
+                  >
+                    <div className="flex items-center justify-between text-xs text-[var(--fg-2)]">
+                      <span>{key} 限额</span>
+                      <span>
+                        ¥{microMoney(win?.used_micro)} /{" "}
+                        {win?.limit_micro ? `¥${microMoney(win.limit_micro)}` : "不限"}
+                      </span>
+                    </div>
+                    <div className="mt-2 h-1.5 rounded-full bg-white/10">
+                      <div
+                        className="h-full rounded-full bg-[var(--accent)]"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    {win?.resets_at && (
+                      <p className="mt-2 type-caption text-[var(--fg-2)]">
+                        重置 {new Date(win.resets_at).toLocaleString()}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        )}
 
         <Card variant="subtle" padding="none" className="overflow-hidden">
           <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">

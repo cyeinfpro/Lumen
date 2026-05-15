@@ -1,0 +1,80 @@
+# Optional zero-downtime API shadow service.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.bluegreen.yml up -d api-green
+
+services:
+  api-green:
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
+    container_name: lumen-api-green
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+      args:
+        LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
+        LUMEN_APP_UID: "${LUMEN_APP_UID:-10001}"
+        LUMEN_APP_GID: "${LUMEN_APP_GID:-10001}"
+    working_dir: /app/apps/api
+    command:
+      - "uvicorn"
+      - "app.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--workers"
+      - "${LUMEN_API_WORKERS:-2}"
+      - "--limit-max-requests"
+      - "${LUMEN_API_LIMIT_MAX_REQUESTS:-10000}"
+      - "--limit-max-requests-jitter"
+      - "${LUMEN_API_LIMIT_MAX_REQUESTS_JITTER:-1000}"
+      - "--timeout-keep-alive"
+      - "${LUMEN_API_TIMEOUT_KEEP_ALIVE:-60}"
+      - "--timeout-graceful-shutdown"
+      - "${LUMEN_API_TIMEOUT_GRACEFUL_SHUTDOWN:-30}"
+      - "--timeout-worker-healthcheck"
+      - "${LUMEN_API_TIMEOUT_WORKER_HEALTHCHECK:-10}"
+    user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
+    group_add:
+      - "${LUMEN_APP_STORAGE_GID:-10001}"
+    env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    cpus: "1.5"
+    mem_limit: 2g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_GREEN_BIND_HOST:-127.0.0.1}:${API_GREEN_BIND_PORT:-18001}:8000"
+    environment:
+      REDIS_URL: "${REDIS_URL:-redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0}"
+      DATABASE_URL: "${DATABASE_URL:-postgresql+asyncpg://${DB_USER:?Set DB_USER in .env}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/${DB_NAME:?Set DB_NAME in .env}}"
+      LUMEN_UPDATE_VIA_TRIGGER: "1"
+    volumes:
+      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
+      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup
+      - ./scripts:/app/scripts:ro
+      - /var/lib/lumen-storage:/var/lib/lumen-storage
+    networks:
+      - lumen_backend
+    labels:
+      lumen.color: "green"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read(); sys.exit(0)\" || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s

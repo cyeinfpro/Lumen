@@ -34,7 +34,9 @@ from lumen_core.schemas import (
     AdminBillingAuditEventOut,
     AdminBillingBootstrapIn,
     AdminBillingOverviewOut,
+    AdminBillingUsageOut,
     AdminOrphanHoldOut,
+    AdminPricingBulkIn,
     AdminRedemptionBatchRedownloadOut,
     AdminRedemptionCodeCreateIn,
     AdminRedemptionCodeCreateOut,
@@ -48,6 +50,9 @@ from lumen_core.schemas import (
     AdminWalletListOut,
     AdminWalletOut,
     AdminWalletAuditOut,
+    BillingSnapshotOut,
+    BillingUsageByKindOut,
+    BillingWindowOut,
     MoneyOut,
     PricingImportIn,
     PricingRuleOut,
@@ -75,9 +80,12 @@ from ..observability import (
 from ..ratelimit import RateLimiter, client_ip
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting, update_settings
+from ..services.billing_cache import BillingCacheService
 
 
 router = APIRouter(tags=["billing"])
+_billing_cache_service: BillingCacheService | None = None
+_CHARGE_KINDS = ("charge", "charge_completion")
 
 REDEMPTION_LIMITER = RateLimiter(
     capacity=10,
@@ -94,6 +102,33 @@ _BILLING_AUDIT_EVENT_PREFIXES = (
     "account.mode_change",
     "billing.",
 )
+_BILLING_WINDOWS: dict[str, timedelta] = {
+    "5h": timedelta(hours=5),
+    "1d": timedelta(days=1),
+    "7d": timedelta(days=7),
+}
+_BULK_RATE_UNITS: dict[str, str] = {
+    "input": "per_1k_tokens_in",
+    "output": "per_1k_tokens_out",
+    "cache_read": "per_1k_tokens_cache_read",
+    "cache_creation": "per_1k_tokens_cache_creation",
+    "cache_creation_5m": "per_1k_tokens_cache_creation_5m",
+    "cache_creation_1h": "per_1k_tokens_cache_creation_1h",
+    "image_output": "per_1k_tokens_image_output",
+    "reasoning": "per_1k_tokens_reasoning",
+    "input_priority": "per_1k_tokens_input_priority",
+    "output_priority": "per_1k_tokens_output_priority",
+    "cache_read_priority": "per_1k_tokens_cache_read_priority",
+}
+
+
+def configure_billing_cache(service: BillingCacheService | None) -> None:
+    global _billing_cache_service
+    _billing_cache_service = service
+
+
+def _billing_cache() -> BillingCacheService | None:
+    return _billing_cache_service
 
 
 def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
@@ -556,12 +591,254 @@ def _rmb_to_micro_or_422(value: str | int | float, *, field: str) -> int:
         raise _http(exc.code, f"{field}: {exc.message}", exc.status_code) from exc
 
 
+def _aware_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _meta_int(mapping: dict[str, Any], key: str) -> int:
+    try:
+        return max(0, int(mapping.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _scaled_meta_cost(mapping: dict[str, Any], key: str) -> int:
+    value = _meta_int(mapping, key)
+    multiplier = _meta_int(mapping, "rate_multiplier_x10000") or 10_000
+    return (value * multiplier) // 10_000
+
+
+def _usage_by_kind(rows: list[WalletTransaction]) -> BillingUsageByKindOut:
+    totals = {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_creation": 0,
+        "image": 0,
+        "reasoning": 0,
+    }
+    for row in rows:
+        meta = row.meta or {}
+        breakdown = meta.get("cost_breakdown")
+        if isinstance(breakdown, dict):
+            totals["input"] += _scaled_meta_cost(breakdown, "input_cost_micro")
+            totals["output"] += _scaled_meta_cost(breakdown, "output_cost_micro")
+            totals["cache_read"] += _scaled_meta_cost(
+                breakdown, "cache_read_cost_micro"
+            )
+            totals["cache_creation"] += _scaled_meta_cost(
+                breakdown, "cache_creation_cost_micro"
+            )
+            totals["image"] += _scaled_meta_cost(
+                breakdown, "image_output_cost_micro"
+            )
+            totals["reasoning"] += _scaled_meta_cost(
+                breakdown, "reasoning_cost_micro"
+            )
+            continue
+
+        if row.ref_type == "generation" or row.kind == "settle":
+            totals["image"] += _meta_int(meta, "actual_micro") or abs(
+                int(row.amount_micro)
+            )
+            continue
+
+        if row.kind.startswith("charge") or row.kind == "charge":
+            totals["output"] += _meta_int(meta, "cost_micro") or abs(
+                int(row.amount_micro)
+            )
+    return BillingUsageByKindOut(**totals)
+
+
+def _usage_total(usage: BillingUsageByKindOut) -> int:
+    return (
+        usage.input
+        + usage.output
+        + usage.cache_read
+        + usage.cache_creation
+        + usage.image
+        + usage.reasoning
+    )
+
+
+def _window_usage(
+    rows: list[WalletTransaction],
+    *,
+    now: datetime,
+    span: timedelta,
+    limit_micro: int,
+) -> BillingWindowOut:
+    cutoff = now - span
+    in_window = [
+        row for row in rows if _aware_utc(row.created_at) >= cutoff
+    ]
+    usage = _usage_by_kind(in_window)
+    oldest = min((_aware_utc(row.created_at) for row in in_window), default=None)
+    return BillingWindowOut(
+        used_micro=_usage_total(usage),
+        limit_micro=max(0, int(limit_micro or 0)),
+        resets_at=(oldest + span) if oldest is not None else None,
+    )
+
+
+async def _active_credential_limits(
+    db: AsyncSession, user_id: str
+) -> dict[str, int]:
+    row = (
+        await db.execute(
+            select(
+                UserApiCredential.limit_5h_micro,
+                UserApiCredential.limit_1d_micro,
+                UserApiCredential.limit_7d_micro,
+            )
+            .where(
+                UserApiCredential.user_id == user_id,
+                UserApiCredential.status == "active",
+                UserApiCredential.deleted_at.is_(None),
+            )
+            .order_by(UserApiCredential.updated_at.desc())
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return {"5h": 0, "1d": 0, "7d": 0}
+    return {
+        "5h": int(row[0] or 0),
+        "1d": int(row[1] or 0),
+        "7d": int(row[2] or 0),
+    }
+
+
+async def _billing_rows_for_range(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    range_start: datetime,
+    range_end: datetime,
+) -> list[WalletTransaction]:
+    return (
+        (
+            await db.execute(
+                select(WalletTransaction)
+                .where(
+                    WalletTransaction.user_id == user_id,
+                    WalletTransaction.created_at >= range_start,
+                    WalletTransaction.created_at <= range_end,
+                    WalletTransaction.kind.in_((*_CHARGE_KINDS, "settle")),
+                )
+                .order_by(WalletTransaction.created_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _billing_balance_micro(db: AsyncSession, user_id: str) -> int:
+    service = _billing_cache()
+    if service is not None:
+        return await service.get_balance(db, user_id)
+    use_cache = billing_core.parse_bool_setting(
+        await _setting_raw(db, "billing.use_redis_cache"), True
+    )
+    redis = None
+    if use_cache:
+        try:
+            redis = get_redis()
+        except Exception:  # noqa: BLE001
+            redis = None
+    return await BillingCacheService(redis=redis).get_balance(db, user_id)
+
+
+async def _invalidate_balance_cache(user_id: str) -> None:
+    service = _billing_cache()
+    if service is None:
+        return
+    await service.invalidate(user_id)
+
+
+async def _billing_snapshot_parts(
+    db: AsyncSession,
+    user_id: str,
+) -> tuple[int, str, datetime, datetime, dict[str, BillingWindowOut], BillingUsageByKindOut, int]:
+    now = datetime.now(timezone.utc)
+    range_start = now - timedelta(days=30)
+    user_row = (
+        await db.execute(
+            select(User.billing_rate_multiplier).where(User.id == user_id)
+        )
+    ).scalar_one_or_none()
+    try:
+        multiplier = f"{Decimal(str(user_row if user_row is not None else 1)).quantize(Decimal('0.0001'))}"
+    except InvalidOperation:
+        multiplier = "1.0000"
+    balance = await _billing_balance_micro(db, user_id)
+    rows = await _billing_rows_for_range(
+        db, user_id, range_start=range_start, range_end=now
+    )
+    limits = await _active_credential_limits(db, user_id)
+    windows = {
+        key: _window_usage(rows, now=now, span=span, limit_micro=limits.get(key, 0))
+        for key, span in _BILLING_WINDOWS.items()
+    }
+    by_kind = _usage_by_kind(rows)
+    return balance, multiplier, range_start, now, windows, by_kind, len(rows)
+
+
+def _bulk_numeric_micro(value: str | int | float | None, *, field: str) -> int | None:
+    if value is None or value == "":
+        return None
+    micro = _rmb_to_micro_or_422(value, field=field)
+    if micro < 0:
+        raise _http("invalid_amount", f"{field}: price must be non-negative", 422)
+    return micro
+
+
+def _bulk_multiplier_x10000(value: float | None, *, field: str) -> int | None:
+    if value is None:
+        return None
+    try:
+        dec = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise _http("invalid_amount", f"{field}: multiplier is invalid", 422) from exc
+    if not dec.is_finite() or dec < 0:
+        raise _http("invalid_amount", f"{field}: multiplier must be non-negative", 422)
+    return int((dec * Decimal(10_000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+async def _invalidate_pricing_cache(model: str, variant: str) -> None:
+    try:
+        redis = get_redis()
+        await redis.delete(
+            f"lumen:pricing:v1:{variant}:{model}",
+            f"lumen:pricing:v1:default:{model}",
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+
 @router.get("/me/wallet", response_model=WalletOut)
 async def get_my_wallet(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WalletOut:
     return await _wallet_out(db, user)
+
+
+@router.get("/me/billing/snapshot", response_model=BillingSnapshotOut)
+async def get_my_billing_snapshot(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BillingSnapshotOut:
+    balance, multiplier, _start, _end, windows, by_kind, _count = (
+        await _billing_snapshot_parts(db, user.id)
+    )
+    return BillingSnapshotOut(
+        balance_micro=balance,
+        billing_rate_multiplier=multiplier,
+        windows=windows,
+        by_kind_30d=by_kind,
+    )
 
 
 @router.get("/me/wallet/transactions", response_model=WalletTransactionListOut)
@@ -580,7 +857,10 @@ async def list_my_wallet_transactions(
         .limit(limit + 1)
     )
     if kind:
-        stmt = stmt.where(WalletTransaction.kind == kind)
+        if kind == "charge":
+            stmt = stmt.where(WalletTransaction.kind.in_(_CHARGE_KINDS))
+        else:
+            stmt = stmt.where(WalletTransaction.kind == kind)
     if cursor:
         try:
             ts_raw, tx_id = cursor.split("|", 1)
@@ -706,7 +986,7 @@ async def admin_billing_overview(
         (
             await db.execute(
                 select(func.coalesce(func.sum(WalletTransaction.amount_micro), 0)).where(
-                    WalletTransaction.kind.in_(("charge", "settle")),
+                    WalletTransaction.kind.in_((*_CHARGE_KINDS, "settle")),
                     WalletTransaction.created_at >= since,
                     WalletTransaction.amount_micro < 0,
                 )
@@ -744,6 +1024,35 @@ async def admin_billing_overview(
         thresholds_pricing_aligned=aligned,
         thresholds_missing_prices=missing,
         recent_audit_events=[_audit_out(row) for row in audit_rows],
+    )
+
+
+@router.get("/admin/billing/usage/{user_id}", response_model=AdminBillingUsageOut)
+async def admin_billing_usage(
+    user_id: str,
+    _admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AdminBillingUsageOut:
+    exists = (
+        await db.execute(
+            select(User.id).where(User.id == user_id, User.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if exists is None:
+        raise _http("not_found", "user not found", 404)
+    balance, multiplier, range_start, range_end, windows, by_kind, count = (
+        await _billing_snapshot_parts(db, user_id)
+    )
+    return AdminBillingUsageOut(
+        user_id=user_id,
+        balance_micro=balance,
+        billing_rate_multiplier=multiplier,
+        range_start=range_start,
+        range_end=range_end,
+        windows=windows,
+        by_kind_30d=by_kind,
+        total_micro=_usage_total(by_kind),
+        transaction_count=count,
     )
 
 
@@ -892,6 +1201,7 @@ async def admin_release_orphan_hold(
         autocommit=False,
     )
     await db.commit()
+    await _invalidate_balance_cache(hold.user_id)
     return _tx_out(tx)
 
 
@@ -1065,6 +1375,7 @@ async def redeem_code(
             autocommit=False,
         )
         await db.commit()
+        await _invalidate_balance_cache(user.id)
     except IntegrityError as exc:
         await db.rollback()
         # Only treat the per-user-redeem unique constraint as CODE_ALREADY_USED.
@@ -1159,6 +1470,14 @@ async def admin_list_pricing(
             await _setting_raw(db, "billing.show_estimate_in_composer"), True
         ),
     )
+
+
+@router.get("/admin/billing/pricing", response_model=PricingRulesOut)
+async def admin_list_billing_pricing(
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PricingRulesOut:
+    return await admin_list_pricing(admin, db)
 
 
 @router.put(
@@ -1256,6 +1575,143 @@ async def admin_update_pricing(
         autocommit=False,
     )
     await db.commit()
+    invalidated: set[tuple[str, str]] = set()
+    for value in values:
+        if value["scope"] == "chat_model":
+            invalidated.add((str(value["key"]), str(value["variant"])))
+    for model, variant in invalidated:
+        await _invalidate_pricing_cache(model, variant)
+    return await admin_list_pricing(admin, db)
+
+
+@router.post(
+    "/admin/billing/pricing/bulk",
+    response_model=PricingRulesOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def admin_bulk_pricing(
+    body: AdminPricingBulkIn,
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PricingRulesOut:
+    now = datetime.now(timezone.utc)
+    model = body.model.strip()
+    variant = (body.channel or "default").strip() or "default"
+    rates = body.rates.model_dump()
+    values: list[dict[str, Any]] = []
+    for field, unit in _BULK_RATE_UNITS.items():
+        micro = _bulk_numeric_micro(rates.get(field), field=f"rates.{field}")
+        if micro is None:
+            continue
+        values.append(
+            {
+                "id": new_uuid7(),
+                "scope": "chat_model",
+                "key": model,
+                "variant": variant,
+                "unit": unit,
+                "price_micro": micro,
+                "enabled": body.enabled,
+                "note": body.note,
+                "updated_at": now,
+            }
+        )
+    if body.rates.long_context_threshold is not None:
+        threshold = int(body.rates.long_context_threshold)
+        if threshold < 0:
+            raise _http(
+                "invalid_amount",
+                "rates.long_context_threshold: threshold must be non-negative",
+                422,
+            )
+        values.append(
+            {
+                "id": new_uuid7(),
+                "scope": "chat_model",
+                "key": model,
+                "variant": variant,
+                "unit": "long_context_threshold",
+                "price_micro": threshold,
+                "enabled": body.enabled,
+                "note": body.note,
+                "updated_at": now,
+            }
+        )
+    for field, unit in (
+        ("long_context_input_multiplier", "long_context_input_multiplier"),
+        ("long_context_output_multiplier", "long_context_output_multiplier"),
+    ):
+        multiplier = _bulk_multiplier_x10000(
+            rates.get(field), field=f"rates.{field}"
+        )
+        if multiplier is None:
+            continue
+        values.append(
+            {
+                "id": new_uuid7(),
+                "scope": "chat_model",
+                "key": model,
+                "variant": variant,
+                "unit": unit,
+                "price_micro": multiplier,
+                "enabled": body.enabled,
+                "note": body.note,
+                "updated_at": now,
+            }
+        )
+    if not values:
+        raise _http("invalid_request", "at least one pricing rate is required", 422)
+
+    bind = await db.connection()
+    if bind.dialect.name == "postgresql":
+        insert_stmt = pg_insert(PricingRule).values(values)
+        await db.execute(
+            insert_stmt.on_conflict_do_update(
+                constraint="uq_pricing_scope_key_variant_unit",
+                set_={
+                    "price_micro": insert_stmt.excluded.price_micro,
+                    "enabled": insert_stmt.excluded.enabled,
+                    "note": insert_stmt.excluded.note,
+                    "updated_at": now,
+                },
+            )
+        )
+    else:
+        for value in values:
+            existing = (
+                await db.execute(
+                    select(PricingRule).where(
+                        PricingRule.scope == value["scope"],
+                        PricingRule.key == value["key"],
+                        PricingRule.variant == value["variant"],
+                        PricingRule.unit == value["unit"],
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(PricingRule(**value))
+            else:
+                existing.price_micro = value["price_micro"]
+                existing.enabled = value["enabled"]
+                existing.note = value["note"]
+                existing.updated_at = now
+    await write_audit(
+        db,
+        event_type="pricing.bulk_update",
+        user_id=admin.id,
+        actor_email_hash=hash_email(admin.email),
+        actor_ip_hash=request_ip_hash(request),
+        details={
+            "model": model,
+            "channel": None if variant == "default" else variant,
+            "count": len(values),
+            "units": [value["unit"] for value in values],
+        },
+        autocommit=False,
+    )
+    await db.commit()
+    await _invalidate_pricing_cache(model, variant)
     return await admin_list_pricing(admin, db)
 
 
@@ -1698,7 +2154,7 @@ async def admin_list_wallets(
                 )
                 .where(
                     WalletTransaction.user_id.in_(user_ids),
-                    WalletTransaction.kind.in_(("charge", "settle")),
+                    WalletTransaction.kind.in_((*_CHARGE_KINDS, "settle")),
                     WalletTransaction.amount_micro < 0,
                 )
                 .group_by(WalletTransaction.user_id)
@@ -1789,6 +2245,7 @@ async def admin_adjust_wallet(
         autocommit=False,
     )
     await db.commit()
+    await _invalidate_balance_cache(user_id)
     return _tx_out(tx)
 
 
@@ -1841,7 +2298,7 @@ async def admin_get_wallet_detail(
         await db.execute(
             select(func.max(WalletTransaction.created_at)).where(
                 WalletTransaction.user_id == user_id,
-                WalletTransaction.kind.in_(("charge", "settle")),
+                WalletTransaction.kind.in_((*_CHARGE_KINDS, "settle")),
                 WalletTransaction.amount_micro < 0,
             )
         )
@@ -1951,6 +2408,7 @@ async def admin_set_account_mode(
         autocommit=False,
     )
     await db.commit()
+    await _invalidate_balance_cache(user_id)
     await db.refresh(target)
     return AdminWalletOut(
         user_id=target.id,
@@ -1975,7 +2433,10 @@ async def admin_list_wallet_transactions(
 ) -> WalletTransactionListOut:
     stmt = select(WalletTransaction).where(WalletTransaction.user_id == user_id)
     if kind:
-        stmt = stmt.where(WalletTransaction.kind == kind)
+        if kind == "charge":
+            stmt = stmt.where(WalletTransaction.kind.in_(_CHARGE_KINDS))
+        else:
+            stmt = stmt.where(WalletTransaction.kind == kind)
     if ref_type:
         stmt = stmt.where(WalletTransaction.ref_type == ref_type)
     if ref_id:

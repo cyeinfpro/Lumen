@@ -1,10 +1,14 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy import CheckConstraint
 
 from lumen_core import billing
+from lumen_core.billing_cache import BillingCacheService
 from lumen_core.models import UserWallet
+from lumen_core.pricing import CostBreakdown, UsageTokens, build_request_fingerprint
 
 
 def test_rmb_micro_conversion_is_decimal_safe():
@@ -51,6 +55,78 @@ def test_wallet_schema_allows_negative_balance_for_graylist_overdraw():
     ]
     assert "hold_micro >= 0" in checks
     assert all("balance_micro" not in check for check in checks)
+
+
+def _breakdown() -> CostBreakdown:
+    return CostBreakdown(
+        input_cost_micro=10,
+        output_cost_micro=20,
+        cache_read_cost_micro=0,
+        cache_creation_cost_micro=0,
+        image_output_cost_micro=0,
+        reasoning_cost_micro=0,
+        long_context_applied=False,
+        priority_tier_applied=False,
+        rate_multiplier_x10000=10_000,
+        total_cost_micro=30,
+        actual_cost_micro=30,
+        pricing_source="test",
+    )
+
+
+def test_request_fingerprint_is_scoped_to_request_identity():
+    usage = UsageTokens(input_tokens=100, output_tokens=50)
+    first = build_request_fingerprint(
+        user_id="user-1",
+        account_type="user",
+        api_key_id=None,
+        request_id="completion-1",
+        idempotency_key="complete:completion-1",
+        model="gpt-5.5",
+        service_tier="standard",
+        billing_type=0,
+        tokens=usage,
+        cost=_breakdown(),
+    )
+    second = build_request_fingerprint(
+        user_id="user-1",
+        account_type="user",
+        api_key_id=None,
+        request_id="completion-2",
+        idempotency_key="complete:completion-2",
+        model="gpt-5.5",
+        service_tier="standard",
+        billing_type=0,
+        tokens=usage,
+        cost=_breakdown(),
+    )
+
+    assert first != second
+    assert first.startswith("v2:")
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_window_usage_accepts_bytes_hash_keys():
+    started = int(datetime(2026, 5, 15, tzinfo=timezone.utc).timestamp())
+
+    class Redis:
+        async def hgetall(self, _key: str) -> dict[Any, Any]:
+            return {
+                b"usage_5h": b"1200",
+                b"limit_5h_micro": b"5000",
+                b"window_5h_started_at_unix": str(started).encode("ascii"),
+            }
+
+    service = BillingCacheService(redis=Redis())
+
+    out = await service.get_window_usage("cred-1", "5h")
+
+    assert out.used_micro == 1200
+    assert out.limit_micro == 5000
+    assert out.resets_at == datetime.fromtimestamp(
+        started + 5 * 3600,
+        tz=timezone.utc,
+    )
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,9 @@ import type {
   AdminBillingAuditEventOut,
   AdminBillingBootstrapIn,
   AdminBillingOverviewOut,
+  AdminBillingUsageOut,
   AdminOrphanHoldOut,
+  AdminPricingBulkIn,
   AdminWalletAuditOut,
   AdminRedemptionBatchRedownloadOut,
   AdminRedemptionCodeCreateOut,
@@ -49,6 +51,7 @@ import type {
   AdminRedemptionUsageListOut,
   AdminWalletDetailOut,
   AdminWalletListOut,
+  BillingSnapshotOut,
   PricingRuleUpsertIn,
   PricingRulesOut,
   RedemptionOut,
@@ -292,6 +295,10 @@ export interface BackendGeneration {
   error_message: string | null;
   started_at: string | null;
   finished_at: string | null;
+  is_dual_race_bonus?: boolean;
+  billing_free?: boolean;
+  billing_label?: string | null;
+  billing_exempt_reason?: string | null;
 }
 
 export interface BackendCompletion {
@@ -327,6 +334,10 @@ export interface BackendImageMeta {
   preview_url?: string | null;
   thumb_url?: string | null;
   metadata_jsonb?: Record<string, unknown> | null;
+  is_dual_race_bonus?: boolean;
+  billing_free?: boolean;
+  billing_label?: string | null;
+  billing_exempt_reason?: string | null;
 }
 
 export interface WorkflowStep {
@@ -575,6 +586,10 @@ export interface ApparelModelLibraryItem {
   library_folder?: string | null;
   prompt_hint?: string | null;
   download_filename?: string | null;
+  is_dual_race_bonus?: boolean;
+  billing_free?: boolean;
+  billing_label?: string | null;
+  billing_exempt_reason?: string | null;
   created_at: string;
   updated_at?: string | null;
 }
@@ -915,6 +930,10 @@ export interface ApparelModelLibraryJobItem {
   appearance_direction: string | null;
   gender: string | null;
   download_filename: string | null;
+  is_dual_race_bonus?: boolean;
+  billing_free?: boolean;
+  billing_label?: string | null;
+  billing_exempt_reason?: string | null;
 }
 
 export interface ApparelModelLibraryJob {
@@ -1761,6 +1780,50 @@ export interface ReleaseInfo {
   is_previous: boolean;
 }
 
+export interface UpdateReleaseOut {
+  tag: string;
+  name?: string | null;
+  body_md: string;
+  body_html: string;
+  html_url?: string | null;
+  published_at?: string | null;
+  is_prerelease: boolean;
+  assets: Record<string, unknown>[];
+}
+
+export interface UpdateCacheOut {
+  cached: boolean;
+  fetched_at?: string | null;
+  stale: boolean;
+  ttl_remaining_sec: number;
+}
+
+export interface AdminUpdateCheckOut {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean | null;
+  release?: UpdateReleaseOut | null;
+  cache: UpdateCacheOut;
+  channel: string;
+  resolved_image_tag: string;
+  build_type: string;
+  warning?: string | null;
+  warm_pull?: {
+    state?: string;
+    tag?: string;
+  };
+}
+
+export interface AdminUpdateVersionOut {
+  version: string;
+  image_tag: string;
+  release_id?: string | null;
+  sha?: string | null;
+  channel: string;
+  build_type: string;
+  degraded: string[];
+}
+
 // 扩展现有 AdminUpdateStatusOut（保留旧字段；新字段全部可选，旧消费者仍可工作）。
 export interface AdminUpdateStatusOut {
   running: boolean;
@@ -1774,6 +1837,14 @@ export interface AdminUpdateStatusOut {
   releases?: ReleaseInfo[];
 }
 
+export interface SystemMaintenanceOut {
+  running: boolean;
+  phase?: string | null;
+  started_at?: string | null;
+  target_tag?: string | null;
+  estimated_remaining_min: number;
+}
+
 export interface AdminUpdateTriggerOut {
   accepted: boolean;
   pid?: number | null;
@@ -1782,6 +1853,15 @@ export interface AdminUpdateTriggerOut {
   proxy_name?: string | null;
   log_path: string;
   note: string;
+  target_tag?: string | null;
+  idempotency_key?: string | null;
+  replayed?: boolean;
+}
+
+export interface AdminUpdateTriggerIn {
+  target_tag?: string | null;
+  force_redeploy?: boolean;
+  channel?: string | null;
 }
 
 export interface AdminRollbackOut {
@@ -1794,10 +1874,25 @@ export function getAdminUpdateStatus(): Promise<AdminUpdateStatusOut> {
   return apiFetch<AdminUpdateStatusOut>("/admin/update/status");
 }
 
-export function triggerAdminUpdate(): Promise<AdminUpdateTriggerOut> {
+export function getSystemMaintenance(): Promise<SystemMaintenanceOut> {
+  return apiFetch<SystemMaintenanceOut>("/system/maintenance");
+}
+
+export function getAdminUpdateVersion(): Promise<AdminUpdateVersionOut> {
+  return apiFetch<AdminUpdateVersionOut>("/admin/update/version");
+}
+
+export function checkAdminUpdate(force = false): Promise<AdminUpdateCheckOut> {
+  const suffix = force ? "?force=true" : "";
+  return apiFetch<AdminUpdateCheckOut>(`/admin/update/check${suffix}`);
+}
+
+export function triggerAdminUpdate(
+  body: AdminUpdateTriggerIn = {},
+): Promise<AdminUpdateTriggerOut> {
   return apiFetch<AdminUpdateTriggerOut>("/admin/update", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify(body),
   });
 }
 
@@ -1812,6 +1907,13 @@ export function rollbackAdminRelease(
   return apiFetch<AdminRollbackOut>("/admin/release/rollback", {
     method: "POST",
     body: JSON.stringify({ release_id }),
+  });
+}
+
+export function rollbackPreviousAdminRelease(): Promise<AdminRollbackOut> {
+  return apiFetch<AdminRollbackOut>("/admin/update/rollback-previous", {
+    method: "POST",
+    body: JSON.stringify({}),
   });
 }
 
@@ -2124,6 +2226,10 @@ export function getMyWallet(): Promise<WalletOut> {
   return apiFetch<WalletOut>("/me/wallet");
 }
 
+export function getMyBillingSnapshot(): Promise<BillingSnapshotOut> {
+  return apiFetch<BillingSnapshotOut>("/me/billing/snapshot");
+}
+
 export function listMyWalletTransactions(
   opts: { cursor?: string | null; limit?: number; kind?: string | null } = {},
 ): Promise<WalletTransactionListOut> {
@@ -2160,8 +2266,18 @@ export function getAdminPricing(): Promise<PricingRulesOut> {
   return apiFetch<PricingRulesOut>("/admin/pricing");
 }
 
+export function getAdminBillingPricing(): Promise<PricingRulesOut> {
+  return apiFetch<PricingRulesOut>("/admin/billing/pricing");
+}
+
 export function getAdminBillingOverview(): Promise<AdminBillingOverviewOut> {
   return apiFetch<AdminBillingOverviewOut>("/admin/billing/overview");
+}
+
+export function getAdminBillingUsage(userId: string): Promise<AdminBillingUsageOut> {
+  return apiFetch<AdminBillingUsageOut>(
+    `/admin/billing/usage/${encodeURIComponent(userId)}`,
+  );
 }
 
 export function listAdminBillingAudit(
@@ -2209,6 +2325,13 @@ export function updateAdminPricing(
   return apiFetch<PricingRulesOut>("/admin/pricing", {
     method: "PUT",
     body: JSON.stringify({ items, ...opts }),
+  });
+}
+
+export function bulkUpdateAdminPricing(body: AdminPricingBulkIn): Promise<PricingRulesOut> {
+  return apiFetch<PricingRulesOut>("/admin/billing/pricing/bulk", {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 

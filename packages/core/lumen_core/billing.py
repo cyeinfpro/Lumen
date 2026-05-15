@@ -20,6 +20,8 @@ from .models import (
     WalletTransaction,
     new_uuid7,
 )
+from .pricing import CostBreakdown, UsageTokens, compute_breakdown
+from .pricing_resolver import PricingResolver
 
 
 MICRO_RMB = 1_000_000
@@ -280,17 +282,51 @@ async def estimate_completion_cost(
     model: str,
     tokens_in: int,
     tokens_out: int,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    cache_creation_5m_tokens: int = 0,
+    cache_creation_1h_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    image_output_tokens: int = 0,
+    rate_multiplier_x10000: int = 10_000,
+    service_tier: str = "standard",
 ) -> int:
-    in_rate = await pricing_price_micro(
-        db, scope="chat_model", key=model, unit="per_1k_tokens_in"
+    breakdown = await estimate_completion_breakdown(
+        db,
+        model=model,
+        tokens=UsageTokens(
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            cache_creation_5m_tokens=cache_creation_5m_tokens,
+            cache_creation_1h_tokens=cache_creation_1h_tokens,
+            reasoning_tokens=reasoning_tokens,
+            image_output_tokens=image_output_tokens,
+        ),
+        rate_multiplier_x10000=rate_multiplier_x10000,
+        service_tier=service_tier,
     )
-    out_rate = await pricing_price_micro(
-        db, scope="chat_model", key=model, unit="per_1k_tokens_out"
+    return breakdown.actual_cost_micro
+
+
+async def estimate_completion_breakdown(
+    db: AsyncSession,
+    *,
+    model: str,
+    tokens: UsageTokens,
+    rate_multiplier_x10000: int = 10_000,
+    service_tier: str = "standard",
+    channel: str | None = None,
+    resolver: PricingResolver | None = None,
+) -> CostBreakdown:
+    pricing = await (resolver or PricingResolver()).resolve(db, model, channel=channel)
+    return compute_breakdown(
+        pricing,
+        tokens,
+        rate_multiplier_x10000=rate_multiplier_x10000,
+        service_tier=service_tier,
     )
-    return (
-        max(0, int(tokens_in)) * int(in_rate or 0)
-        + max(0, int(tokens_out)) * int(out_rate or 0)
-    ) // 1000
 
 
 async def hold(
@@ -474,10 +510,14 @@ async def charge(
     idempotency_key: str,
     allow_negative: bool = False,
     cap_overdraw: bool = True,
+    record_zero: bool = False,
+    kind: str = "charge",
     meta: dict[str, Any] | None = None,
 ) -> WalletTransaction | None:
     amount = int(amount_micro)
-    if amount <= 0:
+    if amount < 0:
+        amount = 0
+    if amount == 0 and not record_zero:
         return None
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
@@ -502,7 +542,7 @@ async def charge(
         db,
         wallet,
         user_id=user_id,
-        kind="charge",
+        kind=kind,
         amount_micro=wallet.balance_micro - before_balance,
         ref_type=ref_type,
         ref_id=ref_id,

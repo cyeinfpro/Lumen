@@ -77,11 +77,14 @@ import {
   getProviders,
   getProviderStats,
   getAdminUpdateStatus,
+  getAdminUpdateVersion,
+  checkAdminUpdate,
   getConversationContext,
   listAdminProxies,
   listAdminReleases,
   restartTelegramBot,
   rollbackAdminRelease,
+  rollbackPreviousAdminRelease,
   testAdminProxy,
   testAllAdminProxies,
   triggerAdminUpdate,
@@ -199,6 +202,9 @@ export const qk = {
   providerStats: () => ["admin", "providers", "stats"] as const,
   adminProxies: () => ["admin", "proxies"] as const,
   adminUpdateStatus: () => ["admin", "update", "status"] as const,
+  adminUpdateVersion: () => ["admin", "update", "version"] as const,
+  adminUpdateCheck: (force: boolean) =>
+    ["admin", "update", "check", { force }] as const,
   adminReleases: () => ["admin", "releases"] as const,
   adminStorage: () => ["admin", "storage"] as const,
   systemPrompts: () => ["system_prompts"] as const,
@@ -800,18 +806,54 @@ export function useAdminUpdateStatusQuery(
   });
 }
 
+export function useAdminUpdateVersionQuery(
+  options?: Omit<
+    UseQueryOptions<import("./apiClient").AdminUpdateVersionOut>,
+    "queryKey" | "queryFn"
+  >,
+) {
+  return useQuery<import("./apiClient").AdminUpdateVersionOut>({
+    queryKey: qk.adminUpdateVersion(),
+    queryFn: getAdminUpdateVersion,
+    ...options,
+  });
+}
+
+export function useAdminCheckUpdateQuery(
+  force = false,
+  options?: Omit<
+    UseQueryOptions<import("./apiClient").AdminUpdateCheckOut>,
+    "queryKey" | "queryFn"
+  >,
+) {
+  return useQuery<import("./apiClient").AdminUpdateCheckOut>({
+    queryKey: qk.adminUpdateCheck(force),
+    queryFn: () => checkAdminUpdate(force),
+    ...options,
+  });
+}
+
 export function useTriggerAdminUpdateMutation(
   options?: Omit<
-    UseMutationOptions<import("./apiClient").AdminUpdateTriggerOut, Error, void>,
+    UseMutationOptions<
+      import("./apiClient").AdminUpdateTriggerOut,
+      Error,
+      import("./apiClient").AdminUpdateTriggerIn | void
+    >,
     "mutationFn"
   >,
 ) {
   const qc = useQueryClient();
-  return useMutation<import("./apiClient").AdminUpdateTriggerOut, Error, void>({
-    mutationFn: () => triggerAdminUpdate(),
+  return useMutation<
+    import("./apiClient").AdminUpdateTriggerOut,
+    Error,
+    import("./apiClient").AdminUpdateTriggerIn | void
+  >({
+    mutationFn: (body) => triggerAdminUpdate(body ?? {}),
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.invalidateQueries({ queryKey: qk.adminUpdateStatus() });
+      qc.invalidateQueries({ queryKey: qk.adminUpdateVersion() });
       qc.invalidateQueries({ queryKey: qk.adminReleases() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
@@ -846,6 +888,25 @@ export function useRollbackReleaseMutation(
     onSuccess: (data, vars, onMutateResult, ctx) => {
       // 回滚也是后台异步任务，立即把 status / releases 标 stale，让 SSE / 下次 fetch 反映
       qc.invalidateQueries({ queryKey: qk.adminUpdateStatus() });
+      qc.invalidateQueries({ queryKey: qk.adminReleases() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useRollbackPreviousMutation(
+  options?: Omit<
+    UseMutationOptions<import("./apiClient").AdminRollbackOut, Error, void>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<import("./apiClient").AdminRollbackOut, Error, void>({
+    mutationFn: () => rollbackPreviousAdminRelease(),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.adminUpdateStatus() });
+      qc.invalidateQueries({ queryKey: qk.adminUpdateVersion() });
       qc.invalidateQueries({ queryKey: qk.adminReleases() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },

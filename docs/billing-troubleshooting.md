@@ -14,6 +14,9 @@
 | `INSUFFICIENT_BALANCE` | 余额不足 | 兑换充值或管理员调账 |
 | 有预扣不释放 | worker 任务失败后未 release | Admin → 计费 → 用户钱包,按 `hold` 过滤流水,再按 ref_id 查任务 |
 | 重试后看不清是否重复扣费 | worker 命中幂等重放 | Admin → 计费 → 概览 → 最近审计,查 `wallet.*.replay` |
+| prompt cache 扣费异常 | 上游 usage 拆分或定价配置异常 | 查看流水 `meta.cost_breakdown`,重点看 `cache_read_cost_micro` / `cache_creation_cost_micro` |
+| fallback 价格生效 | DB 没有对应模型定价 | 审计会有 `billing.pricing.fallback_used`; 到 Admin → 计费 → 定价补齐模型 |
+| 5h/1d/7d 限额拦截 | API key 窗口用量超限 | 查 `/me/billing/snapshot` windows 或 Admin → 用户用量，窗口到期后恢复 |
 
 ## 快速对账
 
@@ -33,3 +36,5 @@ python3 scripts/wallet_audit.py --report-json
 - `redemption_redeemed_total`: 兑换码成功充值次数。
 - `wallet_overdrawn_total`: 透支补差次数,正常应为 0。
 - `wallet_charge_lost_total`: 上游完成后扣费失败次数,正常应为 0。
+- `lumen_billing_rate_limit_block_total`: 窗口限额拦截次数。
+- `lumen_billing_idempotency_replay_total`: 计费幂等重放次数。

@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from app.routes import admin_update
+from app.services.update_check import GitHubReleasesClient, UpdateCheckService
 
 
 def test_update_paths_resolve_from_lumen_scripts_dir(
@@ -208,6 +209,7 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
                 "LUMEN_UPDATE_GIT_PULL": "1",
                 "LUMEN_UPDATE_BUILD": "0",
                 "LUMEN_UPDATE_CHANNEL": "pinned",
+                "LUMEN_UPDATE_FORCE_REDEPLOY": "1",
                 "LUMEN_REPO_DIR": "/root/Lumen",
                 "LUMEN_IMAGE_TAG": "v1.2.3",
                 "HTTP_PROXY": "http://proxy.example:3128",
@@ -226,6 +228,7 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
     assert "LUMEN_UPDATE_NONINTERACTIVE=1" in env_text
     assert "LUMEN_UPDATE_BUILD=0" in env_text
     assert "LUMEN_UPDATE_CHANNEL=pinned" in env_text
+    assert "LUMEN_UPDATE_FORCE_REDEPLOY=1" in env_text
     assert "LUMEN_REPO_DIR=/root/Lumen" in env_text
     assert "LUMEN_IMAGE_TAG=v1.2.3" in env_text
     assert "HTTP_PROXY=http://proxy.example:3128" in env_text
@@ -560,3 +563,37 @@ async def test_resolve_update_proxy_returns_none_when_disabled(
 
     assert proxy is None
     assert proxy_url is None
+
+
+@pytest.mark.asyncio
+async def test_update_check_minor_channel_uses_current_tag_without_github(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "lumen"
+    root.mkdir()
+    (root / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    shared_env = tmp_path / "shared.env"
+    shared_env.write_text("LUMEN_IMAGE_TAG=v1.2.3\n", encoding="utf-8")
+    monkeypatch.setenv("LUMEN_SHARED_ENV", str(shared_env))
+
+    async def fail_fetch_latest(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("minor channel must not call GitHub latest release")
+
+    class Redis:
+        async def get(self, _key: str) -> None:
+            return None
+
+        async def set(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    monkeypatch.setattr(GitHubReleasesClient, "fetch_latest", fail_fetch_latest)
+
+    out = await UpdateCheckService(root=root, redis=Redis(), ttl_sec=0).check(
+        channel="minor",
+    )
+
+    assert out.resolved_image_tag == "v1.2"
+    assert out.latest_version == "v1.2"
+    assert out.has_update is True
+    assert out.warning is None

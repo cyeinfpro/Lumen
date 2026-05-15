@@ -70,6 +70,7 @@ from lumen_core.models import (
     Message,
     new_uuid7,
 )
+from lumen_core.pricing import parse_usage
 
 from .. import runtime_settings
 from ..config import settings
@@ -2536,6 +2537,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     tool_tracker = _CompletionToolTracker()
     tokens_in = 0
     tokens_out = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
+    cache_creation_5m_tokens = 0
+    cache_creation_1h_tokens = 0
+    reasoning_tokens = 0
+    image_output_tokens = 0
 
     # 观测：整个 upstream 流式阶段一层 span；手动 enter/exit 以免嵌套大块改缩进
     _stream_span_cm = None
@@ -2784,16 +2791,15 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 resp = raw_resp if isinstance(raw_resp, dict) else {}
                 completed_response = resp
                 usage = resp.get("usage") or {}
-                tokens_in = int(
-                    usage.get("input_tokens")
-                    or usage.get("prompt_tokens")
-                    or 0
-                )
-                tokens_out = int(
-                    usage.get("output_tokens")
-                    or usage.get("completion_tokens")
-                    or 0
-                )
+                parsed_usage = parse_usage(chat_model, usage)
+                tokens_in = parsed_usage.input_tokens
+                tokens_out = parsed_usage.output_tokens
+                cache_read_tokens = parsed_usage.cache_read_tokens
+                cache_creation_tokens = parsed_usage.cache_creation_tokens
+                cache_creation_5m_tokens = parsed_usage.cache_creation_5m_tokens
+                cache_creation_1h_tokens = parsed_usage.cache_creation_1h_tokens
+                reasoning_tokens = parsed_usage.reasoning_tokens
+                image_output_tokens = parsed_usage.image_output_tokens
                 # 同时抄一下 output_text（兜底：某些网关只在 completed 里给完整文本）
                 if not accumulated_text:
                     accumulated_text = _extract_completed_output_text(resp)
@@ -2884,6 +2890,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     text=final_text,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
+                    cache_creation_5m_tokens=cache_creation_5m_tokens,
+                    cache_creation_1h_tokens=cache_creation_1h_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    image_output_tokens=image_output_tokens,
                     finished_at=datetime.now(timezone.utc),
                     error_code=None,
                     error_message=None,
@@ -2918,8 +2930,20 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 msg.status = MessageStatus.SUCCEEDED
             comp_for_billing = await session.get(Completion, task_id)
             if comp_for_billing is not None:
+                upstream_request = dict(comp_for_billing.upstream_request or {})
+                if fast_mode:
+                    upstream_request["service_tier"] = "priority"
+                else:
+                    upstream_request.pop("service_tier", None)
+                comp_for_billing.upstream_request = upstream_request or None
                 comp_for_billing.tokens_in = tokens_in
                 comp_for_billing.tokens_out = tokens_out
+                comp_for_billing.cache_read_tokens = cache_read_tokens
+                comp_for_billing.cache_creation_tokens = cache_creation_tokens
+                comp_for_billing.cache_creation_5m_tokens = cache_creation_5m_tokens
+                comp_for_billing.cache_creation_1h_tokens = cache_creation_1h_tokens
+                comp_for_billing.reasoning_tokens = reasoning_tokens
+                comp_for_billing.image_output_tokens = image_output_tokens
                 await worker_billing.charge_completion(session, comp_for_billing)
             await session.commit()
 

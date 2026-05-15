@@ -340,7 +340,7 @@ LUMEN_CURRENT_PHASE_START_MS=""
 
 # 所有合法的 phase 枚举（与 update.sh 严格对齐）。
 # rollback 是异常分支，不计入正常流程，但允许在 begin/end 中使用。
-LUMEN_VALID_PHASES="lock check preflight backup_preflight fetch_release set_image_tag pull_images start_infra migrate_db switch restart_services health_check cleanup rollback prepare fetch link_shared containers deps_python deps_node build_web health_post"
+LUMEN_VALID_PHASES="lock check preflight backup_preflight fetch_release set_image_tag pull_images warm_pull start_infra migrate_db switch restart_services start_green shift_traffic shift_traffic_50 shift_traffic_100 drain_blue stop_blue start_blue shift_traffic_blue stop_green health_check cleanup rollback prepare fetch link_shared containers deps_python deps_node build_web health_post"
 
 lumen_iso_now() {
     # GNU date / BSD date 都支持 -u +%FT%TZ
@@ -2317,6 +2317,14 @@ lumen_image_tag_resolve() {
         env_file="$1"
         channel="${LUMEN_UPDATE_CHANNEL:-stable}"
     fi
+    local resolved_tag="${LUMEN_UPDATE_RESOLVED_TAG:-}"
+    if [ -n "${resolved_tag}" ]; then
+        if lumen_image_tag_is_valid "${resolved_tag}"; then
+            printf '%s\n' "${resolved_tag}"
+            return 0
+        fi
+        log_warn "LUMEN_UPDATE_RESOLVED_TAG=${resolved_tag} 非法，忽略并继续解析。"
+    fi
     local current_tag=""
     if [ -f "${env_file}" ]; then
         current_tag="$(lumen_env_value LUMEN_IMAGE_TAG "${env_file}")"
@@ -2397,6 +2405,16 @@ lumen_image_tag_resolve() {
     fi
     printf 'main\n'
     return 0
+}
+
+lumen_image_tag_is_valid() {
+    local tag="${1:-}"
+    case "${tag}" in
+        main|latest)
+            return 0
+            ;;
+    esac
+    printf '%s\n' "${tag}" | grep -Eq '^v[0-9]+(\.[0-9]+){0,2}(-[0-9A-Za-z.-]+)?$'
 }
 
 lumen_image_tag_is_rolling() {

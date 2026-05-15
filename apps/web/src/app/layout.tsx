@@ -9,6 +9,7 @@ import { SSEProvider } from "@/components/SSEProvider";
 import { QueryProvider } from "@/components/QueryProvider";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { OfflineBanner } from "@/components/OfflineBanner";
+import { SystemUpgradeBanner } from "@/components/SystemUpgradeBanner";
 import { ToastViewport } from "@/components/ui/primitives";
 import { MobileToastViewport } from "@/components/ui/primitives/mobile/Toast";
 import { PageTransitions } from "@/components/ui/shell/PageTransitions";
@@ -169,6 +170,7 @@ export default async function RootLayout({
               <Lightbox />
               <InpaintModal />
               <GlobalTaskTray />
+              <SystemUpgradeBanner />
               <OfflineBanner />
               <ToastViewport />
               <MobileToastViewport />

@@ -19,6 +19,7 @@ from .config import settings
 from .jobs.upstream_probe import probe_upstream
 from .observability import init_otel, init_sentry, start_metrics_server
 from .provider_pool import probe_providers
+from .services import billing_cache
 from .tasks import auto_title as auto_title_tasks
 from .tasks import completion as completion_tasks
 from .tasks import context_summary as context_summary_tasks
@@ -43,10 +44,12 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
     # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
     loaded = warm_tiktoken()
     _startup_logger.info("worker.tiktoken_warm loaded=%s", loaded)
+    await billing_cache.configure(ctx.get("redis"))
 
 
 async def _on_shutdown(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_shutdown 钩子：清理 httpx 连接池。"""
+    await billing_cache.shutdown()
     await close_client()
 
 

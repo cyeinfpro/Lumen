@@ -1,0 +1,12 @@
+[Unit]
+Description=Lumen update warm-pull trigger watcher
+After=multi-user.target
+
+[Path]
+# lumen-api writes this marker when /admin/update/check sees a newer target.
+# PID 1 performs the pull so the API container does not need docker access.
+PathChanged=/opt/lumendata/backup/.warm.trigger
+Unit=lumen-update-warm.service
+
+[Install]
+WantedBy=multi-user.target

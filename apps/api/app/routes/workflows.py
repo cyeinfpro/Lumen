@@ -3935,6 +3935,23 @@ async def _image_out_map(db: AsyncSession, images: list[Image]) -> dict[str, Ima
 
 def _image_to_out(img: Image, variant_kinds: set[str] | None = None) -> ImageOut:
     variant_kinds = variant_kinds or set()
+    metadata = img.metadata_jsonb if isinstance(img.metadata_jsonb, dict) else {}
+    billing_label = (
+        metadata.get("billing_label")
+        if isinstance(metadata.get("billing_label"), str)
+        else None
+    )
+    billing_exempt_reason = (
+        metadata.get("billing_exempt_reason")
+        if isinstance(metadata.get("billing_exempt_reason"), str)
+        else None
+    )
+    is_dual_race_bonus = metadata.get("is_dual_race_bonus") is True
+    billing_free = (
+        metadata.get("billing_free") is True
+        or is_dual_race_bonus
+        or billing_label == "free"
+    )
     return ImageOut(
         id=img.id,
         source=img.source,
@@ -3956,7 +3973,11 @@ def _image_to_out(img: Image, variant_kinds: set[str] | None = None) -> ImageOut
             if "thumb256" in variant_kinds
             else None
         ),
-        metadata_jsonb=img.metadata_jsonb or {},
+        metadata_jsonb=metadata,
+        is_dual_race_bonus=is_dual_race_bonus,
+        billing_free=billing_free,
+        billing_label=billing_label,
+        billing_exempt_reason=billing_exempt_reason,
     )
 
 
@@ -5755,9 +5776,25 @@ async def _model_library_image_meta_by_id(
         filename = _clean_optional_text(stored.get("suggested_filename"), max_len=160)
         if filename:
             meta["download_filename"] = filename
+        for key in (
+            "is_dual_race_bonus",
+            "billing_free",
+            "billing_label",
+            "billing_exempt_reason",
+        ):
+            if key in stored:
+                meta[key] = stored[key]
 
         req = generation_req.get(image.owner_generation_id or "", {})
         if req:
+            for key in (
+                "is_dual_race_bonus",
+                "billing_free",
+                "billing_label",
+                "billing_exempt_reason",
+            ):
+                if key in req and key not in meta:
+                    meta[key] = req[key]
             if not meta.get("age_segment"):
                 meta["age_segment"] = _clean_optional_text(
                     req.get("workflow_model_library_age_segment"), max_len=32
@@ -5822,6 +5859,44 @@ def _job_item_out(
             appearance_direction=resolved_appearance,
             style_tags=resolved_tags,
         )
+    is_dual_race_bonus = bool(
+        meta.get("is_dual_race_bonus")
+        or (
+            getattr(image_out, "is_dual_race_bonus", False)
+            if image_out is not None
+            else False
+        )
+    )
+    billing_label = _clean_optional_text(
+        meta.get("billing_label")
+        or (
+            getattr(image_out, "billing_label", None)
+            if image_out is not None
+            else None
+        ),
+        max_len=32,
+    )
+    billing_free = bool(
+        meta.get("billing_free")
+        or (
+            getattr(image_out, "billing_free", False)
+            if image_out is not None
+            else False
+        )
+        or is_dual_race_bonus
+        or billing_label == "free"
+    )
+    if billing_free and not billing_label:
+        billing_label = "free"
+    billing_exempt_reason = _clean_optional_text(
+        meta.get("billing_exempt_reason")
+        or (
+            getattr(image_out, "billing_exempt_reason", None)
+            if image_out is not None
+            else None
+        ),
+        max_len=80,
+    )
     return ApparelModelLibraryJobItemOut(
         image_id=image_id,
         image_url=image_url,
@@ -5832,6 +5907,10 @@ def _job_item_out(
         appearance_direction=resolved_appearance,
         gender=resolved_gender,
         download_filename=filename,
+        is_dual_race_bonus=is_dual_race_bonus,
+        billing_free=billing_free,
+        billing_label=billing_label,
+        billing_exempt_reason=billing_exempt_reason,
     )
 
 

@@ -79,3 +79,28 @@ main
 ```
 
 `latest` 只能由正式版本 tag 更新，不能由普通 main push 覆盖。
+
+## 一键更新 Channel
+
+管理后台的 `/admin/update/check` 是更新目标的唯一来源。它读取 `runtime_settings.update.channel`，默认 `stable`：
+
+| channel | 行为 |
+|---|---|
+| `stable` | 读取 GitHub latest release，忽略 prerelease。 |
+| `main` | 目标镜像 tag 固定为 `main`，无法精确比较 SemVer，适合跟随主干环境。 |
+| `pinned` | 由运维在触发更新时传 `target_tag`，API 和 `update.sh` 都会校验 tag 形态。 |
+| `minor` / `major` | 预留给分支升级策略；未配置时按 stable 处理。 |
+
+相关设置：
+
+- `update.check_ttl_sec`: 检查缓存 TTL，默认 1200 秒；设为 `0` 可关闭缓存。
+- `update.allow_prerelease`: 是否把 prerelease 当成可更新目标，默认关闭。
+- `force_redeploy`: 当前已是目标版本时仍重跑部署，适合配置修复或容器漂移修复。
+
+运行时一致性检查：
+
+```bash
+python3 scripts/version.py print-runtime
+```
+
+输出会对齐 `VERSION`、`LUMEN_IMAGE_TAG` 和 `current/.lumen_release.json`，用于排查“UI 显示版本”和实际 release 不一致。

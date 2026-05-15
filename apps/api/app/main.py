@@ -27,6 +27,7 @@ from .observability import init_otel, init_sentry, setup_prometheus
 from .ratelimit import _is_trusted_proxy
 from .redis_client import get_redis
 from .runtime_settings import migrate_image_primary_route, migrate_provider_purposes
+from .services.billing_cache import BillingCacheService
 
 
 logger = logging.getLogger(__name__)
@@ -284,6 +285,14 @@ async def lifespan(app: FastAPI):
     # 提前建立 redis 连接（失败早暴露）
     r = get_redis()
     await r.ping()
+    billing_cache = BillingCacheService(redis=r)
+    await billing_cache.start_workers()
+    try:
+        from .routes import billing as billing_routes
+
+        billing_routes.configure_billing_cache(billing_cache)
+    except Exception:  # noqa: BLE001
+        logger.warning("billing cache route wiring failed", exc_info=True)
     # 初始化 arq 入队池（与 Worker 注册的 run_generation / run_completion 对接）
     await get_arq_pool()
     # Opportunistic only: if tiktoken's cache is cold and the metadata download is
@@ -293,6 +302,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await billing_cache.stop_workers()
+        try:
+            from .routes import billing as billing_routes
+
+            billing_routes.configure_billing_cache(None)
+        except Exception:  # noqa: BLE001
+            pass
         await close_arq_pool()
         await r.aclose()
 
@@ -502,7 +518,9 @@ app.include_router(admin_proxies_router.router)  # /admin/proxies/*
 app.include_router(admin_storage_router.router)  # /admin/storage
 app.include_router(admin_telegram_router.router)  # /admin/telegram/restart
 app.include_router(admin_update_router.router)  # /admin/update
+app.include_router(admin_update_router.router_public)  # /system/maintenance
 app.include_router(admin_release_router.router)  # /admin/release
+app.include_router(admin_release_router.update_router)  # /admin/update/rollback-previous
 app.include_router(memories_router.router)
 app.include_router(byok_router.router_admin)
 app.include_router(byok_router.router_auth_public)
