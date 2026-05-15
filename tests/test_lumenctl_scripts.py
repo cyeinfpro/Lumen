@@ -557,6 +557,8 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "--profile migrate run --rm migrate" in text
     assert "up -d --wait --force-recreate postgres redis" in text
     assert 'export LUMEN_IMAGE_TAG="${TARGET_TAG}"' in text
+    assert 'tag_version="$(semver_from_image_tag "${target_tag}"' in text
+    assert 'printf \'%s\\n\' "${TARGET_VERSION}" > "${NEW_RELEASE}/VERSION"' in text
     assert 'lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"' in text
     assert "image_tag_drift_redeploy" in text
     assert 'ln -sfn current/VERSION "${ROOT}/VERSION"' in text
