@@ -90,6 +90,8 @@ services:
     <<: *service-hardening
     image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
     container_name: lumen-api
+    labels:
+      lumen.color: "blue"
     build: *app-build
     working_dir: /app/apps/api
     command:
@@ -125,7 +127,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "${API_BIND_HOST:-127.0.0.1}:8000:8000"
+      - "${API_BIND_HOST:-127.0.0.1}:${API_BIND_PORT:-8000}:8000"
     environment:
       <<: *app-runtime-env
       # 容器化部署下让 admin_update 走 path-unit 触发，跳过容器内 systemctl 探测。

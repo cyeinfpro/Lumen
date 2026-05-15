@@ -1,0 +1,21 @@
+name: Alembic expand-contract lint
+
+on:
+  pull_request:
+    paths:
+      - "apps/api/alembic/versions/*.py"
+      - "scripts/lint_alembic_breaking.py"
+      - ".github/workflows/alembic-expand.yml"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check Alembic upgrade safety
+        run: python scripts/lint_alembic_breaking.py

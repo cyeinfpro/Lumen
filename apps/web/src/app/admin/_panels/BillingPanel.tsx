@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import {
+  bulkUpdateAdminPricing,
   bootstrapAdminBilling,
   getAdminBillingOverview,
   getAdminPricing,
@@ -449,6 +450,9 @@ function PricingSubpanel() {
   const [secretDraft, setSecretDraft] = useState("");
   const [secretConfirmed, setSecretConfirmed] = useState(false);
   const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
+  const [bulkModel, setBulkModel] = useState("");
+  const [bulkChannel, setBulkChannel] = useState("");
+  const [bulkRates, setBulkRates] = useState<Record<string, string>>({});
 
   const settingsByKey = useMemo(
     () => new Map(settingsQ.data?.items.map((item) => [item.key, item.value]) ?? []),
@@ -572,6 +576,49 @@ function PricingSubpanel() {
       await invalidateBilling();
     },
     onError: (err) => toast.error("导入失败", { description: err instanceof Error ? err.message : undefined }),
+  });
+
+  const bulkMut = useMutation({
+    mutationFn: () => {
+      const rateValue = (key: string) => {
+        const value = bulkRates[key]?.trim();
+        return value ? value : undefined;
+      };
+      const numberValue = (key: string) => {
+        const raw = bulkRates[key]?.trim();
+        if (!raw) return undefined;
+        const value = Number(raw);
+        return Number.isFinite(value) ? value : undefined;
+      };
+      return bulkUpdateAdminPricing({
+        model: bulkModel.trim(),
+        channel: bulkChannel.trim() || null,
+        rates: {
+          input: rateValue("input"),
+          output: rateValue("output"),
+          cache_read: rateValue("cache_read"),
+          cache_creation: rateValue("cache_creation"),
+          cache_creation_5m: rateValue("cache_creation_5m"),
+          cache_creation_1h: rateValue("cache_creation_1h"),
+          image_output: rateValue("image_output"),
+          reasoning: rateValue("reasoning"),
+          input_priority: rateValue("input_priority"),
+          output_priority: rateValue("output_priority"),
+          cache_read_priority: rateValue("cache_read_priority"),
+          long_context_threshold: numberValue("long_context_threshold"),
+          long_context_input_multiplier: numberValue("long_context_input_multiplier"),
+          long_context_output_multiplier: numberValue("long_context_output_multiplier"),
+        },
+      });
+    },
+    onSuccess: async () => {
+      toast.success("批量模型定价已保存");
+      setBulkModel("");
+      setBulkChannel("");
+      setBulkRates({});
+      await invalidateBilling();
+    },
+    onError: (err) => toast.error("批量保存失败", { description: err instanceof Error ? err.message : undefined }),
   });
 
   const saveModelsMut = useMutation({
@@ -760,6 +807,71 @@ function PricingSubpanel() {
               我确认轮换 secret 会作废所有未兑换码
             </label>
           )}
+        </div>
+      </Card>
+
+      <Card variant="subtle" padding="lg" className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="type-card-title">缓存感知模型定价</p>
+            <p className="type-body-sm text-[var(--fg-2)]">
+              一次写入输入、输出、缓存、推理和长上下文价格。
+            </p>
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => bulkMut.mutate()}
+            loading={bulkMut.isPending}
+            disabled={!bulkModel.trim()}
+            leftIcon={<Save className="h-3.5 w-3.5" />}
+          >
+            批量保存
+          </Button>
+        </div>
+        <div className="grid gap-3 md:grid-cols-[1fr_180px]">
+          <input
+            value={bulkModel}
+            onChange={(e) => setBulkModel(e.target.value)}
+            placeholder="模型，如 claude-sonnet-4-6"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+          />
+          <input
+            value={bulkChannel}
+            onChange={(e) => setBulkChannel(e.target.value)}
+            placeholder="channel，可空"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+          />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            ["input", "输入 ¥/1K"],
+            ["output", "输出 ¥/1K"],
+            ["cache_read", "缓存读 ¥/1K"],
+            ["cache_creation", "缓存写 ¥/1K"],
+            ["cache_creation_5m", "缓存写 5m ¥/1K"],
+            ["cache_creation_1h", "缓存写 1h ¥/1K"],
+            ["image_output", "图片输出 ¥/1K"],
+            ["reasoning", "推理 ¥/1K"],
+            ["input_priority", "Priority 输入"],
+            ["output_priority", "Priority 输出"],
+            ["cache_read_priority", "Priority 缓存读"],
+            ["long_context_threshold", "长上下文阈值"],
+            ["long_context_input_multiplier", "长上下文输入倍数"],
+            ["long_context_output_multiplier", "长上下文输出倍数"],
+          ].map(([key, label]) => (
+            <label key={key} className="space-y-1.5">
+              <span className="type-caption text-[var(--fg-2)]">{label}</span>
+              <input
+                value={bulkRates[key] ?? ""}
+                onChange={(e) =>
+                  setBulkRates((prev) => ({ ...prev, [key]: e.target.value }))
+                }
+                inputMode="decimal"
+                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+              />
+            </label>
+          ))}
         </div>
       </Card>
 

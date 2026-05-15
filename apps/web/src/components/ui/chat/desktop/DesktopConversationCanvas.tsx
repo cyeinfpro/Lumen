@@ -175,6 +175,17 @@ function lightboxThumbUrl(image: GeneratedImage): string | undefined {
   return image.thumb_url ?? image.preview_url;
 }
 
+function isFreeGeneration(gen: Generation, image: GeneratedImage): boolean {
+  return (
+    gen.billing_free === true ||
+    gen.billing_label === "free" ||
+    gen.is_dual_race_bonus === true ||
+    image.billing_free === true ||
+    image.billing_label === "free" ||
+    image.is_dual_race_bonus === true
+  );
+}
+
 function generationSignature(generations: Record<string, Generation>): string {
   return Object.values(generations)
     .map((g) => `${g.id}:${g.status}:${g.stage}:${g.image?.id ?? ""}`)
@@ -819,6 +830,7 @@ const FinalImage = memo(function FinalImage({
   const cardSrc = conversationImageSrc(image);
   const lightboxPreview =
     image.display_url ?? imageVariantUrl(image.id, "display2048");
+  const free = isFreeGeneration(gen, image);
   const elapsed = formatElapsed(gen);
   const tail = [
     gen.aspect_ratio,
@@ -943,6 +955,12 @@ const FinalImage = memo(function FinalImage({
             </>
           )}
         </button>
+
+        {free && (
+          <span className="pointer-events-none absolute left-2 top-2 z-10 rounded-full border border-white/20 bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
+            free
+          </span>
+        )}
 
         {/* hover "···" 菜单按钮（兄弟节点，避免 button-in-button 嵌套） */}
         <button

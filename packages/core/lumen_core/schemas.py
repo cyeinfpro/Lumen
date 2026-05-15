@@ -228,6 +228,10 @@ class GenerationOut(BaseOut):
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    is_dual_race_bonus: bool = False
+    billing_free: bool = False
+    billing_label: str | None = None
+    billing_exempt_reason: str | None = None
 
 
 class CompletionOut(BaseOut):
@@ -284,6 +288,10 @@ class ImageOut(BaseOut):
     preview_url: str | None = None
     thumb_url: str | None = None
     metadata_jsonb: dict[str, Any] = Field(default_factory=dict)
+    is_dual_race_bonus: bool = False
+    billing_free: bool = False
+    billing_label: str | None = None
+    billing_exempt_reason: str | None = None
 
 
 # ---------- Workflows ----------
@@ -643,6 +651,10 @@ class ApparelModelLibraryJobItemOut(BaseModel):
     appearance_direction: str | None = None
     gender: str | None = None
     download_filename: str | None = None
+    is_dual_race_bonus: bool = False
+    billing_free: bool = False
+    billing_label: str | None = None
+    billing_exempt_reason: str | None = None
 
 
 class ApparelModelLibraryJobOut(BaseModel):
@@ -835,12 +847,90 @@ class WalletTransactionListOut(BaseModel):
     next_cursor: str | None = None
 
 
+class BillingWindowOut(BaseModel):
+    used_micro: int
+    limit_micro: int
+    resets_at: datetime | None = None
+
+
+class BillingUsageByKindOut(BaseModel):
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_creation: int = 0
+    image: int = 0
+    reasoning: int = 0
+
+
+class BillingSnapshotOut(BaseModel):
+    balance_micro: int
+    billing_rate_multiplier: str
+    windows: dict[str, BillingWindowOut]
+    by_kind_30d: BillingUsageByKindOut
+
+
+class AdminBillingUsageOut(BaseModel):
+    user_id: str
+    balance_micro: int
+    billing_rate_multiplier: str
+    range_start: datetime
+    range_end: datetime
+    windows: dict[str, BillingWindowOut]
+    by_kind_30d: BillingUsageByKindOut
+    total_micro: int = 0
+    transaction_count: int = 0
+
+
+class AdminPricingBulkRatesIn(BaseModel):
+    input: str | int | float | None = None
+    output: str | int | float | None = None
+    cache_read: str | int | float | None = None
+    cache_creation: str | int | float | None = None
+    cache_creation_5m: str | int | float | None = None
+    cache_creation_1h: str | int | float | None = None
+    image_output: str | int | float | None = None
+    reasoning: str | int | float | None = None
+    input_priority: str | int | float | None = None
+    output_priority: str | int | float | None = None
+    cache_read_priority: str | int | float | None = None
+    long_context_threshold: int | None = None
+    long_context_input_multiplier: float | None = None
+    long_context_output_multiplier: float | None = None
+
+
+class AdminPricingBulkIn(BaseModel):
+    model: str = Field(min_length=1, max_length=64)
+    channel: str | None = Field(default=None, max_length=32)
+    rates: AdminPricingBulkRatesIn
+    enabled: bool = True
+    note: str | None = Field(default=None, max_length=500)
+
+
+PricingUnit = Literal[
+    "per_image",
+    "per_1k_tokens_in",
+    "per_1k_tokens_out",
+    "per_1k_tokens_cache_read",
+    "per_1k_tokens_cache_creation",
+    "per_1k_tokens_cache_creation_5m",
+    "per_1k_tokens_cache_creation_1h",
+    "per_1k_tokens_image_output",
+    "per_1k_tokens_reasoning",
+    "per_1k_tokens_input_priority",
+    "per_1k_tokens_output_priority",
+    "per_1k_tokens_cache_read_priority",
+    "long_context_threshold",
+    "long_context_input_multiplier",
+    "long_context_output_multiplier",
+]
+
+
 class PricingRuleOut(BaseOut):
     id: str
     scope: Literal["image_size", "chat_model"]
     key: str
     variant: str = "default"
-    unit: Literal["per_image", "per_1k_tokens_in", "per_1k_tokens_out"]
+    unit: PricingUnit
     price: MoneyOut
     enabled: bool
     note: str | None = None
@@ -859,7 +949,7 @@ class PricingRuleUpsertIn(BaseModel):
     scope: Literal["image_size", "chat_model"]
     key: str = Field(min_length=1, max_length=64)
     variant: str = Field(default="default", min_length=1, max_length=32)
-    unit: Literal["per_image", "per_1k_tokens_in", "per_1k_tokens_out"]
+    unit: PricingUnit
     price_rmb: str = Field(min_length=1, max_length=32)
     enabled: bool = True
     note: str | None = Field(default=None, max_length=500)
@@ -1759,6 +1849,12 @@ __all__ = [
     "WalletOut",
     "WalletTransactionOut",
     "WalletTransactionListOut",
+    "BillingWindowOut",
+    "BillingUsageByKindOut",
+    "BillingSnapshotOut",
+    "AdminBillingUsageOut",
+    "AdminPricingBulkRatesIn",
+    "AdminPricingBulkIn",
     "PricingRuleOut",
     "PricingRulesOut",
     "PricingRuleUpsertIn",

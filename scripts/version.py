@@ -28,6 +28,7 @@ PYPROJECT_FILES = [
 WEB_PACKAGE_JSON = ROOT / "apps/web/package.json"
 WEB_PACKAGE_LOCK = ROOT / "apps/web/package-lock.json"
 CORE_INIT = ROOT / "packages/core/lumen_core/__init__.py"
+CURRENT_RELEASE_JSON = ROOT / "current" / ".lumen_release.json"
 
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -194,6 +195,40 @@ def assert_tag(tag: str) -> int:
     return 0
 
 
+def print_runtime() -> int:
+    version = read_product_version()
+    release: dict[str, object] = {}
+    try:
+        release = read_json(CURRENT_RELEASE_JSON)
+    except FileNotFoundError:
+        release = {}
+    image_tag = release.get("image_tag") or f"v{version}"
+    if not isinstance(image_tag, str):
+        image_tag = f"v{version}"
+    release_id = release.get("id")
+    sha = release.get("sha")
+    payload = {
+        "version": version,
+        "image_tag": image_tag,
+        "release_id": release_id,
+        "sha": sha,
+    }
+    mismatches: list[str] = []
+    if image_tag != f"v{version}" and image_tag != "main":
+        mismatches.append(f"image_tag={image_tag} != v{version}")
+    if release_id is not None and not isinstance(release_id, str):
+        mismatches.append("release_id not string")
+    if sha is not None and not isinstance(sha, str):
+        mismatches.append("sha not string")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if mismatches:
+        print("runtime mismatch:", file=sys.stderr)
+        for item in mismatches:
+            print(f"  - {item}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -201,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check", help="verify all version targets match VERSION")
     sub.add_parser("sync", help="rewrite version targets to match VERSION")
     sub.add_parser("docker-tags", help="print release Docker tags for VERSION")
+    sub.add_parser("print-runtime", help="print runtime version / image tag / release metadata")
     tag_parser = sub.add_parser("assert-tag", help="verify a git tag matches VERSION")
     tag_parser.add_argument("tag", help="tag name, e.g. v1.2.3")
 
@@ -216,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         return docker_tags()
     if args.cmd == "assert-tag":
         return assert_tag(args.tag)
+    if args.cmd == "print-runtime":
+        return print_runtime()
     raise AssertionError(args.cmd)
 
 

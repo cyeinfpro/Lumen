@@ -42,9 +42,12 @@ import {
   useAdminModelsQuery,
   useAdminProxiesQuery,
   useAdminReleasesQuery,
+  useAdminCheckUpdateQuery,
+  useAdminUpdateVersionQuery,
   useAdminUpdateStatusQuery,
   useProvidersQuery,
   useRollbackReleaseMutation,
+  useRollbackPreviousMutation,
   useSystemSettingsQuery,
   useTriggerAdminUpdateMutation,
   useUpdateSystemSettingsMutation,
@@ -52,8 +55,11 @@ import {
 import {
   adminUpdateStreamUrl,
   ApiError,
+  checkAdminUpdate,
   getAdminContextHealth,
+  type AdminUpdateCheckOut,
   type AdminUpdateStatusOut,
+  type AdminUpdateVersionOut,
   type ReleaseInfo,
   type UpdateStepRecord,
 } from "@/lib/apiClient";
@@ -62,6 +68,7 @@ import { cn } from "@/lib/utils";
 import { Button, ConfirmDialog, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import { ErrorBlock } from "../page";
+import { UpdateAvailableCard } from "@/components/admin/UpdateAvailableCard";
 
 type Op = { kind: "set"; value: string } | { kind: "clear" };
 type SettingGroupId =
@@ -693,6 +700,8 @@ export function SettingsPanel() {
       return query.state.data?.running ? 5000 : false;
     },
   });
+  const updateVersionQ = useAdminUpdateVersionQuery({ retry: false });
+  const updateCheckQ = useAdminCheckUpdateQuery(false, { retry: false });
   const releasesQ = useAdminReleasesQuery({ retry: false });
   const contextHealthQ = useQuery({
     queryKey: ["admin", "context", "health"],
@@ -711,6 +720,7 @@ export function SettingsPanel() {
     text: string;
   } | null>(null);
   const [updateStreamArmed, setUpdateStreamArmed] = useState(false);
+  const [manualCheckPending, setManualCheckPending] = useState(false);
   const triggerUpdateMut = useTriggerAdminUpdateMutation({
     onSuccess: (result) => {
       setUpdateStreamArmed(true);
@@ -731,13 +741,36 @@ export function SettingsPanel() {
       const target = result.unit ? `任务 ${result.unit}` : `进程 ${result.pid ?? "-"}`;
       setUpdateBanner({
         kind: "success",
-        text: `更新已启动，${target}${result.proxy_name ? `，代理 ${result.proxy_name}` : ""}`,
+        text: `更新已启动，${target}${result.proxy_name ? `，代理 ${result.proxy_name}` : ""}${result.target_tag ? `，目标 ${result.target_tag}` : ""}`,
       });
     },
     onError: (err) => {
       setUpdateStreamArmed(false);
       const msg = err instanceof ApiError ? err.message : err.message || "触发更新失败";
       setUpdateBanner({ kind: "error", text: `触发更新失败：${msg}` });
+    },
+  });
+  const previousRollbackMut = useRollbackPreviousMutation({
+    onSuccess: (result) => {
+      setUpdateStreamArmed(true);
+      queryClient.setQueryData<AdminUpdateStatusOut | undefined>(
+        qk.adminUpdateStatus(),
+        (prev) => ({
+          running: true,
+          pid: prev?.pid ?? null,
+          unit: prev?.unit ?? null,
+          started_at: result.started_at,
+          log_tail: prev?.log_tail ?? "",
+          phases: prev?.phases ?? [],
+          current_release: prev?.current_release ?? null,
+          previous_release: prev?.previous_release ?? null,
+          releases: prev?.releases ?? [],
+        }),
+      );
+      setUpdateBanner({
+        kind: "info",
+        text: `已启动回滚到上一版本 ${result.target.id}`,
+      });
     },
   });
   const rollbackMut = useRollbackReleaseMutation({
@@ -769,6 +802,34 @@ export function SettingsPanel() {
     },
   });
 
+  const runUpdateCheck = useCallback(
+    async (force = false) => {
+      setManualCheckPending(true);
+      try {
+        const data = await checkAdminUpdate(force);
+        queryClient.setQueryData(qk.adminUpdateCheck(false), data);
+        queryClient.setQueryData<AdminUpdateVersionOut | undefined>(
+          qk.adminUpdateVersion(),
+          {
+            version: data.current_version,
+            image_tag: updateVersionQ.data?.image_tag ?? `v${data.current_version}`,
+            release_id: updateVersionQ.data?.release_id ?? null,
+            sha: updateVersionQ.data?.sha ?? null,
+            channel: data.channel,
+            build_type: data.build_type,
+            degraded: updateVersionQ.data?.degraded ?? [],
+          },
+        );
+      } catch (err) {
+        const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "检查更新失败";
+        setUpdateBanner({ kind: "error", text: `检查更新失败：${msg}` });
+      } finally {
+        setManualCheckPending(false);
+      }
+    },
+    [queryClient, updateVersionQ.data],
+  );
+
   // SSE 实时流：跑动时打开，连接 /admin/update/stream
   // 该 hook 直接管理 status query data + 本地 log buffer（done 事件触发 invalidate）。
   // running 端为 true → 开流；false 时不打开（避免没必要的连接）。
@@ -779,7 +840,8 @@ export function SettingsPanel() {
     updateRunning ||
     updateStreamArmed ||
     triggerUpdateMut.isPending ||
-    rollbackMut.isPending;
+    rollbackMut.isPending ||
+    previousRollbackMut.isPending;
   const { logBuffer, streamStatus, clearLogs } = useAdminUpdateStream(sseEnabled);
 
   // 把 streamStatus 桥接到 streamConnected，给 useAdminUpdateStatusQuery 的
@@ -790,11 +852,18 @@ export function SettingsPanel() {
 
   useEffect(() => {
     if (!updateStreamArmed) return;
-    if (triggerUpdateMut.isPending || rollbackMut.isPending || updateRunning) return;
+    if (
+      triggerUpdateMut.isPending ||
+      rollbackMut.isPending ||
+      previousRollbackMut.isPending ||
+      updateRunning
+    )
+      return;
     const t = setTimeout(() => setUpdateStreamArmed(false), 0);
     return () => clearTimeout(t);
   }, [
     rollbackMut.isPending,
+    previousRollbackMut.isPending,
     triggerUpdateMut.isPending,
     updateRunning,
     updateStreamArmed,
@@ -1135,6 +1204,31 @@ export function SettingsPanel() {
         data={contextHealthQ.data}
       />
 
+      <UpdateAvailableCard
+        check={updateCheckQ.data}
+        status={updateStatusQ.data}
+        version={updateVersionQ.data}
+        checking={updateCheckQ.isLoading || manualCheckPending}
+        triggering={triggerUpdateMut.isPending || rollbackMut.isPending || previousRollbackMut.isPending}
+        onCheck={(force) => {
+          void runUpdateCheck(force);
+        }}
+        onTrigger={() => {
+          setUpdateBanner(null);
+          clearLogs();
+          triggerUpdateMut.mutate({
+            target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
+            channel: updateCheckQ.data?.channel ?? undefined,
+            force_redeploy: false,
+          });
+        }}
+        onRollbackPrevious={() => {
+          setUpdateBanner(null);
+          clearLogs();
+          previousRollbackMut.mutate();
+        }}
+      />
+
       <LumenUpdateBlock
         status={updateStatusQ.data}
         loading={updateStatusQ.isLoading}
@@ -1152,7 +1246,11 @@ export function SettingsPanel() {
         onTrigger={() => {
           setUpdateBanner(null);
           clearLogs();
-          triggerUpdateMut.mutate();
+          triggerUpdateMut.mutate({
+            target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
+            channel: updateCheckQ.data?.channel ?? undefined,
+            force_redeploy: false,
+          });
         }}
         onRefresh={() => {
           void updateStatusQ.refetch();

@@ -20,6 +20,7 @@ from sqlalchemy import (
     Float,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -109,6 +110,12 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     )
     account_mode: Mapped[str] = mapped_column(
         String(16), default="wallet", nullable=False, server_default="wallet"
+    )
+    billing_rate_multiplier: Mapped[float] = mapped_column(
+        Numeric(8, 4),
+        nullable=False,
+        default=1.0,
+        server_default="1.0000",
     )
     confirmation_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default=text("false")
@@ -318,6 +325,15 @@ class UserApiCredential(Base, TimestampMixin, SoftDeleteMixin):
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     rate_limited_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    limit_5h_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    limit_1d_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    limit_7d_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
     )
     capabilities_jsonb: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
@@ -692,6 +708,24 @@ class Completion(Base, TimestampMixin):
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    cache_creation_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    cache_creation_5m_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    cache_creation_1h_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    reasoning_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    image_output_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     progress_stage: Mapped[str] = mapped_column(
         String(32), nullable=False, default="queued"
@@ -991,6 +1025,12 @@ class UserWallet(Base, TimestampMixin):
     )
     version: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
+    )
+    billing_rate_multiplier: Mapped[float] = mapped_column(
+        Numeric(8, 4),
+        nullable=False,
+        default=1.0,
+        server_default="1.0000",
     )
 
 

@@ -49,6 +49,7 @@ const TX_KIND_LABEL: Record<string, string> = {
   settle: "结算",
   release: "释放",
   charge: "扣费",
+  charge_completion: "扣费",
   topup_redeem: "兑换充值",
   adjust_admin: "管理员调账",
 };

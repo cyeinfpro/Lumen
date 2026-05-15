@@ -56,6 +56,7 @@ from .admin_update import (
 
 
 router = APIRouter(prefix="/admin/release", tags=["admin"])
+update_router = APIRouter(prefix="/admin/update", tags=["admin"])
 
 
 # ---------------------------------------------------------------------------
@@ -459,8 +460,31 @@ async def rollback_release(
     )
 
 
+@update_router.post(
+    "/rollback-previous",
+    response_model=RollbackOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def rollback_previous_release(
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RollbackOut:
+    releases = await asyncio.to_thread(_list_releases)
+    previous = next((r for r in releases if r.is_previous), None)
+    if previous is None:
+        raise _http("no_previous", "no previous release is available", 409)
+    return await rollback_release(
+        RollbackIn(release_id=previous.id),
+        request,
+        admin,
+        db,
+    )
+
+
 __all__ = [
     "router",
+    "update_router",
     "RollbackIn",
     "RollbackOut",
     "_build_rollback_script",

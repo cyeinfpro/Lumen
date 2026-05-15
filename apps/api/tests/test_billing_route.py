@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,6 +13,71 @@ from lumen_core.schemas import AdminRedemptionCodeCreateIn
 
 def test_openai_price_import_uses_decimal_half_up_rounding() -> None:
     assert billing._openai_price_micro("0.0005", 1.0) == 1  # noqa: SLF001
+
+
+def test_usage_by_kind_uses_cost_breakdown_and_rate_multiplier() -> None:
+    row = SimpleNamespace(
+        kind="charge",
+        amount_micro=-25_000,
+        ref_type="completion",
+        created_at=datetime.now(timezone.utc),
+        meta={
+            "cost_breakdown": {
+                "input_cost_micro": 10_000,
+                "output_cost_micro": 20_000,
+                "cache_read_cost_micro": 5_000,
+                "cache_creation_cost_micro": 3_000,
+                "image_output_cost_micro": 2_000,
+                "reasoning_cost_micro": 1_000,
+                "rate_multiplier_x10000": 5000,
+            }
+        },
+    )
+
+    out = billing._usage_by_kind([row])  # noqa: SLF001
+
+    assert out.input == 5_000
+    assert out.output == 10_000
+    assert out.cache_read == 2_500
+    assert out.cache_creation == 1_500
+    assert out.image == 1_000
+    assert out.reasoning == 500
+
+
+def test_window_usage_reports_reset_from_oldest_in_window() -> None:
+    now = datetime(2026, 5, 15, 12, tzinfo=timezone.utc)
+    old = SimpleNamespace(
+        kind="charge",
+        amount_micro=-10_000,
+        ref_type="completion",
+        created_at=now - timedelta(hours=6),
+        meta={"cost_micro": 10_000},
+    )
+    recent = SimpleNamespace(
+        kind="charge",
+        amount_micro=-20_000,
+        ref_type="completion",
+        created_at=now - timedelta(hours=2),
+        meta={"cost_micro": 20_000},
+    )
+
+    out = billing._window_usage(  # noqa: SLF001
+        [old, recent],
+        now=now,
+        span=timedelta(hours=5),
+        limit_micro=100_000,
+    )
+
+    assert out.used_micro == 20_000
+    assert out.limit_micro == 100_000
+    assert out.resets_at == recent.created_at + timedelta(hours=5)
+
+
+def test_bulk_multiplier_converts_to_x10000() -> None:
+    assert (
+        billing._bulk_multiplier_x10000(2.25, field="rates.long_context_input_multiplier")  # noqa: SLF001
+        == 22_500
+    )
 
 
 class _Db:

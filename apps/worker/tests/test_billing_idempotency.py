@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app import billing as worker_billing
+from lumen_core.pricing import CostBreakdown
 
 
 class _Session:
@@ -149,3 +150,145 @@ async def test_charge_completion_integrity_error_bubbles_after_billing_attempt(
         await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
 
     assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_charge_completion_passes_priority_service_tier_to_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(
+        id="completion-1",
+        user_id="user-1",
+        model="gpt-5.5",
+        tokens_in=100,
+        tokens_out=50,
+        upstream_request={"service_tier": "priority"},
+    )
+    captured: dict[str, Any] = {}
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def estimate_cost(*_args: Any, **kwargs: Any) -> int:
+        captured["service_tier"] = kwargs.get("service_tier")
+        return 100
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def charge(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        captured["meta"] = kwargs.get("meta")
+        return SimpleNamespace(
+            id="tx-1",
+            amount_micro=-100,
+            balance_after=900,
+            meta={},
+        )
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_allow_negative_balance", allow_negative_balance)
+    monkeypatch.setattr(worker_billing.billing_core, "estimate_completion_cost", estimate_cost)
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing, "_existing_fingerprint_tx", no_existing)
+    monkeypatch.setattr(worker_billing.billing_core, "charge", charge)
+
+    await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
+
+    assert captured["service_tier"] == "priority"
+    assert captured["meta"]["service_tier"] == "priority"
+    assert captured["meta"]["request_fingerprint"].startswith("v2:")
+
+
+@pytest.mark.asyncio
+async def test_charge_completion_legacy_mode_folds_cache_tokens_into_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(
+        id="completion-1",
+        user_id="user-1",
+        model="gpt-5.5",
+        tokens_in=80,
+        tokens_out=20,
+        cache_read_tokens=15,
+        cache_creation_tokens=5,
+        upstream_request={},
+    )
+    captured: dict[str, Any] = {}
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def cache_aware_enabled() -> bool:
+        return False
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def rate_multiplier(*_args: Any) -> int:
+        return 10_000
+
+    async def estimate_breakdown(*_args: Any, **kwargs: Any) -> CostBreakdown:
+        tokens = kwargs["tokens"]
+        captured["tokens"] = tokens
+        return CostBreakdown(
+            input_cost_micro=100,
+            output_cost_micro=0,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=10_000,
+            total_cost_micro=100,
+            actual_cost_micro=100,
+            pricing_source="test",
+        )
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def charge(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        captured["meta"] = kwargs.get("meta")
+        return SimpleNamespace(
+            id="tx-1",
+            amount_micro=-100,
+            balance_after=900,
+            meta={},
+        )
+
+    monkeypatch.setattr(worker_billing, "AsyncSession", _Session)
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_cache_aware_enabled", cache_aware_enabled)
+    monkeypatch.setattr(worker_billing, "_allow_negative_balance", allow_negative_balance)
+    monkeypatch.setattr(worker_billing, "_rate_multiplier_x10000", rate_multiplier)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing, "_existing_fingerprint_tx", no_existing)
+    monkeypatch.setattr(worker_billing.billing_core, "charge", charge)
+
+    await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
+
+    tokens = captured["tokens"]
+    assert tokens.input_tokens == 100
+    assert tokens.output_tokens == 20
+    assert tokens.cache_read_tokens == 0
+    assert tokens.cache_creation_tokens == 0
+    assert captured["meta"]["tokens_in"] == 100

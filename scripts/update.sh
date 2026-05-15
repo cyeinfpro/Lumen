@@ -192,6 +192,8 @@ refresh_update_runner_units() {
     fi
     local src_path="${src_dir}/lumen-update.path"
     local src_runner="${src_dir}/lumen-update-runner.service"
+    local src_warm_path="${src_dir}/lumen-update-warm.path"
+    local src_warm_service="${src_dir}/lumen-update-warm.service"
     if [ ! -f "${src_path}" ] || [ ! -f "${src_runner}" ]; then
         log_warn "[refresh_update_runner] 找不到 update runner unit 模板（${src_dir}），跳过。"
         emit_warn refresh_update_runner "unit_templates_missing"
@@ -207,6 +209,10 @@ refresh_update_runner_units() {
 
     render_update_runner_unit "${src_path}" "${tmp_dir}/lumen-update.path" "${data_root}" "${backup_root}" "${deploy_root}"
     render_update_runner_unit "${src_runner}" "${tmp_dir}/lumen-update-runner.service" "${data_root}" "${backup_root}" "${deploy_root}"
+    if [ -f "${src_warm_path}" ] && [ -f "${src_warm_service}" ]; then
+        render_update_runner_unit "${src_warm_path}" "${tmp_dir}/lumen-update-warm.path" "${data_root}" "${backup_root}" "${deploy_root}"
+        render_update_runner_unit "${src_warm_service}" "${tmp_dir}/lumen-update-warm.service" "${data_root}" "${backup_root}" "${deploy_root}"
+    fi
 
     if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" /etc/systemd/system/lumen-update.path; then
         log_warn "[refresh_update_runner] 安装 lumen-update.path 失败，面板一键更新可能不可用。"
@@ -218,6 +224,13 @@ refresh_update_runner_units() {
         rm -rf "${tmp_dir}"
         return 0
     fi
+    if [ -f "${tmp_dir}/lumen-update-warm.path" ] && [ -f "${tmp_dir}/lumen-update-warm.service" ]; then
+        if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.path" /etc/systemd/system/lumen-update-warm.path; then
+            log_warn "[refresh_update_runner] 安装 lumen-update-warm.path 失败，镜像预热将不可用。"
+        elif ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.service" /etc/systemd/system/lumen-update-warm.service; then
+            log_warn "[refresh_update_runner] 安装 lumen-update-warm.service 失败，镜像预热将不可用。"
+        fi
+    fi
     if ! lumen_run_as_root systemctl daemon-reload; then
         log_warn "[refresh_update_runner] systemctl daemon-reload 失败，面板一键更新可能不可用。"
         rm -rf "${tmp_dir}"
@@ -228,10 +241,16 @@ refresh_update_runner_units() {
         rm -rf "${tmp_dir}"
         return 0
     fi
+    if [ -f "${tmp_dir}/lumen-update-warm.path" ]; then
+        if ! lumen_run_as_root systemctl enable --now lumen-update-warm.path; then
+            log_warn "[refresh_update_runner] 启用 lumen-update-warm.path 失败，镜像预热将不可用；可稍后手动执行 systemctl enable --now lumen-update-warm.path。"
+        fi
+    fi
     rm -rf "${tmp_dir}"
 
     log_info "一键更新 runner 已刷新：监听 ${backup_root}/.update.trigger"
     emit_info refresh_update_runner update_trigger "${backup_root}/.update.trigger"
+    emit_info refresh_update_runner warm_trigger "${backup_root}/.warm.trigger"
     return 0
 }
 
@@ -585,8 +604,17 @@ fi
 # 当前 tag 与 channel
 CURRENT_TAG="$(lumen_env_value LUMEN_IMAGE_TAG "${SHARED_ENV}" 2>/dev/null || echo "")"
 PREVIOUS_TAG="${CURRENT_TAG}"
-LUMEN_UPDATE_CHANNEL="$(lumen_env_value LUMEN_UPDATE_CHANNEL "${SHARED_ENV}" 2>/dev/null || echo "")"
+if [ -z "${LUMEN_UPDATE_CHANNEL:-}" ]; then
+    LUMEN_UPDATE_CHANNEL="$(lumen_env_value LUMEN_UPDATE_CHANNEL "${SHARED_ENV}" 2>/dev/null || echo "")"
+fi
 [ -n "${LUMEN_UPDATE_CHANNEL}" ] || LUMEN_UPDATE_CHANNEL="stable"
+LUMEN_UPDATE_FORCE_REDEPLOY="${LUMEN_UPDATE_FORCE_REDEPLOY:-0}"
+LUMEN_UPDATE_IDEMPOTENCY_KEY="${LUMEN_UPDATE_IDEMPOTENCY_KEY:-}"
+if [ -n "${LUMEN_UPDATE_RESOLVED_TAG:-}" ]; then
+    LUMEN_UPDATE_RESOLVED_TAG_SOURCE="api"
+else
+    LUMEN_UPDATE_RESOLVED_TAG_SOURCE="shell"
+fi
 
 # 统一代理来源：支持 shared/.env 里的 LUMEN_UPDATE_PROXY_URL / LUMEN_HTTP_PROXY，
 # 也兼容面板触发时透传进来的 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY。
@@ -627,6 +655,9 @@ emit_info check current_id    "${CURRENT_ID:-<none>}"
 emit_info check data_root     "${LUMEN_DATA_ROOT}"
 emit_info check db_root       "${LUMEN_DB_ROOT}"
 emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"
+emit_info check idempotency_key "${LUMEN_UPDATE_IDEMPOTENCY_KEY:-<none>}"
+emit_info check resolved_tag_source "${LUMEN_UPDATE_RESOLVED_TAG_SOURCE}"
+emit_info check force_redeploy "${LUMEN_UPDATE_FORCE_REDEPLOY}"
 if [ -n "${LUMEN_PROXY_URL}" ]; then
     emit_info check proxy "configured"
 fi
@@ -641,7 +672,8 @@ if lumen_image_tag_is_rolling "${TARGET_TAG}"; then
     NOOP_BY_TAG_NAME=0
 fi
 
-if [ -n "${CURRENT_TAG}" ] \
+if [ "${LUMEN_UPDATE_FORCE_REDEPLOY}" != "1" ] \
+        && [ -n "${CURRENT_TAG}" ] \
         && [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] \
         && [ "${CONFIG_CHANGED}" -eq 0 ] \
         && [ "${NOOP_BY_TAG_NAME}" -eq 1 ]; then
@@ -1061,9 +1093,16 @@ emit_done start_infra 0
 # ---------------------------------------------------------------------------
 emit_start migrate_db
 
-log_info "[migrate_db] stop api/worker/tgbot 让出活跃事务,避免 schema lock 死锁"
-# stop 失败 (容器本来没起 / 无该 service 之类) 不阻塞 migrate.
-lumen_compose_in "${NEW_RELEASE}" stop api worker tgbot >/dev/null 2>&1 || true
+_stopped_old_services=0
+if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ]; then
+    log_info "[migrate_db] LUMEN_UPDATE_BLUE_GREEN=1：保持旧 api/worker 运行，依赖 expand-then-contract 迁移闸门。"
+    emit_info migrate_db old_services "kept_running_blue_green"
+else
+    log_info "[migrate_db] stop api/worker/tgbot 让出活跃事务,避免 schema lock 死锁"
+    # stop 失败 (容器本来没起 / 无该 service 之类) 不阻塞 migrate.
+    lumen_compose_in "${NEW_RELEASE}" stop api worker tgbot >/dev/null 2>&1 || true
+    _stopped_old_services=1
+fi
 
 _migrate_run_failed=0
 if ! lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate; then
@@ -1088,9 +1127,9 @@ if [ "${_migrate_run_failed}" = "1" ] \
     log_error "  expected head=${_alembic_heads:-<空>}"
     log_error "  原始 docker compose run rc：${_migrate_run_failed}（0=看起来 success，但 verify 不通过仍 fail-fast）"
     log_error "  根据 §11.3 / §17.6：不切 current、不重启新版本业务容器。"
-    # 关键修复：之前 stop 了旧 api/worker/tgbot，migrate 失败后必须把它们用旧
+    # 关键修复：如果之前 stop 了旧 api/worker/tgbot，migrate 失败后必须把它们用旧
     # release 起回来，否则业务停摆 — 旧 schema 与旧代码兼容，仍可正常服务。
-    if [ -n "${CURRENT_ID:-}" ] && [ -d "${ROOT}/releases/${CURRENT_ID}" ]; then
+    if [ "${_stopped_old_services}" = "1" ] && [ -n "${CURRENT_ID:-}" ] && [ -d "${ROOT}/releases/${CURRENT_ID}" ]; then
         log_warn "[migrate_db] 用旧 release ${CURRENT_ID} 重启 api/worker，让业务恢复旧 schema 服务..."
         # 旧 release 的 compose 文件指向旧镜像 tag（PREVIOUS_TAG），SHARED_ENV
         # 还没被 set_image_tag 改写之前已经被改过；如果已改，先恢复成旧 tag。
@@ -1105,8 +1144,10 @@ if [ "${_migrate_run_failed}" = "1" ] \
             log_error "    cd ${ROOT}/releases/${CURRENT_ID}"
             log_error "    COMPOSE_PROJECT_NAME=lumen docker compose up -d worker api"
         fi
-    else
+    elif [ "${_stopped_old_services}" = "1" ]; then
         log_error "[migrate_db] 无可用的旧 release（CURRENT_ID=${CURRENT_ID:-<none>}），业务停摆。"
+    else
+        log_warn "[migrate_db] 蓝绿模式下旧服务未停止；保持 current 不切换，业务继续由旧版本服务。"
     fi
     log_error "  请人工查 migrate 日志：docker compose logs --tail=120 migrate"
     emit_fail migrate_db 1
@@ -1176,15 +1217,105 @@ CURRENT_LINK="${ROOT}/current"
 # 把 api 放到最后还能用旧 api 把进度写完，再无缝切到新版本。
 # (per project_lumen_update_button.md)
 _restart_ok=1
-for _svc in worker web api; do
-    if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-compose.bluegreen.yml" ]; then
+    _green_port="${API_GREEN_BIND_PORT:-18001}"
+    _blue_port="${API_BIND_PORT:-8000}"
+    _blue_upstream="${LUMEN_BLUE_UPSTREAM:-127.0.0.1:${_blue_port}}"
+    _green_upstream="${LUMEN_GREEN_UPSTREAM:-127.0.0.1:${_green_port}}"
+    _shift_script="${CURRENT_LINK}/scripts/lumen-shift-traffic.sh"
+
+    emit_start start_green
+    if lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml up -d --wait --force-recreate api-green \
+        && lumen_wait_for_http_ok "http://127.0.0.1:${_green_port}/healthz" 60; then
+        emit_info start_green port "${_green_port}"
+        emit_done start_green 0
+    else
         _restart_ok=0
-        break
+        emit_fail start_green 1
     fi
-done
+
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start shift_traffic_50
+        if lumen_run_as_root env LUMEN_BLUE_UPSTREAM="${_blue_upstream}" LUMEN_GREEN_UPSTREAM="${_green_upstream}" bash "${_shift_script}" green 50; then
+            sleep "${LUMEN_BLUE_GREEN_SHIFT_PAUSE_SEC:-3}"
+            emit_done shift_traffic_50 0
+        else
+            _restart_ok=0
+            emit_fail shift_traffic_50 1
+        fi
+    fi
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start shift_traffic_100
+        if lumen_run_as_root env LUMEN_BLUE_UPSTREAM="${_blue_upstream}" LUMEN_GREEN_UPSTREAM="${_green_upstream}" bash "${_shift_script}" green 100; then
+            sleep "${LUMEN_BLUE_GREEN_SHIFT_PAUSE_SEC:-3}"
+            emit_done shift_traffic_100 0
+        else
+            _restart_ok=0
+            emit_fail shift_traffic_100 1
+        fi
+    fi
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start drain_blue
+        sleep "${LUMEN_BLUE_GREEN_DRAIN_SEC:-30}"
+        emit_done drain_blue 0
+    fi
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start stop_blue
+        if lumen_compose_in "${CURRENT_LINK}" stop api; then
+            emit_done stop_blue 0
+        else
+            _restart_ok=0
+            emit_fail stop_blue 1
+        fi
+    fi
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start start_blue
+        for _svc in worker web api; do
+            if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+                _restart_ok=0
+                break
+            fi
+        done
+        if [ "${_restart_ok}" = "1" ]; then
+            emit_done start_blue 0
+        else
+            emit_fail start_blue 1
+        fi
+    fi
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start shift_traffic_blue
+        if lumen_run_as_root env LUMEN_BLUE_UPSTREAM="${_blue_upstream}" LUMEN_GREEN_UPSTREAM="${_green_upstream}" bash "${_shift_script}" blue 100; then
+            emit_done shift_traffic_blue 0
+        else
+            _restart_ok=0
+            emit_fail shift_traffic_blue 1
+        fi
+    fi
+    if [ "${_restart_ok}" = "1" ]; then
+        emit_start stop_green
+        if lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml stop api-green; then
+            emit_done stop_green 0
+        else
+            emit_warn stop_green "stop_green_failed_ignored"
+            emit_done stop_green 0
+        fi
+    fi
+else
+    for _svc in worker web api; do
+        if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+            _restart_ok=0
+            break
+        fi
+    done
+fi
 if [ "${_restart_ok}" = "1" ]; then
     :
 else
+    if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -n "${_shift_script:-}" ]; then
+        log_warn "[restart_services] 蓝绿路径失败，best-effort 切回 blue 100% 并停止 green。"
+        lumen_run_as_root env LUMEN_BLUE_UPSTREAM="${_blue_upstream:-127.0.0.1:8000}" LUMEN_GREEN_UPSTREAM="${_green_upstream:-127.0.0.1:18001}" bash "${_shift_script}" blue 100 >/dev/null 2>&1 || true
+        lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml stop api-green >/dev/null 2>&1 || true
+    fi
     log_error "[restart_services] api/worker/web 启动失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
     emit_warn restart_services "starting_auto_rollback"
     # 事务化回滚：先备份新 tag、改 .env，pull/up 任一步失败就把 .env 恢复成新 tag，

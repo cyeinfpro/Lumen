@@ -7,16 +7,20 @@
 - constants: 共享常量（枚举、队列名、事件名）
 - context_window: 上下文窗口预算与 token 估算
 - providers: Provider Pool 解析与旧 env 兼容 fallback
+- pricing: cache-aware token usage and cost breakdown helpers
 - runtime_settings: 可调系统设置元数据与校验
 """
 
-__version__ = "1.1.21"
+__version__ = "1.1.22"
 
 from . import (  # noqa: F401
     constants,
     context_window,
     image_signing,
     models,
+    pricing,
+    pricing_fallback,
+    pricing_resolver,
     providers,
     runtime_settings,
     schemas,

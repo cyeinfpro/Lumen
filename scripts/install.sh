@@ -1158,6 +1158,29 @@ _render_update_runner_units() {
             -e "s#__LUMEN_DATA_ROOT__#${data_root_esc}#g" \
             -e "s#__LUMEN_DEPLOY_ROOT__#${deploy_root_esc}#g" \
         > "${out_dir}/lumen-update-runner.service"
+    local src_dir src_warm_path src_warm_service
+    src_dir="$(dirname "${src_path}")"
+    src_warm_path="${src_dir}/lumen-update-warm.path"
+    src_warm_service="${src_dir}/lumen-update-warm.service"
+    if [ -f "${src_warm_path}" ]; then
+        sed \
+            -e 's#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g' \
+            "${src_warm_path}" \
+            | sed -e "s#__LUMEN_BACKUP_ROOT__#${backup_root_esc}#g" \
+            > "${out_dir}/lumen-update-warm.path"
+    fi
+    if [ -f "${src_warm_service}" ]; then
+        sed \
+            -e 's#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g' \
+            -e 's#/opt/lumendata#__LUMEN_DATA_ROOT__#g' \
+            -e 's#/opt/lumen#__LUMEN_DEPLOY_ROOT__#g' \
+            "${src_warm_service}" \
+            | sed \
+                -e "s#__LUMEN_BACKUP_ROOT__#${backup_root_esc}#g" \
+                -e "s#__LUMEN_DATA_ROOT__#${data_root_esc}#g" \
+                -e "s#__LUMEN_DEPLOY_ROOT__#${deploy_root_esc}#g" \
+            > "${out_dir}/lumen-update-warm.service"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1715,6 +1738,12 @@ install_update_runner_units() {
         emit_step_done
         return 0
     fi
+    if [ -f "${tmp_dir}/lumen-update-warm.path" ] && [ -f "${tmp_dir}/lumen-update-warm.service" ]; then
+        lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.path" /etc/systemd/system/lumen-update-warm.path \
+            || log_warn "安装 lumen-update-warm.path 失败，镜像预热将不可用。"
+        lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.service" /etc/systemd/system/lumen-update-warm.service \
+            || log_warn "安装 lumen-update-warm.service 失败，镜像预热将不可用。"
+    fi
     if ! lumen_run_as_root systemctl daemon-reload; then
         log_warn "systemctl daemon-reload 失败，面板一键更新可能不可用。"
         rm -rf "${tmp_dir}"
@@ -1727,10 +1756,15 @@ install_update_runner_units() {
         emit_step_done
         return 0
     fi
+    if [ -f "${tmp_dir}/lumen-update-warm.path" ]; then
+        lumen_run_as_root systemctl enable --now lumen-update-warm.path \
+            || log_warn "启用 lumen-update-warm.path 失败，镜像预热将不可用；可稍后手动执行 systemctl enable --now lumen-update-warm.path。"
+    fi
     rm -rf "${tmp_dir}"
 
     log_info "一键更新 runner 已启用：监听 ${backup_root}/.update.trigger"
     emit_info "key=update_trigger" "value=${backup_root}/.update.trigger"
+    emit_info "key=warm_trigger" "value=${backup_root}/.warm.trigger"
     emit_step_done
 }
 

@@ -26,9 +26,7 @@ UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
 
 
-def run_bash(
-    script: str, *, input_text: str | None = None
-) -> subprocess.CompletedProcess[str]:
+def script_env() -> dict[str, str]:
     env = os.environ.copy()
     env["LC_ALL"] = "C"
     # Tests must exercise the working tree under test. The real lumenctl entry
@@ -36,13 +34,19 @@ def run_bash(
     # test mutate this checkout underneath later assertions.
     env.setdefault("LUMEN_SELF_UPDATE", "0")
     env.setdefault("LUMEN_LUMENCTL_SELF_UPDATE", "0")
+    return env
+
+
+def run_bash(
+    script: str, *, input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", "-lc", script],
         cwd=ROOT,
         input=input_text,
         text=True,
         capture_output=True,
-        env=env,
+        env=script_env(),
         check=False,
     )
 
@@ -931,6 +935,7 @@ def test_lumenctl_help_lists_every_documented_command() -> None:
         cwd=ROOT,
         text=True,
         capture_output=True,
+        env=script_env(),
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -974,6 +979,7 @@ def test_lumenctl_menu_accepts_default_exit_without_error() -> None:
         input="\n",
         text=True,
         capture_output=True,
+        env=script_env(),
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -1854,6 +1860,7 @@ def test_lumenctl_help_documents_docker_compose_runtime_block() -> None:
         cwd=ROOT,
         text=True,
         capture_output=True,
+        env=script_env(),
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout

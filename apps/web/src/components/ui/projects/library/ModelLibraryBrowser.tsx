@@ -290,6 +290,10 @@ export function ModelLibraryBrowser({
             thumb_url: it.thumb_url,
             image_id: it.image_id,
             download_filename: it.download_filename,
+            is_dual_race_bonus: it.is_dual_race_bonus,
+            billing_free: it.billing_free,
+            billing_label: it.billing_label,
+            billing_exempt_reason: it.billing_exempt_reason,
             created_at: job.created_at,
           });
         }
@@ -801,6 +805,11 @@ function ModelLibraryCard({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const isPreset = item.source === "preset";
   const isLoser = onSaveLoser != null;
+  const isFree =
+    isLoser ||
+    item.billing_free === true ||
+    item.billing_label === "free" ||
+    item.is_dual_race_bonus === true;
   const loserParts = isLoser ? item.id.split(":") : [];
   const loserWorkflowRunId =
     loserParts.length >= 3 && loserParts[0] === "loser" ? loserParts[1] : "";
@@ -899,11 +908,13 @@ function ModelLibraryCard({
         {/* 来源标识 */}
         <span
           className={cn(
-            "absolute right-2 top-2 inline-flex items-center font-mono text-[10px] uppercase tracking-[0.18em]",
-            isLoser ? "text-[var(--amber-300)]" : "text-white/85 mix-blend-difference",
+            "absolute right-2 top-2 inline-flex items-center font-mono text-[10px]",
+            isFree
+              ? "rounded-full border border-white/20 bg-black/60 px-2 py-0.5 tracking-[0.14em] text-white backdrop-blur"
+              : "uppercase tracking-[0.18em] text-white/85 mix-blend-difference",
           )}
         >
-          {isLoser ? "待入库" : SOURCE_LABEL_SHORT[item.source]}
+          {isFree ? "free" : SOURCE_LABEL_SHORT[item.source]}
         </span>
         {/* 外貌徽标：底部 mono caption */}
         {appearanceLabel ? (

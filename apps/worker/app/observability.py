@@ -152,6 +152,29 @@ wallet_charge_lost_total = Counter(
     "Number of completion charge attempts that failed after upstream work completed.",
 )
 
+billing_cost_micro_total = Counter(
+    "lumen_billing_cost_micro_total",
+    "Completion billing cost by cost bucket, in micro RMB.",
+    labelnames=("kind",),
+)
+
+billing_pricing_source_total = Counter(
+    "lumen_billing_pricing_source_total",
+    "Completion pricing source decisions.",
+    labelnames=("source",),
+)
+
+billing_rate_limit_block_total = Counter(
+    "lumen_billing_rate_limit_block_total",
+    "Billing window rate-limit blocks.",
+    labelnames=("window",),
+)
+
+billing_idempotency_replay_total = Counter(
+    "lumen_billing_idempotency_replay_total",
+    "Billing ledger idempotency replays.",
+)
+
 # ---- 账号级 image 调度指标（多 provider = 多 OAuth 账号 → 每号一组时序） ----
 # 当前 image 路由的状态——每个号每个 state 一个时序；同一时刻一个号只有一个
 # state 是 1，其他 state 是 0。state 取自 ProviderHealth：closed / cooldown /
@@ -365,6 +388,10 @@ __all__ = [
     "upstream_calls_total",
     "wallet_overdrawn_total",
     "wallet_charge_lost_total",
+    "billing_cost_micro_total",
+    "billing_pricing_source_total",
+    "billing_rate_limit_block_total",
+    "billing_idempotency_replay_total",
     "safe_outcome",
     "account_image_state",
     "account_image_calls_total",

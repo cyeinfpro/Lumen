@@ -22,6 +22,17 @@ import type { Generation, Intent } from "@/lib/types";
 const PLACEHOLDER_PIXEL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
+function isFreeGeneration(gen: Generation): boolean {
+  return (
+    gen.billing_free === true ||
+    gen.billing_label === "free" ||
+    gen.is_dual_race_bonus === true ||
+    gen.image?.billing_free === true ||
+    gen.image?.billing_label === "free" ||
+    gen.image?.is_dual_race_bonus === true
+  );
+}
+
 // stage → 粗粒度进度（0-100），用于进度环
 const STAGE_PROGRESS: Record<Generation["stage"], number> = {
   queued: 8,
@@ -146,6 +157,7 @@ export function GenerationView({
 
   if (gen.status === "succeeded" && gen.image) {
     const img = gen.image;
+    const free = isFreeGeneration(gen);
     const elapsed =
       gen.finished_at && gen.started_at
         ? Math.max(0, Math.round((gen.finished_at - gen.started_at) / 100) / 10)
@@ -186,6 +198,17 @@ export function GenerationView({
           className="absolute top-2 right-2"
         />
         {ordinal && <OrdinalBadge value={ordinal} className="top-2 left-2" />}
+        {free && (
+          <span
+            className={cn(
+              "absolute top-2 z-10 rounded-full border border-white/20 bg-black/60 px-2 py-0.5",
+              "font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur",
+              ordinal ? "left-10" : "left-2",
+            )}
+          >
+            free
+          </span>
+        )}
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1">
           <p className={cn("truncate flex-1 min-w-0 basis-[10rem]", compact ? "type-caption" : "type-body-sm")}>
             {gen.prompt}

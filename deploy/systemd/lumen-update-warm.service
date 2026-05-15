@@ -1,0 +1,30 @@
+[Unit]
+Description=Lumen update warm image pull
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/lumen/current
+EnvironmentFile=-/opt/lumendata/backup/.update.env
+Environment=LUMEN_UPDATE_NONINTERACTIVE=1
+StandardOutput=append:/opt/lumendata/backup/.update.log
+StandardError=append:/opt/lumendata/backup/.update.log
+ExecStart=/usr/bin/env bash -ceu 'TAG="$(head -n1 /opt/lumendata/backup/.warm.trigger 2>/dev/null | tr -d "[:space:]")"; \
+  ts() { date -u +%%FT%%TZ; }; \
+  echo "::lumen-step:: phase=warm_pull status=start ts=$(ts)"; \
+  if [[ ! "$TAG" =~ ^(v[0-9]+([.][0-9]+){0,2}(-[0-9A-Za-z.-]+)?|main|latest)$ ]]; then \
+    echo "::lumen-info:: phase=warm_pull key=error value=invalid_tag"; \
+    echo "::lumen-step:: phase=warm_pull status=done rc=2 ts=$(ts)"; \
+    exit 2; \
+  fi; \
+  echo "::lumen-info:: phase=warm_pull key=tag value=$TAG"; \
+  LUMEN_IMAGE_TAG="$TAG" docker compose --profile tgbot --profile pull-only pull api worker web tgbot; \
+  rc=$?; \
+  echo "::lumen-step:: phase=warm_pull status=done rc=$rc ts=$(ts)"; \
+  exit "$rc"'
+ExecStopPost=/bin/sh -c "rm -f /opt/lumendata/backup/.warm.trigger"
+TimeoutStartSec=1800
+TimeoutStopSec=60
+KillSignal=SIGTERM
+KillMode=mixed

@@ -108,10 +108,22 @@ const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const CSRF_FAILED_CODE = "csrf_failed";
 
 // API 重启 / 临时网络抖动时，fetch 会直接 throw（请求从未抵达服务器），这种情况重试是
-// 安全的——服务端不会看到任何重复请求。HTTP 状态码错误（即使 5xx）不在这里重试，
-// 因为无法判断服务端是否已部分处理。
+// 安全的——服务端不会看到任何重复请求。HTTP 502/503/504 只重试 GET/HEAD 或显式带
+// Idempotency-Key 的写请求，避免无法判断服务端是否已部分处理的写操作被重复执行。
 const NETWORK_RETRY_MAX = 2;
 const NETWORK_RETRY_DELAYS_MS = [400, 1200];
+const RETRYABLE_HTTP_STATUSES = new Set([502, 503, 504]);
+
+function hasIdempotencyKey(headers: Headers): boolean {
+  return headers.has("Idempotency-Key") || headers.has("idempotency-key");
+}
+
+function canRetryHttp(method: string, headers: Headers): boolean {
+  if (method === "GET" || method === "HEAD") {
+    return true;
+  }
+  return hasIdempotencyKey(headers);
+}
 
 async function fetchWithNetworkRetry(
   url: string,
@@ -209,14 +221,25 @@ export async function apiFetch<T = unknown>(
     headers,
     credentials: "include" as RequestCredentials,
   };
-  try {
-    res = await fetchWithNetworkRetry(url, requestInit);
-  } catch (err) {
-    throw new ApiError({
-      code: "network_error",
-      message: err instanceof Error ? err.message : "network error",
-      status: 0,
-    });
+  const retryable = canRetryHttp(method, headers);
+  let attempt = 0;
+  while (true) {
+    try {
+      res = await fetchWithNetworkRetry(url, requestInit);
+    } catch (err) {
+      throw new ApiError({
+        code: "network_error",
+        message: err instanceof Error ? err.message : "network error",
+        status: 0,
+      });
+    }
+    if (!retryable || !RETRYABLE_HTTP_STATUSES.has(res.status) || attempt >= NETWORK_RETRY_MAX) {
+      break;
+    }
+    await new Promise((r) =>
+      setTimeout(r, NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200),
+    );
+    attempt += 1;
   }
 
   if (res.status === 401) {
