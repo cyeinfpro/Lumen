@@ -133,6 +133,7 @@ _DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 _GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
 _IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
 _IMAGE_MODERATION_VALUES = {"auto", "low"}
+_IMAGE_BILLING_TIER_VALUES = {"1k", "2k", "4k"}
 _POST_COMMIT_PUBLISH_TIMEOUT_S = 2.0
 _CONFIRM_REPLY_YES_RE = re.compile(
     r"^\s*(对|是|嗯|可以|继续|好|yes|yep|yeah|ok|okay)\b|按.*来",
@@ -222,6 +223,14 @@ async def _billing_image_thresholds(db: AsyncSession) -> dict[str, int]:
 
 def _billing_http_error(exc: billing_core.BillingError) -> HTTPException:
     return _http(exc.code, exc.message, exc.status_code)
+
+
+def _requested_image_billing_tier(image_params: ImageParamsIn) -> str | None:
+    return (
+        image_params.quality
+        if image_params.quality in _IMAGE_BILLING_TIER_VALUES
+        else None
+    )
 
 
 def _resolve_image_render_quality(
@@ -335,6 +344,10 @@ def _image_upstream_request(
             else "low"
         ),
     }
+    billing_tier = _requested_image_billing_tier(image_params)
+    if billing_tier is not None:
+        upstream_request["billing_tier"] = billing_tier
+        upstream_request["billing_tier_source"] = "request_quality"
     if output_format in {"jpeg", "webp"}:
         upstream_request["output_compression"] = (
             _default_output_compression(
@@ -1014,16 +1027,22 @@ async def _create_assistant_task(
             if resolved_size.width and resolved_size.height
             else billing_core.DEFAULT_IMAGE_SIZE_THRESHOLDS["1k"]
         )
-        estimated_micro, estimated_tier = (
-            await billing_core.estimate_image_cost(
+        billing_tier = _requested_image_billing_tier(image_params)
+        if not billing_enabled:
+            estimated_micro, estimated_tier = (0, "free")
+        elif billing_tier is not None:
+            estimated_micro, estimated_tier = await billing_core.estimate_image_cost_for_tier(
+                db,
+                tier=billing_tier,
+                n=1,
+            )
+        else:
+            estimated_micro, estimated_tier = await billing_core.estimate_image_cost(
                 db,
                 size_px=size_px,
                 n=1,
                 thresholds=billing_thresholds or None,
             )
-            if billing_enabled
-            else (0, "free")
-        )
         if credential_pin:
             # Why: image tasks must use the supplier's image model when
             # available — chat models (e.g. gpt-5.4) cannot generate images

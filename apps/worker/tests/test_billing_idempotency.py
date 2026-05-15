@@ -72,6 +72,66 @@ async def test_settle_generation_replay_writes_audit_without_reestimating(
 
 
 @pytest.mark.asyncio
+async def test_settle_generation_uses_requested_billing_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    generation = SimpleNamespace(
+        id="gen-2",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={"billing_tier": "2k"},
+    )
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fail_pixel_estimate(*_args: Any, **_kwargs: Any) -> tuple[int, str]:
+        raise AssertionError("requested billing tier should bypass pixel thresholds")
+
+    async def estimate_for_tier(*_args: Any, **kwargs: Any) -> tuple[int, str]:
+        assert kwargs["tier"] == "2k"
+        return 400, "2k"
+
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            id="tx-2",
+            amount_micro=-400,
+            balance_after=600,
+            hold_after=0,
+            meta=kwargs["meta"],
+        )
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_allow_negative_balance", allow_negative_balance)
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", existing_tx)
+    monkeypatch.setattr(worker_billing.billing_core, "estimate_image_cost", fail_pixel_estimate)
+    monkeypatch.setattr(worker_billing.billing_core, "estimate_image_cost_for_tier", estimate_for_tier)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1792,
+        height=1024,
+    )
+
+    settle_audit = next(row for row in session.added if row.event_type == "wallet.settle.image")
+    assert settle_audit.details["actual_micro"] == 400
+    assert session.added[0].details["tier_source"] == "request"
+
+
+@pytest.mark.asyncio
 async def test_charge_completion_replay_writes_audit_without_estimating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

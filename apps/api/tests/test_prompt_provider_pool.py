@@ -164,7 +164,7 @@ async def test_prompt_enhance_checks_per_user_rate_limit(
 
     await prompts.enhance_prompt(
         prompts.EnhanceIn(text="cat"),
-        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1", account_mode="byok"),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
     )
 
@@ -330,3 +330,156 @@ async def test_prompt_enhance_retries_response_failed_before_text(
         "data: [DONE]\n\n",
     ]
     assert client.calls[1]["json"]["model"] == "gpt-5.4"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_charges_completed_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient(
+        [
+            _StubStreamResponse(
+                200,
+                [
+                    _sse({"type": "response.output_text.delta", "delta": "better"}),
+                    _sse(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp-1",
+                                "model": "gpt-5.5",
+                                "usage": {
+                                    "input_tokens": 12,
+                                    "output_tokens": 5,
+                                },
+                            },
+                        }
+                    ),
+                ],
+            ),
+        ]
+    )
+    charged: list[tuple[prompts._EnhanceBillingContext, prompts._EnhanceUsageCapture]] = []
+
+    async def fake_charge(
+        billing: prompts._EnhanceBillingContext,
+        capture: prompts._EnhanceUsageCapture,
+    ) -> None:
+        charged.append((billing, capture))
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
+    monkeypatch.setattr(prompts, "_charge_prompt_enhance", fake_charge)
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == [
+        'data: {"text": "better"}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    assert len(charged) == 1
+    _billing, capture = charged[0]
+    assert capture.response_id == "resp-1"
+    assert capture.model == "gpt-5.5"
+    assert capture.service_tier == "priority"
+    assert capture.usage == {"input_tokens": 12, "output_tokens": 5}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_charge_uses_completion_wallet_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.routes import prompts
+    from lumen_core.pricing import CostBreakdown
+
+    calls: dict[str, Any] = {}
+    audits: list[dict[str, Any]] = []
+
+    class Db:
+        async def commit(self) -> None:
+            calls["committed"] = True
+
+    async def estimate_breakdown(*_args: Any, **kwargs: Any) -> CostBreakdown:
+        calls["estimate"] = kwargs
+        return CostBreakdown(
+            input_cost_micro=12,
+            output_cost_micro=10,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=True,
+            rate_multiplier_x10000=kwargs["rate_multiplier_x10000"],
+            total_cost_micro=22,
+            actual_cost_micro=22,
+            pricing_source="db",
+        )
+
+    async def charge(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        calls["charge"] = kwargs
+        return SimpleNamespace(amount_micro=-22, balance_after=978)
+
+    async def write_audit(_db: object, **kwargs: Any) -> bool:
+        audits.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    monkeypatch.setattr(prompts.billing_core, "charge", charge)
+    monkeypatch.setattr(prompts, "write_audit", write_audit)
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=15_000,
+        cache_aware=True,
+        allow_negative=False,
+    )
+    capture = prompts._EnhanceUsageCapture(
+        provider_name="primary",
+        model="gpt-5.5",
+        service_tier="priority",
+        response_id="resp-1",
+        usage={"input_tokens": 12, "output_tokens": 5},
+    )
+
+    await prompts._charge_prompt_enhance(billing, capture)
+
+    assert calls["estimate"]["model"] == "gpt-5.5"
+    assert calls["estimate"]["tokens"].input_tokens == 12
+    assert calls["estimate"]["tokens"].output_tokens == 5
+    assert calls["estimate"]["service_tier"] == "priority"
+    assert calls["estimate"]["rate_multiplier_x10000"] == 15_000
+    assert calls["charge"]["kind"] == "charge_completion"
+    assert calls["charge"]["ref_type"] == "prompt_enhance"
+    assert calls["charge"]["ref_id"] == "resp-1"
+    assert calls["charge"]["idempotency_key"] == "prompt_enhance:resp-1"
+    assert calls["committed"] is True
+    assert audits[-1]["event_type"] == "wallet.charge.completion"
+    assert audits[-1]["details"]["route"] == "prompts.enhance"

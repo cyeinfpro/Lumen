@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import secrets
@@ -136,6 +137,14 @@ def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException
     if details:
         err["details"] = details
     return HTTPException(status_code=http, detail={"error": err})
+
+
+def _escape_like_pattern(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _generate_redemption_secret() -> str:
+    return secrets.token_urlsafe(48)
 
 
 def _billing_http(exc: billing_core.BillingError) -> HTTPException:
@@ -1216,6 +1225,9 @@ async def admin_billing_bootstrap(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminBillingOverviewOut:
+    provided_redemption_secret = (body.redemption_code_secret or "").strip()
+    secret_generated = not provided_redemption_secret
+    redemption_secret = provided_redemption_secret or _generate_redemption_secret()
     low_balance_micro = _rmb_to_micro_or_422(
         body.low_balance_warn_rmb, field="low_balance_warn_rmb"
     )
@@ -1274,7 +1286,7 @@ async def admin_billing_bootstrap(
     await update_settings(
         db,
         [
-            ("billing.redemption_code_secret", body.redemption_code_secret),
+            ("billing.redemption_code_secret", redemption_secret),
             ("billing.enabled", "1" if body.enabled else "0"),
             ("billing.usd_to_rmb_rate", str(body.usd_to_rmb_rate)),
             ("billing.low_balance_warn_micro", str(low_balance_micro)),
@@ -1292,7 +1304,58 @@ async def admin_billing_bootstrap(
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
         actor_ip_hash=request_ip_hash(request),
-        details={"tiers": sorted(body.image_size_thresholds), "enabled": body.enabled},
+        details={
+            "tiers": sorted(body.image_size_thresholds),
+            "enabled": body.enabled,
+            "redemption_secret_generated": secret_generated,
+        },
+        autocommit=False,
+    )
+    await db.commit()
+    return await admin_billing_overview(admin, db)
+
+
+@router.post(
+    "/admin/billing/redemption_secret:rotate",
+    response_model=AdminBillingOverviewOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def admin_rotate_redemption_secret(
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AdminBillingOverviewOut:
+    secret_spec = get_spec("billing.redemption_code_secret")
+    if secret_spec is None:
+        raise _http("invalid_request", "redemption secret setting is unsupported", 500)
+    old_secret = await get_setting(db, secret_spec)
+    new_secret = _generate_redemption_secret()
+    await update_settings(db, [("billing.redemption_code_secret", new_secret)])
+
+    revoked_count = 0
+    if old_secret:
+        result = await db.execute(
+            update(RedemptionCode)
+            .where(
+                RedemptionCode.revoked_at.is_(None),
+                RedemptionCode.redeemed_count < RedemptionCode.max_redemptions,
+            )
+            .values(revoked_at=func.now())
+        )
+        revoked_count = int(result.rowcount or 0)
+
+    secret_hash8 = hashlib.sha256(new_secret.encode("utf-8")).hexdigest()[:8]
+    await write_audit(
+        db,
+        event_type="billing.secret.rotate" if old_secret else "billing.secret.configure",
+        user_id=admin.id,
+        actor_email_hash=hash_email(admin.email),
+        actor_ip_hash=request_ip_hash(request),
+        details={
+            "secret_hash8": secret_hash8,
+            "revoked_unredeemed_count": revoked_count,
+            "generated_by": "system",
+        },
         autocommit=False,
     )
     await db.commit()
@@ -2111,11 +2174,15 @@ async def admin_list_wallets(
     if mode in {"wallet", "byok"}:
         stmt = stmt.where(User.account_mode == mode)
     if q:
-        q_clean = q.strip()
-        if len(q_clean) >= 3:
-            stmt = stmt.where(or_(User.email.ilike(f"%{q_clean}%"), User.id == q_clean))
-        else:
-            stmt = stmt.where(User.id == q_clean)
+        q_clean = q.strip()[:200]
+        if q_clean:
+            pattern = f"%{_escape_like_pattern(q_clean)}%"
+            stmt = stmt.where(
+                or_(
+                    User.email.ilike(pattern, escape="\\"),
+                    User.id.ilike(pattern, escape="\\"),
+                )
+            )
     stmt = _cursor_filter(stmt, User, cursor)
     rows = (
         await db.execute(

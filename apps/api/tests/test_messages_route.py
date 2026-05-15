@@ -190,6 +190,26 @@ def test_image_upstream_request_uses_explicit_render_quality_for_4k() -> None:
     assert fast["output_compression"] == 95
 
 
+def test_image_upstream_request_records_billing_tier_from_quality() -> None:
+    from lumen_core.sizing import resolve_size
+
+    resolved = resolve_size("16:9", "fixed", "1792x1024")
+
+    req = messages._image_upstream_request(  # noqa: SLF001
+        ImageParamsIn(
+            aspect_ratio="16:9",
+            size_mode="fixed",
+            fixed_size="1792x1024",
+            quality="2k",
+        ),
+        resolved,
+        prompt="make a wide image",
+    )
+
+    assert req["billing_tier"] == "2k"
+    assert req["billing_tier_source"] == "request_quality"
+
+
 def test_silent_generation_prompt_limit_uses_shared_constant() -> None:
     messages.SilentGenerationIn(
         idempotency_key="idem-silent",

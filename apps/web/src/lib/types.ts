@@ -1020,7 +1020,7 @@ export interface AdminOrphanHoldOut {
 }
 
 export interface AdminBillingBootstrapIn {
-  redemption_code_secret: string;
+  redemption_code_secret?: string | null;
   enabled?: boolean;
   usd_to_rmb_rate?: number;
   low_balance_warn_rmb?: string;

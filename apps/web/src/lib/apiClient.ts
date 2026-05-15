@@ -2297,6 +2297,12 @@ export function bootstrapAdminBilling(body: AdminBillingBootstrapIn): Promise<Ad
   });
 }
 
+export function rotateAdminRedemptionSecret(): Promise<AdminBillingOverviewOut> {
+  return apiFetch<AdminBillingOverviewOut>("/admin/billing/redemption_secret:rotate", {
+    method: "POST",
+  });
+}
+
 export function runAdminWalletAudit(): Promise<AdminWalletAuditOut> {
   return apiFetch<AdminWalletAuditOut>("/admin/billing/wallet_audit");
 }

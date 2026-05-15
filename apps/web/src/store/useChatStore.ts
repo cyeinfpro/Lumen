@@ -240,6 +240,18 @@ function normalizeRenderQuality(
     : "medium";
 }
 
+function qualityFromFixedSize(
+  sizeRequested: string,
+  aspectRatio: AspectRatio,
+): Quality | undefined {
+  if (!sizeRequested.includes("x")) return undefined;
+  const qualities: Quality[] = ["1k", "2k", "4k"];
+  return qualities.find(
+    (quality) =>
+      qualityToFixedSize(quality, aspectRatio).fixed_size === sizeRequested,
+  );
+}
+
 function generationIdsOfMessage(msg: AssistantMessage): string[] {
   if (msg.generation_ids && msg.generation_ids.length > 0)
     return msg.generation_ids;
@@ -2140,6 +2152,7 @@ function createChatStore() {
               return {
                 ...rest,
                 ...resolved,
+                quality: q,
                 fast,
                 render_quality: renderQuality,
                 ...(outputFormat === undefined
@@ -2657,6 +2670,7 @@ function createChatStore() {
           aspect_ratio: aspect,
           size_mode: "fixed",
           fixed_size: fixedSize,
+          quality: "4k",
           count: 1,
           fast: _runtimeFastDefault ?? false,
           render_quality: "medium",
@@ -2725,6 +2739,10 @@ function createChatStore() {
         ? "image_to_image"
         : "text_to_image";
       const rerollRenderQuality = "medium";
+      const rerollQuality = qualityFromFixedSize(
+        gen.size_requested,
+        gen.aspect_ratio,
+      );
 
       const out = await createSilentGeneration(convId, {
         idempotency_key: uuid(),
@@ -2738,6 +2756,7 @@ function createChatStore() {
           fixed_size: gen.size_requested.includes("x")
             ? gen.size_requested
             : undefined,
+          quality: rerollQuality,
           count: 1,
           fast: _runtimeFastDefault ?? false,
           render_quality: rerollRenderQuality,
