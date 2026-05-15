@@ -1,6 +1,10 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
 
 export interface MobileTopBarProps {
   left?: ReactNode;
@@ -59,8 +63,57 @@ export function MobileTopBar({
     >
       <div className="relative flex items-center h-10 max-w-[640px] mx-auto px-3 gap-2.5">
         <div className="flex-1 min-w-0 flex items-center gap-2">{left}</div>
-        <div className="flex items-center gap-1.5">{right}</div>
+        <div className="flex items-center gap-1.5">
+          <MobileWalletPill />
+          {right}
+        </div>
       </div>
     </header>
+  );
+}
+
+function MobileWalletPill() {
+  const pathname = usePathname();
+  const meQuery = useQuery<AuthUser>({
+    queryKey: ["me"],
+    queryFn: getMe,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const enabled = meQuery.data?.account_mode === "wallet" && !pathname.startsWith("/admin");
+  const walletQuery = useQuery({
+    queryKey: ["me", "wallet"],
+    queryFn: getMyWallet,
+    enabled,
+    retry: false,
+    staleTime: 30_000,
+  });
+  const pricingQuery = useQuery({
+    queryKey: ["me", "pricing"],
+    queryFn: getPricing,
+    enabled,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const wallet = walletQuery.data;
+  if (pricingQuery.data?.billing_enabled === false) return null;
+  if (!enabled || !wallet?.balance) return null;
+  const low =
+    wallet.low_balance_threshold?.micro != null &&
+    wallet.balance.micro < wallet.low_balance_threshold.micro;
+  const balanceText = Number(wallet.balance.rmb).toFixed(2);
+  return (
+    <Link
+      href="/me/wallet"
+      aria-label={low ? `钱包余额低 ¥${balanceText}` : `钱包余额 ¥${balanceText}`}
+      className={[
+        "inline-flex h-7 items-center rounded-full border px-2 text-[11px] font-medium tabular-nums",
+        low
+          ? "border-danger-border bg-danger-soft text-[var(--danger-fg)]"
+          : "border-[var(--border)] bg-white/5 text-[var(--fg-1)]",
+      ].join(" ")}
+    >
+      ¥{balanceText}
+    </Link>
   );
 }

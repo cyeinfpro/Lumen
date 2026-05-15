@@ -37,6 +37,11 @@ class _NoopCounter:
         return None
 
 
+class _NoopGauge(_NoopCounter):
+    def set(self, _value: float) -> None:
+        return None
+
+
 def _counter(
     name: str,
     documentation: str,
@@ -55,6 +60,23 @@ def _counter(
     if existing is not None:
         return existing
     return Counter(name, documentation, labelnames=labelnames)
+
+
+def _gauge(
+    name: str,
+    documentation: str,
+    *,
+    labelnames: tuple[str, ...] = (),
+) -> Any:
+    if not settings.metrics_enabled:
+        return _NoopGauge(name)
+
+    from prometheus_client import REGISTRY, Gauge
+
+    existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+    if existing is not None:
+        return existing
+    return Gauge(name, documentation, labelnames=labelnames)
 
 
 # ---------- Sentry PII 脱敏 ----------
@@ -184,6 +206,32 @@ audit_write_failures_total = _counter(
     labelnames=("mode",),
 )
 
+wallet_balance_total = _gauge(
+    "wallet_balance_total",
+    "Total wallet balance across all users, in micro RMB.",
+)
+
+wallet_hold_active = _gauge(
+    "wallet_hold_active",
+    "Number of wallets with an active hold.",
+)
+
+wallet_hold_micro = _gauge(
+    "wallet_hold_micro",
+    "Total active hold amount across all wallets, in micro RMB.",
+)
+
+wallet_orphan_holds = _gauge(
+    "wallet_orphan_holds",
+    "Number of orphan wallet holds found by the admin scan.",
+)
+
+redemption_redeemed_total = _counter(
+    "redemption_redeemed_total",
+    "Number of redemption-code topups successfully committed.",
+    labelnames=(),
+)
+
 
 # ---------- Sentry ----------
 
@@ -307,6 +355,11 @@ __all__ = [
     "setup_prometheus",
     "tasks_enqueued_total",
     "http_errors_total",
+    "wallet_balance_total",
+    "wallet_hold_active",
+    "wallet_hold_micro",
+    "wallet_orphan_holds",
+    "redemption_redeemed_total",
 ]
 
 

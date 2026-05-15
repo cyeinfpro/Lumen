@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -52,12 +53,40 @@ async def main_async(args: argparse.Namespace) -> int:
             )
 
     if mismatches:
+        if args.report_json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "transactions": len(rows),
+                        "users": len(balances),
+                        "mismatch_count": len(mismatches),
+                        "mismatches": mismatches[: args.limit],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 1
         print(f"FAILED: {len(mismatches)} wallet ledger mismatch(es)")
         for line in mismatches[: args.limit]:
             print(line)
         if len(mismatches) > args.limit:
             print(f"... {len(mismatches) - args.limit} more")
         return 1
+    if args.report_json:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "transactions": len(rows),
+                    "users": len(balances),
+                    "mismatch_count": 0,
+                    "mismatches": [],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
     print(f"OK: replayed {len(rows)} wallet transaction(s) for {len(balances)} user(s)")
     return 0
 
@@ -66,6 +95,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--user-id")
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--report-json", action="store_true")
     return asyncio.run(main_async(parser.parse_args()))
 
 

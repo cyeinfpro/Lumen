@@ -109,12 +109,16 @@ def test_billing_settings_are_registered_and_validated():
     threshold = get_spec("billing.low_balance_warn_micro")
     allow_negative = get_spec("billing.allow_negative_balance")
     thresholds = get_spec("billing.image_size_thresholds")
+    bootstrap_completed = get_spec("billing.bootstrap_completed")
+    show_estimate = get_spec("billing.show_estimate_in_composer")
     assert enabled is not None
     assert rate is not None
     assert secret is not None
     assert threshold is not None
     assert allow_negative is not None
     assert thresholds is not None
+    assert bootstrap_completed is not None
+    assert show_estimate is not None
 
     assert enabled.env_fallback == "BILLING_ENABLED"
     assert parse_value(enabled, "0") == 0
@@ -141,6 +145,16 @@ def test_billing_settings_are_registered_and_validated():
     assert parse_value(allow_negative, "1") == 1
     with pytest.raises(ValueError):
         parse_value(allow_negative, "true")
+
+    assert parse_value(bootstrap_completed, "0") == 0
+    assert parse_value(bootstrap_completed, "1") == 1
+    with pytest.raises(ValueError):
+        parse_value(bootstrap_completed, "true")
+
+    assert parse_value(show_estimate, "0") == 0
+    assert parse_value(show_estimate, "1") == 1
+    with pytest.raises(ValueError):
+        parse_value(show_estimate, "true")
 
     valid_thresholds = '{"1k": 1572864, "2k": 3686400}'
     assert parse_value(thresholds, valid_thresholds) == valid_thresholds
