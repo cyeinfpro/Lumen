@@ -102,6 +102,60 @@ def test_generation_fast_default_setting_is_registered_and_validated():
         parse_value(spec, "2")
 
 
+def test_billing_settings_are_registered_and_validated():
+    enabled = get_spec("billing.enabled")
+    rate = get_spec("billing.usd_to_rmb_rate")
+    secret = get_spec("billing.redemption_code_secret")
+    threshold = get_spec("billing.low_balance_warn_micro")
+    allow_negative = get_spec("billing.allow_negative_balance")
+    thresholds = get_spec("billing.image_size_thresholds")
+    assert enabled is not None
+    assert rate is not None
+    assert secret is not None
+    assert threshold is not None
+    assert allow_negative is not None
+    assert thresholds is not None
+
+    assert enabled.env_fallback == "BILLING_ENABLED"
+    assert parse_value(enabled, "0") == 0
+    assert parse_value(enabled, "1") == 1
+    with pytest.raises(ValueError):
+        parse_value(enabled, "true")
+
+    assert parse_value(rate, "1.0") == 1.0
+    with pytest.raises(ValueError):
+        # rate=0 would silently zero out every chat charge; force admin to use
+        # billing.enabled=0 instead.
+        parse_value(rate, "0")
+
+    assert secret.sensitive is True
+    assert parse_value(secret, "a" * 16) == "a" * 16
+    with pytest.raises(ValueError):
+        parse_value(secret, "")
+    with pytest.raises(ValueError):
+        parse_value(secret, "tooshort")
+
+    assert parse_value(threshold, "2000000") == 2_000_000
+
+    assert parse_value(allow_negative, "0") == 0
+    assert parse_value(allow_negative, "1") == 1
+    with pytest.raises(ValueError):
+        parse_value(allow_negative, "true")
+
+    valid_thresholds = '{"1k": 1572864, "2k": 3686400}'
+    assert parse_value(thresholds, valid_thresholds) == valid_thresholds
+    with pytest.raises(ValueError):
+        parse_value(thresholds, "")
+    with pytest.raises(ValueError):
+        parse_value(thresholds, "not-json")
+    with pytest.raises(ValueError):
+        parse_value(thresholds, "[]")
+    with pytest.raises(ValueError):
+        parse_value(thresholds, '{"1k": -1}')
+    with pytest.raises(ValueError):
+        parse_value(thresholds, '{"1k": 1.5}')
+
+
 def test_image_job_base_url_setting_is_registered_and_validated():
     spec = get_spec("image.job_base_url")
     assert spec is not None
@@ -123,7 +177,9 @@ def test_site_public_base_url_setting_is_registered_and_validated():
     assert spec is not None
 
     assert spec.env_fallback == "PUBLIC_BASE_URL"
-    assert parse_value(spec, "https://lumen.example.com/") == "https://lumen.example.com"
+    assert (
+        parse_value(spec, "https://lumen.example.com/") == "https://lumen.example.com"
+    )
     assert parse_value(spec, "http://localhost:3000") == "http://localhost:3000"
     with pytest.raises(ValueError):
         parse_value(spec, "lumen.example.com")
@@ -291,9 +347,7 @@ def test_validate_providers_rejects_unknown_proxy_reference():
             "must include a hostname",
         ),
         (
-            json.dumps(
-                [{"base_url": "https://u:p@upstream.example", "api_key": "sk"}]
-            ),
+            json.dumps([{"base_url": "https://u:p@upstream.example", "api_key": "sk"}]),
             "must not include credentials",
         ),
     ],

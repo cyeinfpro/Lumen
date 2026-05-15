@@ -48,6 +48,7 @@ class UserOut(BaseOut):
     email: str
     display_name: str
     role: str
+    account_mode: Literal["wallet", "byok"] = "wallet"
     notification_email: bool
     default_system_prompt_id: str | None = None
     runtime_defaults: RuntimeDefaultsOut = Field(default_factory=RuntimeDefaultsOut)
@@ -793,11 +794,192 @@ class AdminUserOut(BaseOut):
     id: str
     email: str
     role: str
+    account_mode: Literal["wallet", "byok"] = "wallet"
     display_name: str | None
     created_at: datetime
     generations_count: int
     completions_count: int
     messages_count: int
+
+
+# ---------- Billing / Wallet ----------
+
+class MoneyOut(BaseModel):
+    micro: int
+    rmb: str
+
+
+class WalletOut(BaseModel):
+    mode: Literal["wallet", "byok"]
+    balance: MoneyOut | None
+    hold: MoneyOut | None
+    low_balance_threshold: MoneyOut | None = None
+    frozen: bool = False
+
+
+class WalletTransactionOut(BaseOut):
+    id: str
+    kind: str
+    amount: MoneyOut
+    balance_after: MoneyOut
+    hold_after: MoneyOut
+    ref_type: str | None = None
+    ref_id: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    created_by_admin: str | None = None
+
+
+class WalletTransactionListOut(BaseModel):
+    items: list[WalletTransactionOut]
+    next_cursor: str | None = None
+
+
+class PricingRuleOut(BaseOut):
+    id: str
+    scope: Literal["image_size", "chat_model"]
+    key: str
+    variant: str = "default"
+    unit: Literal["per_image", "per_1k_tokens_in", "per_1k_tokens_out"]
+    price: MoneyOut
+    enabled: bool
+    note: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PricingRulesOut(BaseModel):
+    items: list[PricingRuleOut]
+    image_size_thresholds: dict[str, int] | None = None
+
+
+class PricingRuleUpsertIn(BaseModel):
+    scope: Literal["image_size", "chat_model"]
+    key: str = Field(min_length=1, max_length=64)
+    variant: str = Field(default="default", min_length=1, max_length=32)
+    unit: Literal["per_image", "per_1k_tokens_in", "per_1k_tokens_out"]
+    price_rmb: str = Field(min_length=1, max_length=32)
+    enabled: bool = True
+    note: str | None = Field(default=None, max_length=500)
+
+
+class PricingRulesUpdateIn(BaseModel):
+    items: list[PricingRuleUpsertIn] = Field(min_length=1, max_length=500)
+
+
+class PricingImportIn(BaseModel):
+    content: str = Field(min_length=1, max_length=100_000)
+    rate: float = Field(default=1.0, gt=0, le=100)
+
+
+class RedemptionIn(BaseModel):
+    code: str = Field(min_length=4, max_length=64)
+
+
+class RedemptionOut(BaseModel):
+    amount: MoneyOut
+    balance: MoneyOut
+
+
+class RedemptionUsageOut(BaseOut):
+    id: str
+    code_id: str
+    amount: MoneyOut
+    redeemed_at: datetime
+
+
+class RedemptionUsageListOut(BaseModel):
+    items: list[RedemptionUsageOut]
+    next_cursor: str | None = None
+
+
+class AdminRedemptionCodeOut(BaseOut):
+    id: str
+    code_prefix: str
+    amount: MoneyOut
+    max_redemptions: int
+    redeemed_count: int
+    batch_id: str | None = None
+    note: str | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AdminRedemptionCodeListOut(BaseModel):
+    items: list[AdminRedemptionCodeOut]
+    next_cursor: str | None = None
+
+
+class AdminRedemptionUsageOut(BaseOut):
+    id: str
+    code_id: str
+    user_id: str
+    user_email: str | None = None
+    amount: MoneyOut
+    wallet_tx_id: str
+    redeemed_at: datetime
+    ip_hash: str | None = None
+
+
+class AdminRedemptionUsageListOut(BaseModel):
+    items: list[AdminRedemptionUsageOut]
+    next_cursor: str | None = None
+
+
+class AdminRedemptionCodeCreateIn(BaseModel):
+    amount_rmb: str = Field(min_length=1, max_length=32)
+    count: int = Field(default=1, ge=1, le=1000)
+    max_redemptions: int = Field(default=1, ge=1, le=1000)
+    expires_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expires_at_must_be_future(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return value
+        from datetime import timezone as _tz
+
+        now = datetime.now(_tz.utc)
+        # Require at least 1 minute of validity so the batch isn't dead-on-arrival.
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=_tz.utc)
+        if (value - now).total_seconds() < 60:
+            raise ValueError("expires_at must be at least 1 minute in the future")
+        return value
+
+
+class AdminRedemptionCodeCreateOut(BaseModel):
+    batch_id: str
+    count: int
+    amount: MoneyOut
+    download_token: str
+    expires_at: datetime | None = None
+
+
+class AdminWalletOut(BaseModel):
+    user_id: str
+    email: str
+    account_mode: Literal["wallet", "byok"]
+    wallet: WalletOut
+
+
+class AdminWalletListOut(BaseModel):
+    items: list[AdminWalletOut]
+    next_cursor: str | None = None
+
+
+class AdminWalletAdjustIn(BaseModel):
+    amount_rmb_signed: str = Field(min_length=1, max_length=32)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class AdminSetAccountModeIn(BaseModel):
+    mode: Literal["wallet", "byok"]
+    on_residual_balance: Literal["freeze", "zero"] = "freeze"
 
 
 class UsageOut(BaseModel):
@@ -1498,6 +1680,29 @@ __all__ = [
     "SystemSettingsOut",
     "SystemSettingsUpdateItem",
     "SystemSettingsUpdateIn",
+    "MoneyOut",
+    "WalletOut",
+    "WalletTransactionOut",
+    "WalletTransactionListOut",
+    "PricingRuleOut",
+    "PricingRulesOut",
+    "PricingRuleUpsertIn",
+    "PricingRulesUpdateIn",
+    "PricingImportIn",
+    "RedemptionIn",
+    "RedemptionOut",
+    "RedemptionUsageOut",
+    "RedemptionUsageListOut",
+    "AdminRedemptionCodeOut",
+    "AdminRedemptionCodeListOut",
+    "AdminRedemptionUsageOut",
+    "AdminRedemptionUsageListOut",
+    "AdminRedemptionCodeCreateIn",
+    "AdminRedemptionCodeCreateOut",
+    "AdminWalletOut",
+    "AdminWalletListOut",
+    "AdminWalletAdjustIn",
+    "AdminSetAccountModeIn",
     "StorageMountStatusOut",
     "StorageLocalConfigOut",
     "StorageSmbConfigOut",

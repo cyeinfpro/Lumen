@@ -564,6 +564,7 @@ async def signup_byok(
         display_name=body.display_name or email.split("@")[0],
         email_verified=False,
         role=role,
+        account_mode="byok",
     )
     db.add(user)
     try:

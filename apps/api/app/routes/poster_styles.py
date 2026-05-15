@@ -1657,6 +1657,7 @@ async def _enqueue_poster_style_generate_tasks(
         result = await _create_assistant_task(
             db=db,
             user_id=user.id,
+            account_mode=getattr(user, "account_mode", "wallet"),
             conv=conv,
             user_msg=user_msg,
             intent=Intent.TEXT_TO_IMAGE,

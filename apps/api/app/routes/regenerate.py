@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core import billing as billing_core
 from lumen_core.constants import (
     CompletionStatus,
     GenerationStatus,
@@ -412,22 +413,55 @@ async def regenerate_message(
     now = datetime.now(timezone.utc)
 
     # Cancel any in-flight generations bound to the old assistant message.
-    await db.execute(
-        update(Generation)
-        .where(
-            Generation.message_id == target.id,
-            Generation.status.in_(
-                (
-                    GenerationStatus.QUEUED.value,
-                    GenerationStatus.RUNNING.value,
-                )
-            ),
+    inflight_gens = (
+        await db.execute(
+            select(Generation).where(
+                Generation.message_id == target.id,
+                Generation.status.in_(
+                    (
+                        GenerationStatus.QUEUED.value,
+                        GenerationStatus.RUNNING.value,
+                    )
+                ),
+            )
         )
-        .values(
-            status=GenerationStatus.CANCELED.value,
-            finished_at=now,
+    ).scalars().all()
+    if inflight_gens:
+        await db.execute(
+            update(Generation)
+            .where(
+                Generation.message_id == target.id,
+                Generation.status.in_(
+                    (
+                        GenerationStatus.QUEUED.value,
+                        GenerationStatus.RUNNING.value,
+                    )
+                ),
+            )
+            .values(
+                status=GenerationStatus.CANCELED.value,
+                finished_at=now,
+            )
         )
-    )
+        # Why: cancelled gens may have an outstanding `hold` from the original
+        # submission. Without this release, the held amount stays subtracted
+        # from balance forever — the worker also won't see the row anymore
+        # because it's been moved out of RUNNING/QUEUED.
+        if getattr(user, "account_mode", "wallet") == "wallet":
+            for gen in inflight_gens:
+                try:
+                    await billing_core.release(
+                        db,
+                        user.id,
+                        ref_type="generation",
+                        ref_id=gen.id,
+                        idempotency_key=f"release:{gen.id}",
+                        meta={"reason": "regenerate_cancel"},
+                    )
+                except billing_core.BillingError:
+                    # Don't block the regen path on billing-side issues; the
+                    # reconciler will flag any leaked hold.
+                    logger.exception("release on regenerate cancel failed gen=%s", gen.id)
     # And any in-flight completion.
     await db.execute(
         update(Completion)
@@ -494,6 +528,7 @@ async def regenerate_message(
     result = await _create_assistant_task(
         db=db,
         user_id=user.id,
+        account_mode=getattr(user, "account_mode", "wallet"),
         conv=conv,
         user_msg=user_msg,
         intent=intent,

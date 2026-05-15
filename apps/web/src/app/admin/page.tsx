@@ -34,8 +34,10 @@ import { ApiError, getMe, type AuthUser } from "@/lib/apiClient";
 import { BackupsPanel } from "./_panels/BackupsPanel";
 import { InvitesPanel } from "./_panels/InvitesPanel";
 import { ByokPanel } from "./_panels/ByokPanel";
+import { BillingPanel } from "./_panels/BillingPanel";
 import { ProvidersPanel } from "./_panels/ProvidersPanel";
 import { ProxiesPanel } from "./_panels/ProxiesPanel";
+import { RedemptionPanel } from "./_panels/RedemptionPanel";
 import { RequestEventsPanel } from "./_panels/RequestEventsPanel";
 import { SettingsPanel } from "./_panels/SettingsPanel";
 import { StoragePanel } from "./_panels/StoragePanel";
@@ -49,6 +51,8 @@ type Tab =
   | "events"
   | "invites"
   | "byok"
+  | "billing"
+  | "redemptions"
   | "providers"
   | "proxies"
   | "telegram"
@@ -62,6 +66,8 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "events", label: "请求事件" },
   { key: "invites", label: "邀请链接" },
   { key: "byok", label: "API 站接入" },
+  { key: "billing", label: "计费" },
+  { key: "redemptions", label: "兑换码" },
   { key: "providers", label: "供应商" },
   { key: "proxies", label: "代理池" },
   { key: "telegram", label: "Telegram 机器人" },
@@ -229,6 +235,10 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
                 <InvitesPanel />
               ) : tab === "byok" ? (
                 <ByokPanel />
+              ) : tab === "billing" ? (
+                <BillingPanel />
+              ) : tab === "redemptions" ? (
+                <RedemptionPanel />
               ) : tab === "providers" ? (
                 <ProvidersPanel />
               ) : tab === "proxies" ? (

@@ -240,6 +240,7 @@ export interface AdminUserOut {
   id: string;
   email: string;
   role: "admin" | "member";
+  account_mode: "wallet" | "byok";
   display_name: string | null;
   created_at: string;
   generations_count: number;
@@ -431,6 +432,12 @@ export type SystemSettingKey =
   | "byok.validation_model"
   | "byok.validation_timeout_ms"
   | "byok.pending_token_ttl_seconds"
+  | "billing.enabled"
+  | "billing.usd_to_rmb_rate"
+  | "billing.allow_negative_balance"
+  | "billing.image_size_thresholds"
+  | "billing.redemption_code_secret"
+  | "billing.low_balance_warn_micro"
   | "providers";
 
 export interface SystemSettingItem {
@@ -725,4 +732,138 @@ export interface SessionOut {
   created_at: string;
   expires_at: string;
   is_current: boolean;
+}
+
+// ---------- Billing / Wallet ----------
+
+export interface MoneyOut {
+  micro: number;
+  rmb: string;
+}
+
+export interface WalletOut {
+  mode: "wallet" | "byok";
+  balance: MoneyOut | null;
+  hold: MoneyOut | null;
+  low_balance_threshold?: MoneyOut | null;
+  frozen: boolean;
+}
+
+export interface WalletTransactionOut {
+  id: string;
+  kind: string;
+  amount: MoneyOut;
+  balance_after: MoneyOut;
+  hold_after: MoneyOut;
+  ref_type: string | null;
+  ref_id: string | null;
+  meta: Record<string, unknown>;
+  created_at: string;
+  created_by_admin: string | null;
+}
+
+export interface WalletTransactionListOut {
+  items: WalletTransactionOut[];
+  next_cursor?: string | null;
+}
+
+export interface PricingRuleOut {
+  id: string;
+  scope: "image_size" | "chat_model";
+  key: string;
+  variant: string;
+  unit: "per_image" | "per_1k_tokens_in" | "per_1k_tokens_out";
+  price: MoneyOut;
+  enabled: boolean;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PricingRulesOut {
+  items: PricingRuleOut[];
+  image_size_thresholds?: Record<string, number> | null;
+}
+
+export interface PricingRuleUpsertIn {
+  scope: "image_size" | "chat_model";
+  key: string;
+  variant?: string;
+  unit: "per_image" | "per_1k_tokens_in" | "per_1k_tokens_out";
+  price_rmb: string;
+  enabled?: boolean;
+  note?: string | null;
+}
+
+export interface RedemptionOut {
+  amount: MoneyOut;
+  balance: MoneyOut;
+}
+
+export interface RedemptionUsageOut {
+  id: string;
+  code_id: string;
+  amount: MoneyOut;
+  redeemed_at: string;
+}
+
+export interface RedemptionUsageListOut {
+  items: RedemptionUsageOut[];
+  next_cursor?: string | null;
+}
+
+export interface AdminRedemptionCodeOut {
+  id: string;
+  code_prefix: string;
+  amount: MoneyOut;
+  max_redemptions: number;
+  redeemed_count: number;
+  batch_id: string | null;
+  note: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminRedemptionCodeListOut {
+  items: AdminRedemptionCodeOut[];
+  next_cursor?: string | null;
+}
+
+export interface AdminRedemptionUsageOut {
+  id: string;
+  code_id: string;
+  user_id: string;
+  user_email: string | null;
+  amount: MoneyOut;
+  wallet_tx_id: string;
+  redeemed_at: string;
+  ip_hash: string | null;
+}
+
+export interface AdminRedemptionUsageListOut {
+  items: AdminRedemptionUsageOut[];
+  next_cursor?: string | null;
+}
+
+export interface AdminRedemptionCodeCreateOut {
+  batch_id: string;
+  count: number;
+  amount: MoneyOut;
+  download_token: string;
+  expires_at: string | null;
+}
+
+export interface AdminWalletOut {
+  user_id: string;
+  email: string;
+  account_mode: "wallet" | "byok";
+  wallet: WalletOut;
+}
+
+export interface AdminWalletListOut {
+  items: AdminWalletOut[];
+  next_cursor?: string | null;
 }

@@ -110,7 +110,21 @@ def _conv() -> SimpleNamespace:
 
 
 def _user() -> SimpleNamespace:
-    return SimpleNamespace(id="user-1", default_system_prompt_id=None)
+    return SimpleNamespace(
+        id="user-1",
+        email="user@example.test",
+        account_mode="byok",
+        default_system_prompt_id=None,
+    )
+
+
+def _wallet_user() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="user-1",
+        email="user@example.test",
+        account_mode="wallet",
+        default_system_prompt_id=None,
+    )
 
 
 def _credential() -> SimpleNamespace:
@@ -210,7 +224,7 @@ async def test_post_message_rejects_explicit_image_to_image_without_reference(
                 text="edit this",
                 intent="image_to_image",
             ),
-            _user(),  # type: ignore[arg-type]
+            _wallet_user(),  # type: ignore[arg-type]
             db,  # type: ignore[arg-type]
         )
 
@@ -247,7 +261,7 @@ async def test_post_message_publishes_appended_events_after_commit(
     out = await messages.post_message(
         "conv-1",
         PostMessageIn(idempotency_key="idem-2", text="hello", intent="chat"),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -287,7 +301,7 @@ async def test_post_message_returns_when_post_commit_publish_times_out(
     out = await messages.post_message(
         "conv-1",
         PostMessageIn(idempotency_key="idem-timeout", text="hello", intent="chat"),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -322,7 +336,7 @@ async def test_post_message_persists_web_search_chat_param(
             intent="chat",
             chat_params=ChatParamsIn(reasoning_effort="none", web_search=True),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -365,7 +379,7 @@ async def test_post_message_persists_chat_tool_params(
                 image_generation=True,
             ),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -619,14 +633,15 @@ async def test_user_api_credential_without_required_purpose_blocks_without_fallb
             db,  # type: ignore[arg-type]
             "user-1",
             "image",
+            "byok",
         )
 
-    assert getattr(excinfo.value, "status_code", None) == 409
-    assert excinfo.value.detail["error"]["code"] == "user_api_key_required"
+    assert getattr(excinfo.value, "status_code", None) == 412
+    assert excinfo.value.detail["error"]["code"] == "NO_ACTIVE_API_KEY"
 
 
 @pytest.mark.asyncio
-async def test_user_api_credential_without_required_purpose_can_fallback(
+async def test_user_api_credential_without_required_purpose_ignores_fallback_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
@@ -636,13 +651,16 @@ async def test_user_api_credential_without_required_purpose_can_fallback(
     monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
     db = _Db([_Result((_credential(), _supplier(purposes=["chat"])))])
 
-    pin = await messages._resolve_task_credential_pin(  # noqa: SLF001
-        db,  # type: ignore[arg-type]
-        "user-1",
-        "image",
-    )
+    with pytest.raises(Exception) as excinfo:
+        await messages._resolve_task_credential_pin(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "image",
+            "byok",
+        )
 
-    assert pin is None
+    assert getattr(excinfo.value, "status_code", None) == 412
+    assert excinfo.value.detail["error"]["code"] == "NO_ACTIVE_API_KEY"
 
 
 @pytest.mark.asyncio
@@ -661,14 +679,15 @@ async def test_historical_user_api_credential_blocks_without_fallback(
             db,  # type: ignore[arg-type]
             "user-1",
             "chat",
+            "byok",
         )
 
-    assert getattr(excinfo.value, "status_code", None) == 409
-    assert excinfo.value.detail["error"]["code"] == "user_api_key_required"
+    assert getattr(excinfo.value, "status_code", None) == 412
+    assert excinfo.value.detail["error"]["code"] == "NO_ACTIVE_API_KEY"
 
 
 @pytest.mark.asyncio
-async def test_rate_limited_user_api_credential_can_fallback(
+async def test_rate_limited_user_api_credential_ignores_fallback_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
@@ -678,13 +697,16 @@ async def test_rate_limited_user_api_credential_can_fallback(
     monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
     db = _Db([_Result((_rate_limited_credential(), _supplier(purposes=["chat"])))])
 
-    pin = await messages._resolve_task_credential_pin(  # noqa: SLF001
-        db,  # type: ignore[arg-type]
-        "user-1",
-        "chat",
-    )
+    with pytest.raises(Exception) as excinfo:
+        await messages._resolve_task_credential_pin(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "chat",
+            "byok",
+        )
 
-    assert pin is None
+    assert getattr(excinfo.value, "status_code", None) == 412
+    assert excinfo.value.detail["error"]["code"] == "NO_ACTIVE_API_KEY"
 
 
 @pytest.mark.asyncio
@@ -703,14 +725,15 @@ async def test_rate_limited_user_api_credential_blocks_without_fallback(
             db,  # type: ignore[arg-type]
             "user-1",
             "chat",
+            "byok",
         )
 
-    assert getattr(excinfo.value, "status_code", None) == 409
-    assert excinfo.value.detail["error"]["code"] == "user_api_key_required"
+    assert getattr(excinfo.value, "status_code", None) == 412
+    assert excinfo.value.detail["error"]["code"] == "NO_ACTIVE_API_KEY"
 
 
 @pytest.mark.asyncio
-async def test_user_api_credential_is_ignored_when_byok_mode_disabled(
+async def test_user_api_credential_is_ignored_for_wallet_accounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_read_byok_settings(_db: Any) -> SimpleNamespace:
@@ -724,6 +747,7 @@ async def test_user_api_credential_is_ignored_when_byok_mode_disabled(
         db,  # type: ignore[arg-type]
         "user-1",
         "chat",
+        "wallet",
     )
 
     assert pin is None
@@ -767,7 +791,7 @@ async def test_post_message_persists_image_render_options(
                 moderation="auto",
             ),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -823,7 +847,7 @@ async def test_image_output_format_system_setting_is_default(
                 render_quality="medium",
             ),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -861,7 +885,7 @@ async def test_fast_default_applies_when_client_omits_fast(
     await messages.post_message(
         "conv-1",
         PostMessageIn(idempotency_key="idem-fast-chat", text="hello", intent="chat"),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         chat_db,  # type: ignore[arg-type]
     )
     user_msg = next(
@@ -882,7 +906,7 @@ async def test_fast_default_applies_when_client_omits_fast(
                 fixed_size="1024x1024",
             ),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         image_db,  # type: ignore[arg-type]
     )
     gen = next(item for item in image_db.added if item.__class__.__name__ == "Generation")
@@ -928,7 +952,7 @@ async def test_explicit_fast_false_overrides_system_default(
                 fast=False,
             ),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -970,7 +994,7 @@ async def test_image_prompt_transparent_background_forces_png(
                 background="auto",
             ),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -1025,7 +1049,7 @@ async def test_post_message_persists_mask_image_id_for_image_to_image(
                 fixed_size="1024x1024",
             ),
         ),
-        _user(),  # type: ignore[arg-type]
+        _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
 
@@ -1070,7 +1094,7 @@ async def test_post_message_rejects_mask_without_reference_image(
                 attachment_image_ids=[],
                 mask_image_id="img-mask",
             ),
-            _user(),  # type: ignore[arg-type]
+            _wallet_user(),  # type: ignore[arg-type]
             db,  # type: ignore[arg-type]
         )
 
@@ -1115,7 +1139,7 @@ async def test_post_message_rejects_mask_with_chat_intent(
                 attachment_image_ids=[],
                 mask_image_id="img-mask",
             ),
-            _user(),  # type: ignore[arg-type]
+            _wallet_user(),  # type: ignore[arg-type]
             db,  # type: ignore[arg-type]
         )
 
@@ -1161,7 +1185,7 @@ async def test_post_message_rejects_mask_with_multiple_references(
                 attachment_image_ids=["img-a", "img-b"],
                 mask_image_id="img-mask",
             ),
-            _user(),  # type: ignore[arg-type]
+            _wallet_user(),  # type: ignore[arg-type]
             db,  # type: ignore[arg-type]
         )
 
@@ -1203,7 +1227,7 @@ async def test_post_message_rejects_mask_not_owned_by_user(
                 attachment_image_ids=["img-att"],
                 mask_image_id="img-foreign-mask",
             ),
-            _user(),  # type: ignore[arg-type]
+            _wallet_user(),  # type: ignore[arg-type]
             db,  # type: ignore[arg-type]
         )
 
@@ -1245,7 +1269,7 @@ async def test_get_message_query_is_scoped_to_conversation_owner() -> None:
         await messages.get_message(
             "conv-1",
             "msg-1",
-            _user(),  # type: ignore[arg-type]
+            _wallet_user(),  # type: ignore[arg-type]
             db,  # type: ignore[arg-type]
         )
 
@@ -1266,7 +1290,7 @@ async def test_silent_generation_parent_query_filters_deleted_messages() -> None
                 idempotency_key="silent-1",
                 parent_message_id="deleted-parent",
             ),
-            _user(),  # type: ignore[arg-type]
+            _wallet_user(),  # type: ignore[arg-type]
             db,  # type: ignore[arg-type]
         )
 

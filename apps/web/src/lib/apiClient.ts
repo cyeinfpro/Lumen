@@ -38,6 +38,17 @@ import type {
   ByokSettingsPatchIn,
   UserApiCredentialListOut,
   UserApiCredentialOut,
+  AdminRedemptionCodeCreateOut,
+  AdminRedemptionCodeListOut,
+  AdminRedemptionUsageListOut,
+  AdminWalletListOut,
+  PricingRuleUpsertIn,
+  PricingRulesOut,
+  RedemptionOut,
+  RedemptionUsageListOut,
+  WalletOut,
+  WalletTransactionListOut,
+  WalletTransactionOut,
 } from "./types";
 export { API_BASE, ApiError, apiFetch, apiFetchNoContent } from "./api/http";
 export type { NoContent } from "./api/http";
@@ -48,6 +59,8 @@ export interface AuthUser {
   id: string;
   email?: string;
   name?: string;
+  account_mode?: "wallet" | "byok";
+  role?: "admin" | "member";
   default_system_prompt_id?: string | null;
   runtime_defaults?: {
     fast?: boolean;
@@ -2096,6 +2109,131 @@ export function revokeMyApiCredential(credential_id: string): Promise<{ ok: bool
   return apiFetch<{ ok: boolean }>(`/me/api-credentials/${credential_id}`, {
     method: "DELETE",
   });
+}
+
+// ——— Billing / Wallet ———
+
+export function getMyWallet(): Promise<WalletOut> {
+  return apiFetch<WalletOut>("/me/wallet");
+}
+
+export function listMyWalletTransactions(
+  opts: { cursor?: string | null; limit?: number } = {},
+): Promise<WalletTransactionListOut> {
+  const qs = new URLSearchParams();
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<WalletTransactionListOut>(`/me/wallet/transactions${suffix}`);
+}
+
+export function redeemCode(code: string): Promise<RedemptionOut> {
+  return apiFetch<RedemptionOut>("/me/redemptions", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+export function listMyRedemptions(): Promise<RedemptionUsageListOut> {
+  return apiFetch<RedemptionUsageListOut>("/me/redemptions");
+}
+
+export function getPricing(): Promise<PricingRulesOut> {
+  return apiFetch<PricingRulesOut>("/me/pricing");
+}
+
+export function getAdminPricing(): Promise<PricingRulesOut> {
+  return apiFetch<PricingRulesOut>("/admin/pricing");
+}
+
+export function updateAdminPricing(items: PricingRuleUpsertIn[]): Promise<PricingRulesOut> {
+  return apiFetch<PricingRulesOut>("/admin/pricing", {
+    method: "PUT",
+    body: JSON.stringify({ items }),
+  });
+}
+
+export function importOpenAiPricing(content: string, rate = 1): Promise<PricingRulesOut> {
+  return apiFetch<PricingRulesOut>("/admin/pricing/import_openai", {
+    method: "POST",
+    body: JSON.stringify({ content, rate }),
+  });
+}
+
+export function listAdminRedemptionCodes(): Promise<AdminRedemptionCodeListOut> {
+  return apiFetch<AdminRedemptionCodeListOut>("/admin/redemption_codes");
+}
+
+export function createAdminRedemptionCodes(body: {
+  amount_rmb: string;
+  count: number;
+  max_redemptions?: number;
+  expires_at?: string | null;
+  note?: string | null;
+}): Promise<AdminRedemptionCodeCreateOut> {
+  return apiFetch<AdminRedemptionCodeCreateOut>("/admin/redemption_codes", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function revokeAdminRedemptionCode(
+  id: string,
+): Promise<import("./types").AdminRedemptionCodeOut> {
+  return apiFetch<import("./types").AdminRedemptionCodeOut>(
+    `/admin/redemption_codes/${encodeURIComponent(id)}:revoke`,
+    { method: "POST" },
+  );
+}
+
+export function listAdminRedemptionCodeUsage(id: string): Promise<AdminRedemptionUsageListOut> {
+  return apiFetch<AdminRedemptionUsageListOut>(
+    `/admin/redemption_codes/${encodeURIComponent(id)}/usage`,
+  );
+}
+
+export function revokeAdminRedemptionBatch(batchId: string): Promise<AdminRedemptionCodeListOut> {
+  return apiFetch<AdminRedemptionCodeListOut>(
+    `/admin/redemption_codes/batches/${encodeURIComponent(batchId)}:revoke`,
+    { method: "POST" },
+  );
+}
+
+export function adminRedemptionBatchCsvUrl(batchId: string, token: string): string {
+  return `${API_BASE}/admin/redemption_codes/batches/${encodeURIComponent(batchId)}.csv?download_token=${encodeURIComponent(token)}`;
+}
+
+export function listAdminWallets(q?: string, mode: "wallet" | "byok" | "all" = "wallet"): Promise<AdminWalletListOut> {
+  const qs = new URLSearchParams();
+  if (q) qs.set("q", q);
+  qs.set("mode", mode);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<AdminWalletListOut>(`/admin/wallets${suffix}`);
+}
+
+export function adjustAdminWallet(
+  userId: string,
+  amount_rmb_signed: string,
+  reason: string,
+): Promise<WalletTransactionOut> {
+  return apiFetch<WalletTransactionOut>(`/admin/wallets/${userId}:adjust`, {
+    method: "POST",
+    body: JSON.stringify({ amount_rmb_signed, reason }),
+  });
+}
+
+export function setAdminAccountMode(
+  userId: string,
+  mode: "wallet" | "byok",
+  on_residual_balance: "freeze" | "zero" = "freeze",
+): Promise<import("./types").AdminWalletOut> {
+  return apiFetch<import("./types").AdminWalletOut>(
+    `/admin/users/${userId}:set_account_mode`,
+    {
+      method: "POST",
+      body: JSON.stringify({ mode, on_residual_balance }),
+    },
+  );
 }
 
 // ——— Account memory ———

@@ -33,6 +33,7 @@ from lumen_core.constants import (
 )
 from lumen_core.models import Completion, Generation, Message, OutboxDeadLetter, OutboxEvent
 
+from .. import billing as worker_billing
 from ..db import SessionLocal
 from ..sse_publish import publish_event
 
@@ -480,6 +481,20 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                     msg = await session.get(Message, g.message_id)
                     if msg is not None:
                         msg.status = MessageStatus.FAILED.value
+                    # Why: worker died mid-task, the hold from POST /messages
+                    # is still subtracted. Without this release the wallet
+                    # leaks the held amount permanently — the worker won't
+                    # see this generation again because we just marked it
+                    # FAILED here.
+                    try:
+                        await worker_billing.release_generation(
+                            session, g, reason=_RECON_TIMEOUT_CODE
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "reconcile release_generation failed gen=%s",
+                            g.id,
+                        )
                     pending_sse.append(
                         (
                             g.user_id,
