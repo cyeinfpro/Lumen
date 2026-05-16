@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from app.provider_pool import ProviderPool
 from app.provider_pool import ProviderConfig, ResolvedProvider
-from app.config import Settings
+from app.config import BYOK_DEV_MASTER_SECRET, Settings
 
 
 def test_worker_settings_ignores_shared_env_fields() -> None:
@@ -21,6 +22,14 @@ def test_worker_settings_ignores_shared_env_fields() -> None:
 
     assert settings.database_url
     assert not hasattr(settings, "db_user")
+
+
+def test_worker_non_dev_rejects_byok_dev_fallback_secret() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="prod",
+            byok_api_key_master_secret=BYOK_DEV_MASTER_SECRET,
+        )
 
 
 def test_provider_dataclass_repr_does_not_include_api_key() -> None:

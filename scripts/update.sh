@@ -160,6 +160,8 @@ emit_fail()  {
 emit_info()  { lumen_emit_info "phase=$1" "key=$2" "value=$3"; }
 emit_warn()  { lumen_emit_info "phase=$1" "key=warn" "value=$2"; }
 
+BYOK_DEV_MASTER_SECRET="lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
+
 # 检查 .env 是否存在指定 key 且非空，不输出 value。
 env_key_present() {
     local file="$1"
@@ -804,8 +806,9 @@ if [ "${DISK_FREE_GB}" != "-1" ] && [ "${DISK_FREE_GB}" -lt 5 ]; then
 fi
 
 # .env 关键字段。BYOK 主密钥和应用配置保持一致：开发/本地/测试环境允许
-# API/worker 使用 deterministic dev fallback；非开发环境必须显式配置，避免
-# 重启后无法解密已有用户 API Key。
+# API/worker 使用 deterministic dev fallback。因为 docker compose 插值早于
+# 应用启动，这里会把同一个 fallback 显式写回 shared/.env；非开发环境必须
+# 显式配置真实密钥，避免重启后无法解密已有用户 API Key。
 ENV_MISSING=0
 for k in DATABASE_URL REDIS_URL SESSION_SECRET; do
     if ! env_key_present "${SHARED_ENV}" "${k}"; then
@@ -813,10 +816,20 @@ for k in DATABASE_URL REDIS_URL SESSION_SECRET; do
         ENV_MISSING=1
     fi
 done
-if ! env_key_present "${SHARED_ENV}" "BYOK_API_KEY_MASTER_SECRET"; then
+BYOK_SECRET_VALUE="$(lumen_env_value BYOK_API_KEY_MASTER_SECRET "${SHARED_ENV}" 2>/dev/null || true)"
+if [ -n "${BYOK_SECRET_VALUE}" ] && ! shared_app_env_is_development "${SHARED_ENV}" \
+        && [ "${BYOK_SECRET_VALUE}" = "${BYOK_DEV_MASTER_SECRET}" ]; then
+    log_error "[preflight] 非开发 APP_ENV 不能使用公开的 BYOK dev fallback；请配置真实 BYOK_API_KEY_MASTER_SECRET。"
+    ENV_MISSING=1
+elif [ -z "${BYOK_SECRET_VALUE}" ]; then
     if shared_app_env_is_development "${SHARED_ENV}"; then
-        log_warn "[preflight] shared/.env 缺少 BYOK_API_KEY_MASTER_SECRET；APP_ENV 为开发/本地/测试模式，继续使用应用内 dev fallback。"
-        emit_info preflight byok_secret "dev_fallback"
+        log_warn "[preflight] shared/.env 缺少 BYOK_API_KEY_MASTER_SECRET；APP_ENV 为开发/本地/测试模式，写入应用内 dev fallback 供 docker compose 使用。"
+        if ! lumen_set_env_value_in_file "${SHARED_ENV}" BYOK_API_KEY_MASTER_SECRET "${BYOK_DEV_MASTER_SECRET}"; then
+            log_error "[preflight] 写入 BYOK_API_KEY_MASTER_SECRET dev fallback 失败。"
+            ENV_MISSING=1
+        else
+            emit_info preflight byok_secret "dev_fallback_backfilled"
+        fi
     else
         log_error "[preflight] shared/.env 缺少 BYOK_API_KEY_MASTER_SECRET 或为空。"
         ENV_MISSING=1

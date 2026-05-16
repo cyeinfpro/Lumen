@@ -33,6 +33,7 @@ _DEFAULT_REDIS_URL = (
 )
 _DEFAULT_PUBLIC_BASE_URL = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
 _DEFAULT_CORS_ALLOW_ORIGINS = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
+BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
 
 
 def _workspace_env_file() -> Path | None:
@@ -185,8 +186,12 @@ class Settings(BaseSettings):
         # / fresh local checkouts don't require explicit env configuration.
         byok_secret = self.byok_api_key_master_secret.strip()
         if is_dev and len(byok_secret) < 16:
-            byok_secret = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
+            byok_secret = BYOK_DEV_MASTER_SECRET
             self.byok_api_key_master_secret = byok_secret
+        elif not is_dev and byok_secret == BYOK_DEV_MASTER_SECRET:
+            raise ValueError(
+                "BYOK_API_KEY_MASTER_SECRET must not use the public dev fallback outside development"
+            )
         elif not is_dev and len(byok_secret) < 32:
             raise ValueError(
                 "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters in production; "
