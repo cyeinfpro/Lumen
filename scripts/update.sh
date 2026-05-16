@@ -168,6 +168,18 @@ env_key_present() {
     grep -qE "^${key}=.+" "${file}"
 }
 
+shared_app_env_is_development() {
+    local file="$1"
+    local app_env
+    app_env="$(lumen_env_value APP_ENV "${file}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+    case "${app_env:-dev}" in
+        dev|development|local|test)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 sed_replacement_escape() {
     printf '%s' "$1" | sed 's/[\/&#]/\\&/g'
 }
@@ -791,14 +803,25 @@ if [ "${DISK_FREE_GB}" != "-1" ] && [ "${DISK_FREE_GB}" -lt 5 ]; then
     exit 1
 fi
 
-# .env 关键字段
+# .env 关键字段。BYOK 主密钥和应用配置保持一致：开发/本地/测试环境允许
+# API/worker 使用 deterministic dev fallback；非开发环境必须显式配置，避免
+# 重启后无法解密已有用户 API Key。
 ENV_MISSING=0
-for k in DATABASE_URL REDIS_URL SESSION_SECRET BYOK_API_KEY_MASTER_SECRET; do
+for k in DATABASE_URL REDIS_URL SESSION_SECRET; do
     if ! env_key_present "${SHARED_ENV}" "${k}"; then
         log_error "[preflight] shared/.env 缺少 ${k} 或为空。"
         ENV_MISSING=1
     fi
 done
+if ! env_key_present "${SHARED_ENV}" "BYOK_API_KEY_MASTER_SECRET"; then
+    if shared_app_env_is_development "${SHARED_ENV}"; then
+        log_warn "[preflight] shared/.env 缺少 BYOK_API_KEY_MASTER_SECRET；APP_ENV 为开发/本地/测试模式，继续使用应用内 dev fallback。"
+        emit_info preflight byok_secret "dev_fallback"
+    else
+        log_error "[preflight] shared/.env 缺少 BYOK_API_KEY_MASTER_SECRET 或为空。"
+        ENV_MISSING=1
+    fi
+fi
 if [ "${ENV_MISSING}" -eq 1 ]; then
     emit_fail preflight 1
     exit 1
