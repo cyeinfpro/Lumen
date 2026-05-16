@@ -9,6 +9,7 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
+BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
 
 
 class Settings(BaseSettings):
@@ -82,8 +83,12 @@ class Settings(BaseSettings):
         # dev/test：未设时 fallback 到与 API 端一致的 deterministic dummy
         # （prod 严禁使用，必须显式 ≥ 32 chars）。
         if is_dev and len(secret) < 16:
-            secret = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
+            secret = BYOK_DEV_MASTER_SECRET
             self.byok_api_key_master_secret = secret
+        elif not is_dev and secret == BYOK_DEV_MASTER_SECRET:
+            raise ValueError(
+                "BYOK_API_KEY_MASTER_SECRET must not use the public dev fallback outside development"
+            )
         elif not is_dev and len(secret) < 32:
             raise ValueError(
                 "BYOK_API_KEY_MASTER_SECRET must be at least 32 characters outside development"

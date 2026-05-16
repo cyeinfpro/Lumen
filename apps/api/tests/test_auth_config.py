@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.scripts import bootstrap
-from app.config import Settings, _settings_env_files
+from app.config import BYOK_DEV_MASTER_SECRET, Settings, _settings_env_files
 from lumen_core.runtime_settings import validate_providers
 
 
@@ -84,6 +84,14 @@ def test_non_dev_requires_byok_master_secret() -> None:
 def test_non_dev_rejects_short_byok_master_secret() -> None:
     kwargs = _prod_kwargs()
     kwargs["byok_api_key_master_secret"] = "short"
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_non_dev_rejects_byok_dev_fallback_secret() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["byok_api_key_master_secret"] = BYOK_DEV_MASTER_SECRET
 
     with pytest.raises(ValidationError):
         Settings(**kwargs)
