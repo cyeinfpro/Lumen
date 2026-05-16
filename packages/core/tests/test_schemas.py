@@ -85,3 +85,11 @@ def test_model_library_generate_accepts_multiple_genders():
 
     assert body.gender is None
     assert body.genders == ["female", "male"]
+
+
+def test_showcase_images_accepts_landscape_aspect_ratios():
+    from lumen_core.schemas import ShowcaseImagesCreateIn
+
+    for aspect in ("4:3", "3:2", "16:9", "21:9"):
+        body = ShowcaseImagesCreateIn(aspect_ratio=aspect)
+        assert body.aspect_ratio == aspect

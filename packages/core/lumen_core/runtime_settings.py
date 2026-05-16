@@ -391,6 +391,18 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         allowed_values=("auto", "stream_only", "image_jobs_only"),
     ),
     SettingSpec(
+        key="image.generation_concurrency",
+        description=(
+            "图片生成 FIFO 队列总并发。所有 1K/2K/4K、文生图和图生图共用此上限；"
+            "实际并发还会受每个 provider/key 的 image_concurrency 限制。"
+        ),
+        sensitive=False,
+        parser=int,
+        env_fallback="IMAGE_GENERATION_CONCURRENCY",
+        min_value=1,
+        max_value=32,
+    ),
+    SettingSpec(
         key="image.engine",
         description="生图引擎：responses（Codex 原生）/ image2（直调）/ dual_race（双路竞速）。",
         sensitive=False,

@@ -131,10 +131,11 @@ class WorkerSettings:
         ),
     ]
 
-    # Keep the arq process wide enough for the image FIFO cap plus cron/outbox
-    # jobs. The image queue still owns admission, so this only removes the
-    # process-level bottleneck when IMAGE_GENERATION_CONCURRENCY is raised.
-    max_jobs = max(8, min(64, settings.image_generation_concurrency + 4))
+    # Keep the arq process wide enough for the runtime image FIFO cap plus
+    # cron/outbox jobs. The image queue still owns admission, so this only
+    # prevents max_jobs from becoming the bottleneck when admins raise
+    # image.generation_concurrency from system settings without restarting.
+    max_jobs = 64
     # 4K 图生图（4K 升级后）最糟耗时：主链路 retry × 单次 ~8 min + 备链路 + 解码/落盘
     # 可达 ~20-25 min；给 1800s（30 min）留缓冲。普通小图/文生图远远跑不到这个上限。
     # 保持 > _RUN_GENERATION_TIMEOUT_S（1500s），让 task 自己 raise TimeoutError 释放 lease。

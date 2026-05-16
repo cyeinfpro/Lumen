@@ -435,7 +435,7 @@ Provider 关键字段：
 | `UPSTREAM_DEFAULT_MODEL` | 默认聊天模型，代码默认 `gpt-5.5` |
 | `UPSTREAM_GLOBAL_CONCURRENCY` | 全局上游并发上限 |
 | `UPSTREAM_PIXEL_BUDGET` | `size_mode=auto` 的默认像素预算 |
-| `IMAGE_GENERATION_CONCURRENCY` | Worker 图片 FIFO 队列总并发 |
+| `image.generation_concurrency` / `IMAGE_GENERATION_CONCURRENCY` | Worker 图片 FIFO 队列总并发，DB 设置优先 |
 | `IMAGE_CHANNEL` | `auto`、`stream_only`、`image_jobs_only` |
 | `IMAGE_ENGINE` | `responses`、`image2`、`dual_race` |
 | `IMAGE_JOB_BASE_URL` | image-job sidecar 根地址 |

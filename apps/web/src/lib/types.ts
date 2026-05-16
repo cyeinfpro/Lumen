@@ -415,6 +415,7 @@ export type SystemSettingKey =
   | "upstream.read_timeout_s"
   | "upstream.write_timeout_s"
   | "image.channel"
+  | "image.generation_concurrency"
   | "image.engine"
   | "image.output_format"
   | "image.job_base_url"
