@@ -5967,19 +5967,87 @@ async def _selected_candidate(db: AsyncSession, run_id: str) -> ModelCandidate:
     return candidate
 
 
-@router.post(
-    "/{workflow_run_id}/showcase-images",
-    response_model=WorkflowRunOut,
-    dependencies=[Depends(verify_csrf)],
-)
-async def create_showcase_images(
+def _showcase_request_input_json(
+    *,
+    body: ShowcaseImagesCreateIn,
+    request_id: str,
+    shot_picks: list[tuple[ShotClass, ShotVariant]],
+    age_segment: str,
+    ref_ids: list[str],
+    existing_image_ids: list[str],
+    preflight_status: str,
+    preflight: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scene_cards = list((preflight or {}).get("scene_cards") or [])
+    planning = (preflight or {}).get("planning") or {}
+    payload: dict[str, Any] = {
+        "template": body.template,
+        "shot_plan": [shot_class for shot_class, _ in shot_picks],
+        "shot_variants": [
+            {"shot_class": cls, "label": v["label"], "framing": v["framing"]}
+            for cls, v in shot_picks
+        ],
+        "age_segment": age_segment,
+        "aspect_ratio": body.aspect_ratio,
+        "final_quality": body.final_quality,
+        "output_count": body.output_count,
+        "scene_environment": body.scene_environment,
+        "scene_strategy": body.scene_strategy,
+        "scene_variety": body.scene_variety,
+        "scene_planner": body.scene_planner,
+        "continuity_anchor": body.continuity_anchor,
+        "allow_pet": body.allow_pet,
+        "allow_background_people": body.allow_background_people,
+        "generation_request_id": request_id,
+        "preflight_status": preflight_status,
+        "planner_version": "apparel-gpt55-preflight-v1",
+        "target_image_count": _showcase_target_image_count(
+            existing_image_ids=existing_image_ids,
+            output_count=body.output_count,
+        ),
+        "reference_image_ids": ref_ids,
+    }
+    if preflight:
+        payload.update(
+            {
+                "garment_lock": preflight.get("garment_lock") or {},
+                "scene_planning": planning,
+                "scene_cards": scene_cards,
+                "scene_fingerprints": planning.get("scene_fingerprints")
+                or [
+                    card.get("fingerprint") or _scene_fingerprint(card)
+                    for card in scene_cards
+                ],
+                "per_image_prompts": preflight.get("per_image_prompts") or [],
+                "prompt_reviews": preflight.get("prompt_reviews") or [],
+            }
+        )
+    else:
+        payload.update(
+            {
+                "garment_lock": {},
+                "scene_planning": {},
+                "scene_cards": [],
+                "scene_fingerprints": [],
+                "per_image_prompts": [],
+                "prompt_reviews": [],
+            }
+        )
+    return payload
+
+
+async def _showcase_generation_context(
+    *,
+    db: AsyncSession,
+    user: User,
     workflow_run_id: str,
     body: ShowcaseImagesCreateIn,
-    user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> WorkflowRunOut:
-    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
-    await _sync_workflow_outputs(db, run)
+    lock_run: bool,
+    sync_outputs: bool = True,
+) -> dict[str, Any]:
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=lock_run)
+    if sync_outputs:
+        await _sync_workflow_outputs(db, run)
     product_step = await _step(db, run.id, "product_analysis")
     if product_step.status != "approved":
         raise _http("product_not_approved", "approve product analysis first", 409)
@@ -6000,7 +6068,6 @@ async def create_showcase_images(
         output_count=body.output_count,
         seed_key=seed_key,
     )
-    shot_plan = [shot_class for shot_class, _ in shot_picks]
 
     approval = await _step(db, run.id, "model_approval")
     accessory_plan = (approval.input_json or {}).get("accessory_plan")
@@ -6018,16 +6085,161 @@ async def create_showcase_images(
             else None
         ),
     )
+    return {
+        "run": run,
+        "product_step": product_step,
+        "candidate": candidate,
+        "showcase": showcase,
+        "conv": conv,
+        "age_segment": age_segment,
+        "shot_picks": shot_picks,
+        "approval": approval,
+        "accessory_plan": accessory_plan,
+        "ref_ids": ref_ids,
+    }
+
+
+async def _queue_showcase_images_generation(
+    *,
+    db: AsyncSession,
+    workflow_run_id: str,
+    body: ShowcaseImagesCreateIn,
+    user: User,
+) -> tuple[WorkflowRun, str | None]:
+    context = await _showcase_generation_context(
+        db=db,
+        user=user,
+        workflow_run_id=workflow_run_id,
+        body=body,
+        lock_run=True,
+    )
+    run: WorkflowRun = context["run"]
+    showcase: WorkflowStep = context["showcase"]
+    if showcase.status == "running":
+        await db.commit()
+        return run, None
+
+    request_id = new_uuid7()
+    existing_image_ids = _dedupe_nonempty(showcase.image_ids or [])
+    showcase.status = "running"
+    showcase.task_ids = []
+    showcase.image_ids = existing_image_ids
+    showcase.output_json = {}
+    showcase.input_json = {
+        **_showcase_request_input_json(
+            body=body,
+            request_id=request_id,
+            shot_picks=context["shot_picks"],
+            age_segment=context["age_segment"],
+            ref_ids=context["ref_ids"],
+            existing_image_ids=existing_image_ids,
+            preflight_status="queued",
+        ),
+        "preflight_queued_at": _iso_now(),
+    }
+    quality = await _step(db, run.id, "quality_review")
+    quality.status = "waiting_input"
+    quality.input_json = {}
+    quality.output_json = {}
+    quality.task_ids = []
+    quality.image_ids = []
+    run.current_step = "showcase_generation"
+    run.status = "running"
+    context["conv"].last_activity_at = _now()
+    await db.commit()
+    return run, request_id
+
+
+def _showcase_generation_request_matches(
+    showcase: WorkflowStep, request_id: str
+) -> bool:
+    input_json = showcase.input_json or {}
+    return input_json.get("generation_request_id") == request_id
+
+
+def _showcase_generation_error_payload(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            error = detail.get("error")
+            if isinstance(error, dict):
+                code = str(error.get("code") or "showcase_generation_failed")
+                message = str(error.get("message") or code)
+                return code, message
+        return "showcase_generation_failed", str(detail or exc.status_code)
+    return "showcase_generation_failed", str(exc) or exc.__class__.__name__
+
+
+async def _mark_showcase_generation_failed(
+    *,
+    db: AsyncSession,
+    user_id: str,
+    workflow_run_id: str,
+    request_id: str,
+    exc: Exception,
+) -> None:
+    run = await _get_run(db, user_id=user_id, run_id=workflow_run_id, lock=True)
+    showcase = await _step(db, run.id, "showcase_generation")
+    if not _showcase_generation_request_matches(showcase, request_id):
+        await db.rollback()
+        return
+    error_code, error_message = _showcase_generation_error_payload(exc)
+    showcase.status = "failed"
+    showcase.input_json = {
+        **(showcase.input_json or {}),
+        "preflight_status": "failed",
+        "preflight_failed_at": _iso_now(),
+    }
+    showcase.output_json = {
+        **(showcase.output_json or {}),
+        "error_code": error_code,
+        "error_message": error_message,
+        "generation_request_id": request_id,
+    }
+    run.current_step = "showcase_generation"
+    run.status = "failed"
+    await db.commit()
+
+
+async def _dispatch_showcase_images_generation(
+    *,
+    db: AsyncSession,
+    workflow_run_id: str,
+    body: ShowcaseImagesCreateIn,
+    user: User,
+    request_id: str,
+) -> None:
+    context = await _showcase_generation_context(
+        db=db,
+        user=user,
+        workflow_run_id=workflow_run_id,
+        body=body,
+        lock_run=True,
+        sync_outputs=False,
+    )
+    showcase: WorkflowStep = context["showcase"]
+    if not _showcase_generation_request_matches(showcase, request_id):
+        await db.rollback()
+        return
+    showcase.input_json = {
+        **(showcase.input_json or {}),
+        "preflight_status": "running",
+        "preflight_started_at": _iso_now(),
+    }
+    await db.commit()
+
+    product_step: WorkflowStep = context["product_step"]
+    candidate: ModelCandidate = context["candidate"]
     preflight = await _prepare_showcase_preflight(
         db=db,
         product_analysis=product_step.output_json or {},
         selected_candidate=candidate,
-        accessory_plan=accessory_plan,
+        accessory_plan=context["accessory_plan"],
         template=body.template,
-        shot_picks=shot_picks,
-        age_segment=age_segment,
+        shot_picks=context["shot_picks"],
+        age_segment=context["age_segment"],
         final_quality=body.final_quality,
-        user_prompt=run.user_prompt,
+        user_prompt=context["run"].user_prompt,
         aspect_ratio=body.aspect_ratio,
         scene_environment=body.scene_environment,
         scene_strategy=body.scene_strategy,
@@ -6037,13 +6249,31 @@ async def create_showcase_images(
         allow_pet=body.allow_pet,
         allow_background_people=body.allow_background_people,
     )
+
+    context = await _showcase_generation_context(
+        db=db,
+        user=user,
+        workflow_run_id=workflow_run_id,
+        body=body,
+        lock_run=True,
+        sync_outputs=False,
+    )
+    run = context["run"]
+    product_step = context["product_step"]
+    candidate = context["candidate"]
+    showcase = context["showcase"]
+    conv = context["conv"]
+    if not _showcase_generation_request_matches(showcase, request_id):
+        await db.rollback()
+        return
+
     scene_cards = list(preflight.get("scene_cards") or [])
     final_prompts = list(preflight.get("final_prompts") or [])
     existing_task_ids = _dedupe_nonempty(showcase.task_ids or [])
     existing_image_ids = _dedupe_nonempty(showcase.image_ids or [])
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
-    for idx, (shot_type, variant) in enumerate(shot_picks, start=1):
+    for idx, (shot_type, variant) in enumerate(context["shot_picks"], start=1):
         scene_card = scene_cards[idx - 1] if idx - 1 < len(scene_cards) else {}
         final_prompt = (
             str(final_prompts[idx - 1])
@@ -6051,11 +6281,11 @@ async def create_showcase_images(
             else _showcase_prompt(
                 product_analysis=product_step.output_json or {},
                 selected_candidate=candidate,
-                accessory_plan=accessory_plan,
+                accessory_plan=context["accessory_plan"],
                 template=body.template,
                 shot_type=shot_type,
                 shot_variant=variant,
-                age_segment=age_segment,
+                age_segment=context["age_segment"],
                 final_quality=body.final_quality,
                 user_prompt=run.user_prompt,
                 aspect_ratio=body.aspect_ratio,
@@ -6072,7 +6302,7 @@ async def create_showcase_images(
             conv=conv,
             intent=Intent.IMAGE_TO_IMAGE,
             text=final_prompt,
-            attachment_ids=ref_ids,
+            attachment_ids=context["ref_ids"],
             idempotency_key=f"wf:{run.id[:12]}:shot:{idx}:{new_uuid7()[:8]}",
             workflow_run_id=run.id,
             workflow_step_key="showcase_generation",
@@ -6090,7 +6320,7 @@ async def create_showcase_images(
                 "workflow_shot_variant": variant["label"],
                 "workflow_shot_framing": variant["framing"],
                 "workflow_template": body.template,
-                "workflow_age_segment": age_segment,
+                "workflow_age_segment": context["age_segment"],
                 "workflow_final_quality": body.final_quality,
                 "workflow_scene_environment": body.scene_environment,
                 "workflow_scene_strategy": body.scene_strategy,
@@ -6113,42 +6343,24 @@ async def create_showcase_images(
         )
         task_ids.extend(gen_ids)
         bundles.append(bundle)
+
+    started_at = (showcase.input_json or {}).get("preflight_started_at")
     showcase.status = "running"
     showcase.task_ids = _dedupe_nonempty([*existing_task_ids, *task_ids])
     showcase.image_ids = existing_image_ids
     showcase.input_json = {
-        "template": body.template,
-        "shot_plan": shot_plan,
-        "shot_variants": [
-            {"shot_class": cls, "label": v["label"], "framing": v["framing"]}
-            for cls, v in shot_picks
-        ],
-        "age_segment": age_segment,
-        "aspect_ratio": body.aspect_ratio,
-        "final_quality": body.final_quality,
-        "output_count": body.output_count,
-        "scene_environment": body.scene_environment,
-        "scene_strategy": body.scene_strategy,
-        "scene_variety": body.scene_variety,
-        "scene_planner": body.scene_planner,
-        "continuity_anchor": body.continuity_anchor,
-        "allow_pet": body.allow_pet,
-        "allow_background_people": body.allow_background_people,
-        "garment_lock": preflight.get("garment_lock") or {},
-        "scene_planning": preflight.get("planning") or {},
-        "scene_cards": scene_cards,
-        "scene_fingerprints": (preflight.get("planning") or {}).get(
-            "scene_fingerprints"
-        )
-        or [card.get("fingerprint") or _scene_fingerprint(card) for card in scene_cards],
-        "per_image_prompts": preflight.get("per_image_prompts") or [],
-        "prompt_reviews": preflight.get("prompt_reviews") or [],
-        "planner_version": "apparel-gpt55-preflight-v1",
-        "target_image_count": _showcase_target_image_count(
+        **_showcase_request_input_json(
+            body=body,
+            request_id=request_id,
+            shot_picks=context["shot_picks"],
+            age_segment=context["age_segment"],
+            ref_ids=context["ref_ids"],
             existing_image_ids=existing_image_ids,
-            output_count=body.output_count,
+            preflight_status="dispatched",
+            preflight=preflight,
         ),
-        "reference_image_ids": ref_ids,
+        **({"preflight_started_at": started_at} if started_at else {}),
+        "preflight_completed_at": _iso_now(),
     }
     quality = await _step(db, run.id, "quality_review")
     quality.status = "waiting_input"
@@ -6160,7 +6372,103 @@ async def create_showcase_images(
     run.status = "running"
     conv.last_activity_at = _now()
     await db.commit()
-    await _publish_bundles(db, user_id=user.id, conv_id=conv.id, bundles=bundles)
+    try:
+        await _publish_bundles(db, user_id=user.id, conv_id=conv.id, bundles=bundles)
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        await db.rollback()
+        logger.exception(
+            "showcase background publish failed user=%s run=%s request=%s err=%s",
+            user.id,
+            workflow_run_id,
+            request_id,
+            exc,
+        )
+
+
+async def _run_showcase_images_generation_in_background(
+    user_id: str,
+    workflow_run_id: str,
+    body_payload: dict[str, Any],
+    request_id: str,
+) -> None:
+    try:
+        from app.db import SessionLocal as _Session
+
+        body = ShowcaseImagesCreateIn.model_validate(body_payload)
+        async with _Session() as session:
+            user = await session.get(User, user_id)
+            if user is None:
+                raise _http("not_found", "user not found", 404)
+            try:
+                await _dispatch_showcase_images_generation(
+                    db=session,
+                    workflow_run_id=workflow_run_id,
+                    body=body,
+                    user=user,
+                    request_id=request_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await session.rollback()
+                if isinstance(exc, HTTPException) and exc.status_code < 500:
+                    logger.info(
+                        "showcase background generation stopped user=%s run=%s request=%s status=%s",
+                        user_id,
+                        workflow_run_id,
+                        request_id,
+                        exc.status_code,
+                    )
+                else:
+                    logger.exception(
+                        "showcase background generation failed user=%s run=%s request=%s err=%s",
+                        user_id,
+                        workflow_run_id,
+                        request_id,
+                        exc,
+                    )
+                await _mark_showcase_generation_failed(
+                    db=session,
+                    user_id=user_id,
+                    workflow_run_id=workflow_run_id,
+                    request_id=request_id,
+                    exc=exc,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "showcase background bootstrap failed user=%s run=%s request=%s err=%s",
+            user_id,
+            workflow_run_id,
+            request_id,
+            exc,
+        )
+
+
+@router.post(
+    "/{workflow_run_id}/showcase-images",
+    response_model=WorkflowRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def create_showcase_images(
+    workflow_run_id: str,
+    body: ShowcaseImagesCreateIn,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> WorkflowRunOut:
+    run, request_id = await _queue_showcase_images_generation(
+        db=db,
+        workflow_run_id=workflow_run_id,
+        body=body,
+        user=user,
+    )
+    if request_id is not None:
+        background_tasks.add_task(
+            _run_showcase_images_generation_in_background,
+            user.id,
+            workflow_run_id,
+            body.model_dump(mode="json"),
+            request_id,
+        )
     run = await _get_run(db, user_id=user.id, run_id=workflow_run_id)
     out = await _build_run_out(db, run)
     await db.commit()
