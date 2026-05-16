@@ -3,7 +3,7 @@
 `run_generation(ctx, task_id)` 是 arq 任务入口。流程：
 
 1. 幂等读 Generation 行；若终态直接 return
-2. 进入统一图片 FIFO 队列；只有全局前 2 个任务会被标记 running
+2. 进入统一图片 FIFO 队列；只有全局并发槽内的任务会被标记 running
 3. 起 lease（5min TTL）+ 30s 续租协程
 4. publish generation.started
 5. 解析 size（resolve_size）
@@ -44,6 +44,7 @@ from ..background_removal import (
     process_transparent_request,
 )
 from .. import billing as worker_billing
+from .. import runtime_settings
 
 from lumen_core.constants import (
     DEFAULT_CHAT_MODEL,
@@ -409,12 +410,31 @@ def _redis_text(value: Any) -> str | None:
     return str(value)
 
 
-def _image_queue_capacity() -> int:
-    raw = getattr(settings, "image_generation_concurrency", 4)
+_IMAGE_GENERATION_CONCURRENCY_SETTING = "image.generation_concurrency"
+
+
+def _coerce_image_queue_capacity(raw: Any) -> int:
     try:
         return max(1, min(32, int(raw)))
     except (TypeError, ValueError):
         return 4
+
+
+def _image_queue_capacity() -> int:
+    return _coerce_image_queue_capacity(
+        getattr(settings, "image_generation_concurrency", 4)
+    )
+
+
+async def _resolve_image_queue_capacity() -> int:
+    try:
+        raw = await runtime_settings.resolve(_IMAGE_GENERATION_CONCURRENCY_SETTING)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("image queue capacity resolve failed err=%s", exc)
+        return _image_queue_capacity()
+    if raw is None:
+        return _image_queue_capacity()
+    return _coerce_image_queue_capacity(raw)
 
 
 def _image_provider_lock_key(provider_name: str) -> str:
@@ -692,14 +712,15 @@ async def _clear_image_queue_enqueue_dedupe(redis: Any, task_id: str) -> None:
 
 
 async def _kick_image_queue(redis: Any) -> None:
+    capacity = await _resolve_image_queue_capacity()
     try:
         ids = await _ready_queued_generation_ids(
-            redis, max(_IMAGE_QUEUE_SCAN_LIMIT, _image_queue_capacity() * 2)
+            redis, max(_IMAGE_QUEUE_SCAN_LIMIT, capacity * 2)
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("image queue kick scan failed err=%s", exc)
         return
-    for queued_id in ids[: max(1, _image_queue_capacity() * 2)]:
+    for queued_id in ids[: max(1, capacity * 2)]:
         await _enqueue_generation_once(redis, queued_id)
 
 
@@ -727,7 +748,8 @@ async def _reserve_image_queue_slot(
 
     Policy:
     - all image sizes share the same FIFO queue;
-    - global concurrency cap = ``image_generation_concurrency`` (active task count);
+    - global concurrency cap = ``image.generation_concurrency`` / env
+      ``IMAGE_GENERATION_CONCURRENCY`` (active task count);
     - **per-provider concurrency** is configurable via the provider field
       ``image_concurrency`` (default 1, preserving the historical
       "one task per provider" behaviour). Bumping it lets a single account run
@@ -749,7 +771,7 @@ async def _reserve_image_queue_slot(
     """
     from ..provider_pool import ResolvedProvider, get_pool
 
-    capacity = _image_queue_capacity()
+    capacity = await _resolve_image_queue_capacity()
     async with _image_queue_lock(redis):
         await _cleanup_image_queue_active(redis)
         active_members = await _active_image_provider_names(redis)

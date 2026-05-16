@@ -78,6 +78,21 @@ def test_image_channel_and_engine_settings_are_registered_and_validated():
         parse_value(engine, "image_jobs")
 
 
+def test_image_generation_concurrency_setting_is_registered_and_bounded():
+    spec = get_spec("image.generation_concurrency")
+    assert spec is not None
+
+    assert spec.parser is int
+    assert spec.env_fallback == "IMAGE_GENERATION_CONCURRENCY"
+    assert spec.min_value == 1
+    assert spec.max_value == 32
+    assert parse_value(spec, "8") == 8
+    with pytest.raises(ValueError):
+        parse_value(spec, "0")
+    with pytest.raises(ValueError):
+        parse_value(spec, "33")
+
+
 def test_image_output_format_setting_is_registered_and_validated():
     spec = get_spec("image.output_format")
     assert spec is not None

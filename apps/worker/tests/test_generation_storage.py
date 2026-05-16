@@ -686,6 +686,21 @@ def test_image_queue_capacity_allows_high_provider_concurrency(
 
 
 @pytest.mark.asyncio
+async def test_image_queue_capacity_uses_runtime_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(generation.settings, "image_generation_concurrency", 4)
+
+    async def fake_resolve(key: str) -> str:
+        assert key == "image.generation_concurrency"
+        return "12"
+
+    monkeypatch.setattr(generation.runtime_settings, "resolve", fake_resolve)
+
+    assert await generation._resolve_image_queue_capacity() == 12
+
+
+@pytest.mark.asyncio
 async def test_mark_generation_attempt_failed_publishes_failed_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -151,6 +151,7 @@ const MODEL_LIBRARY_SYNC_PROXY_NAME_KEY = "model_library.sync_proxy_name";
 const GENERATION_FAST_DEFAULT_KEY = "generation.fast_default";
 const IMAGE_ENGINE_KEY = "image.engine";
 const IMAGE_CHANNEL_KEY = "image.channel";
+const IMAGE_GENERATION_CONCURRENCY_KEY = "image.generation_concurrency";
 const IMAGE_OUTPUT_FORMAT_KEY = "image.output_format";
 const IMAGE_JOB_BASE_URL_KEY = "image.job_base_url";
 const SITE_PUBLIC_BASE_URL_KEY = "site.public_base_url";
@@ -260,6 +261,19 @@ const SETTING_META: Record<string, SettingMeta> = {
     recommended: "默认：自动混合",
     choices: IMAGE_CHANNEL_OPTIONS,
     keywords: ["image", "channel", "image_jobs", "stream", "auto", "异步"],
+  },
+  [IMAGE_GENERATION_CONCURRENCY_KEY]: {
+    group: "image",
+    title: "图片队列总并发",
+    summary: "控制最多同时进入真实上游生成的图片任务数量。",
+    detail: "所有尺寸共用的 FIFO 并发",
+    kind: "integer",
+    icon: Activity,
+    min: 1,
+    max: 32,
+    defaultValue: "4",
+    recommended: "小团队通常 4 到 8；调高前先确认 provider/key 并发和上游限额。",
+    keywords: ["image", "generation", "concurrency", "queue", "图片", "队列", "并发"],
   },
   [IMAGE_OUTPUT_FORMAT_KEY]: {
     group: "image",

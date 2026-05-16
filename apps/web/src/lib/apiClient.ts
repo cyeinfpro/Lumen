@@ -656,7 +656,15 @@ export interface CreateShowcaseImagesIn {
   shot_plan: Array<
     "front_full_body" | "natural_pose" | "detail_half_body" | "side_or_back"
   >;
-  aspect_ratio: "4:5" | "3:4" | "1:1" | "16:9" | "9:16";
+  aspect_ratio:
+    | "4:5"
+    | "3:4"
+    | "1:1"
+    | "9:16"
+    | "4:3"
+    | "3:2"
+    | "16:9"
+    | "21:9";
   final_quality: "standard" | "high" | "4k";
   output_count: 1 | 2 | 4 | 8 | 16;
   scene_environment?: "indoor" | "outdoor";
