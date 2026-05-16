@@ -95,6 +95,11 @@
     --success-fg: #30A46C;
     --warning-fg: #F2A93A;
     --info-fg:    #3E9EFF;
+    --accent-on:  #08080A;
+    --danger-on:  #08080A;
+    --success-on: #08080A;
+    --warning-on: #08080A;
+    --info-on:    #08080A;
 
     /* 描边（带暖色） */
     --border-subtle: rgba(245, 241, 234, 0.06);
@@ -264,6 +269,11 @@
     --success-fg: #218358;
     --warning-fg: #9F5700;
     --info-fg:    #0D74CE;
+    --accent-on:  #08080A;
+    --danger-on:  #08080A;
+    --success-on: #08080A;
+    --warning-on: #08080A;
+    --info-on:    #08080A;
   }
 
   @media (prefers-color-scheme: light) {
@@ -290,6 +300,11 @@
       --success-fg: #218358;
       --warning-fg: #9F5700;
       --info-fg:    #0D74CE;
+      --accent-on:  #08080A;
+      --danger-on:  #08080A;
+      --success-on: #08080A;
+      --warning-on: #08080A;
+      --info-on:    #08080A;
     }
   }
 }

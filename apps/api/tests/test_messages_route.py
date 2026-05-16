@@ -1510,6 +1510,10 @@ async def test_signup_byok_token_expired_returns_invalid_token(
 
     assert getattr(excinfo.value, "status_code", None) == 400
     assert excinfo.value.detail["error"]["code"] == "invalid_verification_token"
+    assert (
+        excinfo.value.detail["error"]["message"]
+        == auth_routes._BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE
+    )
     assert db.committed is False
     # Pending token must not be consumed on failure (set later in success path).
     assert expired_pending.consumed_at is None
@@ -1545,6 +1549,10 @@ async def test_signup_byok_email_taken_returns_invalid_token(
     assert (
         excinfo.value.detail["error"]["code"] == "invalid_verification_token"
     ), "must NOT leak email_taken — privacy regression"
+    assert (
+        excinfo.value.detail["error"]["message"]
+        == auth_routes._BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE
+    )
     assert db.committed is False
 
 
@@ -1581,6 +1589,10 @@ async def test_signup_byok_token_consumed_returns_invalid_token(
 
     assert getattr(excinfo.value, "status_code", None) == 400
     assert excinfo.value.detail["error"]["code"] == "invalid_verification_token"
+    assert (
+        excinfo.value.detail["error"]["message"]
+        == auth_routes._BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE
+    )
     assert db.committed is False
 
 

@@ -6,14 +6,21 @@ V1 实现：signup / login / logout / me，以及最小密码重置后端。
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
-import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -58,14 +65,17 @@ from ..security import (
     verify_password,
 )
 from ..ratelimit import (
+    AUTH_ADMIN_LOGIN_LIMITER,
     AUTH_LOGIN_LIMITER,
     AUTH_SIGNUP_LIMITER,
     RateLimiter,
     client_ip,
     require_client_ip,
 )
+from ..public_urls import resolve_public_base_url
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ..services.email import EmailDeliveryError, send_password_reset_email
 
 
 router = APIRouter()
@@ -100,7 +110,13 @@ _PASSWORD_RESET_CONFIRM_IP_LIMITER = RateLimiter(
 _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER = RateLimiter(
     capacity=5, refill_per_sec=5 / 900, always_on=True
 )
+_PASSWORD_RESET_CONFIRM_USER_LIMITER = RateLimiter(
+    capacity=5, refill_per_sec=5 / 3600, always_on=True
+)
 _DEV_ENVS = {"dev", "development", "local", "test"}
+_BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE = (
+    "verification failed; please verify your API key again"
+)
 
 
 def _sanitize_ua(raw: str | None) -> str:
@@ -114,7 +130,9 @@ def _log_hash(value: str | None) -> str | None:
 
 
 def _bad(code: str, msg: str, http: int = 400) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
+    return HTTPException(
+        status_code=http, detail={"error": {"code": code, "message": msg}}
+    )
 
 
 def _validate_password_strength(password: str) -> None:
@@ -130,6 +148,18 @@ def _password_reset_key(token: str) -> str:
     return f"{_PASSWORD_RESET_KEY_PREFIX}:{hash_token(token)}"
 
 
+def _password_reset_url(token: str, public_base_url: str) -> str:
+    return f"{public_base_url.rstrip('/')}/reset-password/{token}"
+
+
+def _redis_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
 def _is_dev_env() -> bool:
     return settings.app_env.strip().lower() in _DEV_ENVS
 
@@ -138,7 +168,7 @@ def _cookie_secure() -> bool:
     return not _is_dev_env()
 
 
-def _cookie_samesite() -> str:
+def _cookie_samesite() -> Literal["lax", "strict"]:
     return "lax" if _is_dev_env() else "strict"
 
 
@@ -205,6 +235,8 @@ class OkOut(BaseModel):
 
 
 async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
+    from .images import MAX_BYTES as IMAGE_UPLOAD_MAX_BYTES
+
     # 默认 fast=True：未配置 generation.fast_default 或值不是 "0"/"1" 时
     # 走 V1 体验偏好（Fast 模式默认开启）。get_setting 已包含 env fallback。
     fast_default = True
@@ -213,7 +245,10 @@ async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
         raw = await get_setting(db, spec)
         if raw in {"0", "1"}:
             fast_default = raw == "1"
-    return RuntimeDefaultsOut(fast=fast_default)
+    return RuntimeDefaultsOut(
+        fast=fast_default,
+        upload_max_source_bytes=IMAGE_UPLOAD_MAX_BYTES,
+    )
 
 
 async def _user_out_with_runtime_defaults(
@@ -235,7 +270,8 @@ async def _create_session(
         refresh_token_hash=hash_token(refresh),
         ua=_sanitize_ua(request.headers.get("user-agent")),
         ip=None if resolved_ip == "unknown" else resolved_ip,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.session_ttl_min),
+        expires_at=datetime.now(timezone.utc)
+        + timedelta(minutes=settings.session_ttl_min),
     )
     db.add(session)
     await db.flush()
@@ -271,7 +307,9 @@ async def signup(
 
     # Pre-existing user check first — don't accidentally consume an invite.
     existing = (
-        await db.execute(select(User).where(User.email == email))
+        await db.execute(
+            select(User).where(User.email == email, User.deleted_at.is_(None))
+        )
     ).scalar_one_or_none()
     if existing:
         # Why: keep response time roughly equal to the success path so attackers
@@ -355,7 +393,10 @@ async def signup(
             verify_password(_DUMMY_PASSWORD_HASH, body.password)
             logger.info(
                 "signup_rejected",
-                extra={"email_hash": _log_hash(email), "reason": "invite_email_mismatch"},
+                extra={
+                    "email_hash": _log_hash(email),
+                    "reason": "invite_email_mismatch",
+                },
             )
             await write_audit_isolated(
                 event_type="auth.signup.fail",
@@ -403,7 +444,9 @@ async def signup(
             actor_ip_hash=request_ip_hash(request),
             details={"reason": "integrity_conflict"},
         )
-        raise _bad("email_taken", "an account with this email already exists", 409) from exc
+        raise _bad(
+            "email_taken", "an account with this email already exists", 409
+        ) from exc
 
     logger.info(
         "signup_succeeded",
@@ -452,7 +495,9 @@ async def signup_byok(
     # user who got the token via a different account can still finish signup
     # by changing the email.
     existing = (
-        await db.execute(select(User).where(User.email == email))
+        await db.execute(
+            select(User).where(User.email == email, User.deleted_at.is_(None))
+        )
     ).scalar_one_or_none()
     if existing is not None:
         verify_password(_DUMMY_PASSWORD_HASH, body.password)
@@ -464,7 +509,7 @@ async def signup_byok(
         )
         raise _bad(
             "invalid_verification_token",
-            "verification failed; please verify your API key again",
+            _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
             400,
         )
 
@@ -492,7 +537,7 @@ async def signup_byok(
         )
         raise _bad(
             "invalid_verification_token",
-            "verification token is invalid or expired",
+            _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
             400,
         )
 
@@ -587,10 +632,7 @@ async def signup_byok(
             invite.used_by = user.id
             if not allow:
                 db.add(AllowedEmail(email=email, invited_by=invite.created_by))
-        elif (
-            byok_settings.byok_signup_bypasses_allowlist
-            and not allow
-        ):
+        elif byok_settings.byok_signup_bypasses_allowlist and not allow:
             # Why: when allowlist is bypassed via BYOK, still record the email
             # in AllowedEmail so subsequent re-signups / OAuth callbacks have a
             # consistent allowlist view (matches the invite branch above).
@@ -634,7 +676,9 @@ async def signup_byok(
             actor_ip_hash=request_ip_hash(request),
             details={"reason": "integrity_conflict"},
         )
-        raise _bad("email_taken", "an account with this email already exists", 409) from exc
+        raise _bad(
+            "email_taken", "an account with this email already exists", 409
+        ) from exc
 
     _set_auth_cookies(response, session.id, csrf)
     return await _user_out_with_runtime_defaults(user, db)
@@ -652,16 +696,26 @@ async def login(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserOut:
     email = body.email.strip().lower()
+    admin_login_key = (
+        f"rl:auth:admin_login:{require_client_ip(request)}:"
+        f"{_log_hash(email) or 'unknown'}"
+    )
+    await AUTH_ADMIN_LOGIN_LIMITER.check(
+        get_redis(),
+        admin_login_key,
+    )
     user = (
-        await db.execute(select(User).where(User.email == email))
+        await db.execute(
+            select(User).where(User.email == email, User.deleted_at.is_(None))
+        )
     ).scalar_one_or_none()
     password_hash = (
         user.password_hash
-        if user is not None and user.deleted_at is None and user.password_hash
+        if user is not None and user.password_hash
         else _DUMMY_PASSWORD_HASH
     )
     password_ok = verify_password(password_hash, body.password)
-    if not user or user.deleted_at is not None or not password_ok:
+    if not user or not password_ok:
         logger.info(
             "auth_failed",
             extra={
@@ -700,6 +754,7 @@ async def login(
 async def password_reset_request(
     body: PasswordResetRequestIn,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OkOut:
     email = body.email.strip().lower()
@@ -715,23 +770,40 @@ async def password_reset_request(
             select(User).where(User.email == email, User.deleted_at.is_(None))
         )
     ).scalar_one_or_none()
+    try:
+        public_base_url = await resolve_public_base_url(request, db)
+    except Exception:
+        logger.exception(
+            "password_reset_public_base_url_failed",
+            extra={"email_hash": _log_hash(email)},
+        )
+        return OkOut(ok=True)
+    if user is None:
+        return OkOut(ok=True)
+
     token = secrets.token_urlsafe(32)
-    store_value = user.id if user is not None else "0"
-    store_ttl = _PASSWORD_RESET_TTL_SECONDS if user is not None else 10
+    key = _password_reset_key(token)
+    reset_url = _password_reset_url(token, public_base_url)
     try:
         await redis.set(
-            _password_reset_key(token),
-            store_value,
-            ex=store_ttl,
+            key,
+            user.id,
+            ex=_PASSWORD_RESET_TTL_SECONDS,
         )
     except Exception:
-        # Do not reveal whether the email exists. Redis failures must not create
-        # a 200-vs-503 side channel for registered addresses.
-        logger.error(
+        logger.exception(
             "password_reset_token_store_failed",
-            extra={"email_hash": _log_hash(email), "user_id": user.id if user else None},
-            exc_info=True,
+            extra={"email_hash": _log_hash(email), "user_id": user.id},
         )
+        return OkOut(ok=True)
+    background_tasks.add_task(
+        _send_password_reset_email_or_delete,
+        redis,
+        key,
+        email,
+        user.id,
+        reset_url,
+    )
     return OkOut(ok=True)
 
 
@@ -750,30 +822,24 @@ async def password_reset_confirm(
     await _PASSWORD_RESET_CONFIRM_IP_LIMITER.check(
         redis, f"rl:pwd_reset_confirm:ip:{require_client_ip(request)}"
     )
-    await _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER.check(
-        redis, f"rl:pwd_reset_confirm:token:{hash_token(token)}"
-    )
     key = _password_reset_key(token)
     try:
-        # Atomically fetch and delete the reset token so it cannot be replayed.
-        raw_user_id = await redis.getdel(key)
+        raw_user_id = _redis_text(await redis.getdel(key))
     except Exception as exc:
-        logger.error("password_reset_token_lookup_failed", exc_info=True)
+        logger.error("password_reset_token_consume_failed", exc_info=True)
         raise _bad(
             "reset_unavailable",
             "password reset is temporarily unavailable",
             503,
         ) from exc
-
-    if isinstance(raw_user_id, bytes):
-        raw_user_id = raw_user_id.decode("utf-8")
     if not raw_user_id:
         raise _bad("invalid_token", "reset token is invalid or expired", 400)
+    await _PASSWORD_RESET_CONFIRM_USER_LIMITER.check(
+        redis, f"rl:pwd_reset_confirm:user:{raw_user_id}"
+    )
 
     user = (
-        await db.execute(
-            select(User).where(User.id == raw_user_id).with_for_update()
-        )
+        await db.execute(select(User).where(User.id == raw_user_id).with_for_update())
     ).scalar_one_or_none()
     if user is None or user.deleted_at is not None:
         raise _bad("invalid_token", "reset token is invalid or expired", 400)
@@ -794,6 +860,34 @@ async def _delete_password_reset_token(redis: Any, key: str) -> None:
         await redis.delete(key)
     except Exception:
         logger.error("password_reset_token_delete_failed", exc_info=True)
+
+
+async def _send_password_reset_email_or_delete(
+    redis: Any,
+    key: str,
+    email: str,
+    user_id: str,
+    reset_url: str,
+) -> None:
+    try:
+        await send_password_reset_email(
+            to_email=email,
+            reset_url=reset_url,
+            expires_minutes=_PASSWORD_RESET_TTL_SECONDS // 60,
+        )
+    except EmailDeliveryError:
+        await _delete_password_reset_token(redis, key)
+        logger.error(
+            "password_reset_email_delivery_failed",
+            extra={"email_hash": _log_hash(email), "user_id": user_id},
+            exc_info=True,
+        )
+    except Exception:
+        await _delete_password_reset_token(redis, key)
+        logger.exception(
+            "password_reset_email_unexpected_failed",
+            extra={"email_hash": _log_hash(email), "user_id": user_id},
+        )
 
 
 @router.get("/csrf", response_model=CsrfOut)

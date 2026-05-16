@@ -9,7 +9,8 @@ provider = 一个账号。account_limiter 提供"该账号还有几次额度"的
   跑一段时间，等到看清各账号的真实订阅额度，再按账号填具体值。
 - 配置了 rate_limit（"5/min" / "50/h" / "200/d"）时用 Redis ZSET 滑动窗口；
   配置了 daily_quota 时用 UTC 当日计数。两者可独立组合或同时启用。
-- 任何 Redis 错误都吞掉：quota 是软约束，Redis 抖动不应让生图任务失败。
+- Redis quota 检查错误 fail-closed 短冷却：Redis 抖动时临时跳过该账号，
+  避免在限流器不可用时继续打爆同一 provider。
 
 成功调用时调 record_image_call() 入账；选号阶段调 check_quota() 决定是否跳过。
 """
@@ -24,7 +25,8 @@ from typing import Any
 _KEY_TS = "lumen:acct:{name}:image:ts"
 _KEY_DAILY = "lumen:acct:{name}:image:daily:{day}"
 _TS_TTL_S = 86400 * 2
-_REDIS_ERROR_RETRY_AFTER_S = 5.0
+REDIS_ERROR_RETRY_AFTER_S = 5.0
+_REDIS_ERROR_RETRY_AFTER_S = REDIS_ERROR_RETRY_AFTER_S
 
 _CHECK_WINDOW_LUA = """
 local key = KEYS[1]
@@ -58,10 +60,21 @@ return 1
 """
 
 _UNIT_SECONDS: dict[str, int] = {
-    "s": 1, "sec": 1, "second": 1, "seconds": 1,
-    "m": 60, "min": 60, "minute": 60, "minutes": 60,
-    "h": 3600, "hr": 3600, "hour": 3600, "hours": 3600,
-    "d": 86400, "day": 86400, "days": 86400,
+    "s": 1,
+    "sec": 1,
+    "second": 1,
+    "seconds": 1,
+    "m": 60,
+    "min": 60,
+    "minute": 60,
+    "minutes": 60,
+    "h": 3600,
+    "hr": 3600,
+    "hour": 3600,
+    "hours": 3600,
+    "d": 86400,
+    "day": 86400,
+    "days": 86400,
 }
 
 
@@ -73,6 +86,13 @@ def _seconds_until_next_utc_day(now: float) -> float:
     dt = datetime.fromtimestamp(now, tz=timezone.utc)
     midnight = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc).timestamp()
     return max(1.0, (midnight + 86400.0) - now)
+
+
+def _daily_expire_at(now: float) -> int:
+    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    midnight = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc).timestamp()
+    next_midnight = int(midnight + 86400.0)
+    return max(next_midnight + 1, int(now) + 1)
 
 
 def parse_rate_limit(s: str | None) -> tuple[int, int] | None:
@@ -103,13 +123,15 @@ async def _check_window_fallback(
     ts_key: str,
     *,
     cutoff: float,
+    cur_now: float,
+    window_s: float,
     count_limit: int,
 ) -> tuple[int, float | None]:
     try:
         await redis.zremrangebyscore(ts_key, 0, cutoff)
         zcard_raw = await redis.zcard(ts_key)
     except Exception:  # noqa: BLE001
-        zcard_raw = 0
+        return count_limit, _make_redis_blip_retry_after(cur_now, window_s)
     try:
         used = int(zcard_raw or 0)
     except (TypeError, ValueError):
@@ -161,9 +183,7 @@ async def _check_window(
             )
             used_raw = raw[0] if isinstance(raw, (list, tuple)) and raw else 0
             oldest_raw = (
-                raw[1]
-                if isinstance(raw, (list, tuple)) and len(raw) > 1
-                else None
+                raw[1] if isinstance(raw, (list, tuple)) and len(raw) > 1 else None
             )
             used = int(used_raw or 0)
             if oldest_raw in (None, "", b""):
@@ -174,7 +194,12 @@ async def _check_window(
             # 交给上层，导致整段 window_s 都被视为不可用，放大一次 Redis 抖动。
             return count_limit, _make_redis_blip_retry_after(cur_now, window_s)
     return await _check_window_fallback(
-        redis, ts_key, cutoff=cutoff, count_limit=count_limit
+        redis,
+        ts_key,
+        cutoff=cutoff,
+        cur_now=cur_now,
+        window_s=window_s,
+        count_limit=count_limit,
     )
 
 
@@ -200,9 +225,7 @@ async def _record_image_call_fallback(
     except Exception:  # noqa: BLE001
         return
     try:
-        await redis.expireat(
-            day_key, int(cur_now + _seconds_until_next_utc_day(cur_now))
-        )
+        await redis.expireat(day_key, _daily_expire_at(cur_now))
     except Exception:  # noqa: BLE001
         pass
 
@@ -314,7 +337,7 @@ async def record_image_call(
     member = task_id or f"ts:{cur_now:.6f}"
     ts_key = _KEY_TS.format(name=account)
     day_key = _KEY_DAILY.format(name=account, day=_today_utc_key(cur_now))
-    day_expire_at = int(cur_now + _seconds_until_next_utc_day(cur_now))
+    day_expire_at = _daily_expire_at(cur_now)
     eval_fn = getattr(redis, "eval", None)
     if callable(eval_fn):
         try:
@@ -344,4 +367,5 @@ __all__ = [
     "parse_rate_limit",
     "check_quota",
     "record_image_call",
+    "REDIS_ERROR_RETRY_AFTER_S",
 ]

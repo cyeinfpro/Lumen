@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { ApiError, apiFetch } from "@/lib/apiClient";
+import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 import { errorToText } from "@/lib/errors";
 
 export default function ResetPasswordPage() {
@@ -35,12 +36,12 @@ function ResetPasswordInner() {
     setError(null);
     setSentTo(null);
 
-    const trimmedEmail = email.trim();
+    const trimmedEmail = normalizeEmailInput(email);
     if (!trimmedEmail) {
       setError("邮箱未填");
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+    if (!isValidEmailInput(trimmedEmail)) {
       setError("邮箱格式不正确");
       return;
     }
@@ -100,14 +101,22 @@ function ResetPasswordInner() {
             </Field>
 
             {sentTo && (
-              <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-3 py-2 type-body-sm text-success">
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-start gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-3 py-2 type-body-sm text-success"
+              >
                 <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
                 如果该邮箱存在，重置链接会发送到 {sentTo}。
               </div>
             )}
 
             {error && (
-              <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
+              <div
+                role="alert"
+                aria-live="assertive"
+                className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
+              >
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                 {error}
               </div>
@@ -116,7 +125,7 @@ function ResetPasswordInner() {
             <button
               type="submit"
               disabled={submitting}
-              className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-black shadow-[0_8px_24px_-12px_var(--color-lumen-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
+              className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[0_8px_24px_-12px_var(--color-lumen-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
             >
               {submitting ? (
                 <>

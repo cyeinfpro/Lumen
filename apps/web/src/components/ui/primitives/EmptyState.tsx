@@ -35,7 +35,7 @@ export function EmptyState({
       <div
         className={cn(
           "mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-card)]",
-          "bg-white/[0.04] border border-white/[0.06] text-[var(--fg-1)]",
+          "bg-[var(--bg-2)] border border-[var(--border)] text-[var(--fg-1)]",
         )}
       >
         {icon ?? <Inbox className="w-5 h-5" aria-hidden="true" />}

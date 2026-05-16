@@ -43,9 +43,9 @@ class BillingCacheService:
         self.balance_ttl_sec = balance_ttl_sec
         self.window_ttl_sec = window_ttl_sec
         self.worker_count = worker_count
-        self._queue: asyncio.Queue[
-            tuple[str, tuple[Any, ...], dict[str, Any]]
-        ] = asyncio.Queue(maxsize=queue_size)
+        self._queue: asyncio.Queue[tuple[str, tuple[Any, ...], dict[str, Any]]] = (
+            asyncio.Queue(maxsize=queue_size)
+        )
         self._locks: dict[str, asyncio.Lock] = {}
         self._workers: list[asyncio.Task[None]] = []
 
@@ -120,9 +120,7 @@ class BillingCacheService:
                 usage_field = f"usage_{label}"
                 try:
                     started = (
-                        int(_hash_value(payload, started_field) or 0)
-                        if payload
-                        else 0
+                        int(_hash_value(payload, started_field) or 0) if payload else 0
                     )
                 except (TypeError, ValueError):
                     started = 0
@@ -181,13 +179,14 @@ class BillingCacheService:
                 select(UserWallet)
                 .where(UserWallet.user_id == user_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if row is None:
             row = UserWallet(user_id=user_id)
             db.add(row)
             await db.flush()
-        row.balance_micro -= int(micro)
+        row.balance_micro = max(0, row.balance_micro - int(micro))
         row.version += 1
         await db.flush()
         if self.redis is not None:
@@ -300,9 +299,7 @@ class BillingCacheService:
             limit = limits.get(window, 0)
             if limit <= 0:
                 continue
-            usage = await self.get_window_usage(
-                key_id, window, limit_micro=limit
-            )
+            usage = await self.get_window_usage(key_id, window, limit_micro=limit)
             if usage.used_micro + int(projected_micro) > limit:
                 return False, window, usage
         return True, None, WindowUsage()

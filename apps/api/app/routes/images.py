@@ -68,7 +68,7 @@ _LINK_UNSUPPORTED_ERRNOS = {
 
 MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_LONG_SIDE = 4096
-MAX_IMAGE_PIXELS = MAX_LONG_SIDE * MAX_LONG_SIDE * 4
+MAX_IMAGE_PIXELS = 64_000_000
 PILImage.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 ALLOWED_MIME = {"image/png", "image/jpeg", "image/webp"}
 EXT_BY_MIME = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
@@ -231,7 +231,7 @@ def _variant_url(image_id: str, kind: str) -> str:
 
 def _variant_key_for_image(img: Image, kind: str) -> str:
     src = Path(img.storage_key)
-    return str(src.with_name(f"{src.stem}.{kind}.webp"))
+    return str(src.with_name(f"{img.id}.{kind}.webp"))
 
 
 def _make_display_variant(

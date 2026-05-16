@@ -239,6 +239,11 @@ AUTH_LOGIN_LIMITER = RateLimiter(
     key_prefix="rl:auth:login",
     scope="ip",
 )
+AUTH_ADMIN_LOGIN_LIMITER = RateLimiter(
+    capacity=5,
+    refill_per_sec=5 / 300,
+    always_on=True,
+)
 AUTH_SIGNUP_LIMITER = RateLimiter(
     capacity=5,
     refill_per_sec=5 / 300,

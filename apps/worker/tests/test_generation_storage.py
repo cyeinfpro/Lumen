@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ os.environ.setdefault(
     "STORAGE_ROOT", f"{tempfile.gettempdir()}/lumen-worker-test-storage"
 )
 
-from lumen_core.constants import EV_GEN_FAILED, MessageStatus
+from lumen_core.constants import EV_GEN_FAILED, EV_GEN_RETRYING, MessageStatus
 from app.background_removal.local_chroma import (
     recover_solid_background_transparency,
 )
@@ -217,6 +218,16 @@ def test_display_variant_preserves_alpha_for_transparent_png() -> None:
         assert reloaded.getchannel("A").getextrema()[0] == 0
 
 
+def test_generation_blurhash_skips_tiny_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_encode(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("tiny images must not call blurhash encoder")
+
+    monkeypatch.setitem(sys.modules, "blurhash", SimpleNamespace(encode=fail_encode))
+    tiny = PILImage.new("RGB", (3, 4), "white")
+
+    assert generation._compute_blurhash(tiny) is None  # noqa: SLF001
+
+
 def test_recover_solid_background_transparency_from_opaque_image() -> None:
     src = PILImage.new("RGB", (24, 24), (255, 255, 255))
     for x in range(6, 18):
@@ -283,6 +294,50 @@ def test_generation_epoch_update_requires_matching_row() -> None:
     generation._ensure_generation_updated(FakeResult(1), "gen-1", 2)
 
 
+def test_validate_resolved_size_accepts_valid_preset() -> None:
+    assert generation._validate_resolved_size("3840x2160", "16:9") == (3840, 2160)
+
+
+def test_validate_resolved_size_rejects_hard_limit_violation() -> None:
+    with pytest.raises(ValueError, match="longest side"):
+        generation._validate_resolved_size("3856x2160", "16:9")
+
+
+def test_validate_resolved_size_rejects_aspect_drift() -> None:
+    with pytest.raises(ValueError, match="aspect ratio drift"):
+        generation._validate_resolved_size("1024x1024", "16:9")
+
+
+def test_retry_delay_adds_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(generation.random, "uniform", lambda low, high: high)
+
+    assert generation._retry_delay_seconds(1) == pytest.approx(12.0)
+
+
+def test_retry_backoff_grows_after_configured_table() -> None:
+    first_tail_attempt = len(generation.RETRY_BACKOFF_SECONDS) + 1
+    assert generation._base_retry_backoff_seconds(first_tail_attempt) == (
+        generation.RETRY_BACKOFF_SECONDS[-1] * 2
+    )
+
+
+def test_safe_generation_error_details_keeps_transparent_context_only() -> None:
+    exc = generation.UpstreamError(
+        "transparent material pipeline failed",
+        error_code=generation.EC.BAD_RESPONSE.value,
+        payload={
+            "transparent_qc": {"alpha_ratio": 0.0},
+            "transparent_provider": "rembg-local",
+            "raw": "do-not-expose",
+        },
+    )
+
+    assert generation._safe_generation_error_details(exc) == {
+        "transparent_qc": {"alpha_ratio": 0.0},
+        "transparent_provider": "rembg-local",
+    }
+
+
 def test_primary_input_image_id_must_be_in_input_image_ids() -> None:
     assert generation._primary_input_image_id_valid(None, []) is True
     assert generation._primary_input_image_id_valid("img-1", ["img-1"]) is True
@@ -303,6 +358,87 @@ async def test_lease_renewer_sets_event_without_raising(
     await generation._lease_renewer(_Redis(), "gen-1", lease_lost)
 
     assert lease_lost.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancel_renewer_task_awaits_cancel_cleanup() -> None:
+    cleaned = asyncio.Event()
+
+    async def renewer() -> None:
+        try:
+            await asyncio.sleep(60)
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    task = asyncio.create_task(renewer())
+    await asyncio.sleep(0)
+
+    await generation._cancel_renewer_task(task)
+
+    assert cleaned.is_set()
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_mark_generation_attempt_retrying_requeues_and_publishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    published: list[dict] = []
+
+    class _Session:
+        committed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def execute(self, _statement):
+            return FakeResult(1)
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    session = _Session()
+
+    async def fake_publish_event(redis_arg, user_id, channel, event_name, data):
+        published.append(
+            {
+                "redis": redis_arg,
+                "user_id": user_id,
+                "channel": channel,
+                "event_name": event_name,
+                "data": data,
+            }
+        )
+
+    monkeypatch.setattr(generation, "SessionLocal", lambda: session)
+    monkeypatch.setattr(generation, "publish_event", fake_publish_event)
+
+    ok = await generation._mark_generation_attempt_retrying(
+        redis,
+        task_id="gen-1",
+        message_id="msg-1",
+        user_id="user-1",
+        attempt=2,
+        error_code="lease_lost",
+        error_message="generation lease lost; task will be retried",
+        delay=3.5,
+        reason="lease_lost",
+        max_attempts=5,
+    )
+
+    assert ok is True
+    assert session.committed is True
+    assert redis.enqueued == [
+        ("run_generation", ("gen-1",), {"_defer_by": 3.5, "_job_try": 3})
+    ]
+    assert generation._image_queue_not_before_key("gen-1") in redis.store
+    assert published[0]["event_name"] == EV_GEN_RETRYING
+    assert published[0]["data"]["reason"] == "lease_lost"
 
 
 @pytest.mark.asyncio

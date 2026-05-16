@@ -220,7 +220,7 @@ function MasterCard({
         </span>
 
         {isSelected ? (
-          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-black shadow-[var(--shadow-amber)]">
+          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
             <Check className="h-3 w-3" />
             已选定
           </span>

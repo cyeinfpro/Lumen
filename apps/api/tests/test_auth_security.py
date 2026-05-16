@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from fastapi import Request
+from fastapi import BackgroundTasks, Request
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
@@ -12,7 +12,7 @@ from app import security
 from app.deps import SESSION_COOKIE, get_current_user
 from app.routes import auth
 from app.security import make_session_cookie
-from lumen_core.schemas import LoginIn, SignupIn
+from lumen_core.schemas import LoginIn, SignupByokIn, SignupIn
 
 
 class _ScalarResult:
@@ -29,11 +29,20 @@ class _ScalarResult:
 class _Db:
     def __init__(self, results=()):
         self.results = list(results)
+        self.results_seen = []
         self.added = []
         self.rolled_back = False
 
-    async def execute(self, _stmt):
-        return _ScalarResult(self.results.pop(0) if self.results else None)
+    async def execute(self, stmt):
+        self.results_seen.append(stmt)
+        value = self.results.pop(0) if self.results else None
+        sql = str(stmt).upper()
+        if (
+            getattr(value, "deleted_at", None) is not None
+            and "DELETED_AT IS NULL" in sql
+        ):
+            value = None
+        return _ScalarResult(value)
 
     def add(self, value):
         self.added.append(value)
@@ -51,7 +60,9 @@ class _Db:
 def _request(method: str = "GET", session_id: str | None = None) -> Request:
     headers = []
     if session_id is not None:
-        headers.append((b"cookie", f"{SESSION_COOKIE}={make_session_cookie(session_id)}".encode()))
+        headers.append(
+            (b"cookie", f"{SESSION_COOKIE}={make_session_cookie(session_id)}".encode())
+        )
     return Request(
         {
             "type": "http",
@@ -75,7 +86,14 @@ def _request_with_forwarded_for() -> Request:
     )
 
 
-def test_verify_password_propagates_unexpected_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def _assert_active_user_filter(stmt) -> None:
+    sql = str(stmt).upper()
+    assert "DELETED_AT IS NULL" in sql
+
+
+def test_verify_password_propagates_unexpected_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def boom(_hashed: str, _plain: str) -> bool:
         raise RuntimeError("argon2 unavailable")
 
@@ -85,18 +103,26 @@ def test_verify_password_propagates_unexpected_errors(monkeypatch: pytest.Monkey
         security.verify_password("hash", "pw")
 
 
-def test_auth_cookies_are_samesite_strict_outside_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_cookies_are_samesite_strict_outside_dev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(auth.settings, "app_env", "prod")
     response = Response()
 
     auth._set_auth_cookies(response, "session-1", "csrf-1")
 
-    cookies = [value.decode().lower() for name, value in response.raw_headers if name == b"set-cookie"]
+    cookies = [
+        value.decode().lower()
+        for name, value in response.raw_headers
+        if name == b"set-cookie"
+    ]
     assert cookies
     assert all("samesite=strict" in cookie for cookie in cookies)
 
 
-def test_auth_cookies_use_lax_for_all_dev_env_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_cookies_use_lax_for_all_dev_env_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for env in ("dev", "development", "local", "test"):
         monkeypatch.setattr(auth.settings, "app_env", env)
         response = Response()
@@ -112,13 +138,19 @@ def test_auth_cookies_use_lax_for_all_dev_env_aliases(monkeypatch: pytest.Monkey
         assert all("samesite=lax" in cookie for cookie in cookies)
 
 
-def test_clear_auth_cookies_matches_cookie_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clear_auth_cookies_matches_cookie_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(auth.settings, "app_env", "production")
     response = Response()
 
     auth._clear_auth_cookies(response)
 
-    cookies = [value.decode().lower() for name, value in response.raw_headers if name == b"set-cookie"]
+    cookies = [
+        value.decode().lower()
+        for name, value in response.raw_headers
+        if name == b"set-cookie"
+    ]
     session_cookie = next(cookie for cookie in cookies if cookie.startswith("session="))
     csrf_cookie = next(cookie for cookie in cookies if cookie.startswith("csrf="))
     assert "secure" in session_cookie
@@ -146,13 +178,21 @@ async def test_get_current_user_rejects_soft_deleted_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_runs_dummy_verify_when_user_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_login_runs_dummy_verify_when_user_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     seen_hashes: list[str] = []
+    seen_admin_limit_keys: list[str] = []
 
     def fake_verify(hashed: str, _plain: str) -> bool:
         seen_hashes.append(hashed)
         return False
 
+    async def fake_admin_check(_redis, key: str, cost: int = 1) -> None:
+        seen_admin_limit_keys.append(key)
+
+    monkeypatch.setattr(auth, "get_redis", lambda: object())
+    monkeypatch.setattr(auth.AUTH_ADMIN_LOGIN_LIMITER, "check", fake_admin_check)
     monkeypatch.setattr(auth, "verify_password", fake_verify)
 
     with pytest.raises(Exception) as excinfo:
@@ -165,10 +205,46 @@ async def test_login_runs_dummy_verify_when_user_missing(monkeypatch: pytest.Mon
 
     assert getattr(excinfo.value, "status_code", None) == 401
     assert seen_hashes == [auth._DUMMY_PASSWORD_HASH]
+    assert len(seen_admin_limit_keys) == 1
 
 
 @pytest.mark.asyncio
-async def test_signup_integrity_error_returns_email_taken(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_admin_login_uses_dedicated_limiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_keys: list[str] = []
+    user = SimpleNamespace(
+        id="admin-1",
+        email="admin@example.com",
+        role="admin",
+        password_hash="hash",
+        deleted_at=None,
+    )
+
+    async def fake_check(_redis, key: str, cost: int = 1) -> None:
+        seen_keys.append(key)
+
+    monkeypatch.setattr(auth, "get_redis", lambda: object())
+    monkeypatch.setattr(auth.AUTH_ADMIN_LOGIN_LIMITER, "check", fake_check)
+    monkeypatch.setattr(auth, "verify_password", lambda *_args: False)
+
+    with pytest.raises(Exception) as excinfo:
+        await auth.login(
+            LoginIn(email="admin@example.com", password="bad-password"),
+            _request(method="POST"),
+            Response(),
+            _Db(results=[user]),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 401
+    assert len(seen_keys) == 1
+    assert seen_keys[0].startswith("rl:auth:admin_login:127.0.0.1:")
+
+
+@pytest.mark.asyncio
+async def test_signup_integrity_error_returns_email_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class ConflictDb(_Db):
         async def flush(self):
             raise IntegrityError("insert users", {}, Exception("duplicate"))
@@ -187,6 +263,56 @@ async def test_signup_integrity_error_returns_email_taken(monkeypatch: pytest.Mo
     assert getattr(excinfo.value, "status_code", None) == 409
     assert excinfo.value.detail["error"]["code"] == "email_taken"
     assert db.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_signup_email_check_ignores_soft_deleted_users() -> None:
+    soft_deleted = SimpleNamespace(
+        id="old-user",
+        email="reuse@example.com",
+        deleted_at=datetime.now(timezone.utc),
+    )
+    db = _Db(results=[soft_deleted])
+
+    with pytest.raises(Exception):
+        await auth.signup(
+            SignupIn(email="reuse@example.com", password="password123"),
+            _request(method="POST"),
+            Response(),
+            db,  # type: ignore[arg-type]
+        )
+
+    _assert_active_user_filter(db.results_seen[0])
+
+
+@pytest.mark.asyncio
+async def test_signup_byok_email_check_ignores_soft_deleted_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_byok_settings(_db):
+        return SimpleNamespace(mode_enabled=True, byok_signup_enabled=True)
+
+    soft_deleted = SimpleNamespace(
+        id="old-byok-user",
+        email="reuse-byok@example.com",
+        deleted_at=datetime.now(timezone.utc),
+    )
+    db = _Db(results=[soft_deleted])
+    monkeypatch.setattr(auth, "read_byok_settings", fake_byok_settings)
+
+    with pytest.raises(Exception):
+        await auth.signup_byok(
+            SignupByokIn(
+                email="reuse-byok@example.com",
+                password="password123",
+                verification_token="verify-token",
+            ),
+            _request(method="POST"),
+            Response(),
+            db,  # type: ignore[arg-type]
+        )
+
+    _assert_active_user_filter(db.results_seen[0])
 
 
 @pytest.mark.asyncio
@@ -245,11 +371,12 @@ async def test_password_reset_request_does_not_reveal_missing_email(
     out = await auth.password_reset_request(
         auth.PasswordResetRequestIn(email="missing@example.com"),
         _request(method="POST"),
+        BackgroundTasks(),
         _Db(results=[None]),  # type: ignore[arg-type]
     )
 
     assert out.ok is True
-    assert redis.calls == [(auth._password_reset_key("reset-token"), "0", 10)]
+    assert redis.calls == []
 
 
 @pytest.mark.asyncio
@@ -275,6 +402,7 @@ async def test_password_reset_request_stores_hashed_token_for_existing_user(
     out = await auth.password_reset_request(
         auth.PasswordResetRequestIn(email="user@example.com"),
         _request(method="POST"),
+        BackgroundTasks(),
         _Db(results=[user]),  # type: ignore[arg-type]
     )
 
@@ -289,7 +417,48 @@ async def test_password_reset_request_stores_hashed_token_for_existing_user(
 
 
 @pytest.mark.asyncio
-async def test_password_reset_request_suppresses_redis_store_failure(
+async def test_password_reset_request_sends_reset_email_for_existing_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        async def eval(self, *_args):
+            return [1, 0]
+
+        async def set(self, *_args, **_kwargs) -> None:
+            return None
+
+    sent: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_send_password_reset_email(*args: object, **kwargs: object) -> None:
+        sent.append((args, kwargs))
+
+    user = SimpleNamespace(id="user-1", deleted_at=None)
+    monkeypatch.setattr(auth, "get_redis", lambda: Redis())
+    monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "reset-token")
+    monkeypatch.setattr(
+        auth,
+        "send_password_reset_email",
+        fake_send_password_reset_email,
+        raising=False,
+    )
+    background = BackgroundTasks()
+
+    out = await auth.password_reset_request(
+        auth.PasswordResetRequestIn(email="User@Example.COM"),
+        _request(method="POST"),
+        background,
+        _Db(results=[user]),  # type: ignore[arg-type]
+    )
+    await background()
+
+    assert out.ok is True
+    payload = repr(sent)
+    assert "user@example.com" in payload
+    assert "reset-token" in payload
+
+
+@pytest.mark.asyncio
+async def test_password_reset_request_hides_redis_store_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Redis:
@@ -305,10 +474,97 @@ async def test_password_reset_request_suppresses_redis_store_failure(
     out = await auth.password_reset_request(
         auth.PasswordResetRequestIn(email="user@example.com"),
         _request(method="POST"),
+        BackgroundTasks(),
         _Db(results=[user]),  # type: ignore[arg-type]
     )
 
     assert out.ok is True
+
+
+@pytest.mark.asyncio
+async def test_password_reset_request_deletes_token_when_email_delivery_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.deleted = []
+
+        async def eval(self, *_args):
+            return [1, 0]
+
+        async def set(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def delete(self, key: str) -> None:
+            self.deleted.append(key)
+
+    async def fail_send(**_kwargs) -> None:
+        raise auth.EmailDeliveryError("smtp down")
+
+    async def fake_public_base_url(_request, _db) -> str:
+        return "https://lumen.example"
+
+    redis = Redis()
+    user = SimpleNamespace(id="user-1", deleted_at=None)
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "reset-token")
+    monkeypatch.setattr(auth, "send_password_reset_email", fail_send)
+    monkeypatch.setattr(auth, "resolve_public_base_url", fake_public_base_url)
+
+    background = BackgroundTasks()
+    out = await auth.password_reset_request(
+        auth.PasswordResetRequestIn(email="user@example.com"),
+        _request(method="POST"),
+        background,
+        _Db(results=[user]),  # type: ignore[arg-type]
+    )
+    await background()
+
+    assert out.ok is True
+    assert redis.deleted == [auth._password_reset_key("reset-token")]
+
+
+@pytest.mark.asyncio
+async def test_password_reset_request_deletes_token_when_email_task_crashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.deleted = []
+
+        async def eval(self, *_args):
+            return [1, 0]
+
+        async def set(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def delete(self, key: str) -> None:
+            self.deleted.append(key)
+
+    async def fail_send(**_kwargs) -> None:
+        raise RuntimeError("smtp crashed")
+
+    async def fake_public_base_url(_request, _db) -> str:
+        return "https://lumen.example"
+
+    redis = Redis()
+    user = SimpleNamespace(id="user-1", deleted_at=None)
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+    monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "reset-token")
+    monkeypatch.setattr(auth, "send_password_reset_email", fail_send)
+    monkeypatch.setattr(auth, "resolve_public_base_url", fake_public_base_url)
+
+    background = BackgroundTasks()
+    out = await auth.password_reset_request(
+        auth.PasswordResetRequestIn(email="user@example.com"),
+        _request(method="POST"),
+        background,
+        _Db(results=[user]),  # type: ignore[arg-type]
+    )
+    await background()
+
+    assert out.ok is True
+    assert redis.deleted == [auth._password_reset_key("reset-token")]
 
 
 @pytest.mark.asyncio
@@ -335,7 +591,9 @@ async def test_password_reset_confirm_updates_password_and_revokes_sessions(
 
     class Db:
         def __init__(self) -> None:
-            self.user = SimpleNamespace(id="user-1", deleted_at=None, password_hash="old")
+            self.user = SimpleNamespace(
+                id="user-1", deleted_at=None, password_hash="old"
+            )
             self.revoked_sessions = False
             self.committed = False
             self.user_select = None
@@ -371,7 +629,45 @@ async def test_password_reset_confirm_updates_password_and_revokes_sessions(
 
 
 @pytest.mark.asyncio
-async def test_create_session_uses_trusted_forwarded_for(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_password_reset_confirm_consumes_token_before_user_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.deleted = []
+
+        async def eval(self, _lua, _keys, key: str, *_args):
+            if key == "rl:pwd_reset_confirm:user:user-1":
+                return [0, 1000]
+            return [1, 0]
+
+        async def get(self, _key: str) -> str:
+            return "user-1"
+
+        async def getdel(self, key: str) -> str:
+            self.deleted.append(key)
+            return "user-1"
+
+    redis = Redis()
+    monkeypatch.setattr(auth, "get_redis", lambda: redis)
+
+    with pytest.raises(Exception) as excinfo:
+        await auth.password_reset_confirm(
+            auth.PasswordResetConfirmIn(
+                token="reset-token", new_password="new-password"
+            ),
+            _request(method="POST"),
+            _Db(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 429
+    assert redis.deleted == [auth._password_reset_key("reset-token")]
+
+
+@pytest.mark.asyncio
+async def test_create_session_uses_trusted_forwarded_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     old = auth.settings.trusted_proxies
     auth.settings.trusted_proxies = "127.0.0.1/32"
 

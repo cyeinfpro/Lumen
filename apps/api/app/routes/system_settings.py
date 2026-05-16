@@ -11,10 +11,10 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import PricingRule, RedemptionCode
+from lumen_core.models import PricingRule
 from lumen_core.runtime_settings import get_spec, parse_value
 from lumen_core.schemas import (
     SystemSettingsOut,
@@ -25,6 +25,10 @@ from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..runtime_settings import get_setting, get_settings_view, update_settings
+from ..services.redemption_secret import (
+    PreviousRedemptionSecretLocked,
+    remember_previous_redemption_secret,
+)
 
 
 router = APIRouter(prefix="/admin/settings", tags=["admin-settings"])
@@ -155,27 +159,30 @@ async def put_settings_endpoint(
     )
     new_secret = pair_map.get("billing.redemption_code_secret")
     if new_secret and new_secret != old_secret:
-        revoked_count = 0
-        if old_secret:
-            result = await db.execute(
-                update(RedemptionCode)
-                .where(
-                    RedemptionCode.revoked_at.is_(None),
-                    RedemptionCode.redeemed_count < RedemptionCode.max_redemptions,
-                )
-                .values(revoked_at=func.now())
+        try:
+            transition_expires_at = await remember_previous_redemption_secret(
+                db, old_secret
             )
-            revoked_count = int(result.rowcount or 0)
+        except PreviousRedemptionSecretLocked as exc:
+            await db.rollback()
+            raise _http(
+                "previous_secret_locked",
+                "another rotation is still inside the 24h transition window",
+                409,
+            ) from exc
         secret_hash8 = hashlib.sha256(new_secret.encode("utf-8")).hexdigest()[:8]
         await write_audit(
             db,
-            event_type="billing.secret.rotate" if old_secret else "billing.secret.configure",
+            event_type="billing.secret.rotate"
+            if old_secret
+            else "billing.secret.configure",
             user_id=admin.id,
             actor_email_hash=hash_email(admin.email),
             actor_ip_hash=request_ip_hash(request),
             details={
                 "secret_hash8": secret_hash8,
-                "revoked_unredeemed_count": revoked_count,
+                "previous_secret_valid_until": transition_expires_at,
+                "revoked_unredeemed_count": 0,
             },
             autocommit=False,
         )

@@ -25,12 +25,42 @@ class FakeRedis:
         self.dlq_calls = 0
         self.published: list[tuple[str, str]] = []
         self.dlq: list[tuple[str, str]] = []
+        self.dedupe: dict[str, str] = {}
+        self.stream_entries: list[tuple[str, dict]] = []
 
     async def xadd(self, key, fields, **_kwargs):
         self.xadd_calls += 1
         if self.xadd_calls <= self.xadd_failures:
             raise RuntimeError("redis unavailable")
+        self.stream_entries.append((key, dict(fields)))
         return "1710000000000-0"
+
+    async def eval(
+        self,
+        _lua: str,
+        _num_keys: int,
+        stream_key: str,
+        _dedupe_key: str,
+        event_id: str,
+        event_name: str,
+        payload_json: str,
+        *_args: str,
+    ):
+        self.xadd_calls += 1
+        if self.xadd_calls <= self.xadd_failures:
+            raise RuntimeError("redis unavailable")
+        existing = self.dedupe.get(event_id)
+        if existing is not None:
+            return existing
+        stream_id = f"1710000000000-{len(self.stream_entries)}"
+        self.stream_entries.append(
+            (
+                stream_key,
+                {"event": event_name, "data": payload_json, "event_id": event_id},
+            )
+        )
+        self.dedupe[event_id] = stream_id
+        return stream_id
 
     async def publish(self, channel: str, payload: str):
         self.publish_calls += 1
@@ -83,6 +113,58 @@ async def test_publish_event_xadd_retries_use_seconds_not_milliseconds(monkeypat
     assert channel == "user:user-1"
     assert payload["event"] == "generation.requeued"
     assert payload["sse_id"] == "1710000000000-0"
+    assert isinstance(payload["event_id"], str)
+
+
+class AcceptedThenRaisedRedis(FakeRedis):
+    async def eval(
+        self,
+        _lua: str,
+        _num_keys: int,
+        stream_key: str,
+        _dedupe_key: str,
+        event_id: str,
+        event_name: str,
+        payload_json: str,
+        *_args: str,
+    ):
+        self.xadd_calls += 1
+        existing = self.dedupe.get(event_id)
+        if existing is not None:
+            return existing
+        stream_id = "1710000000000-42"
+        self.stream_entries.append(
+            (
+                stream_key,
+                {"event": event_name, "data": payload_json, "event_id": event_id},
+            )
+        )
+        self.dedupe[event_id] = stream_id
+        raise RuntimeError("connection dropped after server accepted xadd")
+
+
+@pytest.mark.asyncio
+async def test_publish_event_xadd_retry_is_idempotent_after_accepted_exception(
+    monkeypatch,
+):
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(sse_publish.asyncio, "sleep", fake_sleep)
+    redis = AcceptedThenRaisedRedis()
+
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "user:user-1",
+        "generation.progress",
+        {"generation_id": "gen-1"},
+    )
+
+    assert redis.xadd_calls == 2
+    assert len(redis.stream_entries) == 1
+    payload = json.loads(redis.published[0][1])
+    assert payload["sse_id"] == "1710000000000-42"
 
 
 @pytest.mark.asyncio

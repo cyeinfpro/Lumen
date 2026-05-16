@@ -15,7 +15,7 @@ import re
 from errno import EADDRINUSE
 from typing import Any
 
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, start_http_server
 
 logger = logging.getLogger(__name__)
 
@@ -128,49 +128,89 @@ def _sentry_before_breadcrumb(crumb: dict, _hint: dict) -> dict | None:
 
 # ---------- 业务指标（top-level，tasks 模块直接 import） ----------
 
-task_duration_seconds = Histogram(
+
+def _registered_collector(name: str) -> Any | None:
+    names_to_collectors = getattr(REGISTRY, "_names_to_collectors", {})
+    base = name[:-6] if name.endswith("_total") else name
+    for candidate in (
+        name,
+        base,
+        f"{base}_total",
+        f"{base}_created",
+        f"{base}_bucket",
+        f"{base}_count",
+        f"{base}_sum",
+    ):
+        collector = names_to_collectors.get(candidate)
+        if collector is not None:
+            return collector
+    return None
+
+
+def _metric(factory: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+    existing = _registered_collector(name)
+    if existing is not None:
+        return existing
+    try:
+        return factory(name, *args, **kwargs)
+    except ValueError:
+        existing = _registered_collector(name)
+        if existing is not None:
+            return existing
+        raise
+
+
+task_duration_seconds = _metric(
+    Histogram,
     "lumen_worker_task_duration_seconds",
     "Worker task duration in seconds, labeled by kind and outcome.",
     labelnames=("kind", "outcome"),
     buckets=(0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
 )
 
-upstream_calls_total = Counter(
+upstream_calls_total = _metric(
+    Counter,
     "lumen_worker_upstream_calls_total",
     "Count of upstream API calls, labeled by kind and outcome.",
     labelnames=("kind", "outcome"),
 )
 
-wallet_overdrawn_total = Counter(
+wallet_overdrawn_total = _metric(
+    Counter,
     "wallet_overdrawn_total",
     "Number of wallet billing operations that produced an overdrawn adjustment.",
     labelnames=("kind",),
 )
 
-wallet_charge_lost_total = Counter(
+wallet_charge_lost_total = _metric(
+    Counter,
     "wallet_charge_lost_total",
     "Number of completion charge attempts that failed after upstream work completed.",
 )
 
-billing_cost_micro_total = Counter(
+billing_cost_micro_total = _metric(
+    Counter,
     "lumen_billing_cost_micro_total",
     "Completion billing cost by cost bucket, in micro RMB.",
     labelnames=("kind",),
 )
 
-billing_pricing_source_total = Counter(
+billing_pricing_source_total = _metric(
+    Counter,
     "lumen_billing_pricing_source_total",
     "Completion pricing source decisions.",
     labelnames=("source",),
 )
 
-billing_rate_limit_block_total = Counter(
+billing_rate_limit_block_total = _metric(
+    Counter,
     "lumen_billing_rate_limit_block_total",
     "Billing window rate-limit blocks.",
     labelnames=("window",),
 )
 
-billing_idempotency_replay_total = Counter(
+billing_idempotency_replay_total = _metric(
+    Counter,
     "lumen_billing_idempotency_replay_total",
     "Billing ledger idempotency replays.",
 )
@@ -179,7 +219,8 @@ billing_idempotency_replay_total = Counter(
 # 当前 image 路由的状态——每个号每个 state 一个时序；同一时刻一个号只有一个
 # state 是 1，其他 state 是 0。state 取自 ProviderHealth：closed / cooldown /
 # rate_limited（与 pool.get_status() 的 image.state 字段对齐）。
-account_image_state = Gauge(
+account_image_state = _metric(
+    Gauge,
     "lumen_account_image_state",
     "Per-account image route state (1=in this state, 0=not). "
     "States: closed / cooldown / rate_limited.",
@@ -190,7 +231,8 @@ account_image_state = Gauge(
 # success：report_image_success
 # failure：report_image_failure（普通 retriable，3 次累计触发 image cooldown）
 # rate_limited：report_image_rate_limited（429 / quota）
-account_image_calls_total = Counter(
+account_image_calls_total = _metric(
+    Counter,
     "lumen_account_image_calls_total",
     "Per-account image generation call count by outcome.",
     labelnames=("account", "outcome"),
@@ -199,7 +241,8 @@ account_image_calls_total = Counter(
 # 当前已用配额（运维用来对比 image_rate_limit / image_daily_quota 配置）：
 # - window=current_window：滑动窗口当前已用次数（来自 Redis ZCARD）
 # - window=daily：当日已用次数（来自 Redis daily counter）
-account_image_quota_used = Gauge(
+account_image_quota_used = _metric(
+    Gauge,
     "lumen_account_image_quota_used",
     "Per-account image quota used in current window.",
     labelnames=("account", "window"),
@@ -214,7 +257,8 @@ account_image_quota_used = Gauge(
 # - trigger: "auto" / "manual"（与 record_summary_metrics 现有 trigger 含义对齐，spec
 #            里写的 "auto/user" 是笔误，按现有 Redis 体系用 "auto/manual"）
 # - outcome: "ok" / "failed" / "circuit_open" / "lock_busy" / "cas_failed"
-context_compaction_total = Counter(
+context_compaction_total = _metric(
+    Counter,
     "lumen_context_compaction_total",
     "Conversation context compaction outcomes",
     labelnames=("reason", "trigger", "outcome"),
@@ -223,7 +267,8 @@ context_compaction_total = Counter(
 # Why: lock_busy 是没真正干活的快速失败，histogram 不该污染 p50/p99，所以调用方在
 # lock_busy 分支不要 observe；只在 ok / failed / cas_failed 等真正跑过 upstream
 # 的分支记录耗时（不含 lock 等待）。
-context_compaction_duration_seconds = Histogram(
+context_compaction_duration_seconds = _metric(
+    Histogram,
     "lumen_context_compaction_duration_seconds",
     "Time spent producing a context compaction summary (excluding lock wait)",
     labelnames=("reason", "outcome"),
@@ -231,7 +276,9 @@ context_compaction_duration_seconds = Histogram(
 )
 
 # Why: 限制 outcome 标签基数，避免 prometheus 时间序列爆炸（恶意/未知值都映射到 "unknown"）
-_ALLOWED_OUTCOMES = frozenset({"succeeded", "retry", "failed", "unknown", "ok", "error"})
+_ALLOWED_OUTCOMES = frozenset(
+    {"succeeded", "retry", "failed", "unknown", "ok", "error"}
+)
 
 # image route 的 outcome 白名单（与 account_image_calls_total 标签对齐）
 _ALLOWED_IMAGE_OUTCOMES = frozenset({"success", "failure", "rate_limited"})
@@ -255,6 +302,7 @@ def safe_outcome(outcome: str | None) -> str:
 
 
 # ---------- Sentry ----------
+
 
 def init_sentry(
     dsn: str,
@@ -281,6 +329,7 @@ def init_sentry(
 
 # ---------- OpenTelemetry ----------
 
+
 def init_otel(service_name: str, endpoint: str) -> None:
     if not endpoint:
         return
@@ -295,7 +344,9 @@ def init_otel(service_name: str, endpoint: str) -> None:
 
         resource = Resource.create({"service.name": service_name})
         provider = TracerProvider(resource=resource)
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+        )
         trace.set_tracer_provider(provider)
 
         try:
@@ -329,15 +380,17 @@ def init_otel(service_name: str, endpoint: str) -> None:
 # ---------- Prometheus HTTP server ----------
 
 _metrics_server_started = False
+_metrics_httpd: Any | None = None
+_metrics_thread: Any | None = None
 
 
 def start_metrics_server(port: int) -> None:
     """在指定端口起一个独立的 prometheus_client HTTP server。幂等。"""
-    global _metrics_server_started
+    global _metrics_httpd, _metrics_server_started, _metrics_thread
     if _metrics_server_started:
         return
     try:
-        start_http_server(port)
+        _metrics_httpd, _metrics_thread = start_http_server(port)
         _metrics_server_started = True
         logger.info("worker metrics server started on :%d", port)
     except OSError as exc:
@@ -347,12 +400,25 @@ def start_metrics_server(port: int) -> None:
                 f"worker metrics server port already in use: {port}"
             ) from exc
         logger.error("worker metrics server could not bind :%d: %s", port, exc)
-        raise RuntimeError(
-            f"worker metrics server could not bind port {port}"
-        ) from exc
+        raise RuntimeError(f"worker metrics server could not bind port {port}") from exc
     except Exception as exc:  # noqa: BLE001
         logger.error("worker metrics server failed on :%d: %s", port, exc)
         raise RuntimeError(f"worker metrics server failed on port {port}") from exc
+
+
+def stop_metrics_server() -> None:
+    """Stop the prometheus HTTP server if startup later fails."""
+    global _metrics_httpd, _metrics_server_started, _metrics_thread
+    httpd = _metrics_httpd
+    _metrics_httpd = None
+    _metrics_thread = None
+    _metrics_server_started = False
+    if httpd is None:
+        return
+    try:
+        httpd.shutdown()
+    finally:
+        httpd.server_close()
 
 
 def get_tracer(name: str = "lumen.worker"):
@@ -362,6 +428,7 @@ def get_tracer(name: str = "lumen.worker"):
 
         return trace.get_tracer(name)
     except Exception:  # noqa: BLE001
+
         class _NoopSpan:
             def __enter__(self):
                 return self
@@ -383,6 +450,7 @@ __all__ = [
     "init_sentry",
     "init_otel",
     "start_metrics_server",
+    "stop_metrics_server",
     "get_tracer",
     "task_duration_seconds",
     "upstream_calls_total",

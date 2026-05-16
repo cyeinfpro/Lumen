@@ -9,8 +9,11 @@ export function SystemUpgradeBanner() {
   const q = useQuery({
     queryKey: ["system", "maintenance"],
     queryFn: getSystemMaintenance,
-    refetchInterval: (query) => (query.state.data?.running ? 5000 : 15000),
-    retry: false,
+    refetchInterval: (query) => {
+      if (query.state.error) return 30_000;
+      return query.state.data?.running ? 5000 : 60000;
+    },
+    retry: 2,
   });
   const data = q.data;
   if (!data?.running) return null;

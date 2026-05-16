@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Annotated, Any
@@ -82,6 +83,12 @@ from ..ratelimit import RateLimiter, client_ip
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting, update_settings
 from ..services.billing_cache import BillingCacheService
+from ..services.idempotency import cache_json, get_cached_json
+from ..services.redemption_secret import (
+    PreviousRedemptionSecretLocked,
+    previous_redemption_secret,
+    remember_previous_redemption_secret,
+)
 
 
 router = APIRouter(tags=["billing"])
@@ -96,6 +103,11 @@ REDEMPTION_LIMITER = RateLimiter(
 _DOWNLOAD_TOKEN_PREFIX = "billing:redemption_csv:"
 _PLAINTEXT_BATCH_PREFIX = "billing:redemption_plaintext:"
 _REDEMPTION_DOWNLOAD_TTL_SECONDS = 300
+_REDEMPTION_IDEMPOTENCY_NAMESPACE = "billing:redemption:idempotency"
+_REDEMPTION_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
+_REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE = uuid.UUID(
+    "cf14d7e7-73ca-4b91-89fa-d4ab765034c9"
+)
 _BILLING_AUDIT_EVENT_PREFIXES = (
     "wallet.",
     "pricing.",
@@ -155,6 +167,144 @@ def _money(amount_micro: int) -> MoneyOut:
     return MoneyOut(**billing_core.money_dict(amount_micro))
 
 
+def _redemption_request_hash(normalized_code: str) -> str:
+    return hashlib.sha256(
+        f"redemption-code:{normalized_code}".encode("utf-8")
+    ).hexdigest()
+
+
+def _redemption_idempotency_key(
+    request: Request,
+    *,
+    user_id: str,
+    normalized_code: str,
+) -> str:
+    raw = request.headers.get("Idempotency-Key")
+    if raw is None:
+        digest = hashlib.sha256(
+            f"{user_id}:{normalized_code}".encode("utf-8")
+        ).hexdigest()[:32]
+        return f"derived:{digest}"
+    key = raw.strip()
+    if not key:
+        raise _http(
+            "idempotency_key_invalid",
+            "Idempotency-Key must not be blank",
+            422,
+        )
+    if len(key) > 128 or any(ord(ch) < 33 or ord(ch) > 126 for ch in key):
+        raise _http(
+            "idempotency_key_invalid",
+            "Idempotency-Key must be 1-128 printable ASCII characters",
+            422,
+        )
+    return f"client:{key}"
+
+
+def _redemption_usage_id(user_id: str, idempotency_key: str) -> str:
+    return str(
+        uuid.uuid5(
+            _REDEMPTION_IDEMPOTENCY_UUID_NAMESPACE,
+            f"{user_id}:{idempotency_key}",
+        )
+    )
+
+
+def _redemption_idempotency_cache_key(user_id: str, idempotency_key: str) -> str:
+    return hashlib.sha256(f"{user_id}:{idempotency_key}".encode("utf-8")).hexdigest()
+
+
+async def _lock_redemption_idempotency_key(
+    db: AsyncSession, user_id: str, idempotency_key: str
+) -> None:
+    connection = getattr(db, "connection", None)
+    if connection is None:
+        return
+    bind = await connection()
+    if bind.dialect.name != "postgresql":
+        return
+    lock_key = f"redemption:{user_id}:{idempotency_key}"
+    lock_id = int.from_bytes(
+        hashlib.sha256(lock_key.encode("utf-8")).digest()[:8],
+        "big",
+        signed=True,
+    )
+    await db.execute(select(func.pg_advisory_xact_lock(lock_id)))
+
+
+async def _cached_redemption_out(
+    user_id: str,
+    idempotency_key: str,
+    request_hash: str,
+) -> RedemptionOut | None:
+    cached = await get_cached_json(
+        _REDEMPTION_IDEMPOTENCY_NAMESPACE,
+        _redemption_idempotency_cache_key(user_id, idempotency_key),
+    )
+    if cached is None:
+        return None
+    if cached.get("request_hash") != request_hash:
+        raise _http(
+            "idempotency_conflict",
+            "Idempotency-Key was already used for a different redemption request",
+            409,
+        )
+    response = cached.get("response")
+    if not isinstance(response, dict):
+        return None
+    return RedemptionOut.model_validate(response)
+
+
+async def _cache_redemption_out(
+    user_id: str,
+    idempotency_key: str,
+    request_hash: str,
+    response: RedemptionOut,
+) -> None:
+    await cache_json(
+        _REDEMPTION_IDEMPOTENCY_NAMESPACE,
+        _redemption_idempotency_cache_key(user_id, idempotency_key),
+        {"request_hash": request_hash, "response": response},
+        _REDEMPTION_IDEMPOTENCY_TTL_SECONDS,
+    )
+
+
+async def _redemption_out_for_usage(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    usage_id: str,
+    request_hash: str,
+) -> RedemptionOut | None:
+    row = (
+        await db.execute(
+            select(RedemptionCodeUsage, WalletTransaction)
+            .join(
+                WalletTransaction,
+                WalletTransaction.id == RedemptionCodeUsage.wallet_tx_id,
+            )
+            .where(
+                RedemptionCodeUsage.id == usage_id,
+                RedemptionCodeUsage.user_id == user_id,
+            )
+        )
+    ).first()
+    if row is None:
+        return None
+    usage, tx = row
+    meta = tx.meta if isinstance(tx.meta, dict) else {}
+    if meta.get("redemption_request_hash") != request_hash:
+        raise _http(
+            "idempotency_conflict",
+            "Idempotency-Key was already used for a different redemption request",
+            409,
+        )
+    return RedemptionOut(
+        amount=_money(usage.amount_micro),
+        balance=_money(tx.balance_after),
+    )
+
+
 async def _setting_raw(db: AsyncSession, key: str) -> str | None:
     spec = get_spec(key)
     if spec is None:
@@ -191,6 +341,15 @@ async def _redemption_secret(db: AsyncSession) -> str:
             412,
         )
     return secret
+
+
+async def _redemption_secrets(db: AsyncSession) -> list[str]:
+    current = await _redemption_secret(db)
+    secrets = [current]
+    previous = await previous_redemption_secret(db)
+    if previous and previous != current:
+        secrets.append(previous)
+    return secrets
 
 
 async def _billing_enabled_setting(db: AsyncSession) -> bool:
@@ -285,9 +444,7 @@ def _tx_out(tx: WalletTransaction) -> WalletTransactionOut:
     )
 
 
-def _redemption_status(
-    code: RedemptionCode, *, now: datetime | None = None
-) -> str:
+def _redemption_status(code: RedemptionCode, *, now: datetime | None = None) -> str:
     current = now or datetime.now(timezone.utc)
     expires_at = code.expires_at
     if expires_at is not None and expires_at.tzinfo is None:
@@ -347,7 +504,9 @@ def _cursor_filter(stmt: Any, model: Any, cursor: str | None) -> Any:
     )
 
 
-def _next_cursor(rows: list[Any], has_more: bool, attr: str = "created_at") -> str | None:
+def _next_cursor(
+    rows: list[Any], has_more: bool, attr: str = "created_at"
+) -> str | None:
     if not has_more or not rows:
         return None
     last = rows[-1]
@@ -397,7 +556,9 @@ def _redemption_csv_batch_id(csv_text: str) -> str | None:
 
 def _require_redemption_download_batch(csv_text: str, batch_id: str) -> None:
     if _redemption_csv_batch_id(csv_text) != batch_id:
-        raise _http("download_token_batch_mismatch", "download token does not match batch", 404)
+        raise _http(
+            "download_token_batch_mismatch", "download token does not match batch", 404
+        )
 
 
 async def _store_redemption_plaintext_batch(
@@ -457,7 +618,9 @@ async def _load_redemption_plaintext_batch(batch_id: str) -> dict[str, Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise _http("redemption_plaintext_corrupt", "plaintext cache is invalid", 500) from exc
+        raise _http(
+            "redemption_plaintext_corrupt", "plaintext cache is invalid", 500
+        ) from exc
     if not isinstance(payload, dict) or payload.get("batch_id") != batch_id:
         raise _http("redemption_plaintext_corrupt", "plaintext cache is invalid", 500)
     codes = payload.get("codes")
@@ -480,14 +643,18 @@ def _billing_audit_predicate() -> Any:
 async def _threshold_price_alignment(db: AsyncSession) -> tuple[bool, list[str]]:
     thresholds = await _image_thresholds(db)
     rows = (
-        await db.execute(
-            select(PricingRule.key).where(
-                PricingRule.scope == "image_size",
-                PricingRule.unit == "per_image",
-                PricingRule.enabled.is_(True),
+        (
+            await db.execute(
+                select(PricingRule.key).where(
+                    PricingRule.scope == "image_size",
+                    PricingRule.unit == "per_image",
+                    PricingRule.enabled.is_(True),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     priced = {str(row) for row in rows}
     missing = sorted(key for key in thresholds if key not in priced)
     return not missing, missing
@@ -503,20 +670,21 @@ async def _validate_thresholds_have_prices(
     if force:
         return
     rows = (
-        await db.execute(
-            select(PricingRule.key).where(
-                PricingRule.scope == "image_size",
-                PricingRule.unit == "per_image",
-                PricingRule.enabled.is_(True),
+        (
+            await db.execute(
+                select(PricingRule.key).where(
+                    PricingRule.scope == "image_size",
+                    PricingRule.unit == "per_image",
+                    PricingRule.enabled.is_(True),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     enabled = {str(row) for row in rows}
     for item in candidate_items or []:
-        if (
-            item.get("scope") == "image_size"
-            and item.get("unit") == "per_image"
-        ):
+        if item.get("scope") == "image_size" and item.get("unit") == "per_image":
             key = str(item.get("key"))
             if item.get("enabled") is True:
                 enabled.add(key)
@@ -638,12 +806,8 @@ def _usage_by_kind(rows: list[WalletTransaction]) -> BillingUsageByKindOut:
             totals["cache_creation"] += _scaled_meta_cost(
                 breakdown, "cache_creation_cost_micro"
             )
-            totals["image"] += _scaled_meta_cost(
-                breakdown, "image_output_cost_micro"
-            )
-            totals["reasoning"] += _scaled_meta_cost(
-                breakdown, "reasoning_cost_micro"
-            )
+            totals["image"] += _scaled_meta_cost(breakdown, "image_output_cost_micro")
+            totals["reasoning"] += _scaled_meta_cost(breakdown, "reasoning_cost_micro")
             continue
 
         if row.ref_type == "generation" or row.kind == "settle":
@@ -678,9 +842,7 @@ def _window_usage(
     limit_micro: int,
 ) -> BillingWindowOut:
     cutoff = now - span
-    in_window = [
-        row for row in rows if _aware_utc(row.created_at) >= cutoff
-    ]
+    in_window = [row for row in rows if _aware_utc(row.created_at) >= cutoff]
     usage = _usage_by_kind(in_window)
     oldest = min((_aware_utc(row.created_at) for row in in_window), default=None)
     return BillingWindowOut(
@@ -690,9 +852,7 @@ def _window_usage(
     )
 
 
-async def _active_credential_limits(
-    db: AsyncSession, user_id: str
-) -> dict[str, int]:
+async def _active_credential_limits(db: AsyncSession, user_id: str) -> dict[str, int]:
     row = (
         await db.execute(
             select(
@@ -769,13 +929,19 @@ async def _invalidate_balance_cache(user_id: str) -> None:
 async def _billing_snapshot_parts(
     db: AsyncSession,
     user_id: str,
-) -> tuple[int, str, datetime, datetime, dict[str, BillingWindowOut], BillingUsageByKindOut, int]:
+) -> tuple[
+    int,
+    str,
+    datetime,
+    datetime,
+    dict[str, BillingWindowOut],
+    BillingUsageByKindOut,
+    int,
+]:
     now = datetime.now(timezone.utc)
     range_start = now - timedelta(days=30)
     user_row = (
-        await db.execute(
-            select(User.billing_rate_multiplier).where(User.id == user_id)
-        )
+        await db.execute(select(User.billing_rate_multiplier).where(User.id == user_id))
     ).scalar_one_or_none()
     try:
         multiplier = f"{Decimal(str(user_row if user_row is not None else 1)).quantize(Decimal('0.0001'))}"
@@ -839,9 +1005,15 @@ async def get_my_billing_snapshot(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BillingSnapshotOut:
-    balance, multiplier, _start, _end, windows, by_kind, _count = (
-        await _billing_snapshot_parts(db, user.id)
-    )
+    (
+        balance,
+        multiplier,
+        _start,
+        _end,
+        windows,
+        by_kind,
+        _count,
+    ) = await _billing_snapshot_parts(db, user.id)
     return BillingSnapshotOut(
         balance_micro=balance,
         billing_rate_multiplier=multiplier,
@@ -933,7 +1105,9 @@ async def admin_billing_audit(
     rows = (
         (
             await db.execute(
-                stmt.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit)
+                stmt.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(
+                    limit
+                )
             )
         )
         .scalars()
@@ -951,7 +1125,9 @@ async def admin_billing_overview(
     since = now - timedelta(hours=24)
     billing_enabled = await _billing_enabled_setting(db)
     bootstrap_completed = await _bootstrap_completed_setting(db)
-    secret_configured = bool((await _setting_raw(db, "billing.redemption_code_secret") or "").strip())
+    secret_configured = bool(
+        (await _setting_raw(db, "billing.redemption_code_secret") or "").strip()
+    )
     wallet_balance = int(
         (
             await db.execute(
@@ -994,7 +1170,9 @@ async def admin_billing_overview(
     charges_24h = int(
         (
             await db.execute(
-                select(func.coalesce(func.sum(WalletTransaction.amount_micro), 0)).where(
+                select(
+                    func.coalesce(func.sum(WalletTransaction.amount_micro), 0)
+                ).where(
                     WalletTransaction.kind.in_((*_CHARGE_KINDS, "settle")),
                     WalletTransaction.created_at >= since,
                     WalletTransaction.amount_micro < 0,
@@ -1049,9 +1227,15 @@ async def admin_billing_usage(
     ).scalar_one_or_none()
     if exists is None:
         raise _http("not_found", "user not found", 404)
-    balance, multiplier, range_start, range_end, windows, by_kind, count = (
-        await _billing_snapshot_parts(db, user_id)
-    )
+    (
+        balance,
+        multiplier,
+        range_start,
+        range_end,
+        windows,
+        by_kind,
+        count,
+    ) = await _billing_snapshot_parts(db, user_id)
     return AdminBillingUsageOut(
         user_id=user_id,
         balance_micro=balance,
@@ -1188,7 +1372,9 @@ async def admin_release_orphan_hold(
         )
     ).scalar_one_or_none()
     if consumed is not None:
-        raise _http("HOLD_ALREADY_CONSUMED", "hold was already settled or released", 409)
+        raise _http(
+            "HOLD_ALREADY_CONSUMED", "hold was already settled or released", 409
+        )
     tx = await billing_core.release(
         db,
         hold.user_id,
@@ -1332,28 +1518,32 @@ async def admin_rotate_redemption_secret(
     new_secret = _generate_redemption_secret()
     await update_settings(db, [("billing.redemption_code_secret", new_secret)])
 
-    revoked_count = 0
+    transition_expires_at = None
     if old_secret:
-        result = await db.execute(
-            update(RedemptionCode)
-            .where(
-                RedemptionCode.revoked_at.is_(None),
-                RedemptionCode.redeemed_count < RedemptionCode.max_redemptions,
+        try:
+            transition_expires_at = await remember_previous_redemption_secret(
+                db, old_secret
             )
-            .values(revoked_at=func.now())
-        )
-        revoked_count = int(result.rowcount or 0)
+        except PreviousRedemptionSecretLocked as exc:
+            raise _http(
+                "previous_secret_locked",
+                "another rotation is still inside the 24h transition window",
+                409,
+            ) from exc
 
     secret_hash8 = hashlib.sha256(new_secret.encode("utf-8")).hexdigest()[:8]
     await write_audit(
         db,
-        event_type="billing.secret.rotate" if old_secret else "billing.secret.configure",
+        event_type="billing.secret.rotate"
+        if old_secret
+        else "billing.secret.configure",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
         actor_ip_hash=request_ip_hash(request),
         details={
             "secret_hash8": secret_hash8,
-            "revoked_unredeemed_count": revoked_count,
+            "previous_secret_valid_until": transition_expires_at,
+            "revoked_unredeemed_count": 0,
             "generated_by": "system",
         },
         autocommit=False,
@@ -1374,22 +1564,57 @@ async def redeem_code(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RedemptionOut:
     _require_wallet_user(user)
+    normalized_code = billing_core.normalize_redemption_code(body.code)
+    if len(normalized_code) < 4:
+        raise _http("invalid_code", "redemption code is invalid", 422)
+    request_hash = _redemption_request_hash(normalized_code)
+    idempotency_key = _redemption_idempotency_key(
+        request,
+        user_id=user.id,
+        normalized_code=normalized_code,
+    )
+    cached = await _cached_redemption_out(user.id, idempotency_key, request_hash)
+    if cached is not None:
+        return cached
+    await _lock_redemption_idempotency_key(db, user.id, idempotency_key)
+    cached = await _cached_redemption_out(user.id, idempotency_key, request_hash)
+    if cached is not None:
+        return cached
+    usage_id = _redemption_usage_id(user.id, idempotency_key)
+    existing = await _redemption_out_for_usage(
+        db,
+        user_id=user.id,
+        usage_id=usage_id,
+        request_hash=request_hash,
+    )
+    if existing is not None:
+        await _cache_redemption_out(user.id, idempotency_key, request_hash, existing)
+        return existing
+
     await _require_redemption_operational(db)
     ip = client_ip(request)
     redis = get_redis()
     await REDEMPTION_LIMITER.check(redis, f"rl:redemption:user:{user.id}")
     await REDEMPTION_LIMITER.check(redis, f"rl:redemption:ip:{ip}")
-    secret = await _redemption_secret(db)
-    code_hash = billing_core.hash_redemption_code(body.code, secret)
+    code_hashes = [
+        billing_core.hash_redemption_code(normalized_code, secret)
+        for secret in await _redemption_secrets(db)
+    ]
     now = datetime.now(timezone.utc)
 
-    code = (
-        await db.execute(
-            select(RedemptionCode)
-            .where(RedemptionCode.code_hash == code_hash)
-            .with_for_update()
+    matching_codes = (
+        (
+            await db.execute(
+                select(RedemptionCode)
+                .where(RedemptionCode.code_hash.in_(code_hashes))
+                .with_for_update()
+            )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .all()
+    )
+    codes_by_hash = {item.code_hash: item for item in matching_codes}
+    code = next((codes_by_hash.get(code_hash) for code_hash in code_hashes), None)
     if code is None:
         raise _http("CODE_NOT_FOUND", "redemption code not found", 404)
     if code.revoked_at is not None:
@@ -1402,7 +1627,6 @@ async def redeem_code(
     if code.redeemed_count >= code.max_redemptions:
         raise _http("CODE_EXHAUSTED", "redemption code is exhausted", 409)
 
-    usage_id = new_uuid7()
     try:
         tx = await billing_core.topup_redeem(
             db,
@@ -1410,6 +1634,12 @@ async def redeem_code(
             code.amount_micro,
             usage_id=usage_id,
             code_id=code.id,
+            meta={
+                "client_idempotency_hash": hashlib.sha256(
+                    idempotency_key.encode("utf-8")
+                ).hexdigest()[:16],
+                "redemption_request_hash": request_hash,
+            },
         )
         db.add(
             RedemptionCodeUsage(
@@ -1447,6 +1677,17 @@ async def redeem_code(
         diag = str(getattr(exc.orig, "diag", None) or "")
         msg = f"{exc!s} {diag}".lower()
         if "uq_redeem_code_user" in msg:
+            existing = await _redemption_out_for_usage(
+                db,
+                user_id=user.id,
+                usage_id=usage_id,
+                request_hash=request_hash,
+            )
+            if existing is not None:
+                await _cache_redemption_out(
+                    user.id, idempotency_key, request_hash, existing
+                )
+                return existing
             raise _http(
                 "CODE_ALREADY_USED",
                 "this code was already used by this user",
@@ -1454,9 +1695,11 @@ async def redeem_code(
             ) from exc
         raise
 
-    return RedemptionOut(
+    response = RedemptionOut(
         amount=_money(code.amount_micro), balance=_money(tx.balance_after)
     )
+    await _cache_redemption_out(user.id, idempotency_key, request_hash, response)
+    return response
 
 
 @router.get("/me/redemptions", response_model=RedemptionUsageListOut)
@@ -1705,9 +1948,7 @@ async def admin_bulk_pricing(
         ("long_context_input_multiplier", "long_context_input_multiplier"),
         ("long_context_output_multiplier", "long_context_output_multiplier"),
     ):
-        multiplier = _bulk_multiplier_x10000(
-            rates.get(field), field=f"rates.{field}"
-        )
+        multiplier = _bulk_multiplier_x10000(rates.get(field), field=f"rates.{field}")
         if multiplier is None:
             continue
         values.append(
@@ -2044,7 +2285,9 @@ async def admin_download_redemption_batch_txt(
     data = await redis.get(key)
     if data is None:
         raise _http("download_token_expired", "download token expired", 410)
-    csv_text = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
+    csv_text = (
+        data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
+    )
     _require_redemption_download_batch(csv_text, batch_id)
     reader = csv.DictReader(io.StringIO(csv_text))
     codes = [str(row.get("code") or "") for row in reader if row.get("code")]
@@ -2072,9 +2315,15 @@ async def admin_redownload_redemption_batch(
 ) -> AdminRedemptionBatchRedownloadOut:
     payload = await _load_redemption_plaintext_batch(batch_id)
     codes = [str(code) for code in payload["codes"]]
-    amount = _rmb_to_micro_or_422(str(payload.get("amount_rmb") or "0"), field="amount_rmb")
+    amount = _rmb_to_micro_or_422(
+        str(payload.get("amount_rmb") or "0"), field="amount_rmb"
+    )
     expires_raw = payload.get("expires_at")
-    expires_at = datetime.fromisoformat(expires_raw) if isinstance(expires_raw, str) and expires_raw else None
+    expires_at = (
+        datetime.fromisoformat(expires_raw)
+        if isinstance(expires_raw, str) and expires_raw
+        else None
+    )
     token = await _store_redemption_plaintext_batch(
         batch_id=batch_id,
         amount_micro=amount,
@@ -2205,7 +2454,9 @@ async def admin_list_wallets(
                 )
                 .where(
                     WalletTransaction.user_id.in_(user_ids),
-                    WalletTransaction.kind.in_(("topup_redeem", "adjust_admin", "grant")),
+                    WalletTransaction.kind.in_(
+                        ("topup_redeem", "adjust_admin", "grant")
+                    ),
                     WalletTransaction.amount_micro > 0,
                 )
                 .group_by(WalletTransaction.user_id)

@@ -54,7 +54,7 @@ export function SelectableImageGrid({
                 N°{String(index + 1).padStart(2, "0")}
               </span>
               {selected ? (
-                <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-black shadow-[var(--shadow-amber)]">
+                <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
                   <Check className="h-3 w-3" />
                   已选中
                 </span>

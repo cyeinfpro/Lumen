@@ -9,7 +9,14 @@
 //     附带一个 live 密码强度指示器
 //  4. 提交 → signup(email, password, token)；成功 router.push("/")；失败 inline 显示
 
-import { use, useMemo, useState } from "react";
+import {
+  use,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
@@ -34,6 +41,7 @@ import {
 
 import { usePublicInviteQuery } from "@/lib/queries";
 import { ApiError, signup } from "@/lib/apiClient";
+import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 import type { InviteLinkPublicOut } from "@/lib/types";
 
 export default function InvitePage({
@@ -43,6 +51,7 @@ export default function InvitePage({
 }) {
   const { token } = use(params);
   const q = usePublicInviteQuery(token);
+  const showSkeleton = useDelayedFlag(q.isLoading, 180);
 
   return (
     <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
@@ -67,7 +76,7 @@ export default function InvitePage({
           </header>
 
           {q.isLoading ? (
-            <SkeletonInvite />
+            showSkeleton ? <SkeletonInvite /> : null
           ) : q.isError ? (
             <ErrorView error={q.error} />
           ) : q.data ? (
@@ -92,13 +101,25 @@ export default function InvitePage({
   );
 }
 
+function useDelayedFlag(active: boolean, delayMs: number): boolean {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setVisible(active),
+      active ? delayMs : 0,
+    );
+    return () => window.clearTimeout(timer);
+  }, [active, delayMs]);
+  return visible;
+}
+
 function SkeletonInvite() {
   return (
     <div className="space-y-5">
-      <div className="h-8 w-48 bg-white/5 rounded animate-pulse" />
-      <div className="h-4 w-72 bg-white/5 rounded animate-pulse" />
-      <div className="h-40 rounded-2xl bg-white/5 animate-pulse mt-6" />
-      <div className="h-44 rounded-2xl bg-white/5 animate-pulse" />
+      <div className="h-8 w-48 bg-[var(--bg-2)] rounded animate-pulse" />
+      <div className="h-4 w-72 bg-[var(--bg-2)] rounded animate-pulse" />
+      <div className="h-40 rounded-2xl bg-[var(--bg-2)] animate-pulse mt-6" />
+      <div className="h-44 rounded-2xl bg-[var(--bg-2)] animate-pulse" />
     </div>
   );
 }
@@ -120,6 +141,7 @@ function SignupForm({
   const [showPwd, setShowPwd] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const submitGuardRef = useRef(false);
 
   const expiresLabel = useMemo(() => {
     if (!invite.expires_at) return "永久";
@@ -130,13 +152,18 @@ function SignupForm({
     }
   }, [invite.expires_at]);
 
-  const strength = useMemo(() => passwordStrength(password), [password]);
+  const normalizedEmail = normalizeEmailInput(email);
+  const deferredPassword = useDeferredValue(password);
+  const strength = useMemo(
+    () => passwordStrength(deferredPassword),
+    [deferredPassword],
+  );
   const confirmMismatch = confirm.length > 0 && confirm !== password;
   const passwordTooShort = password.length < 8;
   const canSubmit =
     !submitting &&
-    email.trim().length > 0 &&
-    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) &&
+    normalizedEmail.length > 0 &&
+    isValidEmailInput(normalizedEmail) &&
     !passwordTooShort &&
     confirm === password;
 
@@ -144,12 +171,12 @@ function SignupForm({
     e.preventDefault();
     setError(null);
 
-    const trimmedEmail = email.trim();
+    const trimmedEmail = normalizeEmailInput(email);
     if (!trimmedEmail) {
       setError("邮箱未填");
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+    if (!isValidEmailInput(trimmedEmail)) {
       setError("邮箱格式不正确");
       return;
     }
@@ -162,6 +189,8 @@ function SignupForm({
       return;
     }
 
+    if (submitGuardRef.current) return;
+    submitGuardRef.current = true;
     setSubmitting(true);
     try {
       await signup(trimmedEmail, password, token);
@@ -184,6 +213,7 @@ function SignupForm({
       } else {
         setError("注册失败");
       }
+      submitGuardRef.current = false;
       setSubmitting(false);
     }
   };
@@ -266,7 +296,7 @@ function SignupForm({
               type="button"
               onClick={() => setShowPwd((v) => !v)}
               aria-label={showPwd ? "隐藏密码" : "显示密码"}
-              className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 flex items-center justify-center transition-colors"
+              className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
             >
               {showPwd ? (
                 <EyeOff className="w-4 h-4" />
@@ -310,7 +340,11 @@ function SignupForm({
             }
           />
           {confirmMismatch && (
-            <p className="flex items-center gap-1 type-caption text-danger mt-1.5">
+            <p
+              role="alert"
+              aria-live="assertive"
+              className="flex items-center gap-1 type-caption text-danger mt-1.5"
+            >
               <AlertCircle className="w-3 h-3" /> 两次输入不一致
             </p>
           )}
@@ -322,6 +356,8 @@ function SignupForm({
               initial={{ opacity: 0, y: -2 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
+              role="alert"
+              aria-live="assertive"
               className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
             >
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -333,7 +369,7 @@ function SignupForm({
         <button
           type="submit"
           disabled={!canSubmit}
-          className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-black text-sm font-medium disabled:opacity-50 transition-all shadow-[0_8px_24px_-12px_var(--color-lumen-amber)]"
+          className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[0_8px_24px_-12px_var(--color-lumen-amber)]"
         >
           {submitting ? (
             <>
@@ -380,22 +416,22 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
   const icon = (() => {
     switch (reason) {
       case "expired":
-        return <Clock className="w-6 h-6 text-neutral-400" />;
+        return <Clock className="w-6 h-6 text-[var(--fg-2)]" />;
       case "used":
-        return <Check className="w-6 h-6 text-neutral-400" />;
+        return <Check className="w-6 h-6 text-[var(--fg-2)]" />;
       case "revoked":
-        return <ShieldOff className="w-6 h-6 text-neutral-400" />;
+        return <ShieldOff className="w-6 h-6 text-[var(--fg-2)]" />;
       case "not_found":
-        return <FileX className="w-6 h-6 text-neutral-400" />;
+        return <FileX className="w-6 h-6 text-[var(--fg-2)]" />;
       default:
-        return <AlertCircle className="w-6 h-6 text-neutral-400" />;
+        return <AlertCircle className="w-6 h-6 text-[var(--fg-2)]" />;
     }
   })();
 
   return (
     <div className="space-y-5">
       <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
+        <div className="mx-auto w-14 h-14 rounded-2xl bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
           {icon}
         </div>
         <h1 className="type-section-title">邀请不可用</h1>
@@ -407,13 +443,13 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
       <div className="grid grid-cols-2 gap-2">
         <Link
           href="/login"
-          className="h-10 inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm transition-colors"
+          className="h-10 inline-flex items-center justify-center rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
         >
           去登录
         </Link>
         <Link
           href="/"
-          className="h-10 inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm transition-colors"
+          className="h-10 inline-flex items-center justify-center rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
         >
           返回首页
         </Link>
@@ -428,8 +464,8 @@ function ErrorView({ error }: { error: unknown }) {
   return (
     <div className="space-y-5">
       <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
-          <FileX className="w-6 h-6 text-neutral-400" />
+        <div className="mx-auto w-14 h-14 rounded-2xl bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
+          <FileX className="w-6 h-6 text-[var(--fg-2)]" />
         </div>
         <h1 className="type-section-title">
           {isNotFound ? "邀请不存在" : "加载邀请失败"}
@@ -442,7 +478,7 @@ function ErrorView({ error }: { error: unknown }) {
       </div>
       <Link
         href="/"
-        className="h-10 w-full inline-flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 border border-[var(--border)] text-sm transition-colors"
+        className="h-10 w-full inline-flex items-center justify-center rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
       >
         返回首页
       </Link>
@@ -505,7 +541,7 @@ function RoleBadge({ role }: { role: "admin" | "member" }) {
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-[var(--fg-1)] border border-[var(--border)]">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border)]">
       <UsersIcon className="w-3 h-3" />
       member
     </span>
@@ -556,7 +592,7 @@ function PasswordStrength({
             key={segment}
             className={
               "flex-1 h-1 rounded-full transition-colors duration-200 " +
-              (i < strength.score ? strength.color : "bg-white/8")
+              (i < strength.score ? strength.color : "bg-[var(--bg-2)]")
             }
           />
         ))}

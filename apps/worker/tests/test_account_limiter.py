@@ -79,6 +79,24 @@ class FakeRedis:
         self.expirations[key] = int(ts)
         return 1
 
+    async def eval(self, _lua: str, keys: int, *args: str) -> list[Any] | int:
+        if keys == 1:
+            key, cutoff_raw, count_limit_raw = args
+            await self.zremrangebyscore(key, 0, float(cutoff_raw))
+            used = await self.zcard(key)
+            if used < int(count_limit_raw):
+                return [used, None]
+            head = await self.zrange(key, 0, 0, withscores=True)
+            return [used, head[0][1] if head else None]
+        if keys == 2:
+            ts_key, day_key, member, now_raw, ttl_raw, expire_at_raw = args
+            await self.zadd(ts_key, {member: float(now_raw)})
+            await self.expire(ts_key, int(ttl_raw))
+            await self.incr(day_key)
+            await self.expireat(day_key, int(expire_at_raw))
+            return 1
+        raise AssertionError(f"unexpected eval key count: {keys}")
+
 
 # --- parse_rate_limit -------------------------------------------------------
 
@@ -138,9 +156,7 @@ async def test_check_quota_passes_below_window_limit() -> None:
     now = 1_700_000_000.0
     # 预填 4 条历史时间戳（窗口 60s 内），limit=5 → 仍可放行
     for i in range(4):
-        await redis.zadd(
-            "lumen:acct:acc1:image:ts", {f"old{i}": now - 30 + i}
-        )
+        await redis.zadd("lumen:acct:acc1:image:ts", {f"old{i}": now - 30 + i})
     allowed, retry_after = await account_limiter.check_quota(
         redis, "acc1", rate_limit="5/min", daily_quota=None, now=now
     )
@@ -155,9 +171,7 @@ async def test_check_quota_blocks_at_window_limit_with_retry_after() -> None:
     # 5 条都在窗口内，最早的离 now 只 50s，60s 窗口要等 ~10s 才出窗口
     earliest = now - 50.0
     for i in range(5):
-        await redis.zadd(
-            "lumen:acct:acc1:image:ts", {f"t{i}": earliest + i * 10.0}
-        )
+        await redis.zadd("lumen:acct:acc1:image:ts", {f"t{i}": earliest + i * 10.0})
     allowed, retry_after = await account_limiter.check_quota(
         redis, "acc1", rate_limit="5/min", daily_quota=None, now=now
     )
@@ -186,9 +200,7 @@ async def test_check_quota_expires_old_window_entries() -> None:
     now = 1_700_000_000.0
     # 4 条 60s 之外的旧戳 + 1 条新戳：清理后只剩 1 条 → 仍可放行 limit=5
     for i in range(4):
-        await redis.zadd(
-            "lumen:acct:acc1:image:ts", {f"old{i}": now - 600 - i}
-        )
+        await redis.zadd("lumen:acct:acc1:image:ts", {f"old{i}": now - 600 - i})
     await redis.zadd("lumen:acct:acc1:image:ts", {"recent": now - 5})
     allowed, _ = await account_limiter.check_quota(
         redis, "acc1", rate_limit="5/min", daily_quota=None, now=now
@@ -213,6 +225,23 @@ async def test_check_quota_lua_failure_uses_short_fail_closed_retry() -> None:
     assert 1.0 <= retry_after <= account_limiter._REDIS_ERROR_RETRY_AFTER_S + 0.5
 
 
+@pytest.mark.asyncio
+async def test_check_quota_fallback_failure_uses_short_fail_closed_retry() -> None:
+    class NoEvalBrokenRedis(FakeRedis):
+        eval = None
+
+        async def zcard(self, _key: str) -> int:
+            raise RuntimeError("redis down")
+
+    now = 1_700_000_000.0
+    allowed, retry_after = await account_limiter.check_quota(
+        NoEvalBrokenRedis(), "acc1", rate_limit="5/min", daily_quota=None, now=now
+    )
+
+    assert allowed is False
+    assert 1.0 <= retry_after <= account_limiter._REDIS_ERROR_RETRY_AFTER_S + 0.5
+
+
 # --- record_image_call ------------------------------------------------------
 
 
@@ -220,9 +249,7 @@ async def test_check_quota_lua_failure_uses_short_fail_closed_retry() -> None:
 async def test_record_image_call_writes_zset_and_daily() -> None:
     redis = FakeRedis()
     now = 1_700_000_000.0
-    await account_limiter.record_image_call(
-        redis, "acc1", task_id="task-abc", now=now
-    )
+    await account_limiter.record_image_call(redis, "acc1", task_id="task-abc", now=now)
     ts_key = "lumen:acct:acc1:image:ts"
     day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
     assert ts_key in redis.zsets
@@ -232,6 +259,20 @@ async def test_record_image_call_writes_zset_and_daily() -> None:
     # ZSET 和 daily 都设置了 expire
     assert ts_key in redis.expirations
     assert day_key in redis.expirations
+
+
+@pytest.mark.asyncio
+async def test_record_image_call_daily_expireat_is_future_at_utc_boundary() -> None:
+    redis = FakeRedis()
+    now = 1_704_067_199.9  # 2023-12-31T23:59:59.900Z
+
+    await account_limiter.record_image_call(
+        redis, "acc1", task_id="task-boundary", now=now
+    )
+
+    day_key = f"lumen:acct:acc1:image:daily:{account_limiter._today_utc_key(now)}"
+    assert redis.expirations[day_key] >= int(now) + 1
+    assert redis.expirations[day_key] >= 1_704_067_201
 
 
 @pytest.mark.asyncio
@@ -279,6 +320,7 @@ async def test_record_image_call_swallow_redis_errors() -> None:
 
 
 # --- pytest-asyncio 兼容 ----------------------------------------------------
+
 
 # conftest 里没有显式 asyncio fixture loop，使用 asyncio mode=auto 不可保证；显式
 # 提供一个 event_loop fixture 让所有 @pytest.mark.asyncio 都能跑。

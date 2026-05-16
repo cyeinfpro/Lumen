@@ -1,12 +1,15 @@
 {
   "name": "web",
-  "version": "1.1.26",
+  "version": "1.1.27",
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 3000",
-    "lint": "eslint",
+    "lint": "npm run check:ui-governance && npm run lint:eslint",
+    "lint:eslint": "eslint",
+    "check:ui-governance": "node scripts/check-ui-governance.mjs",
+    "check:ui-governance:update": "node scripts/check-ui-governance.mjs --update-baseline",
     "type-check": "tsc --noEmit",
     "type-check:full": "tsc --noEmit --skipLibCheck false"
   },

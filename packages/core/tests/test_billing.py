@@ -130,6 +130,57 @@ async def test_billing_cache_window_usage_accepts_bytes_hash_keys():
 
 
 @pytest.mark.asyncio
+async def test_get_wallet_lock_refreshes_existing_identity_map():
+    class Result:
+        def scalar_one_or_none(self) -> UserWallet:
+            return UserWallet(user_id="user-1", balance_micro=100)
+
+    class Session:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+
+        async def execute(self, stmt: Any) -> Result:
+            self.statements.append(stmt)
+            return Result()
+
+    session = Session()
+
+    wallet = await billing.get_wallet(session, "user-1", lock=True)  # type: ignore[arg-type]
+
+    assert wallet is not None
+    assert session.statements[0].get_execution_options()["populate_existing"] is True
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_deduct_lock_refreshes_existing_identity_map():
+    row = SimpleNamespace(balance_micro=100, version=0)
+
+    class Result:
+        def scalar_one_or_none(self) -> Any:
+            return row
+
+    class Session:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+
+        async def execute(self, stmt: Any) -> Result:
+            self.statements.append(stmt)
+            return Result()
+
+        async def flush(self) -> None:
+            return None
+
+    session = Session()
+    service = BillingCacheService(redis=None)
+
+    balance = await service.deduct_sync(session, "user-1", 10)  # type: ignore[arg-type]
+
+    assert balance == 90
+    assert row.version == 1
+    assert session.statements[0].get_execution_options()["populate_existing"] is True
+
+
+@pytest.mark.asyncio
 async def test_hold_rechecks_idempotency_after_wallet_lock(
     monkeypatch: pytest.MonkeyPatch,
 ):

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import re
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -64,6 +66,19 @@ _MODEL_UNAVAILABLE_MARKERS = (
     "does not have access to model",
     "model_not_found",
 )
+_FORBIDDEN_HOST_NETWORKS = (
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
 
 
 @dataclass(frozen=True)
@@ -89,7 +104,7 @@ def slugify_supplier(value: str) -> str:
     return slug[:80] or "supplier"
 
 
-def normalize_base_url(raw: str) -> str:
+async def normalize_base_url(raw: str) -> str:
     value = raw.strip().rstrip("/")
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -97,9 +112,23 @@ def normalize_base_url(raw: str) -> str:
     if parsed.username or parsed.password:
         raise ValueError("base_url must not contain username or password")
     host = parsed.hostname or ""
-    if not is_dev_env() and _is_private_host(host):
+    if not is_dev_env() and (
+        _is_private_host(host) or await _host_resolves_to_private(host)
+    ):
         raise ValueError("private supplier URLs are not allowed outside development")
     return value
+
+
+def _is_forbidden_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+        or any(ip in network for network in _FORBIDDEN_HOST_NETWORKS)
+    )
 
 
 def _is_private_host(host: str) -> bool:
@@ -112,13 +141,26 @@ def _is_private_host(host: str) -> bool:
         ip = ipaddress.ip_address(lower.strip("[]"))
     except ValueError:
         return False
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-    )
+    return _is_forbidden_ip(ip)
+
+
+async def _host_resolves_to_private(host: str) -> bool:
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        try:
+            ip = ipaddress.ip_address(str(sockaddr[0]))
+        except ValueError:
+            continue
+        if _is_forbidden_ip(ip):
+            return True
+    return False
 
 
 async def read_byok_settings(db: AsyncSession) -> ByokSettingsOut:
@@ -289,12 +331,21 @@ async def validate_api_key_with_supplier(
             key_hint=None,
             challenge_jsonb={},
         )
+    try:
+        base_url = await normalize_base_url(supplier.base_url)
+    except ValueError:
+        return ValidationOutcome(
+            ok=False,
+            error_code="invalid_supplier_url",
+            http_status=None,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            key_hint=api_key_hint(key),
+            challenge_jsonb={},
+        )
     challenge = generate_arithmetic_challenge()
     challenge_jsonb = challenge.as_json()
     model = (
-        validation_model
-        or supplier.validation_model
-        or BYOK_DEFAULT_VALIDATION_MODEL
+        validation_model or supplier.validation_model or BYOK_DEFAULT_VALIDATION_MODEL
     )
     body = build_validation_request(challenge, model=model)
     headers = {
@@ -314,7 +365,7 @@ async def validate_api_key_with_supplier(
             proxy=proxy_url,
         ) as client:
             resp = await client.post(
-                _responses_url(supplier.base_url),
+                _responses_url(base_url),
                 json=body,
                 headers=headers,
             )

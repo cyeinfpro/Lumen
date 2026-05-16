@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -12,7 +13,9 @@ from lumen_core.byok import ArithmeticChallenge
 
 
 class _StubResponse:
-    def __init__(self, status_code: int, payload: object, text: str | None = None) -> None:
+    def __init__(
+        self, status_code: int, payload: object, text: str | None = None
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
         self.text = json.dumps(payload) if text is None else text
@@ -61,23 +64,67 @@ def _challenge() -> ArithmeticChallenge:
     )
 
 
-def test_normalize_base_url_blocks_private_hosts_outside_development(
+@pytest.mark.asyncio
+async def test_normalize_base_url_blocks_private_hosts_outside_development(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(byok_service.settings, "app_env", "production")
 
     with pytest.raises(ValueError, match="private supplier URLs"):
-        byok_service.normalize_base_url("http://127.0.0.1:8000/")
+        await byok_service.normalize_base_url("http://127.0.0.1:8000/")
 
     monkeypatch.setattr(byok_service.settings, "app_env", "local")
-    assert byok_service.normalize_base_url("http://127.0.0.1:8000/") == (
+    assert await byok_service.normalize_base_url("http://127.0.0.1:8000/") == (
         "http://127.0.0.1:8000"
     )
 
 
-def test_normalize_base_url_rejects_credentials() -> None:
+@pytest.mark.asyncio
+async def test_normalize_base_url_rejects_credentials() -> None:
     with pytest.raises(ValueError, match="username or password"):
-        byok_service.normalize_base_url("https://user:pass@upstream.example")
+        await byok_service.normalize_base_url("https://user:pass@upstream.example")
+
+
+@pytest.mark.asyncio
+async def test_normalize_base_url_blocks_dns_resolution_to_private_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(byok_service.settings, "app_env", "production")
+
+    def fake_getaddrinfo(
+        host: str, *_args: Any, **_kwargs: Any
+    ) -> list[tuple[Any, ...]]:
+        assert host == "rebind.example"
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", 443),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="private supplier URLs"):
+        await byok_service.normalize_base_url("https://rebind.example/v1")
+
+
+@pytest.mark.asyncio
+async def test_normalize_base_url_allows_dns_blips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(byok_service.settings, "app_env", "production")
+
+    def fake_getaddrinfo(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
+        raise socket.gaierror("temporary dns failure")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    assert await byok_service.normalize_base_url("https://upstream.example/v1") == (
+        "https://upstream.example/v1"
+    )
 
 
 @pytest.mark.asyncio
@@ -91,7 +138,9 @@ async def test_validate_api_key_with_supplier_calls_responses_endpoint(
         return client
 
     challenge = _challenge()
-    monkeypatch.setattr(byok_service, "generate_arithmetic_challenge", lambda: challenge)
+    monkeypatch.setattr(
+        byok_service, "generate_arithmetic_challenge", lambda: challenge
+    )
     monkeypatch.setattr(byok_service.httpx, "AsyncClient", fake_client)
 
     outcome = await byok_service.validate_api_key_with_supplier(

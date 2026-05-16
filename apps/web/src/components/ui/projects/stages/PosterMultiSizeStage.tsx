@@ -153,7 +153,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
                   active
                     ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
                     : existed
-                      ? "border-[var(--border)] bg-white/[0.02] text-[var(--fg-2)]"
+                      ? "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]"
                       : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
                 )}
               >
@@ -302,12 +302,12 @@ function ReviseDialog({
       role="dialog"
       aria-modal="true"
       aria-label="返修"
-      className="fixed inset-0 z-[var(--z-modal)] flex items-end justify-center bg-black/55 backdrop-blur-sm md:items-center md:p-6"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-modal)] flex items-end justify-center bg-black/55 backdrop-blur-sm md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <div className="relative w-full max-w-md overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] md:rounded-lg md:border md:border-[var(--border)]">
+      <div className="mobile-dialog-panel relative flex w-full max-w-md flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:max-h-[var(--mobile-dialog-max-height)] max-md:rounded-t-[var(--radius-sheet)] md:rounded-lg md:border md:border-[var(--border)]">
         <header className="border-b border-[var(--border)] px-5 py-4">
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
             Revise · {render.aspect_ratio}
@@ -323,7 +323,7 @@ function ReviseDialog({
               className={cn(
                 "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                 scope === "background"
-                  ? "bg-[var(--amber-400)] text-black"
+                  ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
               )}
             >
@@ -336,7 +336,7 @@ function ReviseDialog({
               className={cn(
                 "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                 scope === "style"
-                  ? "bg-[var(--amber-400)] text-black"
+                  ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
               )}
             >
@@ -364,7 +364,7 @@ function ReviseDialog({
           </label>
         </div>
 
-        <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-5 py-3">
+        <footer className="mobile-dialog-footer flex items-center justify-end gap-2 border-t border-[var(--border)] px-5 py-3">
           <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
             取消
           </Button>

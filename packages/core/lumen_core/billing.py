@@ -171,7 +171,7 @@ async def get_wallet(
 ) -> UserWallet | None:
     stmt = select(UserWallet).where(UserWallet.user_id == user_id)
     if lock:
-        stmt = stmt.with_for_update()
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     wallet = (await db.execute(stmt)).scalar_one_or_none()
     if wallet is not None:
         return wallet
@@ -180,7 +180,7 @@ async def get_wallet(
     await _ensure_wallet(db, user_id)
     stmt = select(UserWallet).where(UserWallet.user_id == user_id)
     if lock:
-        stmt = stmt.with_for_update()
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     wallet = (await db.execute(stmt)).scalar_one_or_none()
     if wallet is None:
         wallet = UserWallet(user_id=user_id)
@@ -611,11 +611,17 @@ async def topup_redeem(
     *,
     usage_id: str,
     code_id: str,
+    idempotency_key: str | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> WalletTransaction:
     amount = int(amount_micro)
+    key = idempotency_key or f"redeem:{usage_id}"
+    existing = await _existing_tx(db, user_id, key)
+    if existing is not None:
+        return existing
     wallet = await get_wallet(db, user_id, lock=True)
     assert wallet is not None
-    existing = await _existing_tx(db, user_id, f"redeem:{usage_id}")
+    existing = await _existing_tx(db, user_id, key)
     if existing is not None:
         return existing
     wallet.balance_micro += amount
@@ -629,6 +635,6 @@ async def topup_redeem(
         amount_micro=amount,
         ref_type="redemption",
         ref_id=usage_id,
-        idempotency_key=f"redeem:{usage_id}",
-        meta={"code_id": code_id},
+        idempotency_key=key,
+        meta={**(meta or {}), "code_id": code_id},
     )

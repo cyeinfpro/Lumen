@@ -107,8 +107,8 @@ export default function AdminPage() {
     }
     if (meQuery.isError) {
       const err = meQuery.error;
-      // 401：另一 tab 登出后再切回本 tab → 走 /login（保留 next 回到 admin）
-      if (err instanceof ApiError && err.status === 401) {
+      // 401/403：另一 tab 登出或权限失效后再切回本 tab → 走 /login（保留 next 回到 admin）
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
         router.replace("/login?next=" + encodeURIComponent("/admin"));
       } else {
         router.replace("/");
@@ -152,7 +152,7 @@ export default function AdminPage() {
       <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-1)] flex items-center justify-center px-4">
         <div className="text-center space-y-3">
           <div className="mx-auto w-12 h-12 rounded-full bg-white/5 border border-[var(--border)] flex items-center justify-center">
-            <ShieldCheck className="w-5 h-5 text-neutral-400" />
+            <ShieldCheck className="w-5 h-5 text-[var(--fg-2)]" />
           </div>
           <p className="text-lg">仅管理员可访问</p>
           <Link
@@ -350,12 +350,12 @@ function AllowedEmailsPanel() {
   return (
     <section className="space-y-5">
       {/* —— 添加 / 搜索行 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl p-4 md:p-5 space-y-3">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-2xl p-4 md:p-5 space-y-3">
         <form
           onSubmit={onSubmit}
           className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center"
         >
-          <div className="flex-1 flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25 transition-colors">
+          <div className="flex-1 flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/60 border border-[var(--border)] focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25 transition-colors">
             <label htmlFor="add-allowed-email" className="sr-only">
               邮箱
             </label>
@@ -367,7 +367,7 @@ function AllowedEmailsPanel() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@示例.com"
               autoComplete="off"
-              className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-neutral-600"
+              className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-[var(--fg-2)]"
             />
           </div>
           {/* @hit-area-ok: admin desktop form submit button, desktop-only page */}
@@ -392,8 +392,8 @@ function AllowedEmailsPanel() {
           </p>
         )}
 
-        <div className="flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/40 border border-white/8 focus-within:border-white/20 transition-colors">
-          <Search className="w-3.5 h-3.5 text-neutral-500" />
+        <div className="flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/40 border border-[var(--border-subtle)] focus-within:border-[var(--border-strong)] transition-colors">
+          <Search className="w-3.5 h-3.5 text-[var(--fg-2)]" />
           <label htmlFor="search-allowed" className="sr-only">
             搜索白名单
           </label>
@@ -403,13 +403,13 @@ function AllowedEmailsPanel() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索邮箱或邀请人"
-            className="flex-1 bg-transparent text-xs focus:outline-none placeholder:text-neutral-600"
+            className="flex-1 bg-transparent text-xs focus:outline-none placeholder:text-[var(--fg-2)]"
           />
         </div>
       </div>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-2xl overflow-hidden">
         {q.isLoading ? (
           <ListSkeleton rows={4} />
         ) : q.isError ? (
@@ -431,7 +431,7 @@ function AllowedEmailsPanel() {
             {/* 桌面端表格 */}
             <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
               <table className="w-full text-sm">
-                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-white/10">
+                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
                   <tr>
                     <th className="text-left py-3 px-4 font-medium">邮箱</th>
                     <th className="text-left py-3 px-4 font-medium">邀请人</th>
@@ -449,13 +449,13 @@ function AllowedEmailsPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.03, 0.18),
                       }}
-                      className="border-t border-white/5 hover:bg-white/[0.03] transition-colors align-middle"
+                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors align-middle"
                     >
-                      <td className="py-3 px-4 text-neutral-100 break-all">{row.email}</td>
-                      <td className="py-3 px-4 text-neutral-400 break-all">
+                      <td className="py-3 px-4 text-[var(--fg-0)] break-all">{row.email}</td>
+                      <td className="py-3 px-4 text-[var(--fg-1)] break-all">
                         {row.invited_by_email ?? "—"}
                       </td>
-                      <td className="py-3 px-4 text-neutral-400 font-mono text-xs tabular-nums whitespace-nowrap">
+                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums whitespace-nowrap">
                         {formatISODate(row.created_at)}
                       </td>
                       <td className="py-3 px-4 text-right">
@@ -480,7 +480,7 @@ function AllowedEmailsPanel() {
               {filtered.map((row) => (
                 <li key={row.id} className="p-4 space-y-2">
                   <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm text-neutral-100 break-all min-w-0">
+                    <span className="text-sm text-[var(--fg-0)] break-all min-w-0">
                       {row.email}
                     </span>
                     <ConfirmInlineRemove
@@ -496,18 +496,18 @@ function AllowedEmailsPanel() {
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div>
-                      <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+                      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
                         邀请人
                       </div>
-                      <div className="text-neutral-300 break-all">
+                      <div className="text-[var(--fg-1)] break-all">
                         {row.invited_by_email ?? "—"}
                       </div>
                     </div>
                     <div>
-                      <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+                      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
                         创建
                       </div>
-                      <div className="text-neutral-300 font-mono tabular-nums">
+                      <div className="text-[var(--fg-1)] font-mono tabular-nums">
                         {formatISODate(row.created_at)}
                       </div>
                     </div>
@@ -556,12 +556,12 @@ function ConfirmInlineRemove({
       transition={{ duration: 0.14 }}
       className="inline-flex items-center gap-2 shrink-0"
     >
-      <span className="text-xs text-neutral-400 hidden sm:inline">确认?</span>
+      <span className="text-xs text-[var(--fg-1)] hidden sm:inline">确认?</span>
       <button
         type="button"
         onClick={onConfirm}
         disabled={pending}
-        className="type-caption px-3 py-1.5 min-h-[32px] rounded-[var(--radius-control)] bg-danger hover:brightness-110 text-white disabled:opacity-50 transition-colors"
+        className="type-caption px-3 py-1.5 min-h-[32px] rounded-[var(--radius-control)] border border-danger-border bg-danger-soft text-[var(--danger-fg)] hover:brightness-110 disabled:opacity-50 transition-colors"
       >
         {pending ? "移除中" : "移除"}
       </button>
@@ -569,7 +569,7 @@ function ConfirmInlineRemove({
         type="button"
         onClick={onCancel}
         disabled={pending}
-        className="text-xs px-3 py-1.5 min-h-[32px] rounded-md bg-white/5 hover:bg-white/10 text-neutral-300 disabled:opacity-50 transition-colors"
+        className="text-xs px-3 py-1.5 min-h-[32px] rounded-md bg-white/5 hover:bg-white/10 text-[var(--fg-1)] disabled:opacity-50 transition-colors"
       >
         取消
       </button>
@@ -609,8 +609,8 @@ function UsersPanel() {
     <section className="space-y-5">
       {/* —— 过滤行 —— */}
       <div className="flex flex-col md:flex-row gap-3 md:items-center">
-        <div className="flex-1 w-full md:min-w-[220px] flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/60 border border-white/10 focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25 transition-colors">
-          <Search className="w-3.5 h-3.5 text-neutral-500" />
+        <div className="flex-1 w-full md:min-w-[220px] flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/60 border border-[var(--border)] focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25 transition-colors">
+          <Search className="w-3.5 h-3.5 text-[var(--fg-2)]" />
           <label htmlFor="search-users" className="sr-only">
             搜索用户
           </label>
@@ -620,13 +620,13 @@ function UsersPanel() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索邮箱或名称"
-            className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-neutral-600"
+            className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-[var(--fg-2)]"
           />
         </div>
         <div
           role="tablist"
           aria-label="按角色过滤"
-          className="inline-flex items-center gap-0.5 p-0.5 rounded-xl bg-white/[0.04] border border-white/10 text-xs"
+          className="inline-flex items-center gap-0.5 p-0.5 rounded-xl bg-white/[0.04] border border-[var(--border)] text-xs"
         >
           {(["all", "admin", "member"] as const).map((r) => (
             <button
@@ -638,8 +638,8 @@ function UsersPanel() {
               className={
                 "px-3 h-8 sm:h-7 rounded-lg transition-colors " +
                 (roleFilter === r
-                  ? "bg-white/10 text-neutral-100"
-                  : "text-neutral-400 hover:text-neutral-100")
+                  ? "bg-white/10 text-[var(--fg-0)]"
+                  : "text-[var(--fg-1)] hover:text-[var(--fg-0)]")
               }
             >
               {r === "all" ? "全部" : r === "admin" ? "管理员" : "成员"}
@@ -649,7 +649,7 @@ function UsersPanel() {
       </div>
 
       {/* —— 表格 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-2xl overflow-hidden">
         {q.isLoading && rows.length === 0 ? (
           <ListSkeleton rows={6} />
         ) : q.isError && rows.length === 0 ? (
@@ -671,7 +671,7 @@ function UsersPanel() {
             {/* 桌面端表格 */}
             <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
               <table className="w-full text-sm">
-                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-white/10">
+                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
                   <tr>
                     <th className="text-left py-3 px-4 font-medium">邮箱</th>
                     <th className="text-left py-3 px-4 font-medium">角色</th>
@@ -692,25 +692,25 @@ function UsersPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.02, 0.2),
                       }}
-                      className="border-t border-white/5 hover:bg-white/[0.03] transition-colors"
+                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors"
                     >
-                      <td className="py-3 px-4 text-neutral-100 break-all">{u.email}</td>
+                      <td className="py-3 px-4 text-[var(--fg-0)] break-all">{u.email}</td>
                       <td className="py-3 px-4">
                         <RoleBadge role={u.role} />
                       </td>
-                      <td className="py-3 px-4 text-neutral-300 break-all">
+                      <td className="py-3 px-4 text-[var(--fg-1)] break-all">
                         {u.display_name ?? "—"}
                       </td>
-                      <td className="py-3 px-4 text-neutral-400 font-mono text-xs tabular-nums whitespace-nowrap">
+                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums whitespace-nowrap">
                         {formatISODate(u.created_at)}
                       </td>
-                      <td className="py-3 px-4 text-right text-neutral-100 font-mono tabular-nums">
+                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
                         {u.generations_count}
                       </td>
-                      <td className="py-3 px-4 text-right text-neutral-100 font-mono tabular-nums">
+                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
                         {u.completions_count}
                       </td>
-                      <td className="py-3 px-4 text-right text-neutral-100 font-mono tabular-nums">
+                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
                         {u.messages_count}
                       </td>
                     </motion.tr>
@@ -723,7 +723,7 @@ function UsersPanel() {
               {filtered.map((u) => (
                 <li key={u.id} className="p-4 space-y-2">
                   <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm text-neutral-100 break-all min-w-0 flex-1">
+                    <span className="text-sm text-[var(--fg-0)] break-all min-w-0 flex-1">
                       {u.email}
                     </span>
                     <div className="shrink-0">
@@ -731,11 +731,11 @@ function UsersPanel() {
                     </div>
                   </div>
                   {u.display_name && (
-                    <div className="text-xs text-neutral-400 break-all">
+                    <div className="text-xs text-[var(--fg-1)] break-all">
                       {u.display_name}
                     </div>
                   )}
-                  <div className="text-sm text-neutral-500 font-mono tabular-nums">
+                  <div className="text-sm text-[var(--fg-2)] font-mono tabular-nums">
                     {formatISODate(u.created_at)}
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-xs">
@@ -756,7 +756,7 @@ function UsersPanel() {
             type="button"
             onClick={() => void q.fetchNextPage()}
             disabled={q.isFetchingNextPage}
-            className="inline-flex items-center gap-1.5 h-9 px-5 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-sm disabled:opacity-50 transition-colors"
+            className="inline-flex items-center gap-1.5 h-9 px-5 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-[var(--border)] text-sm disabled:opacity-50 transition-colors"
           >
             {q.isFetchingNextPage ? (
               <>
@@ -774,11 +774,11 @@ function UsersPanel() {
 
 function MiniStat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-lg bg-white/[0.03] border border-white/5 px-2 py-1.5">
-      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+    <div className="rounded-lg bg-white/[0.03] border border-[var(--border-subtle)] px-2 py-1.5">
+      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
-      <div className="text-base text-neutral-100 font-mono tabular-nums">
+      <div className="text-base text-[var(--fg-0)] font-mono tabular-nums">
         {value}
       </div>
     </div>
@@ -822,13 +822,13 @@ export function EmptyBlock({
 }) {
   return (
     <div className="py-14 flex flex-col items-center gap-3 text-center">
-      <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center">
-        <Inbox className="w-5 h-5 text-neutral-500" />
+      <div className="w-12 h-12 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
+        <Inbox className="w-5 h-5 text-[var(--fg-2)]" />
       </div>
       <div>
-        <p className="text-sm text-neutral-200">{title}</p>
+        <p className="text-sm text-[var(--fg-0)]">{title}</p>
         {description && (
-          <p className="text-xs text-neutral-500 mt-1">{description}</p>
+          <p className="text-xs text-[var(--fg-2)] mt-1">{description}</p>
         )}
       </div>
       {cta}
@@ -857,7 +857,7 @@ export function ErrorBlock({
         <button
           type="button"
           onClick={onRetry}
-          className="h-8 px-3 rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 text-xs transition-colors"
+          className="h-8 px-3 rounded-lg bg-white/10 hover:bg-white/15 border border-[var(--border-strong)] text-xs transition-colors"
         >
           重试
         </button>
@@ -876,7 +876,7 @@ function RoleBadge({ role }: { role: "admin" | "member" }) {
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-neutral-400 border border-white/10">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-[var(--fg-1)] border border-[var(--border)]">
       <UsersIcon className="w-3 h-3" />
       成员
     </span>

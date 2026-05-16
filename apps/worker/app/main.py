@@ -17,7 +17,12 @@ from lumen_core.context_window import warm_tiktoken
 
 from .config import settings
 from .jobs.upstream_probe import probe_upstream
-from .observability import init_otel, init_sentry, start_metrics_server
+from .observability import (
+    init_otel,
+    init_sentry,
+    start_metrics_server,
+    stop_metrics_server,
+)
 from .provider_pool import probe_providers
 from .services import billing_cache
 from .tasks import auto_title as auto_title_tasks
@@ -33,24 +38,47 @@ _startup_logger = logging.getLogger(__name__)
 
 async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_startup 钩子：初始化观测层（幂等）。"""
-    init_sentry(
-        settings.sentry_dsn,
-        settings.sentry_environment or settings.app_env,
-        settings.sentry_traces_sample_rate,
-    )
-    init_otel(settings.otel_service_name, settings.otel_exporter_endpoint)
-    start_metrics_server(settings.worker_metrics_port)
-    # P1-4: 预热 tiktoken o200k_base encoding，避免首条请求承担 ~100-200 ms 加载耗时。
-    # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
-    loaded = warm_tiktoken()
-    _startup_logger.info("worker.tiktoken_warm loaded=%s", loaded)
-    await billing_cache.configure(ctx.get("redis"))
+    try:
+        init_sentry(
+            settings.sentry_dsn,
+            settings.sentry_environment or settings.app_env,
+            settings.sentry_traces_sample_rate,
+        )
+        init_otel(settings.otel_service_name, settings.otel_exporter_endpoint)
+        start_metrics_server(settings.worker_metrics_port)
+        # P1-4: 预热 tiktoken o200k_base encoding，避免首条请求承担 ~100-200 ms 加载耗时。
+        # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
+        loaded = warm_tiktoken()
+        _startup_logger.info("worker.tiktoken_warm loaded=%s", loaded)
+        await billing_cache.configure(ctx.get("redis"))
+    except Exception:
+        _startup_logger.exception("worker startup failed; cleaning partial resources")
+        try:
+            await billing_cache.shutdown()
+        except Exception:  # noqa: BLE001
+            _startup_logger.warning(
+                "billing cache cleanup after startup failure failed", exc_info=True
+            )
+        try:
+            await close_client()
+        except Exception:  # noqa: BLE001
+            _startup_logger.warning(
+                "upstream client cleanup after startup failure failed", exc_info=True
+            )
+        try:
+            stop_metrics_server()
+        except Exception:  # noqa: BLE001
+            _startup_logger.warning(
+                "metrics server cleanup after startup failure failed", exc_info=True
+            )
+        raise
 
 
 async def _on_shutdown(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_shutdown 钩子：清理 httpx 连接池。"""
     await billing_cache.shutdown()
     await close_client()
+    stop_metrics_server()
 
 
 class WorkerSettings:

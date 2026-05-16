@@ -10,6 +10,7 @@ import { useChatStore } from "@/store/useChatStore";
 
 export type RuntimeDefaults = {
   fast?: boolean;
+  upload_max_source_bytes?: number;
 };
 
 // SSR 阶段把 layout.tsx 抓到的 defaults 同步到 store（首屏不闪烁），
@@ -25,21 +26,26 @@ export function RuntimeDefaultsBootstrap({
   const isPublicAuthPath = isPublicPath(pathname);
 
   useLayoutEffect(() => {
-    useChatStore.getState().applyRuntimeDefaults({ fast: defaults.fast });
-  }, [defaults.fast]);
+    useChatStore.getState().applyRuntimeDefaults(defaults);
+  }, [defaults]);
 
   const meQuery = useQuery<AuthUser>({
     queryKey: ["me"],
     queryFn: getMe,
     retry: false,
     staleTime: 60_000,
+    refetchOnMount: false,
     enabled: !isPublicAuthPath,
   });
   const fast = meQuery.data?.runtime_defaults?.fast;
+  const uploadMaxSourceBytes =
+    meQuery.data?.runtime_defaults?.upload_max_source_bytes;
   useLayoutEffect(() => {
-    if (typeof fast !== "boolean") return;
-    useChatStore.getState().applyRuntimeDefaults({ fast });
-  }, [fast]);
+    useChatStore.getState().applyRuntimeDefaults({
+      fast,
+      upload_max_source_bytes: uploadMaxSourceBytes,
+    });
+  }, [fast, uploadMaxSourceBytes]);
 
   return null;
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -111,14 +112,42 @@ def test_install_pull_failure_falls_back_to_main_for_default_tag() -> None:
     assert "main 镜像也未发布 → 使用 --build 本地构建" in text
 
 
-def test_web_port_defaults_to_public_bind_and_install_migrates_old_env() -> None:
+def test_install_generates_all_required_compose_secrets() -> None:
+    text = INSTALL.read_text(encoding="utf-8")
+    for key in (
+        "DB_PASSWORD",
+        "REDIS_PASSWORD",
+        "SESSION_SECRET",
+        "BYOK_API_KEY_MASTER_SECRET",
+        "TELEGRAM_BOT_SHARED_SECRET",
+    ):
+        assert f'ensure_env_secret "${{file}}" {key}' in text
+
+
+def test_web_port_defaults_to_loopback_bind_and_install_preserves_explicit_override() -> (
+    None
+):
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
-    assert '"${WEB_BIND_HOST:-0.0.0.0}:3000:3000"' in compose
-    assert "WEB_BIND_HOST=0.0.0.0" in env_example
-    assert "WEB_BIND_HOST 仍是旧默认 127.0.0.1，自动改为 0.0.0.0" in install
-    assert 'env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"' in install
+    assert '"${WEB_BIND_HOST:-127.0.0.1}:3000:3000"' in compose
+    assert "WEB_BIND_HOST=127.0.0.1" in env_example
+    assert "LUMEN_WEB_BIND_HOST" in install
+    assert 'env_file_set "${shared_env}" WEB_BIND_HOST "127.0.0.1"' in install
+
+
+def test_workflow_actions_are_sha_pinned() -> None:
+    for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
+        text = workflow.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            match = re.search(r"uses:\s*[^@\s]+@([^\s#]+)", line)
+            if match:
+                assert re.fullmatch(r"[0-9a-f]{40}", match.group(1)), (
+                    f"{workflow} has unpinned action line: {line}"
+                )
+                assert "#" in line, (
+                    f"{workflow} action pin missing upstream tag comment: {line}"
+                )
 
 
 def test_api_service_mounts_release_scripts_for_admin_update() -> None:
@@ -252,7 +281,7 @@ def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
     assert "GHCR 镜像不可用，自动启用本地 build 继续" in update
 
 
-def test_update_migrates_old_web_bind_and_proxy_env() -> None:
+def test_update_preserves_web_bind_and_proxy_env() -> None:
     update = UPDATE.read_text(encoding="utf-8")
     lib = LIB.read_text(encoding="utf-8")
 
@@ -271,8 +300,10 @@ def test_update_migrates_old_web_bind_and_proxy_env() -> None:
     assert 'emit_info check reason "missing_shared_env"' in update
     assert 'emit_info check reason "target_tag_empty"' in update
     assert (
-        'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"' in update
+        'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "127.0.0.1"'
+        in update
     )
+    assert "若需直暴 3000，请在 .env 明确设为 0.0.0.0" in update
     assert (
         'emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"' in update
     )
@@ -555,19 +586,22 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     # docker compose 关键命令
     assert "lumen_compose_in" in text
     assert "--profile migrate run --rm migrate" in text
-    assert "up -d --wait --force-recreate postgres redis" in text
+    assert "up --pull missing -d --wait --force-recreate postgres redis" in text
     assert 'export LUMEN_IMAGE_TAG="${TARGET_TAG}"' in text
     assert 'tag_version="$(semver_from_image_tag "${target_tag}"' in text
     assert 'printf \'%s\\n\' "${TARGET_VERSION}" > "${NEW_RELEASE}/VERSION"' in text
-    assert 'lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"' in text
+    assert (
+        'lumen_set_env_value_in_file "${SHARED_ENV}" LUMEN_VERSION "${TARGET_VERSION}"'
+        in text
+    )
     assert "image_tag_drift_redeploy" in text
     assert 'ln -sfn current/VERSION "${ROOT}/VERSION"' in text
     assert 'stop -t "${LUMEN_UPDATE_STOP_TIMEOUT:-30}" api worker tgbot' in text
     # restart_services: api 必须最后启动（lumen-api 在跑 update.sh 自身的进度
     # SSE，先重 api 会让前端断流）。形态：for _svc in worker web api; do up -d
-    # --wait --force-recreate "${_svc}"; done
+    # --pull missing --wait --force-recreate "${_svc}"; done
     assert "for _svc in worker web api" in text
-    assert 'up -d --wait --force-recreate "${_svc}"' in text
+    assert 'up --pull missing -d --wait --force-recreate "${_svc}"' in text
     # release 切换走 atomic switch
     assert 'lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"' in text
     # 反断言：脚本注释里可以提"不再 uv sync / npm ci"，但实际可执行命令必须不包含。
@@ -642,8 +676,12 @@ def test_update_script_pulls_tgbot_image_when_telegram_configured() -> None:
         "pull_images must explicitly pull the profile=tgbot image so "
         "restart_services doesn't reuse the cached pre-update digest"
     )
-    # Failure is non-blocking — tgbot is auxiliary; api/worker/web matter more.
+    # Failure is warn-only by default so api/worker/web updates are not blocked
+    # by a non-core profile image.
     assert "tgbot pull 失败" in text
+    assert "LUMEN_UPDATE_REQUIRE_TGBOT" in code
+    assert "跳过 tgbot 更新" in text
+    assert 'tgbot_pull "warn_skipped"' not in code
 
 
 def test_update_script_skips_tag_name_noop_for_rolling_channels() -> None:
@@ -1320,6 +1358,7 @@ esac
     export LUMEN_HEALTH_COMPOSE_ATTEMPTS=1
     export LUMEN_HEALTH_COMPOSE_INTERVAL=1
     export LUMEN_RELEASE_KEEP=3
+    export LUMEN_ALLOW_BYOK_KEY_GEN=1
     export LUMEN_BACKUP_RESTORE_LOCKFILE="${{DATA_ROOT}}/backup/backup-restore.lock"
     export LUMEN_BACKUP_ROOT="${{DATA_ROOT}}/backup"
     # update.sh 的 check_storage phase 检查 LUMEN_DATA_ROOT 是否挂载；CI 临时目录
@@ -1479,6 +1518,21 @@ def test_lumen_nginx_config_contains_sse_api_and_security_defaults(
     )
     assert "add_header X-Content-Type-Options" in config
     assert "client_max_body_size 60m;" in config
+
+
+def test_nginx_example_security_headers_are_not_duplicated() -> None:
+    config = (ROOT / "deploy" / "nginx.conf.example").read_text(encoding="utf-8")
+
+    for header in (
+        "Strict-Transport-Security",
+        "X-Content-Type-Options",
+        "Referrer-Policy",
+        "X-Frame-Options",
+        "Cross-Origin-Opener-Policy",
+        "Cross-Origin-Resource-Policy",
+    ):
+        assert config.count(f"add_header {header}") == 1
+    assert "Content-Security-Policy \"default-src 'none'" not in config
 
 
 def test_sub2api_nginx_configs_have_long_timeouts_and_buffering_off(
@@ -1658,6 +1712,13 @@ def test_uninstall_script_uses_docker_compose_down() -> None:
     # set -euo pipefail + source lib.sh 必须保留
     assert "set -euo pipefail" in text
     assert "lib.sh" in text
+
+
+def test_uninstall_purge_has_lumen_data_prefix_guard() -> None:
+    text = UNINSTALL.read_text(encoding="utf-8")
+    assert "lumen_uninstall_data_path_safe_for_purge" in text
+    assert "/opt/lumen*|/var/lumen*|/var/lib/lumen*|/srv/lumen*" in text
+    assert "purge 路径规范化后脱离 Lumen 数据目录前缀" in text
 
 
 def test_lib_provides_compose_helpers_required_by_cutover() -> None:

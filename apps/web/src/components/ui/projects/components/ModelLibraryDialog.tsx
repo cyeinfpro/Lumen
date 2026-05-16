@@ -219,7 +219,7 @@ function DialogHeader({
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50 max-sm:h-11 max-sm:w-11"
+          className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50 max-sm:h-11 max-sm:w-11"
           aria-label="关闭模特库"
         >
           <X className="h-4 w-4" />

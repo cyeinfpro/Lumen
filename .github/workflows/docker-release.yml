@@ -22,6 +22,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: cyeinfpro
+  NPM_VERSION: "10.9.0"
 
 jobs:
   version-check:
@@ -29,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
       - name: Check version consistency
@@ -44,13 +45,13 @@ jobs:
     needs: version-check
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
 
@@ -64,7 +65,7 @@ jobs:
         run: bash scripts/test.sh
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '22'
 
@@ -90,10 +91,14 @@ jobs:
           db_pass="$(openssl rand -hex 32)"
           redis_pass="$(openssl rand -hex 32)"
           session_secret="$(openssl rand -hex 64)"
+          byok_secret="$(openssl rand -hex 48)"
+          telegram_secret="$(openssl rand -hex 32)"
           sed -i \
             -e "s|^DB_PASSWORD=.*|DB_PASSWORD=${db_pass}|" \
             -e "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${redis_pass}|" \
             -e "s|^SESSION_SECRET=.*|SESSION_SECRET=${session_secret}|" \
+            -e "s|^BYOK_API_KEY_MASTER_SECRET=.*|BYOK_API_KEY_MASTER_SECRET=${byok_secret}|" \
+            -e "s|^TELEGRAM_BOT_SHARED_SECRET=.*|TELEGRAM_BOT_SHARED_SECRET=${telegram_secret}|" \
             .env.ci
           sed -i "s|^LUMEN_COMPOSE_ENV_FILE=.*|LUMEN_COMPOSE_ENV_FILE=.env.ci|" .env.ci
 
@@ -153,7 +158,7 @@ jobs:
           - { name: lumen-tgbot,  file: ./Dockerfile.python,    context: .,           platforms: "linux/amd64,linux/arm64" }
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0
@@ -171,13 +176,13 @@ jobs:
           echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -185,7 +190,7 @@ jobs:
 
       - name: Extract Docker metadata (tags + OCI labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}
           tags: |
@@ -201,7 +206,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Build and push ${{ matrix.image.name }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: ${{ matrix.image.context }}
           file: ${{ matrix.image.file }}
@@ -236,7 +241,7 @@ jobs:
           - { tag: arm64, name: linux/arm64, runs_on: ubuntu-24.04-arm }
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0
@@ -254,10 +259,10 @@ jobs:
           echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -265,7 +270,7 @@ jobs:
 
       - name: Build & push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: ./apps/web
           file: ./apps/web/Dockerfile
@@ -285,6 +290,7 @@ jobs:
             LUMEN_BUILD_TIME=${{ steps.meta-vars.outputs.build_time }}
             LUMEN_REVISION=${{ github.sha }}
             LUMEN_CREATED=${{ steps.meta-vars.outputs.build_time }}
+            NPM_VERSION=${{ env.NPM_VERSION }}
 
       - name: Export digest
         run: |
@@ -293,7 +299,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digests-web-${{ matrix.platform.tag }}
           path: /tmp/digests/*
@@ -309,22 +315,22 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: /tmp/digests
           pattern: digests-web-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -332,7 +338,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web
           tags: |
@@ -363,7 +369,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Compute short sha
         id: sha
@@ -401,7 +407,7 @@ jobs:
           echo "path=release_body.md" >> "$GITHUB_OUTPUT"
 
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}

@@ -15,9 +15,9 @@ interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
 
 const VARIANTS: Record<Variant, { bg: string; text: string; border: string; dot: string }> = {
   neutral: {
-    bg: "bg-white/[0.06]",
+    bg: "bg-[var(--bg-2)]",
     text: "text-[var(--fg-0)]",
-    border: "border-white/10",
+    border: "border-[var(--border)]",
     dot: "bg-[var(--fg-1)]",
   },
   amber: {

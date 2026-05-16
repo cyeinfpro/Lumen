@@ -103,7 +103,10 @@ async function readRequestPathname(): Promise<string> {
   }
 }
 
-async function readRuntimeDefaults(): Promise<{ fast: boolean }> {
+async function readRuntimeDefaults(): Promise<{
+  fast: boolean;
+  upload_max_source_bytes?: number;
+}> {
   try {
     const cookieStore = await cookies();
     const cookie = cookieStore.toString();
@@ -118,13 +121,22 @@ async function readRuntimeDefaults(): Promise<{ fast: boolean }> {
     });
     if (!res.ok) return { fast: true };
     const data = (await res.json().catch(() => null)) as
-      | { runtime_defaults?: { fast?: unknown } }
+      | {
+          runtime_defaults?: {
+            fast?: unknown;
+            upload_max_source_bytes?: unknown;
+          };
+        }
       | null;
     const fast =
       typeof data?.runtime_defaults?.fast === "boolean"
         ? data.runtime_defaults.fast
         : true;
-    return { fast };
+    const uploadMaxSourceBytes =
+      typeof data?.runtime_defaults?.upload_max_source_bytes === "number"
+        ? data.runtime_defaults.upload_max_source_bytes
+        : undefined;
+    return { fast, upload_max_source_bytes: uploadMaxSourceBytes };
   } catch {
     return { fast: true };
   }
@@ -161,23 +173,31 @@ export default async function RootLayout({
         {isPublicShareRoute ? (
           children
         ) : (
-          <ErrorBoundary>
-            <QueryProvider>
-              <RuntimeDefaultsBootstrap defaults={runtimeDefaults} />
-              <SSEProvider>
+          <QueryProvider>
+            <RuntimeDefaultsBootstrap defaults={runtimeDefaults} />
+            <SSEProvider>
+              <ErrorBoundary>
                 <PageTransitions>{children}</PageTransitions>
-              </SSEProvider>
+              </ErrorBoundary>
+            </SSEProvider>
+            <ErrorBoundary fallback={null}>
               <Lightbox />
+            </ErrorBoundary>
+            <ErrorBoundary fallback={null}>
               <InpaintModal />
+            </ErrorBoundary>
+            <ErrorBoundary fallback={null}>
               <GlobalTaskTray />
-              <SystemUpgradeBanner />
-              <OfflineBanner />
-              <ToastViewport />
-              <MobileToastViewport />
+            </ErrorBoundary>
+            <SystemUpgradeBanner />
+            <OfflineBanner />
+            <ToastViewport />
+            <MobileToastViewport />
+            <ErrorBoundary fallback={null}>
               <CommandPalette />
-              <ServiceWorkerRegister />
-            </QueryProvider>
-          </ErrorBoundary>
+            </ErrorBoundary>
+            <ServiceWorkerRegister />
+          </QueryProvider>
         )}
       </body>
     </html>

@@ -32,16 +32,16 @@ const BASE =
 
 const VARIANTS: Record<Variant, string> = {
   primary:
-    "bg-[var(--accent)] text-black hover:bg-[var(--amber-300)]",
+    "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--amber-300)]",
   secondary:
-    "bg-white/6 text-[var(--fg-0)] hover:bg-white/12 " +
+    "bg-[var(--bg-2)] text-[var(--fg-0)] hover:bg-[var(--bg-3)] " +
     "border border-[var(--border)] hover:border-[var(--border-strong)]",
   ghost:
-    "bg-transparent text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/6",
+    "bg-transparent text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
   danger:
-    "bg-[var(--danger)] text-white hover:brightness-110",
+    "bg-[var(--danger)] text-[var(--danger-on)] hover:brightness-110",
   outline:
-    "bg-transparent text-[var(--fg-0)] border border-[var(--border)] hover:border-[var(--border-strong)] hover:bg-white/4",
+    "bg-transparent text-[var(--fg-0)] border border-[var(--border)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
 };
 
 // 移动端：显式 min-h/min-w 11 (44px) 避免 globals.css 的 coarse pointer 兜底与

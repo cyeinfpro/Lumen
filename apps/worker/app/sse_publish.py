@@ -26,7 +26,30 @@ logger = logging.getLogger(__name__)
 # 24h 粗略上限——redis 的 MAXLEN ~ 是近似修剪
 _EVENTS_STREAM_MAXLEN = 86400
 _EVENTS_DLQ_MAXLEN = 1000
+_EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
 _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
+_XADD_IDEMPOTENT_LUA = """
+local existing = redis.call('GET', KEYS[2])
+if existing then
+  return existing
+end
+local stream_id = redis.call(
+  'XADD',
+  KEYS[1],
+  'MAXLEN',
+  '~',
+  tonumber(ARGV[4]),
+  '*',
+  'event',
+  ARGV[2],
+  'data',
+  ARGV[3],
+  'event_id',
+  ARGV[1]
+)
+redis.call('SET', KEYS[2], stream_id, 'EX', tonumber(ARGV[5]))
+return stream_id
+"""
 
 # GEN-P2 ts_ms 单调：进程内 last value，wall clock 回退（NTP 校时 / 闰秒）时
 # 至少递增 1ms，保证前端按 ts_ms 排序的事件不会乱序。
@@ -52,11 +75,52 @@ async def _monotonic_ts_ms() -> int:
 
 
 async def _envelope(event_name: str, data: dict[str, Any]) -> dict[str, Any]:
+    raw_event_id = data.get("event_id")
+    event_id = raw_event_id if raw_event_id not in (None, "") else uuid.uuid4()
     return {
         "event": event_name,
         "data": data,
+        "event_id": str(event_id),
         "ts_ms": await _monotonic_ts_ms(),
     }
+
+
+async def _xadd_event_once(
+    redis: Any,
+    *,
+    stream_key: str,
+    event_name: str,
+    envelope: dict[str, Any],
+    payload_json: str,
+) -> str:
+    event_id = str(envelope["event_id"])
+    eval_fn = getattr(redis, "eval", None)
+    if eval_fn is None:
+        stream_id = await redis.xadd(
+            stream_key,
+            {
+                "event": event_name,
+                "data": payload_json,
+                "event_id": event_id,
+            },
+            maxlen=_EVENTS_STREAM_MAXLEN,
+            approximate=True,
+        )
+    else:
+        stream_id = await eval_fn(
+            _XADD_IDEMPOTENT_LUA,
+            2,
+            stream_key,
+            f"{stream_key}:dedupe:{event_id}",
+            event_id,
+            event_name,
+            payload_json,
+            str(_EVENTS_STREAM_MAXLEN),
+            str(_EVENTS_DEDUPE_TTL_SECONDS),
+        )
+    if isinstance(stream_id, bytes):
+        return stream_id.decode("ascii", errors="replace")
+    return str(stream_id)
 
 
 async def publish_event(
@@ -84,17 +148,13 @@ async def publish_event(
         try:
             # Write replay stream first so the live PubSub message can carry the
             # same id browsers later send as Last-Event-ID.
-            stream_id = await redis.xadd(
-                stream_key,
-                {
-                    "event": event_name,
-                    "data": payload_json,
-                },
-                maxlen=_EVENTS_STREAM_MAXLEN,
-                approximate=True,
+            stream_id = await _xadd_event_once(
+                redis,
+                stream_key=stream_key,
+                event_name=event_name,
+                envelope=envelope,
+                payload_json=payload_json,
             )
-            if isinstance(stream_id, bytes):
-                stream_id = stream_id.decode("ascii", errors="replace")
             break
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -118,7 +178,9 @@ async def publish_event(
             )
             redis_dlq_ok = True
         except Exception as exc:  # noqa: BLE001
-            logger.error("publish_event: DLQ write failed key=%s err=%s", stream_key, exc)
+            logger.error(
+                "publish_event: DLQ write failed key=%s err=%s", stream_key, exc
+            )
         if redis_dlq_ok:
             try:
                 await redis.ltrim(f"{stream_key}:dlq", 0, _EVENTS_DLQ_MAXLEN - 1)
@@ -208,13 +270,14 @@ async def _persist_sse_dlq(
                 duplicate = False
                 for row in rows:
                     row_payload = row.payload if isinstance(row.payload, dict) else {}
-                    row_env = row_payload.get("envelope") if isinstance(row_payload, dict) else None
+                    row_env = (
+                        row_payload.get("envelope")
+                        if isinstance(row_payload, dict)
+                        else None
+                    )
                     if not isinstance(row_env, dict):
                         continue
-                    if (
-                        sse_id is not None
-                        and row_env.get("sse_id") == sse_id
-                    ):
+                    if sse_id is not None and row_env.get("sse_id") == sse_id:
                         duplicate = True
                         break
                     if (
@@ -227,7 +290,9 @@ async def _persist_sse_dlq(
                 if duplicate:
                     logger.info(
                         "publish_event: PG DLQ dedup hit event=%s sse_id=%s ts_ms=%s",
-                        event_name, sse_id, ts_ms,
+                        event_name,
+                        sse_id,
+                        ts_ms,
                     )
                     return True
 

@@ -11,7 +11,7 @@
 //    task_id 即 generation.id / completion.id；后端会校验 ref 归属）
 //  - 注意：不要用 gen:{id} / comp:{id} / msg:{id}——后端不接收这些前缀。
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { disposeChatStoreRuntime, useChatStore } from "@/store/useChatStore";
 import { getTask, type BackendCompletion } from "@/lib/apiClient";
@@ -58,6 +58,43 @@ const USER_EVENTS = ["user.notice", "account_settings_updated"] as const;
 // pollInflightTasks(), just without live progress events until capacity frees.
 const MAX_SSE_CHANNELS_PER_CONNECTION = 62;
 const SSE_RECOVERY_POLL_MS = 10_000;
+const SSE_BROADCAST_CHANNEL = "lumen:sse-events:v1";
+const MAX_SEEN_SSE_EVENT_IDS = 2_000;
+
+type SSEBroadcastPayload = {
+  source: string;
+  name: string;
+  data: unknown;
+  eventId?: string;
+  sentAt: number;
+};
+
+function createBroadcastSourceId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function payloadEventId(data: unknown, eventId?: string): string | null {
+  if (data && typeof data === "object") {
+    const raw = (data as { event_id?: unknown; msg_id?: unknown }).event_id;
+    if (typeof raw === "string" && raw) return raw;
+    const msgId = (data as { msg_id?: unknown }).msg_id;
+    if (typeof msgId === "string" && msgId) return msgId;
+  }
+  return eventId || null;
+}
+
+function isSSEBroadcastPayload(value: unknown): value is SSEBroadcastPayload {
+  if (!value || typeof value !== "object") return false;
+  const raw = value as Partial<SSEBroadcastPayload>;
+  return (
+    typeof raw.source === "string" &&
+    typeof raw.name === "string" &&
+    typeof raw.sentAt === "number"
+  );
+}
 
 function sortedUniqueTaskKey(ids: Iterable<string>): string {
   return [...new Set(ids)].sort().join(",");
@@ -192,16 +229,37 @@ async function refreshActiveCompletionText(): Promise<void> {
 }
 
 export function SSEProvider({ children }: { children: React.ReactNode }) {
+  const [broadcastSourceId] = useState(createBroadcastSourceId);
   const userId = useChatStore((s) => s.currentUserId);
   const convId = useChatStore((s) => s.currentConvId);
   const generationTaskKey = useChatStore((s) => activeGenerationTaskKey(s.generations));
   const assistantTaskKey = useChatStore((s) => activeAssistantTaskKey(s.messages));
   const qc = useQueryClient();
   const qcRef = useRef(qc);
+  const broadcastRef = useRef<BroadcastChannel | null>(null);
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
+  const seenEventIdQueueRef = useRef<string[]>([]);
 
   useEffect(() => {
     qcRef.current = qc;
   }, [qc]);
+
+  const markEventSeen = useCallback((data: unknown, eventId?: string) => {
+    const id = payloadEventId(data, eventId);
+    if (!id) return null;
+
+    const seen = seenEventIdsRef.current;
+    if (seen.has(id)) return false;
+
+    seen.add(id);
+    const queue = seenEventIdQueueRef.current;
+    queue.push(id);
+    while (queue.length > MAX_SEEN_SSE_EVENT_IDS) {
+      const old = queue.shift();
+      if (old) seen.delete(old);
+    }
+    return true;
+  }, []);
 
   const channels = useMemo(() => {
     const out: string[] = [];
@@ -220,48 +278,101 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     return out;
   }, [userId, convId, generationTaskKey, assistantTaskKey]);
 
-  const applyStoreEvent = useCallback((name: string, data: unknown) => {
-      useChatStore.getState().applySSEEvent(name, data);
-  }, []);
+  const applySSEEventWithSideEffects = useCallback((name: string, data: unknown) => {
+    useChatStore.getState().applySSEEvent(name, data);
 
-  const handleRenamed = useCallback(
-    (data: unknown) => {
-      applyStoreEvent("conv.renamed", data);
-      qc.invalidateQueries({ queryKey: ["conversations"] });
-    },
-    [applyStoreEvent, qc],
-  );
+    if (name === "conv.renamed") {
+      qcRef.current.invalidateQueries({ queryKey: ["conversations"] });
+      return;
+    }
 
-  const handleAccountSettingsUpdated = useCallback(
-    (data: unknown) => {
-      applyStoreEvent("account_settings_updated", data);
+    if (name === "account_settings_updated") {
       // 之前用 ["me", "memory"] / ["conversation"] 全前缀失效, 任意一次后端推
       // 都会让 messages list / used-memories / context / scopes / staging /
       // timeline / settings 七八个 query 一起 refetch — 切页面或后台 worker
       // 写一条记忆都触发风暴, 是页面卡顿的主因.
       // settings 事件只代表 user-level memory 开关变了, 精确刷 settings + scopes 即可.
-      qc.invalidateQueries({ queryKey: ["me", "memory", "settings"] });
-      qc.invalidateQueries({ queryKey: ["me", "memory", "scopes"] });
-    },
-    [applyStoreEvent, qc],
-  );
+      qcRef.current.invalidateQueries({ queryKey: ["me", "memory", "settings"] });
+      qcRef.current.invalidateQueries({ queryKey: ["me", "memory", "scopes"] });
+      return;
+    }
 
-  const handleConversationMemoryUpdated = useCallback(
-    (data: unknown) => {
-      applyStoreEvent("conversation.memory.updated", data);
+    if (name === "conversation.memory.updated") {
       // 只刷这个 conv 的 used-memories,不动 messages / context / 别的 conv.
-      const convId =
+      const nextConvId =
         data && typeof data === "object" && "conversation_id" in data
           ? (data as { conversation_id?: unknown }).conversation_id
           : null;
-      if (typeof convId === "string" && convId) {
-        qc.invalidateQueries({
-          queryKey: ["conversation", convId, "used-memories"],
+      if (typeof nextConvId === "string" && nextConvId) {
+        qcRef.current.invalidateQueries({
+          queryKey: ["conversation", nextConvId, "used-memories"],
+        });
+      }
+    }
+  }, []);
+
+  const deliverSSEEvent = useCallback(
+    (
+      name: string,
+      data: unknown,
+      eventId?: string,
+      opts?: { broadcast?: boolean },
+    ) => {
+      const accepted = markEventSeen(data, eventId);
+      if (accepted === false) return;
+
+      applySSEEventWithSideEffects(name, data);
+
+      if (accepted === null) return;
+      if (opts?.broadcast === false) return;
+      try {
+        broadcastRef.current?.postMessage({
+          source: broadcastSourceId,
+          name,
+          data,
+          eventId,
+          sentAt: Date.now(),
+        } satisfies SSEBroadcastPayload);
+      } catch (err) {
+        logError(err, {
+          scope: "sse-broadcast",
+          extra: { phase: "postMessage", event: name },
         });
       }
     },
-    [applyStoreEvent, qc],
+    [applySSEEventWithSideEffects, broadcastSourceId, markEventSeen],
   );
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === "undefined") return;
+
+    const channel = new BroadcastChannel(SSE_BROADCAST_CHANNEL);
+    broadcastRef.current = channel;
+    channel.onmessage = (event: MessageEvent) => {
+      const message = event.data;
+      if (!isSSEBroadcastPayload(message)) return;
+      if (message.source === broadcastSourceId) return;
+      deliverSSEEvent(message.name, message.data, message.eventId, {
+        broadcast: false,
+      });
+    };
+
+    return () => {
+      channel.close();
+      if (broadcastRef.current === channel) {
+        broadcastRef.current = null;
+      }
+    };
+  }, [broadcastSourceId, deliverSSEEvent]);
+
+  useEffect(() => {
+    const clearSeen = () => {
+      seenEventIdsRef.current.clear();
+      seenEventIdQueueRef.current = [];
+    };
+    window.addEventListener("lumen:chat-store-reset", clearSeen);
+    return () => window.removeEventListener("lumen:chat-store-reset", clearSeen);
+  }, []);
 
   const handlers = useMemo<SSEHandlers>(() => {
     const h: SSEHandlers = {};
@@ -271,18 +382,11 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       ...CONV_EVENTS,
       ...USER_EVENTS,
     ]) {
-      h[name] = (data: unknown) => applyStoreEvent(name, data);
+      h[name] = (data: unknown, eventId: string) =>
+        deliverSSEEvent(name, data, eventId);
     }
-    h["conv.renamed"] = handleRenamed;
-    h["account_settings_updated"] = handleAccountSettingsUpdated;
-    h["conversation.memory.updated"] = handleConversationMemoryUpdated;
     return h;
-  }, [
-    applyStoreEvent,
-    handleAccountSettingsUpdated,
-    handleConversationMemoryUpdated,
-    handleRenamed,
-  ]);
+  }, [deliverSSEEvent]);
 
   const recoveryInFlightRef = useRef(false);
   const runRecovery = useCallback(

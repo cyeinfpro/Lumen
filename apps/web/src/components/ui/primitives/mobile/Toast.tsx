@@ -113,17 +113,19 @@ export function MobileToastViewport() {
               exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: DURATION.normal, ease: EASE.develop }}
               className={[
-                "pointer-events-auto inline-flex items-center gap-2",
-                "max-w-full px-4 py-2.5 rounded-full",
+                "pointer-events-auto flex items-start gap-2",
+                "w-full max-w-[min(28rem,calc(100vw-2rem))] px-3.5 py-2.5 rounded-[var(--radius-card)]",
                 "text-[13px] font-medium",
                 "backdrop-blur-xl border shadow-[var(--shadow-2)]",
                 kindClass(t.kind),
               ].join(" ")}
               role={t.kind === "danger" || t.kind === "warning" ? "alert" : "status"}
             >
-              <span>{t.message}</span>
+              <span className="min-w-0 flex-1 break-words leading-snug [overflow-wrap:anywhere]">
+                {t.message}
+              </span>
               {t.count > 1 && (
-                <span className="text-[10px] tracking-wider text-[var(--fg-2)] ml-0.5">
+                <span className="mt-0.5 shrink-0 text-[10px] tracking-wider text-[var(--fg-2)]">
                   ×{t.count}
                 </span>
               )}
@@ -132,7 +134,7 @@ export function MobileToastViewport() {
                 label="关闭通知"
                 minHit={false}
                 onPress={() => setItems((list) => list.filter((x) => x.id !== t.id))}
-                className="w-8 h-8 opacity-60 hover:opacity-100"
+                className="-mr-1 -mt-1 w-8 h-8 shrink-0 opacity-60 hover:opacity-100"
               />
             </motion.div>
           ))}

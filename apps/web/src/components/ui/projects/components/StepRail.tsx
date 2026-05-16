@@ -56,7 +56,7 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
                 className={cn(
                   "relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-all duration-[var(--dur-base)]",
                   isCurrent
-                    ? "border-[var(--amber-400)] bg-[var(--amber-400)] text-black"
+                    ? "border-[var(--amber-400)] bg-[var(--amber-400)] text-[var(--accent-on)]"
                     : done
                       ? "border-[var(--border-amber)] bg-transparent text-[var(--amber-300)]"
                       : isFailed

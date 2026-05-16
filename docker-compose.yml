@@ -3,6 +3,7 @@
 # tgbot / migrate / bootstrap live behind compose profiles so default `up -d` only starts the core stack.
 
 x-service-hardening: &service-hardening
+  init: true
   cap_drop:
     - ALL
   security_opt:
@@ -10,8 +11,8 @@ x-service-hardening: &service-hardening
   logging:
     driver: "json-file"
     options:
-      max-size: "10m"
-      max-file: "3"
+      max-size: "50m"
+      max-file: "5"
 
 x-app-build: &app-build
   context: .
@@ -27,6 +28,8 @@ x-redis-url-env: &redis-url-env
 x-app-runtime-env: &app-runtime-env
   <<: *redis-url-env
   DATABASE_URL: "${DATABASE_URL:-postgresql+asyncpg://${DB_USER:?Set DB_USER in .env}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/${DB_NAME:?Set DB_NAME in .env}}"
+  SESSION_SECRET: "${SESSION_SECRET:?Set SESSION_SECRET in .env}"
+  BYOK_API_KEY_MASTER_SECRET: "${BYOK_API_KEY_MASTER_SECRET:?Set BYOK_API_KEY_MASTER_SECRET in .env}"
 
 services:
   postgres:
@@ -37,7 +40,7 @@ services:
     # update.sh 升级路径会自动 chown 数据目录 (70 → 999).
     image: pgvector/pgvector:pg16
     container_name: lumen-pg
-    user: "999:999"
+    user: "${LUMEN_POSTGRES_UID:-999}:${LUMEN_POSTGRES_GID:-999}"
     restart: unless-stopped
     shm_size: "256m"
     stop_grace_period: 60s
@@ -63,7 +66,7 @@ services:
     <<: *service-hardening
     image: redis:7.4-alpine
     container_name: lumen-redis
-    user: "999:999"
+    user: "${LUMEN_REDIS_UID:-999}:${LUMEN_REDIS_GID:-999}"
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
@@ -218,6 +221,7 @@ services:
       args:
         LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
         LUMEN_BACKEND_URL: "http://api:8000"
+        NPM_VERSION: "${NPM_VERSION:-10.9.0}"
     restart: unless-stopped
     stop_grace_period: 30s
     cpus: "1.0"
@@ -230,11 +234,13 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "${WEB_BIND_HOST:-0.0.0.0}:3000:3000"
+      - "${WEB_BIND_HOST:-127.0.0.1}:3000:3000"
     networks:
       - lumen_backend
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/healthz >/dev/null || exit 1"]
+      test:
+        - "CMD-SHELL"
+        - "node -e \"require('http').get('http://127.0.0.1:3000/api/healthz', (r) => { process.exit(r.statusCode >= 200 && r.statusCode < 400 ? 0 : 1); }).on('error', () => process.exit(1)).setTimeout(5000, function () { this.destroy(); process.exit(1); })\""
       interval: 10s
       timeout: 5s
       retries: 6
@@ -246,7 +252,12 @@ services:
     container_name: lumen-tgbot
     build: *app-build
     working_dir: /app/apps/tgbot
-    command: ["python", "-m", "app.main"]
+    command:
+      - "/bin/sh"
+      - "-ec"
+      - |
+        : "$${TELEGRAM_BOT_SHARED_SECRET:?Set TELEGRAM_BOT_SHARED_SECRET in .env when enabling tgbot}"
+        exec python -m app.main
     # 与 api/worker 一致：先 env_file 读 .env，environment 块再覆盖关键变量。
     # 没 env_file 会让 tgbot 漏掉 admin / DB / observability 等共用配置。
     env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
@@ -285,7 +296,6 @@ services:
     environment:
       <<: *app-runtime-env
       APP_ENV: "${APP_ENV:-dev}"
-      SESSION_SECRET: "${SESSION_SECRET:-}"
       IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
     restart: "no"
@@ -301,11 +311,16 @@ services:
     image: ${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}/lumen-api:${LUMEN_IMAGE_TAG:-latest}
     build: *app-build
     working_dir: /app/apps/api
-    command: ["python", "-m", "app.scripts.bootstrap"]
+    command:
+      - "/bin/sh"
+      - "-ec"
+      - |
+        : "$${LUMEN_ADMIN_EMAIL:?Set LUMEN_ADMIN_EMAIL when running bootstrap profile}"
+        : "$${LUMEN_ADMIN_PASSWORD:?Set LUMEN_ADMIN_PASSWORD when running bootstrap profile}"
+        exec python -m app.scripts.bootstrap
     environment:
       <<: *app-runtime-env
       APP_ENV: "${APP_ENV:-dev}"
-      SESSION_SECRET: "${SESSION_SECRET:-}"
       IMAGE_PROXY_SECRET: "${IMAGE_PROXY_SECRET:-}"
       TELEGRAM_BOT_SHARED_SECRET: "${TELEGRAM_BOT_SHARED_SECRET:-}"
       LUMEN_ADMIN_EMAIL: "${LUMEN_ADMIN_EMAIL:-}"

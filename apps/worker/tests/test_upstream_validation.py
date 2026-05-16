@@ -86,10 +86,13 @@ async def test_validate_provider_base_url_rejects_unsupported_scheme() -> None:
 async def test_provider_pool_validation_does_not_import_upstream() -> None:
     from app import provider_pool
 
-    sys.modules.pop("app.upstream", None)
-
-    assert (
-        await provider_pool._validate_provider_base_url("https://8.8.8.8/v1/")
-        == "https://8.8.8.8/v1"
-    )
-    assert "app.upstream" not in sys.modules
+    previous = sys.modules.pop("app.upstream", None)
+    try:
+        assert (
+            await provider_pool._validate_provider_base_url("https://8.8.8.8/v1/")
+            == "https://8.8.8.8/v1"
+        )
+        assert "app.upstream" not in sys.modules
+    finally:
+        if previous is not None:
+            sys.modules["app.upstream"] = previous

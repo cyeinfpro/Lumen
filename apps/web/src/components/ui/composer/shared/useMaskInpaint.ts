@@ -7,7 +7,7 @@
 //
 // 返回值由 Desktop / MobileComposerPill 共享：UI 渲染按钮 + 提示，调用 open / cancel / submit。
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { uploadImage as apiUploadImage } from "@/lib/apiClient";
@@ -15,6 +15,10 @@ import { logError } from "@/lib/logger";
 import { useChatStore } from "@/store/useChatStore";
 
 import type { MaskExport } from "../MaskCanvas";
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
 
 export type InpaintDisableReason =
   | null
@@ -31,6 +35,14 @@ export function useMaskInpaint() {
 
   const [open, setOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const uploadControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      uploadControllerRef.current?.abort();
+      uploadControllerRef.current = null;
+    };
+  }, []);
 
   const disableReason: InpaintDisableReason = useMemo(() => {
     if (mode !== "image") return "chat-mode";
@@ -77,11 +89,14 @@ export function useMaskInpaint() {
         setOpen(false);
         return;
       }
+      uploadControllerRef.current?.abort();
+      const ctl = new AbortController();
+      uploadControllerRef.current = ctl;
       setSubmitting(true);
       try {
         // 把 mask 当成普通图片上传（mask 是 PNG，service 已支持）
         const file = new File([m.blob], "mask.png", { type: "image/png" });
-        const uploaded = await apiUploadImage(file);
+        const uploaded = await apiUploadImage(file, { signal: ctl.signal });
         setMask({
           image_id: uploaded.id,
           preview_data_url: m.preview_data_url,
@@ -90,10 +105,12 @@ export function useMaskInpaint() {
         pushMobileToast("已设置局部修改 mask", "success");
         setOpen(false);
       } catch (err) {
+        if (isAbortError(err)) return;
         logError(err, { scope: "composer", code: "mask_upload_failed" });
         const msg = err instanceof Error ? err.message : "mask 上传失败";
         pushMobileToast(msg, "danger");
       } finally {
+        if (uploadControllerRef.current === ctl) uploadControllerRef.current = null;
         setSubmitting(false);
       }
     },

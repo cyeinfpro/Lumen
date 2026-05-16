@@ -79,7 +79,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
@@ -124,6 +124,13 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     # requires alembic migration: create index ix_users_alive on users(deleted_at)
     __table_args__ = (
         Index("ix_users_alive", "deleted_at"),
+        Index(
+            "uq_users_email_active",
+            "email",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
         Index("ix_users_account_mode", "account_mode"),
         CheckConstraint(
             "account_mode IN ('wallet', 'byok')",

@@ -25,6 +25,7 @@ import {
   signupByok,
   verifyApiKey,
 } from "@/lib/apiClient";
+import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 
 // review §9: 8+ BYOK 错误码 → 中文文案。signup 与绑定页共用。
 const BYOK_ERROR_TEXT: Record<string, string> = {
@@ -107,7 +108,8 @@ export default function SignupPage() {
       setError("API Key 未验证");
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    const trimmedEmail = normalizeEmailInput(email);
+    if (!isValidEmailInput(trimmedEmail)) {
       setError("邮箱格式不正确");
       return;
     }
@@ -121,7 +123,7 @@ export default function SignupPage() {
     }
     setSubmitting(true);
     try {
-      await signupByok(email.trim(), password, verificationToken);
+      await signupByok(trimmedEmail, password, verificationToken);
       router.push("/");
     } catch (err) {
       // step 2 token 过期 / 已用 / 不存在 → 清空 token 让用户回 step 1 重新验证
@@ -164,6 +166,7 @@ export default function SignupPage() {
             {suppliersQ.isError && (
               <div
                 role="alert"
+                aria-live="assertive"
                 className="flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
               >
                 <span>供应商列表加载失败</span>
@@ -171,7 +174,7 @@ export default function SignupPage() {
                   type="button"
                   onClick={() => void suppliersQ.refetch()}
                   disabled={suppliersQ.isFetching}
-                  className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-neutral-200 hover:bg-white/10 disabled:opacity-50"
+                  className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-xs text-[var(--fg-1)] hover:bg-[var(--bg-2)] disabled:opacity-50"
                 >
                   {suppliersQ.isFetching ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -220,7 +223,7 @@ export default function SignupPage() {
               type="button"
               onClick={onVerify}
               disabled={disabled || verifying || Boolean(verificationToken)}
-              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.12] border border-[var(--border)] text-sm disabled:opacity-50"
+              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm disabled:opacity-50"
             >
               {verifying ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -275,7 +278,11 @@ export default function SignupPage() {
             />
 
             {error && (
-              <div role="alert" className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
+              <div
+                role="alert"
+                aria-live="assertive"
+                className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
+              >
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>{error}</span>
               </div>
@@ -284,7 +291,7 @@ export default function SignupPage() {
             <button
               type="submit"
               disabled={submitting || !verificationToken}
-              className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] text-black text-sm font-medium disabled:opacity-50"
+              className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "创建账号"}
               {!submitting && <ArrowRight className="w-4 h-4" />}

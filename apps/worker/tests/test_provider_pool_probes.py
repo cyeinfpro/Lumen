@@ -476,6 +476,7 @@ async def test_probe_all_limits_parallelism(monkeypatch: pytest.MonkeyPatch) -> 
             active -= 1
 
     monkeypatch.setattr(provider_pool_module, "_PROBE_MAX_CONCURRENCY", 2)
+    monkeypatch.setitem(pool.probe_all.__globals__, "_PROBE_MAX_CONCURRENCY", 2)
     monkeypatch.setattr(pool, "_probe_one", fake_probe)
 
     results = await pool.probe_all()
@@ -506,6 +507,9 @@ async def test_probe_image_all_limits_parallelism(
             active -= 1
 
     monkeypatch.setattr(provider_pool_module, "_PROBE_MAX_CONCURRENCY", 2)
+    monkeypatch.setitem(
+        pool.probe_image_all.__globals__, "_PROBE_MAX_CONCURRENCY", 2
+    )
     monkeypatch.setattr(pool, "_probe_image_one", fake_probe)
 
     results = await pool.probe_image_all()

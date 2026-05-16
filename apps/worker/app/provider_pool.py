@@ -82,16 +82,18 @@ class ProviderConfig:
     proxy: ProviderProxyDefinition | None = field(
         default=None, repr=False, compare=False
     )
-    image_rate_limit: str | None = None    # "5/min" / "50/h" / "200/d"
+    image_rate_limit: str | None = None  # "5/min" / "50/h" / "200/d"
     image_daily_quota: int | None = None
     image_jobs_enabled: bool = False
-    image_jobs_endpoint: str = "auto"      # "auto" | "generations" | "responses"
+    image_jobs_endpoint: str = "auto"  # "auto" | "generations" | "responses"
     # 锁定模式：当 endpoint != auto 且 lock=True，本号只服务对应 endpoint，
     # 选号阶段过滤掉对端请求，failover 也不再回退到对端。
     image_jobs_endpoint_lock: bool = False
-    image_jobs_base_url: str = ""          # empty → fall back to global image.job_base_url
-    image_edit_input_transport: str = "url"  # image-job /v1/images/edits: "url" | "file"
-    image_concurrency: int = 1             # 每 provider 同时进行的图片任务上限
+    image_jobs_base_url: str = ""  # empty → fall back to global image.job_base_url
+    image_edit_input_transport: str = (
+        "url"  # image-job /v1/images/edits: "url" | "file"
+    )
+    image_concurrency: int = 1  # 每 provider 同时进行的图片任务上限
     # Capability tri-state（详见 lumen_core.providers.ProviderDefinition 注释）
     responses_supported: bool | None = None
     image_generations_supported: bool | None = None
@@ -114,6 +116,7 @@ class EndpointStat:
     has behaved on a specific upstream endpoint — generations vs responses —
     so auto mode can prefer the historically-faster path before falling back.
     """
+
     last_success_at: float | None = None
     last_failure_at: float | None = None
     consecutive_failures: int = 0
@@ -193,7 +196,6 @@ async def _validate_provider_base_url(raw_base: str) -> str:
 # ProviderPool
 # ---------------------------------------------------------------------------
 class ProviderPool:
-
     def __init__(self) -> None:
         self._providers: list[ProviderConfig] = []
         self._proxies: dict[str, ProviderProxyDefinition] = {}
@@ -231,8 +233,7 @@ class ProviderPool:
         provider_defs, proxy_defs, errors = build_effective_provider_config(
             raw_providers=raw,
             legacy_base_url=(
-                os.environ.get("UPSTREAM_BASE_URL")
-                or DEFAULT_LEGACY_PROVIDER_BASE_URL
+                os.environ.get("UPSTREAM_BASE_URL") or DEFAULT_LEGACY_PROVIDER_BASE_URL
             ),
             legacy_api_key=os.environ.get("UPSTREAM_API_KEY"),
         )
@@ -261,9 +262,7 @@ class ProviderPool:
                 image_generations_supported=getattr(
                     p, "image_generations_supported", None
                 ),
-                image_responses_supported=getattr(
-                    p, "image_responses_supported", None
-                ),
+                image_responses_supported=getattr(p, "image_responses_supported", None),
             )
             for p in provider_defs
         ], {p.name: p for p in proxy_defs}
@@ -336,9 +335,7 @@ class ProviderPool:
             for name in new_names - old_names:
                 self._health[name] = ProviderHealth()
 
-            changed = (
-                [p.name for p in self._providers] != [p.name for p in validated]
-            )
+            changed = [p.name for p in self._providers] != [p.name for p in validated]
             self._providers = validated
             self._proxies = new_proxies
             self._config_loaded_at = now
@@ -377,9 +374,7 @@ class ProviderPool:
                 continue
             # capability gate（image-stability-hardening §P2）：capability=False 显式排除；
             # capability=None 保留现有行为（按健康度 / failover 学习）。
-            if not provider_supports_route(
-                p, route=route, endpoint_kind=endpoint_kind
-            ):
+            if not provider_supports_route(p, route=route, endpoint_kind=endpoint_kind):
                 continue
             by_priority.setdefault(p.priority, []).append(p)
         if not by_priority:
@@ -610,9 +605,7 @@ class ProviderPool:
         """
         from .upstream import UpstreamError
 
-        enabled = [
-            p for p in self._providers if p.enabled and purpose in p.purposes
-        ]
+        enabled = [p for p in self._providers if p.enabled and purpose in p.purposes]
         if not enabled:
             raise UpstreamError(
                 "no upstream providers configured or all disabled",
@@ -634,9 +627,7 @@ class ProviderPool:
         avoided: set[str] = set()
         if task_id and redis is not None:
             try:
-                raw = await redis.smembers(
-                    f"generation:image_queue:avoid:{task_id}"
-                )
+                raw = await redis.smembers(f"generation:image_queue:avoid:{task_id}")
                 for item in raw or []:
                     if isinstance(item, bytes):
                         try:
@@ -697,22 +688,26 @@ class ProviderPool:
                     now=wall_now,
                 )
             except Exception as exc:  # noqa: BLE001
-                # limiter 异常按"放开"处理（fail-open）：quota 是软约束，不应让
-                # Redis 短暂抖动阻塞 image 主路径；记 warning 让运维看到。
+                # limiter 异常 fail-closed 短冷却：配额系统不可用时临时跳过该账号，
+                # 避免绕过限流继续打爆同一个 upstream account。
                 logger.warning(
                     "account_limiter.check_quota raised provider=%s err=%s — "
-                    "treating as allowed",
+                    "treating as temporarily unavailable",
                     p.name,
                     exc,
                 )
-                allowed, retry_after = True, 0.0
+                allowed = False
+                retry_after = float(account_limiter.REDIS_ERROR_RETRY_AFTER_S)
             if not allowed:
                 # 缓存到 image_rate_limited_until，避免下次选号再查 Redis
                 h.image_rate_limited_until = now + max(1.0, retry_after)
-                skipped.append((p.name, f"quota_exhausted retry_after={retry_after:.0f}s"))
+                skipped.append(
+                    (p.name, f"quota_exhausted retry_after={retry_after:.0f}s")
+                )
                 continue
             ek_key = endpoint_kind or ""
-            inflight = h.image_inflight.get(ek_key, 0)
+            with self._stats_lock:
+                inflight = h.image_inflight.get(ek_key, 0)
             # last_used_at 严格按 endpoint_kind 维度查；不 fallback 到全局
             # image_last_used_at——一个号在 responses lane 成功后，那次成功不应
             # 推后它在 generations lane 的排序，否则 generations 流量会长期堆在
@@ -720,9 +715,7 @@ class ProviderPool:
             # None（从未在该 endpoint 上成功）→ -inf 排最前；不能用 `or 0.0`，
             # 因为 monotonic() 可能 < 0 之外的任意正小值，会把"从未用过"误排到中间。
             last_used = h.image_last_used_at_per_ek.get(ek_key)
-            last_used_key = (
-                last_used if last_used is not None else float("-inf")
-            )
+            last_used_key = last_used if last_used is not None else float("-inf")
             target_bucket = candidates
             if requires_mask and mask_transport_required:
                 if p.image_edit_input_transport == "file":
@@ -765,7 +758,9 @@ class ProviderPool:
                     requires_mask=requires_mask,
                     mask_transport_required=mask_transport_required,
                 )
-            detail = ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
+            detail = (
+                ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
+            )
             raise UpstreamError(
                 f"all accounts unavailable for image: {detail}",
                 error_code=EC.ALL_ACCOUNTS_FAILED.value,
@@ -856,9 +851,10 @@ class ProviderPool:
         endpoint_kind=None 时落到 "" 这个聚合 key——dual_race reserve 等不区分
         endpoint 的路径会用到。caller 必须保证最终调一次 release_image_inflight。
         """
-        h = self._health.setdefault(provider_name, ProviderHealth())
         k = endpoint_kind or ""
-        h.image_inflight[k] = h.image_inflight.get(k, 0) + 1
+        with self._stats_lock:
+            h = self._health.setdefault(provider_name, ProviderHealth())
+            h.image_inflight[k] = h.image_inflight.get(k, 0) + 1
 
     def release_image_inflight(
         self, provider_name: str, endpoint_kind: str | None
@@ -866,15 +862,16 @@ class ProviderPool:
         """配 acquire_image_inflight 用，无论请求成功 / 失败 / cancel 都要在 finally
         段里调一次。下界保护：减到 0 就 pop key，不允许出现负数。
         """
-        h = self._health.get(provider_name)
-        if h is None:
-            return
         k = endpoint_kind or ""
-        cur = h.image_inflight.get(k, 0)
-        if cur <= 1:
-            h.image_inflight.pop(k, None)
-        else:
-            h.image_inflight[k] = cur - 1
+        with self._stats_lock:
+            h = self._health.get(provider_name)
+            if h is None:
+                return
+            cur = h.image_inflight.get(k, 0)
+            if cur <= 1:
+                h.image_inflight.pop(k, None)
+            else:
+                h.image_inflight[k] = cur - 1
 
     def report_image_success(
         self, provider_name: str, *, endpoint_kind: str | None = None
@@ -907,9 +904,7 @@ class ProviderPool:
         except Exception:  # noqa: BLE001
             pass
         if was_image_open:
-            logger.info(
-                "image_circuit_closed: provider=%s recovered", provider_name
-            )
+            logger.info("image_circuit_closed: provider=%s recovered", provider_name)
 
     def report_image_failure(self, provider_name: str) -> None:
         """失败一次 image_generation（普通 retriable，比如 SSE response.failed / 5xx）。
@@ -959,7 +954,9 @@ class ProviderPool:
         if latency_ms is not None and latency_ms > 0:
             stat.success_count += 1
             # Welford running mean — O(1), no list of samples to bound.
-            stat.success_mean_ms += (latency_ms - stat.success_mean_ms) / stat.success_count
+            stat.success_mean_ms += (
+                latency_ms - stat.success_mean_ms
+            ) / stat.success_count
 
     def record_endpoint_failure(self, provider_name: str, endpoint: str) -> None:
         stat = self._endpoint_stat(provider_name, endpoint)
@@ -1018,8 +1015,12 @@ class ProviderPool:
         # generations/edits than responses (responses' input_image base64 path
         # is heavier); push responses lower for edit unless it's clearly better.
         if action == "edit" and ranked == ["responses", "generations"]:
-            stat_g = (h.endpoint_stats.get("generations") if h else None) or EndpointStat()
-            stat_r = (h.endpoint_stats.get("responses") if h else None) or EndpointStat()
+            stat_g = (
+                h.endpoint_stats.get("generations") if h else None
+            ) or EndpointStat()
+            stat_r = (
+                h.endpoint_stats.get("responses") if h else None
+            ) or EndpointStat()
             if stat_g.consecutive_failures <= stat_r.consecutive_failures:
                 ranked = ["generations", "responses"]
         return ranked
@@ -1108,7 +1109,7 @@ class ProviderPool:
             for line in raw_event.splitlines():
                 line = line.strip()
                 if line.startswith("data:"):
-                    data_lines.append(line[len("data:"):].strip())
+                    data_lines.append(line[len("data:") :].strip())
             if not data_lines:
                 continue
             data = "\n".join(data_lines)
@@ -1271,9 +1272,7 @@ class ProviderPool:
 
             if healthy:
                 self.report_success(provider.name, is_probe=True)
-                logger.debug(
-                    "probe_result: provider=%s status=ok", provider.name
-                )
+                logger.debug("probe_result: provider=%s status=ok", provider.name)
             else:
                 self.report_failure(provider.name, is_probe=True)
 
@@ -1367,9 +1366,7 @@ class ProviderPool:
             outcome[provider.name] = healthy
             if healthy:
                 self.report_image_probe_success(provider.name)
-                logger.debug(
-                    "image_probe_result: provider=%s status=ok", provider.name
-                )
+                logger.debug("image_probe_result: provider=%s status=ok", provider.name)
             else:
                 self.report_image_probe_failure(provider.name)
         return outcome
@@ -1458,9 +1455,7 @@ class ProviderPool:
                 _, window_s = parsed
                 ts_key = f"lumen:acct:{name}:image:ts"
                 try:
-                    await redis.zremrangebyscore(
-                        ts_key, 0, wall_now - window_s
-                    )
+                    await redis.zremrangebyscore(ts_key, 0, wall_now - window_s)
                     used_raw = await redis.zcard(ts_key)
                     used_window = int(used_raw or 0)
                     account_image_quota_used.labels(
@@ -1549,9 +1544,7 @@ class ProviderPool:
                 and now < h.image_rate_limited_until
             ):
                 image_state = "rate_limited"
-            elif (
-                h.image_cooldown_until is not None and now < h.image_cooldown_until
-            ):
+            elif h.image_cooldown_until is not None and now < h.image_cooldown_until:
                 image_state = "cooldown"
             with self._stats_lock:
                 total_requests = h.total_requests
@@ -1690,9 +1683,7 @@ async def probe_providers(ctx: dict[str, Any]) -> int | None:
                     summary,
                 )
             else:
-                logger.info(
-                    "probe_image_providers: %d/%d healthy", i_healthy, i_total
-                )
+                logger.info("probe_image_providers: %d/%d healthy", i_healthy, i_total)
 
     return healthy
 

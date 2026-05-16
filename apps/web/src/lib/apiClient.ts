@@ -60,6 +60,7 @@ import type {
   WalletTransactionListOut,
   WalletTransactionOut,
 } from "./types";
+import { uuid } from "./utils";
 export { API_BASE, ApiError, apiFetch, apiFetchNoContent } from "./api/http";
 export type { NoContent } from "./api/http";
 
@@ -74,6 +75,7 @@ export interface AuthUser {
   default_system_prompt_id?: string | null;
   runtime_defaults?: {
     fast?: boolean;
+    upload_max_source_bytes?: number;
   };
 }
 
@@ -1373,11 +1375,19 @@ export interface UploadedImage {
   metadata_jsonb?: Record<string, unknown> | null;
 }
 
-export function uploadImage(file: File): Promise<UploadedImage> {
+export interface UploadImageOptions {
+  signal?: AbortSignal;
+}
+
+export function uploadImage(
+  file: File,
+  opts: UploadImageOptions = {},
+): Promise<UploadedImage> {
   const fd = new FormData();
   fd.append("file", file);
   return apiFetch<UploadedImage>("/images/upload", {
     method: "POST",
+    signal: opts.signal,
     body: fd,
   });
 }
@@ -2244,6 +2254,7 @@ export function listMyWalletTransactions(
 export function redeemCode(code: string): Promise<RedemptionOut> {
   return apiFetch<RedemptionOut>("/me/redemptions", {
     method: "POST",
+    headers: { "Idempotency-Key": uuid() },
     body: JSON.stringify({ code }),
   });
 }

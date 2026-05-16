@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { ApiError, listPublicApiSuppliers, login } from "@/lib/apiClient";
+import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 import { errorToText } from "@/lib/errors";
 
 export default function LoginPage() {
@@ -58,12 +59,12 @@ function LoginInner() {
     e.preventDefault();
     setError(null);
 
-    const trimmedEmail = email.trim();
+    const trimmedEmail = normalizeEmailInput(email);
     if (!trimmedEmail) {
       setError("邮箱未填");
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+    if (!isValidEmailInput(trimmedEmail)) {
       setError("邮箱格式不正确");
       return;
     }
@@ -162,7 +163,7 @@ function LoginInner() {
                       type="button"
                       onClick={() => setShowPwd((v) => !v)}
                       aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 flex items-center justify-center transition-colors"
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
                     >
                       {showPwd ? (
                         <EyeOff className="w-4 h-4" />
@@ -175,7 +176,9 @@ function LoginInner() {
                     <Link
                       href={
                         email.trim()
-                          ? `/reset-password?email=${encodeURIComponent(email.trim())}`
+                          ? `/reset-password?email=${encodeURIComponent(
+                              normalizeEmailInput(email),
+                            )}`
                           : "/reset-password"
                       }
                       className="text-xs text-[var(--color-lumen-amber)] hover:underline"
@@ -201,7 +204,7 @@ function LoginInner() {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-black text-sm font-medium disabled:opacity-50 transition-all shadow-[0_8px_24px_-12px_var(--color-lumen-amber)]"
+                  className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[0_8px_24px_-12px_var(--color-lumen-amber)]"
                 >
                   {submitting ? (
                     <>
@@ -304,7 +307,7 @@ function Field({
 
 function BrandPanel() {
   return (
-    <aside className="hidden md:flex relative overflow-hidden bg-[var(--bg-1)]/30 border-r border-white/8">
+    <aside className="hidden md:flex relative overflow-hidden bg-[var(--bg-1)]/30 border-r border-[var(--border)]">
       {/* 背景装饰 */}
       <div className="absolute inset-0 pointer-events-none">
         <div className="absolute -top-20 -left-20 w-80 h-80 rounded-full bg-[var(--color-lumen-amber)]/10 blur-3xl" />

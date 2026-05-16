@@ -74,9 +74,10 @@ async def test_select_image_jobs_no_longer_filters_marked_providers() -> None:
 
     assert {p.name for p in image_providers} == {"plain", "async-a", "async-b"}
     assert {p.name for p in async_providers} == {"plain", "async-a", "async-b"}
-    assert {
-        p.name for p in async_providers if p.image_jobs_enabled
-    } == {"async-a", "async-b"}
+    assert {p.name for p in async_providers if p.image_jobs_enabled} == {
+        "async-a",
+        "async-b",
+    }
 
 
 @pytest.mark.asyncio
@@ -178,9 +179,7 @@ async def test_report_image_rate_limited_with_explicit_retry_after() -> None:
     pool.report_image_rate_limited("acc1", retry_after_s=42.0)
     h = pool._health["acc1"]
     assert h.image_rate_limited_until is not None
-    assert h.image_rate_limited_until - time.monotonic() == pytest.approx(
-        42.0, abs=1.0
-    )
+    assert h.image_rate_limited_until - time.monotonic() == pytest.approx(42.0, abs=1.0)
     # rate_limited 不计入 image_consecutive_failures（"号没额度" 不是 "号坏了"）
     assert h.image_consecutive_failures == 0
 
@@ -192,9 +191,7 @@ async def test_report_image_rate_limited_default_when_no_retry_after() -> None:
     h = pool._health["acc1"]
     # 默认 60s
     assert h.image_rate_limited_until is not None
-    assert h.image_rate_limited_until - time.monotonic() == pytest.approx(
-        60.0, abs=2.0
-    )
+    assert h.image_rate_limited_until - time.monotonic() == pytest.approx(60.0, abs=2.0)
 
 
 @pytest.mark.asyncio
@@ -270,11 +267,11 @@ async def test_select_image_skips_when_redis_quota_exhausted(
 
 
 @pytest.mark.asyncio
-async def test_select_image_fail_open_when_limiter_raises(
+async def test_select_image_fail_closed_when_limiter_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """check_quota 抛意外错时按"放开"处理：quota 是软约束，不应阻塞 image 主路径。"""
     from app import account_limiter
+    from app.upstream import UpstreamError
 
     pool = _make_pool(_cfg("acc1", rate_limit="5/min"))
     pool.attach_redis(object())
@@ -284,9 +281,12 @@ async def test_select_image_fail_open_when_limiter_raises(
 
     monkeypatch.setattr(account_limiter, "check_quota", boom_check_quota)
 
-    providers = await pool.select(route="image")
-    # 应该仍能返回 acc1（fail-open）
-    assert [p.name for p in providers] == ["acc1"]
+    with pytest.raises(UpstreamError) as exc_info:
+        await pool.select(route="image")
+
+    assert exc_info.value.error_code == "all_accounts_failed"
+    h_acc1 = pool._health["acc1"]
+    assert h_acc1.image_rate_limited_until is not None
 
 
 # --- get_status 暴露 image 状态 ---------------------------------------------
@@ -530,9 +530,7 @@ async def test_report_image_calls_increments_counter() -> None:
 async def test_flush_image_metrics_sets_state_gauges() -> None:
     from app.observability import account_image_state
 
-    pool = _make_pool(
-        _cfg("acc_state_x"), _cfg("acc_state_y"), _cfg("acc_state_z")
-    )
+    pool = _make_pool(_cfg("acc_state_x"), _cfg("acc_state_y"), _cfg("acc_state_z"))
     # acc_state_x: closed
     # acc_state_y: cooldown
     # acc_state_z: rate_limited
@@ -543,23 +541,36 @@ async def test_flush_image_metrics_sets_state_gauges() -> None:
     await pool.flush_image_metrics()
 
     # acc_state_x 应当 closed=1，其余为 0
-    assert _gauge_value(
-        account_image_state, {"account": "acc_state_x", "state": "closed"}
-    ) == 1.0
-    assert _gauge_value(
-        account_image_state, {"account": "acc_state_x", "state": "cooldown"}
-    ) == 0.0
-    assert _gauge_value(
-        account_image_state, {"account": "acc_state_x", "state": "rate_limited"}
-    ) == 0.0
+    assert (
+        _gauge_value(account_image_state, {"account": "acc_state_x", "state": "closed"})
+        == 1.0
+    )
+    assert (
+        _gauge_value(
+            account_image_state, {"account": "acc_state_x", "state": "cooldown"}
+        )
+        == 0.0
+    )
+    assert (
+        _gauge_value(
+            account_image_state, {"account": "acc_state_x", "state": "rate_limited"}
+        )
+        == 0.0
+    )
     # acc_state_y cooldown=1
-    assert _gauge_value(
-        account_image_state, {"account": "acc_state_y", "state": "cooldown"}
-    ) == 1.0
+    assert (
+        _gauge_value(
+            account_image_state, {"account": "acc_state_y", "state": "cooldown"}
+        )
+        == 1.0
+    )
     # acc_state_z rate_limited=1
-    assert _gauge_value(
-        account_image_state, {"account": "acc_state_z", "state": "rate_limited"}
-    ) == 1.0
+    assert (
+        _gauge_value(
+            account_image_state, {"account": "acc_state_z", "state": "rate_limited"}
+        )
+        == 1.0
+    )
 
 
 @pytest.mark.asyncio
@@ -580,20 +591,25 @@ async def test_flush_image_metrics_reads_quota_from_redis() -> None:
     for i in range(3):
         await redis.zadd("lumen:acct:acc_quota:image:ts", {f"t{i}": now - 5 - i})
     redis.kv[
-        f"lumen:acct:acc_quota:image:daily:"
-        f"{account_limiter._today_utc_key(now)}"
+        f"lumen:acct:acc_quota:image:daily:{account_limiter._today_utc_key(now)}"
     ] = "12"
 
     await pool.flush_image_metrics()
 
-    assert _gauge_value(
-        account_image_quota_used,
-        {"account": "acc_quota", "window": "current_window"},
-    ) == 3.0
-    assert _gauge_value(
-        account_image_quota_used,
-        {"account": "acc_quota", "window": "daily"},
-    ) == 12.0
+    assert (
+        _gauge_value(
+            account_image_quota_used,
+            {"account": "acc_quota", "window": "current_window"},
+        )
+        == 3.0
+    )
+    assert (
+        _gauge_value(
+            account_image_quota_used,
+            {"account": "acc_quota", "window": "daily"},
+        )
+        == 12.0
+    )
 
 
 @pytest.mark.asyncio
