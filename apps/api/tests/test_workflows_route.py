@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from app.routes import workflows
 from lumen_core.schemas import (
     ApparelModelLibraryBatchDeleteIn,
+    ApparelModelLibraryGenerateIn,
     ModelCandidatesCreateIn,
     ShowcaseImagesCreateIn,
 )
@@ -33,7 +34,9 @@ class _Result:
 
 
 class _Db:
-    def __init__(self, rows: list[Any], responses: list[list[Any]] | None = None) -> None:
+    def __init__(
+        self, rows: list[Any], responses: list[list[Any]] | None = None
+    ) -> None:
         self.rows = rows
         self.responses = responses
         self.statements: list[Any] = []
@@ -63,7 +66,11 @@ def test_model_candidates_mvp_requires_three_candidates() -> None:
     body = ModelCandidatesCreateIn(
         candidate_count=3,
         style_prompt="premium",
-        accessory_plan={"enabled": True, "items": ["white sneakers"], "strength": "subtle"},
+        accessory_plan={
+            "enabled": True,
+            "items": ["white sneakers"],
+            "strength": "subtle",
+        },
     )
 
     assert body.accessory_plan.items == ["white sneakers"]
@@ -149,7 +156,9 @@ def test_github_folder_metadata_keeps_fine_grained_appearance() -> None:
 
 def test_preset_title_uses_updated_age_labels() -> None:
     assert workflows._title_from_preset_id("adult-female-001").startswith("熟龄 女性")
-    assert workflows._title_from_preset_id("middle-aged-male-001").startswith("中年 男性")
+    assert workflows._title_from_preset_id("middle-aged-male-001").startswith(
+        "中年 男性"
+    )
 
 
 def test_github_folder_metadata_ignores_thumb_files() -> None:
@@ -196,7 +205,10 @@ def test_model_library_folder_helpers_support_numbered_age_dirs() -> None:
     assert workflows._normalize_age_segment("05_adult") == "adult"  # noqa: SLF001
     assert workflows._normalize_age_segment("04_young_adult") == "young_adult"  # noqa: SLF001
     assert workflows._model_library_folder_for_age("senior", "male") == "07_senior/male"  # noqa: SLF001
-    assert workflows._model_library_folder_for_age("bad", "female") == "00_user_favorites/female"  # noqa: SLF001
+    assert (
+        workflows._model_library_folder_for_age("bad", "female")
+        == "00_user_favorites/female"
+    )  # noqa: SLF001
     assert workflows._model_library_folder_for_age("adult", "bad") == "05_adult/female"  # noqa: SLF001
 
 
@@ -260,7 +272,9 @@ async def test_workflow_produced_model_image_ids_includes_dual_race_bonus_ids() 
 
 
 @pytest.mark.asyncio
-async def test_workflow_produced_model_image_ids_pulls_from_owner_generation_subquery() -> None:
+async def test_workflow_produced_model_image_ids_pulls_from_owner_generation_subquery() -> (
+    None
+):
     # task_ids 非空 → 触发反向 SQL 查询：把 worker 还没回写到 step.image_ids
     # 但 owner_generation_id 已经指向 task_ids 或 dual_race bonus generation 的图也算「produced」。
     from sqlalchemy.dialects import postgresql
@@ -293,10 +307,16 @@ async def test_workflow_produced_model_image_ids_pulls_from_owner_generation_sub
     # 子查询：通过 generations.upstream_request 反查 dual_race bonus generation 产出的图。
     assert "FROM generations" in rendered
     assert "generations.user_id = 'user-1'" in rendered
-    assert "(generations.upstream_request ->> 'parent_generation_id') IN ('task-a', 'task-b')" in rendered
+    assert (
+        "(generations.upstream_request ->> 'parent_generation_id') IN ('task-a', 'task-b')"
+        in rendered
+    )
     # 注意：as_boolean() 在 PostgreSQL 上编译成 CAST(text AS BOOLEAN)，
     # 这样 worker 不论写 JSON true 还是字符串 "true" 都能被 cast 命中。
-    assert "CAST((generations.upstream_request ->> 'is_dual_race_bonus') AS BOOLEAN) IS true" in rendered
+    assert (
+        "CAST((generations.upstream_request ->> 'is_dual_race_bonus') AS BOOLEAN) IS true"
+        in rendered
+    )
 
 
 @pytest.mark.asyncio
@@ -317,8 +337,12 @@ async def test_workflow_produced_model_image_ids_skips_sql_when_no_task_ids() ->
 def test_task_error_summary_prefers_messages_and_dedupes() -> None:
     out = workflows._task_error_summary(  # noqa: SLF001
         [
-            SimpleNamespace(error_code="upstream_error", error_message="provider timeout"),
-            SimpleNamespace(error_code="upstream_error", error_message="provider timeout"),
+            SimpleNamespace(
+                error_code="upstream_error", error_message="provider timeout"
+            ),
+            SimpleNamespace(
+                error_code="upstream_error", error_message="provider timeout"
+            ),
             SimpleNamespace(error_code="safety", error_message=None),
         ],
         "生成失败",
@@ -404,10 +428,16 @@ async def test_delete_workflow_cleans_generated_outputs_and_backing_conversation
                 "cancel_message": cancel_message,
             }
         )
-        return {"images_deleted": 1, "generations_canceled": 0, "completions_canceled": 0}
+        return {
+            "images_deleted": 1,
+            "generations_canceled": 0,
+            "completions_canceled": 0,
+        }
 
     monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_soft_delete_workflow_generated_images", fake_cleanup)
+    monkeypatch.setattr(
+        workflows, "_soft_delete_workflow_generated_images", fake_cleanup
+    )
     db = _Db([], responses=[[conv]])
 
     out = await workflows.delete_workflow(  # noqa: SLF001
@@ -462,10 +492,16 @@ async def test_delete_apparel_model_library_job_cleans_generated_outputs(
     ) -> dict[str, int]:
         assert deleted_at.tzinfo is not None
         cleanup_calls.append(f"{run.id}:{cancel_message}")
-        return {"images_deleted": 2, "generations_canceled": 0, "completions_canceled": 0}
+        return {
+            "images_deleted": 2,
+            "generations_canceled": 0,
+            "completions_canceled": 0,
+        }
 
     monkeypatch.setattr(workflows, "_get_run", fake_get_run)
-    monkeypatch.setattr(workflows, "_soft_delete_workflow_generated_images", fake_cleanup)
+    monkeypatch.setattr(
+        workflows, "_soft_delete_workflow_generated_images", fake_cleanup
+    )
     db = _Db([])
 
     out = await workflows.delete_apparel_model_library_job(  # noqa: SLF001
@@ -485,8 +521,12 @@ async def test_clear_apparel_model_library_jobs_cleans_each_finished_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = [
-        SimpleNamespace(id="run-1", user_id="user-1", deleted_at=None, conversation_id=None),
-        SimpleNamespace(id="run-2", user_id="user-1", deleted_at=None, conversation_id=None),
+        SimpleNamespace(
+            id="run-1", user_id="user-1", deleted_at=None, conversation_id=None
+        ),
+        SimpleNamespace(
+            id="run-2", user_id="user-1", deleted_at=None, conversation_id=None
+        ),
     ]
     cleanup_calls: list[str] = []
 
@@ -498,9 +538,15 @@ async def test_clear_apparel_model_library_jobs_cleans_each_finished_job(
         cancel_message: str,
     ) -> dict[str, int]:
         cleanup_calls.append(f"{run.id}:{cancel_message}:{deleted_at.isoformat()}")
-        return {"images_deleted": 1, "generations_canceled": 0, "completions_canceled": 0}
+        return {
+            "images_deleted": 1,
+            "generations_canceled": 0,
+            "completions_canceled": 0,
+        }
 
-    monkeypatch.setattr(workflows, "_soft_delete_workflow_generated_images", fake_cleanup)
+    monkeypatch.setattr(
+        workflows, "_soft_delete_workflow_generated_images", fake_cleanup
+    )
     db = _Db([], responses=[rows])
 
     out = await workflows.clear_apparel_model_library_jobs(  # noqa: SLF001
@@ -607,7 +653,9 @@ async def test_library_job_derives_failed_status_from_failed_generation() -> Non
 
 
 @pytest.mark.asyncio
-async def test_apparel_model_library_jobs_respects_offset_and_has_more(monkeypatch) -> None:
+async def test_apparel_model_library_jobs_respects_offset_and_has_more(
+    monkeypatch,
+) -> None:
     async def fake_ensure_legacy_user_library_migrated(_db, _user_id):
         return False
 
@@ -615,7 +663,9 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(monkeypat
         return {}
 
     monkeypatch.setattr(
-        workflows, "_ensure_legacy_user_library_migrated", fake_ensure_legacy_user_library_migrated
+        workflows,
+        "_ensure_legacy_user_library_migrated",
+        fake_ensure_legacy_user_library_migrated,
     )
     monkeypatch.setattr(workflows, "_saved_image_id_set", fake_saved_image_id_set)
 
@@ -671,7 +721,10 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(monkeypat
         SimpleNamespace(id="library-2"),
     ]
     candidate_rows = [
-        (SimpleNamespace(id="project-1", title="Project 1"), SimpleNamespace(id="step-1")),
+        (
+            SimpleNamespace(id="project-1", title="Project 1"),
+            SimpleNamespace(id="step-1"),
+        ),
     ]
     expected_db = _Db([], responses=[library_runs, candidate_rows])
     expected_db_second = _Db([], responses=[library_runs, candidate_rows])
@@ -698,7 +751,9 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_create_user_image_from_preset_copies_to_user_private_storage(tmp_path, monkeypatch) -> None:
+async def test_create_user_image_from_preset_copies_to_user_private_storage(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setattr(workflows.settings, "storage_root", str(tmp_path))
     source_key = "apparel-model-library/presets/adult-female/v1.png"
     source_path = tmp_path / source_key
@@ -897,7 +952,11 @@ async def test_sync_showcase_completion_advances_to_quality_review() -> None:
         responses=[
             steps,  # _load_steps
             [],  # model candidates
-            [SimpleNamespace(id="gen-1", status=workflows.GenerationStatus.SUCCEEDED.value)],
+            [
+                SimpleNamespace(
+                    id="gen-1", status=workflows.GenerationStatus.SUCCEEDED.value
+                )
+            ],
             [],  # dual-race bonus generations
             [SimpleNamespace(id="image-1", owner_generation_id="gen-1")],
             [],  # quality reports
@@ -1089,7 +1148,11 @@ async def test_reopen_model_selection_resets_downstream_and_clears_quality_repor
         "model_approval": SimpleNamespace(
             status="approved",
             input_json={
-                "accessory_plan": {"enabled": True, "items": ["bag"], "strength": "subtle"},
+                "accessory_plan": {
+                    "enabled": True,
+                    "items": ["bag"],
+                    "strength": "subtle",
+                },
                 "style_prompt": "clean studio",
             },
             output_json={"selected_candidate_id": "cand-1"},
@@ -1130,7 +1193,9 @@ async def test_reopen_model_selection_resets_downstream_and_clears_quality_repor
         ),
     }
 
-    async def fake_get_run(db: Any, *, user_id: str, run_id: str, lock: bool = False) -> Any:
+    async def fake_get_run(
+        db: Any, *, user_id: str, run_id: str, lock: bool = False
+    ) -> Any:
         assert user_id == "user-1"
         assert run_id == "run-1"
         assert lock is True
@@ -1177,7 +1242,9 @@ async def test_reopen_model_selection_resets_downstream_and_clears_quality_repor
     assert run.current_step == "model_candidates"
     assert run.status == "needs_review"
     assert db.committed is True
-    assert any("DELETE FROM quality_reports" in str(statement) for statement in db.statements)
+    assert any(
+        "DELETE FROM quality_reports" in str(statement) for statement in db.statements
+    )
 
 
 def test_candidate_prompt_uses_clean_four_view_reference_without_text_labels() -> None:
@@ -1388,7 +1455,10 @@ def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
 
 def test_accessory_preview_prompt_is_model_quad_with_accessories_only() -> None:
     prompt = workflows._accessory_preview_prompt(  # noqa: SLF001
-        accessory_plan={"items": ["small earrings", "white sneakers"], "strength": "subtle"},
+        accessory_plan={
+            "items": ["small earrings", "white sneakers"],
+            "strength": "subtle",
+        },
         style_prompt="natural clean styling",
     )
 
@@ -1472,7 +1542,10 @@ def test_daily_snapshot_template_uses_phone_realistic_scene() -> None:
     )
 
     prompt = workflows._showcase_prompt(  # noqa: SLF001
-        product_analysis={"category": "针织上衣", "must_preserve": ["浅灰色", "短款版型"]},
+        product_analysis={
+            "category": "针织上衣",
+            "must_preserve": ["浅灰色", "短款版型"],
+        },
         selected_candidate=candidate,  # type: ignore[arg-type]
         accessory_plan={"enabled": True, "items": ["帆布包"], "strength": "subtle"},
         template="daily_snapshot",
@@ -1568,7 +1641,9 @@ def test_showcase_prompt_scene_environment_indoor_keeps_default_scene() -> None:
         assert "户外" not in indoor_prompt
 
 
-def test_showcase_prompt_scene_environment_outdoor_branches_for_lifestyle_templates() -> None:
+def test_showcase_prompt_scene_environment_outdoor_branches_for_lifestyle_templates() -> (
+    None
+):
     candidate = SimpleNamespace(
         id="cand-1",
         model_brief_json={"summary": "natural model", "height_cm": 168},
@@ -1703,7 +1778,9 @@ def test_pick_shot_variants_counts_match_output_count() -> None:
         assert len(picks) == n, f"expected {n} picks for output_count={n}"
         product_count = sum(1 for _, v in picks if v["framing"] == "product_first")
         if n >= 2:
-            assert product_count >= 2, f"need >= 2 product_first for N={n}, got {product_count}"
+            assert product_count >= 2, (
+                f"need >= 2 product_first for N={n}, got {product_count}"
+            )
         else:
             assert product_count >= 1
 
@@ -1742,7 +1819,9 @@ def test_default_showcase_pools_avoid_high_risk_motion_terms() -> None:
                 for variant in variants:
                     label = variant["label"]
                     if any(term in label for term in risky_terms):
-                        offenders.append(f"{pool_name}/{template}/{shot_class}: {label}")
+                        offenders.append(
+                            f"{pool_name}/{template}/{shot_class}: {label}"
+                        )
 
     assert offenders == []
 
@@ -1811,7 +1890,9 @@ def test_pick_shot_variants_covers_all_four_classes_when_output_4() -> None:
         "social_seed",
     ],
 )
-def test_natural_light_templates_describe_light_direction_and_contrast(template: str) -> None:
+def test_natural_light_templates_describe_light_direction_and_contrast(
+    template: str,
+) -> None:
     """自然光模板要明确光线方向和明暗反差，否则模型默认渲染均匀照明 → 假感重。
 
     棚拍类（white/premium）有人造光，本来就工整，不在此约束。
@@ -1840,7 +1921,9 @@ def test_natural_light_templates_describe_light_direction_and_contrast(template:
         "social_seed",
     ],
 )
-def test_render_direction_includes_skin_texture_for_every_template(template: str) -> None:
+def test_render_direction_includes_skin_texture_for_every_template(
+    template: str,
+) -> None:
     """每个模板都要给"真实皮肤毛孔/细纹"正面约束 + 反对塑料感/磨皮，避免 AI 假感。"""
     direction = workflows._showcase_render_direction(template)  # noqa: SLF001
     assert "皮肤" in direction
@@ -1911,7 +1994,9 @@ def test_framing_direction_for_tone_first_emphasizes_environment() -> None:
 
 
 @pytest.mark.parametrize("age_segment", ["child", "toddler"])
-def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(age_segment: str) -> None:
+def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(
+    age_segment: str,
+) -> None:
     """child 每类只 3 条、toddler 每类只 2 条，请求 16 张需循环复用变体而不是少返回。"""
     picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
         template="premium_studio",
@@ -1921,7 +2006,12 @@ def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(age_s
     )
     assert len(picks) == 16
     classes = [cls for cls, _ in picks]
-    for cls_name in ("front_full_body", "natural_pose", "detail_half_body", "side_or_back"):
+    for cls_name in (
+        "front_full_body",
+        "natural_pose",
+        "detail_half_body",
+        "side_or_back",
+    ):
         assert classes.count(cls_name) == 4, f"{cls_name} should appear 4 times"
     # 至少 2 张 product_first（min_product_first 保证）
     product = sum(1 for _, v in picks if v["framing"] == "product_first")
@@ -2053,6 +2143,135 @@ def test_model_library_generate_prompt_embeds_age_gender_appearance() -> None:
     assert "Every candidate must wear this exact same outfit" in prompt
 
 
+def test_model_library_generate_prompt_reference_mode_locks_identity() -> None:
+    prompt = workflows._model_library_generate_prompt(  # noqa: SLF001
+        age_segment="young_adult",
+        gender="female",
+        appearance_direction="east_asian",
+        extra_requirements=None,
+        style_tags=["温柔亲和"],
+        candidate_index=1,
+        reference_mode=True,
+    )
+
+    assert "Use the attached reference image ONLY" in prompt
+    assert "SAME PERSON" in prompt
+    assert "neutral relaxed expression" in prompt
+    assert "Look anchor for this candidate" not in prompt
+    assert "Variation index: 1." in prompt
+
+
+def test_apparel_model_library_generate_schema_validates_modes() -> None:
+    assert ApparelModelLibraryGenerateIn(age_segment="young_adult").mode == "text"
+
+    body = ApparelModelLibraryGenerateIn(
+        mode="reference_image",
+        reference_image_id="img-1",
+        count=1,
+    )
+    assert body.age_segment is None
+    assert body.reference_image_id == "img-1"
+
+    with pytest.raises(ValidationError):
+        ApparelModelLibraryGenerateIn(mode="reference_image", count=1)
+
+    with pytest.raises(ValidationError):
+        ApparelModelLibraryGenerateIn(
+            age_segment="young_adult",
+            reference_image_id="img-1",
+        )
+
+
+def test_merge_reference_overrides_user_fields_win() -> None:
+    body = ApparelModelLibraryGenerateIn(
+        mode="reference_image",
+        reference_image_id="img-1",
+        age_segment="adult",
+        genders=["male"],
+        appearance_direction="european",
+        style_tags=["用户标签"],
+        count=1,
+    )
+    extracted = workflows.ReferenceProfile(  # noqa: SLF001
+        age_segment="young_adult",
+        gender="female",
+        appearance_direction="east_asian",
+        style_tags=["温柔亲和"],
+        notes="短发",
+    )
+
+    merged = workflows._merge_reference_overrides(body, extracted)  # noqa: SLF001
+
+    assert merged.age_segment == "adult"
+    assert merged.genders == ["male"]
+    assert merged.gender == "male"
+    assert merged.appearance_direction == "european"
+    assert merged.style_tags == ["用户标签", "温柔亲和"]
+
+
+def test_reference_profile_required_fields_gate() -> None:
+    body = ApparelModelLibraryGenerateIn(
+        mode="reference_image",
+        reference_image_id="img-1",
+        count=1,
+    )
+    assert (
+        workflows._reference_profile_has_required_text_fields(  # noqa: SLF001
+            body,
+            workflows.ReferenceProfile(notes="not a person"),
+        )
+        is False
+    )
+    assert (
+        workflows._reference_profile_has_required_text_fields(  # noqa: SLF001
+            body,
+            workflows.ReferenceProfile(age_segment="young_adult", gender="female"),
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_model_library_reference_tasks_use_i2i_attachment_and_meta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_create_workflow_task(**kwargs: Any) -> tuple[Any, None, list[str]]:
+        calls.append(kwargs)
+        return SimpleNamespace(), None, [f"gen-{len(calls)}"]
+
+    monkeypatch.setattr(workflows, "_create_workflow_task", fake_create_workflow_task)
+    body = ApparelModelLibraryGenerateIn(
+        mode="reference_image",
+        reference_image_id="img-ref",
+        age_segment="young_adult",
+        genders=["female"],
+        count=1,
+    )
+    step = SimpleNamespace(task_ids=[])
+
+    _bundles, task_ids = await workflows._enqueue_model_library_generate_tasks(  # noqa: SLF001
+        db=SimpleNamespace(),
+        user=SimpleNamespace(id="user-1"),
+        conv=SimpleNamespace(id="conv-1"),
+        run=SimpleNamespace(id="run-1234567890"),
+        step=step,
+        body=body,
+        reference_image_id="img-ref",
+    )
+
+    assert task_ids == ["gen-1"]
+    assert step.task_ids == ["gen-1"]
+    assert calls[0]["intent"] == workflows.Intent.IMAGE_TO_IMAGE
+    assert calls[0]["attachment_ids"] == ["img-ref"]
+    assert "Use the attached reference image ONLY" in calls[0]["text"]
+    meta = calls[0]["workflow_meta"]
+    assert meta["workflow_model_library_mode"] == "reference_image"
+    assert meta["workflow_model_library_reference_image_id"] == "img-ref"
+    assert meta["workflow_model_library_age_segment"] == "young_adult"
+
+
 def test_model_diversity_anchor_rotates_by_candidate_index_and_gender() -> None:
     anchor = workflows._model_diversity_anchor  # noqa: SLF001
 
@@ -2064,7 +2283,9 @@ def test_model_diversity_anchor_rotates_by_candidate_index_and_gender() -> None:
     assert "Look anchor for this candidate" in a2
 
     # 池子大小 8：第 9 个绕回第 1 个
-    assert anchor(candidate_index=9, gender="female") == anchor(candidate_index=1, gender="female")
+    assert anchor(candidate_index=9, gender="female") == anchor(
+        candidate_index=1, gender="female"
+    )
 
     # gender 切换 → 不同池子
     male_a1 = anchor(candidate_index=1, gender="male")
@@ -2109,7 +2330,9 @@ def test_model_library_job_status_combines_step_status_and_count() -> None:
     # running with partial -> still running
     assert f(step_status="running", requested_count=4, finished_count=2) == "running"
     # succeeded with full -> succeeded
-    assert f(step_status="succeeded", requested_count=4, finished_count=4) == "succeeded"
+    assert (
+        f(step_status="succeeded", requested_count=4, finished_count=4) == "succeeded"
+    )
     # succeeded with partial -> partial
     assert f(step_status="succeeded", requested_count=4, finished_count=2) == "partial"
     # failed with no images -> failed

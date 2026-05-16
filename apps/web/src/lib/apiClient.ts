@@ -921,6 +921,15 @@ export type ApparelModelLibraryJobStatus =
   | "failed"
   | "partial";
 export type ApparelModelLibraryGenerateCount = 1 | 2 | 4 | 16;
+export type ApparelModelLibraryGenerateMode = "text" | "reference_image";
+
+export interface ApparelModelLibraryExtractedProfile {
+  age_segment?: ModelLibraryItemAgeSegment | null;
+  gender?: string | null;
+  appearance_direction?: string | null;
+  style_tags?: string[];
+  notes?: string | null;
+}
 
 export interface ApparelModelLibraryJobItem {
   image_id: string;
@@ -951,6 +960,9 @@ export interface ApparelModelLibraryJob {
   gender: string | null;
   appearance_direction: string | null;
   extra_requirements: string | null;
+  reference_image_id: string | null;
+  reference_image_url: string | null;
+  extracted_profile: ApparelModelLibraryExtractedProfile | null;
   items: ApparelModelLibraryJobItem[];
   // dual_race 模式下另一路 provider 产出的图，展示在候选区，也可按需保存到模特库
   candidates: ApparelModelLibraryJobItem[];
@@ -972,7 +984,9 @@ export interface ApparelModelLibraryJobsOpts {
 }
 
 export interface ApparelModelLibraryGenerateIn {
-  age_segment: ModelLibraryItemAgeSegment;
+  mode?: ApparelModelLibraryGenerateMode;
+  reference_image_id?: string | null;
+  age_segment?: ModelLibraryItemAgeSegment | null;
   gender?: string | null;
   genders?: Array<"female" | "male">;
   appearance_direction?: string | null;
@@ -1008,6 +1022,8 @@ export function generateApparelModelLibrary(
     {
       method: "POST",
       body: JSON.stringify({
+        mode: "text",
+        reference_image_id: null,
         style_tags: [],
         appearance_direction: null,
         extra_requirements: null,
@@ -1371,6 +1387,9 @@ export interface UploadedImage {
   width: number;
   height: number;
   url: string;
+  display_url?: string | null;
+  preview_url?: string | null;
+  thumb_url?: string | null;
   mime?: string;
   metadata_jsonb?: Record<string, unknown> | null;
 }

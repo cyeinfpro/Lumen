@@ -200,6 +200,18 @@ http_errors_total = _counter(
     labelnames=("code",),
 )
 
+apparel_model_library_generate_mode_total = _counter(
+    "apparel_model_library_generate_mode_total",
+    "Number of apparel model library generation requests, labeled by mode.",
+    labelnames=("mode",),
+)
+
+apparel_model_library_reference_extract_total = _counter(
+    "apparel_model_library_reference_extract_total",
+    "Number of apparel model library reference-image extraction attempts.",
+    labelnames=("result",),
+)
+
 audit_write_failures_total = _counter(
     "lumen_audit_write_failures_total",
     "Number of audit log write failures, labeled by write mode.",
@@ -355,6 +367,8 @@ __all__ = [
     "setup_prometheus",
     "tasks_enqueued_total",
     "http_errors_total",
+    "apparel_model_library_generate_mode_total",
+    "apparel_model_library_reference_extract_total",
     "wallet_balance_total",
     "wallet_hold_active",
     "wallet_hold_micro",

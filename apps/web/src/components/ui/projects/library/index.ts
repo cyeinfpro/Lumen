@@ -4,5 +4,7 @@ export { ModelLibraryBrowser } from "./ModelLibraryBrowser";
 export type { ModelLibraryBrowserProps } from "./ModelLibraryBrowser";
 export { ModelLibraryGenerator } from "./ModelLibraryGenerator";
 export type { ModelLibraryGeneratorProps } from "./ModelLibraryGenerator";
+export { ModelLibraryReferenceUploader } from "./ModelLibraryReferenceUploader";
+export type { ModelLibraryReferenceValue } from "./ModelLibraryReferenceUploader";
 export { ModelLibraryJobsPanel } from "./ModelLibraryJobsPanel";
 export { ModelLibraryPage } from "./ModelLibraryPage";

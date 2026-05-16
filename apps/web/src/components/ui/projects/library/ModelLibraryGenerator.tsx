@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
 import { cn } from "@/lib/utils";
 import {
+  type ApparelModelLibraryGenerateMode,
   type ApparelModelLibraryGenerateCount,
   type ApparelModelLibraryGenerateIn,
   type ModelLibraryAppearance,
@@ -18,6 +19,10 @@ import {
   MODEL_LIBRARY_APPEARANCE_LABEL,
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
+import {
+  ModelLibraryReferenceUploader,
+  type ModelLibraryReferenceValue,
+} from "./ModelLibraryReferenceUploader";
 
 const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
   ["toddler", "幼儿"],
@@ -52,6 +57,11 @@ const STYLE_PRESETS = [
 
 const COUNT_OPTIONS: ApparelModelLibraryGenerateCount[] = [1, 2, 4, 16];
 
+const MODE_OPTIONS: Array<[ApparelModelLibraryGenerateMode, string, string]> = [
+  ["text", "文生模特", "通过描述生成"],
+  ["reference_image", "参考图生模特", "上传人像复刻同一人"],
+];
+
 const EXTRA_MAX = 400;
 
 export interface ModelLibraryGeneratorProps {
@@ -65,7 +75,12 @@ export function ModelLibraryGenerator({
   generating,
   defaultAgeSegment = "young_adult",
 }: ModelLibraryGeneratorProps) {
-  const [ageSegment, setAgeSegment] = useState<ModelLibraryItemAgeSegment>(defaultAgeSegment);
+  const [mode, setMode] = useState<ApparelModelLibraryGenerateMode>("text");
+  const [referenceImage, setReferenceImage] = useState<ModelLibraryReferenceValue | null>(null);
+  const [referenceUploading, setReferenceUploading] = useState(false);
+  const [ageSegment, setAgeSegment] = useState<ModelLibraryItemAgeSegment | "">(
+    defaultAgeSegment,
+  );
   const [genders, setGenders] = useState<Array<"female" | "male">>(["female"]);
   // 外貌方向：枚举单选，"" 表示不指定
   const [appearance, setAppearance] = useState<ModelLibraryAppearance | "">("");
@@ -73,12 +88,26 @@ export function ModelLibraryGenerator({
   const [extra, setExtra] = useState("");
   const [count, setCount] = useState<ApparelModelLibraryGenerateCount>(4);
   const [autoTag, setAutoTag] = useState(true);
+  const submitDisabled = mode === "reference_image" && (!referenceImage || referenceUploading);
+  const totalCount = count * Math.max(1, genders.length);
 
   const submit = async () => {
+    if (mode === "reference_image" && referenceUploading) {
+      toast.warning("参考图仍在上传");
+      return;
+    }
+    if (mode === "reference_image" && !referenceImage) {
+      toast.warning("请先上传参考图");
+      return;
+    }
+    const resolvedAgeSegment =
+      mode === "text" ? (ageSegment || defaultAgeSegment) : ageSegment || null;
     const body: ApparelModelLibraryGenerateIn = {
-      age_segment: ageSegment,
-      genders,
-      gender: genders[0] ?? "female",
+      mode,
+      reference_image_id: mode === "reference_image" ? referenceImage?.imageId ?? null : null,
+      age_segment: resolvedAgeSegment,
+      genders: genders.length ? genders : undefined,
+      gender: mode === "text" ? genders[0] ?? "female" : genders[0] ?? null,
       appearance_direction: appearance || null,
       extra_requirements: extra.trim() || null,
       style_tags: styleTags,
@@ -94,11 +123,23 @@ export function ModelLibraryGenerator({
     }
   };
 
+  const switchMode = (nextMode: ApparelModelLibraryGenerateMode) => {
+    if (nextMode === mode) return;
+    setMode(nextMode);
+    if (nextMode === "reference_image") {
+      setAgeSegment("");
+      setGenders([]);
+      return;
+    }
+    setAgeSegment((prev) => prev || defaultAgeSegment);
+    setGenders((prev) => (prev.length > 0 ? prev : ["female"]));
+  };
+
   const toggleGender = (value: "female" | "male") => {
     setGenders((prev) => {
       if (prev.includes(value)) {
         const next = prev.filter((item) => item !== value);
-        return next.length > 0 ? next : prev;
+        return next.length > 0 || mode === "reference_image" ? next : prev;
       }
       return [...prev, value].sort((a, b) => {
         const order = { female: 0, male: 1 };
@@ -133,33 +174,143 @@ export function ModelLibraryGenerator({
         </p>
       </header>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        {/* 1. 基础信息 */}
-        <Section eyebrow="N°01" title="基础信息">
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
-            <Field label="年龄段">
-              <ChipRow>
-                {AGE_OPTIONS.map(([value, label]) => (
-                  <Chip
-                    key={value}
-                    active={ageSegment === value}
-                    onClick={() => setAgeSegment(value)}
-                  >
-                    {label}
-                  </Chip>
-                ))}
-              </ChipRow>
-            </Field>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border)] pb-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          N°00
+        </span>
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {MODE_OPTIONS.map(([value, label, hint]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => switchMode(value)}
+              aria-pressed={mode === value}
+              className={cn(
+                "group relative inline-flex min-h-8 flex-col items-start px-1 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                mode === value
+                  ? "text-[var(--fg-0)]"
+                  : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
+              )}
+            >
+              <span className="font-mono text-[10.5px] uppercase tracking-[0.14em]">
+                {label}
+              </span>
+              <span className="text-[11px] leading-[1.35] text-[var(--fg-3)]">
+                {hint}
+              </span>
+              <span
+                aria-hidden
+                className={cn(
+                  "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
+                  mode === value
+                    ? "bg-[var(--amber-400)]"
+                    : "bg-transparent group-hover:bg-[var(--border-strong)]",
+                )}
+              />
+            </button>
+          ))}
+        </div>
+      </div>
 
-            <Field label="性别">
+      <div className="grid gap-4 xl:grid-cols-2">
+        {mode === "reference_image" ? (
+          <Section eyebrow="N°01" title="参考图">
+            <ModelLibraryReferenceUploader
+              value={referenceImage}
+              onChange={setReferenceImage}
+              onBusyChange={setReferenceUploading}
+              disabled={generating}
+            />
+          </Section>
+        ) : (
+          <Section eyebrow="N°01" title="基础信息">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <Field label="年龄段">
+                <ChipRow>
+                  {AGE_OPTIONS.map(([value, label]) => (
+                    <Chip
+                      key={value}
+                      active={ageSegment === value}
+                      onClick={() => setAgeSegment(value)}
+                    >
+                      {label}
+                    </Chip>
+                  ))}
+                </ChipRow>
+              </Field>
+
+              <Field label="性别">
+                <ChipRow>
+                  {GENDER_OPTIONS.map(([value, label]) => (
+                    <Chip
+                      key={value}
+                      active={genders.includes(value)}
+                      onClick={() => toggleGender(value)}
+                    >
+                      {label}
+                    </Chip>
+                  ))}
+                </ChipRow>
+              </Field>
+            </div>
+          </Section>
+        )}
+
+        {/* 2. 外貌方向 / 覆盖项 */}
+        <Section
+          eyebrow="N°02"
+          title={mode === "reference_image" ? "覆盖项（可选）" : "外貌方向"}
+        >
+          <div className="grid gap-4">
+            {mode === "reference_image" ? (
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                <Field label="年龄段" hint="留空自动识别">
+                  <ChipRow>
+                    <Chip active={ageSegment === ""} onClick={() => setAgeSegment("")}>
+                      自动识别
+                    </Chip>
+                    {AGE_OPTIONS.map(([value, label]) => (
+                      <Chip
+                        key={value}
+                        active={ageSegment === value}
+                        onClick={() => setAgeSegment(value)}
+                      >
+                        {label}
+                      </Chip>
+                    ))}
+                  </ChipRow>
+                </Field>
+
+                <Field label="性别" hint="留空自动识别">
+                  <ChipRow>
+                    <Chip active={genders.length === 0} onClick={() => setGenders([])}>
+                      自动识别
+                    </Chip>
+                    {GENDER_OPTIONS.map(([value, label]) => (
+                      <Chip
+                        key={value}
+                        active={genders.includes(value)}
+                        onClick={() => toggleGender(value)}
+                      >
+                        {label}
+                      </Chip>
+                    ))}
+                  </ChipRow>
+                </Field>
+              </div>
+            ) : null}
+            <Field hint={mode === "reference_image" ? "留空自动识别" : "留空由模型自由发挥"}>
               <ChipRow>
-                {GENDER_OPTIONS.map(([value, label]) => (
+                <Chip active={appearance === ""} onClick={() => setAppearance("")}>
+                  {mode === "reference_image" ? "自动识别" : "不指定"}
+                </Chip>
+                {APPEARANCE_OPTIONS.map((value) => (
                   <Chip
                     key={value}
-                    active={genders.includes(value)}
-                    onClick={() => toggleGender(value)}
+                    active={appearance === value}
+                    onClick={() => setAppearance(value)}
                   >
-                    {label}
+                    {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
                   </Chip>
                 ))}
               </ChipRow>
@@ -167,32 +318,20 @@ export function ModelLibraryGenerator({
           </div>
         </Section>
 
-        {/* 2. 外貌方向（地域枚举单选） */}
-        <Section eyebrow="N°02" title="外貌方向">
-          <Field hint="留空由模型自由发挥">
-            <ChipRow>
-              <Chip active={appearance === ""} onClick={() => setAppearance("")}>
-                不指定
-              </Chip>
-              {APPEARANCE_OPTIONS.map((value) => (
-                <Chip
-                  key={value}
-                  active={appearance === value}
-                  onClick={() => setAppearance(value)}
-                >
-                  {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
-                </Chip>
-              ))}
-            </ChipRow>
-          </Field>
-        </Section>
-
         {/* 3. 气质 & 细节 */}
-        <Section eyebrow="N°03" title="气质 & 细节" className="xl:col-span-2">
+        <Section
+          eyebrow="N°03"
+          title={mode === "reference_image" ? "气质 & 其他要求" : "气质 & 细节"}
+          className="xl:col-span-2"
+        >
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.42fr)]">
             <Field
               label="气质方向"
-              hint="最多选择 2 个；自动识别只追加标签"
+              hint={
+                mode === "reference_image"
+                  ? "可选覆盖；会与识别标签合并"
+                  : "最多选择 2 个；自动识别只追加标签"
+              }
             >
               <ChipRow>
                 {STYLE_PRESETS.map((preset) => (
@@ -267,17 +406,25 @@ export function ModelLibraryGenerator({
 
             <div className="hidden flex-col gap-2 md:col-span-2 md:flex xl:col-span-1 xl:min-w-[220px]">
               <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
-                {`${count * genders.length} 张（每个性别 ${count} 张）`}
+                {mode === "reference_image"
+                  ? `${totalCount} 张（参考图模式）`
+                  : `${totalCount} 张（每个性别 ${count} 张）`}
               </p>
               <Button
                 variant="primary"
                 loading={generating}
+                disabled={submitDisabled}
                 onClick={submit}
                 leftIcon={<Sparkles className="h-4 w-4" />}
                 className="w-full"
               >
                 开始生成
               </Button>
+              {submitDisabled ? (
+                <p className="text-[12px] leading-[1.5] text-[var(--danger)]">
+                  {referenceUploading ? "参考图上传中" : "请先上传参考图"}
+                </p>
+              ) : null}
             </div>
           </div>
         </Section>
@@ -290,17 +437,25 @@ export function ModelLibraryGenerator({
         )}
       >
         <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
-          {`${count * genders.length} 张（每个性别 ${count} 张）`}
+          {mode === "reference_image"
+            ? `${totalCount} 张（参考图模式）`
+            : `${totalCount} 张（每个性别 ${count} 张）`}
         </p>
         <Button
           variant="primary"
           loading={generating}
+          disabled={submitDisabled}
           onClick={submit}
           leftIcon={<Sparkles className="h-4 w-4" />}
           className="w-full md:w-auto"
         >
           开始生成
         </Button>
+        {submitDisabled ? (
+          <p className="text-[12px] leading-[1.5] text-[var(--danger)]">
+            {referenceUploading ? "参考图上传中" : "请先上传参考图"}
+          </p>
+        ) : null}
       </div>
     </section>
   );
