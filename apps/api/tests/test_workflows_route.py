@@ -1537,11 +1537,15 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
     assert "城市斑马线" in prompt
     assert "牵狗过马路" in prompt
     assert "high_angle" in prompt
-    assert "按 SceneCard 的机位" in prompt
+    assert "严格按 SceneCard" in prompt
     assert "50mm 标准焦段" not in prompt
     assert "低存在感宠物" in prompt
     assert "GPT-5.5 单张执行 Prompt" in composed
     assert "蓝色格纹衬衫" in composed
+    assert "本张 SceneCard 必须执行" in composed
+    assert "城市斑马线" in composed
+    assert "high_angle" in composed
+    assert "牵狗过马路" in composed
     assert "不要遮挡胸前" in composed
     assert "【最高优先级：商品 1:1 还原】" in safe
     assert "蓝色格纹衬衫" in safe
@@ -1675,6 +1679,8 @@ async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_revie
     assert len(preflight["prompt_reviews"]) == 2
     assert "GPT-5.5 单张执行 Prompt" in preflight["final_prompts"][0]
     assert "蓝色格纹" in preflight["final_prompts"][0]
+    assert "本张 SceneCard 必须执行" in preflight["final_prompts"][0]
+    assert "自然事件 1" in preflight["final_prompts"][0]
 
 
 @pytest.mark.asyncio
@@ -1952,7 +1958,7 @@ async def test_prepare_showcase_preflight_timeout_falls_back_to_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_wait_for(awaitable: Any, timeout: float) -> Any:
-        assert timeout == 90.0
+        assert timeout == 240.0
         awaitable.close()
         raise asyncio.TimeoutError
 

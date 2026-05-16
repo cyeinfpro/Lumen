@@ -8,6 +8,7 @@ task creation; this module owns structured scene planning and safe fallbacks.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -80,6 +81,190 @@ _TEMPLATE_FAMILY = {
     "natural_phone_snapshot": "phone_snapshot",
     "social_seed": "social_seeding",
 }
+
+_FALLBACK_FAMILY_POOLS = {
+    "indoor_rich": (
+        "premium_studio",
+        "designed_lifestyle",
+        "daily_life",
+        "phone_snapshot",
+    ),
+    "outdoor_rich": (
+        "urban_street",
+        "outdoor_daily",
+        "social_seeding",
+        "phone_snapshot",
+    ),
+    "editorial": (
+        "premium_studio",
+        "designed_lifestyle",
+        "urban_street",
+        "social_seeding",
+    ),
+}
+
+_FALLBACK_LOCATION_POOLS: dict[str, tuple[str, ...]] = {
+    "clean_ecommerce": (
+        "近白底自然光摄影区",
+        "浅灰背景的极简电商棚",
+        "米白墙面和浅色地面的干净拍摄区",
+        "无缝白背景前的自然站位区",
+    ),
+    "premium_studio": (
+        "带侧窗光的极简摄影棚角落",
+        "灰白墙面和木地板的高级棚拍空间",
+        "画廊式浅色走廊",
+        "柔光灯下的干净布景区",
+    ),
+    "urban_street": (
+        "咖啡店门口的人行道",
+        "城市斑马线旁的街角",
+        "玻璃橱窗外的街边",
+        "树影落下的社区街道",
+        "地铁口外的开阔人行区",
+    ),
+    "outdoor_daily": (
+        "公园步道边",
+        "小区楼下的绿化步道",
+        "便利店外的街边台阶",
+        "河边栏杆旁的步行道",
+        "阳光下的校园式步道",
+    ),
+    "designed_lifestyle": (
+        "自然采光的客厅一角",
+        "书店过道旁",
+        "木质长桌边的生活空间",
+        "酒店大堂边缘的安静区域",
+        "浅色楼梯转角",
+    ),
+    "daily_life": (
+        "窗边玄关",
+        "家中餐桌旁",
+        "开放式厨房边缘",
+        "阳台门口的自然光区域",
+        "衣帽架旁的生活角落",
+    ),
+    "phone_snapshot": (
+        "朋友视角的街边随手拍位置",
+        "窗边自然光下的手机抓拍位置",
+        "店外台阶旁的手机竖拍位置",
+        "走廊尽头的自然手机视角",
+        "公园座椅旁的随手拍位置",
+    ),
+    "social_seeding": (
+        "精品店门口的种草街拍位",
+        "咖啡店外的小桌旁",
+        "展览空间外的自然打卡位",
+        "街边绿植和玻璃窗之间",
+        "生活方式店的入口旁",
+    ),
+}
+
+_FALLBACK_EVENTS_BY_SHOT: dict[str, tuple[str, ...]] = {
+    "front_full_body": (
+        "刚走到地点中央时短暂停步看向镜头",
+        "等人时自然站定，身体重心落在一侧",
+        "从门口走出后停下整理步伐",
+        "穿过光影区域时回头确认镜头",
+        "在路边停住，手臂自然垂落不遮挡衣服",
+    ),
+    "natural_pose": (
+        "走了两步后自然放慢脚步",
+        "低头看了一眼手机又抬眼",
+        "和镜头外的人轻声回应",
+        "一只手轻扶衣摆边缘但不遮挡主体",
+        "转身准备离开时被自然抓拍",
+    ),
+    "detail_half_body": (
+        "抬手轻整理袖口，胸前和领口保持清楚",
+        "手指轻触衣摆边缘展示面料垂感",
+        "肩颈放松地看向一侧，衣领细节清楚",
+        "低头检查纽扣或拉链，手不压住主体",
+        "自然抬臂调整发丝，手臂避开胸前图案",
+    ),
+    "side_or_back": (
+        "侧身迈上一步时回头",
+        "从座位旁起身转向镜头",
+        "看向橱窗时身体保持侧面轮廓",
+        "转过街角前短暂停住",
+        "背向前走半步后自然回望",
+    ),
+}
+
+_FALLBACK_POSES_BY_SHOT: dict[str, tuple[str, ...]] = {
+    "front_full_body": (
+        "一脚在前的自然全身站姿，肩颈放松",
+        "身体微微侧向镜头，双手自然垂落",
+        "重心落在后脚，前脚轻点地面",
+        "步伐刚停下的全身姿态",
+    ),
+    "natural_pose": (
+        "身体三分之二侧向，头部自然转回",
+        "轻微前行动作，手部保持低位",
+        "上半身放松，视线偏离镜头一点",
+        "自然转身中的松弛姿态",
+    ),
+    "detail_half_body": (
+        "半身微侧，手部动作避开胸前主体",
+        "肩线自然，手指只触碰袖口或衣摆边缘",
+        "头部微低，上半身保持服装细节清楚",
+        "手臂打开一点，领口和胸前完整可见",
+    ),
+    "side_or_back": (
+        "侧身站位，肩背轮廓完整",
+        "回头看向镜头，身体保持侧后角度",
+        "小步转身，背部或侧面廓形清楚",
+        "一肩靠近镜头，另一侧自然后退",
+    ),
+}
+
+_FALLBACK_MOTIONS_BY_SHOT: dict[str, tuple[str, ...]] = {
+    "front_full_body": (
+        "刚停住的轻微惯性，衣摆有自然垂坠",
+        "低幅度呼吸感，身体重心真实",
+        "脚步从移动到停下，动作幅度很小",
+        "手臂自然摆动到身体两侧",
+    ),
+    "natural_pose": (
+        "小步前行中的自然定格",
+        "轻微转身带出衣服褶皱",
+        "手部低位小动作，主体不被遮挡",
+        "视线和身体方向不同步的抓拍感",
+    ),
+    "detail_half_body": (
+        "手指轻整理细节，衣服纹理和结构清楚",
+        "肩颈有轻微动作，胸前保持无遮挡",
+        "袖口或领口被轻轻调整但不改变款式",
+        "近距离自然呼吸感，面料褶皱可信",
+    ),
+    "side_or_back": (
+        "轻微转身带出侧面或背面廓形",
+        "一步未落稳的自然抓拍",
+        "回头动作很小，身体比例稳定",
+        "衣摆随转身轻微移动",
+    ),
+}
+
+_GENERIC_SCENE_TEXT = {
+    "正面全身",
+    "自然动作",
+    "半身细节",
+    "上身细节",
+    "侧面背面",
+    "自然站姿",
+    "自然站定",
+    "自然穿搭抓拍",
+}
+
+
+def _is_generic_scene_text(value: Any, *, shot_class: str, label: str) -> bool:
+    text = clean_text(value, max_len=160)
+    if not text:
+        return True
+    normalized = text.lower()
+    if normalized in {shot_class.lower(), clean_text(label, max_len=160).lower()}:
+        return True
+    return text in _GENERIC_SCENE_TEXT
 
 
 def clean_text(value: Any, *, max_len: int = 160) -> str:
@@ -207,15 +392,28 @@ def fallback_scene_cards_from_pool(
     accessory_plan: dict[str, Any],
     allow_pet: bool,
     continuity_anchor: str,
+    scene_strategy: str = "natural_series",
+    scene_variety: str = "rich",
 ) -> list[dict[str, Any]]:
     category = clean_text(product_analysis.get("category"), max_len=80) or "服饰"
-    family = _TEMPLATE_FAMILY.get(template, template)
-    if scene_environment == "outdoor" and family in {"daily_life", "phone_snapshot"}:
-        family = "outdoor_daily"
+    base_family = _TEMPLATE_FAMILY.get(template, template)
+    if scene_environment == "outdoor" and base_family in {"daily_life", "phone_snapshot"}:
+        base_family = "outdoor_daily"
     accessories = coerce_string_list(accessory_plan.get("items"), max_items=4)
     cards: list[dict[str, Any]] = []
     for index, (shot_class, variant) in enumerate(shot_picks, start=1):
         label = clean_text(variant.get("label"), max_len=140) or shot_class
+        family = _fallback_family(
+            base_family=base_family,
+            template=template,
+            scene_environment=scene_environment,
+            scene_strategy=scene_strategy,
+            scene_variety=scene_variety,
+            continuity_anchor=continuity_anchor,
+            index=index,
+            shot_class=shot_class,
+            user_prompt=user_prompt,
+        )
         camera = dict(_SHOT_CAMERA.get(shot_class, _SHOT_CAMERA["natural_pose"]))
         if aspect_ratio in {"16:9", "21:9", "4:3", "3:2"}:
             camera["orientation"] = "landscape"
@@ -228,11 +426,15 @@ def fallback_scene_cards_from_pool(
         card = {
             "id": f"fallback-{index:02d}-{shot_class}",
             "scene_family": family,
-            "location": _fallback_location(template, scene_environment, category),
-            "micro_event": label,
+            "location": _fallback_location(
+                template, scene_environment, category, family=family, index=index
+            ),
+            "micro_event": _fallback_micro_event(
+                shot_class, label, family=family, category=category, index=index
+            ),
             "camera": camera,
-            "pose": label,
-            "motion": _motion_for_shot(shot_class),
+            "pose": _fallback_pose(shot_class, label, index=index),
+            "motion": _motion_for_shot(shot_class, index=index),
             "props": clean_string_list(props, max_items=5, max_len=40),
             "lighting": _fallback_lighting(template, scene_environment),
             "composition": _composition_for_shot(shot_class),
@@ -250,7 +452,61 @@ def fallback_scene_cards_from_pool(
     return cards
 
 
-def _fallback_location(template: str, scene_environment: str, category: str) -> str:
+def _stable_cycle(options: tuple[str, ...], *, index: int, seed: str) -> str:
+    if not options:
+        return ""
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    offset = int(digest[:8], 16) % len(options)
+    return options[(offset + index - 1) % len(options)]
+
+
+def _fallback_family(
+    *,
+    base_family: str,
+    template: str,
+    scene_environment: str,
+    scene_strategy: str,
+    scene_variety: str,
+    continuity_anchor: str,
+    index: int,
+    shot_class: str,
+    user_prompt: str,
+) -> str:
+    if template == "white_ecommerce" and scene_variety == "safe":
+        return base_family
+    if continuity_anchor == "location_series" and scene_variety == "safe":
+        return base_family
+    if scene_strategy == "editorial_campaign":
+        pool = _FALLBACK_FAMILY_POOLS["editorial"]
+    elif scene_environment == "outdoor":
+        pool = _FALLBACK_FAMILY_POOLS["outdoor_rich"]
+    elif scene_variety in {"rich", "wild"} and template != "white_ecommerce":
+        pool = _FALLBACK_FAMILY_POOLS["indoor_rich"]
+    else:
+        return base_family
+    return _stable_cycle(
+        pool,
+        index=index,
+        seed=f"{template}|{scene_environment}|{scene_strategy}|{scene_variety}|{shot_class}|{user_prompt}",
+    )
+
+
+def _fallback_location(
+    template: str,
+    scene_environment: str,
+    category: str,
+    *,
+    family: str | None = None,
+    index: int = 1,
+) -> str:
+    family_key = family or _TEMPLATE_FAMILY.get(template, template)
+    locations = _FALLBACK_LOCATION_POOLS.get(family_key)
+    if locations:
+        return _stable_cycle(
+            locations,
+            index=index,
+            seed=f"{template}|{scene_environment}|{category}|{family_key}",
+        )
     if template == "white_ecommerce":
         return "白底或近白底商业摄影空间"
     if template == "premium_studio":
@@ -266,6 +522,29 @@ def _fallback_location(template: str, scene_environment: str, category: str) -> 
     return f"与{category}风格匹配的精品空间"
 
 
+def _fallback_micro_event(
+    shot_class: str,
+    label: str,
+    *,
+    family: str,
+    category: str,
+    index: int,
+) -> str:
+    events = _FALLBACK_EVENTS_BY_SHOT.get(shot_class, ())
+    event = _stable_cycle(
+        events,
+        index=index,
+        seed=f"{family}|{category}|{shot_class}|event",
+    )
+    return event or label
+
+
+def _fallback_pose(shot_class: str, label: str, *, index: int) -> str:
+    poses = _FALLBACK_POSES_BY_SHOT.get(shot_class, ())
+    pose = _stable_cycle(poses, index=index, seed=f"{shot_class}|pose")
+    return pose or label
+
+
 def _fallback_lighting(template: str, scene_environment: str) -> str:
     if template in {"white_ecommerce", "premium_studio"}:
         return "柔和可控的商业摄影光，服装细节清楚"
@@ -274,14 +553,12 @@ def _fallback_lighting(template: str, scene_environment: str) -> str:
     return "自然窗光或柔和室内暖光，方向明确不过曝"
 
 
-def _motion_for_shot(shot_class: str) -> str:
-    if shot_class == "detail_half_body":
-        return "小幅整理领口或袖口，服装细节清楚"
-    if shot_class == "side_or_back":
-        return "轻微转身或回头，身体重心稳定"
-    if shot_class == "natural_pose":
-        return "小步停下或轻整理衣摆，自然抓拍感"
-    return "自然站定或小步向前，商品主体完整"
+def _motion_for_shot(shot_class: str, *, index: int = 1) -> str:
+    motions = _FALLBACK_MOTIONS_BY_SHOT.get(shot_class, ())
+    motion = _stable_cycle(motions, index=index, seed=f"{shot_class}|motion")
+    if motion:
+        return motion
+    return "小幅自然动作，商品主体完整"
 
 
 def _composition_for_shot(shot_class: str) -> str:
@@ -347,6 +624,8 @@ async def plan_scene_cards_with_gpt55(
         accessory_plan=accessory_plan,
         allow_pet=allow_pet,
         continuity_anchor=continuity_anchor,
+        scene_strategy=scene_strategy,
+        scene_variety=scene_variety,
     )
     payload = {
         "product": {
@@ -374,7 +653,10 @@ async def plan_scene_cards_with_gpt55(
             }
             for shot_class, variant in shot_picks
         ],
-        "fallback_scene_pool": fallback_cards,
+        "fallback_guardrails": {
+            "do_not_copy": "不要照抄模板 shot label；你需要重新导演每张图的真实地点、事件、动作和机位。",
+            "safe_if_needed": "如果上游失败，本地规则才会兜底；正常情况下以你的 SceneCard 为准。",
+        },
     }
     instructions = _director_instructions(output_count)
     try:
@@ -421,6 +703,8 @@ def rules_fallback_planning(
     accessory_plan: dict[str, Any],
     allow_pet: bool,
     continuity_anchor: str,
+    scene_strategy: str = "natural_series",
+    scene_variety: str = "rich",
 ) -> dict[str, Any]:
     cards = fallback_scene_cards_from_pool(
         product_analysis=product_analysis,
@@ -432,6 +716,8 @@ def rules_fallback_planning(
         accessory_plan=accessory_plan,
         allow_pet=allow_pet,
         continuity_anchor=continuity_anchor,
+        scene_strategy=scene_strategy,
+        scene_variety=scene_variety,
     )
     return _fallback_planning_result(cards, reason="rules_fallback_requested")
 
@@ -454,7 +740,8 @@ def _fallback_planning_result(
 def _director_instructions(output_count: int) -> str:
     return (
         "你是服饰电商真人模特图的拍摄导演。你要为整批图片生成自然、不重复、"
-        "像真实拍摄分镜的 SceneCards。必须只输出 JSON 对象，不要 Markdown。\n"
+        "像真实拍摄分镜的 SceneCards。场景、姿势、微动作、镜头全部由你决定，"
+        "不要照抄 shot_plan 的标签或 fallback 文案。必须只输出 JSON 对象，不要 Markdown。\n"
         f"scene_cards 必须正好 {output_count} 条，且第 i 条必须严格对应 "
         "shot_plan[i]，id 用 shot_plan[i].shot_class 加 '-' 加索引，例如 "
         "detail_half_body-3。禁止重排 shot_plan 顺序。\n"
@@ -464,7 +751,9 @@ def _director_instructions(output_count: int) -> str:
         "camera 必须有 distance, angle, lens_feel, orientation。\n"
         "最高优先级：商品还原，不能改颜色、版型、领口、袖型、衣长、图案/logo、"
         "纽扣、口袋、缝线。动作和道具不得遮挡商品主体。"
-        "每张 micro_event 必须不同，camera angle/distance 要有变化。"
+        "每张 micro_event 必须是具体生活事件，不能直接复制 variant_label 或写成"
+        "正面全身/自然动作/自然站姿。camera angle/distance、地点、身体重心、"
+        "手部动作至少两项要变化，禁止整批退回普通棚拍站姿。"
         "可以有连续元素，但不能让宠物、包、饮料、手机抢主体。"
         "童装/儿童必须年龄合适，不能成人化。"
     )
@@ -502,6 +791,7 @@ async def compose_image_prompt_with_gpt55(
         "可执行的中文 final_prompt。必须只输出 JSON 对象，不要 Markdown。\n"
         "字段：final_prompt, product_visibility_checklist, negative_prompt_notes, regenerate_if。\n"
         "final_prompt 必须自然、有具体拍摄事件和镜头，但商品还原优先级最高。"
+        "必须保留 scene_card 的 location、micro_event、pose、motion、camera，不得简化成普通站姿。"
         "不要引入没有要求的新服装图案、logo、口袋、腰带或遮挡道具。"
         "如果有 rewrite_instruction，必须按它降低风险。"
     )
@@ -664,6 +954,12 @@ def _normalize_scene_cards(
     normalized: list[dict[str, Any]] = []
     for index, raw in enumerate(aligned):
         fallback = fallback_cards[index] if index < len(fallback_cards) else {}
+        shot_class = shot_picks[index][0] if index < len(shot_picks) else ""
+        shot_label = (
+            clean_text(shot_picks[index][1].get("label"), max_len=160)
+            if index < len(shot_picks) and isinstance(shot_picks[index][1], dict)
+            else ""
+        )
         if not isinstance(raw, dict):
             raw = {}
         camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
@@ -719,6 +1015,18 @@ def _normalize_scene_cards(
             or list(fallback.get("negative") or []),
             "source": "gpt55",
         }
+        if _is_generic_scene_text(
+            card.get("micro_event"), shot_class=shot_class, label=shot_label
+        ):
+            card["micro_event"] = fallback.get("micro_event") or card["micro_event"]
+        if _is_generic_scene_text(
+            card.get("pose"), shot_class=shot_class, label=shot_label
+        ):
+            card["pose"] = fallback.get("pose") or card["pose"]
+        if _is_generic_scene_text(
+            card.get("motion"), shot_class=shot_class, label=shot_label
+        ):
+            card["motion"] = fallback.get("motion") or card["motion"]
         card["fingerprint"] = scene_fingerprint(card)
         normalized.append(card)
     return _dedupe_scene_cards(normalized, fallback_cards)
@@ -877,7 +1185,7 @@ async def _call_responses_text(
 
     proxy_url = await resolve_provider_proxy_url(provider.proxy)
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=8.0, read=25.0, write=25.0, pool=8.0),
+        timeout=httpx.Timeout(connect=8.0, read=70.0, write=30.0, pool=8.0),
         proxy=proxy_url,
     ) as client:
         resp = await client.post(

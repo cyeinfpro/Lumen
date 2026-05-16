@@ -4,10 +4,10 @@
 # 行为（详见 docs/docker-full-stack-cutover-plan.md §11.3）：
 #   1. lumen_with_lock "update" 把整段流程包在全局锁里
 #   2. 解析目标 LUMEN_IMAGE_TAG（channel + GitHub Releases），current==target 直接 noop
-#   3. preflight 检查 docker / 磁盘 / .env 关键字段 / /opt/lumendata 目录权限
-#   4. backup_preflight 强制 PG dump（除非显式 SKIP），失败 abort
-#   5. 准备新 release 目录（rsync 仓库快照），shared/.env 软链回去
-#   6. set_image_tag → docker compose pull → start_infra → migrate_db
+#   3. 默认 fast 模式：少做 release 拉取、可配置备份、按需迁移、跳过阻塞式 cleanup
+#   4. 准备新 release 目录，shared/.env 软链回去
+#   5. set_image_tag → fast 跳过显式 pull / standard 执行 docker compose pull
+#   6. 判断 DB migration 是否变化；无 migration 时跳过 stop + alembic upgrade
 #   7. migrate 失败 → fail-fast，不切 current、不重启业务容器（§11.3 + §17.6）
 #   8. 切 current → restart_services；失败自动用上一已知好 tag pull && up
 #   9. health_check / cleanup
@@ -108,6 +108,24 @@ PREVIOUS_TAG=""
 TARGET_TAG=""
 SWITCHED=0
 ROLLBACK_DONE=0
+LUMEN_UPDATE_MODE="$(printf '%s' "${LUMEN_UPDATE_MODE:-fast}" | tr '[:upper:]' '[:lower:]')"
+case "${LUMEN_UPDATE_MODE}" in
+    fast)
+        ;;
+    standard|safe|full)
+        LUMEN_UPDATE_MODE="standard"
+        ;;
+    *)
+        log_warn "未知 LUMEN_UPDATE_MODE=${LUMEN_UPDATE_MODE}，回退到 fast。"
+        LUMEN_UPDATE_MODE="fast"
+        ;;
+esac
+if [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ -z "${LUMEN_UPDATE_SELF_UPDATE_SCRIPTS+x}" ]; then
+    # Fast 是默认交互更新路径：不在每次点击时额外拉 raw.githubusercontent
+    # 上的脚本。需要全量自更新/强校验时用 LUMEN_UPDATE_MODE=standard。
+    LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0
+fi
+export LUMEN_UPDATE_MODE
 
 lumen_install_signal_handlers
 
@@ -116,6 +134,7 @@ if [ "${ROOT_SOURCE}" = "deploy_root" ]; then
     log_info "检测到已安装部署目录：${ROOT}；发布物来源：${LUMEN_REPO_DIR:-${SCRIPT_ROOT}}"
 fi
 log_info "operation_id：${OPERATION_ID}"
+log_info "update_mode：${LUMEN_UPDATE_MODE}"
 
 # ---------------------------------------------------------------------------
 # 工具函数：emit 包装 + 安全 mask
@@ -214,6 +233,55 @@ release_version_for_target() {
         return 0
     fi
     return 1
+}
+
+compose_up_service_fast() {
+    local compose_dir="$1"
+    local svc="$2"
+    # --no-deps 是快速更新的关键：否则重建 worker/web 时 Compose 会顺带 stop/recreate
+    # api/redis 等依赖，用户正在看的项目页会撞到 ECONNREFUSED。
+    lumen_compose_in "${compose_dir}" up \
+        --pull missing \
+        --no-deps \
+        --timeout "${LUMEN_UPDATE_RECREATE_TIMEOUT:-30}" \
+        -d --wait --force-recreate \
+        "${svc}"
+}
+
+compose_up_service_standard() {
+    local compose_dir="$1"
+    local svc="$2"
+    lumen_compose_in "${compose_dir}" up \
+        --pull missing \
+        --timeout "${LUMEN_UPDATE_RECREATE_TIMEOUT:-30}" \
+        -d --wait --force-recreate \
+        "${svc}"
+}
+
+compose_up_service() {
+    local compose_dir="$1"
+    local svc="$2"
+    if [ "${LUMEN_UPDATE_MODE}" = "fast" ]; then
+        compose_up_service_fast "${compose_dir}" "${svc}"
+    else
+        compose_up_service_standard "${compose_dir}" "${svc}"
+    fi
+}
+
+alembic_revision_from_output() {
+    awk 'NF && !/^INFO/ {print $1; exit}'
+}
+
+target_alembic_head() {
+    local compose_dir="$1"
+    lumen_compose_in "${compose_dir}" --profile migrate run --rm migrate alembic heads 2>/dev/null \
+        | alembic_revision_from_output
+}
+
+current_alembic_revision() {
+    local compose_dir="$1"
+    lumen_compose_in "${compose_dir}" --profile migrate run --rm migrate alembic current 2>/dev/null \
+        | alembic_revision_from_output
 }
 
 render_update_runner_unit() {
@@ -736,6 +804,7 @@ emit_info check current_id    "${CURRENT_ID:-<none>}"
 emit_info check data_root     "${LUMEN_DATA_ROOT}"
 emit_info check db_root       "${LUMEN_DB_ROOT}"
 emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"
+emit_info check update_mode "${LUMEN_UPDATE_MODE}"
 emit_info check idempotency_key "${LUMEN_UPDATE_IDEMPOTENCY_KEY:-<none>}"
 emit_info check resolved_tag_source "${LUMEN_UPDATE_RESOLVED_TAG_SOURCE}"
 emit_info check force_redeploy "${LUMEN_UPDATE_FORCE_REDEPLOY}"
@@ -860,6 +929,10 @@ if [ "${LUMEN_UPDATE_SKIP_BACKUP:-0}" = "1" ]; then
     log_warn "[backup_preflight] LUMEN_UPDATE_SKIP_BACKUP=1，跳过备份（强烈不推荐）。"
     emit_warn backup_preflight "skipped_by_env"
     emit_done backup_preflight 0
+elif [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ "${LUMEN_UPDATE_FAST_BACKUP:-0}" != "1" ]; then
+    log_warn "[backup_preflight] fast 模式默认跳过备份；需要强制备份请设置 LUMEN_UPDATE_FAST_BACKUP=1 或 LUMEN_UPDATE_MODE=standard。"
+    emit_warn backup_preflight "skipped_by_fast_mode"
+    emit_done backup_preflight 0
 else
     BACKUP_SCRIPT=""
     if [ -x "${SCRIPT_DIR}/backup.sh" ]; then
@@ -922,10 +995,16 @@ try_image_extract_release() {
     fi
     local registry="${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}"
     local image="${registry}/lumen-api:${tag}"
-    log_info "[fetch_release] 尝试 docker pull ${image}"
-    if ! docker pull "${image}" >/dev/null 2>&1; then
-        log_warn "[fetch_release] docker pull 失败 (image=${image})"
-        return 1
+    if [ "${LUMEN_UPDATE_MODE}" = "fast" ] \
+            && ! lumen_image_tag_is_rolling "${tag}" \
+            && docker image inspect "${image}" >/dev/null 2>&1; then
+        log_info "[fetch_release] fast 模式：复用本地已有 ${image} 提取发布物。"
+    else
+        log_info "[fetch_release] 尝试 docker pull ${image}"
+        if ! docker pull "${image}" >/dev/null 2>&1; then
+            log_warn "[fetch_release] docker pull 失败 (image=${image})"
+            return 1
+        fi
     fi
     rm -rf "${out_dir}"
     mkdir -p "${out_dir}"
@@ -964,9 +1043,11 @@ if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
         IMAGE_EXTRACT_DIR="${ROOT}/.update-image-extract"
         # CI smoke tests set LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT=1 to skip the
         # network-y docker pull and exercise the legacy snapshot-only branch.
+        RELEASE_SOURCE_IMAGE_EXTRACT=0
         if [ "${LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT:-0}" != "1" ] && \
            try_image_extract_release "${TARGET_TAG:-main}" "${IMAGE_EXTRACT_DIR}"; then
             REPO_DIR="${IMAGE_EXTRACT_DIR}"
+            RELEASE_SOURCE_IMAGE_EXTRACT=1
             emit_info fetch_release source "image_extract"
             log_info "[fetch_release] 已从 image 提取代码到 ${REPO_DIR}"
         else
@@ -1037,7 +1118,10 @@ enable_local_build_fallback() {
     export LUMEN_UPDATE_BUILD
     emit_info fetch_release build_fallback "local"
 }
-if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
+if [ "${RELEASE_SOURCE_IMAGE_EXTRACT:-0}" = "1" ]; then
+    log_info "[fetch_release] image_extract 已验证 ${TARGET_TAG} 可拉取，跳过 GHCR manifest 探测。"
+    emit_info fetch_release tag_probe "skipped_image_extract_verified"
+elif ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
     if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-1}" = "1" ]; then
         log_warn "[fetch_release] 目标镜像 tag=${TARGET_TAG} 不存在，自动回退到 main。"
         emit_info fetch_release target_tag_fallback "main"
@@ -1117,7 +1201,18 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" = "1" ]; then
     emit_done pull_images 0
 fi
 
-if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
+if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ] \
+        && [ "${LUMEN_UPDATE_MODE}" = "fast" ] \
+        && ! lumen_image_tag_is_rolling "${TARGET_TAG}" \
+        && [ "${LUMEN_UPDATE_FAST_EXPLICIT_PULL:-0}" != "1" ]; then
+    # Fast 模式不做单独的 compose pull 阻塞阶段。restart_services 用
+    # `up --pull missing` 按服务拉缺失镜像：已有镜像直接复用，缺哪个才拉哪个。
+    emit_start pull_images
+    log_info "[pull_images] fast 模式：跳过显式 docker compose pull，稍后按服务 --pull missing。"
+    emit_info pull_images action "skipped_by_fast_mode"
+    emit_info pull_images pull_policy "up_pull_missing"
+    emit_done pull_images 0
+elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     # -----------------------------------------------------------------------
     # Phase: pull_images
     # -----------------------------------------------------------------------
@@ -1200,13 +1295,27 @@ if ! migrate_postgres_uid; then
     exit 1
 fi
 
-# --force-recreate：避免容器名已存在但配置签名不一致（caller 历史 cwd 不同
-# 或人工 docker compose up 留下来的孤儿容器）时报 conflict 直接 fail。
-if ! lumen_compose_in "${NEW_RELEASE}" up --pull missing -d --wait --force-recreate postgres redis; then
-    log_error "[start_infra] postgres / redis 启动或健康检查失败。"
-    log_error "  当前 API/Worker/Web 服务保持不变。"
-    emit_fail start_infra 1
-    exit 1
+if [ "${LUMEN_UPDATE_MODE}" = "fast" ] \
+        && LUMEN_HEALTH_COMPOSE_ATTEMPTS="${LUMEN_UPDATE_FAST_HEALTH_ATTEMPTS:-1}" \
+           LUMEN_HEALTH_COMPOSE_INTERVAL="${LUMEN_UPDATE_FAST_HEALTH_INTERVAL:-1}" \
+           lumen_health_compose postgres redis >/dev/null 2>&1; then
+    log_info "[start_infra] fast 模式：postgres/redis 已 healthy，跳过基础设施容器重建。"
+    emit_info start_infra action "reuse_healthy_infra"
+else
+    # standard 模式保留 force-recreate；fast 模式只在 infra 不健康/缺失时启动，不主动重建。
+    if [ "${LUMEN_UPDATE_MODE}" = "fast" ]; then
+        if ! lumen_compose_in "${NEW_RELEASE}" up --pull missing -d --wait postgres redis; then
+            log_error "[start_infra] postgres / redis 启动或健康检查失败。"
+            log_error "  当前 API/Worker/Web 服务保持不变。"
+            emit_fail start_infra 1
+            exit 1
+        fi
+    elif ! lumen_compose_in "${NEW_RELEASE}" up --pull missing -d --wait --force-recreate postgres redis; then
+        log_error "[start_infra] postgres / redis 启动或健康检查失败。"
+        log_error "  当前 API/Worker/Web 服务保持不变。"
+        emit_fail start_infra 1
+        exit 1
+    fi
 fi
 emit_done start_infra 0
 
@@ -1222,8 +1331,26 @@ emit_done start_infra 0
 # ---------------------------------------------------------------------------
 emit_start migrate_db
 
+MIGRATE_NEEDED=1
+if [ "${LUMEN_UPDATE_MODE}" = "fast" ]; then
+    _alembic_heads_pre="$(target_alembic_head "${NEW_RELEASE}" 2>/dev/null || true)"
+    _alembic_current_pre="$(current_alembic_revision "${NEW_RELEASE}" 2>/dev/null || true)"
+    if [ -n "${_alembic_heads_pre}" ] && [ "${_alembic_current_pre}" = "${_alembic_heads_pre}" ]; then
+        MIGRATE_NEEDED=0
+        log_info "[migrate_db] fast 模式：DB 已在目标 head=${_alembic_heads_pre}，跳过 stop api/worker 与 alembic upgrade。"
+        emit_info migrate_db action "skip_already_at_head"
+        emit_info migrate_db head "${_alembic_heads_pre}"
+        emit_done migrate_db 0
+    else
+        emit_info migrate_db current "${_alembic_current_pre:-<unknown>}"
+        emit_info migrate_db head "${_alembic_heads_pre:-<unknown>}"
+    fi
+fi
+
 _stopped_old_services=0
-if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ]; then
+if [ "${MIGRATE_NEEDED}" = "0" ]; then
+    :
+elif [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ]; then
     log_info "[migrate_db] LUMEN_UPDATE_BLUE_GREEN=1：保持旧 api/worker 运行，依赖 expand-then-contract 迁移闸门。"
     emit_info migrate_db old_services "kept_running_blue_green"
 else
@@ -1235,8 +1362,10 @@ else
 fi
 
 _migrate_run_failed=0
-if ! lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate; then
-    _migrate_run_failed=1
+if [ "${MIGRATE_NEEDED}" = "1" ]; then
+    if ! lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate; then
+        _migrate_run_failed=1
+    fi
 fi
 
 # Verify alembic 真到 head — 已观察到 alembic upgrade 在某些情况下 silent
@@ -1244,14 +1373,17 @@ fi
 # SA 内部吞掉）。仅看 docker compose run 的 exit code 不可靠：必须二次
 # query alembic_version 与 heads 比对。否则 update.sh 误以为 success 后切
 # current → api 用新代码查旧 schema → 全站 500（v1.1.0 prod 已踩过）。
-_alembic_heads="$(lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate alembic heads 2>/dev/null \
-    | awk 'NF && !/^INFO/ {print $1; exit}')"
-_alembic_current="$(lumen_compose_in "${NEW_RELEASE}" --profile migrate run --rm migrate alembic current 2>/dev/null \
-    | awk 'NF && !/^INFO/ {print $1; exit}')"
+if [ "${MIGRATE_NEEDED}" = "1" ]; then
+    _alembic_heads="$(target_alembic_head "${NEW_RELEASE}" 2>/dev/null || true)"
+    _alembic_current="$(current_alembic_revision "${NEW_RELEASE}" 2>/dev/null || true)"
+else
+    _alembic_heads="${_alembic_heads_pre:-}"
+    _alembic_current="${_alembic_current_pre:-}"
+fi
 
-if [ "${_migrate_run_failed}" = "1" ] \
+if [ "${MIGRATE_NEEDED}" = "1" ] && { [ "${_migrate_run_failed}" = "1" ] \
         || [ -z "${_alembic_heads}" ] \
-        || [ "${_alembic_current}" != "${_alembic_heads}" ]; then
+        || [ "${_alembic_current}" != "${_alembic_heads}" ]; }; then
     log_error "[migrate_db] alembic upgrade 失败或未真正落地 → fail-fast。"
     log_error "  observed alembic current=${_alembic_current:-<空>}"
     log_error "  expected head=${_alembic_heads:-<空>}"
@@ -1283,7 +1415,9 @@ if [ "${_migrate_run_failed}" = "1" ] \
     emit_fail migrate_db 1
     exit 1
 fi
-emit_done migrate_db 0
+if [ "${MIGRATE_NEEDED}" = "1" ]; then
+    emit_done migrate_db 0
+fi
 
 # ---------------------------------------------------------------------------
 # Phase: switch
@@ -1404,7 +1538,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     if [ "${_restart_ok}" = "1" ]; then
         emit_start start_blue
         for _svc in worker web api; do
-            if ! lumen_compose_in "${CURRENT_LINK}" up --pull missing -d --wait --force-recreate "${_svc}"; then
+            if ! compose_up_service "${CURRENT_LINK}" "${_svc}"; then
                 _restart_ok=0
                 break
             fi
@@ -1435,7 +1569,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     fi
 else
     for _svc in worker web api; do
-        if ! lumen_compose_in "${CURRENT_LINK}" up --pull missing -d --wait --force-recreate "${_svc}"; then
+        if ! compose_up_service "${CURRENT_LINK}" "${_svc}"; then
             _restart_ok=0
             break
         fi
@@ -1477,7 +1611,7 @@ else
                     && lumen_compose_in "${CURRENT_LINK}" pull; then
                     # 回滚同样按 worker → web → api 顺序逐个 up，保留 api 最后启动的偏好。
                     for _svc in worker web api; do
-                        if ! lumen_compose_in "${CURRENT_LINK}" up --pull missing -d --wait --force-recreate "${_svc}"; then
+                        if ! compose_up_service_standard "${CURRENT_LINK}" "${_svc}"; then
                             _rollback_started=0
                             break
                         fi
@@ -1517,7 +1651,9 @@ fi
 
 # tgbot：如果 .env 有 TELEGRAM_BOT_TOKEN 非空才起
 if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
-    if ! lumen_compose_in "${CURRENT_LINK}" --profile tgbot up --pull missing -d --force-recreate tgbot; then
+    if ! lumen_compose_in "${CURRENT_LINK}" --profile tgbot up \
+            --pull missing --no-deps --timeout "${LUMEN_UPDATE_RECREATE_TIMEOUT:-30}" \
+            -d --force-recreate tgbot; then
         log_warn "[restart_services] tgbot 启动失败，已忽略（业务 API 不受影响）。"
         emit_warn restart_services "tgbot_failed_ignored"
     else
@@ -1593,33 +1729,38 @@ _cleanup_filter_args() {
     fi
 }
 
-# 1. dangling layers — 几乎 0 风险。
-filter_args=()
-while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_DANGLING_H}")
-if ! lumen_docker image prune -f "${filter_args[@]}" >/dev/null 2>&1; then
-    log_warn "[cleanup] docker image prune (dangling) 失败（已忽略）。"
+if [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ "${LUMEN_UPDATE_FAST_CLEANUP:-0}" != "1" ]; then
+    log_info "[cleanup] fast 模式：跳过 docker image/buildx prune；仅清理旧 release 目录。"
+    emit_info cleanup image_prune "skipped_by_fast_mode"
 else
-    emit_info cleanup dangling_pruned "hours=${CLEANUP_DANGLING_H}"
-fi
-
-# 2. untagged unused images — 旧 :main / :v1.0.x。docker 不会 prune 仍被运行容器
-#    引用的 image，所以默认无 filter 安全。
-filter_args=()
-while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_IMAGES_H}")
-if ! lumen_docker image prune -a -f "${filter_args[@]}" >/dev/null 2>&1; then
-    log_warn "[cleanup] docker image prune -a 失败（已忽略）。"
-else
-    emit_info cleanup unused_images_pruned "hours=${CLEANUP_IMAGES_H}"
-fi
-
-# 3. buildx build cache — local build 路径会无限增长，必须定期清。
-if lumen_docker buildx version >/dev/null 2>&1; then
+    # 1. dangling layers — 几乎 0 风险。
     filter_args=()
-    while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_CACHE_H}")
-    if ! lumen_docker buildx prune -f "${filter_args[@]}" >/dev/null 2>&1; then
-        log_warn "[cleanup] docker buildx prune 失败（已忽略）。"
+    while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_DANGLING_H}")
+    if ! lumen_docker image prune -f "${filter_args[@]}" >/dev/null 2>&1; then
+        log_warn "[cleanup] docker image prune (dangling) 失败（已忽略）。"
     else
-        emit_info cleanup buildx_cache_pruned "hours=${CLEANUP_CACHE_H}"
+        emit_info cleanup dangling_pruned "hours=${CLEANUP_DANGLING_H}"
+    fi
+
+    # 2. untagged unused images — 旧 :main / :v1.0.x。docker 不会 prune 仍被运行容器
+    #    引用的 image，所以默认无 filter 安全。
+    filter_args=()
+    while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_IMAGES_H}")
+    if ! lumen_docker image prune -a -f "${filter_args[@]}" >/dev/null 2>&1; then
+        log_warn "[cleanup] docker image prune -a 失败（已忽略）。"
+    else
+        emit_info cleanup unused_images_pruned "hours=${CLEANUP_IMAGES_H}"
+    fi
+
+    # 3. buildx build cache — local build 路径会无限增长，必须定期清。
+    if lumen_docker buildx version >/dev/null 2>&1; then
+        filter_args=()
+        while IFS= read -r line; do filter_args+=("${line}"); done < <(_cleanup_filter_args "${CLEANUP_CACHE_H}")
+        if ! lumen_docker buildx prune -f "${filter_args[@]}" >/dev/null 2>&1; then
+            log_warn "[cleanup] docker buildx prune 失败（已忽略）。"
+        else
+            emit_info cleanup buildx_cache_pruned "hours=${CLEANUP_CACHE_H}"
+        fi
     fi
 fi
 
