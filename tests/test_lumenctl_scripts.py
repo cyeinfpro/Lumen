@@ -124,6 +124,15 @@ def test_install_generates_all_required_compose_secrets() -> None:
         assert f'ensure_env_secret "${{file}}" {key}' in text
 
 
+def test_update_preflight_matches_byok_dev_fallback_policy() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+    assert "shared_app_env_is_development" in text
+    assert "for k in DATABASE_URL REDIS_URL SESSION_SECRET; do" in text
+    assert 'env_key_present "${SHARED_ENV}" "BYOK_API_KEY_MASTER_SECRET"' in text
+    assert 'emit_info preflight byok_secret "dev_fallback"' in text
+    assert "dev|development|local|test)" in text
+
+
 def test_web_port_defaults_to_loopback_bind_and_install_preserves_explicit_override() -> (
     None
 ):
