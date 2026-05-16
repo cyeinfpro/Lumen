@@ -609,9 +609,12 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert 'stop -t "${LUMEN_UPDATE_STOP_TIMEOUT:-30}" api worker tgbot' in text
     # restart_services: api 必须最后启动（lumen-api 在跑 update.sh 自身的进度
     # SSE，先重 api 会让前端断流）。形态：for _svc in worker web api; do up -d
-    # --pull missing --wait --force-recreate "${_svc}"; done
+    # --pull missing --wait --force-recreate "${_svc}"; done。fast 模式通过
+    # compose_up_service helper 加 --no-deps，standard 保留原重建语义。
     assert "for _svc in worker web api" in text
-    assert 'up --pull missing -d --wait --force-recreate "${_svc}"' in text
+    assert 'compose_up_service "${CURRENT_LINK}" "${_svc}"' in text
+    assert "compose_up_service_fast()" in text
+    assert "--no-deps" in text
     # release 切换走 atomic switch
     assert 'lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"' in text
     # 反断言：脚本注释里可以提"不再 uv sync / npm ci"，但实际可执行命令必须不包含。
@@ -665,6 +668,20 @@ def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
     assert code.count("已忽略") >= 4
     # Existing release directory cleanup is preserved.
     assert 'lumen_release_cleanup_old "${ROOT}" "${LUMEN_RELEASE_KEEP:-3}"' in code
+
+
+def test_update_script_defaults_to_fast_update_path() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+    code = _strip_shell_comments(text)
+
+    assert 'LUMEN_UPDATE_MODE:-fast' in code
+    assert 'LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=0' in code
+    assert 'LUMEN_UPDATE_FAST_EXPLICIT_PULL:-0' in code
+    assert '! lumen_image_tag_is_rolling "${TARGET_TAG}"' in code
+    assert 'skipped_by_fast_mode' in text
+    assert 'reuse_healthy_infra' in code
+    assert '--no-deps' in code
+    assert 'image_prune "skipped_by_fast_mode"' in code
 
 
 def test_update_script_pulls_tgbot_image_when_telegram_configured() -> None:

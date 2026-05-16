@@ -91,3 +91,34 @@ def test_normalize_scene_cards_aligns_by_product_visibility_and_dedupes() -> Non
     assert cards[1]["product_visibility"] == "upper_body_detail"
     assert len(fingerprints) == len(set(fingerprints))
     assert "变体 3" in cards[2]["micro_event"]
+
+
+def test_fallback_scene_cards_use_real_events_not_shot_labels() -> None:
+    shot_picks = [
+        ("front_full_body", {"label": "正面全身", "framing": "product_first"}),
+        ("natural_pose", {"label": "自然动作", "framing": "tone_first"}),
+        ("detail_half_body", {"label": "半身细节", "framing": "product_first"}),
+        ("side_or_back", {"label": "侧面背面", "framing": "tone_first"}),
+    ]
+
+    cards = scene_planner.fallback_scene_cards_from_pool(
+        product_analysis={"category": "衬衫"},
+        template="premium_studio",
+        scene_environment="indoor",
+        shot_picks=shot_picks,
+        aspect_ratio="4:5",
+        user_prompt="自然真实",
+        accessory_plan={"items": ["细项链"]},
+        allow_pet=False,
+        continuity_anchor="accessory",
+        scene_strategy="natural_series",
+        scene_variety="rich",
+    )
+
+    labels = {variant["label"] for _shot, variant in shot_picks}
+    assert len(cards) == 4
+    assert len({card["fingerprint"] for card in cards}) == 4
+    assert len({card["location"] for card in cards}) > 1
+    assert len({card["pose"] for card in cards}) > 1
+    assert all(card["micro_event"] not in labels for card in cards)
+    assert all(card["pose"] not in labels for card in cards)

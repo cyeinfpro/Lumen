@@ -539,8 +539,10 @@ def _showcase_prompt_brief(
     if extra_direction:
         direction = f"{direction}；{extra_direction}"
     photography_direction = (
-        "1. 摄影执行：按 SceneCard 的机位、距离和镜头感执行，允许真实低角度、俯拍、"
-        "近距离手机抓拍或环境远景；必须保持头身比例自然、透视可信，动作像真实抓拍，"
+        "1. 摄影执行：严格按 SceneCard 的地点、生活事件、机位、距离、镜头感、"
+        "动作和动态执行，允许真实低角度、俯拍、近距离手机抓拍或环境远景；"
+        "必须保持头身比例自然、透视可信，动作像真实抓拍；不得退回普通棚拍站姿，"
+        "不得和其它图片重复同一地点、同一站姿、同一手部动作；"
         "避免跳跃、转圈、跪趴、后仰、大幅甩头。"
         if scene_card_mode
         else "1. 摄影执行：真实模特目录摄影，约 50mm 标准焦段（不要广角拉头身比、不要长焦压扁），平视或胸口高度机位；身体重心可信，动作幅度小，避免跳跃、转圈、跪趴、后仰、大幅甩头。"
@@ -3033,6 +3035,7 @@ def _showcase_prompt(
         if garment_lock is not None
         else ""
     )
+    scene_direction = _showcase_scene_card_direction(scene_card)
     if composed_prompt and composed_prompt.strip():
         prefix = (
             f"{lock_prefix}\n\n【GPT-5.5 单张执行 Prompt】\n"
@@ -3041,11 +3044,19 @@ def _showcase_prompt(
         )
         if len(prefix) > MAX_PROMPT_CHARS - 600:
             prefix = _truncate_prompt_text(prefix, MAX_PROMPT_CHARS - 600)
-        return prefix + composed_prompt.strip()[: max(0, MAX_PROMPT_CHARS - len(prefix))]
+        body = composed_prompt.strip()
+        if scene_direction:
+            body = (
+                f"{body}\n\n"
+                "【本张 SceneCard 必须执行】"
+                f"{scene_direction}。"
+                "最终画面必须明显呈现这个地点、生活事件、动作动态和机位；"
+                "不得退回普通站姿、棚拍硬 pose 或与其它图片重复的同一动作。"
+            )
+        return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
     template_direction = _template_requirement(
         template, product_analysis, scene_environment
     )
-    scene_direction = _showcase_scene_card_direction(scene_card)
     if scene_direction:
         template_direction = f"{template_direction}；{scene_direction}"
     body = _showcase_prompt_brief(
@@ -3157,6 +3168,8 @@ async def _prepare_showcase_preflight_impl(
             accessory_plan=accessory_plan,
             allow_pet=allow_pet,
             continuity_anchor=continuity_anchor,
+            scene_strategy=scene_strategy,
+            scene_variety=scene_variety,
         )
     else:
         planning = await _plan_scene_cards_with_gpt55(
@@ -3190,6 +3203,8 @@ async def _prepare_showcase_preflight_impl(
             accessory_plan=accessory_plan,
             allow_pet=allow_pet,
             continuity_anchor=continuity_anchor,
+            scene_strategy=scene_strategy,
+            scene_variety=scene_variety,
         )
         scene_cards = list(planning.get("scene_cards") or [])
 
@@ -3340,6 +3355,7 @@ async def _prepare_showcase_preflight_impl(
                         user_prompt=user_prompt,
                         aspect_ratio=aspect_ratio,
                         scene_environment=scene_environment,
+                        scene_card=scene_card,
                         garment_lock=garment_lock,
                         allow_pet=allow_pet,
                         allow_background_people=allow_background_people,
@@ -3347,7 +3363,7 @@ async def _prepare_showcase_preflight_impl(
                     composition = _fallback_prompt_composition(
                         base_prompt=safe_prompt,
                         scene_card=scene_card,
-                        reason="rewrite_still_risky; using scene-free safe prompt",
+                        reason="rewrite_still_risky; using scene-card safe prompt",
                     )
                     review = {
                         **rewritten_review,
@@ -3355,7 +3371,7 @@ async def _prepare_showcase_preflight_impl(
                         "must_rewrite": False,
                         "safe_fallback": True,
                         "fallback_reason": (
-                            "rewrite_still_risky; using scene-free safe prompt"
+                            "rewrite_still_risky; using scene-card safe prompt"
                         ),
                     }
                     final_prompt = safe_prompt
@@ -3395,9 +3411,15 @@ async def _prepare_showcase_preflight_impl(
 
 async def _prepare_showcase_preflight(**kwargs: Any) -> dict[str, Any]:
     try:
+        timeout_seconds = float(
+            os.environ.get("LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC", "240")
+        )
+    except (TypeError, ValueError):
+        timeout_seconds = 240.0
+    try:
         return await asyncio.wait_for(
             _prepare_showcase_preflight_impl(**kwargs),
-            timeout=90.0,
+            timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
         logger.warning("apparel preflight timed out; falling back to rules planning")
