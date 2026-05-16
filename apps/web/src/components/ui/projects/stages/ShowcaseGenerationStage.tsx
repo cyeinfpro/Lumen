@@ -119,8 +119,9 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [confirmDeliver, setConfirmDeliver] = useState(false);
 
-  const hasTasks = Boolean(step?.task_ids?.length);
   const isRunning = step?.status === "running";
+  const hasTasks = Boolean(step?.task_ids?.length);
+  const hasGenerationStarted = hasTasks || isRunning;
   const stageError = stringValue(step?.output_json?.error_message);
   if (!isRunning && trackedConfigKey !== currentConfigKey) {
     setTrackedConfigKey(currentConfigKey);
@@ -332,7 +333,11 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
           leftIcon={hasTasks ? <RefreshCw className="h-4 w-4" /> : <Shirt className="h-4 w-4" />}
           className="w-full sm:w-auto"
         >
-          {hasTasks ? `按当前模板再生成 ${outputCount} 张` : `开始生成 ${outputCount} 张展示图`}
+          {isRunning
+            ? "展示图任务运行中"
+            : hasTasks
+              ? `按当前模板再生成 ${outputCount} 张`
+              : `开始生成 ${outputCount} 张展示图`}
         </Button>
         {generated.length > 0 ? (
           <Button
@@ -348,7 +353,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
         ) : null}
       </section>
 
-      {hasTasks ? (
+      {hasGenerationStarted ? (
         <section className="border-t border-[var(--border)] py-5">
           <div className="mb-3 flex items-center justify-between gap-3">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">

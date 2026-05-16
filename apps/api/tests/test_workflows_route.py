@@ -65,6 +65,14 @@ class _Db:
         self.committed = True
 
 
+class _BackgroundTasks:
+    def __init__(self) -> None:
+        self.tasks: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
+
+    def add_task(self, func: Any, *args: Any, **kwargs: Any) -> None:
+        self.tasks.append((func, args, kwargs))
+
+
 def test_model_candidates_mvp_requires_three_candidates() -> None:
     body = ModelCandidatesCreateIn(
         candidate_count=3,
@@ -929,6 +937,187 @@ def test_showcase_regeneration_target_keeps_existing_outputs() -> None:
         )
         == 8
     )
+
+
+@pytest.mark.asyncio
+async def test_create_showcase_images_queues_gpt55_preflight_in_background(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        conversation_id="conv-1",
+        user_prompt="自然街拍",
+        product_image_ids=["product-1"],
+        current_step="model_approval",
+        status="needs_review",
+        metadata_jsonb={},
+    )
+    product_step = SimpleNamespace(
+        step_key="product_analysis",
+        status="approved",
+        output_json={"category": "衬衫"},
+    )
+    candidate = SimpleNamespace(
+        id="cand-1",
+        contact_sheet_image_id="model-1",
+        model_brief_json={},
+    )
+    showcase = SimpleNamespace(
+        step_key="showcase_generation",
+        status="failed",
+        input_json={},
+        output_json={},
+        task_ids=["old-failed-task"],
+        image_ids=["old-image"],
+    )
+    approval = SimpleNamespace(
+        step_key="model_approval",
+        input_json={
+            "accessory_plan": {
+                "enabled": False,
+                "items": [],
+                "strength": "subtle",
+            }
+        },
+    )
+    quality = SimpleNamespace(
+        step_key="quality_review",
+        status="waiting_input",
+        input_json={},
+        output_json={},
+        task_ids=[],
+        image_ids=[],
+    )
+    conv = SimpleNamespace(id="conv-1", last_activity_at=None)
+    steps = {
+        "product_analysis": product_step,
+        "showcase_generation": showcase,
+        "model_approval": approval,
+        "quality_review": quality,
+    }
+
+    async def fake_get_run(
+        db: Any, *, user_id: str, run_id: str, lock: bool = False
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-1"
+        return run
+
+    async def fake_sync(db: Any, current_run: Any) -> None:
+        assert current_run is run
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        assert run_id == "run-1"
+        return steps[step_key]
+
+    async def fake_selected_candidate(db: Any, run_id: str) -> Any:
+        assert run_id == "run-1"
+        return candidate
+
+    async def fake_conversation(
+        db: Any, *, user_id: str, conversation_id: str
+    ) -> Any:
+        assert user_id == "user-1"
+        assert conversation_id == "conv-1"
+        return conv
+
+    async def fake_build_run_out(db: Any, current_run: Any) -> Any:
+        return current_run
+
+    async def fail_if_called(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("preflight must run in the background task")
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflows, "_step", fake_step)
+    monkeypatch.setattr(workflows, "_selected_candidate", fake_selected_candidate)
+    monkeypatch.setattr(workflows, "_get_owned_conversation", fake_conversation)
+    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+    monkeypatch.setattr(workflows, "_prepare_showcase_preflight", fail_if_called)
+
+    background = _BackgroundTasks()
+    body = ShowcaseImagesCreateIn(output_count=2, template="urban_commute")
+    db = _Db([])
+
+    out = await workflows.create_showcase_images(
+        "run-1",
+        body,
+        background,  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out is run
+    assert run.current_step == "showcase_generation"
+    assert run.status == "running"
+    assert showcase.status == "running"
+    assert showcase.task_ids == []
+    assert showcase.output_json == {}
+    assert showcase.input_json["preflight_status"] == "queued"
+    assert showcase.input_json["target_image_count"] == 3
+    assert showcase.input_json["reference_image_ids"] == ["product-1", "model-1"]
+    assert quality.status == "waiting_input"
+    assert conv.last_activity_at is not None
+    assert db.committed is True
+    assert len(background.tasks) == 1
+    func, args, kwargs = background.tasks[0]
+    assert func is workflows._run_showcase_images_generation_in_background  # noqa: SLF001
+    assert kwargs == {}
+    assert args[0] == "user-1"
+    assert args[1] == "run-1"
+    assert args[2]["output_count"] == 2
+    assert args[3] == showcase.input_json["generation_request_id"]
+
+
+@pytest.mark.asyncio
+async def test_mark_showcase_generation_failed_records_background_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        current_step="showcase_generation",
+        status="running",
+    )
+    showcase = SimpleNamespace(
+        step_key="showcase_generation",
+        status="running",
+        input_json={"generation_request_id": "req-1", "preflight_status": "running"},
+        output_json={},
+    )
+
+    async def fake_get_run(
+        db: Any, *, user_id: str, run_id: str, lock: bool = False
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-1"
+        assert lock is True
+        return run
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        assert run_id == "run-1"
+        assert step_key == "showcase_generation"
+        return showcase
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_step", fake_step)
+
+    db = _Db([])
+    await workflows._mark_showcase_generation_failed(  # noqa: SLF001
+        db=db,  # type: ignore[arg-type]
+        user_id="user-1",
+        workflow_run_id="run-1",
+        request_id="req-1",
+        exc=RuntimeError("gpt55 preflight timeout"),
+    )
+
+    assert showcase.status == "failed"
+    assert showcase.input_json["preflight_status"] == "failed"
+    assert showcase.output_json["error_code"] == "showcase_generation_failed"
+    assert showcase.output_json["error_message"] == "gpt55 preflight timeout"
+    assert run.status == "failed"
+    assert db.committed is True
 
 
 @pytest.mark.asyncio
