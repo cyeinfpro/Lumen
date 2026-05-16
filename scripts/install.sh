@@ -82,19 +82,8 @@ raw_install_git() {
     case "$(uname -s 2>/dev/null || echo unknown)" in
         Darwin)
             if ! raw_have_cmd brew; then
-                printf '[INFO] macOS 未发现 Homebrew，尝试自动安装。\n'
-                if ! /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
-                    printf '[ERROR] Homebrew 自动安装失败；请手动安装 Homebrew 或 Xcode Command Line Tools 后重跑。\n' >&2
-                    return 1
-                fi
-                # brew 默认装到 /opt/homebrew (Apple Silicon) 或 /usr/local (Intel)，
-                # 此时当前 shell PATH 还没拿到 brew，先手动 source brew shellenv 再走。
-                if [ -x /opt/homebrew/bin/brew ]; then
-                    eval "$(/opt/homebrew/bin/brew shellenv)"
-                elif [ -x /usr/local/bin/brew ]; then
-                    eval "$(/usr/local/bin/brew shellenv)"
-                fi
-                raw_refresh_tool_paths
+                printf '[ERROR] macOS 缺少 git，且未发现 Homebrew。请先安装 Xcode Command Line Tools 或 Homebrew 后重跑。\n' >&2
+                return 1
             fi
             if raw_have_cmd brew; then
                 brew install git
@@ -441,7 +430,7 @@ dispatch_entrypoint() {
                 exit 1
             fi
             log_step "[repair] 重新启动 stack 到 project=${LUMEN_COMPOSE_PROJECT:-lumen}"
-            if ! lumen_compose_in "${_root}" up -d --wait --force-recreate; then
+            if ! lumen_compose_in "${_root}" up --pull missing -d --wait --force-recreate; then
                 log_error "[repair] docker compose up 失败；请检查 docker / compose 状态。"
                 exit 1
             fi
@@ -623,6 +612,97 @@ env_file_set() {
 # 读取 .env 中某 key 的当前值（沿用 lib.sh 实现）
 env_file_get() {
     lumen_read_dotenv_value "$1" "$2"
+}
+
+generate_hex_secret() {
+    local bytes="${1:-32}"
+    openssl rand -hex "${bytes}"
+}
+
+ensure_env_secret() {
+    local file="$1"
+    local key="$2"
+    local bytes="${3:-32}"
+    local value
+    value="$(env_file_get "${key}" "${file}")"
+    if [ -n "${value}" ]; then
+        return 0
+    fi
+    if [ "${key}" = "BYOK_API_KEY_MASTER_SECRET" ] && [ "${LUMEN_ALLOW_BYOK_KEY_GEN:-0}" != "1" ]; then
+        log_error "BYOK_API_KEY_MASTER_SECRET 缺失，且数据库可能已有 BYOK 密文。"
+        log_error "  - 新部署：export LUMEN_ALLOW_BYOK_KEY_GEN=1 再重跑安装。"
+        log_error "  - 升级：从备份恢复原始 BYOK_API_KEY_MASTER_SECRET，不要让脚本随机生成。"
+        return 1
+    fi
+    value="$(generate_hex_secret "${bytes}")"
+    if [ "${key}" = "REDIS_PASSWORD" ]; then
+        validate_redis_password "${value}" || return 1
+    else
+        validate_dotenv_value "${key}" "${value}" || return 1
+    fi
+    env_file_set "${file}" "${key}" "${value}" || return 1
+    return 2
+}
+
+ensure_required_env_secrets() {
+    local file="$1"
+    local generated=()
+    local db_url redis_url redis_from_url
+
+    db_url="$(env_file_get DATABASE_URL "${file}")"
+    if [ -z "$(env_file_get DB_PASSWORD "${file}")" ] && [ -n "${db_url}" ]; then
+        lumen_ensure_compose_db_env_vars "${file}" || return 1
+    fi
+
+    redis_url="$(env_file_get REDIS_URL "${file}")"
+    if [ -z "$(env_file_get REDIS_PASSWORD "${file}")" ] && [ -n "${redis_url}" ]; then
+        redis_from_url="$(lumen_redis_password_from_url "${redis_url}" 2>/dev/null || true)"
+        if [ -n "${redis_from_url}" ]; then
+            validate_redis_password "${redis_from_url}" || return 1
+            env_file_set "${file}" REDIS_PASSWORD "${redis_from_url}" || return 1
+        fi
+    fi
+
+    ensure_env_secret "${file}" DB_PASSWORD 32 || case "$?" in
+        2) generated+=("DB_PASSWORD") ;;
+        *) return 1 ;;
+    esac
+    ensure_env_secret "${file}" REDIS_PASSWORD 32 || case "$?" in
+        2) generated+=("REDIS_PASSWORD") ;;
+        *) return 1 ;;
+    esac
+    ensure_env_secret "${file}" SESSION_SECRET 64 || case "$?" in
+        2) generated+=("SESSION_SECRET") ;;
+        *) return 1 ;;
+    esac
+    ensure_env_secret "${file}" BYOK_API_KEY_MASTER_SECRET 48 || case "$?" in
+        2) generated+=("BYOK_API_KEY_MASTER_SECRET") ;;
+        *) return 1 ;;
+    esac
+    ensure_env_secret "${file}" TELEGRAM_BOT_SHARED_SECRET 32 || case "$?" in
+        2) generated+=("TELEGRAM_BOT_SHARED_SECRET") ;;
+        *) return 1 ;;
+    esac
+
+    local db_user db_name db_password redis_password
+    db_user="$(env_file_get DB_USER "${file}")"
+    db_name="$(env_file_get DB_NAME "${file}")"
+    db_password="$(env_file_get DB_PASSWORD "${file}")"
+    redis_password="$(env_file_get REDIS_PASSWORD "${file}")"
+    db_user="${db_user:-lumen_app}"
+    db_name="${db_name:-lumen_app}"
+    if [ -z "$(env_file_get DATABASE_URL "${file}")" ]; then
+        env_file_set "${file}" DATABASE_URL \
+            "postgresql+asyncpg://${db_user}:${db_password}@postgres:5432/${db_name}" || return 1
+    fi
+    if [ -z "$(env_file_get REDIS_URL "${file}")" ]; then
+        env_file_set "${file}" REDIS_URL \
+            "redis://:${redis_password}@redis:6379/0" || return 1
+    fi
+
+    if [ "${#generated[@]}" -gt 0 ]; then
+        log_info "已补齐随机密钥：${generated[*]}。"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1151,10 @@ prepare_data_dirs() {
     local db_root="${LUMEN_DB_ROOT}"
     local app_uid="${LUMEN_APP_UID:-10001}"
     local app_storage_gid="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"
+    local postgres_uid="${LUMEN_POSTGRES_UID:-999}"
+    local postgres_gid="${LUMEN_POSTGRES_GID:-999}"
+    local redis_uid="${LUMEN_REDIS_UID:-999}"
+    local redis_gid="${LUMEN_REDIS_GID:-999}"
 
     if [ -e "${data_root}" ] && [ ! -d "${data_root}" ]; then
         log_error "${data_root} 已存在但不是目录，请先移走或删除后重试。"
@@ -1100,11 +1184,11 @@ prepare_data_dirs() {
         || log_warn "chmod 755 数据根失败（已忽略）"
 
     # 按服务分别 chown（禁止整体 chown 给所有目录 —— §15.2）
-    lumen_run_as_root chown -R 999:999 "${db_root}/postgres" || {
+    lumen_run_as_root chown -R "${postgres_uid}:${postgres_gid}" "${db_root}/postgres" || {
         log_error "chown postgres 数据目录失败。"
         exit 1
     }
-    lumen_run_as_root chown -R 999:999 "${db_root}/redis" || {
+    lumen_run_as_root chown -R "${redis_uid}:${redis_gid}" "${db_root}/redis" || {
         log_error "chown redis 数据目录失败。"
         exit 1
     }
@@ -1118,7 +1202,7 @@ prepare_data_dirs() {
     lumen_run_as_root chmod 750 "${data_root}/storage" "${data_root}/backup" \
         || log_warn "chmod 750 storage/backup 失败（已忽略，但 api/worker 可能写不进去）"
 
-    log_info "数据目录权限设置完成（postgres/redis 在 ${db_root}；storage/backup 在 ${data_root}）。"
+    log_info "数据目录权限设置完成（postgres=${postgres_uid}:${postgres_gid}, redis=${redis_uid}:${redis_gid}；storage/backup 在 ${data_root}）。"
     emit_info "key=data_root" "value=${data_root}"
     emit_info "key=db_root" "value=${db_root}"
     emit_step_done
@@ -1299,34 +1383,11 @@ prepare_env_file() {
         log_info "shared/.env 不存在，从 .env.example 拷贝并生成强随机密钥。"
         cp "${example}" "${shared_env}"
         chmod 600 "${shared_env}"
-
-        # 强随机替换 3 个 placeholder（使用 URL-safe 字符避免破坏 REDIS_URL）
-        local db_password redis_password session_secret
-        db_password="$(openssl rand -hex 24)"
-        redis_password="$(openssl rand -hex 24)"
-        session_secret="$(openssl rand -hex 64)"
-        validate_dotenv_value DB_PASSWORD "${db_password}" || exit 1
-        validate_redis_password "${redis_password}" || exit 1
-        validate_dotenv_value SESSION_SECRET "${session_secret}" || exit 1
-
-        env_file_set "${shared_env}" DB_PASSWORD     "${db_password}"
-        env_file_set "${shared_env}" REDIS_PASSWORD  "${redis_password}"
-        env_file_set "${shared_env}" SESSION_SECRET  "${session_secret}"
-
-        # DATABASE_URL / REDIS_URL：基于新密码精确重写（不要全局 sed）
-        local db_user db_name
-        db_user="$(env_file_get DB_USER "${shared_env}")"
-        db_name="$(env_file_get DB_NAME "${shared_env}")"
-        db_user="${db_user:-lumen_app}"
-        db_name="${db_name:-lumen_app}"
-        env_file_set "${shared_env}" DATABASE_URL \
-            "postgresql+asyncpg://${db_user}:${db_password}@postgres:5432/${db_name}"
-        env_file_set "${shared_env}" REDIS_URL \
-            "redis://:${redis_password}@redis:6379/0"
-
-        log_info "已写入随机密钥（DB_PASSWORD/REDIS_PASSWORD/SESSION_SECRET）。"
+        ensure_required_env_secrets "${shared_env}" || exit 1
+        log_info "已写入随机密钥（DB_PASSWORD/REDIS_PASSWORD/SESSION_SECRET/BYOK_API_KEY_MASTER_SECRET/TELEGRAM_BOT_SHARED_SECRET）。"
     else
         log_info "shared/.env 已存在，跳过密钥生成。"
+        ensure_required_env_secrets "${shared_env}" || exit 1
         # 兜底：补齐 docker compose 必需的 DB_USER/DB_PASSWORD/DB_NAME
         lumen_ensure_compose_db_env_vars "${shared_env}" || exit 1
         case "${LUMEN_ENV_MIGRATE_CONTAINER_URLS:-dry-run}" in
@@ -1378,15 +1439,17 @@ prepare_env_file() {
     env_file_set "${shared_env}" LUMEN_VERSION        "${lumen_version}"
     env_file_set "${shared_env}" LUMEN_DATA_ROOT      "${LUMEN_DATA_ROOT}"
     env_file_set "${shared_env}" LUMEN_DB_ROOT        "${LUMEN_DB_ROOT}"
+    env_file_set "${shared_env}" LUMEN_POSTGRES_UID   "${LUMEN_POSTGRES_UID}"
+    env_file_set "${shared_env}" LUMEN_POSTGRES_GID   "${LUMEN_POSTGRES_GID}"
+    env_file_set "${shared_env}" LUMEN_REDIS_UID      "${LUMEN_REDIS_UID}"
+    env_file_set "${shared_env}" LUMEN_REDIS_GID      "${LUMEN_REDIS_GID}"
     env_file_set "${shared_env}" LUMEN_APP_UID        "${LUMEN_APP_UID}"
     env_file_set "${shared_env}" LUMEN_APP_GID        "${LUMEN_APP_GID}"
     env_file_set "${shared_env}" LUMEN_APP_STORAGE_GID "${LUMEN_APP_STORAGE_GID}"
-    if [ "${LUMEN_WEB_BIND_HOST:-}" = "" ] \
-        && [ "$(env_file_get WEB_BIND_HOST "${shared_env}")" = "127.0.0.1" ]; then
-        log_info "WEB_BIND_HOST 仍是旧默认 127.0.0.1，自动改为 0.0.0.0 暴露宿主机 3000。"
-        env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"
-    elif [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
+    if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
         env_file_set "${shared_env}" WEB_BIND_HOST "${LUMEN_WEB_BIND_HOST}"
+    elif [ -z "$(env_file_get WEB_BIND_HOST "${shared_env}")" ]; then
+        env_file_set "${shared_env}" WEB_BIND_HOST "127.0.0.1"
     fi
 
     # 创建 release/.env -> ../../shared/.env 的相对 symlink
@@ -1531,7 +1594,7 @@ pull_or_build_images() {
 
 start_infrastructure() {
     emit_step_start containers "启动 PostgreSQL / Redis 并等待健康"
-    if ! _install_compose up -d --wait postgres redis; then
+    if ! _install_compose up --pull missing -d --wait postgres redis; then
         log_error "postgres / redis 启动或健康检查失败。"
         exit 1
     fi
@@ -1638,7 +1701,7 @@ run_bootstrap_admin() {
 
 start_application_services() {
     emit_step_start containers "启动 API / Worker / Web（compose --wait）"
-    if ! _install_compose up -d --wait api worker web; then
+    if ! _install_compose up --pull missing -d --wait api worker web; then
         log_error "api / worker / web 启动或健康检查失败。"
         exit 1
     fi
@@ -1650,7 +1713,7 @@ start_application_services() {
     bot_token="$(env_file_get TELEGRAM_BOT_TOKEN "${shared_env}")"
     if [ -n "${bot_token}" ]; then
         log_info "检测到 TELEGRAM_BOT_TOKEN 非空，启动 tgbot service。"
-        if ! _install_compose --profile tgbot up -d tgbot; then
+        if ! _install_compose --profile tgbot up --pull missing -d tgbot; then
             log_warn "tgbot 启动失败（可能是 token 无效或网络问题）。主栈不受影响。"
             INSTALL_TGBOT_STATUS="failed"
         else
@@ -1837,8 +1900,8 @@ print_summary() {
 
   ${LUMEN_C_BOLD}Lumen 安装完成（Docker Compose 全栈）${LUMEN_C_RESET}
 
-  Web 地址 ......... http://<服务器IP>:3000/
-                     （默认监听 0.0.0.0:3000；生产也可通过 nginx 反代）
+  Web 地址 ......... http://127.0.0.1:3000/
+                     （默认仅本机监听；生产请通过 nginx/Caddy/Traefik 反代 HTTPS）
   API 健康检查 ..... http://127.0.0.1:8000/healthz
   管理员邮箱 ....... ${INSTALL_ADMIN_EMAIL:-（已存在或非交互模式未设置）}
   Provider 配置 .... 登录后 → 右上角「管理 → 上游 Provider」
@@ -1902,6 +1965,10 @@ esac
 
 LUMEN_DATA_ROOT="${INSTALL_DATA_ROOT_OVERRIDE:-${LUMEN_DATA_ROOT:-/opt/lumendata}}"
 LUMEN_DB_ROOT="${INSTALL_DB_ROOT_OVERRIDE:-${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}}"
+LUMEN_POSTGRES_UID="${LUMEN_POSTGRES_UID:-999}"
+LUMEN_POSTGRES_GID="${LUMEN_POSTGRES_GID:-999}"
+LUMEN_REDIS_UID="${LUMEN_REDIS_UID:-999}"
+LUMEN_REDIS_GID="${LUMEN_REDIS_GID:-999}"
 LUMEN_APP_UID="${LUMEN_APP_UID:-10001}"
 LUMEN_APP_GID="${LUMEN_APP_GID:-10001}"
 LUMEN_APP_STORAGE_GID="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID}}"

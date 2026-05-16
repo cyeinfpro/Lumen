@@ -12,6 +12,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useRef,
 } from "react";
 
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
@@ -33,6 +34,10 @@ interface UseComposerAttachmentDndOptions {
   setExpanded: (value: boolean) => void;
 }
 
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 export function useComposerAttachmentDnd({
   fileInputRef,
   dragDepthRef,
@@ -43,22 +48,27 @@ export function useComposerAttachmentDnd({
   const addAttachment = useChatStore((s) => s.addAttachment);
   const uploadAttachment = useChatStore((s) => s.uploadAttachment);
   const setComposerError = useChatStore((s) => s.setComposerError);
+  const uploadControllersRef = useRef<Set<AbortController>>(new Set());
 
   const ingestFile = useCallback(
     async (file: File): Promise<boolean> => {
       if (!file.type.startsWith("image/")) return false;
+      const ctl = new AbortController();
+      uploadControllersRef.current.add(ctl);
       try {
         setIsUploading(true);
-        const att = await uploadAttachment(file);
+        const att = await uploadAttachment(file, { signal: ctl.signal });
         addAttachment(att);
         return true;
       } catch (err) {
+        if (isAbortError(err)) return false;
         const msg = err instanceof Error ? err.message : "上传失败";
         setComposerError(msg);
         pushMobileToast(msg, "danger");
         return false;
       } finally {
-        setIsUploading(false);
+        uploadControllersRef.current.delete(ctl);
+        setIsUploading(uploadControllersRef.current.size > 0);
       }
     },
     [uploadAttachment, addAttachment, setComposerError, setIsUploading],
@@ -168,6 +178,7 @@ export function useComposerAttachmentDnd({
   );
 
   useEffect(() => {
+    const uploadControllers = uploadControllersRef.current;
     const resetDragState = () => {
       dragDepthRef.current = 0;
       setIsDragActive(false);
@@ -207,6 +218,10 @@ export function useComposerAttachmentDnd({
       window.removeEventListener("drop", onDrop);
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("dragend", resetDragState);
+      for (const ctl of uploadControllers) {
+        ctl.abort();
+      }
+      uploadControllers.clear();
     };
   }, [dragDepthRef, ingestMany, setExpanded, setIsDragActive]);
 

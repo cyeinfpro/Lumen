@@ -123,8 +123,8 @@ function ToastRow({ item }: { item: ToastItem }) {
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, x: 24, scale: 0.96, transition: { duration: 0.18 } }}
       transition={{ type: "spring", damping: 22, stiffness: 260 }}
-      role="status"
-      aria-live="polite"
+      role={item.tone === "error" || item.tone === "warning" ? "alert" : "status"}
+      aria-live={item.tone === "error" || item.tone === "warning" ? "assertive" : "polite"}
       className={cn(
         "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)]",
         // 移动端撑满可用宽度（已扣掉 viewport 两侧 padding）
@@ -170,7 +170,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         onClick={() => dismiss(item.id)}
         className={cn(
           "shrink-0 w-6 h-6 rounded-md inline-flex items-center justify-center",
-          "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/8 transition-colors",
+          "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] transition-colors",
         )}
       >
         <X className="w-3.5 h-3.5" aria-hidden="true" />

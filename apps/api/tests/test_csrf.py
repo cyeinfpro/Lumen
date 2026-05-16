@@ -30,6 +30,11 @@ class _Db:
         return _ScalarResult((session, user))
 
 
+class _EmptyDb:
+    async def execute(self, _stmt):
+        return _ScalarResult(None)
+
+
 def _request(*, session_id: str = "session-1", csrf: str | None = None, header: str | None = None) -> Request:
     csrf = csrf if csrf is not None else make_csrf_token(session_id)
     raw_session = make_session_cookie(session_id)
@@ -88,6 +93,17 @@ async def test_verify_csrf_rejects_token_from_another_session() -> None:
         assert getattr(exc, "status_code", None) == 403
     else:
         raise AssertionError("expected CSRF failure")
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_reports_invalid_session_before_token_mismatch() -> None:
+    request = _request(session_id="session-1", header="not-the-cookie")
+
+    with pytest.raises(Exception) as excinfo:
+        await verify_csrf(request, _EmptyDb())  # type: ignore[arg-type]
+
+    assert getattr(excinfo.value, "status_code", None) == 401
+    assert excinfo.value.detail["error"]["code"] == "unauthenticated"
 
 
 def _csrf_refresh_request(session_id: str | None = "session-1") -> Request:

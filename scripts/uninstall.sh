@@ -167,6 +167,63 @@ lumen_uninstall_safe_name() {
     printf '%s' "${value:-nginx.conf}"
 }
 
+lumen_uninstall_normalize_existing_path() {
+    local path="$1"
+    if [ -d "${path}" ]; then
+        (cd "${path}" && pwd -P) 2>/dev/null
+        return $?
+    fi
+    if [ -e "${path}" ] || [ -L "${path}" ]; then
+        local parent base
+        parent="$(dirname "${path}")"
+        base="$(basename "${path}")"
+        if [ -d "${parent}" ]; then
+            printf '%s/%s\n' "$(cd "${parent}" && pwd -P)" "${base}"
+            return 0
+        fi
+    fi
+    printf '%s\n' "${path%/}"
+}
+
+lumen_uninstall_data_path_safe_for_purge() {
+    local raw="$1"
+    local normalized home_dir
+    home_dir="${HOME:-}"
+    case "${raw}" in
+        /*) ;;
+        *)
+            log_error "purge 路径不是绝对路径，拒绝删除：${raw}"
+            return 1
+            ;;
+    esac
+    case "${raw%/}" in
+        /|/opt|/var|/var/lib|/srv|/home|/Users|/usr|/etc|/tmp|/root|"${home_dir}")
+            log_error "purge 路径是系统/用户根目录，拒绝删除：${raw}"
+            return 1
+            ;;
+    esac
+    case "${raw%/}" in
+        /opt/lumen*|/var/lumen*|/var/lib/lumen*|/srv/lumen*) ;;
+        *)
+            log_error "purge 只允许删除 /opt/lumen*、/var/lumen*、/var/lib/lumen* 或 /srv/lumen* 下的数据目录：${raw}"
+            return 1
+            ;;
+    esac
+    normalized="$(lumen_uninstall_normalize_existing_path "${raw}")"
+    case "${normalized%/}" in
+        /|/opt|/var|/var/lib|/srv|/home|/Users|/usr|/etc|/tmp|/root|"${home_dir}")
+            log_error "purge 路径规范化后是系统/用户根目录，拒绝删除：${raw} -> ${normalized}"
+            return 1
+            ;;
+        /opt/lumen*|/var/lumen*|/var/lib/lumen*|/srv/lumen*) ;;
+        *)
+            log_error "purge 路径规范化后脱离 Lumen 数据目录前缀，拒绝删除：${raw} -> ${normalized}"
+            return 1
+            ;;
+    esac
+    lumen_path_safe_for_rm "${normalized}" || return 1
+}
+
 lumen_uninstall_collect_nginx_candidates() {
     local dir file seen=" "
     for dir in "${LUMEN_NGINX_ACTIVE_DIRS[@]}"; do
@@ -344,7 +401,12 @@ lumen_uninstall_purge_data_dirs() {
     for d in "${targets[@]}"; do
         if [ -e "${d}" ] || [ -L "${d}" ]; then
             log_warn "即将删除 ${d}（持久化数据目录，操作不可恢复）"
-            # lumen_safe_rm_rf_as_root 内部用 lumen_path_safe_for_rm 拦截 / /usr /opt 等系统目录
+            if ! lumen_uninstall_data_path_safe_for_purge "${d}"; then
+                log_warn "跳过 ${d}（不满足 Lumen 数据目录 purge 安全前缀）。"
+                KEPT+=("${d} 删除失败（路径安全校验未通过）")
+                continue
+            fi
+            # lumen_safe_rm_rf_as_root 内部再次用 lumen_path_safe_for_rm 拦截 / /usr /opt 等系统目录
             if lumen_safe_rm_rf_as_root "${d}"; then
                 log_info "已删除 ${d}"
                 DONE+=("已删除 ${d}")

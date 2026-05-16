@@ -11,7 +11,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from .constants import (
     MAX_MESSAGE_ATTACHMENTS,
@@ -25,6 +32,7 @@ class BaseOut(BaseModel):
 
 
 # ---------- Auth / User ----------
+
 
 class SignupIn(BaseModel):
     # EmailStr 依赖 pydantic[email]（apps/api 已声明）；触发 422 而非 500，比手写正则更严格。
@@ -41,6 +49,7 @@ class LoginIn(BaseModel):
 
 class RuntimeDefaultsOut(BaseModel):
     fast: bool = True
+    upload_max_source_bytes: int = 50 * 1024 * 1024
 
 
 class UserOut(BaseOut):
@@ -55,6 +64,7 @@ class UserOut(BaseOut):
 
 
 # ---------- System Prompts ----------
+
 
 class SystemPromptOut(BaseOut):
     id: str
@@ -84,6 +94,7 @@ class SystemPromptListOut(BaseModel):
 
 # ---------- Conversations ----------
 
+
 class ConversationOut(BaseOut):
     id: str
     title: str
@@ -108,6 +119,7 @@ class ConversationPatchIn(BaseModel):
 
 
 # ---------- Messages ----------
+
 
 class ImageParamsIn(BaseModel):
     # AspectRatio 的 Literal 联合在 sizing.py 里维护；此处 import 复用，
@@ -174,6 +186,7 @@ class AdvancedIn(BaseModel):
 
 class PostMessageIn(BaseModel):
     """DESIGN §5.4 核心写入接口。"""
+
     idempotency_key: str = Field(min_length=1, max_length=64)
     # 上游 prompt 上限对齐：单条用户输入限制 10k 字符，避免恶意 / 误粘大文本撑爆 DB / 上游。
     text: str = Field(max_length=MAX_PROMPT_CHARS)
@@ -187,7 +200,9 @@ class PostMessageIn(BaseModel):
     mask_image_id: str | None = None
     # intent 必须由前端显式给出；V1 删掉了 auto 启发式（命中率低，易误判）。
     # 历史客户端若仍带 "auto"，统一按 chat 处理（后端在 intent.resolve_intent 里兜底）。
-    intent: Literal["auto", "chat", "vision_qa", "text_to_image", "image_to_image"] = "chat"
+    intent: Literal["auto", "chat", "vision_qa", "text_to_image", "image_to_image"] = (
+        "chat"
+    )
     image_params: ImageParamsIn = Field(default_factory=ImageParamsIn)
     chat_params: ChatParamsIn = Field(default_factory=ChatParamsIn)
     advanced: AdvancedIn = Field(default_factory=AdvancedIn)
@@ -212,6 +227,7 @@ class PostMessageOut(BaseModel):
 
 
 # ---------- Tasks ----------
+
 
 class GenerationOut(BaseOut):
     id: str
@@ -259,6 +275,7 @@ class CompletionOut(BaseOut):
 
 class TaskItemOut(BaseModel):
     """Global Task Tray 聚合（DESIGN §5.5）。"""
+
     kind: Literal["generation", "completion"]
     id: str
     message_id: str
@@ -272,17 +289,21 @@ class ActiveTasksOut(BaseModel):
 
     返回当前用户所有未完成的 generations / completions 完整字段，前端启动 / SSE 重连时
     一次性 hydrate 到 store，避免任务列表按会话碎片化。"""
+
     generations: list[GenerationOut]
     completions: list[CompletionOut]
 
 
 # ---------- Images ----------
 
+
 class ImageOut(BaseOut):
     id: str
     source: str
     parent_image_id: str | None
-    owner_generation_id: str | None = None  # generated 图反查所属 Generation；uploaded 图为 None
+    owner_generation_id: str | None = (
+        None  # generated 图反查所属 Generation；uploaded 图为 None
+    )
     width: int
     height: int
     mime: str
@@ -769,14 +790,17 @@ class ImageRevisionIn(BaseModel):
 
 # ---------- Worker payload (XADD into Redis Stream) ----------
 
+
 class TaskQueueItem(BaseModel):
     """Worker 从 queue:generations / queue:completions 读取的最小 payload。"""
+
     task_id: str
     kind: Literal["generation", "completion"]
     user_id: str
 
 
 # ---------- SSE envelopes ----------
+
 
 class SSEEvent(BaseModel):
     event: str  # 事件名，见 constants.EV_*
@@ -785,6 +809,7 @@ class SSEEvent(BaseModel):
 
 
 # ---------- Errors ----------
+
 
 class ErrorBody(BaseModel):
     code: str
@@ -798,6 +823,7 @@ class ErrorResponse(BaseModel):
 
 
 # ---------- Admin / Usage / Share (V1.0 收尾) ----------
+
 
 class AllowedEmailOut(BaseOut):
     id: str
@@ -819,6 +845,7 @@ class AdminUserOut(BaseOut):
 
 
 # ---------- Billing / Wallet ----------
+
 
 class MoneyOut(BaseModel):
     micro: int
@@ -1209,6 +1236,7 @@ class PublicShareOut(BaseModel):
 
 # ---------- Invite Links（V1.0 收尾） ----------
 
+
 class InviteLinkOut(BaseModel):
     id: str
     token: str
@@ -1233,6 +1261,7 @@ class InviteLinkPublicOut(BaseModel):
 
 
 # ---------- System Settings（V1.0 收尾） ----------
+
 
 class SystemSettingItem(BaseModel):
     key: str
@@ -1336,6 +1365,7 @@ class StorageApplyResponseOut(BaseModel):
 
 
 # ---------- Providers（管理员 Provider Pool CRUD + 探活） ----------
+
 
 class ProviderItemOut(BaseModel):
     name: str
@@ -1466,7 +1496,7 @@ class ProviderStatsItem(BaseModel):
     success: int = 0
     fail: int = 0
     success_rate: float = 0.0  # 0.0 ~ 1.0
-    traffic_pct: float = 0.0   # 该 provider 占总请求的比例
+    traffic_pct: float = 0.0  # 该 provider 占总请求的比例
 
 
 class ProviderStatsOut(BaseModel):
@@ -1584,7 +1614,9 @@ class ApiSupplierTemplateIn(BaseModel):
     enabled: bool = True
     public_signup_enabled: bool = False
     user_bind_enabled: bool = True
-    purposes: list[ByokPurpose] = Field(default_factory=_default_byok_purposes, min_length=1)
+    purposes: list[ByokPurpose] = Field(
+        default_factory=_default_byok_purposes, min_length=1
+    )
     validation_model: str = Field(default="gpt-5.4", min_length=1, max_length=64)
     default_chat_model: str = Field(default="gpt-5.4", min_length=1, max_length=64)
     # review #12：默认 None，由 admin 显式选填；不在 schema 写默认 image 模型，
@@ -1703,6 +1735,7 @@ class ApiSupplierStatsOut(BaseModel):
 
 # ---------- Sessions（V1.0 收尾：/me/sessions） ----------
 
+
 class SessionOut(BaseModel):
     id: str
     ua: str | None
@@ -1717,6 +1750,7 @@ class SessionsOut(BaseModel):
 
 
 # ---------- Regenerate（V1.0 收尾） ----------
+
 
 class RegenerateIn(BaseModel):
     intent: Literal["chat", "vision_qa", "text_to_image", "image_to_image"]
@@ -1738,6 +1772,7 @@ PosterRevisionScope = Literal["background", "inpaint", "style"]
 
 class PosterBrandAssetsIn(BaseModel):
     """可选品牌资产；前端不传时全部 None，prompt 里跳过该段。"""
+
     logo_image_id: str | None = None
     product_image_id: str | None = None
     primary_color: str | None = Field(default=None, max_length=24)
@@ -1746,6 +1781,7 @@ class PosterBrandAssetsIn(BaseModel):
 
 class PosterDesignWorkflowCreateIn(BaseModel):
     """创建海报工作流入参（mirror ApparelWorkflowCreateIn）。"""
+
     conversation_id: str | None = None
     copy_text: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     style_id: str = Field(min_length=1, max_length=128)
@@ -1767,11 +1803,13 @@ class PosterDesignWorkflowCreateOut(BaseModel):
 
 class CopyAnalysisApproveIn(BaseModel):
     """文案分析阶段确认入参。corrections 字段为用户手工修正，None 表示沿用 AI 输出。"""
+
     corrections: dict[str, Any] = Field(default_factory=dict)
 
 
 class PosterMastersCreateIn(BaseModel):
     """生成母版候选入参。固定 4 张，多于/少于 4 也支持但默认 4。"""
+
     candidate_count: int = Field(default=4, ge=1, le=8)
     size_mode: Literal["auto", "fixed"] = "fixed"
     # size 仅在 size_mode=fixed 时使用；不传则按 quality_mode 自动选 1:1 preset。
@@ -1780,11 +1818,13 @@ class PosterMastersCreateIn(BaseModel):
 
 class PosterMasterApproveIn(BaseModel):
     """选定母版入参。adjustments 给后续多尺寸 prompt 留口子，可空。"""
+
     adjustments: str = Field(default="", max_length=MAX_PROMPT_CHARS)
 
 
 class PosterRendersCreateIn(BaseModel):
     """生成多尺寸成品入参；每个 aspect 独立 Generation 任务（stagger 入队）。"""
+
     aspects: list[PosterAspectRatio] = Field(
         default_factory=lambda: ["1:1", "9:16", "16:9", "3:4"],
         min_length=1,
@@ -1796,6 +1836,7 @@ class PosterRendersCreateIn(BaseModel):
 
 class PosterReviseIn(BaseModel):
     """单张返修入参。scope=background/inpaint/style；inpaint 需要 mask_image_id。"""
+
     scope: PosterRevisionScope = "background"
     instruction: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     # 仅 scope=inpaint 时使用；前端先 POST /images/upload 拿到 image_id 再带进来。
@@ -1810,6 +1851,7 @@ class PosterReviseIn(BaseModel):
 
 class PosterInpaintIn(BaseModel):
     """inpaint 专用端点入参；mask_image_id 必填。"""
+
     instruction: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     mask_image_id: str = Field(min_length=1, max_length=36)
 

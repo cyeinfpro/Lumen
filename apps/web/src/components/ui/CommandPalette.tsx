@@ -373,14 +373,14 @@ export function CommandPalette() {
                 "flex min-h-[58px] w-full items-center gap-3 rounded-[var(--radius-control)] px-3 py-2.5 text-left",
                 "transition-colors focus-visible:outline-none",
                 selected
-                  ? "bg-white/10 text-[var(--fg-0)]"
-                  : "text-[var(--fg-1)] hover:bg-white/6 hover:text-[var(--fg-0)]",
+                  ? "bg-[var(--bg-2)] text-[var(--fg-0)]"
+                  : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
               )}
             >
               <span
                 className={cn(
                   "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md",
-                  selected ? "bg-[var(--accent-soft)]" : "bg-white/6",
+                  selected ? "bg-[var(--accent-soft)]" : "bg-[var(--bg-2)]",
                 )}
                 aria-hidden
               >
@@ -429,6 +429,31 @@ export function CommandPalette() {
     </div>
   );
 
+  const shortcutHelp = (
+    <div
+      className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border)] px-4 py-3 text-[11px] text-[var(--fg-2)]"
+      aria-label="快捷键"
+    >
+      <span className="inline-flex items-center gap-1.5">
+        <Kbd>{modifierLabel}</Kbd>
+        <Kbd>K</Kbd>
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <Kbd>↑</Kbd>
+        <Kbd>↓</Kbd>
+        选择
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <Kbd>Enter</Kbd>
+        打开
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <Kbd>Esc</Kbd>
+        关闭
+      </span>
+    </div>
+  );
+
   if (!isDesktop) {
     // BottomSheet 自带 role="dialog" + aria-label="命令面板"，桌面分支的 sr-only 标题/描述无需重复。
     return (
@@ -444,6 +469,7 @@ export function CommandPalette() {
         >
           {searchRow}
           {list}
+          {shortcutHelp}
         </div>
       </BottomSheet>
     );
@@ -480,6 +506,7 @@ export function CommandPalette() {
         </p>
         {searchRow}
         {list}
+        {shortcutHelp}
       </section>
     </div>
   );

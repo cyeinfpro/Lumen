@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
 from typing import Any
 
 import httpx
@@ -155,6 +156,108 @@ async def test_get_client_rebuilds_when_runtime_timeout_changes(
 
 
 @pytest.mark.asyncio
+async def test_get_client_lru_evicts_proxied_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ClosableClient:
+        def __init__(self, proxy_url: str) -> None:
+            self.proxy_url = proxy_url
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    clients: list[_ClosableClient] = []
+    timeout_config = upstream._TimeoutConfig(connect=3.0, read=30.0, write=4.0)
+
+    async def fake_resolve_timeout_config() -> upstream._TimeoutConfig:
+        return timeout_config
+
+    def fake_build_client(
+        _timeout_config: upstream._TimeoutConfig,
+        *,
+        proxy_url: str | None = None,
+    ) -> _ClosableClient:
+        client = _ClosableClient(proxy_url or "")
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        upstream, "_resolve_timeout_config", fake_resolve_timeout_config
+    )
+    monkeypatch.setattr(upstream, "_build_client", fake_build_client)
+    monkeypatch.setattr(upstream, "_proxied_clients", OrderedDict())
+    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CACHE_MAX", 2)
+    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01)
+
+    first = await upstream._get_client("http://proxy-1")
+    second = await upstream._get_client("http://proxy-2")
+    again = await upstream._get_client("http://proxy-1")
+    third = await upstream._get_client("http://proxy-3")
+
+    assert again is first
+    assert third is clients[2]
+    assert first.closed is False
+    assert second.closed is False
+    await asyncio.sleep(0.05)
+    assert second.closed is True
+    assert len(upstream._proxied_clients) == 2
+    assert [client.proxy_url for client in upstream._proxied_clients.values()] == [
+        "http://proxy-1",
+        "http://proxy-3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_images_client_lru_evicts_proxied_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ClosableClient:
+        def __init__(self, proxy_url: str) -> None:
+            self.proxy_url = proxy_url
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    clients: list[_ClosableClient] = []
+    timeout_config = upstream._TimeoutConfig(connect=3.0, read=30.0, write=4.0)
+
+    async def fake_resolve_timeout_config() -> upstream._TimeoutConfig:
+        return timeout_config
+
+    def fake_build_images_client(
+        _timeout_config: upstream._TimeoutConfig,
+        *,
+        proxy_url: str | None = None,
+    ) -> _ClosableClient:
+        client = _ClosableClient(proxy_url or "")
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        upstream, "_resolve_timeout_config", fake_resolve_timeout_config
+    )
+    monkeypatch.setattr(upstream, "_build_images_client", fake_build_images_client)
+    monkeypatch.setattr(upstream, "_proxied_images_clients", OrderedDict())
+    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CACHE_MAX", 2)
+    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01)
+
+    first = await upstream._get_images_client("http://proxy-1")
+    second = await upstream._get_images_client("http://proxy-2")
+    again = await upstream._get_images_client("http://proxy-1")
+    third = await upstream._get_images_client("http://proxy-3")
+
+    assert again is first
+    assert third is clients[2]
+    assert first.closed is False
+    assert second.closed is False
+    await asyncio.sleep(0.05)
+    assert second.closed is True
+    assert len(upstream._proxied_images_clients) == 2
+
+
+@pytest.mark.asyncio
 async def test_responses_call_aggregates_sse_completed_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -278,9 +381,7 @@ async def test_responses_call_4xx_raises_upstream_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """4xx：解析 body 里的 error code，抛 UpstreamError 让上层 retry classifier 工作。"""
-    err_body = {
-        "error": {"message": "rate limit exceeded", "code": "rate_limit_error"}
-    }
+    err_body = {"error": {"message": "rate limit exceeded", "code": "rate_limit_error"}}
     fake_response = _FakeStreamResponse(
         status_code=429,
         headers={"content-type": "application/json", "x-request-id": "req-429"},

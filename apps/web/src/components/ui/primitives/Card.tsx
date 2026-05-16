@@ -24,7 +24,7 @@ interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
 const VARIANTS: Record<Variant, string> = {
   default: "surface-card",
   glass:
-    "bg-black/55 backdrop-blur-md border border-white/15 " +
+    "bg-[var(--bg-0)]/70 backdrop-blur-md border border-[var(--border-strong)] " +
     "rounded-[var(--radius-panel)]",
   subtle:
     "bg-[var(--bg-1)]/60 border border-[var(--border-subtle)] " +

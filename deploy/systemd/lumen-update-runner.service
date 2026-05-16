@@ -16,14 +16,16 @@ Environment=LUMEN_UPDATE_GIT_PULL=1
 Environment=LUMEN_UPDATE_BUILD=0
 StandardOutput=append:/opt/lumendata/backup/.update.log
 StandardError=append:/opt/lumendata/backup/.update.log
-ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/update.sh
+# timeout gives the runner its own wall-clock guard in addition to systemd's
+# TimeoutStartSec, so a wedged child process cannot sit for the full unit cap.
+ExecStart=/usr/bin/env timeout --preserve-status --kill-after=300s 7200s bash /opt/lumen/current/scripts/update.sh
 # update.sh 的非零退出必须保持 failed 状态，便于 systemctl/journal/告警发现。
 SuccessExitStatus=0 SIGTERM SIGINT
 # Clean trigger / marker / env regardless of update result so the next click works.
 ExecStopPost=/bin/sh -c "rm -f /opt/lumendata/backup/.update.trigger /opt/lumendata/backup/.update.running /opt/lumendata/backup/.update.env"
 # 7200s 上限：弱网下 docker pull 多 GB 镜像 + 偶发 npm/uv 兜底 build 可能 > 1h；
 # 比 infinity 稳（卡住时仍会被 systemd 终结），又留出充足窗口避免误杀正常更新。
-TimeoutStartSec=7200
+TimeoutStartSec=7300
 TimeoutStopSec=300
 KillSignal=SIGTERM
 KillMode=mixed

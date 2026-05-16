@@ -41,6 +41,13 @@ def _unauthorized(code: str = "unauthenticated", msg: str = "missing or invalid 
     )
 
 
+def _csrf_failed() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"error": {"code": "csrf_failed", "message": "CSRF token mismatch"}},
+    )
+
+
 async def get_current_user(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -125,14 +132,13 @@ async def verify_csrf(
     """
     if request.method in SAFE_METHODS:
         return
-    header = request.headers.get(CSRF_HEADER)
     sid = parse_session_cookie(request.cookies.get(SESSION_COOKIE))
-    if not header or not sid or not verify_csrf_token(sid, header):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": {"code": "csrf_failed", "message": "CSRF token mismatch"}},
-        )
+    if not sid:
+        raise _unauthorized()
     await require_active_session_user(request, db, sid)
+    header = request.headers.get(CSRF_HEADER)
+    if not header or not verify_csrf_token(sid, header):
+        raise _csrf_failed()
     request.state.csrf_session_id = sid
 
 
@@ -143,19 +149,15 @@ async def verify_csrf_session(
     """CSRF check for auth-sensitive routes that must reject stale sessions early."""
     if request.method in SAFE_METHODS:
         return
-    header = request.headers.get(CSRF_HEADER)
     sid = parse_session_cookie(request.cookies.get(SESSION_COOKIE))
-    if not header or not sid:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": {"code": "csrf_failed", "message": "CSRF token mismatch"}},
-        )
-    if not verify_csrf_token(sid, header):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": {"code": "csrf_failed", "message": "CSRF token mismatch"}},
-        )
+    if not sid:
+        raise _unauthorized()
     await require_active_session_user(request, db, sid)
+    header = request.headers.get(CSRF_HEADER)
+    if not header:
+        raise _csrf_failed()
+    if not verify_csrf_token(sid, header):
+        raise _csrf_failed()
     request.state.csrf_session_id = sid
 
 

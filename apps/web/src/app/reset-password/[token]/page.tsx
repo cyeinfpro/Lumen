@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useDeferredValue, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -34,7 +34,11 @@ function ResetPasswordConfirm({ token }: { token: string }) {
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const strength = useMemo(() => passwordStrength(password), [password]);
+  const deferredPassword = useDeferredValue(password);
+  const strength = useMemo(
+    () => passwordStrength(deferredPassword),
+    [deferredPassword],
+  );
   const passwordTooShort = password.length < 8;
   const confirmMismatch = confirm.length > 0 && confirm !== password;
   const canSubmit =
@@ -102,7 +106,11 @@ function ResetPasswordConfirm({ token }: { token: string }) {
 
           {done ? (
             <div className="space-y-4">
-              <div className="rounded-[var(--radius-dialog)] border border-success-border bg-success-soft p-5 type-body-sm text-success">
+              <div
+                role="status"
+                aria-live="polite"
+                className="rounded-[var(--radius-dialog)] border border-success-border bg-success-soft p-5 type-body-sm text-success"
+              >
                 <div className="flex items-start gap-2">
                   <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
                   密码已更新，请重新登录。
@@ -110,7 +118,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               </div>
               <Link
                 href="/login"
-                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-black transition-all hover:brightness-110 active:scale-[0.98] sm:h-10"
+                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] transition-all hover:brightness-110 active:scale-[0.98] sm:h-10"
               >
                 去登录 <ArrowRight className="h-4 w-4" />
               </Link>
@@ -134,7 +142,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                     type="button"
                     onClick={() => setShowPwd((value) => !value)}
                     aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                    className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--fg-1)] transition-colors hover:bg-white/5 hover:text-[var(--fg-0)] md:h-8 md:w-8"
+                    className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] md:h-8 md:w-8"
                   >
                     {showPwd ? (
                       <EyeOff className="h-4 w-4" />
@@ -178,14 +186,22 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                   }
                 />
                 {confirmMismatch && (
-                  <p className="mt-1.5 flex items-center gap-1 type-caption text-danger">
+                  <p
+                    role="alert"
+                    aria-live="assertive"
+                    className="mt-1.5 flex items-center gap-1 type-caption text-danger"
+                  >
                     <AlertCircle className="h-3 w-3" /> 两次输入不一致
                   </p>
                 )}
               </Field>
 
               {error && (
-                <div className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger">
+                <div
+                  role="alert"
+                  aria-live="assertive"
+                  className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-danger"
+                >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   {error}
                 </div>
@@ -194,7 +210,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               <button
                 type="submit"
                 disabled={!canSubmit}
-                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-black shadow-[0_8px_24px_-12px_var(--color-lumen-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
+                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[0_8px_24px_-12px_var(--color-lumen-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
               >
                 {submitting ? (
                   <>
@@ -282,7 +298,7 @@ function PasswordStrength({
             key={segment}
             className={
               "h-1 flex-1 rounded-full transition-colors duration-200 " +
-              (index < strength.score ? strength.color : "bg-white/8")
+              (index < strength.score ? strength.color : "bg-[var(--bg-2)]")
             }
           />
         ))}

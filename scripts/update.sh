@@ -24,6 +24,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _LUMEN_UPDATE_INPUT_DATA_ROOT="${LUMEN_DATA_ROOT-}"
 _LUMEN_UPDATE_INPUT_DB_ROOT="${LUMEN_DB_ROOT-}"
 _LUMEN_UPDATE_INPUT_BACKUP_ROOT="${LUMEN_BACKUP_ROOT-}"
+_LUMEN_UPDATE_INPUT_POSTGRES_UID="${LUMEN_POSTGRES_UID-}"
+_LUMEN_UPDATE_INPUT_POSTGRES_GID="${LUMEN_POSTGRES_GID-}"
+_LUMEN_UPDATE_INPUT_REDIS_UID="${LUMEN_REDIS_UID-}"
+_LUMEN_UPDATE_INPUT_REDIS_GID="${LUMEN_REDIS_GID-}"
 _LUMEN_UPDATE_INPUT_APP_UID="${LUMEN_APP_UID-}"
 _LUMEN_UPDATE_INPUT_APP_GID="${LUMEN_APP_GID-}"
 _LUMEN_UPDATE_INPUT_APP_STORAGE_GID="${LUMEN_APP_STORAGE_GID-}"
@@ -64,6 +68,10 @@ SHARED_ENV="${SHARED_DIR}/.env"
 shared_data_root=""
 shared_db_root=""
 shared_backup_root=""
+shared_postgres_uid=""
+shared_postgres_gid=""
+shared_redis_uid=""
+shared_redis_gid=""
 shared_app_uid=""
 shared_app_gid=""
 shared_app_storage_gid=""
@@ -72,6 +80,10 @@ if [ -f "${SHARED_ENV}" ]; then
     shared_db_root="$(lumen_env_value LUMEN_DB_ROOT "${SHARED_ENV}" 2>/dev/null || true)"
     shared_backup_root="$(lumen_env_value LUMEN_BACKUP_ROOT "${SHARED_ENV}" 2>/dev/null || true)"
     shared_backup_root="${shared_backup_root:-$(lumen_env_value BACKUP_ROOT "${SHARED_ENV}" 2>/dev/null || true)}"
+    shared_postgres_uid="$(lumen_env_value LUMEN_POSTGRES_UID "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_postgres_gid="$(lumen_env_value LUMEN_POSTGRES_GID "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_redis_uid="$(lumen_env_value LUMEN_REDIS_UID "${SHARED_ENV}" 2>/dev/null || true)"
+    shared_redis_gid="$(lumen_env_value LUMEN_REDIS_GID "${SHARED_ENV}" 2>/dev/null || true)"
     shared_app_uid="$(lumen_env_value LUMEN_APP_UID "${SHARED_ENV}" 2>/dev/null || true)"
     shared_app_gid="$(lumen_env_value LUMEN_APP_GID "${SHARED_ENV}" 2>/dev/null || true)"
     shared_app_storage_gid="$(lumen_env_value LUMEN_APP_STORAGE_GID "${SHARED_ENV}" 2>/dev/null || true)"
@@ -79,10 +91,14 @@ fi
 LUMEN_DATA_ROOT="${_LUMEN_UPDATE_INPUT_DATA_ROOT:-${shared_data_root:-/opt/lumendata}}"
 LUMEN_DB_ROOT="${_LUMEN_UPDATE_INPUT_DB_ROOT:-${shared_db_root:-${LUMEN_DATA_ROOT}}}"
 LUMEN_BACKUP_ROOT="${_LUMEN_UPDATE_INPUT_BACKUP_ROOT:-${shared_backup_root:-${LUMEN_DATA_ROOT}/backup}}"
+LUMEN_POSTGRES_UID="${_LUMEN_UPDATE_INPUT_POSTGRES_UID:-${shared_postgres_uid:-999}}"
+LUMEN_POSTGRES_GID="${_LUMEN_UPDATE_INPUT_POSTGRES_GID:-${shared_postgres_gid:-999}}"
+LUMEN_REDIS_UID="${_LUMEN_UPDATE_INPUT_REDIS_UID:-${shared_redis_uid:-999}}"
+LUMEN_REDIS_GID="${_LUMEN_UPDATE_INPUT_REDIS_GID:-${shared_redis_gid:-999}}"
 LUMEN_APP_UID="${_LUMEN_UPDATE_INPUT_APP_UID:-${shared_app_uid:-10001}}"
 LUMEN_APP_GID="${_LUMEN_UPDATE_INPUT_APP_GID:-${shared_app_gid:-10001}}"
 LUMEN_APP_STORAGE_GID="${_LUMEN_UPDATE_INPUT_APP_STORAGE_GID:-${shared_app_storage_gid:-${LUMEN_APP_GID}}}"
-export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT LUMEN_APP_UID LUMEN_APP_GID LUMEN_APP_STORAGE_GID
+export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT LUMEN_POSTGRES_UID LUMEN_POSTGRES_GID LUMEN_REDIS_UID LUMEN_REDIS_GID LUMEN_APP_UID LUMEN_APP_GID LUMEN_APP_STORAGE_GID
 UPDATE_LOG_DIR="${LUMEN_BACKUP_ROOT}"
 OPERATION_ID="update-$(date -u +%Y%m%d-%H%M%S)-$$"
 
@@ -322,9 +338,9 @@ check_data_owners() {
     local uid gid
     if command -v stat >/dev/null 2>&1; then
         uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/postgres" 2>/dev/null || echo "")"
-        [ -n "${uid}" ] && [ "${uid}" != "999" ] && log_warn "${LUMEN_DB_ROOT}/postgres 属主非 999（实际 ${uid}），postgres 容器可能起不来。"
+        [ -n "${uid}" ] && [ "${uid}" != "${LUMEN_POSTGRES_UID}" ] && log_warn "${LUMEN_DB_ROOT}/postgres 属主非 ${LUMEN_POSTGRES_UID}（实际 ${uid}），postgres 容器可能起不来。"
         uid="$(stat -c '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || stat -f '%u' "${LUMEN_DB_ROOT}/redis" 2>/dev/null || echo "")"
-        [ -n "${uid}" ] && [ "${uid}" != "999" ] && log_warn "${LUMEN_DB_ROOT}/redis 属主非 999（实际 ${uid}），redis 容器可能起不来。"
+        [ -n "${uid}" ] && [ "${uid}" != "${LUMEN_REDIS_UID}" ] && log_warn "${LUMEN_DB_ROOT}/redis 属主非 ${LUMEN_REDIS_UID}（实际 ${uid}），redis 容器可能起不来。"
         gid="$(stat -c '%g' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || stat -f '%g' "${LUMEN_DATA_ROOT}/storage" 2>/dev/null || echo "")"
         [ -n "${gid}" ] && [ "${gid}" != "${LUMEN_APP_STORAGE_GID}" ] && log_warn "${LUMEN_DATA_ROOT}/storage 属组非 ${LUMEN_APP_STORAGE_GID}（实际 ${gid}），api/worker 可能写不进去。"
         gid="$(stat -c '%g' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || stat -f '%g' "${LUMEN_DATA_ROOT}/backup" 2>/dev/null || echo "")"
@@ -333,9 +349,9 @@ check_data_owners() {
     return 0
 }
 
-# v1.0.48: postgres 镜像从 alpine (uid=70) 切到 pgvector/pgvector:pg16 (uid=999).
-# 老 install 在数据目录写过 owner=70 的文件,新容器 uid=999 启动会 EACCES.
-# 这个 helper 检测属主, 仅在 ≠ 999 时 chown 一次, idempotent.
+# v1.0.48: postgres 镜像从 alpine (uid=70) 切到 pgvector/pgvector:pg16 (默认 uid=999).
+# 老 install 在数据目录写过 owner=70 的文件,新容器 uid 启动会 EACCES.
+# 这个 helper 检测属主, 仅在 ≠ 目标 uid 时 chown 一次, idempotent.
 migrate_postgres_uid() {
     local pg_dir="${LUMEN_DB_ROOT}/postgres"
     if [ ! -d "${pg_dir}" ]; then
@@ -345,11 +361,11 @@ migrate_postgres_uid() {
     if command -v stat >/dev/null 2>&1; then
         current_uid="$(stat -c '%u' "${pg_dir}" 2>/dev/null || stat -f '%u' "${pg_dir}" 2>/dev/null || echo "")"
     fi
-    if [ -z "${current_uid}" ] || [ "${current_uid}" = "999" ]; then
+    if [ -z "${current_uid}" ] || [ "${current_uid}" = "${LUMEN_POSTGRES_UID}" ]; then
         return 0
     fi
-    log_info "[migrate_postgres_uid] ${pg_dir} 属主 ${current_uid} → 999 (pgvector 镜像 postgres uid)"
-    if lumen_run_as_root chown -R 999:999 "${pg_dir}"; then
+    log_info "[migrate_postgres_uid] ${pg_dir} 属主 ${current_uid} → ${LUMEN_POSTGRES_UID}:${LUMEN_POSTGRES_GID} (postgres image uid/gid)"
+    if lumen_run_as_root chown -R "${LUMEN_POSTGRES_UID}:${LUMEN_POSTGRES_GID}" "${pg_dir}"; then
         log_info "[migrate_postgres_uid] chown 完成"
         return 0
     fi
@@ -661,10 +677,10 @@ if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
         CURRENT_WEB_BIND_HOST="${LUMEN_WEB_BIND_HOST}"
         CONFIG_CHANGED=1
     fi
-elif [ -z "${CURRENT_WEB_BIND_HOST}" ] || [ "${CURRENT_WEB_BIND_HOST}" = "127.0.0.1" ]; then
-    log_info "[check] WEB_BIND_HOST 仍是旧默认 ${CURRENT_WEB_BIND_HOST:-<unset>}，自动改为 0.0.0.0 暴露宿主机 3000。"
-    lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"
-    CURRENT_WEB_BIND_HOST="0.0.0.0"
+elif [ -z "${CURRENT_WEB_BIND_HOST}" ]; then
+    log_info "[check] WEB_BIND_HOST 未设置，使用安全默认 127.0.0.1。若需直暴 3000，请在 .env 明确设为 0.0.0.0。"
+    lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "127.0.0.1"
+    CURRENT_WEB_BIND_HOST="127.0.0.1"
     CONFIG_CHANGED=1
 fi
 
@@ -777,7 +793,7 @@ fi
 
 # .env 关键字段
 ENV_MISSING=0
-for k in DATABASE_URL REDIS_URL SESSION_SECRET; do
+for k in DATABASE_URL REDIS_URL SESSION_SECRET BYOK_API_KEY_MASTER_SECRET; do
     if ! env_key_present "${SHARED_ENV}" "${k}"; then
         log_error "[preflight] shared/.env 缺少 ${k} 或为空。"
         ENV_MISSING=1
@@ -1109,13 +1125,17 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     # tgbot 在 docker-compose.yml 里走 profile=tgbot，bare `docker compose pull`
     # 会跳过它。如果 .env 启用了 telegram，单独拉一次让 tgbot 镜像也跟到目标
     # tag 对应的 GHCR digest——否则 restart_services 阶段的
-    # `--profile tgbot up -d tgbot` 会复用本地旧 image。失败仅 warn，不阻断
-    # 业务 API 升级。
+    # `--profile tgbot up -d tgbot` 会复用本地旧 image。启用 tgbot 时它属于
+    # 本次部署的服务集合；默认不让非核心 tgbot 镜像阻断 api/worker/web 更新。
     if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
         if ! lumen_retry 2 5 "docker compose pull tgbot" \
                 lumen_compose_in "${NEW_RELEASE}" --profile tgbot pull tgbot; then
-            log_warn "[pull_images] tgbot pull 失败，已忽略（业务 API 不受影响）。"
-            emit_info pull_images tgbot_pull "warn_skipped"
+            if [ "${LUMEN_UPDATE_REQUIRE_TGBOT:-0}" = "1" ]; then
+                log_error "[pull_images] tgbot pull 失败，已配置 REQUIRE_TGBOT，终止更新。"
+                emit_fail pull_images 1
+                exit 1
+            fi
+            log_warn "[pull_images] tgbot pull 失败，跳过 tgbot 更新（不影响 api/worker/web）。"
         else
             emit_info pull_images tgbot_pull "ok"
         fi
@@ -1146,7 +1166,7 @@ fi
 
 # --force-recreate：避免容器名已存在但配置签名不一致（caller 历史 cwd 不同
 # 或人工 docker compose up 留下来的孤儿容器）时报 conflict 直接 fail。
-if ! lumen_compose_in "${NEW_RELEASE}" up -d --wait --force-recreate postgres redis; then
+if ! lumen_compose_in "${NEW_RELEASE}" up --pull missing -d --wait --force-recreate postgres redis; then
     log_error "[start_infra] postgres / redis 启动或健康检查失败。"
     log_error "  当前 API/Worker/Web 服务保持不变。"
     emit_fail start_infra 1
@@ -1211,7 +1231,7 @@ if [ "${_migrate_run_failed}" = "1" ] \
             lumen_set_image_tag_in_env "${SHARED_ENV}" "${PREVIOUS_TAG}" 2>/dev/null \
                 || log_warn "  恢复 SHARED_ENV 到 ${PREVIOUS_TAG} 失败，旧服务可能拉错镜像 tag。"
         fi
-        if lumen_compose_in "${ROOT}/releases/${CURRENT_ID}" up -d worker api 2>/dev/null; then
+        if lumen_compose_in "${ROOT}/releases/${CURRENT_ID}" up --pull missing -d worker api 2>/dev/null; then
             log_info "[migrate_db] 旧服务 (${CURRENT_ID}) 已重启，业务可用旧 schema 继续。"
         else
             log_error "[migrate_db] 旧服务重启失败！业务此时停摆，请人工处理："
@@ -1302,7 +1322,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     _shift_script="${CURRENT_LINK}/scripts/lumen-shift-traffic.sh"
 
     emit_start start_green
-    if lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml up -d --wait --force-recreate api-green \
+    if lumen_compose_in "${CURRENT_LINK}" -f docker-compose.yml -f docker-compose.bluegreen.yml up --pull missing -d --wait --force-recreate api-green \
         && lumen_wait_for_http_ok "http://127.0.0.1:${_green_port}/healthz" 60; then
         emit_info start_green port "${_green_port}"
         emit_done start_green 0
@@ -1348,7 +1368,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     if [ "${_restart_ok}" = "1" ]; then
         emit_start start_blue
         for _svc in worker web api; do
-            if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+            if ! lumen_compose_in "${CURRENT_LINK}" up --pull missing -d --wait --force-recreate "${_svc}"; then
                 _restart_ok=0
                 break
             fi
@@ -1379,7 +1399,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     fi
 else
     for _svc in worker web api; do
-        if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+        if ! lumen_compose_in "${CURRENT_LINK}" up --pull missing -d --wait --force-recreate "${_svc}"; then
             _restart_ok=0
             break
         fi
@@ -1421,7 +1441,7 @@ else
                     && lumen_compose_in "${CURRENT_LINK}" pull; then
                     # 回滚同样按 worker → web → api 顺序逐个 up，保留 api 最后启动的偏好。
                     for _svc in worker web api; do
-                        if ! lumen_compose_in "${CURRENT_LINK}" up -d --wait --force-recreate "${_svc}"; then
+                        if ! lumen_compose_in "${CURRENT_LINK}" up --pull missing -d --wait --force-recreate "${_svc}"; then
                             _rollback_started=0
                             break
                         fi
@@ -1454,14 +1474,14 @@ else
     log_error "[restart_services] 自动回滚失败 → 请按 §18 手动回滚："
     log_error "  ln -sfn releases/${CURRENT_ID:-<id>} ${ROOT}/current"
     log_error "  sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${ROLLBACK_TAG:-${PREVIOUS_TAG:-<old-tag>}}|' ${SHARED_ENV}"
-    log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && up -d --wait api worker web"
+    log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && docker compose up --pull missing -d --wait api worker web"
     emit_fail restart_services 1
     exit 1
 fi
 
 # tgbot：如果 .env 有 TELEGRAM_BOT_TOKEN 非空才起
 if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
-    if ! lumen_compose_in "${CURRENT_LINK}" --profile tgbot up -d --force-recreate tgbot; then
+    if ! lumen_compose_in "${CURRENT_LINK}" --profile tgbot up --pull missing -d --force-recreate tgbot; then
         log_warn "[restart_services] tgbot 启动失败，已忽略（业务 API 不受影响）。"
         emit_warn restart_services "tgbot_failed_ignored"
     else

@@ -66,12 +66,12 @@ export function PosterStyleSelector({
       role="dialog"
       aria-modal="true"
       aria-label="选择风格"
-      className="fixed inset-0 z-[var(--z-modal)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center md:p-6"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-modal)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="relative flex h-full w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] md:h-[min(86vh,720px)] md:rounded-lg md:border md:border-[var(--border)]">
+      <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-lg md:border md:border-[var(--border)]">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
@@ -83,7 +83,7 @@ export function PosterStyleSelector({
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
           >
             <X className="h-4 w-4" />
           </button>
@@ -120,7 +120,7 @@ export function PosterStyleSelector({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {query.isLoading ? (
             <div className="flex h-64 flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
               <Spinner size={20} />
@@ -191,7 +191,7 @@ function StyleCard({
             </div>
           )}
           {selected ? (
-            <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-black shadow-[var(--shadow-amber)]">
+            <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
               <Check className="h-3 w-3" />
               已选
             </span>

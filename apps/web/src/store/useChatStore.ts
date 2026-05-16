@@ -18,6 +18,11 @@ import {
   clampPromptForRequest,
   isPromptTooLong,
 } from "@/lib/promptLimits";
+import {
+  MAX_UPLOAD_SOURCE_BYTES,
+  maxUploadSourceMessage,
+  setMaxUploadSourceBytes,
+} from "@/lib/uploadLimits";
 import type {
   AspectRatio,
   AssistantMessage,
@@ -99,7 +104,10 @@ interface ChatState {
   currentConvId: string | null;
   setCurrentUser: (id: string | null) => void;
   setCurrentConv: (id: string | null) => void;
-  applyRuntimeDefaults: (defaults: { fast?: boolean }) => void;
+  applyRuntimeDefaults: (defaults: {
+    fast?: boolean;
+    upload_max_source_bytes?: number;
+  }) => void;
 
   // 数据
   messages: Message[];
@@ -141,10 +149,14 @@ interface ChatState {
 
   // —— async actions ——
   // 把本地 File 上传到后端 → 返回 AttachmentImage（含后端 image_id）
-  uploadAttachment: (file: File) => Promise<AttachmentImage>;
+  uploadAttachment: (
+    file: File,
+    opts?: { signal?: AbortSignal },
+  ) => Promise<AttachmentImage>;
   // 把 composer 当前状态作为一次发送：乐观插入 + POST → 校正
   sendMessage: (opts?: {
     intentOverride?: Exclude<Intent, "auto">;
+    restoreComposerOnFailure?: boolean;
   }) => Promise<void>;
   // 切换 conv 后载入历史文本消息（不含历史 generations/images；继续新发消息可补全）
   loadHistoricalMessages: (convId: string, loadMore?: boolean) => Promise<void>;
@@ -325,6 +337,30 @@ function createInitialComposer(): ComposerState {
     params: { ...DEFAULT_PARAMS },
     mask: null,
   };
+}
+
+function cloneComposerState(composer: ComposerState): ComposerState {
+  const attachments = composer.attachments.map((attachment) => ({ ...attachment }));
+  const mask =
+    composer.mask &&
+    attachments.some((attachment) => attachment.id === composer.mask?.target_attachment_id)
+      ? { ...composer.mask }
+      : null;
+  return {
+    ...composer,
+    attachments,
+    params: { ...composer.params },
+    mask,
+  };
+}
+
+function isResetComposerDraft(composer: ComposerState): boolean {
+  return (
+    composer.text === "" &&
+    composer.attachments.length === 0 &&
+    composer.mask === null &&
+    composer.forceIntent === undefined
+  );
 }
 
 function createInitialChatData(): ChatDataSlice {
@@ -755,17 +791,47 @@ function imageEncodeError(): Error {
   return e;
 }
 
+function uploadAbortError(signal?: AbortSignal): DOMException {
+  const reason = signal?.reason;
+  if (reason instanceof DOMException) return reason;
+  return new DOMException("上传已取消", "AbortError");
+}
+
+function throwIfUploadAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw uploadAbortError(signal);
+}
+
 function loadBrowserImage(
   file: File,
+  signal?: AbortSignal,
 ): Promise<{ img: HTMLImageElement; url: string }> {
+  throwIfUploadAborted(signal);
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
-    img.onload = () => resolve({ img, url });
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("读取图片失败"));
+    let settled = false;
+
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
     };
+    const resolveOnce = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ img, url });
+    };
+    const rejectOnce = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      URL.revokeObjectURL(url);
+      reject(err);
+    };
+    const onAbort = () => rejectOnce(uploadAbortError(signal));
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    img.onload = resolveOnce;
+    img.onerror = () => rejectOnce(new Error("读取图片失败"));
     img.src = url;
   });
 }
@@ -806,17 +872,21 @@ function canvasToBlob(
 async function encodeImageForUpload(
   img: HTMLImageElement,
   maxSide: number,
+  signal?: AbortSignal,
 ): Promise<{ blob: Blob; mime: "image/webp" | "image/jpeg" }> {
   let best: { blob: Blob; mime: "image/webp" | "image/jpeg" } | null = null;
 
   for (const mime of ["image/webp", "image/jpeg"] as const) {
+    throwIfUploadAborted(signal);
     const canvas = drawImageToCanvas(
       img,
       maxSide,
       mime === "image/jpeg" ? "#fff" : null,
     );
     for (const quality of ENCODE_QUALITIES) {
+      throwIfUploadAborted(signal);
       const blob = await canvasToBlob(canvas, mime, quality);
+      throwIfUploadAborted(signal);
       if (!blob || blob.type !== mime) continue;
       if (!best || blob.size < best.blob.size) best = { blob, mime };
       if (blob.size <= UPLOAD_TARGET_BYTES) return { blob, mime };
@@ -833,16 +903,30 @@ function nextCompressedSide(currentSide: number, encodedBytes: number): number {
   return Math.max(MIN_COMPRESSED_DIM, Math.floor(currentSide * shrink));
 }
 
-async function compressToMaxDim(file: File): Promise<File> {
-  const { img, url } = await loadBrowserImage(file);
+async function compressToMaxDim(
+  file: File,
+  signal?: AbortSignal,
+): Promise<File> {
+  if (file.size > MAX_UPLOAD_SOURCE_BYTES) {
+    throw new Error(maxUploadSourceMessage());
+  }
+
+  const { img, url } = await loadBrowserImage(file, signal);
   try {
+    throwIfUploadAborted(signal);
     const { naturalWidth: w, naturalHeight: h } = img;
     if (!w || !h) throw new Error("读取图片失败");
 
     const supportedOriginal = UPLOAD_MIME.has(file.type);
     const oversizedDimensions = Math.max(w, h) > MAX_DIM;
     const oversizedBytes = file.size > UPLOAD_TARGET_BYTES;
-    if (supportedOriginal && !oversizedDimensions && !oversizedBytes) {
+    const shouldNormalizeOriginal = file.type === "image/jpeg";
+    if (
+      supportedOriginal &&
+      !shouldNormalizeOriginal &&
+      !oversizedDimensions &&
+      !oversizedBytes
+    ) {
       return file;
     }
 
@@ -850,7 +934,7 @@ async function compressToMaxDim(file: File): Promise<File> {
     let encoded: { blob: Blob; mime: "image/webp" | "image/jpeg" } | null =
       null;
     for (let attempt = 0; attempt < 6; attempt++) {
-      encoded = await encodeImageForUpload(img, maxSide);
+      encoded = await encodeImageForUpload(img, maxSide, signal);
       if (
         encoded.blob.size <= UPLOAD_TARGET_BYTES ||
         maxSide <= MIN_COMPRESSED_DIM
@@ -861,6 +945,7 @@ async function compressToMaxDim(file: File): Promise<File> {
     }
 
     if (!encoded) throw imageEncodeError();
+    throwIfUploadAborted(signal);
     if (encoded.blob.size > UPLOAD_HARD_MAX_BYTES) {
       throw new Error("图片文件过大，请换一张较小的图片或先压缩后再上传");
     }
@@ -1157,14 +1242,33 @@ function flushCompletionStreamPatches(): void {
           (patch.compId != null && m.completion_id === patch.compId);
         if (!matches) continue;
         next ??= { ...m };
-        if (patch.text) next.text = (next.text ?? "") + patch.text;
-        if (patch.thinking)
-          next.thinking = (next.thinking ?? "") + patch.thinking;
+        const isTerminal =
+          next.status === "succeeded" ||
+          next.status === "failed" ||
+          next.status === "canceled";
+        if (patch.text) {
+          const text = next.text ?? "";
+          if (!isTerminal || !text.endsWith(patch.text)) {
+            next.text = text + patch.text;
+          }
+        }
+        if (patch.thinking) {
+          const thinking = next.thinking ?? "";
+          if (!isTerminal || !thinking.endsWith(patch.thinking)) {
+            next.thinking = thinking + patch.thinking;
+          }
+        }
       }
 
       if (!next) return m;
-      next.status = "streaming";
-      next.stream_started_at ??= now;
+      const isTerminal =
+        next.status === "succeeded" ||
+        next.status === "failed" ||
+        next.status === "canceled";
+      if (!isTerminal) {
+        next.status = "streaming";
+        next.stream_started_at ??= now;
+      }
       next.last_delta_at = now;
       changed = true;
       return next;
@@ -1599,6 +1703,7 @@ function createChatStore() {
     ...createInitialChatData(),
     setCurrentUser: (id) => set({ currentUserId: id }),
     applyRuntimeDefaults: (defaults) => {
+      setMaxUploadSourceBytes(defaults.upload_max_source_bytes);
       if (typeof defaults.fast !== "boolean") return;
       const fastDefault = defaults.fast;
       _runtimeFastDefault = fastDefault;
@@ -1792,16 +1897,18 @@ function createChatStore() {
     },
 
     // —— 上传附件：先上后端拿到 image_id，再作为 attachment 挂到 composer ——
-    async uploadAttachment(file) {
-      const compressed = await compressToMaxDim(file);
-      const uploaded = await apiUploadImage(compressed);
+    async uploadAttachment(file, opts = {}) {
+      const compressed = await compressToMaxDim(file, opts.signal);
+      const uploaded = await apiUploadImage(compressed, {
+        signal: opts.signal,
+      });
       const att: AttachmentImage = {
         id: uploaded.id, // 使用后端返回的 image_id（后续 postMessage 直接用）
         kind: "upload",
         data_url: uploaded.url?.startsWith("data:")
           ? uploaded.url
           : imageBinaryUrl(uploaded.id),
-        mime: uploaded.mime ?? file.type,
+        mime: uploaded.mime ?? compressed.type ?? file.type,
         width: uploaded.width,
         height: uploaded.height,
       };
@@ -1970,6 +2077,7 @@ function createChatStore() {
       }
       phase = "post";
       state = get();
+      const composerToSend = cloneComposerState(state.composer);
       const {
         text: rawText,
         attachments,
@@ -1983,7 +2091,7 @@ function createChatStore() {
         codeInterpreter,
         imageGeneration,
         mask,
-      } = state.composer;
+      } = composerToSend;
       const params = normalizeImageParams(rawParams);
       const text = rawText.trim();
       if (!text && attachments.length === 0) {
@@ -2297,7 +2405,6 @@ function createChatStore() {
           removeOptimisticSend();
           return;
         }
-        const failedAt = Date.now();
         const code = err instanceof ApiError ? err.code : "client_exception";
         const rawMessage = err instanceof Error ? err.message : "发送失败";
         // 优先用错误码映射的友好文案；映射缺失时回退到原始 message（不再暴露 code 给用户）
@@ -2309,41 +2416,13 @@ function createChatStore() {
           code,
           extra: { raw: rawMessage, phase },
         });
-        // chat/vision 没有 generation 卡，把错误写进助手气泡 text；
-        // image 场景下留空 text，由 GenerationView 的红色失败卡承担渲染，避免重复
+        removeOptimisticSend();
         set((s) => ({
           composerError: uiErr,
-          messages: s.messages.map((m) => {
-            if (m.id === optimisticAssistantId && m.role === "assistant") {
-              return {
-                ...m,
-                status: "failed",
-                text: isImage ? m.text : uiErr,
-              } as AssistantMessage;
-            }
-            return m;
-          }),
-          generations:
-            optimisticGenIds.length > 0
-              ? {
-                  ...s.generations,
-                  ...Object.fromEntries(
-                    optimisticGenIds
-                      .filter((id) => s.generations[id])
-                      .map((id) => [
-                        id,
-                        {
-                          ...s.generations[id],
-                          status: "failed" as const,
-                          stage: "finalizing" as const,
-                          error_code: code,
-                          error_message: message,
-                          finished_at: failedAt,
-                        },
-                      ]),
-                  ),
-                }
-              : s.generations,
+          ...(opts?.restoreComposerOnFailure !== false &&
+          isResetComposerDraft(s.composer)
+            ? { composer: cloneComposerState(composerToSend) }
+            : {}),
         }));
       } finally {
         untrackSendRequest();
@@ -2894,7 +2973,7 @@ function createChatStore() {
       }));
 
       try {
-        await get().sendMessage();
+        await get().sendMessage({ restoreComposerOnFailure: false });
       } finally {
         // sendMessage reset composer 后，把用户原本未发出的草稿字段补回。
         // 但若 composer 已被外部改动（如其他流程主动写了新草稿），不要覆盖。
@@ -3929,6 +4008,8 @@ function createChatStore() {
     },
 
     reset: () => {
+      _runtimeFastDefault = null;
+      _fastTouchedByUser = false;
       clearCompletionStreamBuffer();
       abortAllHistoryRequests();
       abortAllSendRequests();
@@ -3937,6 +4018,9 @@ function createChatStore() {
         _base64EvictionTimer = null;
       }
       clearConversationIndexes();
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event("lumen:chat-store-reset"));
+      }
       set(createInitialChatData());
     },
   }));

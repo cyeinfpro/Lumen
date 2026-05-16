@@ -29,25 +29,25 @@ const BASE =
 
 const VARIANTS: Record<Variant, string> = {
   primary:
-    "bg-[var(--accent)] text-black hover:bg-[var(--amber-300)] " +
+    "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--amber-300)] " +
     "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_var(--amber-glow-strong)]",
   secondary:
-    "bg-white/8 text-[var(--fg-0)] hover:bg-white/12 " +
+    "bg-[var(--bg-2)] text-[var(--fg-0)] hover:bg-[var(--bg-3)] " +
     "border border-[var(--border)] hover:border-[var(--border-strong)] backdrop-blur-sm",
   ghost:
-    "bg-transparent text-[var(--fg-0)] hover:bg-white/6 " +
+    "bg-transparent text-[var(--fg-0)] hover:bg-[var(--bg-2)] " +
     "border border-transparent",
   danger:
-    "bg-[var(--danger)] text-white hover:brightness-110 " +
+    "bg-[var(--danger)] text-[var(--danger-on)] hover:brightness-110 " +
     // shadow 内部 rgba 是 --danger 同源色（暂无 token），保留硬编码不引用 Tailwind 强调色。
     "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_rgba(229,72,77,0.55)]",
   outline:
     "bg-transparent text-[var(--fg-0)] border border-[var(--border)] " +
-    "hover:border-[var(--border-strong)] hover:bg-white/4",
+    "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
   // glass: 浮层透明按钮（用于图片卡片浮动操作、AttachmentTray 等）。
   glass:
-    "bg-black/55 backdrop-blur-md text-[var(--fg-0)] hover:bg-black/65 " +
-    "border border-white/15 hover:border-white/25",
+    "bg-[var(--bg-0)]/70 backdrop-blur-md text-[var(--fg-0)] hover:bg-[var(--bg-1)]/85 " +
+    "border border-[var(--border-strong)] hover:border-[var(--border-strong)]",
   // link: 看起来像链接的按钮（替代裸 <a> 风格按钮）。
   // 走 LINK_SIZES 而非 SIZES，避免 twMerge 让 SIZES 的 h/p 覆盖 link 的 h-auto/p-0。
   link:

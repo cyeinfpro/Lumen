@@ -100,7 +100,7 @@ from .state import is_completion_terminal
 
 from .generation import (
     _cleanup_storage_on_error,
-    _compute_blurhash,
+    _compute_blurhash as _generation_compute_blurhash,
     _make_display,
     _make_preview,
     _make_thumb,
@@ -253,7 +253,9 @@ class _CompletionToolTracker:
         self._last_published[call_id] = signature
         return next_state.payload()
 
-    def update_from_response(self, response: dict[str, Any] | None) -> list[dict[str, Any]]:
+    def update_from_response(
+        self, response: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
         if not isinstance(response, dict):
             return []
         output = response.get("output")
@@ -314,7 +316,9 @@ def _normalize_reasoning_effort_for_upstream(
     return effort
 
 
-async def _chat_tools_from_content(content: dict[str, Any] | None) -> list[dict[str, Any]]:
+async def _chat_tools_from_content(
+    content: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     content = content or {}
     tools: list[dict[str, Any]] = []
     if content.get("web_search") is True:
@@ -328,7 +332,9 @@ async def _chat_tools_from_content(content: dict[str, Any] | None) -> list[dict[
                     await runtime_settings.resolve(_CHAT_TOOL_VECTOR_STORE_SETTING)
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("file_search vector store setting resolve failed: %s", exc)
+                logger.warning(
+                    "file_search vector store setting resolve failed: %s", exc
+                )
                 vector_store_ids = []
         if vector_store_ids:
             tools.append(
@@ -440,7 +446,14 @@ def _normalize_tool_status(raw: Any, *, event_type: str = "") -> str | None:
     if event_type.endswith((".completed", ".complete", ".done")):
         return "succeeded"
     if event_type.endswith(
-        (".created", ".queued", ".in_progress", ".running", ".searching", ".interpreting")
+        (
+            ".created",
+            ".queued",
+            ".in_progress",
+            ".running",
+            ".searching",
+            ".interpreting",
+        )
     ):
         return "running"
     return None
@@ -543,15 +556,16 @@ def _merge_tool_call_state(
     update: dict[str, Any],
 ) -> _ToolCallState:
     next_status = update["status"]
-    if (
-        previous is not None
-        and _tool_status_rank(previous.status) > _tool_status_rank(next_status)
+    if previous is not None and _tool_status_rank(previous.status) > _tool_status_rank(
+        next_status
     ):
         next_status = previous.status
     next_type = update["type"] or (previous.type if previous is not None else "tool")
     next_name = update.get("name") or (previous.name if previous is not None else None)
     next_label = update.get("label") or (
-        previous.label if previous is not None else _tool_display_label(next_type, next_name)
+        previous.label
+        if previous is not None
+        else _tool_display_label(next_type, next_name)
     )
     return _ToolCallState(
         id=update["id"],
@@ -770,7 +784,9 @@ def _extract_reasoning_text_from_response(response: dict[str, Any] | None) -> st
     return "\n\n".join(chunks)
 
 
-def _extract_image_events_from_response(response: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _extract_image_events_from_response(
+    response: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     if not isinstance(response, dict):
         return []
     output = response.get("output")
@@ -778,12 +794,24 @@ def _extract_image_events_from_response(response: dict[str, Any] | None) -> list
         return []
     events: list[dict[str, Any]] = []
     for item in output:
-        if isinstance(item, dict) and item.get("type") == _IMAGE_GENERATION_TOOL_TYPE + "_call":
+        if (
+            isinstance(item, dict)
+            and item.get("type") == _IMAGE_GENERATION_TOOL_TYPE + "_call"
+        ):
             events.append({"type": "response.output_item.done", "item": item})
     return events
 
 
-def _image_format_and_meta(raw_image: bytes) -> tuple[
+def _compute_blurhash(img: PILImage.Image) -> str | None:
+    width, height = img.size
+    if width < 4 or height < 4:
+        return None
+    return _generation_compute_blurhash(img)
+
+
+def _image_format_and_meta(
+    raw_image: bytes,
+) -> tuple[
     str,
     str,
     int,
@@ -1037,6 +1065,7 @@ def _completion_lock_key(completion_id: str) -> int:
     检查与 UPDATE 之间有客户端重试路径，advisory lock 也能保证互斥。
     """
     import hashlib
+
     h = hashlib.sha256(completion_id.encode("utf-8", errors="replace")).digest()
     # 取前 8 字节，mask 到 63 bit 正整数
     return int.from_bytes(h[:8], byteorder="big", signed=False) & ((1 << 63) - 1)
@@ -1046,7 +1075,9 @@ async def _acquire_completion_xact_lock(session: Any, completion_id: str) -> Non
     """Best-effort: 在当前事务内拿 pg_advisory_xact_lock。非 Postgres 后端静默跳过。"""
     try:
         key = _completion_lock_key(completion_id)
-        await session.execute(sa_text("SELECT pg_advisory_xact_lock(:k)").bindparams(k=key))
+        await session.execute(
+            sa_text("SELECT pg_advisory_xact_lock(:k)").bindparams(k=key)
+        )
     except Exception as exc:  # noqa: BLE001
         # SQLite 单测 / 非 PG 环境没有 pg_advisory_xact_lock；退化到 CAS 级保护。
         logger.debug("pg_advisory_xact_lock unavailable: %s", exc)
@@ -1248,8 +1279,7 @@ def _count_message_tokens(role: str, content: dict[str, Any] | None) -> int:
     if role == Role.USER.value:
         attachments = content.get("attachments") or []
         image_count = sum(
-            1 for att in attachments
-            if isinstance(att, dict) and att.get("image_id")
+            1 for att in attachments if isinstance(att, dict) and att.get("image_id")
         )
         if not text and image_count == 0:
             return 0
@@ -1385,7 +1415,9 @@ def _make_quality_probes(packed: PackedContext) -> dict[str, Any]:
     }
 
 
-def _packed_with_input(input_list: list[dict[str, Any]], packed: PackedContext) -> PackedContext:
+def _packed_with_input(
+    input_list: list[dict[str, Any]], packed: PackedContext
+) -> PackedContext:
     return replace(
         packed,
         input_list=input_list,
@@ -1393,9 +1425,12 @@ def _packed_with_input(input_list: list[dict[str, Any]], packed: PackedContext) 
     )
 
 
-def _estimated_summary_source(rows: list[Message], *, skip_message_id: str | None) -> int:
+def _estimated_summary_source(
+    rows: list[Message], *, skip_message_id: str | None
+) -> int:
     """Estimate tokens for summary source messages using tiktoken via JSON serialization."""
     import json
+
     total = 0
     for m in rows:
         if m.id == skip_message_id:
@@ -1429,7 +1464,9 @@ def _pack_with_existing_summary(
         sticky_tokens = MESSAGE_OVERHEAD_TOKENS + count_tokens(sticky_input_text)
 
     used_tokens = (
-        estimate_system_prompt_tokens(_with_summary_guardrail(system_prompt, enabled=True))
+        estimate_system_prompt_tokens(
+            _with_summary_guardrail(system_prompt, enabled=True)
+        )
         + sticky_tokens
         + MESSAGE_OVERHEAD_TOKENS
         + summary_token_count
@@ -1469,7 +1506,8 @@ def _pack_with_existing_summary(
         summary_created=False,
         summary_up_to_message_id=str(summary.get("up_to_message_id") or ""),
         sticky_used=sticky_message is not None,
-        included_messages_count=len(recent_rows) + (1 if sticky_message is not None else 0),
+        included_messages_count=len(recent_rows)
+        + (1 if sticky_message is not None else 0),
         truncated_without_summary=False,
         fallback_reason=None,
         compression_enabled=True,
@@ -1739,7 +1777,11 @@ async def _ensure_context_summary(
     redis: Any | None,
 ) -> dict[str, Any] | None:
     service = context_summary
-    ensure = getattr(service, "ensure_context_summary", None) if service is not None else None
+    ensure = (
+        getattr(service, "ensure_context_summary", None)
+        if service is not None
+        else None
+    )
     if ensure is None:
         return None
     settings_payload = {
@@ -1852,9 +1894,14 @@ async def _pack_recent_history(
         # A persisted manual summary is authoritative even when auto compression
         # is disabled. Only roll it forward when auto compression is enabled and
         # new post-summary history has grown back toward the trigger threshold.
-        if not compression_enabled or existing_summary_packed.estimated_tokens < trigger_tokens:
+        if (
+            not compression_enabled
+            or existing_summary_packed.estimated_tokens < trigger_tokens
+        ):
             return _packed_with_input(
-                await _build_input_from_packed_context(session, existing_summary_packed),
+                await _build_input_from_packed_context(
+                    session, existing_summary_packed
+                ),
                 existing_summary_packed,
             )
 
@@ -1959,12 +2006,16 @@ async def _pack_recent_history(
             continue
         if len(forced_recent_desc) < min_recent_messages:
             forced_recent_desc.append(m)
-    if current_user is not None and all(m.id != current_user.id for m in forced_recent_desc):
+    if current_user is not None and all(
+        m.id != current_user.id for m in forced_recent_desc
+    ):
         forced_recent_desc.insert(0, current_user)
 
     forced_ids = {m.id for m in forced_recent_desc}
     first_user_in_recent = first_user is not None and first_user.id in forced_ids
-    sticky_message = first_user if first_user is not None and not first_user_in_recent else None
+    sticky_message = (
+        first_user if first_user is not None and not first_user_in_recent else None
+    )
     sticky_tokens = 0
     if sticky_message is not None:
         sticky_input_text = format_sticky_input_text(
@@ -1972,13 +2023,12 @@ async def _pack_recent_history(
         )
         # P1-4: sticky 文本是 trigger 判定后续 used_tokens 累加的种子值之一，
         # 用 tiktoken 精确计数收紧 ±15% 偏差；其它估算点不动以避免破坏现有 monkeypatch 测试。
-        sticky_tokens = (
-            MESSAGE_OVERHEAD_TOKENS
-            + count_tokens(sticky_input_text)
-        )
+        sticky_tokens = MESSAGE_OVERHEAD_TOKENS + count_tokens(sticky_input_text)
 
     used_tokens = (
-        estimate_system_prompt_tokens(_with_summary_guardrail(system_prompt, enabled=True))
+        estimate_system_prompt_tokens(
+            _with_summary_guardrail(system_prompt, enabled=True)
+        )
         + sticky_tokens
         + target_tokens
         + MESSAGE_OVERHEAD_TOKENS
@@ -2012,7 +2062,9 @@ async def _pack_recent_history(
     if not summary_rows:
         if existing_summary_packed is not None:
             return _packed_with_input(
-                await _build_input_from_packed_context(session, existing_summary_packed),
+                await _build_input_from_packed_context(
+                    session, existing_summary_packed
+                ),
                 existing_summary_packed,
             )
         packed = _fallback_pack(
@@ -2077,7 +2129,9 @@ async def _pack_recent_history(
             source_message_count=len(summary_rows),
             source_token_estimate=_estimated_summary_source(
                 summary_rows,
-                skip_message_id=sticky_message.id if sticky_message is not None else None,
+                skip_message_id=sticky_message.id
+                if sticky_message is not None
+                else None,
             ),
         )
         try:
@@ -2127,7 +2181,9 @@ async def _pack_recent_history(
     summary_token_count = estimate_summary_tokens(summary)
     recent_rows = tuple(reversed(recent_desc))
     estimated_tokens = (
-        estimate_system_prompt_tokens(_with_summary_guardrail(system_prompt, enabled=True))
+        estimate_system_prompt_tokens(
+            _with_summary_guardrail(system_prompt, enabled=True)
+        )
         + (sticky_tokens if sticky_message is not None else 0)
         + MESSAGE_OVERHEAD_TOKENS
         + summary_token_count
@@ -2142,7 +2198,8 @@ async def _pack_recent_history(
             (summary or {}).get("up_to_message_id") or boundary_message.id
         ),
         sticky_used=sticky_message is not None,
-        included_messages_count=len(recent_rows) + (1 if sticky_message is not None else 0),
+        included_messages_count=len(recent_rows)
+        + (1 if sticky_message is not None else 0),
         truncated_without_summary=False,
         fallback_reason=None,
         compression_enabled=True,
@@ -2197,7 +2254,9 @@ def _classify_exception(exc: BaseException, has_partial: bool) -> RetryDecision:
         return is_retriable(
             exc.error_code, exc.status_code, has_partial, error_message=str(exc)
         )
-    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)):
+    if isinstance(
+        exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
+    ):
         return is_retriable(
             "stream_interrupted" if has_partial else "upstream_error",
             None,
@@ -2205,9 +2264,7 @@ def _classify_exception(exc: BaseException, has_partial: bool) -> RetryDecision:
             error_message=str(exc),
         )
     if isinstance(exc, httpx.HTTPError):
-        return is_retriable(
-            "upstream_error", None, has_partial, error_message=str(exc)
-        )
+        return is_retriable("upstream_error", None, has_partial, error_message=str(exc))
     return RetryDecision(False, f"unhandled {type(exc).__name__}")
 
 
@@ -2270,7 +2327,8 @@ def _insert_user_context_after_summary(
         joined = "\n".join(
             str(part.get("text") or "")
             for part in content
-            if isinstance(part, dict) and part.get("type") in {"input_text", "output_text"}
+            if isinstance(part, dict)
+            and part.get("type") in {"input_text", "output_text"}
         )
         if "CONVERSATION SUMMARY" in joined or "会话摘要" in joined:
             insert_at = idx + 1
@@ -2286,7 +2344,11 @@ async def _inject_user_memory_context(
     parent_user_message_id: str | None,
     redis: Any | None = None,
 ) -> dict[str, Any]:
-    if memory_extraction is None or conversation_id is None or not parent_user_message_id:
+    if (
+        memory_extraction is None
+        or conversation_id is None
+        or not parent_user_message_id
+    ):
         return {"used_memory_ids": [], "used_memory_summary": []}
     parent = await session.get(Message, parent_user_message_id)
     if parent is None:
@@ -2426,7 +2488,9 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             logger.warning("completion not found task_id=%s", task_id)
             return
         if is_completion_terminal(comp.status):
-            logger.info("completion terminal task_id=%s status=%s", task_id, comp.status)
+            logger.info(
+                "completion terminal task_id=%s status=%s", task_id, comp.status
+            )
             return
 
         # 判断是否是"被接管重跑"——attempt > 0 且 text 非空 ⇒ 上一个 worker 挂了
@@ -2923,8 +2987,8 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         "used_memory_summary", []
                     )
                     if memory_meta_for_event.get("confirmation_candidate_id"):
-                        content["confirmation_candidate_id"] = memory_meta_for_event.get(
-                            "confirmation_candidate_id"
+                        content["confirmation_candidate_id"] = (
+                            memory_meta_for_event.get("confirmation_candidate_id")
                         )
                 msg.content = content
                 msg.status = MessageStatus.SUCCEEDED
@@ -2980,6 +3044,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 自动起会话标题（第一轮对话完成后触发；内部幂等）
         if conversation_id:
             from .auto_title import maybe_enqueue_auto_title
+
             await maybe_enqueue_auto_title(redis, conversation_id)
             if memory_extraction is not None:
                 try:
@@ -2991,7 +3056,9 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         await arq_pool.enqueue_job(
                             "memory_extract",
                             conversation_id,
-                            getattr(msg, "parent_message_id", None) if msg is not None else "",
+                            getattr(msg, "parent_message_id", None)
+                            if msg is not None
+                            else "",
                             message_id,
                         )
                     elif msg is not None and msg.parent_message_id:
@@ -3100,9 +3167,9 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             if user_api_credential_id and byok_error
             else str(exc)[:2000]
         )
-        _task_outcome = "retry" if (
-            decision.retriable and attempt < _MAX_ATTEMPTS
-        ) else "failed"
+        _task_outcome = (
+            "retry" if (decision.retriable and attempt < _MAX_ATTEMPTS) else "failed"
+        )
 
         if decision.retriable and attempt < _MAX_ATTEMPTS:
             idx = min(attempt - 1, len(RETRY_BACKOFF_SECONDS) - 1)
@@ -3189,9 +3256,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     comp_partial.tokens_in = tokens_in
                     comp_partial.tokens_out = tokens_out
                     try:
-                        await worker_billing.charge_completion(
-                            session, comp_partial
-                        )
+                        await worker_billing.charge_completion(session, comp_partial)
                     except Exception:  # noqa: BLE001
                         logger.exception(
                             "partial-stream charge failed comp=%s", task_id

@@ -858,7 +858,10 @@ function ModelLibraryCard({
       : null;
 
   return (
-    <article className="group relative">
+    <article
+      className="group relative"
+      style={{ contentVisibility: "auto", containIntrinsicSize: "1px 360px" }}
+    >
       {onToggleSelected ? (
         <button
           type="button"
@@ -867,7 +870,7 @@ function ModelLibraryCard({
           className={cn(
             "absolute left-2 top-2 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full border backdrop-blur transition-colors",
             selected
-              ? "border-[var(--border-amber)] bg-[var(--accent)] text-[var(--bg-0)]"
+              ? "border-[var(--border-amber)] bg-[var(--accent)] text-[var(--accent-on)]"
               : "border-white/40 bg-black/35 text-white hover:bg-black/55",
           )}
         >

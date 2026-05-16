@@ -102,7 +102,7 @@ function DrawerHeader({ onClose }: { onClose: () => void }) {
         type="button"
         onClick={onClose}
         aria-label="关闭"
-        className="-mr-2 inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)]"
+        className="-mr-2 inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
       >
         <X className="h-4 w-4" />
       </button>

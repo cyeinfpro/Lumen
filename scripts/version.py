@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -28,7 +29,10 @@ PYPROJECT_FILES = [
 WEB_PACKAGE_JSON = ROOT / "apps/web/package.json"
 WEB_PACKAGE_LOCK = ROOT / "apps/web/package-lock.json"
 CORE_INIT = ROOT / "packages/core/lumen_core/__init__.py"
-CURRENT_RELEASE_JSON = ROOT / "current" / ".lumen_release.json"
+CURRENT_RELEASE_JSON_CANDIDATES = (
+    ROOT / ".lumen_release.json",
+    ROOT / "current" / ".lumen_release.json",
+)
 
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -83,6 +87,24 @@ def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def current_release_json_path() -> Path | None:
+    for path in CURRENT_RELEASE_JSON_CANDIDATES:
+        if path.exists():
+            return path
+    return None
+
+
+def rolling_tag_allowed() -> bool:
+    return os.environ.get("LUMEN_ALLOW_ROLLING_TAG") == "1"
+
+
+def allowed_runtime_image_tags(version: str) -> set[str]:
+    allowed = {f"v{version}"}
+    if rolling_tag_allowed():
+        allowed.add("main")
+    return allowed
+
+
 def current_value(target: VersionTarget) -> str | None:
     text = target.path.read_text(encoding="utf-8")
     match = target.pattern.search(text)
@@ -129,6 +151,29 @@ def check() -> int:
             f"{WEB_PACKAGE_LOCK.relative_to(ROOT)} packages['']: "
             f"{root_package.get('version')} != {version}"
         )
+
+    current_release_json = current_release_json_path()
+    if current_release_json is not None:
+        try:
+            release = read_json(current_release_json)
+        except json.JSONDecodeError as exc:
+            mismatches.append(f"{current_release_json.relative_to(ROOT)}: invalid JSON ({exc})")
+        else:
+            if not isinstance(release, dict):
+                mismatches.append(f"{current_release_json.relative_to(ROOT)}: JSON root is not object")
+            else:
+                image_tag = release.get("image_tag")
+                if image_tag not in allowed_runtime_image_tags(version):
+                    mismatches.append(
+                        f"{current_release_json.relative_to(ROOT)} image_tag: "
+                        f"{image_tag!r} != 'v{version}'"
+                    )
+                for key in ("id", "sha"):
+                    value = release.get(key)
+                    if value is not None and not isinstance(value, str):
+                        mismatches.append(
+                            f"{current_release_json.relative_to(ROOT)} {key}: not a string"
+                        )
 
     if mismatches:
         print("Version mismatch:", file=sys.stderr)
@@ -198,10 +243,9 @@ def assert_tag(tag: str) -> int:
 def print_runtime() -> int:
     version = read_product_version()
     release: dict[str, object] = {}
-    try:
-        release = read_json(CURRENT_RELEASE_JSON)
-    except FileNotFoundError:
-        release = {}
+    current_release_json = current_release_json_path()
+    if current_release_json is not None:
+        release = read_json(current_release_json)
     image_tag = release.get("image_tag") or f"v{version}"
     if not isinstance(image_tag, str):
         image_tag = f"v{version}"
@@ -214,7 +258,7 @@ def print_runtime() -> int:
         "sha": sha,
     }
     mismatches: list[str] = []
-    if image_tag != f"v{version}" and image_tag != "main":
+    if image_tag not in allowed_runtime_image_tags(version):
         mismatches.append(f"image_tag={image_tag} != v{version}")
     if release_id is not None and not isinstance(release_id, str):
         mismatches.append("release_id not string")

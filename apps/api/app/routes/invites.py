@@ -139,7 +139,7 @@ async def create_invite_link(
 
 @router_authed.get("")
 async def list_invite_links(
-    _admin: AdminUser,
+    admin: AdminUser,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
@@ -177,7 +177,9 @@ async def revoke_invite_link(
 ) -> None:
     inv = (
         await db.execute(
-            select(InviteLink).where(InviteLink.id == invite_id).with_for_update()
+            select(InviteLink)
+            .where(InviteLink.id == invite_id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not inv:

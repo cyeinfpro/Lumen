@@ -6978,7 +6978,7 @@ async def _run_auto_tag_in_background(user_id: str, item_id: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         # Unexpected exceptions are real failures — surface to monitoring.
-        logger.warning(
+        logger.exception(
             "model_library auto_tag background failed user=%s item=%s err=%s",
             user_id,
             item_id,

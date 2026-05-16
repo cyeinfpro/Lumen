@@ -15,6 +15,8 @@ def _prod_kwargs() -> dict[str, str]:
         "byok_api_key_master_secret": "b" * 32,
         "database_url": "postgresql+asyncpg://lumen_prod:secret@localhost:5432/lumen",
         "redis_url": "redis://:redis-prod-password@localhost:6379/0",
+        "smtp_host": "smtp.example.com",
+        "smtp_from_email": "noreply@example.com",
     }
 
 
@@ -48,6 +50,27 @@ def test_dev_default_session_secret_is_empty(monkeypatch: pytest.MonkeyPatch) ->
 def test_non_dev_no_longer_requires_upstream_api_key() -> None:
     settings = Settings(**_prod_kwargs())
     assert settings.app_env == "prod"
+
+
+def test_non_dev_requires_password_reset_smtp_host() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["smtp_host"] = ""
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_non_dev_requires_password_reset_from_email() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["smtp_from_email"] = ""
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_dev_allows_missing_password_reset_smtp() -> None:
+    settings = Settings(app_env="dev", _env_file=None)
+    assert settings.smtp_host == ""
 
 
 def test_non_dev_requires_byok_master_secret() -> None:

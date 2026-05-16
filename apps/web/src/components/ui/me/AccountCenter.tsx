@@ -81,6 +81,7 @@ export function AccountCenter() {
     } catch (err) {
       logWarn("mobile_me.logout_failed", { scope: "mobile-me", extra: { err: String(err) } });
     } finally {
+      useChatStore.getState().reset();
       qc.clear();
       setLoggingOut(false);
       router.push("/login");

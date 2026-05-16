@@ -291,12 +291,12 @@ export function PosterInpaintDialog({
       role="dialog"
       aria-modal="true"
       aria-label="局部修复"
-      className="fixed inset-0 z-[var(--z-modal)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center md:p-6"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-modal)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !submitBusy) onClose();
       }}
     >
-      <div className="relative flex h-full w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] md:h-[min(86vh,720px)] md:rounded-lg md:border md:border-[var(--border)]">
+      <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-lg md:border md:border-[var(--border)]">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
@@ -309,7 +309,7 @@ export function PosterInpaintDialog({
             onClick={onClose}
             disabled={submitBusy}
             aria-label="关闭"
-            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-white/[0.06] hover:text-[var(--fg-0)] disabled:opacity-50"
+            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
           >
             <X className="h-4 w-4" />
           </button>
@@ -362,7 +362,7 @@ export function PosterInpaintDialog({
                     className={cn(
                       "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                       mode === "draw"
-                        ? "bg-[var(--amber-400)] text-black"
+                        ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
                         : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                     )}
                   >
@@ -375,7 +375,7 @@ export function PosterInpaintDialog({
                     className={cn(
                       "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                       mode === "erase"
-                        ? "bg-[var(--amber-400)] text-black"
+                        ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
                         : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                     )}
                   >
@@ -411,7 +411,7 @@ export function PosterInpaintDialog({
           </div>
 
           <aside className="flex min-h-0 shrink-0 flex-col border-t border-[var(--border)] lg:border-l lg:border-t-0">
-            <div className="flex-1 overflow-y-auto px-5 py-4">
+            <div className="mobile-dialog-scroll flex-1 overflow-y-auto px-5 py-4">
               <label className="block">
                 <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
                   编辑意图
@@ -436,7 +436,7 @@ export function PosterInpaintDialog({
               </p>
             </div>
 
-            <div className="shrink-0 border-t border-[var(--border)] px-5 py-4">
+            <div className="mobile-dialog-footer shrink-0 border-t border-[var(--border)] px-5 py-4">
               <Button
                 variant="primary"
                 fullWidth

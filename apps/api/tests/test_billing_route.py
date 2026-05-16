@@ -5,10 +5,25 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import Response
+from fastapi import Request, Response
 
 from app.routes import billing
+from lumen_core import billing as billing_core
 from lumen_core.schemas import AdminRedemptionCodeCreateIn
+
+
+def _request(
+    method: str = "GET", headers: list[tuple[bytes, bytes]] | None = None
+) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": "/",
+            "headers": headers or [],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
 
 
 def test_openai_price_import_uses_decimal_half_up_rounding() -> None:
@@ -75,7 +90,9 @@ def test_window_usage_reports_reset_from_oldest_in_window() -> None:
 
 def test_bulk_multiplier_converts_to_x10000() -> None:
     assert (
-        billing._bulk_multiplier_x10000(2.25, field="rates.long_context_input_multiplier")  # noqa: SLF001
+        billing._bulk_multiplier_x10000(
+            2.25, field="rates.long_context_input_multiplier"
+        )  # noqa: SLF001
         == 22_500
     )
 
@@ -151,6 +168,38 @@ class _ScalarResult:
 
     def all(self) -> list[Any]:
         return self._values
+
+
+class _FirstResult:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def first(self) -> Any:
+        if self.value is None:
+            return None
+        return _Row(self.value)
+
+
+class _Row:
+    def __init__(self, value: Any) -> None:
+        self._value = value
+        if isinstance(value, tuple):
+            self._mapping = {idx: item for idx, item in enumerate(value)}
+        else:
+            self._mapping = {0: value}
+
+    def __iter__(self):
+        if isinstance(self._value, tuple):
+            return iter(self._value)
+        return iter((self._value,))
+
+
+class _FirstDb:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    async def execute(self, *_args: Any, **_kwargs: Any) -> _FirstResult:
+        return _FirstResult(self.value)
 
 
 @pytest.mark.asyncio
@@ -329,3 +378,232 @@ async def test_threshold_price_validation_treats_candidate_disable_as_missing() 
     assert getattr(excinfo.value, "status_code", None) == 422
     assert excinfo.value.detail["error"]["code"] == "THRESHOLDS_PRICING_MISMATCH"
     assert excinfo.value.detail["error"]["details"]["missing"] == ["1k"]
+
+
+@pytest.mark.asyncio
+async def test_topup_redeem_requests_wallet_row_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+    wallet = SimpleNamespace(
+        balance_micro=0,
+        hold_micro=0,
+        lifetime_topup_micro=0,
+        version=0,
+    )
+
+    async def fake_get_wallet(_db: Any, _user_id: str, *, lock: bool) -> Any:
+        calls.append(lock)
+        return wallet
+
+    async def fake_existing_tx(_db: Any, _user_id: str, _idempotency_key: str) -> None:
+        return None
+
+    async def fake_insert_tx(
+        _db: Any,
+        wallet_arg: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        return SimpleNamespace(id="tx-1", balance_after=wallet_arg.balance_micro)
+
+    monkeypatch.setattr(billing.billing_core, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing.billing_core, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing.billing_core, "_insert_tx", fake_insert_tx)
+
+    tx = await billing.billing_core.topup_redeem(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        123,
+        usage_id="usage-1",
+        code_id="code-1",
+    )
+
+    assert calls == [True]
+    assert wallet.balance_micro == 123
+    assert tx.balance_after == 123
+
+
+@pytest.mark.asyncio
+async def test_redemption_idempotency_replays_existing_usage() -> None:
+    out = await billing._redemption_out_for_usage(  # noqa: SLF001
+        _FirstDb(
+            (
+                SimpleNamespace(amount_micro=5_000_000),
+                SimpleNamespace(
+                    balance_after=12_000_000,
+                    meta={"redemption_request_hash": "request-hash"},
+                ),
+            )
+        ),  # type: ignore[arg-type]
+        user_id="user-1",
+        usage_id="usage-1",
+        request_hash="request-hash",
+    )
+
+    assert out is not None
+    assert out.amount.micro == 5_000_000
+    assert out.balance.micro == 12_000_000
+
+
+@pytest.mark.asyncio
+async def test_redemption_idempotency_rejects_reused_key_for_different_code() -> None:
+    with pytest.raises(Exception) as excinfo:
+        await billing._redemption_out_for_usage(  # noqa: SLF001
+            _FirstDb(
+                (
+                    SimpleNamespace(amount_micro=5_000_000),
+                    SimpleNamespace(
+                        balance_after=12_000_000,
+                        meta={"redemption_request_hash": "first-code"},
+                    ),
+                )
+            ),  # type: ignore[arg-type]
+            user_id="user-1",
+            usage_id="usage-1",
+            request_hash="second-code",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_rotate_redemption_secret_keeps_previous_secret_for_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remembered: list[str | None] = []
+    updated: list[list[tuple[str, str]]] = []
+    audits: list[dict[str, Any]] = []
+
+    class Db:
+        committed = False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    async def fake_get_setting(_db: Any, _spec: Any) -> str:
+        return "old-secret-value-123456"
+
+    async def fake_update_settings(_db: Any, pairs: list[tuple[str, str]]) -> None:
+        updated.append(pairs)
+
+    async def fake_remember(_db: Any, old_secret: str | None) -> str:
+        remembered.append(old_secret)
+        return "2026-05-17T00:00:00+00:00"
+
+    async def fake_write_audit(_db: Any, **kwargs: Any) -> bool:
+        audits.append(kwargs)
+        return True
+
+    async def fake_overview(_admin: Any, _db: Any) -> Any:
+        return "overview"
+
+    monkeypatch.setattr(billing, "get_setting", fake_get_setting)
+    monkeypatch.setattr(billing, "update_settings", fake_update_settings)
+    monkeypatch.setattr(billing, "_generate_redemption_secret", lambda: "new-secret")
+    monkeypatch.setattr(billing, "remember_previous_redemption_secret", fake_remember)
+    monkeypatch.setattr(billing, "write_audit", fake_write_audit)
+    monkeypatch.setattr(billing, "request_ip_hash", lambda _request: "ip-hash")
+    monkeypatch.setattr(billing, "admin_billing_overview", fake_overview)
+
+    db = Db()
+    out = await billing.admin_rotate_redemption_secret(
+        object(),  # type: ignore[arg-type]
+        SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == "overview"
+    assert db.committed is True
+    assert updated == [[("billing.redemption_code_secret", "new-secret")]]
+    assert remembered == ["old-secret-value-123456"]
+    assert audits[0]["details"]["revoked_unredeemed_count"] == 0
+    assert audits[0]["details"]["previous_secret_valid_until"] is not None
+
+
+@pytest.mark.asyncio
+async def test_topup_redeem_locks_wallet_before_balance_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, bool | str]] = []
+    wallet = SimpleNamespace(balance_micro=0, lifetime_topup_micro=0, version=0)
+
+    async def fake_get_wallet(_db: Any, user_id: str, *, lock: bool = False) -> Any:
+        calls.append((user_id, lock))
+        return wallet
+
+    async def fake_existing_tx(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_insert_tx(
+        _db: Any,
+        wallet_arg: Any,
+        *,
+        user_id: str,
+        kind: str,
+        amount_micro: int,
+        ref_type: str,
+        ref_id: str,
+        idempotency_key: str,
+        meta: dict[str, Any],
+    ) -> SimpleNamespace:
+        assert wallet_arg is wallet
+        assert wallet.balance_micro == amount_micro
+        return SimpleNamespace(
+            id="wallet-tx-1",
+            user_id=user_id,
+            kind=kind,
+            amount_micro=amount_micro,
+            ref_type=ref_type,
+            ref_id=ref_id,
+            idempotency_key=idempotency_key,
+            meta=meta,
+            balance_after=wallet.balance_micro,
+        )
+
+    monkeypatch.setattr(billing_core, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing_core, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing_core, "_insert_tx", fake_insert_tx)
+
+    tx = await billing_core.topup_redeem(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        25_000_000,
+        usage_id="usage-1",
+        code_id="code-1",
+    )
+
+    assert calls == [("user-1", True)]
+    assert wallet.balance_micro == 25_000_000
+    assert tx.idempotency_key == "redeem:usage-1"
+
+
+def test_redemption_idempotency_key_derives_for_legacy_clients() -> None:
+    request = _request(method="POST")
+
+    first = billing._redemption_idempotency_key(  # noqa: SLF001
+        request,
+        user_id="user-1",
+        normalized_code="ABCD-1234",
+    )
+    second = billing._redemption_idempotency_key(  # noqa: SLF001
+        request,
+        user_id="user-1",
+        normalized_code="ABCD-1234",
+    )
+
+    assert first == second
+    assert first.startswith("derived:")
+
+
+def test_redemption_idempotency_key_rejects_blank_header() -> None:
+    request = _request(method="POST", headers=[(b"idempotency-key", b"  ")])
+
+    with pytest.raises(Exception) as excinfo:
+        billing._redemption_idempotency_key(  # noqa: SLF001
+            request,
+            user_id="user-1",
+            normalized_code="ABCD-1234",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422

@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     cors_allow_origins: str = _DEFAULT_CORS_ALLOW_ORIGINS
     trusted_proxies: str = ""
 
+    # Password reset email delivery. Production must be wired to a real SMTP
+    # server so reset links are not silently generated and dropped.
+    smtp_host: str = ""
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = False
+    smtp_starttls: bool = True
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
     # Apparel model library presets live in this repo under
     # assets/apparel-model-presets/. After pushing that folder to GitHub, the
     # sync endpoint enumerates the folder through GitHub Contents API and
@@ -157,6 +168,16 @@ class Settings(BaseSettings):
                 raise ValueError(f"invalid TRUSTED_PROXIES CIDR: {cidr}") from exc
         env = self.app_env.strip().lower()
         is_dev = env in {"dev", "development", "local", "test"}
+        smtp_host = self.smtp_host.strip()
+        smtp_from = self.smtp_from_email.strip()
+        smtp_username = self.smtp_username.strip()
+        smtp_password = self.smtp_password.strip()
+        if self.smtp_use_tls and self.smtp_starttls:
+            raise ValueError("SMTP_USE_TLS and SMTP_STARTTLS cannot both be enabled")
+        if smtp_from and "@" not in smtp_from:
+            raise ValueError("SMTP_FROM_EMAIL must be a valid email address")
+        if smtp_password and not smtp_username:
+            raise ValueError("SMTP_USERNAME must be set when SMTP_PASSWORD is set")
         # Why: BYOK_API_KEY_MASTER_SECRET is required *in production* — without
         # it AES-GCM encryption can't deterministically derive a key and every
         # restart would silently invalidate stored credentials. In dev/test we
@@ -172,6 +193,10 @@ class Settings(BaseSettings):
                 "generate with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
             )
         if not is_dev:
+            if not smtp_host:
+                raise ValueError("SMTP_HOST must be set outside development for password reset email")
+            if not smtp_from:
+                raise ValueError("SMTP_FROM_EMAIL must be set outside development for password reset email")
             secret = self.session_secret.strip()
             if not secret:
                 raise ValueError("SESSION_SECRET must be set outside development")

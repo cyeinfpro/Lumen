@@ -220,7 +220,9 @@ def _replay_payload_matches_channels(
     conv_id = payload.get("conversation_id")
     if isinstance(conv_id, str) and conv_id:
         event_channels.add(f"conv:{conv_id}")
-    event_channels.update(f"task:{task_id}" for task_id in _task_ids_from_payload(payload))
+    event_channels.update(
+        f"task:{task_id}" for task_id in _task_ids_from_payload(payload)
+    )
     if not event_channels:
         return False
     return bool(event_channels & requested_channels)
@@ -233,7 +235,9 @@ async def events(
     db: Annotated[AsyncSession, Depends(get_db)],
     channels: str = Query(default=""),
 ) -> EventSourceResponse:
-    client_requested = list(dict.fromkeys(c.strip() for c in channels.split(",") if c.strip()))
+    client_requested = list(
+        dict.fromkeys(c.strip() for c in channels.split(",") if c.strip())
+    )
     requested = list(client_requested)
     # ensure the personal user channel is always included.
     if f"user:{user.id}" not in requested:
@@ -272,7 +276,9 @@ async def events(
         # (`ms-seq`)，这样 XREAD 从它严格之后继续；绝不本地生成假 ID。
         if last_event_id:
             try:
-                replay = await redis.xread({stream_key: last_event_id}, count=500, block=0)
+                replay = await redis.xread(
+                    {stream_key: last_event_id}, count=500, block=0
+                )
                 # xread returns [[stream_key, [(id, {field: val}), ...]]]
                 for _stream, entries in replay or []:
                     for msg_id, fields in entries:
@@ -280,7 +286,9 @@ async def events(
                         if isinstance(msg_id, (bytes, bytearray)):
                             msg_id = msg_id.decode("ascii", errors="replace")
                         data = fields.get("data") if isinstance(fields, dict) else None
-                        event_name = fields.get("event") if isinstance(fields, dict) else None
+                        event_name = (
+                            fields.get("event") if isinstance(fields, dict) else None
+                        )
                         if isinstance(data, (bytes, bytearray)):
                             data = data.decode("utf-8", errors="replace")
                         if isinstance(event_name, (bytes, bytearray)):
@@ -358,7 +366,10 @@ async def events(
                 now = time.monotonic()
                 expired_started = [
                     conv_id
-                    for conv_id, (deadline, _event) in pending_compaction_started.items()
+                    for conv_id, (
+                        deadline,
+                        _event,
+                    ) in pending_compaction_started.items()
                     if deadline <= now
                 ]
                 for conv_id in expired_started:
@@ -374,7 +385,8 @@ async def events(
                 timeout = 1.0
                 if pending_compaction_started:
                     next_deadline = min(
-                        deadline for deadline, _event in pending_compaction_started.values()
+                        deadline
+                        for deadline, _event in pending_compaction_started.values()
                     )
                     timeout = max(0.0, min(timeout, next_deadline - time.monotonic()))
 
@@ -425,13 +437,27 @@ async def events(
                         # GEN-P0-7: publisher 在 XADD 之后把 stream msg_id 写进 envelope.sse_id
                         # 再 PUBLISH——这里直接透传，绝不本地生成。重连时浏览器的
                         # Last-Event-ID 即为这个 id，下次 XREAD 严格 resume。
-                        event_id = parsed.get("sse_id") if isinstance(parsed, dict) else None
+                        event_id = (
+                            parsed.get("sse_id") if isinstance(parsed, dict) else None
+                        )
+                        envelope_event_id = (
+                            parsed.get("event_id") if isinstance(parsed, dict) else None
+                        )
                         # 同时把 msg_id 放进 payload 方便前端 JSON 级去重
                         if isinstance(event_id, str) and event_id:
                             if isinstance(payload, dict):
                                 payload = {**payload, "msg_id": event_id}
                             else:
                                 payload = {"data": payload, "msg_id": event_id}
+                        if isinstance(envelope_event_id, str) and envelope_event_id:
+                            if isinstance(payload, dict):
+                                if "event_id" not in payload:
+                                    payload = {**payload, "event_id": envelope_event_id}
+                            else:
+                                payload = {
+                                    "data": payload,
+                                    "event_id": envelope_event_id,
+                                }
                         out = {
                             "event": ev_name,
                             "data": json.dumps(payload, separators=(",", ":")),

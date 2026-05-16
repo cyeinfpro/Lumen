@@ -52,12 +52,16 @@ log_step() {
 : "${LUMEN_DATA_ROOT:=/opt/lumendata}"
 : "${LUMEN_DB_ROOT:=$LUMEN_DATA_ROOT}"
 : "${LUMEN_BACKUP_ROOT:=$LUMEN_DATA_ROOT/backup}"
+: "${LUMEN_POSTGRES_UID:=999}"
+: "${LUMEN_POSTGRES_GID:=999}"
+: "${LUMEN_REDIS_UID:=999}"
+: "${LUMEN_REDIS_GID:=999}"
 : "${LUMEN_APP_UID:=10001}"
 : "${LUMEN_APP_GID:=10001}"
 : "${LUMEN_APP_STORAGE_GID:=$LUMEN_APP_GID}"
 : "${LUMEN_DEPLOY_ROOT:=/opt/lumen}"
 : "${LUMEN_COMPOSE_PROJECT:=lumen}"
-export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT LUMEN_APP_UID LUMEN_APP_GID LUMEN_APP_STORAGE_GID LUMEN_DEPLOY_ROOT LUMEN_COMPOSE_PROJECT
+export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT LUMEN_POSTGRES_UID LUMEN_POSTGRES_GID LUMEN_REDIS_UID LUMEN_REDIS_GID LUMEN_APP_UID LUMEN_APP_GID LUMEN_APP_STORAGE_GID LUMEN_DEPLOY_ROOT LUMEN_COMPOSE_PROJECT
 
 lumen_read_dotenv_value() {
     local key="$1"
@@ -219,6 +223,33 @@ def replace_netloc(value: str, host: str, port: int) -> str:
 def quote_value(value: str, quote: str) -> str:
     return f"{quote}{value}{quote}" if quote else value
 
+def mask_url(value: str) -> str:
+    parts = urlsplit(value)
+    if not parts.scheme or not parts.netloc:
+        return "<redacted>"
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    if parts.username or parts.password:
+        user = parts.username or ""
+        auth = f"{user}:***@" if user else "***@"
+    else:
+        auth = ""
+    return urlunsplit((parts.scheme, f"{auth}{host}{port}", parts.path, parts.query, parts.fragment))
+
+def mask_value(key: str, value: str) -> str:
+    if key in {"DATABASE_URL", "REDIS_URL"}:
+        return mask_url(value)
+    if any(token in key for token in ("PASSWORD", "SECRET", "TOKEN", "API_KEY")):
+        return "<redacted>"
+    return value
+
+def mask_assignment_line(line: str) -> str:
+    parsed = split_assignment(line)
+    if parsed is None:
+        return line
+    key, value, quote, prefix = parsed
+    return f"{prefix}={quote_value(mask_value(key, value), quote)}"
+
 for line in original:
     parsed = split_assignment(line)
     if parsed is None:
@@ -265,10 +296,10 @@ if not diff_before_after:
     raise SystemExit(0)
 
 for key, before, after in diff_before_after:
-    print(f"{key}: {before} -> {after}")
+    print(f"{key}: {mask_value(key, before)} -> {mask_value(key, after)}")
 diff = difflib.unified_diff(
-    [line + "\n" for line in original],
-    [line + "\n" for line in changed],
+    [mask_assignment_line(line) + "\n" for line in original],
+    [mask_assignment_line(line) + "\n" for line in changed],
     fromfile=str(path),
     tofile=f"{path} (container-url-migrated)",
 )
@@ -468,6 +499,37 @@ lumen_release_lock() {
     LUMEN_LOCK_KIND=""
 }
 
+lumen_lock_dir_stale() {
+    local lock_dir="$1"
+    local owner_file="${lock_dir}/owner"
+    local owner_pid="" owner_script="" owner_cmd=""
+    if [ ! -f "${owner_file}" ]; then
+        return 0
+    fi
+    owner_pid="$(grep -E '^pid=' "${owner_file}" 2>/dev/null \
+        | head -1 | sed 's/^pid=//' | tr -d '[:space:]')"
+    owner_script="$(grep -E '^script=' "${owner_file}" 2>/dev/null \
+        | head -1 | sed 's/^script=//' | tr -d '[:space:]')"
+    case "${owner_pid}" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if ! kill -0 "${owner_pid}" 2>/dev/null; then
+        return 0
+    fi
+    if [ -z "${owner_script}" ]; then
+        return 1
+    fi
+    if ! owner_cmd="$(lumen_pid_cmdline "${owner_pid}" 2>/dev/null)"; then
+        log_warn "锁 owner pid=${owner_pid} 仍存在，但命令行暂不可读；保守保留 lock。"
+        return 1
+    fi
+    case "${owner_cmd}" in
+        *"${owner_script}"*) return 1 ;;
+    esac
+    log_warn "锁 owner pid=${owner_pid} 仍存在，但命令行不匹配 script=${owner_script}：${owner_cmd:-<unavailable>}"
+    return 0
+}
+
 lumen_acquire_lock() {
     local root="$1"
     local script_name="${2:-maintenance}"
@@ -493,19 +555,16 @@ lumen_acquire_lock() {
     else
         if ! mkdir "${lock_dir}" 2>/dev/null; then
             # mkdir 锁的 stale-check：进程被 kill -9 / OOM kill 不会跑 EXIT
-            # trap，锁目录残留。读 owner/pid 验证持有者是否还活着；死了就当
-            # stale 强制清理并重试一次。flock 路径不需此逻辑，kernel 自动释放。
+            # trap，锁目录残留。读 owner 的 pid + script，并验证 pid 命令行仍是
+            # 同一个维护脚本；仅 pid 存活不够，PID 复用会把 stale 锁误判为活锁。
+            # flock 路径不需此逻辑，kernel 自动释放。
             local _owner_pid=""
-            local _stale=0
             if [ -f "${lock_dir}/owner" ]; then
                 _owner_pid="$(grep -E '^pid=' "${lock_dir}/owner" 2>/dev/null \
                     | head -1 | sed 's/^pid=//' | tr -d '[:space:]')"
-                if [ -n "${_owner_pid}" ] && ! kill -0 "${_owner_pid}" 2>/dev/null; then
-                    _stale=1
-                fi
             fi
-            if [ "${_stale}" = "1" ]; then
-                log_warn "检测到 stale 锁（owner pid=${_owner_pid} 已死），自动清理后重试..."
+            if lumen_lock_dir_stale "${lock_dir}"; then
+                log_warn "检测到 stale 锁（owner pid=${_owner_pid:-未知} 已失效或不匹配），自动清理后重试..."
                 rm -rf "${lock_dir}" 2>/dev/null || true
                 if ! mkdir "${lock_dir}" 2>/dev/null; then
                     log_error "已有 Lumen 维护脚本在运行（stale 清理后仍冲突），当前 ${script_name} 退出。"
@@ -559,7 +618,12 @@ lumen_try_acquire_lock() {
         LUMEN_LOCK_PATH="${lock_file}"
     else
         if ! mkdir "${lock_dir}" 2>/dev/null; then
-            return 1
+            if lumen_lock_dir_stale "${lock_dir}"; then
+                rm -rf "${lock_dir}" 2>/dev/null || true
+                mkdir "${lock_dir}" 2>/dev/null || return 1
+            else
+                return 1
+            fi
         fi
         LUMEN_LOCK_KIND="mkdir"
         LUMEN_LOCK_PATH="${lock_dir}"
@@ -1488,19 +1552,28 @@ lumen_pid_exists() {
 lumen_pid_cmdline() {
     local pid="$1"
     if [ -r "/proc/${pid}/cmdline" ]; then
-        tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null
-        return 0
+        local proc_out
+        proc_out="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)"
+        if [ -n "${proc_out}" ]; then
+            printf '%s' "${proc_out}"
+            return 0
+        fi
     fi
     if command -v ps >/dev/null 2>&1; then
         # macOS ps 没有 /proc，用 -o command= 拿全命令行
-        ps -o command= -p "${pid}" 2>/dev/null || ps -o args= -p "${pid}" 2>/dev/null || {
-            if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-                lumen_run_as_root ps -o command= -p "${pid}" 2>/dev/null \
-                    || lumen_run_as_root ps -o args= -p "${pid}" 2>/dev/null \
-                    || true
-            fi
-        }
+        local out
+        out="$(ps -o command= -p "${pid}" 2>/dev/null)"
+        if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
+        out="$(ps -o args= -p "${pid}" 2>/dev/null)"
+        if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
+        if [ "${EUID:-$(id -u)}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            out="$(lumen_run_as_root ps -o command= -p "${pid}" 2>/dev/null)"
+            if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
+            out="$(lumen_run_as_root ps -o args= -p "${pid}" 2>/dev/null)"
+            if [ -n "${out}" ]; then printf '%s' "${out}"; return 0; fi
+        fi
     fi
+    return 1
 }
 
 # 抓 PID 的工作目录。next-server 子进程把 process.title 改成 "next-server (v...)"，
@@ -2522,6 +2595,7 @@ lumen_emit_info() {
 # 注意：仅拦截"等于"系统目录；/opt/lumen, /opt/lumendata 等子路径不受影响。
 lumen_path_safe_for_rm() {
     local p="$1"
+    local home_dir="${HOME:-}"
     if [ -z "${p}" ]; then
         log_error "lumen_path_safe_for_rm: 路径为空，拒绝删除。"
         return 1
@@ -2549,6 +2623,10 @@ lumen_path_safe_for_rm() {
             return 1
             ;;
     esac
+    if [ -n "${home_dir}" ] && [ "${p%/}" = "${home_dir%/}" ]; then
+        log_error "lumen_path_safe_for_rm: '${p}' 是当前用户 HOME，拒绝删除。"
+        return 1
+    fi
     # 移除多余的尾部斜杠后再次校验（避免 "/opt/" 通过）
     local trimmed="${p}"
     while [[ "${trimmed}" == */ && "${trimmed}" != "/" ]]; do
@@ -2560,6 +2638,10 @@ lumen_path_safe_for_rm() {
             return 1
             ;;
     esac
+    if [ -n "${home_dir}" ] && [ "${trimmed}" = "${home_dir%/}" ]; then
+        log_error "lumen_path_safe_for_rm: 规范化后 '${trimmed}' 是当前用户 HOME，拒绝删除。"
+        return 1
+    fi
     return 0
 }
 

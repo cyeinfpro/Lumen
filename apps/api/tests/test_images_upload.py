@@ -173,8 +173,39 @@ def test_display_variant_key_is_next_to_original() -> None:
     )
 
     assert images._variant_key_for_image(img, images.DISPLAY_VARIANT) == (
-        "u/user_1/g/gen_1/orig.display2048.webp"
+        "u/user_1/g/gen_1/img_1.display2048.webp"
     )
+
+
+def test_display_variant_key_uses_image_id_to_avoid_stem_collisions() -> None:
+    first = Image(
+        id="img_1",
+        user_id="user_1",
+        source="generated",
+        storage_key="u/user_1/g/gen_1/orig.png",
+        mime="image/png",
+        width=1,
+        height=1,
+        size_bytes=1,
+        sha256="abc",
+        visibility="private",
+    )
+    second = Image(
+        id="img_2",
+        user_id="user_1",
+        source="generated",
+        storage_key="u/user_1/g/gen_1/orig.jpg",
+        mime="image/jpeg",
+        width=1,
+        height=1,
+        size_bytes=1,
+        sha256="def",
+        visibility="private",
+    )
+
+    assert images._variant_key_for_image(  # noqa: SLF001
+        first, images.DISPLAY_VARIANT
+    ) != images._variant_key_for_image(second, images.DISPLAY_VARIANT)  # noqa: SLF001
 
 
 def test_make_display_variant_downsizes_and_encodes_webp(tmp_path: Path) -> None:

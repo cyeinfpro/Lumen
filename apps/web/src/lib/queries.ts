@@ -1491,7 +1491,7 @@ export function useUploadImageMutation(
   options?: Omit<UseMutationOptions<UploadedImage, Error, File>, "mutationFn">,
 ) {
   return useMutation<UploadedImage, Error, File>({
-    mutationFn: uploadImage,
+    mutationFn: (file) => uploadImage(file),
     ...options,
   });
 }

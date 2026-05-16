@@ -3,7 +3,11 @@ from __future__ import annotations
 from fastapi import Request
 import pytest
 
-from app.ratelimit import AUTH_LOGIN_LIMITER, AUTH_SIGNUP_LIMITER
+from app.ratelimit import (
+    AUTH_ADMIN_LOGIN_LIMITER,
+    AUTH_LOGIN_LIMITER,
+    AUTH_SIGNUP_LIMITER,
+)
 from app.routes import auth
 
 
@@ -40,6 +44,8 @@ def test_auth_routes_mount_ip_limiters() -> None:
     assert AUTH_SIGNUP_LIMITER in _route_dependencies("/signup")
     assert AUTH_LOGIN_LIMITER.always_on is True
     assert AUTH_LOGIN_LIMITER.scope == "ip"
+    assert AUTH_ADMIN_LOGIN_LIMITER.always_on is True
+    assert AUTH_ADMIN_LOGIN_LIMITER.capacity < AUTH_LOGIN_LIMITER.capacity
     assert AUTH_SIGNUP_LIMITER.always_on is True
     assert AUTH_SIGNUP_LIMITER.scope == "ip"
 

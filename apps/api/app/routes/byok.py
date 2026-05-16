@@ -65,7 +65,9 @@ router_me = APIRouter(
 )
 
 _VERIFY_IP_LIMITER = RateLimiter(capacity=5, refill_per_sec=5 / 60, always_on=True)
-_VERIFY_SUPPLIER_LIMITER = RateLimiter(capacity=60, refill_per_sec=60 / 60, always_on=True)
+_VERIFY_SUPPLIER_LIMITER = RateLimiter(
+    capacity=60, refill_per_sec=60 / 60, always_on=True
+)
 _VERIFY_KEY_LIMITER = RateLimiter(capacity=10, refill_per_sec=10 / 900, always_on=True)
 _MIN_VALIDATION_SECONDS = 0.25
 
@@ -155,12 +157,16 @@ async def list_api_suppliers(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApiSupplierTemplateListOut:
     suppliers = (
-        await db.execute(
-            select(ApiSupplierTemplate)
-            .where(ApiSupplierTemplate.deleted_at.is_(None))
-            .order_by(ApiSupplierTemplate.created_at.desc())
+        (
+            await db.execute(
+                select(ApiSupplierTemplate)
+                .where(ApiSupplierTemplate.deleted_at.is_(None))
+                .order_by(ApiSupplierTemplate.created_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return ApiSupplierTemplateListOut(
         items=[await supplier_to_out(db, supplier) for supplier in suppliers]
     )
@@ -180,7 +186,7 @@ async def create_api_supplier(
     supplier = ApiSupplierTemplate(
         name=body.name.strip(),
         slug=slugify_supplier(body.slug or body.name),
-        base_url=normalize_base_url(body.base_url),
+        base_url=await normalize_base_url(body.base_url),
         enabled=body.enabled,
         public_signup_enabled=body.public_signup_enabled,
         user_bind_enabled=body.user_bind_enabled,
@@ -200,7 +206,9 @@ async def create_api_supplier(
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        raise _http("duplicate_supplier_slug", "supplier slug already exists", 409) from exc
+        raise _http(
+            "duplicate_supplier_slug", "supplier slug already exists", 409
+        ) from exc
     await write_audit(
         db,
         event_type="admin.api_supplier.create",
@@ -243,7 +251,7 @@ async def patch_api_supplier(
     if body.slug is not None:
         supplier.slug = slugify_supplier(body.slug or supplier.name)
     if body.base_url is not None:
-        supplier.base_url = normalize_base_url(body.base_url)
+        supplier.base_url = await normalize_base_url(body.base_url)
     for field in (
         "enabled",
         "public_signup_enabled",
@@ -271,7 +279,9 @@ async def patch_api_supplier(
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        raise _http("duplicate_supplier_slug", "supplier slug already exists", 409) from exc
+        raise _http(
+            "duplicate_supplier_slug", "supplier slug already exists", 409
+        ) from exc
     await write_audit(
         db,
         event_type="admin.api_supplier.update",
@@ -361,16 +371,20 @@ async def list_public_api_suppliers(
     if not settings_out.mode_enabled or not settings_out.byok_signup_enabled:
         return ApiSupplierTemplatePublicListOut(items=[])
     suppliers = (
-        await db.execute(
-            select(ApiSupplierTemplate)
-            .where(
-                ApiSupplierTemplate.deleted_at.is_(None),
-                ApiSupplierTemplate.enabled.is_(True),
-                ApiSupplierTemplate.public_signup_enabled.is_(True),
+        (
+            await db.execute(
+                select(ApiSupplierTemplate)
+                .where(
+                    ApiSupplierTemplate.deleted_at.is_(None),
+                    ApiSupplierTemplate.enabled.is_(True),
+                    ApiSupplierTemplate.public_signup_enabled.is_(True),
+                )
+                .order_by(ApiSupplierTemplate.name.asc())
             )
-            .order_by(ApiSupplierTemplate.name.asc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return ApiSupplierTemplatePublicListOut(
         items=[supplier_to_public_out(supplier) for supplier in suppliers]
     )
@@ -479,7 +493,10 @@ async def list_my_api_credentials(
     rows = (
         await db.execute(
             select(UserApiCredential, ApiSupplierTemplate)
-            .join(ApiSupplierTemplate, ApiSupplierTemplate.id == UserApiCredential.supplier_id)
+            .join(
+                ApiSupplierTemplate,
+                ApiSupplierTemplate.id == UserApiCredential.supplier_id,
+            )
             .where(
                 UserApiCredential.user_id == user.id,
                 UserApiCredential.deleted_at.is_(None),
@@ -488,10 +505,7 @@ async def list_my_api_credentials(
         )
     ).all()
     return UserApiCredentialListOut(
-        items=[
-            _credential_out(credential, supplier)
-            for credential, supplier in rows
-        ]
+        items=[_credential_out(credential, supplier) for credential, supplier in rows]
     )
 
 
@@ -504,16 +518,20 @@ async def list_bindable_api_suppliers(
     if not settings_out.mode_enabled:
         return ApiSupplierTemplatePublicListOut(items=[])
     suppliers = (
-        await db.execute(
-            select(ApiSupplierTemplate)
-            .where(
-                ApiSupplierTemplate.deleted_at.is_(None),
-                ApiSupplierTemplate.enabled.is_(True),
-                ApiSupplierTemplate.user_bind_enabled.is_(True),
+        (
+            await db.execute(
+                select(ApiSupplierTemplate)
+                .where(
+                    ApiSupplierTemplate.deleted_at.is_(None),
+                    ApiSupplierTemplate.enabled.is_(True),
+                    ApiSupplierTemplate.user_bind_enabled.is_(True),
+                )
+                .order_by(ApiSupplierTemplate.name.asc())
             )
-            .order_by(ApiSupplierTemplate.name.asc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return ApiSupplierTemplatePublicListOut(
         items=[supplier_to_public_out(supplier) for supplier in suppliers]
     )

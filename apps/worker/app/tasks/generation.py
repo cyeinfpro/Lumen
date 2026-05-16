@@ -28,6 +28,7 @@ import hashlib
 import io
 import logging
 import math
+import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -174,6 +175,9 @@ _IMAGE_QUEUE_AVOID_TTL_S = 120
 # 多 provider 时 task 层升级为 retriable，配 avoid set 把请求路由到下一个未试 provider。
 # 上限取 min(_MODERATION_RETRY_CAP, enabled_provider_count)。
 _MODERATION_RETRY_CAP = 6
+_RETRY_JITTER_RATIO = 0.20
+_RETRY_BACKOFF_MAX_SECONDS = 15 * 60
+_LEASE_REACQUIRED_SUBSTAGE = "lease_reacquired"
 _IMAGE_RENDER_QUALITY_VALUES = {"low", "medium", "high", "auto"}
 _IMAGE_OUTPUT_FORMAT_VALUES = {"png", "jpeg", "webp"}
 _IMAGE_BACKGROUND_VALUES = {"auto", "opaque", "transparent"}
@@ -210,9 +214,23 @@ async def _acquire_lease(redis: Any, task_id: str, worker_id: str) -> None:
     await redis.set(f"task:{task_id}:lease", worker_id, ex=_LEASE_TTL_S)
 
 
-async def _release_lease(redis: Any, task_id: str) -> None:
+_RELEASE_LEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
+async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
     try:
-        await redis.delete(f"task:{task_id}:lease")
+        eval_fn = getattr(redis, "eval", None)
+        if callable(eval_fn):
+            await eval_fn(_RELEASE_LEASE_LUA, 1, f"task:{task_id}:lease", worker_id)
+            return
+        current = await redis.get(f"task:{task_id}:lease")
+        if _redis_text(current) == worker_id:
+            await redis.delete(f"task:{task_id}:lease")
     except Exception:  # noqa: BLE001
         pass
 
@@ -243,9 +261,7 @@ async def _lease_renewer(
                     await redis.expire(key, _LEASE_TTL_S)
                 # in-flight provider 快照随 lease 续命（admin 列表才能持续看到）
                 with suppress(Exception):
-                    await redis.expire(
-                        _image_inflight_key(task_id), _LEASE_TTL_S * 4
-                    )
+                    await redis.expire(_image_inflight_key(task_id), _LEASE_TTL_S * 4)
                 if image_provider_name:
                     new_expiry = time.time() + _LEASE_TTL_S
                     if _is_dual_race_sentinel(image_provider_name):
@@ -283,6 +299,18 @@ async def _lease_renewer(
                     return
     except asyncio.CancelledError:
         raise
+
+
+async def _cancel_renewer_task(renewer: asyncio.Task[None] | None) -> None:
+    if renewer is None:
+        return
+    renewer.cancel()
+    try:
+        await renewer
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001
+        logger.debug("generation lease renewer cancellation failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +390,9 @@ class _RedisSemaphore:
                 # 不能 raise（aexit 链路），但必须看得见——否则 redis 抖动期间名额会持续
                 # 漏算（DECR 没成功）让后续 task 永远拿不到名额。
                 logger.warning(
-                    "redis sem decr failed key=%s err=%s", self.key, exc,
+                    "redis sem decr failed key=%s err=%s",
+                    self.key,
+                    exc,
                 )
 
 
@@ -527,7 +557,7 @@ async def _image_queue_lock(redis: Any) -> AsyncIterator[None]:
             if current == token:
                 await redis.delete(_IMAGE_QUEUE_LOCK_KEY)
         except Exception:  # noqa: BLE001
-            logger.debug("image queue lock release failed", exc_info=True)
+            logger.warning("image queue lock release failed", exc_info=True)
 
 
 async def _cleanup_image_queue_active(redis: Any) -> None:
@@ -568,7 +598,8 @@ async def _provider_active_count(redis: Any, provider_name: str) -> int | None:
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "image queue active_count failed provider=%s err=%s",
-            provider_name, exc,
+            provider_name,
+            exc,
         )
         return None
     try:
@@ -580,13 +611,17 @@ async def _provider_active_count(redis: Any, provider_name: str) -> int | None:
 async def _queued_generation_ids(limit: int) -> list[str]:
     async with SessionLocal() as session:
         rows = (
-            await session.execute(
-                select(Generation.id)
-                .where(Generation.status == GenerationStatus.QUEUED.value)
-                .order_by(Generation.created_at.asc(), Generation.id.asc())
-                .limit(limit)
+            (
+                await session.execute(
+                    select(Generation.id)
+                    .where(Generation.status == GenerationStatus.QUEUED.value)
+                    .order_by(Generation.created_at.asc(), Generation.id.asc())
+                    .limit(limit)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     return [str(row) for row in rows]
 
 
@@ -659,8 +694,7 @@ async def _clear_image_queue_enqueue_dedupe(redis: Any, task_id: str) -> None:
 async def _kick_image_queue(redis: Any) -> None:
     try:
         ids = await _ready_queued_generation_ids(
-            redis,
-            max(_IMAGE_QUEUE_SCAN_LIMIT, _image_queue_capacity() * 2)
+            redis, max(_IMAGE_QUEUE_SCAN_LIMIT, _image_queue_capacity() * 2)
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("image queue kick scan failed err=%s", exc)
@@ -991,6 +1025,9 @@ def _decode_upstream_image_b64(value: str) -> bytes:
 
 
 def _compute_blurhash(img: PILImage.Image) -> str | None:
+    width, height = img.size
+    if width < 4 or height < 4:
+        return None
     try:
         import blurhash as _bh
 
@@ -1015,9 +1052,7 @@ def _make_preview(
 
 
 def _image_has_alpha(im: PILImage.Image) -> bool:
-    return im.mode in {"LA", "RGBA"} or (
-        im.mode == "P" and "transparency" in im.info
-    )
+    return im.mode in {"LA", "RGBA"} or (im.mode == "P" and "transparency" in im.info)
 
 
 def _image_has_transparency(im: PILImage.Image) -> bool:
@@ -1057,7 +1092,9 @@ def _make_display(
         return buf.getvalue(), im.size
 
 
-def _make_thumb(orig: PILImage.Image, max_side: int = 256) -> tuple[bytes, tuple[int, int]]:
+def _make_thumb(
+    orig: PILImage.Image, max_side: int = 256
+) -> tuple[bytes, tuple[int, int]]:
     with orig.copy() as im:
         im.thumbnail((max_side, max_side))
         buf = io.BytesIO()
@@ -1205,9 +1242,7 @@ async def _load_reference_images(
 _MASK_MAX_BYTES = 50 * 1024 * 1024
 
 
-async def _load_mask_image(
-    session: Any, mask_image_id: str
-) -> bytes:
+async def _load_mask_image(session: Any, mask_image_id: str) -> bytes:
     """从 Image 表读 mask PNG 字节。
 
     与 ``_load_reference_images`` 行为对齐：DB 行缺失 / storage 读不到 → 抛硬错误，
@@ -1416,7 +1451,9 @@ def _inpaint_size_from_reference(ref_w: int, ref_h: int) -> str | None:
     for align in (
         lambda v: max(EXPLICIT_ALIGN, int(round(v / EXPLICIT_ALIGN)) * EXPLICIT_ALIGN),
         lambda v: max(EXPLICIT_ALIGN, int(v // EXPLICIT_ALIGN) * EXPLICIT_ALIGN),
-        lambda v: max(EXPLICIT_ALIGN, int(math.ceil(v / EXPLICIT_ALIGN)) * EXPLICIT_ALIGN),
+        lambda v: max(
+            EXPLICIT_ALIGN, int(math.ceil(v / EXPLICIT_ALIGN)) * EXPLICIT_ALIGN
+        ),
     ):
         candidates.append((align(target_w), align(target_h)))
     seen: set[tuple[int, int]] = set()
@@ -1442,6 +1479,67 @@ def _bounded_next_attempt(current_attempt: int | None) -> tuple[int, bool]:
     if current >= _MAX_ATTEMPTS:
         return current, False
     return current + 1, True
+
+
+def _parse_size_string(size: str) -> tuple[int, int]:
+    if not isinstance(size, str) or "x" not in size:
+        raise ValueError(f"invalid resolved size: {size!r}")
+    raw_w, raw_h = size.split("x", 1)
+    if not raw_w.isdigit() or not raw_h.isdigit():
+        raise ValueError(f"invalid resolved size: {size!r}")
+    return int(raw_w), int(raw_h)
+
+
+def _validate_resolved_size(
+    size: str,
+    aspect_ratio: str,
+    *,
+    validate_aspect_ratio: bool = True,
+    max_ratio_deviation: float = 0.02,
+) -> tuple[int, int]:
+    """Defense-in-depth after resolve_size(): validate hard limits and ratio drift."""
+    width, height = _parse_size_string(size)
+    validate_explicit_size(width, height)
+    if validate_aspect_ratio and isinstance(aspect_ratio, str) and ":" in aspect_ratio:
+        raw_rw, raw_rh = aspect_ratio.split(":", 1)
+        if raw_rw.isdigit() and raw_rh.isdigit():
+            ratio_w = int(raw_rw)
+            ratio_h = int(raw_rh)
+            if ratio_w > 0 and ratio_h > 0:
+                target = ratio_w / ratio_h
+                actual = width / height
+                deviation = abs(actual - target) / target
+                if deviation > max_ratio_deviation:
+                    raise ValueError(
+                        "resolved size aspect ratio drift too large: "
+                        f"size={size} requested={aspect_ratio} "
+                        f"deviation={deviation:.3%}"
+                    )
+    return width, height
+
+
+def _base_retry_backoff_seconds(attempt: int) -> float:
+    idx = max(0, int(attempt) - 1)
+    if idx < len(RETRY_BACKOFF_SECONDS):
+        return float(RETRY_BACKOFF_SECONDS[idx])
+    last = float(RETRY_BACKOFF_SECONDS[-1]) if RETRY_BACKOFF_SECONDS else 1.0
+    overflow = idx - len(RETRY_BACKOFF_SECONDS) + 1
+    return min(last * (2**overflow), float(_RETRY_BACKOFF_MAX_SECONDS))
+
+
+def _retry_delay_seconds(
+    attempt: int,
+    *,
+    jitter_ratio: float = _RETRY_JITTER_RATIO,
+) -> float:
+    base = _base_retry_backoff_seconds(attempt)
+    if base <= 0 or jitter_ratio <= 0:
+        return base
+    return base + random.uniform(0, base * jitter_ratio)
+
+
+def _retry_not_before_ttl(delay: float) -> int:
+    return max(1, math.ceil(delay + _IMAGE_QUEUE_NOT_BEFORE_GRACE_S))
 
 
 def _generation_attempt_update(task_id: str, attempt_epoch: int):
@@ -1494,7 +1592,11 @@ async def _maybe_enqueue_workflow_quality_review(
     # vision completion here would waste quota and surprise users.
     return
 
-    req = generation.upstream_request if isinstance(generation.upstream_request, dict) else {}
+    req = (
+        generation.upstream_request
+        if isinstance(generation.upstream_request, dict)
+        else {}
+    )
     if req.get("workflow_type") != "apparel_model_showcase":
         return
     if req.get("workflow_step_key") != "showcase_generation":
@@ -1562,7 +1664,9 @@ async def _maybe_enqueue_workflow_quality_review(
             selected_model_brief = dict(candidate.model_brief_json or {})
 
     attachment_ids = [
-        image_id for image_id in (run.product_image_ids or []) if isinstance(image_id, str)
+        image_id
+        for image_id in (run.product_image_ids or [])
+        if isinstance(image_id, str)
     ]
     if candidate_ref_id:
         attachment_ids.append(candidate_ref_id)
@@ -1576,7 +1680,11 @@ async def _maybe_enqueue_workflow_quality_review(
             "text": _workflow_qc_prompt(
                 product_analysis=product_step.output_json or {},
                 selected_model_brief=selected_model_brief,
-                shot_type=str(req.get("workflow_shot_type") or req.get("workflow_revision_scope") or ""),
+                shot_type=str(
+                    req.get("workflow_shot_type")
+                    or req.get("workflow_revision_scope")
+                    or ""
+                ),
             ),
             "attachments": [{"image_id": iid} for iid in attachment_ids],
             "workflow_run_id": run.id,
@@ -1623,8 +1731,12 @@ async def _maybe_enqueue_workflow_quality_review(
     output_json["review_tasks"] = review_tasks
     output_json["review_task_count"] = len(review_tasks)
     quality_step.output_json = output_json
-    quality_step.task_ids = list(dict.fromkeys([*(quality_step.task_ids or []), completion.id]))
-    quality_step.image_ids = list(dict.fromkeys([*(quality_step.image_ids or []), image_id]))
+    quality_step.task_ids = list(
+        dict.fromkeys([*(quality_step.task_ids or []), completion.id])
+    )
+    quality_step.image_ids = list(
+        dict.fromkeys([*(quality_step.image_ids or []), image_id])
+    )
     quality_step.status = "running"
     run.current_step = "quality_review"
     run.status = "running"
@@ -1817,9 +1929,7 @@ async def _maybe_record_poster_style_library_generate_image(
     category = category_raw if category_raw else "user_favorites"
     mood_raw = input_json.get("mood")
     mood = (
-        str(mood_raw)[:128]
-        if isinstance(mood_raw, str) and mood_raw.strip()
-        else None
+        str(mood_raw)[:128] if isinstance(mood_raw, str) and mood_raw.strip() else None
     )
     prompt_template_raw = input_json.get("prompt_template")
     prompt_value = str(input_json.get("prompt") or "")[:4000]
@@ -1840,10 +1950,12 @@ async def _maybe_record_poster_style_library_generate_image(
 
     existing = (
         await session.execute(
-            select(PosterStyleItem).where(
+            select(PosterStyleItem)
+            .where(
                 PosterStyleItem.user_id == user_id,
                 PosterStyleItem.cover_image_id == image_id,
-            ).limit(1)
+            )
+            .limit(1)
         )
     ).scalar_one_or_none()
     if existing is None:
@@ -1886,7 +1998,9 @@ async def _maybe_record_poster_style_library_generate_image(
             if result.mood and not target_item.mood:
                 target_item.mood = result.mood[:128]
             if result.style_tags:
-                merged_tags = list(dict.fromkeys([*target_item.style_tags, *result.style_tags]))[:8]
+                merged_tags = list(
+                    dict.fromkeys([*target_item.style_tags, *result.style_tags])
+                )[:8]
                 target_item.style_tags = merged_tags
             if result.palette and not target_item.palette:
                 target_item.palette = list(result.palette)[:8]
@@ -1996,7 +2110,12 @@ async def _maybe_record_poster_workflow_image(
     if req.get("workflow_type") != "poster_design":
         return
     action = req.get("workflow_action")
-    if action not in {"poster_master", "poster_render", "poster_revise", "poster_inpaint"}:
+    if action not in {
+        "poster_master",
+        "poster_render",
+        "poster_revise",
+        "poster_inpaint",
+    }:
         return
     run_id = req.get("workflow_run_id")
     if not isinstance(run_id, str) or not run_id:
@@ -2150,9 +2269,7 @@ async def _ensure_generation_attempt_current(
 ) -> None:
     current_attempt = (
         await session.execute(
-            select(Generation.attempt)
-            .where(Generation.id == task_id)
-            .with_for_update()
+            select(Generation.attempt).where(Generation.id == task_id).with_for_update()
         )
     ).scalar_one_or_none()
     if current_attempt != attempt_epoch:
@@ -2175,8 +2292,7 @@ async def _mark_generation_attempt_failed(
     try:
         async with SessionLocal() as session:
             result = await session.execute(
-                _generation_attempt_update(task_id, attempt)
-                .values(
+                _generation_attempt_update(task_id, attempt).values(
                     status=GenerationStatus.FAILED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
@@ -2217,6 +2333,85 @@ async def _mark_generation_attempt_failed(
             "code": error_code,
             "message": error_message,
             "retriable": retriable,
+        },
+    )
+    return True
+
+
+async def _mark_generation_attempt_retrying(
+    redis: Any,
+    *,
+    task_id: str,
+    message_id: str,
+    user_id: str,
+    attempt: int,
+    error_code: str,
+    error_message: str,
+    delay: float,
+    reason: str,
+    max_attempts: int,
+) -> bool:
+    try:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                _generation_attempt_update(task_id, attempt).values(
+                    status=GenerationStatus.QUEUED.value,
+                    progress_stage=GenerationStage.QUEUED,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+            )
+            _ensure_generation_updated(result, task_id, attempt)
+            await session.commit()
+    except _StaleGenerationAttempt as stale_exc:
+        logger.info(
+            "generation retry update skipped by stale attempt task=%s "
+            "attempt=%s err=%s",
+            task_id,
+            attempt,
+            stale_exc,
+        )
+        return False
+
+    try:
+        await redis.set(
+            _image_queue_not_before_key(task_id),
+            str(time.time() + delay),
+            ex=_retry_not_before_ttl(delay),
+        )
+        await redis.enqueue_job(
+            "run_generation", task_id, _defer_by=delay, _job_try=attempt + 1
+        )
+    except Exception as enq_exc:  # noqa: BLE001
+        logger.error("re-enqueue failed task=%s err=%s", task_id, enq_exc)
+        enqueue_err = "retry_enqueue_failed"
+        enqueue_msg = f"failed to enqueue retry: {enq_exc}"
+        await _mark_generation_attempt_failed(
+            redis,
+            task_id=task_id,
+            message_id=message_id,
+            user_id=user_id,
+            attempt=attempt,
+            error_code=enqueue_err,
+            error_message=enqueue_msg[:2000],
+            retriable=False,
+        )
+        return False
+
+    await publish_event(
+        redis,
+        user_id,
+        task_channel(task_id),
+        EV_GEN_RETRYING,
+        {
+            "generation_id": task_id,
+            "message_id": message_id,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "retry_delay_seconds": delay,
+            "error_code": error_code,
+            "error_message": error_message,
+            "reason": reason,
         },
     )
     return True
@@ -2412,23 +2607,37 @@ async def _ensure_generation_conversation_alive(
 
 def _classify_exception(exc: BaseException, has_partial: bool) -> RetryDecision:
     if isinstance(exc, StorageDiskFullError):
-        return is_retriable(EC.DISK_FULL.value, None, has_partial, error_message=str(exc))
+        return is_retriable(
+            EC.DISK_FULL.value, None, has_partial, error_message=str(exc)
+        )
     if isinstance(exc, TimeoutError):
         return is_retriable("timeout", None, has_partial, error_message=str(exc))
     if isinstance(exc, UpstreamError):
         return is_retriable(
             exc.error_code, exc.status_code, has_partial, error_message=str(exc)
         )
-    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)):
-        return is_retriable(
-            "upstream_error", None, has_partial, error_message=str(exc)
-        )
+    if isinstance(
+        exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
+    ):
+        return is_retriable("upstream_error", None, has_partial, error_message=str(exc))
     if isinstance(exc, httpx.HTTPError):
-        return is_retriable(
-            "upstream_error", None, has_partial, error_message=str(exc)
-        )
+        return is_retriable("upstream_error", None, has_partial, error_message=str(exc))
     # 其他未预期异常 → 不重试（避免放大故障）
     return RetryDecision(False, f"unhandled {type(exc).__name__}")
+
+
+def _safe_generation_error_details(exc: BaseException) -> dict[str, Any]:
+    payload = getattr(exc, "payload", None)
+    if not isinstance(payload, dict):
+        return {}
+    details: dict[str, Any] = {}
+    transparent_qc = payload.get("transparent_qc")
+    if isinstance(transparent_qc, dict):
+        details["transparent_qc"] = transparent_qc
+    transparent_provider = payload.get("transparent_provider")
+    if isinstance(transparent_provider, str) and transparent_provider:
+        details["transparent_provider"] = transparent_provider[:128]
+    return details
 
 
 def _decide_moderation_retry_upgrade(
@@ -2458,11 +2667,11 @@ def _decide_moderation_retry_upgrade(
         return None
     # already_avoided_count = 进入本次 except 时 avoid set 的大小（不含本次）；
     # _avoid_provider_for_task 在 retriable 分支里把当前 reserved 加入，下次 reserve 跳过它。
+    if enabled_provider_count - already_avoided_count <= 1:
+        return None
     if already_avoided_count + 1 >= min(cap, enabled_provider_count):
         return None
-    return RetryDecision(
-        retriable=True, reason="moderation_blocked try_next_provider"
-    )
+    return RetryDecision(retriable=True, reason="moderation_blocked try_next_provider")
 
 
 async def _delete_storage_keys(keys: list[str]) -> None:
@@ -2478,6 +2687,7 @@ async def _delete_storage_keys(keys: list[str]) -> None:
     try:
         results = await asyncio.shield(cleanup)
     except asyncio.CancelledError:
+
         def _log_late_cleanup(task: asyncio.Task[Any]) -> None:
             with suppress(Exception):
                 late_results = task.result()
@@ -2573,9 +2783,7 @@ async def _handle_dual_race_bonus_image(
     try:
         raw_image = _decode_upstream_image_b64(b64_result)
     except binascii.Error:
-        logger.warning(
-            "dual_race bonus base64 decode failed parent=%s", parent_task_id
-        )
+        logger.warning("dual_race bonus base64 decode failed parent=%s", parent_task_id)
         return
     sha = _sha256(raw_image)
 
@@ -2599,7 +2807,8 @@ async def _handle_dual_race_bonus_image(
             if pil.format not in ("PNG", "WEBP", "JPEG"):
                 logger.warning(
                     "dual_race bonus unexpected format=%s parent=%s",
-                    pil.format, parent_task_id,
+                    pil.format,
+                    parent_task_id,
                 )
                 return
             orig_format = pil.format
@@ -2607,19 +2816,20 @@ async def _handle_dual_race_bonus_image(
             if width < 1 or height < 1 or width > 10000 or height > 10000:
                 logger.warning(
                     "dual_race bonus dims out of range %dx%d parent=%s",
-                    width, height, parent_task_id,
+                    width,
+                    height,
+                    parent_task_id,
                 )
                 return
             processed: PILImage.Image | None = None
             if transparent_requested and not _image_has_transparency(pil):
                 try:
-                    pipeline_out = await process_transparent_request(
-                        pil, prompt=prompt
-                    )
+                    pipeline_out = await process_transparent_request(pil, prompt=prompt)
                 except TransparentPipelineFailure as exc:
                     logger.info(
                         "dual_race bonus transparent pipeline failed parent=%s err=%r",
-                        parent_task_id, exc,
+                        parent_task_id,
+                        exc,
                     )
                     return
                 raw_image = pipeline_out.rgba_png
@@ -2643,7 +2853,8 @@ async def _handle_dual_race_bonus_image(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "dual_race bonus pillow decode failed parent=%s err=%r",
-            parent_task_id, exc,
+            parent_task_id,
+            exc,
         )
         return
 
@@ -2652,7 +2863,9 @@ async def _handle_dual_race_bonus_image(
     image_id = new_uuid7()
     orig_ext_by_format = {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}
     orig_mime_by_format = {
-        "PNG": "image/png", "WEBP": "image/webp", "JPEG": "image/jpeg",
+        "PNG": "image/png",
+        "WEBP": "image/webp",
+        "JPEG": "image/jpeg",
     }
     orig_ext = orig_ext_by_format[orig_format]
     orig_mime = orig_mime_by_format[orig_format]
@@ -2703,7 +2916,8 @@ async def _handle_dual_race_bonus_image(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "dual_race bonus storage write failed parent=%s err=%r",
-            parent_task_id, exc,
+            parent_task_id,
+            exc,
         )
         return
 
@@ -2740,7 +2954,9 @@ async def _handle_dual_race_bonus_image(
                 if transparent_qc_payload is not None:
                     bonus_upstream_req["transparent_qc"] = transparent_qc_payload
                 if transparent_provider is not None:
-                    bonus_upstream_req["transparent_pipeline_provider"] = transparent_provider
+                    bonus_upstream_req["transparent_pipeline_provider"] = (
+                        transparent_provider
+                    )
                 if revised_prompt:
                     bonus_upstream_req["revised_prompt"] = revised_prompt
 
@@ -2855,14 +3071,16 @@ async def _handle_dual_race_bonus_image(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "model_library candidate hook failed parent=%s err=%s",
-                        parent_task_id, exc,
+                        parent_task_id,
+                        exc,
                     )
 
                 await session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "dual_race bonus DB write failed parent=%s err=%r",
-            parent_task_id, exc,
+            parent_task_id,
+            exc,
         )
         return
 
@@ -2917,7 +3135,8 @@ async def _handle_dual_race_bonus_image(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "dual_race bonus publish failed parent=%s err=%r",
-            parent_task_id, exc,
+            parent_task_id,
+            exc,
         )
         return
 
@@ -3002,7 +3221,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         gen_idempotency_key = gen.idempotency_key
         gen_model = gen.model
         gen_upstream_request_snapshot: dict[str, Any] | None = (
-            dict(gen.upstream_request) if isinstance(gen.upstream_request, dict) else None
+            dict(gen.upstream_request)
+            if isinstance(gen.upstream_request, dict)
+            else None
         )
         image_request_options = _image_request_options(
             gen.upstream_request,
@@ -3121,7 +3342,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             )
             _ensure_generation_updated(result, task_id, gen.attempt)
             msg_existing = await session.get(Message, message_id)
-            if msg_existing is not None and msg_existing.status != MessageStatus.SUCCEEDED:
+            if (
+                msg_existing is not None
+                and msg_existing.status != MessageStatus.SUCCEEDED
+            ):
                 msg_existing.status = MessageStatus.SUCCEEDED
             await worker_billing.settle_generation(
                 session,
@@ -3277,7 +3501,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         if image_route == "dual_race":
             image_route = "responses"
     is_dual_race = image_route == "dual_race"
-    endpoint_kind = None if is_dual_race else _image_endpoint_kind_for_engine(image_route)
+    endpoint_kind = (
+        None if is_dual_race else _image_endpoint_kind_for_engine(image_route)
+    )
     # mask 不为空 → reserve 阶段把任务标记给 ProviderPool：sidecar 路径优先
     # file-mode provider，file-mode 候选耗尽时允许 url-mode 兜底；direct 路径本身
     # 是 multipart，不依赖 provider 的 image_edit_input_transport 配置。
@@ -3353,7 +3579,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await _release_image_queue_slot(
                 redis, task_id=task_id, provider_name=reserved_provider_name
             )
-            await _release_lease(redis, task_id)
+            await _release_lease(redis, task_id, worker_id)
             return
         attempt, attempt_may_run = _bounded_next_attempt(current.attempt)
         if not attempt_may_run:
@@ -3361,13 +3587,14 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await _release_image_queue_slot(
                 redis, task_id=task_id, provider_name=reserved_provider_name
             )
-            await _release_lease(redis, task_id)
+            await _release_lease(redis, task_id, worker_id)
             return
         running_upstream_request: dict[str, Any] = (
             dict(current.upstream_request)
             if isinstance(current.upstream_request, dict)
             else {}
         )
+        lease_reacquired = current.error_code == "lease_lost"
         running_upstream_request["upstream_route"] = image_route
         if is_dual_race:
             running_upstream_request.pop("provider", None)
@@ -3387,6 +3614,8 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 started_at=datetime.now(timezone.utc),
                 attempt=attempt,
                 upstream_request=running_upstream_request,
+                error_code=None,
+                error_message=None,
             )
         )
         try:
@@ -3395,7 +3624,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await _release_image_queue_slot(
                 redis, task_id=task_id, provider_name=reserved_provider_name
             )
-            await _release_lease(redis, task_id)
+            await _release_lease(redis, task_id, worker_id)
             raise
         await session.commit()
 
@@ -3423,8 +3652,22 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             "attempt": attempt,
             "provider": None if is_dual_race else upstream_provider_label,
             "route": image_route,
+            "lease_reacquired": bool(lease_reacquired),
         },
     )
+    if lease_reacquired:
+        await publish_event(
+            redis,
+            user_id,
+            channel,
+            EV_GEN_PROGRESS,
+            {
+                "generation_id": task_id,
+                "message_id": message_id,
+                "stage": GenerationStage.QUEUED.value,
+                "substage": _LEASE_REACQUIRED_SUBSTAGE,
+            },
+        )
     # 写入 in-flight provider 快照初值；后续 publish_image_progress 收到 provider_used 时
     # 覆盖具体 provider 名（dual_race 两条 lane 各占一个 field）。
     initial_inflight: dict[str, str] = {
@@ -3439,15 +3682,24 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     await _inflight_set_fields(redis, task_id, initial_inflight)
     await _kick_image_queue(redis)
 
-    has_partial = False  # 新同步路径不存在 partial，永远为 False（保留变量给下方 classify 用）
+    has_partial = (
+        False  # 新同步路径不存在 partial，永远为 False（保留变量给下方 classify 用）
+    )
     image_iter: AsyncIterator[tuple[str, str | None]] | None = None
 
     try:
         # 新 API 不支持 size="auto"，强制走 fixed 模式（让 resolve_size 走预设/比例回退）
         size_mode = "fixed"
-        fixed_size = size_requested if (size_requested and "x" in size_requested) else None
+        fixed_size = (
+            size_requested if (size_requested and "x" in size_requested) else None
+        )
         try:
             resolved = resolve_size(aspect_ratio, size_mode, fixed_size)
+            _validate_resolved_size(
+                resolved.size,
+                aspect_ratio,
+                validate_aspect_ratio=fixed_size is None,
+            )
         except ValueError as exc:
             # GEN-P2 size_requested API 层校验补丁：worker 兜底捕获 sizing.validate_explicit_size
             # 抛的 ValueError，转为 terminal UpstreamError 并走 failed 分支。即使 API 漏检
@@ -3487,9 +3739,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 走原 resolved.size 兜底。
         inpaint_size_override: str | None = None
         if mask_bytes_raw is not None and ref_for_body:
-            mask_bytes = _resize_mask_to_reference(
-                mask_bytes_raw, ref_for_body[0][1]
-            )
+            mask_bytes = _resize_mask_to_reference(mask_bytes_raw, ref_for_body[0][1])
             ref_size = _reference_pixel_size(ref_for_body[0][1])
             if ref_size is not None:
                 inpaint_size_override = _inpaint_size_from_reference(*ref_size)
@@ -3540,7 +3790,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 for key in ("job_id", "endpoint_used", "expires_at", "format"):
                     value = event.get(key)
                     if value is not None:
-                        image_job_meta[f"image_job_{key}" if not key.startswith("image_job_") else key] = value
+                        image_job_meta[
+                            f"image_job_{key}"
+                            if not key.startswith("image_job_")
+                            else key
+                        ] = value
                 return
             if event_type == "endpoint_failover":
                 # Inner-loop endpoint switch (generations ↔ responses) on the
@@ -3727,8 +3981,12 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 images=[raw for _sha, raw in ref_for_body],
                                 mask=mask_bytes,
                                 quality=str(image_request_options["render_quality"]),
-                                output_format=str(image_request_options["output_format"]),
-                                output_compression=image_request_options.get("output_compression"),
+                                output_format=str(
+                                    image_request_options["output_format"]
+                                ),
+                                output_compression=image_request_options.get(
+                                    "output_compression"
+                                ),
                                 background=str(image_request_options["background"]),
                                 moderation=str(image_request_options["moderation"]),
                                 model=responses_model,
@@ -3743,8 +4001,12 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 prompt=prompt,
                                 size=resolved.size,
                                 quality=str(image_request_options["render_quality"]),
-                                output_format=str(image_request_options["output_format"]),
-                                output_compression=image_request_options.get("output_compression"),
+                                output_format=str(
+                                    image_request_options["output_format"]
+                                ),
+                                output_compression=image_request_options.get(
+                                    "output_compression"
+                                ),
                                 background=str(image_request_options["background"]),
                                 moderation=str(image_request_options["moderation"]),
                                 model=responses_model,
@@ -3755,7 +4017,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                                 user_id=user_id,
                             )
                         first_pair = await _anext_image_with_guards(
-                            image_iter, lease_lost, redis=redis, task_id=task_id,
+                            image_iter,
+                            lease_lost,
+                            redis=redis,
+                            task_id=task_id,
                         )
                     finally:
                         pop_image_retry_attempt(retry_attempt_token)
@@ -3863,7 +4128,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 processed: PILImage.Image | None = None
                 if transparent_requested and not _image_has_transparency(pil):
                     try:
-                        pipeline_out = await process_transparent_request(pil, prompt=prompt)
+                        pipeline_out = await process_transparent_request(
+                            pil, prompt=prompt
+                        )
                     except TransparentPipelineFailure as exc:
                         qc_dict = exc.qc.to_dict() if exc.qc is not None else None
                         raise UpstreamError(
@@ -3981,7 +4248,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     owner_generation_id=task_id,
                     source=ImageSource.GENERATED.value,
                     parent_image_id=(
-                        primary_input_image_id if action == GenerationAction.EDIT else None
+                        primary_input_image_id
+                        if action == GenerationAction.EDIT
+                        else None
                     ),
                     storage_key=key_orig,
                     mime=orig_mime,
@@ -4060,8 +4329,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 parent_upstream_request_for_bonus = dict(upstream_req)
 
                 result = await session.execute(
-                    _generation_attempt_update(task_id, attempt)
-                    .values(
+                    _generation_attempt_update(task_id, attempt).values(
                         status=GenerationStatus.SUCCEEDED.value,
                         progress_stage=GenerationStage.FINALIZING,
                         finished_at=datetime.now(timezone.utc),
@@ -4194,6 +4462,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 自动起会话标题（第一轮生成完成后触发；内部幂等）
         if conversation_id_for_title:
             from .auto_title import maybe_enqueue_auto_title
+
             await maybe_enqueue_auto_title(redis, conversation_id_for_title)
 
         # dual_race bonus：winner 已成功，尝试从同一 image_iter 取第二份；
@@ -4205,15 +4474,17 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             bonus_pair: tuple[str, str | None] | None = None
             try:
                 bonus_pair = await _anext_image_with_guards(
-                    image_iter, lease_lost, redis=redis, task_id=task_id,
+                    image_iter,
+                    lease_lost,
+                    redis=redis,
+                    task_id=task_id,
                 )
             except (_LeaseLost, _TaskCancelled, asyncio.CancelledError):
                 logger.info(
                     "dual_race bonus iter aborted by cancel/lease task=%s",
                     task_id,
                 )
-                with suppress(Exception):
-                    await image_iter.aclose()
+                await _consume_image_iter_close_result(image_iter, task_id=task_id)
                 image_iter = None
                 bonus_pair = None
             except Exception as exc:  # noqa: BLE001
@@ -4259,27 +4530,41 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "dual_race bonus finalize unexpected error task=%s err=%r",
-                        task_id, exc,
+                        task_id,
+                        exc,
                     )
 
     except _LeaseLost as exc:
         logger.warning(
             "generation lease lost task=%s attempt=%s err=%s", task_id, attempt, exc
         )
-        await publish_event(
+        if attempt >= _MAX_ATTEMPTS:
+            await _mark_generation_attempt_failed(
+                redis,
+                task_id=task_id,
+                message_id=message_id,
+                user_id=user_id,
+                attempt=attempt,
+                error_code="lease_lost_max_attempts",
+                error_message="lease lost after max attempts",
+                retriable=False,
+            )
+            _task_outcome = "failed"
+            return
+        delay = _retry_delay_seconds(attempt)
+        requeued = await _mark_generation_attempt_retrying(
             redis,
-            user_id,
-            channel,
-            EV_GEN_FAILED,
-            {
-                "generation_id": task_id,
-                "message_id": message_id,
-                "code": "lease_lost",
-                "message": "generation lease lost; task will be reconciled",
-                "retriable": True,
-            },
+            task_id=task_id,
+            message_id=message_id,
+            user_id=user_id,
+            attempt=attempt,
+            error_code="lease_lost",
+            error_message="generation lease lost; task will be retried",
+            delay=delay,
+            reason="lease_lost",
+            max_attempts=_MAX_ATTEMPTS,
         )
-        _task_outcome = "lease_lost"
+        _task_outcome = "retry" if requeued else "lease_lost"
         return
 
     except _StaleGenerationAttempt as exc:
@@ -4295,8 +4580,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         try:
             async with SessionLocal() as session:
                 result = await session.execute(
-                    _generation_attempt_update(task_id, attempt)
-                    .values(
+                    _generation_attempt_update(task_id, attempt).values(
                         status=GenerationStatus.CANCELED.value,
                         progress_stage=GenerationStage.FINALIZING,
                         finished_at=datetime.now(timezone.utc),
@@ -4376,7 +4660,8 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         err_code = (
             byok_error_to_generation_code(byok_error)
             if user_api_credential_id and byok_error
-            else "timeout" if isinstance(exc, TimeoutError)
+            else "timeout"
+            if isinstance(exc, TimeoutError)
             else getattr(exc, "error_code", None) or type(exc).__name__
         )
         err_msg = (
@@ -4384,6 +4669,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             if user_api_credential_id and byok_error
             else str(exc)[:2000]
         )
+        error_details = _safe_generation_error_details(exc)
 
         moderation_upgrade = False
         if (
@@ -4394,6 +4680,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         ):
             try:
                 from ..provider_pool import get_pool as _get_pool
+
                 _pool = await _get_pool()
                 _enabled_count = len(_pool.enabled_provider_names())
             except Exception:  # noqa: BLE001
@@ -4429,27 +4716,25 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         effective_max_attempts = (
             _MODERATION_RETRY_CAP if moderation_upgrade else _MAX_ATTEMPTS
         )
-        _task_outcome = "retry" if (
-            decision.retriable and attempt < effective_max_attempts
-        ) else "failed"
+        _task_outcome = (
+            "retry"
+            if (decision.retriable and attempt < effective_max_attempts)
+            else "failed"
+        )
 
         if decision.retriable and attempt < effective_max_attempts:
             # 把刚刚失败的 provider 加入 avoid set，下次 reserve 跳过它一次。
             # 解决 858 那种"task 锁单 provider，遇到 model_not_found 反复打"的死循环。
             # dual_race 模式下 reserved_provider 是 sentinel，没有真正绑定的 provider，跳过。
             if not _is_dual_race_sentinel(reserved_provider_name):
-                await _avoid_provider_for_task(
-                    redis, task_id, reserved_provider_name
-                )
+                await _avoid_provider_for_task(redis, task_id, reserved_provider_name)
             # backoff + 重新 enqueue；arq 自己的 retry 机制也可，我们手动更可控
-            idx = min(attempt - 1, len(RETRY_BACKOFF_SECONDS) - 1)
-            delay = RETRY_BACKOFF_SECONDS[idx]
+            delay = _retry_delay_seconds(attempt)
 
             try:
                 async with SessionLocal() as session:
                     result = await session.execute(
-                        _generation_attempt_update(task_id, attempt)
-                        .values(
+                        _generation_attempt_update(task_id, attempt).values(
                             status=GenerationStatus.QUEUED.value,
                             progress_stage=GenerationStage.QUEUED,
                             error_code=err_code,
@@ -4468,15 +4753,16 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 _task_outcome = "stale_attempt"
                 return
 
-            renewer.cancel()
-            await _release_lease(redis, task_id)
+            await _cancel_renewer_task(renewer)
+            renewer = None
+            await _release_lease(redis, task_id, worker_id)
 
             # 用 arq redis 延迟入队（_defer_by 秒）
             try:
                 await redis.set(
                     _image_queue_not_before_key(task_id),
                     str(time.time() + delay),
-                    ex=delay + _IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
+                    ex=_retry_not_before_ttl(delay),
                 )
                 await redis.enqueue_job(
                     "run_generation", task_id, _defer_by=delay, _job_try=attempt + 1
@@ -4532,6 +4818,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     "retry_delay_seconds": delay,
                     "error_code": err_code,
                     "error_message": err_msg,
+                    **({"error_details": error_details} if error_details else {}),
                 },
             )
             return
@@ -4540,8 +4827,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         try:
             async with SessionLocal() as session:
                 result = await session.execute(
-                    _generation_attempt_update(task_id, attempt)
-                    .values(
+                    _generation_attempt_update(task_id, attempt).values(
                         status=GenerationStatus.FAILED.value,
                         progress_stage=GenerationStage.FINALIZING,
                         finished_at=datetime.now(timezone.utc),
@@ -4582,6 +4868,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 "code": err_code,
                 "message": err_msg,
                 "retriable": False,
+                **({"error_details": error_details} if error_details else {}),
             },
         )
 
@@ -4590,11 +4877,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 用 shield 跑完，避免外层 cancel 时 generator 关闭被推到下一轮 loop——
         # 4K 高负载 + 失败路径会累积到 fd 不释放。
         if renewer is not None:
-            renewer.cancel()
-            try:
-                await renewer
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            await _cancel_renewer_task(renewer)
 
         # cancel-safe 关键清理：arq 1800s timeout 触发外层 cancel 时，finally 第一个
         # 普通 await 会立刻重抛 CancelledError，导致后续 release 全被跳过，只能靠
@@ -4640,7 +4923,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         exc_info=True,
                     )
             try:
-                await _release_lease(redis, task_id)
+                await _release_lease(redis, task_id, worker_id)
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "generation lease release failed task=%s",

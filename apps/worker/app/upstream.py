@@ -45,6 +45,7 @@ import signal
 import tempfile
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -87,6 +88,7 @@ try:
         record_used_percent,
     )
 except Exception:  # noqa: BLE001
+
     def record_upstream_tokens(kind: str, n: int) -> None:  # type: ignore[no-redef]
         return None
 
@@ -99,10 +101,12 @@ except Exception:  # noqa: BLE001
     def record_used_percent(p: int) -> None:  # type: ignore[no-redef]
         return None
 
+
 logger = logging.getLogger(__name__)
 
 
 # ---- 上游标识 / trace ----
+
 
 def _resolve_lumen_version() -> str:
     """resolve "lumen-prod-{ver}" originator 用的版本号。
@@ -135,17 +139,19 @@ def _generate_trace_id() -> str:
 
 # ---- 已知 SSE output[].type 白名单 ----
 # 解析 SSE 帧或 compact JSON 时未知 type 仅 warning + 跳过，不抛 KeyError 让整条流挂掉。
-_KNOWN_OUTPUT_ITEM_TYPES = frozenset({
-    "message",
-    "reasoning",
-    "function_call",
-    "compaction_summary",
-    "tool_call",
-    "web_search_call",
-    "file_search_call",
-    "code_interpreter_call",
-    "image_generation_call",  # /v1/responses + image_generation 工具的 item 类型
-})
+_KNOWN_OUTPUT_ITEM_TYPES = frozenset(
+    {
+        "message",
+        "reasoning",
+        "function_call",
+        "compaction_summary",
+        "tool_call",
+        "web_search_call",
+        "file_search_call",
+        "code_interpreter_call",
+        "image_generation_call",  # /v1/responses + image_generation 工具的 item 类型
+    }
+)
 
 # ---- Responses SSE 终止事件白名单 ----
 # 兼容网关常见返回形态：除了官方 `response.completed`，部分实现会用 `response.done`
@@ -164,11 +170,15 @@ _RESPONSES_TERMINAL_EVENTS = (
 
 
 def _is_responses_success_terminal(event_type: Any) -> bool:
-    return isinstance(event_type, str) and event_type in _RESPONSES_SUCCESS_TERMINAL_EVENTS
+    return (
+        isinstance(event_type, str) and event_type in _RESPONSES_SUCCESS_TERMINAL_EVENTS
+    )
 
 
 def _is_responses_error_terminal(event_type: Any) -> bool:
-    return isinstance(event_type, str) and event_type in _RESPONSES_ERROR_TERMINAL_EVENTS
+    return (
+        isinstance(event_type, str) and event_type in _RESPONSES_ERROR_TERMINAL_EVENTS
+    )
 
 
 # Sentinel event：iterator 在 200 但 Content-Type 不是 text/event-stream 时 yield，
@@ -187,6 +197,7 @@ ImageProgressCallback = Callable[[dict[str, Any]], Any]
 _MAX_REFERENCE_IMAGE_BYTES = 100 * 1024 * 1024
 _MAX_NORMALIZED_IMAGE_BYTES = 100 * 1024 * 1024
 _MAX_REFERENCE_IMAGE_PIXELS = 64_000_000
+
 
 # PIL 默认对 >89M 像素图像抛 DecompressionBombWarning 但不 raise。
 # 强制上限到 64M 像素——和 _MAX_REFERENCE_IMAGE_PIXELS 对齐——这样即使 magic bytes
@@ -247,12 +258,18 @@ _REFERENCE_CACHE_LRU_SUFFIX = ":lru"
 # 单例 client——进程内复用连接池
 _client: httpx.AsyncClient | None = None
 _client_timeout_config: "_TimeoutConfig | None" = None
-_proxied_clients: dict[tuple["_TimeoutConfig", str], httpx.AsyncClient] = {}
+_PROXIED_CLIENT_CACHE_MAX = 32
+_PROXIED_CLIENT_CLOSE_DELAY_SECONDS = 30.0
+_proxied_clients: OrderedDict[tuple["_TimeoutConfig", str], httpx.AsyncClient] = (
+    OrderedDict()
+)
 # 专供 /v1/images/* 使用的 client：不设默认 content-type，让 httpx 根据 files
 # 自动生成 multipart boundary；JSON 请求则显式传 json= 由 httpx 自己设 header。
 _images_client: httpx.AsyncClient | None = None
 _images_client_timeout_config: "_TimeoutConfig | None" = None
-_proxied_images_clients: dict[tuple["_TimeoutConfig", str], httpx.AsyncClient] = {}
+_proxied_images_clients: OrderedDict[
+    tuple["_TimeoutConfig", str], httpx.AsyncClient
+] = OrderedDict()
 _client_lock = asyncio.Lock()
 _images_client_lock = asyncio.Lock()
 
@@ -359,6 +376,8 @@ def _apply_retry_cache_busters(
     for tool in body.get("tools") or []:
         if isinstance(tool, dict) and tool.get("type") == "image_generation":
             tool.pop("partial_images", None)
+
+
 _DEFAULT_IMAGE_BACKGROUND = "auto"
 _DEFAULT_IMAGE_MODERATION = "low"
 _DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
@@ -385,7 +404,9 @@ def _redact_upstream_log_text(value: str) -> str:
     return text[:300]
 
 
-def _summarize_upstream_error_detail(detail: dict[str, Any] | None) -> dict[str, Any] | str:
+def _summarize_upstream_error_detail(
+    detail: dict[str, Any] | None,
+) -> dict[str, Any] | str:
     if not isinstance(detail, dict):
         return "none"
     summary: dict[str, Any] = {}
@@ -515,17 +536,23 @@ async def _resolve_timeout_config() -> _TimeoutConfig:
         try:
             raw = await resolve(spec_key)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("runtime timeout setting fallback key=%s err=%s", spec_key, exc)
+            logger.debug(
+                "runtime timeout setting fallback key=%s err=%s", spec_key, exc
+            )
             return fallback
         if raw is None:
             return fallback
         try:
             value = float(raw)
         except (TypeError, ValueError):
-            logger.warning("invalid runtime timeout setting key=%s value=%r", spec_key, raw)
+            logger.warning(
+                "invalid runtime timeout setting key=%s value=%r", spec_key, raw
+            )
             return fallback
         if not math.isfinite(value) or value <= 0:
-            logger.warning("invalid runtime timeout setting key=%s value=%r", spec_key, raw)
+            logger.warning(
+                "invalid runtime timeout setting key=%s value=%r", spec_key, raw
+            )
             return fallback
         return value
 
@@ -574,18 +601,47 @@ def _build_images_client(
     return httpx.AsyncClient(timeout=timeout_config.to_httpx(), proxy=proxy_url)
 
 
+def _cache_proxied_client(
+    cache: OrderedDict[tuple[_TimeoutConfig, str], httpx.AsyncClient],
+    key: tuple[_TimeoutConfig, str],
+    client: httpx.AsyncClient,
+) -> list[httpx.AsyncClient]:
+    cache[key] = client
+    cache.move_to_end(key)
+    evicted: list[httpx.AsyncClient] = []
+    while len(cache) > _PROXIED_CLIENT_CACHE_MAX:
+        _old_key, old_client = cache.popitem(last=False)
+        evicted.append(old_client)
+    return evicted
+
+
+async def _delayed_aclose(
+    client: httpx.AsyncClient, *, delay: float | None = None
+) -> None:
+    try:
+        await asyncio.sleep(
+            _PROXIED_CLIENT_CLOSE_DELAY_SECONDS if delay is None else delay
+        )
+        await client.aclose()
+    except Exception:  # noqa: BLE001
+        logger.warning("delayed proxied client close failed", exc_info=True)
+
+
 async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
     global _client, _client_timeout_config
     timeout_config = await _resolve_timeout_config()
     if proxy_url:
         key = (timeout_config, proxy_url)
-        client = _proxied_clients.get(key)
-        if client is None:
-            async with _client_lock:
-                client = _proxied_clients.get(key)
-                if client is None:
-                    client = _build_client(timeout_config, proxy_url=proxy_url)
-                    _proxied_clients[key] = client
+        evicted: list[httpx.AsyncClient] = []
+        async with _client_lock:
+            client = _proxied_clients.get(key)
+            if client is not None:
+                _proxied_clients.move_to_end(key)
+                return client
+            client = _build_client(timeout_config, proxy_url=proxy_url)
+            evicted = _cache_proxied_client(_proxied_clients, key, client)
+        for old_client in evicted:
+            asyncio.create_task(_delayed_aclose(old_client))
         return client
     if _client is None or _client_timeout_config != timeout_config:
         async with _client_lock:
@@ -603,17 +659,23 @@ async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
     timeout_config = await _resolve_timeout_config()
     if proxy_url:
         key = (timeout_config, proxy_url)
-        client = _proxied_images_clients.get(key)
-        if client is None:
-            async with _images_client_lock:
-                client = _proxied_images_clients.get(key)
-                if client is None:
-                    client = _build_images_client(timeout_config, proxy_url=proxy_url)
-                    _proxied_images_clients[key] = client
+        evicted: list[httpx.AsyncClient] = []
+        async with _images_client_lock:
+            client = _proxied_images_clients.get(key)
+            if client is not None:
+                _proxied_images_clients.move_to_end(key)
+                return client
+            client = _build_images_client(timeout_config, proxy_url=proxy_url)
+            evicted = _cache_proxied_client(_proxied_images_clients, key, client)
+        for old_client in evicted:
+            asyncio.create_task(_delayed_aclose(old_client))
         return client
     if _images_client is None or _images_client_timeout_config != timeout_config:
         async with _images_client_lock:
-            if _images_client is None or _images_client_timeout_config != timeout_config:
+            if (
+                _images_client is None
+                or _images_client_timeout_config != timeout_config
+            ):
                 old_client = _images_client
                 _images_client = _build_images_client(timeout_config)
                 _images_client_timeout_config = timeout_config
@@ -624,7 +686,11 @@ async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
 
 async def close_client() -> None:
     """Worker shutdown 钩子可调用此方法关闭连接池。"""
-    global _client, _images_client, _client_timeout_config, _images_client_timeout_config
+    global \
+        _client, \
+        _images_client, \
+        _client_timeout_config, \
+        _images_client_timeout_config
     async with _client_lock:
         clients: list[httpx.AsyncClient] = []
         if _client is not None:
@@ -862,7 +928,9 @@ def _log_upstream_call(
     )
     try:
         record_upstream_request(status_code=status, endpoint=endpoint)
-        record_upstream_duration(seconds=max(0.0, duration_ms / 1000.0), endpoint=endpoint)
+        record_upstream_duration(
+            seconds=max(0.0, duration_ms / 1000.0), endpoint=endpoint
+        )
         if isinstance(used_pct, int):
             record_used_percent(p=used_pct)
     except Exception:  # noqa: BLE001
@@ -1030,7 +1098,9 @@ def _parse_error(payload: dict[str, Any], status_code: int) -> UpstreamError:
     if isinstance(err, dict):
         code = err.get("code") or err.get("type") or "upstream_error"
         msg = err.get("message") or "upstream error"
-        return UpstreamError(msg, status_code=status_code, error_code=code, payload=payload)
+        return UpstreamError(
+            msg, status_code=status_code, error_code=code, payload=payload
+        )
     detail = payload.get("detail") if isinstance(payload, dict) else None
     if isinstance(detail, str) and detail:
         return UpstreamError(
@@ -1293,21 +1363,25 @@ async def _post_with_retry(
             if json_body is not None:
                 resp = await client.post(url, json=json_body, headers=headers)
             else:
-                resp = await client.post(
-                    url, data=data, files=files, headers=headers
-                )
+                resp = await client.post(url, data=data, files=files, headers=headers)
         except _RETRY_HTTPX_EXC as exc:
             last_exc = exc
             logger.warning(
                 "upstream transient httpx error attempt=%d/%d url=%s err=%r",
-                attempt + 1, max_attempts, url, exc,
+                attempt + 1,
+                max_attempts,
+                url,
+                exc,
             )
             continue
         if resp.status_code in _RETRY_STATUS:
             last_resp = resp
             logger.warning(
                 "upstream transient status attempt=%d/%d url=%s status=%d",
-                attempt + 1, max_attempts, url, resp.status_code,
+                attempt + 1,
+                max_attempts,
+                url,
+                resp.status_code,
             )
             continue
         return resp
@@ -1333,7 +1407,9 @@ async def _direct_generate_image_once(
 ) -> tuple[str, str | None]:
     """Text-to-image via direct `/v1/images/generations` using gpt-image-2."""
     proxy_url = await resolve_provider_proxy_url(proxy_override)
-    client = await (_get_images_client(proxy_url) if proxy_url else _get_images_client())
+    client = await (
+        _get_images_client(proxy_url) if proxy_url else _get_images_client()
+    )
     url = _image_generations_url(base_url_override)
     # Model 显式 pin：UPSTREAM_MODEL 来自 lumen_core.constants（lumen-core wheel 里固化）。
     # 加 runtime assert 防止未来改动把 model 字段隐式置空 / fallback 到上游默认。
@@ -1416,7 +1492,9 @@ async def _direct_generate_image_once(
 
     if resp.status_code >= 400:
         raise _with_error_context(
-            _parse_error(payload if isinstance(payload, dict) else {}, resp.status_code),
+            _parse_error(
+                payload if isinstance(payload, dict) else {}, resp.status_code
+            ),
             path="images/generations",
             method="POST",
             url=url,
@@ -1424,9 +1502,7 @@ async def _direct_generate_image_once(
     # JSON 响应里的 usage（如有）也走标准埋点。
     if isinstance(payload, dict):
         _record_usage(payload.get("usage"))
-    return await _extract_image_result(
-        payload, resp.status_code, proxy_url=proxy_url
-    )
+    return await _extract_image_result(payload, resp.status_code, proxy_url=proxy_url)
 
 
 def _wrap_inpaint_prompt(user_intent: str) -> str:
@@ -1702,7 +1778,10 @@ def _build_responses_image_body(
                 ref_bytes, mime = _normalize_reference_image(raw)
                 image_b64 = base64.b64encode(ref_bytes).decode("ascii")
                 content.append(
-                    {"type": "input_image", "image_url": f"data:{mime};base64,{image_b64}"}
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{mime};base64,{image_b64}",
+                    }
                 )
     # input item 显式带 `type: "message"`：Codex 私有 /responses 端点对 input
     # 数组项的字段验证比公网 OpenAI Responses API 更严，sub2api / CLIProxyAPI
@@ -1851,7 +1930,9 @@ async def _submit_and_wait_image_job(
     progress_callback: ImageProgressCallback | None,
 ) -> tuple[str, str | None]:
     proxy_url = await resolve_provider_proxy_url(proxy)
-    client = await (_get_images_client(proxy_url) if proxy_url else _get_images_client())
+    client = await (
+        _get_images_client(proxy_url) if proxy_url else _get_images_client()
+    )
     submit_url = _image_jobs_url(base_url)
     trace_id = _generate_trace_id()
     headers = _auth_headers(api_key, trace_id=trace_id)
@@ -1966,7 +2047,9 @@ async def _submit_and_wait_image_job(
             ) from exc
         if poll_resp.status_code >= 400:
             raise _with_error_context(
-                _parse_error(job if isinstance(job, dict) else {}, poll_resp.status_code),
+                _parse_error(
+                    job if isinstance(job, dict) else {}, poll_resp.status_code
+                ),
                 path="image-jobs",
                 method="GET",
                 url=status_url,
@@ -2134,7 +2217,9 @@ async def _image_job_edit_once(
     if mask is not None:
         mask_b64 = base64.b64encode(mask).decode("ascii")
         body["mask"] = {"image_url": f"data:image/png;base64,{mask_b64}"}
-    submit_base_url = base_url_override or sidecar_base_url or await _resolve_image_job_base_url()
+    submit_base_url = (
+        base_url_override or sidecar_base_url or await _resolve_image_job_base_url()
+    )
     return await _submit_and_wait_image_job(
         payload=_image_job_payload(
             request_type="edits",
@@ -2474,7 +2559,10 @@ async def _curl_post_multipart_with_retry(
                 last_exc = exc
                 logger.warning(
                     "curl upstream transient error attempt=%d/%d url=%s err=%r",
-                    attempt + 1, max_attempts, url, exc,
+                    attempt + 1,
+                    max_attempts,
+                    url,
+                    exc,
                 )
                 continue
             if status in _RETRY_STATUS:
@@ -2482,7 +2570,10 @@ async def _curl_post_multipart_with_retry(
                 last_payload = payload
                 logger.warning(
                     "curl upstream transient status attempt=%d/%d url=%s status=%d",
-                    attempt + 1, max_attempts, url, status,
+                    attempt + 1,
+                    max_attempts,
+                    url,
+                    status,
                 )
                 continue
             return status, payload
@@ -2705,7 +2796,10 @@ async def _iter_sse_curl(
             err_text = err_raw.decode("utf-8", "replace")
             logger.warning(
                 "curl sse non-2xx status=%s url=%s body=%.1000s trace_id=%s x_request_id=%s",
-                status_code, url, err_text, trace_id,
+                status_code,
+                url,
+                err_text,
+                trace_id,
                 response_headers.get("x-request-id"),
             )
             try:
@@ -2771,7 +2865,8 @@ async def _iter_sse_curl(
                         stderr_s = (await proc.stderr.read()).decode("utf-8", "replace")
                     logger.debug(
                         "curl json fallback exited rc=%s stderr=%.500s",
-                        rc, stderr_s,
+                        rc,
+                        stderr_s,
                     )
                 return
 
@@ -2998,9 +3093,9 @@ def _extract_image_b64_from_payload(payload: Any) -> str | None:
                 if isinstance(content, list):
                     for piece in content:
                         if isinstance(piece, dict):
-                            got = _b64_value_if_str(piece.get("result")) or _b64_value_if_str(
-                                piece.get("b64_json")
-                            )
+                            got = _b64_value_if_str(
+                                piece.get("result")
+                            ) or _b64_value_if_str(piece.get("b64_json"))
                             if got:
                                 return got
     return None
@@ -3091,7 +3186,11 @@ def _normalize_reference_image(raw: bytes) -> tuple[bytes, str]:
     try:
         with PILImage.open(io.BytesIO(raw)) as im:
             width, height = im.size
-            if width <= 0 or height <= 0 or width * height > _MAX_REFERENCE_IMAGE_PIXELS:
+            if (
+                width <= 0
+                or height <= 0
+                or width * height > _MAX_REFERENCE_IMAGE_PIXELS
+            ):
                 raise UpstreamError(
                     "reference image exceeds pixel limit",
                     error_code=EC.REFERENCE_IMAGE_TOO_LARGE.value,
@@ -3225,7 +3324,9 @@ async def _reference_cache_delete(
         await redis.hdel(cache_key, digest)
         await redis.zrem(lru_key, digest)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("reference cache delete skipped digest=%s err=%r", digest[:12], exc)
+        logger.debug(
+            "reference cache delete skipped digest=%s err=%r", digest[:12], exc
+        )
 
 
 async def _reference_cache_trim(redis: Any, *, user_id: str) -> None:
@@ -3583,7 +3684,9 @@ async def _responses_image_stream(
     # JSON fallback 命中时记录响应 Content-Type / body 摘要，纳入失败诊断
     json_fallback_content_type: str | None = None
     json_fallback_body_summary: str | None = None
-    await _emit_image_progress(progress_callback, "fallback_started", action=action, size=size)
+    await _emit_image_progress(
+        progress_callback, "fallback_started", action=action, size=size
+    )
     # curl 历史上是主稳定路径（详见函数上方注释）；use_httpx=True 时走 httpx——用在
     # edit race 的冗余 lane 上，换一套 client fingerprint，赌某次 curl 挂时 httpx 活。
     # read_timeout 按图像像素分级（4K 需要 ≥360s）。
@@ -3620,9 +3723,11 @@ async def _responses_image_stream(
         # 直接按 JSON payload 提图、提 usage、提 revised_prompt。
         if event_type == _JSON_PAYLOAD_SENTINEL_TYPE:
             json_payload = event.get("payload")
-            json_fallback_content_type = event.get("content_type") if isinstance(
-                event.get("content_type"), str
-            ) else None
+            json_fallback_content_type = (
+                event.get("content_type")
+                if isinstance(event.get("content_type"), str)
+                else None
+            )
             if isinstance(json_payload, dict):
                 # 提取 usage（兼容 usage / response.usage / tool_usage.image_gen.images）
                 if isinstance(json_payload.get("usage"), dict):
@@ -3638,7 +3743,10 @@ async def _responses_image_stream(
                     logger.info(
                         "responses fallback json payload images_count=%d "
                         "trace_id=%s action=%s size=%s",
-                        billable, call_trace_id, action, size,
+                        billable,
+                        call_trace_id,
+                        action,
+                        size,
                     )
                 # 提图：复用 _extract_image_b64_from_payload 多路径宽松解析
                 b64 = _extract_image_b64_from_payload(json_payload)
@@ -3680,9 +3788,7 @@ async def _responses_image_stream(
                         upstream_error_detail = err
                     # 抽 body 摘要（去敏感字段）方便排查
                     summary_keys = sorted(json_payload.keys())[:10]
-                    json_fallback_body_summary = (
-                        f"keys={summary_keys}"
-                    )
+                    json_fallback_body_summary = f"keys={summary_keys}"
             else:
                 # 非 dict body 直接判失败，但保留 content_type / 摘要给后面诊断
                 json_fallback_body_summary = (
@@ -3731,7 +3837,8 @@ async def _responses_image_stream(
                 ):
                     logger.warning(
                         "output_item.done with unknown item.type=%r last_event=%s",
-                        item_type, last_event_type,
+                        item_type,
+                        last_event_type,
                     )
                 if item.get("status") in {"failed", "incomplete"}:
                     item_err = item.get("error") or item.get("incomplete_details")
@@ -3758,15 +3865,18 @@ async def _responses_image_stream(
             diagnostic["json_fallback_body_summary"] = json_fallback_body_summary
         logger.warning(
             "responses fallback drained without image: %s",
-            json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":"),
-                       default=str),
+            json.dumps(
+                diagnostic, ensure_ascii=False, separators=(",", ":"), default=str
+            ),
         )
         # 把上游明确的 error.code 透传出去，让 classifier 按真实原因决定 terminal/retriable——
         # 否则 moderation_blocked 这类硬拒会被当成 no_image_returned 去重试 6 次，既拿不回图也烧配额。
         upstream_code: str | None = None
         upstream_msg: str | None = None
         if isinstance(upstream_error_detail, dict):
-            raw_code = upstream_error_detail.get("code") or upstream_error_detail.get("type")
+            raw_code = upstream_error_detail.get("code") or upstream_error_detail.get(
+                "type"
+            )
             if isinstance(raw_code, str) and raw_code:
                 upstream_code = raw_code
             raw_msg = upstream_error_detail.get("message")
@@ -4097,7 +4207,9 @@ def _pool_report_image_success(
         fn(name)
 
 
-def _provider_endpoint_locked_error(provider: Any, endpoint_kind: str) -> UpstreamError | None:
+def _provider_endpoint_locked_error(
+    provider: Any, endpoint_kind: str
+) -> UpstreamError | None:
     if endpoint_kind_allowed(provider, endpoint_kind):
         return None
     provider_name = getattr(provider, "name", "unknown")
@@ -4115,7 +4227,9 @@ def _provider_endpoint_locked_error(provider: Any, endpoint_kind: str) -> Upstre
     )
 
 
-def _provider_capability_error(provider: Any, endpoint_kind: str) -> UpstreamError | None:
+def _provider_capability_error(
+    provider: Any, endpoint_kind: str
+) -> UpstreamError | None:
     if provider_supports_route(provider, route="image", endpoint_kind=endpoint_kind):
         return None
     provider_name = getattr(provider, "name", "unknown")
@@ -4134,10 +4248,9 @@ def _provider_capability_error(provider: Any, endpoint_kind: str) -> UpstreamErr
 def _provider_endpoint_unavailable_error(
     provider: Any, endpoint_kind: str
 ) -> UpstreamError | None:
-    return (
-        _provider_endpoint_locked_error(provider, endpoint_kind)
-        or _provider_capability_error(provider, endpoint_kind)
-    )
+    return _provider_endpoint_locked_error(
+        provider, endpoint_kind
+    ) or _provider_capability_error(provider, endpoint_kind)
 
 
 def _provider_allows_image_endpoint(provider: Any, endpoint_kind: str) -> bool:
@@ -4224,9 +4337,8 @@ async def _responses_image_stream_with_retry(
             attempt += 1
             # GEN-P1-9: 这次失败按错误形态算"该错码下应给的预算"——攻顶后停。
             attempts_for_this = _max_attempts_for_exception(exc)
-            if (
-                attempt >= attempts_for_this
-                or not _is_retryable_fallback_exception(exc)
+            if attempt >= attempts_for_this or not _is_retryable_fallback_exception(
+                exc
             ):
                 raise _merge_fallback_errors(
                     errors,
@@ -4241,9 +4353,7 @@ async def _responses_image_stream_with_retry(
             retry_after = _retry_after_seconds(exc)
             if retry_after is not None:
                 backoff = retry_after
-            elif (
-                isinstance(exc, UpstreamError) and exc.status_code == 429
-            ):
+            elif isinstance(exc, UpstreamError) and exc.status_code == 429:
                 backoff = min(_FALLBACK_429_DEFAULT_WAIT_S, _FALLBACK_429_MAX_WAIT_S)
             else:
                 backoff = _fallback_retry_backoff_seconds(attempt)
@@ -4795,7 +4905,9 @@ async def _image_job_with_failover(
                 # preference=None 时由本号自决），这里直接锁单 endpoint。
                 endpoint_chain = [configured_endpoint]
             elif endpoint_preference is not None:
-                endpoint_chain = _image_jobs_endpoint_fallback_chain(endpoint_preference)
+                endpoint_chain = _image_jobs_endpoint_fallback_chain(
+                    endpoint_preference
+                )
             else:
                 endpoint_chain = pool.endpoint_chain(
                     provider.name, action, configured_endpoint
@@ -4981,6 +5093,7 @@ async def _image_job_with_failover(
 # eyeballs reading recent logs) finds them. Both delegate to the unified
 # implementation. Safe to delete in a follow-up once we confirm no callers
 # remain outside this file.
+
 
 async def _image_job_generate_with_failover(
     *,
@@ -5525,7 +5638,9 @@ async def _race_responses_image(
                         )
                     logger.info(
                         "%s race: %s won, cancelled %d lane(s)",
-                        action, winner_name, len(losers),
+                        action,
+                        winner_name,
+                        len(losers),
                     )
                     return finished.result()
                 # GEN-P1-4: 调用方主动取消 → 立即 cancel 残余 lane 并透传，不再 race。
@@ -5538,7 +5653,8 @@ async def _race_responses_image(
                         )
                     logger.info(
                         "%s race: cancelled by caller; aborting %d lane(s)",
-                        action, len(losers),
+                        action,
+                        len(losers),
                     )
                     raise exc
                 errors.append(exc)
@@ -5740,7 +5856,9 @@ async def _dual_race_image_action(
                 if exc is None:
                     logger.info(
                         "%s dual_race: %s won, loser keeps running (grace=%.0fs)",
-                        action, lane_name, grace_s,
+                        action,
+                        lane_name,
+                        grace_s,
                     )
                     winner_yielded = True
                     yield finished.result()
@@ -5749,9 +5867,7 @@ async def _dual_race_image_action(
                     # caller 取消 → finally 段会收割残余 lane
                     raise exc
                 errors.append((lane_name, exc))
-                logger.warning(
-                    "%s dual_race: %s failed: %r", action, lane_name, exc
-                )
+                logger.warning("%s dual_race: %s failed: %r", action, lane_name, exc)
 
         if not winner_yielded:
             logger.warning(
@@ -5785,7 +5901,8 @@ async def _dual_race_image_action(
                 )
                 logger.info(
                     "%s dual_race: loser exceeded grace=%.0fs, cancelled silently",
-                    action, grace_s,
+                    action,
+                    grace_s,
                 )
                 return
             for finished in done:
@@ -5802,7 +5919,9 @@ async def _dual_race_image_action(
                     return
                 logger.info(
                     "%s dual_race: bonus %s failed silently: %r",
-                    action, lane_name, exc,
+                    action,
+                    lane_name,
+                    exc,
                 )
                 return
     finally:
@@ -5909,7 +6028,9 @@ async def _dual_race_image_jobs_action(
             endpoint=event.get("endpoint"),
         )
 
-    async def _lane(endpoint: str, lane_progress: ImageProgressCallback | None) -> tuple[str, str | None]:
+    async def _lane(
+        endpoint: str, lane_progress: ImageProgressCallback | None
+    ) -> tuple[str, str | None]:
         # mask 仅在 generations endpoint 有意义；responses lane 上游 image_generation
         # 工具不支持 mask 字段，无脑透传只会浪费 body bytes。这里按 endpoint 过滤一次。
         lane_mask = mask if endpoint == "generations" else None
@@ -5961,7 +6082,9 @@ async def _dual_race_image_jobs_action(
                 if exc is None:
                     logger.info(
                         "%s image_jobs dual_race: %s won, loser keeps running (grace=%.0fs)",
-                        action, lane_name, grace_s,
+                        action,
+                        lane_name,
+                        grace_s,
                     )
                     winner_yielded = True
                     yield finished.result()
@@ -5971,7 +6094,9 @@ async def _dual_race_image_jobs_action(
                 errors.append((lane_name, exc))
                 logger.warning(
                     "%s image_jobs dual_race: %s failed: %r",
-                    action, lane_name, exc,
+                    action,
+                    lane_name,
+                    exc,
                 )
 
         if not winner_yielded:
@@ -6005,7 +6130,8 @@ async def _dual_race_image_jobs_action(
                 )
                 logger.info(
                     "%s image_jobs dual_race: loser exceeded grace=%.0fs, cancelled silently",
-                    action, grace_s,
+                    action,
+                    grace_s,
                 )
                 return
             for finished in done:
@@ -6014,7 +6140,8 @@ async def _dual_race_image_jobs_action(
                 if exc is None:
                     logger.info(
                         "%s image_jobs dual_race: bonus from %s succeeded",
-                        action, lane_name,
+                        action,
+                        lane_name,
                     )
                     yield finished.result()
                     return
@@ -6022,7 +6149,9 @@ async def _dual_race_image_jobs_action(
                     return
                 logger.info(
                     "%s image_jobs dual_race: bonus %s failed silently: %r",
-                    action, lane_name, exc,
+                    action,
+                    lane_name,
+                    exc,
                 )
                 return
     finally:
@@ -6529,7 +6658,10 @@ async def _dispatch_image(
                     exc,
                     retriable=decision.retriable,
                 )
-                if channel == _IMAGE_CHANNEL_IMAGE_JOBS_ONLY and not _provider_supports_image_jobs(provider):
+                if (
+                    channel == _IMAGE_CHANNEL_IMAGE_JOBS_ONLY
+                    and not _provider_supports_image_jobs(provider)
+                ):
                     raise
                 if not should_continue:
                     raise
@@ -6704,10 +6836,7 @@ async def _iter_sse_with_runtime(
         "json": body,
         "headers": _auth_headers(api_key, trace_id=call_trace_id),
     }
-    if (
-        read_timeout_s is not None
-        and read_timeout_s > timeout_config.read
-    ):
+    if read_timeout_s is not None and read_timeout_s > timeout_config.read:
         stream_kwargs["timeout"] = timeout_config.to_httpx(read=read_timeout_s)
     started = time.monotonic()
     final_status = 0
@@ -6728,14 +6857,20 @@ async def _iter_sse_with_runtime(
                 logger.warning(
                     "httpx sse non-2xx status=%s url=%s body=%.1000s trace_id=%s "
                     "x_request_id=%s",
-                    resp.status_code, url, raw_text, call_trace_id, req_id,
+                    resp.status_code,
+                    url,
+                    raw_text,
+                    call_trace_id,
+                    req_id,
                 )
                 try:
                     payload = json.loads(raw_text)
                 except Exception:
                     payload = {"raw": raw_text}
                 raise _with_error_context(
-                    _parse_error(payload if isinstance(payload, dict) else {}, resp.status_code),
+                    _parse_error(
+                        payload if isinstance(payload, dict) else {}, resp.status_code
+                    ),
                     path="responses",
                     method="POST",
                     url=url,
@@ -7001,7 +7136,9 @@ async def responses_call(
     # 3) 单次请求 timeout 覆盖：仅当 caller 给的更长时构造 httpx.Timeout 注入
     stream_kwargs: dict[str, Any] = {"json": body, "headers": headers}
     timeout_config = await _resolve_timeout_config()
-    effective_timeout = float(timeout_s) if timeout_s is not None else timeout_config.read
+    effective_timeout = (
+        float(timeout_s) if timeout_s is not None else timeout_config.read
+    )
     stream_kwargs["timeout"] = timeout_config.to_httpx(read=effective_timeout)
 
     proxy_url = await resolve_provider_proxy_url(proxy)
@@ -7126,14 +7263,12 @@ async def responses_call(
                                     err = None
                                     resp_obj = event.get("response")
                                     if isinstance(resp_obj, dict):
-                                        err = (
-                                            resp_obj.get("error")
-                                            or resp_obj.get("incomplete_details")
+                                        err = resp_obj.get("error") or resp_obj.get(
+                                            "incomplete_details"
                                         )
                                     if err is None:
-                                        err = (
-                                            event.get("error")
-                                            or event.get("incomplete_details")
+                                        err = event.get("error") or event.get(
+                                            "incomplete_details"
                                         )
                                     if isinstance(err, dict):
                                         error_terminal = err
@@ -7164,10 +7299,9 @@ async def responses_call(
                         return completed
                     # error terminal 优先抛具体的上游 error code，便于 caller 分类重试
                     if error_terminal is not None:
-                        upstream_code = (
-                            error_terminal.get("code")
-                            or error_terminal.get("type")
-                        )
+                        upstream_code = error_terminal.get(
+                            "code"
+                        ) or error_terminal.get("type")
                         upstream_msg = error_terminal.get("message")
                         raise UpstreamError(
                             upstream_msg

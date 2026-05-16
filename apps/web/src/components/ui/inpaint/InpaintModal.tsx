@@ -408,11 +408,8 @@ function InpaintModalInner() {
       className={cn(
         "fixed inset-0 z-[var(--z-dialog)]",
         "bg-black/76 backdrop-blur-md",
-        "flex items-center justify-center",
-        "p-2 sm:p-6",
-        // iOS safe-area
-        "[padding-top:max(0.5rem,env(safe-area-inset-top))]",
-        "[padding-bottom:max(0.5rem,env(safe-area-inset-bottom))]",
+        "mobile-dialog-shell",
+        "flex items-end justify-center sm:items-center",
       )}
       role="presentation"
       onPointerDown={(e) => {
@@ -433,13 +430,15 @@ function InpaintModalInner() {
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
         onKeyDown={onRootKeyDown}
         className={cn(
+          "mobile-dialog-panel",
           "w-full max-w-[1100px]",
           // dvh = 浏览器栏 + 键盘动态视口；svh fallback 在更小视口
           // 桌面给固定高度（760px clamp 到视口），让 body flex-1 链路有撑开依据；
           // 之前 sm:h-auto 内容驱动 + MaskBoard fit 模式互相塌缩，整个弹窗缩成只有 header
-          "h-[calc(100dvh-1rem)] sm:h-[760px] sm:max-h-[calc(100dvh-3rem)]",
+          "h-[var(--mobile-dialog-max-height)] sm:h-[760px] sm:max-h-[calc(100dvh-3rem)]",
           "flex flex-col overflow-hidden",
-          "rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]",
+          "max-sm:rounded-t-[var(--radius-sheet)] max-sm:rounded-b-none sm:rounded-[var(--radius-dialog)]",
+          "border border-[var(--border)] bg-[var(--bg-1)]",
           "shadow-[var(--shadow-2)]",
         )}
       >
@@ -523,6 +522,7 @@ function InpaintModalInner() {
               "shrink-0 flex flex-col gap-3 p-3 sm:p-4",
               "md:w-[320px] md:max-w-[320px]",
               "bg-[var(--bg-0)]",
+              "mobile-dialog-scroll overflow-y-auto",
               "border-t border-[var(--border-subtle)] md:border-t-0",
             )}
           >
@@ -621,7 +621,7 @@ function InpaintModalInner() {
               </div>
             </div>
 
-            <div className="mt-auto flex items-center justify-end gap-2 pt-2">
+            <div className="mobile-dialog-footer mt-auto flex items-center justify-end gap-2 pt-2">
               <Button
                 variant={inConfirmClose ? "danger" : "ghost"}
                 size="md"

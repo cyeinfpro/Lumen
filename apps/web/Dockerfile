@@ -25,7 +25,7 @@ RUN npm run build
 # ---- runner: minimal runtime image ----
 FROM node:22-alpine AS runner
 WORKDIR /app
-RUN apk add --no-cache wget dumb-init \
+RUN apk add --no-cache dumb-init \
     && addgroup -g 10001 nodejs \
     && adduser -S -D -H -u 10001 -G nodejs nextjs
 ENV NODE_ENV=production \

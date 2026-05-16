@@ -75,6 +75,7 @@ server {
     add_header X-Frame-Options "DENY" always;
     add_header Cross-Origin-Opener-Policy "same-origin" always;
     add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; frame-ancestors 'none';" always;
 
     # ----- Body / 上传 -----------------------------------------------------
     # 与 apps/web/next.config 保持一致的 60MB 上限；瘦身到 1m/10m 会触发 413。
@@ -183,14 +184,8 @@ server {
 
         # immutable variants 让浏览器长缓存，CIFS 读速也不再被反复触发。
         # lumen-api 已经在响应里带了 Cache-Control / ETag；nginx 不要覆盖它们，
-        # 也不要再次 gzip（image variants 全是 jpeg/webp，再压无效）。
-        add_header              Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-        add_header              X-Content-Type-Options "nosniff" always;
-        add_header              Referrer-Policy "strict-origin-when-cross-origin" always;
-        add_header              Content-Security-Policy "default-src 'none'; frame-ancestors 'none'; sandbox" always;
-        add_header              X-Frame-Options "DENY" always;
-        add_header              Cross-Origin-Opener-Policy "same-origin" always;
-        add_header              Cross-Origin-Resource-Policy "same-origin" always;
+        # 也不要再次 gzip（image variants 全是 jpeg/webp，再压无效）。不要在本
+        # location 重复 add_header；否则 nginx 会停止继承 server 级安全头。
         gzip                    off;
     }
 

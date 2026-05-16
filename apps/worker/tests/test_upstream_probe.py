@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import Any, AsyncIterator
 
 import pytest
@@ -67,6 +68,8 @@ def _make_failing_stream(exc: BaseException):
 @pytest.fixture
 def probe_model(monkeypatch: pytest.MonkeyPatch) -> str:
     fixed = "gpt-5.4"
+    monkeypatch.setitem(sys.modules, "app.upstream", upstream_mod)
+    monkeypatch.setitem(sys.modules, "app.jobs.upstream_probe", upstream_probe)
     monkeypatch.setattr(upstream_probe, "_resolve_probe_model", lambda: fixed)
     return fixed
 

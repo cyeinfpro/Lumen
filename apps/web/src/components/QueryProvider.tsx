@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
+import { MotionConfig } from "framer-motion";
 import { makeQueryClient } from "@/lib/queryClient";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 
@@ -16,10 +17,12 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={client}>
-      {children}
-      {process.env.NODE_ENV !== "production" && isMobile === false ? (
-        <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
-      ) : null}
+      <MotionConfig reducedMotion="user">
+        {children}
+        {process.env.NODE_ENV !== "production" && isMobile === false ? (
+          <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
+        ) : null}
+      </MotionConfig>
     </QueryClientProvider>
   );
 }
