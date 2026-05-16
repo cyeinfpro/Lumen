@@ -19,7 +19,15 @@ from pathlib import Path
 from typing import Annotated, Any, Iterable
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage
 from sqlalchemy import delete, desc, or_, select, update
@@ -120,6 +128,10 @@ from lumen_core.schemas import (
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..config import settings
+from ..observability import (
+    apparel_model_library_generate_mode_total,
+    apparel_model_library_reference_extract_total,
+)
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from .messages import (
@@ -139,6 +151,11 @@ from ._showcase_shot_pool import (
 )
 from ._showcase_shot_pool_adult import ADULT_POOL
 from ._showcase_shot_pool_kids import CHILD_POOL, TODDLER_POOL
+from ._apparel_library_reference import (
+    ReferenceProfile,
+    auto_tag_owned_model_library_image,
+    extract_reference_profile,
+)
 
 
 SHOT_POOL_BY_BAND: dict[str, ShotPool] = {
@@ -234,11 +251,13 @@ TEMPLATE_LABELS = {
     "social_seed": "自然种草",
 }
 
-SCENE_ENVIRONMENT_TEMPLATES = frozenset({
-    "daily_snapshot",
-    "natural_phone_snapshot",
-    "social_seed",
-})
+SCENE_ENVIRONMENT_TEMPLATES = frozenset(
+    {
+        "daily_snapshot",
+        "natural_phone_snapshot",
+        "social_seed",
+    }
+)
 
 
 def _scene_environment_outdoor_phrase(template: str, category: str) -> str:
@@ -270,7 +289,9 @@ def _template_requirement(
     scene_environment: str = "indoor",
 ) -> str:
     category = str(product_analysis.get("category") or "服饰").strip() or "服饰"
-    recommended_background = str(product_analysis.get("background_recommendation") or "").strip()
+    recommended_background = str(
+        product_analysis.get("background_recommendation") or ""
+    ).strip()
     matched_background = (
         recommended_background
         if recommended_background and recommended_background.lower() != "unknown"
@@ -304,8 +325,7 @@ def _template_requirement(
             )
         ),
         "social_seed": (
-            outdoor_phrase
-            or f"与{category}匹配的自然种草氛围，松弛、真实、有生活感"
+            outdoor_phrase or f"与{category}匹配的自然种草氛围，松弛、真实、有生活感"
         ),
     }
     return requirements.get(template, TEMPLATE_LABELS.get(template, template))
@@ -420,13 +440,15 @@ def _showcase_pose_direction(template: str) -> str:
     return _POSE_DIRECTIONS.get(template, "姿态自然舒展")
 
 
-_LIFESTYLE_TEMPLATES = frozenset({
-    "urban_commute",
-    "lifestyle",
-    "daily_snapshot",
-    "natural_phone_snapshot",
-    "social_seed",
-})
+_LIFESTYLE_TEMPLATES = frozenset(
+    {
+        "urban_commute",
+        "lifestyle",
+        "daily_snapshot",
+        "natural_phone_snapshot",
+        "social_seed",
+    }
+)
 
 
 def _showcase_composition_direction(template: str) -> str:
@@ -456,8 +478,7 @@ def _showcase_framing_direction(
     """
     if shot_class == "detail_half_body":
         return (
-            "上半身或胸口以上入镜，头顶留出适度边距，"
-            "肩部肘部不顶画面边缘，背景留白干净"
+            "上半身或胸口以上入镜，头顶留出适度边距，肩部肘部不顶画面边缘，背景留白干净"
         )
     is_square_or_landscape = aspect_ratio in _SQUARE_OR_LANDSCAPE_RATIOS
     if framing == "tone_first":
@@ -538,7 +559,10 @@ def _infer_model_height_cm(text: str) -> int:
     age = _infer_age(text)
     if age is None:
         lowered = (text or "").lower()
-        if any(word in lowered for word in ("儿童", "童装", "小朋友", "孩子", "kid", "kids", "child")):
+        if any(
+            word in lowered
+            for word in ("儿童", "童装", "小朋友", "孩子", "kid", "kids", "child")
+        ):
             return 128
         return 168
     if age <= 2:
@@ -561,8 +585,13 @@ def _height_requirement(text: str) -> str:
 def _age_direction(text: str) -> str:
     lowered = (text or "").lower()
     age = _infer_age(text)
-    if age is not None and age <= 12 or any(
-        word in lowered for word in ("儿童", "童装", "小朋友", "孩子", "kid", "kids", "child")
+    if (
+        age is not None
+        and age <= 12
+        or any(
+            word in lowered
+            for word in ("儿童", "童装", "小朋友", "孩子", "kid", "kids", "child")
+        )
     ):
         age_text = f"around {age} years old" if age is not None else "child age range"
         return (
@@ -588,17 +617,24 @@ def _age_direction(text: str) -> str:
 def _accessory_age_direction(text: str) -> str:
     lowered = (text or "").lower()
     age = _infer_age(text)
-    if age is not None and age <= 12 or any(
-        word in lowered for word in ("儿童", "童装", "小朋友", "孩子", "kid", "kids", "child")
+    if (
+        age is not None
+        and age <= 12
+        or any(
+            word in lowered
+            for word in ("儿童", "童装", "小朋友", "孩子", "kid", "kids", "child")
+        )
     ):
         return (
             "Accessory styling must be child-appropriate: simple, safe-looking, playful but restrained, "
             "with no adult jewelry styling, glamour accessories, mature handbags, heels, or adult fashion cues."
         )
-    if age is not None and age < 18 or any(word in lowered for word in ("青少年", "teen", "teenager")):
-        return (
-            "Accessory styling must fit a teenager: casual, age-appropriate, not childish, and not adult glamour."
-        )
+    if (
+        age is not None
+        and age < 18
+        or any(word in lowered for word in ("青少年", "teen", "teenager"))
+    ):
+        return "Accessory styling must fit a teenager: casual, age-appropriate, not childish, and not adult glamour."
     if age is not None:
         return (
             f"Accessory styling must match an adult around {age} years old: commercially polished, natural, "
@@ -650,10 +686,7 @@ def _infer_candidate_gender(style_prompt: str, product_analysis: dict[str, Any])
     text = " ".join(
         [style_prompt or "", str(product_analysis.get("category") or "")]
     ).lower()
-    if any(
-        token in text
-        for token in ("女装", "女性", "女士", "女生", "女童")
-    ) or any(
+    if any(token in text for token in ("女装", "女性", "女士", "女生", "女童")) or any(
         re.search(pattern, text)
         for pattern in (
             r"\bfemale\b",
@@ -664,9 +697,7 @@ def _infer_candidate_gender(style_prompt: str, product_analysis: dict[str, Any])
         )
     ):
         return "female"
-    if any(
-        token in text for token in ("男装", "男性", "男士", "男生", "男童")
-    ) or any(
+    if any(token in text for token in ("男装", "男性", "男士", "男生", "男童")) or any(
         re.search(pattern, text)
         for pattern in (
             r"\bmale\b",
@@ -804,7 +835,9 @@ def _clean_style_tags(values: Iterable[str]) -> list[str]:
     return out
 
 
-def _clean_string_list(values: Iterable[str], *, max_items: int, max_len: int) -> list[str]:
+def _clean_string_list(
+    values: Iterable[str], *, max_items: int, max_len: int
+) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw in values:
@@ -858,8 +891,12 @@ def _storage_path(storage_key: str) -> Path:
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode(
+        "utf-8"
+    )
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -892,7 +929,9 @@ def _read_json_file(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     except FileNotFoundError:
         return dict(default)
     except (OSError, json.JSONDecodeError) as exc:
-        raise _http("invalid_index", f"invalid model library index: {path.name}", 500) from exc
+        raise _http(
+            "invalid_index", f"invalid model library index: {path.name}", 500
+        ) from exc
     if not isinstance(data, dict):
         raise _http("invalid_index", f"invalid model library index: {path.name}", 500)
     return data
@@ -1052,7 +1091,11 @@ def _model_library_item_out(raw: dict[str, Any]) -> ApparelModelLibraryItemOut:
         if image_id
         else _library_item_url(item_id, "thumb")
     )
-    created_at = _safe_datetime(raw.get("created_at")) or _safe_datetime(raw.get("updated_at")) or _now()
+    created_at = (
+        _safe_datetime(raw.get("created_at"))
+        or _safe_datetime(raw.get("updated_at"))
+        or _now()
+    )
     visibility_scope = "global_preset" if source == "preset" else "user_private"
     style_tags = _clean_style_tags(raw.get("style_tags") or raw.get("tags") or [])
     gender = _clean_optional_text(raw.get("gender"), max_len=40)
@@ -1118,7 +1161,9 @@ def _load_user_library_index(user_id: str) -> dict[str, Any]:
     before DB reads so users do not lose visibility of old saved models when
     the new tables exist but the one-off backfill has not been run yet.
     """
-    return _read_json_file(_library_user_index_path(user_id), _default_user_library_index())
+    return _read_json_file(
+        _library_user_index_path(user_id), _default_user_library_index()
+    )
 
 
 def _save_global_library_index(index: dict[str, Any]) -> None:
@@ -1194,7 +1239,9 @@ def _model_library_row_to_dict(row: ModelLibraryItem) -> dict[str, Any]:
         "style_tags": list(row.style_tags or []),
         "library_folder": row.library_folder,
         "prompt_hint": row.prompt_hint,
-        "auto_tagged_at": row.auto_tagged_at.isoformat() if row.auto_tagged_at else None,
+        "auto_tagged_at": row.auto_tagged_at.isoformat()
+        if row.auto_tagged_at
+        else None,
         "auto_tag_notes": row.auto_tag_notes,
         "metadata_jsonb": dict(row.metadata_jsonb or {}),
         "owner_user_id": row.user_id,
@@ -1219,11 +1266,15 @@ def _legacy_library_item_insert_values(
     normalized_age = _normalize_age_segment(raw.get("age_segment"))
     normalized_gender = _normalize_model_gender(raw.get("gender"))
     created_at = (
-        _safe_datetime(raw.get("created_at") if isinstance(raw.get("created_at"), str) else None)
+        _safe_datetime(
+            raw.get("created_at") if isinstance(raw.get("created_at"), str) else None
+        )
         or _now()
     )
     updated_at = (
-        _safe_datetime(raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else None)
+        _safe_datetime(
+            raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else None
+        )
         or created_at
     )
     known_keys = {
@@ -1264,7 +1315,9 @@ def _legacy_library_item_insert_values(
         ),
         "prompt_hint": _clean_optional_text(raw.get("prompt_hint"), max_len=1000),
         "auto_tagged_at": _safe_datetime(
-            raw.get("auto_tagged_at") if isinstance(raw.get("auto_tagged_at"), str) else None
+            raw.get("auto_tagged_at")
+            if isinstance(raw.get("auto_tagged_at"), str)
+            else None
         ),
         "auto_tag_notes": _clean_optional_text(raw.get("auto_tag_notes"), max_len=200),
         "metadata_jsonb": {k: v for k, v in raw.items() if k not in known_keys},
@@ -1273,9 +1326,7 @@ def _legacy_library_item_insert_values(
     }
 
 
-async def _ensure_legacy_user_library_migrated(
-    db: AsyncSession, user_id: str
-) -> bool:
+async def _ensure_legacy_user_library_migrated(db: AsyncSession, user_id: str) -> bool:
     """Lazily backfill one user's legacy JSON index into PostgreSQL.
 
     The schema migration creates empty tables; deployments may not run the
@@ -1287,9 +1338,7 @@ async def _ensure_legacy_user_library_migrated(
     if not index_path.is_file():
         return False
     index = _load_user_library_index(user_id)
-    raw_items = [
-        item for item in (index.get("items") or []) if isinstance(item, dict)
-    ]
+    raw_items = [item for item in (index.get("items") or []) if isinstance(item, dict)]
     raw_hidden_ids = _dedupe_nonempty(index.get("hidden_preset_ids") or [])
     if not raw_items and not raw_hidden_ids:
         return False
@@ -1386,16 +1435,18 @@ async def _load_user_library_items(
     return out
 
 
-async def _load_user_hidden_preset_ids(
-    db: AsyncSession, user_id: str
-) -> set[str]:
+async def _load_user_hidden_preset_ids(db: AsyncSession, user_id: str) -> set[str]:
     rows = (
-        await db.execute(
-            select(ModelLibraryHiddenPreset.preset_id).where(
-                ModelLibraryHiddenPreset.user_id == user_id
+        (
+            await db.execute(
+                select(ModelLibraryHiddenPreset.preset_id).where(
+                    ModelLibraryHiddenPreset.user_id == user_id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {pid for pid in rows if isinstance(pid, str)}
 
 
@@ -1441,7 +1492,11 @@ def _filter_library_items(
                     str(item.get("title") or ""),
                     str(item.get("gender") or ""),
                     str(item.get("appearance_direction") or ""),
-                    " ".join(_clean_style_tags(item.get("style_tags") or item.get("tags") or [])),
+                    " ".join(
+                        _clean_style_tags(
+                            item.get("style_tags") or item.get("tags") or []
+                        )
+                    ),
                 ]
             ).lower()
             if query not in haystack:
@@ -1552,7 +1607,9 @@ def _preset_storage_key(preset_id: str, version: int, image_path: str) -> str:
     return f"{MODEL_LIBRARY_ROOT_KEY}/presets/{preset_id}/v{version}{suffix}"
 
 
-def _preset_thumb_storage_key(preset_id: str, thumb_path: str | None, image_key: str) -> str:
+def _preset_thumb_storage_key(
+    preset_id: str, thumb_path: str | None, image_key: str
+) -> str:
     if not thumb_path:
         return image_key
     suffix = Path(thumb_path).suffix.lower() or ".webp"
@@ -1561,7 +1618,9 @@ def _preset_thumb_storage_key(preset_id: str, thumb_path: str | None, image_key:
 
 def _write_bytes_replace(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -1610,7 +1669,9 @@ async def _walk_github_contents(
         entry_type = entry.get("type")
         name = str(entry.get("name") or "")
         if entry_type == "dir":
-            child_url = str(entry.get("url") or "") or _github_api_child_url(contents_url, name)
+            child_url = str(entry.get("url") or "") or _github_api_child_url(
+                contents_url, name
+            )
             files.extend(await _walk_github_contents(client, child_url))
         elif entry_type == "file":
             files.append(entry)
@@ -1677,7 +1738,9 @@ def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
     words = [
         part
         for part in re.split(r"[-_]+", path.stem)
-        if part and not part.isdigit() and part not in {age_segment, "female", "male", "woman", "man"}
+        if part
+        and not part.isdigit()
+        and part not in {age_segment, "female", "male", "woman", "man"}
     ]
     return {
         "preset_id": preset_id,
@@ -1697,7 +1760,9 @@ def _metadata_from_github_file(entry: dict[str, Any]) -> dict[str, Any] | None:
 
 def _cached_sync_response(state: dict[str, Any]) -> ApparelModelLibrarySyncOut:
     """从 sync state 拼装一个 'skipped' 响应，用于 cooldown 命中时返回。"""
-    result = state.get("last_result") if isinstance(state.get("last_result"), dict) else {}
+    result = (
+        state.get("last_result") if isinstance(state.get("last_result"), dict) else {}
+    )
     return ApparelModelLibrarySyncOut(
         status="skipped",
         added=int(result.get("added") or 0),
@@ -1719,7 +1784,9 @@ async def _sync_library_presets_from_github_folder(
     proxy_url: str | None = None,
 ) -> ApparelModelLibrarySyncOut:
     if not contents_url:
-        raise _http("sync_not_configured", "preset GitHub folder url is not configured", 503)
+        raise _http(
+            "sync_not_configured", "preset GitHub folder url is not configured", 503
+        )
     # _SYNC_LOCK 防同进程并发；cooldown 用 last_success_at（5min）和
     # last_attempt_at（30s 失败重试保护），避免失败被锁死或滥用 hammer GitHub。
     async with _SYNC_LOCK:
@@ -1769,7 +1836,9 @@ async def _do_sync_library_presets(
                     continue
                 if not path.stem.endswith(".thumb"):
                     continue
-                base = str(path.with_name(f"{path.stem[:-len('.thumb')]}{path.suffix}"))
+                base = str(
+                    path.with_name(f"{path.stem[: -len('.thumb')]}{path.suffix}")
+                )
                 thumb_by_base[base] = entry
 
             index = _load_global_library_index()
@@ -1822,7 +1891,9 @@ async def _do_sync_library_presets(
                     except Exception as exc:  # noqa: BLE001
                         thumb_key = image_key
                         thumb_sha = actual_sha
-                        errors.append(f"{preset_id}: thumb fallback to original: {exc!r}")
+                        errors.append(
+                            f"{preset_id}: thumb fallback to original: {exc!r}"
+                        )
                 else:
                     thumb_sha = actual_sha
 
@@ -1843,7 +1914,9 @@ async def _do_sync_library_presets(
                     "thumb_sha256": thumb_sha,
                     "prompt_hint": parsed["prompt_hint"],
                     "github_image_path": parsed["image_path"],
-                    "github_thumb_path": str(thumb_entry.get("path")) if thumb_entry else None,
+                    "github_thumb_path": str(thumb_entry.get("path"))
+                    if thumb_entry
+                    else None,
                     "github_sha": parsed.get("sha"),
                     "created_at": (previous or {}).get("created_at") or _iso_now(),
                     "updated_at": _iso_now(),
@@ -1973,14 +2046,18 @@ async def _validate_owned_images(
     if max_count is not None and len(ids) > max_count:
         raise _http("too_many_images", f"at most {max_count} images allowed", 422)
     rows = (
-        await db.execute(
-            select(Image.id).where(
-                Image.id.in_(ids),
-                Image.user_id == user_id,
-                Image.deleted_at.is_(None),
+        (
+            await db.execute(
+                select(Image.id).where(
+                    Image.id.in_(ids),
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if set(rows) != set(ids):
         raise _http(
             "invalid_image",
@@ -2001,7 +2078,9 @@ async def _owned_image(db: AsyncSession, *, user_id: str, image_id: str) -> Imag
         )
     ).scalar_one_or_none()
     if img is None:
-        raise _http("invalid_image", "image is not owned by current user or was deleted", 400)
+        raise _http(
+            "invalid_image", "image is not owned by current user or was deleted", 400
+        )
     return img
 
 
@@ -2154,7 +2233,9 @@ def _library_item_to_user_index_entry(
         "source": source,
         "title": title.strip()[:120],
         "age_segment": normalized_age,
-        "library_folder": _model_library_folder_for_age(normalized_age, normalized_gender),
+        "library_folder": _model_library_folder_for_age(
+            normalized_age, normalized_gender
+        ),
         "gender": normalized_gender,
         "appearance_direction": _clean_optional_text(appearance_direction, max_len=80),
         "style_tags": _clean_style_tags(style_tags),
@@ -2231,9 +2312,7 @@ async def _add_user_library_item(
         gender=normalized_gender,
         appearance_direction=cleaned_appearance,
         style_tags=cleaned_tags,
-        library_folder=_model_library_folder_for_age(
-            normalized_age, normalized_gender
-        ),
+        library_folder=_model_library_folder_for_age(normalized_age, normalized_gender),
         metadata_jsonb=metadata_jsonb,
     )
     image_metadata = dict(getattr(image, "metadata_jsonb", None) or {})
@@ -2381,10 +2460,14 @@ async def _get_run(
 
 async def _load_steps(db: AsyncSession, run_id: str) -> list[WorkflowStep]:
     rows = (
-        await db.execute(
-            select(WorkflowStep).where(WorkflowStep.workflow_run_id == run_id)
+        (
+            await db.execute(
+                select(WorkflowStep).where(WorkflowStep.workflow_run_id == run_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     # apparel 与 poster 的 step_key 互不重叠；合并成一张顺序表，
     # 未识别的 key 保留尾部稳定顺序。
     order: dict[str, int] = {}
@@ -2435,7 +2518,9 @@ async def _workflow_steps_and_candidates(
             await db.execute(
                 select(ModelCandidate).where(ModelCandidate.workflow_run_id == run.id)
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     return steps, candidates
 
@@ -2447,7 +2532,11 @@ def _workflow_direct_task_ids(
     return _dedupe_nonempty(
         [
             *(task_id for step in steps for task_id in (step.task_ids or [])),
-            *(task_id for candidate in candidates for task_id in (candidate.task_ids or [])),
+            *(
+                task_id
+                for candidate in candidates
+                for task_id in (candidate.task_ids or [])
+            ),
         ]
     )
 
@@ -2471,10 +2560,16 @@ def _workflow_direct_image_ids(
 def _candidate_reference_image_ids(candidate: ModelCandidate) -> list[str]:
     brief = getattr(candidate, "model_brief_json", None) or {}
     raw_candidate_ids = brief.get("candidate_image_ids")
-    candidate_image_ids = raw_candidate_ids if isinstance(raw_candidate_ids, list) else []
+    candidate_image_ids = (
+        raw_candidate_ids if isinstance(raw_candidate_ids, list) else []
+    )
     return _dedupe_nonempty(
         [
-            *(image_id for image_id in candidate_image_ids if isinstance(image_id, str)),
+            *(
+                image_id
+                for image_id in candidate_image_ids
+                if isinstance(image_id, str)
+            ),
             candidate.contact_sheet_image_id,
             candidate.portrait_image_id,
             candidate.front_image_id,
@@ -2517,7 +2612,9 @@ async def _workflow_generation_rows_from_task_ids(
                     Generation.id.in_(task_ids),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     if not include_dual_bonus:
         return base_generations
@@ -2536,7 +2633,9 @@ async def _workflow_generation_rows_from_task_ids(
                 )
                 .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     return [*base_generations, *bonus_generations]
 
@@ -2749,7 +2848,9 @@ def _showcase_prompt(
     brief = selected_candidate.model_brief_json or {}
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
     must_preserve = product_analysis.get("must_preserve")
-    fallback_preserve = "颜色、版型、款式、领口、袖型、衣长、图案/logo、纽扣/拉链/口袋/缝线"
+    fallback_preserve = (
+        "颜色、版型、款式、领口、袖型、衣长、图案/logo、纽扣/拉链/口袋/缝线"
+    )
     preserve_items = (
         [str(item).strip() for item in must_preserve if str(item).strip()]
         if isinstance(must_preserve, list)
@@ -2761,7 +2862,9 @@ def _showcase_prompt(
         height_cm = (
             int(height_cm_raw)
             if height_cm_raw is not None
-            else _infer_model_height_cm(" ".join(part for part in (summary, user_prompt) if part))
+            else _infer_model_height_cm(
+                " ".join(part for part in (summary, user_prompt) if part)
+            )
         )
     except (TypeError, ValueError):
         height_cm = _infer_model_height_cm(
@@ -2772,7 +2875,9 @@ def _showcase_prompt(
         f"身高 {height_cm}cm，头身比和肢体长度沿用参考模特。"
         f"模特方向：{summary}。"
     )
-    accessory_direction = "少量自然搭配，不要抢衣服主体；如果附件中包含已选配饰四宫格，优先参考它。"
+    accessory_direction = (
+        "少量自然搭配，不要抢衣服主体；如果附件中包含已选配饰四宫格，优先参考它。"
+    )
     if shot_variant is None:
         shot_variant = _showcase_default_variant(template, shot_type, age_segment)
     shot_direction = shot_variant["label"] if shot_variant else shot_type
@@ -2789,7 +2894,9 @@ def _showcase_prompt(
     style_region = _style_region_from_text(summary)
     return _showcase_prompt_brief(
         user_direction=user_prompt,
-        template_direction=_template_requirement(template, product_analysis, scene_environment),
+        template_direction=_template_requirement(
+            template, product_analysis, scene_environment
+        ),
         product_preserve=product_preserve,
         accessory_direction=accessory_direction,
         model_consistency=model_consistency,
@@ -2837,11 +2944,7 @@ def _showcase_pick_shot_variants(
         plan=plan,
         seed_key=seed_key,
         min_product_first=(
-            output_count
-            if output_count <= 4
-            else 6
-            if output_count <= 8
-            else 12
+            output_count if output_count <= 4 else 6 if output_count <= 8 else 12
         ),
     )
     return list(zip(plan, variants))
@@ -2854,7 +2957,11 @@ def _revision_prompt(
     selected_candidate: ModelCandidate,
 ) -> str:
     must_preserve = product_analysis.get("must_preserve")
-    preserve = ", ".join(str(x) for x in must_preserve) if isinstance(must_preserve, list) else ""
+    preserve = (
+        ", ".join(str(x) for x in must_preserve)
+        if isinstance(must_preserve, list)
+        else ""
+    )
     return (
         "请根据用户要求返修这张服饰电商模特图。"
         "【商品 1:1 还原】衣服以白底产品图为准，不要改款、改色、改廓形、改领口袖型衣长、改图案/logo、改纽扣拉链口袋缝线。"
@@ -2913,7 +3020,9 @@ def _accessory_preview_prompt(
     )
 
 
-def _accessory_plan_from_product_analysis(product_analysis: dict[str, Any] | None) -> dict[str, Any]:
+def _accessory_plan_from_product_analysis(
+    product_analysis: dict[str, Any] | None,
+) -> dict[str, Any]:
     raw_items = (product_analysis or {}).get("styling_recommendations")
     items = _clean_string_list(_coerce_string_list(raw_items), max_items=3, max_len=80)
     return {
@@ -2999,7 +3108,8 @@ def _extract_jsonish_value(value: Any) -> Any:
             return _extract_jsonish_value(value[0])
         dict_items = [item for item in value if isinstance(item, dict)]
         if dict_items and all(
-            any(key in item for key in ("type", "text", "content")) for item in dict_items
+            any(key in item for key in ("type", "text", "content"))
+            for item in dict_items
         ):
             chunks = [
                 str(_extract_jsonish_value(item))
@@ -3056,9 +3166,7 @@ def _normalize_product_analysis_payload(parsed: dict[str, Any]) -> dict[str, Any
             *payload.get("key_details", []),
         ]
         preserve = _dedupe_nonempty(
-            str(item)
-            for item in visible_bits
-            if item not in (None, "", "unknown")
+            str(item) for item in visible_bits if item not in (None, "", "unknown")
         )
     payload["must_preserve"] = preserve or ["颜色", "廓形", "可见商品细节"]
     return {key: payload.get(key) for key in PRODUCT_ANALYSIS_FIELDS}
@@ -3121,7 +3229,11 @@ def _quality_payload_from_text(text: str) -> dict[str, Any]:
             {
                 "severity": "medium",
                 "type": "quality_review",
-                "message": str(parsed.get("summary_text") or text or "QC review did not return issue details."),
+                "message": str(
+                    parsed.get("summary_text")
+                    or text
+                    or "QC review did not return issue details."
+                ),
             }
         ]
     recommendation = str(parsed.get("recommendation") or "review").strip().lower()
@@ -3129,11 +3241,16 @@ def _quality_payload_from_text(text: str) -> dict[str, Any]:
         recommendation = "revise"
     return {
         "overall_score": _clamp_score(parsed.get("overall_score"), 70),
-        "product_fidelity_score": _clamp_score(parsed.get("product_fidelity_score"), 70),
-        "model_consistency_score": _clamp_score(parsed.get("model_consistency_score"), 70),
+        "product_fidelity_score": _clamp_score(
+            parsed.get("product_fidelity_score"), 70
+        ),
+        "model_consistency_score": _clamp_score(
+            parsed.get("model_consistency_score"), 70
+        ),
         "aesthetic_score": _clamp_score(parsed.get("aesthetic_score"), 70),
         "artifact_score": _clamp_score(parsed.get("artifact_score"), 70),
-        "issues_json": [item for item in issues if isinstance(item, dict)] or [
+        "issues_json": [item for item in issues if isinstance(item, dict)]
+        or [
             {
                 "severity": "medium",
                 "type": "quality_review",
@@ -3303,7 +3420,9 @@ def _candidate_image_params() -> ImageParamsIn:
         render_quality="high",
         fast=False,
     )
-    return params.model_copy(update={"output_format": "png", "output_compression": None})
+    return params.model_copy(
+        update={"output_format": "png", "output_compression": None}
+    )
 
 
 def _accessory_preview_image_params() -> ImageParamsIn:
@@ -3314,7 +3433,9 @@ def _accessory_preview_image_params() -> ImageParamsIn:
         final_quality="high",
         fast=False,
     )
-    return params.model_copy(update={"output_format": "png", "output_compression": None})
+    return params.model_copy(
+        update={"output_format": "png", "output_compression": None}
+    )
 
 
 def _merge_product_corrections(
@@ -3369,11 +3490,15 @@ async def _sync_workflow_outputs(
                 .where(ModelCandidate.workflow_run_id == run.id)
                 .order_by(ModelCandidate.candidate_index.asc())
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     if candidates:
         all_candidate_task_ids = [
-            task_id for candidate in candidates for task_id in (candidate.task_ids or [])
+            task_id
+            for candidate in candidates
+            for task_id in (candidate.task_ids or [])
         ]
         images_by_gen: dict[str, Image] = {}
         gens_by_id: dict[str, Generation] = {}
@@ -3381,43 +3506,61 @@ async def _sync_workflow_outputs(
         bonus_parent_by_gen: dict[str, str] = {}
         if all_candidate_task_ids:
             base_generations = (
-                await db.execute(
-                    select(Generation).where(Generation.id.in_(all_candidate_task_ids))
-                )
-            ).scalars().all()
-            bonus_generations = (
-                await db.execute(
-                    select(Generation)
-                    .where(
-                        Generation.user_id == run.user_id,
-                        Generation.upstream_request["parent_generation_id"].astext.in_(
-                            all_candidate_task_ids
-                        ),
-                        Generation.upstream_request["is_dual_race_bonus"]
-                        .as_boolean()
-                        .is_(True),
+                (
+                    await db.execute(
+                        select(Generation).where(
+                            Generation.id.in_(all_candidate_task_ids)
+                        )
                     )
-                    .order_by(Generation.created_at.asc(), Generation.id.asc())
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
+            bonus_generations = (
+                (
+                    await db.execute(
+                        select(Generation)
+                        .where(
+                            Generation.user_id == run.user_id,
+                            Generation.upstream_request[
+                                "parent_generation_id"
+                            ].astext.in_(all_candidate_task_ids),
+                            Generation.upstream_request["is_dual_race_bonus"]
+                            .as_boolean()
+                            .is_(True),
+                        )
+                        .order_by(Generation.created_at.asc(), Generation.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
             generations = [*base_generations, *bonus_generations]
             gens_by_id = {g.id: g for g in generations}
             for generation in bonus_generations:
                 req = generation.upstream_request or {}
-                parent_id = req.get("parent_generation_id") if isinstance(req, dict) else None
+                parent_id = (
+                    req.get("parent_generation_id") if isinstance(req, dict) else None
+                )
                 if isinstance(parent_id, str) and parent_id:
-                    bonus_gen_ids_by_parent.setdefault(parent_id, []).append(generation.id)
+                    bonus_gen_ids_by_parent.setdefault(parent_id, []).append(
+                        generation.id
+                    )
                     bonus_parent_by_gen[generation.id] = parent_id
             images = (
-                await db.execute(
-                    select(Image)
-                    .where(
-                        Image.owner_generation_id.in_([g.id for g in generations]),
-                        Image.deleted_at.is_(None),
+                (
+                    await db.execute(
+                        select(Image)
+                        .where(
+                            Image.owner_generation_id.in_([g.id for g in generations]),
+                            Image.deleted_at.is_(None),
+                        )
+                        .order_by(Image.created_at.asc(), Image.id.asc())
                     )
-                    .order_by(Image.created_at.asc(), Image.id.asc())
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for image in images:
                 if (
                     image.owner_generation_id
@@ -3540,43 +3683,57 @@ async def _sync_workflow_outputs(
     approval_step = steps.get("model_approval")
     if approval_step and approval_step.task_ids:
         accessory_base_generations = (
-            await db.execute(
-                select(Generation).where(Generation.id.in_(approval_step.task_ids))
-            )
-        ).scalars().all()
-        accessory_bonus_generations = (
-            await db.execute(
-                select(Generation)
-                .where(
-                    Generation.user_id == run.user_id,
-                    Generation.upstream_request["parent_generation_id"].astext.in_(
-                        approval_step.task_ids
-                    ),
-                    Generation.upstream_request["is_dual_race_bonus"]
-                    .as_boolean()
-                    .is_(True),
+            (
+                await db.execute(
+                    select(Generation).where(Generation.id.in_(approval_step.task_ids))
                 )
-                .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
+        accessory_bonus_generations = (
+            (
+                await db.execute(
+                    select(Generation)
+                    .where(
+                        Generation.user_id == run.user_id,
+                        Generation.upstream_request["parent_generation_id"].astext.in_(
+                            approval_step.task_ids
+                        ),
+                        Generation.upstream_request["is_dual_race_bonus"]
+                        .as_boolean()
+                        .is_(True),
+                    )
+                    .order_by(Generation.created_at.asc(), Generation.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
         accessory_generations = [
             *accessory_base_generations,
             *accessory_bonus_generations,
         ]
         accessory_images = (
-            await db.execute(
-                select(Image)
-                .where(
-                    Image.owner_generation_id.in_(
-                        [generation.id for generation in accessory_generations]
-                    ),
-                    Image.deleted_at.is_(None),
+            (
+                await db.execute(
+                    select(Image)
+                    .where(
+                        Image.owner_generation_id.in_(
+                            [generation.id for generation in accessory_generations]
+                        ),
+                        Image.deleted_at.is_(None),
+                    )
+                    .order_by(Image.created_at.asc(), Image.id.asc())
                 )
-                .order_by(Image.created_at.asc(), Image.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if accessory_images:
-            approval_step.image_ids = _dedupe_nonempty(image.id for image in accessory_images)
+            approval_step.image_ids = _dedupe_nonempty(
+                image.id for image in accessory_images
+            )
             if approval_step.status == "running":
                 approval_step.status = "needs_review"
                 run.status = "needs_review"
@@ -3606,36 +3763,50 @@ async def _sync_workflow_outputs(
                 run.current_step = "model_approval"
     if showcase_step and showcase_step.task_ids:
         base_generations = (
-            await db.execute(
-                select(Generation).where(Generation.id.in_(showcase_step.task_ids))
-            )
-        ).scalars().all()
-        bonus_generations = (
-            await db.execute(
-                select(Generation)
-                .where(
-                    Generation.user_id == run.user_id,
-                    Generation.upstream_request["parent_generation_id"].astext.in_(
-                        showcase_step.task_ids
-                    ),
-                    Generation.upstream_request["is_dual_race_bonus"]
-                    .as_boolean()
-                    .is_(True),
+            (
+                await db.execute(
+                    select(Generation).where(Generation.id.in_(showcase_step.task_ids))
                 )
-                .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
+        bonus_generations = (
+            (
+                await db.execute(
+                    select(Generation)
+                    .where(
+                        Generation.user_id == run.user_id,
+                        Generation.upstream_request["parent_generation_id"].astext.in_(
+                            showcase_step.task_ids
+                        ),
+                        Generation.upstream_request["is_dual_race_bonus"]
+                        .as_boolean()
+                        .is_(True),
+                    )
+                    .order_by(Generation.created_at.asc(), Generation.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
         generations = [*base_generations, *bonus_generations]
         images = (
-            await db.execute(
-                select(Image)
-                .where(
-                    Image.owner_generation_id.in_([generation.id for generation in generations]),
-                    Image.deleted_at.is_(None),
+            (
+                await db.execute(
+                    select(Image)
+                    .where(
+                        Image.owner_generation_id.in_(
+                            [generation.id for generation in generations]
+                        ),
+                        Image.deleted_at.is_(None),
+                    )
+                    .order_by(Image.created_at.asc(), Image.id.asc())
                 )
-                .order_by(Image.created_at.asc(), Image.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         image_ids = _dedupe_nonempty(image.id for image in images)
         if image_ids:
             showcase_step.image_ids = image_ids
@@ -3761,7 +3932,9 @@ async def _load_quality_reports(db: AsyncSession, run_id: str) -> list[QualityRe
                 .where(QualityReport.workflow_run_id == run_id)
                 .order_by(QualityReport.created_at.asc(), QualityReport.id.asc())
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
 
 
@@ -3793,13 +3966,17 @@ async def _sync_quality_reports_from_tasks(
     if not task_ids:
         return
     completions = (
-        await db.execute(
-            select(Completion).where(
-                Completion.id.in_(task_ids),
-                Completion.user_id == run.user_id,
+        (
+            await db.execute(
+                select(Completion).where(
+                    Completion.id.in_(task_ids),
+                    Completion.user_id == run.user_id,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     completion_by_id = {completion.id: completion for completion in completions}
     for image_id, raw_task_id in review_map.items():
         if not isinstance(image_id, str) or not isinstance(raw_task_id, str):
@@ -3878,7 +4055,9 @@ async def _ensure_legacy_quality_reports(
                     QualityReport.image_id.in_([image.id for image in images]),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     }
     for image in images:
         if image.id in existing:
@@ -3930,7 +4109,9 @@ async def _image_out_map(db: AsyncSession, images: list[Image]) -> dict[str, Ima
     variant_map: dict[str, set[str]] = {}
     for image_id, kind in variant_rows:
         variant_map.setdefault(image_id, set()).add(kind)
-    return {image.id: _image_to_out(image, variant_map.get(image.id)) for image in images}
+    return {
+        image.id: _image_to_out(image, variant_map.get(image.id)) for image in images
+    }
 
 
 def _image_to_out(img: Image, variant_kinds: set[str] | None = None) -> ImageOut:
@@ -3994,7 +4175,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
                 .where(ModelCandidate.workflow_run_id == run.id)
                 .order_by(ModelCandidate.candidate_index.asc())
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     reports = await _load_quality_reports(db, run.id)
     for row in [*steps, *candidates, *reports]:
@@ -4014,7 +4197,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
                     .where(PosterMaster.workflow_run_id == run.id)
                     .order_by(PosterMaster.candidate_index.asc())
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         poster_renders_rows = list(
             (
@@ -4023,7 +4208,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
                     .where(PosterRender.workflow_run_id == run.id)
                     .order_by(PosterRender.created_at.asc(), PosterRender.id.asc())
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         for row in [*poster_masters_rows, *poster_renders_rows]:
             await db.refresh(row)
@@ -4053,10 +4240,15 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
             (
                 await db.execute(
                     select(Generation)
-                    .where(Generation.id.in_(all_task_ids), Generation.user_id == run.user_id)
+                    .where(
+                        Generation.id.in_(all_task_ids),
+                        Generation.user_id == run.user_id,
+                    )
                     .order_by(Generation.created_at.asc(), Generation.id.asc())
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
     if all_task_ids:
         owned_images = list(
@@ -4065,7 +4257,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
                     select(Image)
                     .where(
                         or_(
-                            Image.id.in_(image_ids) if image_ids else Image.id == "__none__",
+                            Image.id.in_(image_ids)
+                            if image_ids
+                            else Image.id == "__none__",
                             Image.owner_generation_id.in_(all_task_ids),
                         ),
                         Image.user_id == run.user_id,
@@ -4073,7 +4267,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
                     )
                     .order_by(Image.created_at.asc(), Image.id.asc())
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
     elif image_ids:
         owned_images = list(
@@ -4087,7 +4283,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
                     )
                     .order_by(Image.created_at.asc(), Image.id.asc())
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
     else:
         owned_images = []
@@ -4107,8 +4305,12 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
         if image.id not in product_image_ids and image.id in image_map
     ]
 
-    poster_masters_out = [PosterMasterOut.model_validate(m) for m in poster_masters_rows]
-    poster_renders_out = [PosterRenderOut.model_validate(r) for r in poster_renders_rows]
+    poster_masters_out = [
+        PosterMasterOut.model_validate(m) for m in poster_masters_rows
+    ]
+    poster_renders_out = [
+        PosterRenderOut.model_validate(r) for r in poster_renders_rows
+    ]
 
     return WorkflowRunOut(
         id=run.id,
@@ -4135,7 +4337,9 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
     )
 
 
-def _list_item_from_run(run: WorkflowRun, output_count: int = 0) -> WorkflowRunListItemOut:
+def _list_item_from_run(
+    run: WorkflowRun, output_count: int = 0
+) -> WorkflowRunListItemOut:
     return WorkflowRunListItemOut(
         id=run.id,
         conversation_id=run.conversation_id,
@@ -4371,14 +4575,10 @@ async def patch_apparel_model_library_item(
         row.title = body.title.strip()[:120]
     if body.age_segment is not None:
         row.age_segment = _normalize_age_segment(body.age_segment)
-        row.library_folder = _model_library_folder_for_age(
-            row.age_segment, row.gender
-        )
+        row.library_folder = _model_library_folder_for_age(row.age_segment, row.gender)
     if body.gender is not None:
         row.gender = _clean_optional_text(body.gender, max_len=40)
-        row.library_folder = _model_library_folder_for_age(
-            row.age_segment, row.gender
-        )
+        row.library_folder = _model_library_folder_for_age(row.age_segment, row.gender)
     if body.appearance_direction is not None:
         row.appearance_direction = _clean_optional_text(
             body.appearance_direction, max_len=80
@@ -4497,16 +4697,19 @@ async def list_workflows(
     runs = list(
         (
             await db.execute(
-                stmt.order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id)).limit(limit)
+                stmt.order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id)).limit(
+                    limit
+                )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     output_counts: dict[str, int] = {}
     if runs:
         rows = (
             await db.execute(
-                select(WorkflowStep.workflow_run_id, WorkflowStep.image_ids)
-                .where(
+                select(WorkflowStep.workflow_run_id, WorkflowStep.image_ids).where(
                     WorkflowStep.workflow_run_id.in_([run.id for run in runs]),
                     WorkflowStep.step_key.in_(
                         ["showcase_generation", "multi_size_generation"]
@@ -4656,17 +4859,23 @@ async def create_model_candidates(
     if product_step.status != "approved":
         raise _http("product_not_approved", "approve product analysis first", 409)
     existing_candidates = (
-        await db.execute(
-            select(ModelCandidate)
-            .where(ModelCandidate.workflow_run_id == run.id)
-            .order_by(ModelCandidate.candidate_index.asc())
+        (
+            await db.execute(
+                select(ModelCandidate)
+                .where(ModelCandidate.workflow_run_id == run.id)
+                .order_by(ModelCandidate.candidate_index.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     model_settings = await _step(db, run.id, "model_settings")
     candidate_step = await _step(db, run.id, "model_candidates")
     if candidate_step.status == "running":
-        raise _http("already_running", "model candidates are already being generated", 409)
+        raise _http(
+            "already_running", "model candidates are already being generated", 409
+        )
     if any(candidate.status == "selected" for candidate in existing_candidates):
         raise _http(
             "model_already_selected",
@@ -4687,10 +4896,14 @@ async def create_model_candidates(
     run.current_step = "model_candidates"
     run.status = "running"
 
-    conv = await _get_owned_conversation(db, user_id=user.id, conversation_id=run.conversation_id or "")
+    conv = await _get_owned_conversation(
+        db, user_id=user.id, conversation_id=run.conversation_id or ""
+    )
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
-    model_direction = body.style_prompt or run.user_prompt or "premium ecommerce synthetic model"
+    model_direction = (
+        body.style_prompt or run.user_prompt or "premium ecommerce synthetic model"
+    )
     height_cm = _infer_model_height_cm(model_direction)
     height_requirement = _height_requirement(model_direction)
     existing_count = len(existing_candidates)
@@ -4801,7 +5014,9 @@ async def select_apparel_model_library_item(
     )
     existing_accessory_plan = _coerce_accessory_plan_payload(
         (model_settings.output_json or {}).get("accessory_plan")
-    ) or _coerce_accessory_plan_payload((model_settings.input_json or {}).get("accessory_plan"))
+    ) or _coerce_accessory_plan_payload(
+        (model_settings.input_json or {}).get("accessory_plan")
+    )
     accessory_plan = (
         requested_accessory_plan
         or existing_accessory_plan
@@ -4814,10 +5029,16 @@ async def select_apparel_model_library_item(
         or run.user_prompt
     )
     existing_count = (
-        await db.execute(
-            select(ModelCandidate.id).where(ModelCandidate.workflow_run_id == run.id)
+        (
+            await db.execute(
+                select(ModelCandidate.id).where(
+                    ModelCandidate.workflow_run_id == run.id
+                )
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     candidate = ModelCandidate(
         workflow_run_id=run.id,
         candidate_index=len(existing_count) + 1,
@@ -4970,7 +5191,9 @@ async def approve_model_candidate(
     if candidate is None:
         raise _http("not_found", "model candidate not found", 404)
     if candidate.status != "ready" or not candidate.contact_sheet_image_id:
-        raise _http("candidate_not_ready", "model candidate is not ready to approve", 409)
+        raise _http(
+            "candidate_not_ready", "model candidate is not ready to approve", 409
+        )
     selected_accessory_image_id = body.selected_accessory_image_id
     approval = await _step(db, run.id, "model_approval")
     if selected_accessory_image_id:
@@ -4985,12 +5208,18 @@ async def approve_model_candidate(
             )
         ).scalar_one_or_none()
         if valid_accessory_image_id is None:
-            raise _http("invalid_accessory_image", "selected accessory preview is invalid", 400)
+            raise _http(
+                "invalid_accessory_image", "selected accessory preview is invalid", 400
+            )
     all_candidates = (
-        await db.execute(
-            select(ModelCandidate).where(ModelCandidate.workflow_run_id == run.id)
+        (
+            await db.execute(
+                select(ModelCandidate).where(ModelCandidate.workflow_run_id == run.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     now = _now()
     for row in all_candidates:
         if row.id == candidate.id:
@@ -5040,13 +5269,19 @@ async def reopen_model_selection(
     run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
     await _sync_workflow_outputs(db, run)
     candidates = (
-        await db.execute(
-            select(ModelCandidate).where(ModelCandidate.workflow_run_id == run.id)
+        (
+            await db.execute(
+                select(ModelCandidate).where(ModelCandidate.workflow_run_id == run.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for candidate in candidates:
         if candidate.status in {"selected", "rejected"}:
-            candidate.status = "ready" if candidate.contact_sheet_image_id else "generating"
+            candidate.status = (
+                "ready" if candidate.contact_sheet_image_id else "generating"
+            )
             candidate.selected_at = None
     approval = await _step(db, run.id, "model_approval")
     previous_approval_input = dict(approval.input_json or {})
@@ -5055,8 +5290,12 @@ async def reopen_model_selection(
     product_step = await _step(db, run.id, "product_analysis")
     preserved_accessory_plan = (
         _coerce_accessory_plan_payload(previous_approval_input.get("accessory_plan"))
-        or _coerce_accessory_plan_payload((candidate_step.input_json or {}).get("accessory_plan"))
-        or _coerce_accessory_plan_payload((model_settings.output_json or {}).get("accessory_plan"))
+        or _coerce_accessory_plan_payload(
+            (candidate_step.input_json or {}).get("accessory_plan")
+        )
+        or _coerce_accessory_plan_payload(
+            (model_settings.output_json or {}).get("accessory_plan")
+        )
         or _accessory_plan_from_product_analysis(product_step.output_json or {})
     )
     preserved_style_prompt = (
@@ -5070,7 +5309,11 @@ async def reopen_model_selection(
     approval.approved_at = None
     approval.approved_by = None
     approval.input_json = {
-        **({"accessory_plan": preserved_accessory_plan} if preserved_accessory_plan else {}),
+        **(
+            {"accessory_plan": preserved_accessory_plan}
+            if preserved_accessory_plan
+            else {}
+        ),
         **({"style_prompt": preserved_style_prompt} if preserved_style_prompt else {}),
     }
     approval.output_json = {}
@@ -5088,7 +5331,9 @@ async def reopen_model_selection(
     quality.output_json = {}
     quality.task_ids = []
     quality.image_ids = []
-    await db.execute(delete(QualityReport).where(QualityReport.workflow_run_id == run.id))
+    await db.execute(
+        delete(QualityReport).where(QualityReport.workflow_run_id == run.id)
+    )
     delivery = await _step(db, run.id, "delivery")
     delivery.status = "waiting_input"
     delivery.input_json = {}
@@ -5132,7 +5377,9 @@ async def create_accessory_previews(
             409,
         )
     approval = await _step(db, run.id, "model_approval")
-    conv = await _get_owned_conversation(db, user_id=user.id, conversation_id=run.conversation_id or "")
+    conv = await _get_owned_conversation(
+        db, user_id=user.id, conversation_id=run.conversation_id or ""
+    )
     brief = candidate.model_brief_json or {}
     age_context = " ".join(
         str(part)
@@ -5209,7 +5456,9 @@ async def save_accessory_selection(
             )
         ).scalar_one_or_none()
         if valid_image_id is None:
-            raise _http("invalid_accessory_image", "selected accessory preview is invalid", 400)
+            raise _http(
+                "invalid_accessory_image", "selected accessory preview is invalid", 400
+            )
     approval.input_json = {
         **(approval.input_json or {}),
         "selected_accessory_image_id": selected_image_id,
@@ -5258,9 +5507,13 @@ async def create_showcase_images(
         raise _http("product_not_approved", "approve product analysis first", 409)
     candidate = await _selected_candidate(db, run.id)
     if not candidate.contact_sheet_image_id:
-        raise _http("missing_model_reference", "selected model has no reference image", 409)
+        raise _http(
+            "missing_model_reference", "selected model has no reference image", 409
+        )
     showcase = await _step(db, run.id, "showcase_generation")
-    conv = await _get_owned_conversation(db, user_id=user.id, conversation_id=run.conversation_id or "")
+    conv = await _get_owned_conversation(
+        db, user_id=user.id, conversation_id=run.conversation_id or ""
+    )
     age_segment = _infer_age_segment_from_workflow(run)
     seed_key = f"{run.id}:{body.template}:{body.output_count}:{showcase.task_ids and len(showcase.task_ids) or 0}"
     shot_picks = _showcase_pick_shot_variants(
@@ -5275,12 +5528,16 @@ async def create_showcase_images(
     accessory_plan = (approval.input_json or {}).get("accessory_plan")
     if not isinstance(accessory_plan, dict):
         accessory_plan = AccessoryPlanIn().model_dump()
-    selected_accessory_image_id = (approval.input_json or {}).get("selected_accessory_image_id")
+    selected_accessory_image_id = (approval.input_json or {}).get(
+        "selected_accessory_image_id"
+    )
     ref_ids = _showcase_reference_image_ids(
         product_image_ids=run.product_image_ids,
         model_image_id=candidate.contact_sheet_image_id,
         selected_accessory_image_id=(
-            selected_accessory_image_id if isinstance(selected_accessory_image_id, str) else None
+            selected_accessory_image_id
+            if isinstance(selected_accessory_image_id, str)
+            else None
         ),
     )
     existing_task_ids = _dedupe_nonempty(showcase.task_ids or [])
@@ -5385,7 +5642,9 @@ async def revise_showcase_image(
     await _sync_workflow_outputs(db, run)
     showcase = await _step(db, run.id, "showcase_generation")
     if image_id not in set(showcase.image_ids or []):
-        raise _http("invalid_image", "image is not a showcase output for this workflow", 404)
+        raise _http(
+            "invalid_image", "image is not a showcase output for this workflow", 404
+        )
     image = (
         await db.execute(
             select(Image).where(
@@ -5399,8 +5658,12 @@ async def revise_showcase_image(
         raise _http("not_found", "image not found", 404)
     product_step = await _step(db, run.id, "product_analysis")
     candidate = await _selected_candidate(db, run.id)
-    refs = _dedupe_nonempty([*run.product_image_ids, candidate.contact_sheet_image_id or "", image_id])
-    conv = await _get_owned_conversation(db, user_id=user.id, conversation_id=run.conversation_id or "")
+    refs = _dedupe_nonempty(
+        [*run.product_image_ids, candidate.contact_sheet_image_id or "", image_id]
+    )
+    conv = await _get_owned_conversation(
+        db, user_id=user.id, conversation_id=run.conversation_id or ""
+    )
     revision_index = len(showcase.task_ids or []) + 1
     bundle, _, gen_ids = await _create_workflow_task(
         db=db,
@@ -5528,18 +5791,21 @@ def _model_library_gender_label(genders: list[str]) -> str:
 
 def _model_library_run_title(
     *,
-    age_segment: str,
+    age_segment: str | None,
     gender: str | None = None,
     genders: list[str] | None = None,
     appearance_direction: str | None,
+    mode: str = "text",
 ) -> str:
-    age_label = _MODEL_LIBRARY_TITLE_AGE_LABELS.get(age_segment, age_segment)
+    age_key = age_segment or "young_adult"
+    age_label = _MODEL_LIBRARY_TITLE_AGE_LABELS.get(age_key, age_key)
     gender_label = _model_library_gender_label(genders or ([gender] if gender else []))
     appearance = (appearance_direction or "").strip()
+    prefix = "参考图生成" if mode == "reference_image" else "模特库生成"
     parts = [f"{age_label}{gender_label}"]
     if appearance:
         parts.append(appearance[:24])
-    title = " · ".join(["模特库生成", *parts])
+    title = " · ".join([prefix, *parts])
     return title[:120]
 
 
@@ -5551,6 +5817,7 @@ def _model_library_generate_prompt(
     extra_requirements: str | None,
     style_tags: list[str],
     candidate_index: int,
+    reference_mode: bool = False,
 ) -> str:
     """构造一张 2x2 contact sheet 模特参考图的 prompt。
 
@@ -5578,15 +5845,33 @@ def _model_library_generate_prompt(
     elif age_segment == "senior":
         age_directive = "age 60 or older, senior adult proportions"
     base_styling = "warm ivory sleeveless top and warm ivory shorts, barefoot"
-    appearance_directive = (
-        f"Appearance direction: {appearance}." if appearance else ""
-    )
+    appearance_directive = f"Appearance direction: {appearance}." if appearance else ""
     style_directive = f"Style references: {tag_text}." if tag_text else ""
     extras_directive = f"User notes: {extras}." if extras else ""
-    diversity = _model_diversity_anchor(
-        candidate_index=candidate_index,
-        gender=gender,
-        age_segment=age_segment,
+    diversity = (
+        ""
+        if reference_mode
+        else _model_diversity_anchor(
+            candidate_index=candidate_index,
+            gender=gender,
+            age_segment=age_segment,
+        )
+    )
+    reference_directive = (
+        "Use the attached reference image ONLY as the identity lock for the SAME "
+        "PERSON that must appear in all four panels. Preserve the reference "
+        "person's facial structure, eye shape, nose, mouth, eyebrows, skin tone, "
+        "hair color, hair length and hair style as faithfully as possible. The "
+        "reference image may be from any angle, expression, crop, or composition "
+        "(front, three-quarter, profile, back, close-up, candid). Do not copy the "
+        "reference pose, framing, background, clothing, or expression. Infer unseen "
+        "sides of the head and body from the reference, and re-render the same "
+        "person in the required front, true left profile, back, and frontal "
+        "headshot views with a neutral relaxed expression and closed mouth. If the "
+        "reference only shows the face or upper body, infer plausible full-body "
+        "proportions consistent with the inferred age and gender."
+        if reference_mode
+        else ""
     )
     return " ".join(
         part
@@ -5594,6 +5879,7 @@ def _model_library_generate_prompt(
             "Create one clean 2x2 ecommerce model reference contact sheet, exactly four panels: "
             "top-left front full body, top-right left 90-degree profile full body, "
             "bottom-left straight back full body, bottom-right close-up headshot.",
+            reference_directive,
             "Same model in all four panels, consistent framing, "
             "same camera height and distance for the three full-body views.",
             "Side panel must be a true left profile (only one eye visible, "
@@ -5624,7 +5910,9 @@ def _model_library_generate_image_params() -> ImageParamsIn:
         render_quality="high",
         fast=False,
     )
-    return params.model_copy(update={"output_format": "png", "output_compression": None})
+    return params.model_copy(
+        update={"output_format": "png", "output_compression": None}
+    )
 
 
 def _model_library_run_inputs(step: WorkflowStep) -> dict[str, Any]:
@@ -5638,6 +5926,13 @@ def _model_library_run_inputs(step: WorkflowStep) -> dict[str, Any]:
         else _normalize_model_gender(genders[0] if genders else raw.get("gender"))
     )
     return {
+        "mode": raw.get("mode") or "text",
+        "reference_image_id": _clean_optional_text(
+            raw.get("reference_image_id"), max_len=64
+        ),
+        "extracted_profile": raw.get("extracted_profile")
+        if isinstance(raw.get("extracted_profile"), dict)
+        else None,
         "age_segment": _normalize_age_segment(raw.get("age_segment")),
         "gender": gender,
         "genders": genders,
@@ -5653,9 +5948,7 @@ def _model_library_run_inputs(step: WorkflowStep) -> dict[str, Any]:
     }
 
 
-async def _saved_image_id_set(
-    db: AsyncSession, user_id: str
-) -> dict[str, str]:
+async def _saved_image_id_set(db: AsyncSession, user_id: str) -> dict[str, str]:
     """{ image_id -> library_item_id } map: 看哪些图已经收藏到当前用户的库。"""
     rows = (
         await db.execute(
@@ -5703,14 +5996,15 @@ async def _gather_job_image_outs(
     images = list(
         (
             await db.execute(
-                select(Image)
-                .where(
+                select(Image).where(
                     Image.id.in_(image_ids),
                     Image.user_id == user_id,
                     Image.deleted_at.is_(None),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     return await _image_out_map(db, images)
 
@@ -5727,30 +6021,30 @@ async def _model_library_image_meta_by_id(
     images = list(
         (
             await db.execute(
-                select(Image)
-                .where(
+                select(Image).where(
                     Image.id.in_(ids),
                     Image.user_id == user_id,
                     Image.deleted_at.is_(None),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
-    gen_ids = _dedupe_nonempty(
-        image.owner_generation_id or "" for image in images
-    )
+    gen_ids = _dedupe_nonempty(image.owner_generation_id or "" for image in images)
     generation_req: dict[str, dict[str, Any]] = {}
     if gen_ids:
         generations = list(
             (
                 await db.execute(
-                    select(Generation)
-                    .where(
+                    select(Generation).where(
                         Generation.id.in_(gen_ids),
                         Generation.user_id == user_id,
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         generation_req = {
             generation.id: dict(generation.upstream_request or {})
@@ -5836,15 +6130,11 @@ def _job_item_out(
         display_url = None
         thumb_url = None
     meta = image_meta or {}
-    resolved_tags = _clean_style_tags(
-        [*(meta.get("style_tags") or []), *style_tags]
-    )
+    resolved_tags = _clean_style_tags([*(meta.get("style_tags") or []), *style_tags])
     resolved_age = _normalize_age_segment(meta.get("age_segment") or age_segment)
     if resolved_age == "user_favorites" and age_segment:
         resolved_age = _normalize_age_segment(age_segment)
-    resolved_gender = _clean_optional_text(
-        meta.get("gender") or gender, max_len=40
-    )
+    resolved_gender = _clean_optional_text(meta.get("gender") or gender, max_len=40)
     resolved_appearance = _clean_optional_text(
         meta.get("appearance_direction") or appearance_direction,
         max_len=80,
@@ -5870,9 +6160,7 @@ def _job_item_out(
     billing_label = _clean_optional_text(
         meta.get("billing_label")
         or (
-            getattr(image_out, "billing_label", None)
-            if image_out is not None
-            else None
+            getattr(image_out, "billing_label", None) if image_out is not None else None
         ),
         max_len=32,
     )
@@ -5951,27 +6239,31 @@ async def _workflow_produced_model_image_ids(
         return produced
 
     owned = (
-        await db.execute(
-            select(Image.id).where(
-                Image.user_id == user_id,
-                Image.deleted_at.is_(None),
-                or_(
-                    Image.owner_generation_id.in_(all_task_ids),
-                    Image.owner_generation_id.in_(
-                        select(Generation.id).where(
-                            Generation.user_id == user_id,
-                            Generation.upstream_request[
-                                "parent_generation_id"
-                            ].astext.in_(all_task_ids),
-                            Generation.upstream_request[
-                                "is_dual_race_bonus"
-                            ].as_boolean().is_(True),
-                        )
+        (
+            await db.execute(
+                select(Image.id).where(
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
+                    or_(
+                        Image.owner_generation_id.in_(all_task_ids),
+                        Image.owner_generation_id.in_(
+                            select(Generation.id).where(
+                                Generation.user_id == user_id,
+                                Generation.upstream_request[
+                                    "parent_generation_id"
+                                ].astext.in_(all_task_ids),
+                                Generation.upstream_request["is_dual_race_bonus"]
+                                .as_boolean()
+                                .is_(True),
+                            )
+                        ),
                     ),
-                ),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     produced.update(iid for iid in owned if isinstance(iid, str) and iid)
     return produced
 
@@ -6046,7 +6338,8 @@ async def _job_from_library_run(
             image_out=image_out_map.get(bid),
             saved_item_id=saved_map.get(bid),
             age_segment=inputs.get("age_segment"),
-            gender=(image_meta_map.get(bid) or {}).get("gender") or inputs.get("gender"),
+            gender=(image_meta_map.get(bid) or {}).get("gender")
+            or inputs.get("gender"),
             style_tags=inputs.get("style_tags") or [],
             appearance_direction=inputs.get("appearance_direction"),
             image_meta=image_meta_map.get(bid),
@@ -6099,6 +6392,13 @@ async def _job_from_library_run(
         gender=inputs.get("gender"),
         appearance_direction=inputs.get("appearance_direction"),
         extra_requirements=inputs.get("extra_requirements"),
+        reference_image_id=inputs.get("reference_image_id"),
+        reference_image_url=(
+            _image_url(inputs["reference_image_id"])
+            if inputs.get("reference_image_id")
+            else None
+        ),
+        extracted_profile=inputs.get("extracted_profile"),
         items=items,
         candidates=candidates,
         error_message=error_message,
@@ -6136,9 +6436,7 @@ async def _job_from_project_candidate_step(
     )
     gender = profile.get("gender") if isinstance(profile, dict) else None
     appearance_direction = (
-        profile.get("appearance_direction")
-        if isinstance(profile, dict)
-        else None
+        profile.get("appearance_direction") if isinstance(profile, dict) else None
     )
     items = [
         _job_item_out(
@@ -6186,7 +6484,11 @@ async def _job_from_project_candidate_step(
         if generation.status
         in {GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value}
     ]
-    if failed_generations and not active_generations and len(image_ids) < requested_count:
+    if (
+        failed_generations
+        and not active_generations
+        and len(image_ids) < requested_count
+    ):
         if step_status == "running":
             step_status = "failed"
         if error_message is None:
@@ -6211,6 +6513,9 @@ async def _job_from_project_candidate_step(
         gender=gender,
         appearance_direction=appearance_direction,
         extra_requirements=None,
+        reference_image_id=None,
+        reference_image_url=None,
+        extracted_profile=None,
         items=items,
         candidates=candidates,
         error_message=error_message,
@@ -6227,6 +6532,7 @@ async def _enqueue_model_library_generate_tasks(
     run: WorkflowRun,
     step: WorkflowStep,
     body: ApparelModelLibraryGenerateIn,
+    reference_image_id: str | None = None,
 ) -> tuple[list[_PublishBundle], list[str]]:
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
@@ -6235,21 +6541,25 @@ async def _enqueue_model_library_generate_tasks(
     for gender in genders:
         for idx in range(1, int(body.count) + 1):
             task_index += 1
+            prompt_candidate_index = 1 if reference_image_id else idx
             prompt = _model_library_generate_prompt(
-                age_segment=body.age_segment,
+                age_segment=body.age_segment or "young_adult",
                 gender=gender,
                 appearance_direction=body.appearance_direction,
                 extra_requirements=body.extra_requirements,
                 style_tags=body.style_tags,
-                candidate_index=idx,
+                candidate_index=prompt_candidate_index,
+                reference_mode=reference_image_id is not None,
             )
             bundle, _, gen_ids = await _create_workflow_task(
                 db=db,
                 user=user,
                 conv=conv,
-                intent=Intent.TEXT_TO_IMAGE,
+                intent=Intent.IMAGE_TO_IMAGE
+                if reference_image_id
+                else Intent.TEXT_TO_IMAGE,
                 text=prompt,
-                attachment_ids=[],
+                attachment_ids=[reference_image_id] if reference_image_id else [],
                 idempotency_key=f"mlib:{run.id[:24]}:{gender}:{idx}",
                 workflow_run_id=run.id,
                 workflow_step_key=MODEL_LIBRARY_GENERATE_STEP_KEY,
@@ -6257,6 +6567,11 @@ async def _enqueue_model_library_generate_tasks(
                 workflow_meta={
                     "workflow_action": MODEL_LIBRARY_GENERATE_WORKER_ACTION,
                     "workflow_candidate_index": task_index,
+                    "workflow_model_library_mode": (
+                        "reference_image" if reference_image_id else "text"
+                    ),
+                    "workflow_model_library_reference_image_id": reference_image_id
+                    or "",
                     "workflow_model_library_age_segment": body.age_segment,
                     "workflow_model_library_gender": gender,
                     "workflow_model_library_appearance_direction": (
@@ -6272,6 +6587,55 @@ async def _enqueue_model_library_generate_tasks(
             bundles.append(bundle)
     step.task_ids = task_ids
     return bundles, task_ids
+
+
+def _model_library_explicit_genders(
+    body: ApparelModelLibraryGenerateIn,
+) -> list[str]:
+    raw = getattr(body, "genders", None)
+    genders = _dedupe_nonempty(raw or [])
+    if not genders and body.gender:
+        genders = [body.gender]
+    return [gender for gender in genders if gender in {"female", "male"}]
+
+
+def _reference_profile_has_required_text_fields(
+    body: ApparelModelLibraryGenerateIn,
+    extracted: ReferenceProfile | None,
+) -> bool:
+    age = body.age_segment or (extracted.age_segment if extracted else None)
+    gender = _model_library_explicit_genders(body) or (
+        [extracted.gender] if extracted and extracted.gender else []
+    )
+    return bool(age and gender)
+
+
+def _merge_reference_overrides(
+    body: ApparelModelLibraryGenerateIn,
+    extracted: ReferenceProfile | None,
+) -> ApparelModelLibraryGenerateIn:
+    explicit_genders = _model_library_explicit_genders(body)
+    extracted_tags = extracted.style_tags if extracted else []
+    merged_tags = _clean_style_tags([*(body.style_tags or []), *extracted_tags])
+    genders = explicit_genders
+    if not genders and extracted and extracted.gender in {"female", "male"}:
+        genders = [extracted.gender]
+    if not genders:
+        genders = ["female"]
+    return body.model_copy(
+        update={
+            "age_segment": body.age_segment
+            or (extracted.age_segment if extracted else None)
+            or "young_adult",
+            "gender": genders[0],
+            "genders": genders,
+            "appearance_direction": (
+                body.appearance_direction
+                or (extracted.appearance_direction if extracted else None)
+            ),
+            "style_tags": merged_tags,
+        }
+    )
 
 
 @router.post(
@@ -6295,12 +6659,39 @@ async def generate_apparel_model_library_job(
             f"count must be one of {sorted(MODEL_LIBRARY_GENERATE_COUNTS)}",
             422,
         )
+    apparel_model_library_generate_mode_total.labels(mode=body.mode).inc()
+    reference_image_id: str | None = None
+    extracted_profile: ReferenceProfile | None = None
+    if body.mode == "reference_image":
+        reference_image_id = body.reference_image_id
+        await _validate_owned_images(
+            db,
+            user_id=user.id,
+            image_ids=[reference_image_id or ""],
+            min_count=1,
+            max_count=1,
+        )
+        extracted_profile = await extract_reference_profile(
+            db=db,
+            user=user,
+            image_id=reference_image_id or "",
+        )
+        if not _reference_profile_has_required_text_fields(body, extracted_profile):
+            apparel_model_library_reference_extract_total.labels(result="failed").inc()
+            raise _http(
+                "reference_extract_failed",
+                "无法识别参考图人物特征，请换一张更清晰的人像，或切回文生图模式。",
+                422,
+            )
+        apparel_model_library_reference_extract_total.labels(result="ok").inc()
+        body = _merge_reference_overrides(body, extracted_profile)
     genders = _model_library_generate_genders(body)
     title = _model_library_run_title(
         age_segment=body.age_segment,
         gender=body.gender,
         genders=genders,
         appearance_direction=body.appearance_direction,
+        mode=body.mode,
     )
     conv = await _get_or_create_workflow_conversation(
         db,
@@ -6323,6 +6714,11 @@ async def generate_apparel_model_library_job(
         quality_mode="standard",
         metadata_jsonb={
             "template": "apparel_model_library_generate",
+            "mode": body.mode,
+            "reference_image_id": reference_image_id,
+            "extracted_profile": (
+                extracted_profile.to_dict() if extracted_profile else None
+            ),
             "model_profile": {
                 "age_segment": body.age_segment,
                 "gender": genders[0],
@@ -6338,6 +6734,11 @@ async def generate_apparel_model_library_job(
         step_key=MODEL_LIBRARY_GENERATE_STEP_KEY,
         status="running",
         input_json={
+            "mode": body.mode,
+            "reference_image_id": reference_image_id,
+            "extracted_profile": (
+                extracted_profile.to_dict() if extracted_profile else None
+            ),
             "age_segment": body.age_segment,
             "gender": genders[0],
             "genders": genders,
@@ -6359,6 +6760,7 @@ async def generate_apparel_model_library_job(
         run=run,
         step=step,
         body=body,
+        reference_image_id=reference_image_id,
     )
     conv.last_activity_at = _now()
     await db.commit()
@@ -6397,7 +6799,9 @@ async def list_apparel_model_library_jobs(
                 .order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id))
                 .limit(fetch_limit)
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     library_jobs: list[ApparelModelLibraryJobOut] = []
     for run in library_runs:
@@ -6515,7 +6919,9 @@ async def clear_apparel_model_library_jobs(
                     WorkflowRun.status.in_(["completed", "failed", "canceled"]),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     now = _now()
     for run in rows:
@@ -6644,155 +7050,15 @@ async def _api_call_tagging_upstream(
 ) -> dict[str, Any]:
     """API 进程内同步调 vision provider 做模特库自动打标签。
 
-    [DECISION] worker 进程和 api 进程的 sys.path 隔离（docker-compose
-    `working_dir` 不同），api 不能直接 import apps.worker.* 的模块。
-    这里把"读图字节 + provider failover + httpx + JSON 解析"的精简版搬过来，
-    避免再加一个共享 package。失败 graceful，返回 {} 让调用方留默认空字段。
+    与参考图生模特共用 ``lumen_core.vision_tagging`` 的 prompt、解析和
+    Responses 请求构造；失败 graceful，返回 {} 让调用方留默认空字段。
     """
-    import base64
-
-    from lumen_core.providers import (
-        DEFAULT_LEGACY_PROVIDER_BASE_URL,
-        build_effective_provider_config,
-        endpoint_kind_allowed,
-        resolve_provider_proxy_url,
-        weighted_priority_order,
+    result = await auto_tag_owned_model_library_image(
+        db,
+        user_id=user_id,
+        image_id=image_id,
     )
-    from lumen_core.runtime_settings import get_spec
-
-    from ..runtime_settings import get_setting
-
-    image = (
-        await db.execute(
-            select(Image).where(
-                Image.id == image_id,
-                Image.user_id == user_id,
-                Image.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if image is None:
-        return {}
-    storage_key = (image.storage_key or "").strip()
-    if not storage_key:
-        return {}
-    try:
-        path = _storage_path(storage_key)
-        raw = path.read_bytes()
-    except Exception as exc:  # noqa: BLE001
-        logger.info(
-            "model_library auto_tag api: read image failed key=%s err=%s",
-            storage_key,
-            exc,
-        )
-        return {}
-    if not raw:
-        return {}
-    mime = image.mime if isinstance(image.mime, str) and image.mime.startswith("image/") else "image/png"
-    image_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-
-    spec_providers = get_spec("providers")
-    raw_providers = (
-        await get_setting(db, spec_providers) if spec_providers else None
-    )
-    providers, _proxies, _errors = build_effective_provider_config(
-        raw_providers=raw_providers,
-        legacy_base_url=(
-            os.environ.get("UPSTREAM_BASE_URL") or DEFAULT_LEGACY_PROVIDER_BASE_URL
-        ),
-        legacy_api_key=os.environ.get("UPSTREAM_API_KEY"),
-    )
-    providers = [p for p in providers if endpoint_kind_allowed(p, "responses")]
-    counters: dict[int, int] = {}
-    ordered = weighted_priority_order(providers, counters)
-    if not ordered:
-        return {}
-
-    instructions = (
-        "你是模特库自动打标签助手。仔细分析这张模特图，输出严格 JSON。\n\n"
-        "字段（全部必填，无法判断填空串/空数组）：\n"
-        "- appearance_direction：英文小写之一：asian / east_asian / southeast_asian / "
-        "south_asian / european / latin / middle_eastern / african / mixed / other。\n"
-        "- style_tags：3-6 个中文短词，每个 ≤ 8 字，只写两类：\n"
-        "    1) 相貌气质 — 五官 / 脸型 / 肤色 / 发型 / 骨相 / 整体观感"
-        "（例：清冷、高颅顶、英气、邻家感、奶油感、骨相清秀、温柔、酷感）\n"
-        "    2) 适合风格定位（例：少女感、高级感、知性、御姐感、复古、运动、文艺、街头）\n"
-        "  禁止描述衣服 / 单品 / 拍摄场景 / 光线 / 品牌 / 营销词；禁止英文。\n"
-        "- age_segment：toddler / child / teen / young_adult / adult / middle_aged / senior 之一。\n"
-        "- gender：female 或 male 之一。\n"
-        "- notes：≤ 60 字中文一句话，聚焦相貌与风格定位，不评价衣服。\n\n"
-        "只输出 JSON 对象，不要 Markdown / 代码块 / 解释。字段必须用上述英文名。"
-    )
-    body = {
-        "model": "gpt-5.4-mini",
-        "instructions": instructions,
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": instructions},
-                    {"type": "input_image", "image_url": image_url},
-                ],
-            }
-        ],
-        "metadata": {"image_id": image_id, "purpose": "model_library_tagging"},
-        "stream": False,
-        "store": False,
-        "max_output_tokens": 600,
-    }
-    last_err: str | None = None
-    for provider in ordered:
-        try:
-            proxy_url = await resolve_provider_proxy_url(provider.proxy)
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=10.0, read=25.0, write=25.0, pool=10.0),
-                proxy=proxy_url,
-            ) as client:
-                resp = await client.post(
-                    f"{provider.base_url.rstrip('/')}/v1/responses"
-                    if not provider.base_url.rstrip("/").endswith("/v1")
-                    else f"{provider.base_url.rstrip('/')}/responses",
-                    json=body,
-                    headers={
-                        "authorization": f"Bearer {provider.api_key}",
-                        "content-type": "application/json",
-                    },
-                )
-        except httpx.HTTPError as exc:
-            last_err = f"network: {exc}"
-            continue
-        if resp.status_code >= 400:
-            last_err = f"http {resp.status_code}"
-            # 4xx 鉴权 / 模型不支持等：换号；5xx：换号
-            continue
-        try:
-            payload = resp.json()
-        except (json.JSONDecodeError, ValueError):
-            last_err = "bad_json"
-            continue
-        text_chunks: list[str] = []
-        output = payload.get("output") if isinstance(payload, dict) else None
-        if isinstance(output, list):
-            for item in output:
-                if not isinstance(item, dict):
-                    continue
-                content = item.get("content")
-                if not isinstance(content, list):
-                    continue
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    t = part.get("text") or part.get("output_text")
-                    if isinstance(t, str) and t:
-                        text_chunks.append(t)
-        ot = payload.get("output_text") if isinstance(payload, dict) else None
-        if isinstance(ot, str) and ot:
-            text_chunks.append(ot)
-        text = "".join(text_chunks).strip()
-        return _parse_tagging_text(text)
-    if last_err is not None:
-        logger.info("model_library auto_tag api: all providers failed err=%s", last_err)
-    return {}
+    return result.to_dict() if result else {}
 
 
 def _parse_tagging_text(text: str) -> dict[str, Any]:
@@ -7089,9 +7355,7 @@ def _poster_style_from_preset(raw: dict[str, Any]) -> Any:
     style.recommended_aspects = [
         str(v) for v in (raw.get("recommended_aspects") or []) if str(v).strip()
     ]
-    style.style_tags = [
-        str(v) for v in (raw.get("style_tags") or []) if str(v).strip()
-    ]
+    style.style_tags = [str(v) for v in (raw.get("style_tags") or []) if str(v).strip()]
     style.category = str(raw.get("category") or "")
     return style
 
@@ -7173,6 +7437,7 @@ def _poster_layout_safe_area(info_density: str) -> str:
 
 def _poster_text_fields_block(copy_analysis: dict[str, Any]) -> str:
     """把文案字段拼成稳定的 prompt 段（用于母版/多尺寸 prompt）。"""
+
     def _val(key: str) -> str:
         v = copy_analysis.get(key)
         if v is None:
@@ -7210,9 +7475,13 @@ def _poster_brand_assets_block(brand_assets: dict[str, Any]) -> str:
     if font_family:
         bits.append(f"preferred font family: {font_family}")
     if brand_assets.get("logo_image_id"):
-        bits.append("a brand logo image is provided as reference; integrate it tastefully if appropriate")
+        bits.append(
+            "a brand logo image is provided as reference; integrate it tastefully if appropriate"
+        )
     if brand_assets.get("product_image_id"):
-        bits.append("a product image is provided as reference; place it as the visual focal point")
+        bits.append(
+            "a product image is provided as reference; place it as the visual focal point"
+        )
     return "; ".join(bits) if bits else "no extra brand asset constraints"
 
 
@@ -7231,7 +7500,9 @@ def _poster_master_prompt(
     """
     info_density = str(copy_analysis.get("info_density") or "medium")
     palette = style_summary.get("palette") or []
-    palette_text = ", ".join(str(p) for p in palette if str(p).strip()) or "balanced palette"
+    palette_text = (
+        ", ".join(str(p) for p in palette if str(p).strip()) or "balanced palette"
+    )
     style_prompt_template = (style_summary.get("prompt_template") or "").strip()
     style_mood = (style_summary.get("mood") or "").strip()
     safe_area = _poster_layout_safe_area(info_density)
@@ -7268,7 +7539,9 @@ def _poster_render_prompt(
 ) -> str:
     """多尺寸 prompt（docs §8.3）。母版作为 reference 重出目标比例。"""
     palette = style_summary.get("palette") or []
-    palette_text = ", ".join(str(p) for p in palette if str(p).strip()) or "balanced palette"
+    palette_text = (
+        ", ".join(str(p) for p in palette if str(p).strip()) or "balanced palette"
+    )
     info_density = str(copy_analysis.get("info_density") or "medium")
     safe_area = _poster_layout_safe_area(info_density)
     text_block = _poster_text_fields_block(copy_analysis)
@@ -7333,7 +7606,8 @@ def _poster_seed_steps(run: WorkflowRun) -> list[WorkflowStep]:
             status = "approved"
             input_json = {
                 "style_id": (run.metadata_jsonb or {}).get("style_id"),
-                "target_aspects": (run.metadata_jsonb or {}).get("target_aspects") or list(POSTER_DEFAULT_TARGET_ASPECTS),
+                "target_aspects": (run.metadata_jsonb or {}).get("target_aspects")
+                or list(POSTER_DEFAULT_TARGET_ASPECTS),
             }
             output_json = {"confirmed": True}
         elif key == "copy_analysis":
@@ -7470,7 +7744,9 @@ def _poster_parse_copy_analysis_text(text: str) -> dict[str, Any]:
         "subtitle": str(subtitle).strip() if subtitle else None,
         "selling_points": (
             _clean_string_list(
-                (str(item) for item in selling_points) if isinstance(selling_points, list) else [],
+                (str(item) for item in selling_points)
+                if isinstance(selling_points, list)
+                else [],
                 max_items=4,
                 max_len=60,
             )
@@ -7529,7 +7805,9 @@ async def _sync_poster_workflow_outputs(
         ).scalar_one_or_none()
         if completion is not None:
             if completion.status == CompletionStatus.SUCCEEDED.value:
-                copy_step.output_json = _poster_parse_copy_analysis_text(completion.text)
+                copy_step.output_json = _poster_parse_copy_analysis_text(
+                    completion.text
+                )
                 copy_step.status = "needs_review"
                 run.status = "needs_review"
                 run.current_step = "copy_analysis"
@@ -7549,31 +7827,48 @@ async def _sync_poster_workflow_outputs(
                 .where(PosterMaster.workflow_run_id == run.id)
                 .order_by(PosterMaster.candidate_index.asc())
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     if masters:
-        all_master_task_ids = [task_id for master in masters for task_id in (master.task_ids or [])]
+        all_master_task_ids = [
+            task_id for master in masters for task_id in (master.task_ids or [])
+        ]
         gens_by_id: dict[str, Generation] = {}
         images_by_gen: dict[str, Image] = {}
         if all_master_task_ids:
             master_generations = (
-                await db.execute(
-                    select(Generation).where(Generation.id.in_(all_master_task_ids))
+                (
+                    await db.execute(
+                        select(Generation).where(Generation.id.in_(all_master_task_ids))
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             gens_by_id = {g.id: g for g in master_generations}
             images = (
-                await db.execute(
-                    select(Image)
-                    .where(
-                        Image.owner_generation_id.in_([g.id for g in master_generations]),
-                        Image.deleted_at.is_(None),
+                (
+                    await db.execute(
+                        select(Image)
+                        .where(
+                            Image.owner_generation_id.in_(
+                                [g.id for g in master_generations]
+                            ),
+                            Image.deleted_at.is_(None),
+                        )
+                        .order_by(Image.created_at.asc(), Image.id.asc())
                     )
-                    .order_by(Image.created_at.asc(), Image.id.asc())
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for image in images:
-                if image.owner_generation_id and image.owner_generation_id not in images_by_gen:
+                if (
+                    image.owner_generation_id
+                    and image.owner_generation_id not in images_by_gen
+                ):
                     images_by_gen[image.owner_generation_id] = image
 
         for master in masters:
@@ -7600,7 +7895,9 @@ async def _sync_poster_workflow_outputs(
         master_step = steps.get("master_generation")
         if master_step and master_step.status == "running":
             current_task_ids = {
-                task_id for task_id in (master_step.task_ids or []) if isinstance(task_id, str)
+                task_id
+                for task_id in (master_step.task_ids or [])
+                if isinstance(task_id, str)
             }
             current_masters = [
                 m
@@ -7636,7 +7933,9 @@ async def _sync_poster_workflow_outputs(
                 master_step.output_json = {
                     **(master_step.output_json or {}),
                     "failed_generation_ids": [g.id for g in failed_generations],
-                    "error_message": _task_error_summary(failed_generations, "母版生成失败"),
+                    "error_message": _task_error_summary(
+                        failed_generations, "母版生成失败"
+                    ),
                 }
                 run.status = "failed"
                 run.current_step = "master_generation"
@@ -7649,31 +7948,48 @@ async def _sync_poster_workflow_outputs(
                 .where(PosterRender.workflow_run_id == run.id)
                 .order_by(PosterRender.created_at.asc(), PosterRender.id.asc())
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     if renders:
-        all_render_task_ids = [task_id for r in renders for task_id in (r.task_ids or [])]
+        all_render_task_ids = [
+            task_id for r in renders for task_id in (r.task_ids or [])
+        ]
         render_gens_by_id: dict[str, Generation] = {}
         render_images_by_gen: dict[str, Image] = {}
         if all_render_task_ids:
             render_generations = (
-                await db.execute(
-                    select(Generation).where(Generation.id.in_(all_render_task_ids))
+                (
+                    await db.execute(
+                        select(Generation).where(Generation.id.in_(all_render_task_ids))
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             render_gens_by_id = {g.id: g for g in render_generations}
             render_images = (
-                await db.execute(
-                    select(Image)
-                    .where(
-                        Image.owner_generation_id.in_([g.id for g in render_generations]),
-                        Image.deleted_at.is_(None),
+                (
+                    await db.execute(
+                        select(Image)
+                        .where(
+                            Image.owner_generation_id.in_(
+                                [g.id for g in render_generations]
+                            ),
+                            Image.deleted_at.is_(None),
+                        )
+                        .order_by(Image.created_at.asc(), Image.id.asc())
                     )
-                    .order_by(Image.created_at.asc(), Image.id.asc())
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for image in render_images:
-                if image.owner_generation_id and image.owner_generation_id not in render_images_by_gen:
+                if (
+                    image.owner_generation_id
+                    and image.owner_generation_id not in render_images_by_gen
+                ):
                     render_images_by_gen[image.owner_generation_id] = image
         multi_step = steps.get("multi_size_generation")
         active_task_ids: set[str] = set()
@@ -7688,7 +8004,9 @@ async def _sync_poster_workflow_outputs(
         for render in renders:
             # 整张返修也会 append task_id；image_id 取最新成功的
             render_task_ids = [
-                task_id for task_id in (render.task_ids or []) if isinstance(task_id, str)
+                task_id
+                for task_id in (render.task_ids or [])
+                if isinstance(task_id, str)
             ]
             task_ids_for_status = render_task_ids
             if render.status in {"generating", "revising"} and active_task_ids:
@@ -7712,7 +8030,8 @@ async def _sync_poster_workflow_outputs(
                 and task_ids_for_status
                 and all(
                     render_gens_by_id.get(task_id) is not None
-                    and render_gens_by_id[task_id].status == GenerationStatus.FAILED.value
+                    and render_gens_by_id[task_id].status
+                    == GenerationStatus.FAILED.value
                     for task_id in task_ids_for_status
                 )
             ):
@@ -7758,7 +8077,9 @@ async def _sync_poster_workflow_outputs(
                 multi_step.output_json = {
                     **(multi_step.output_json or {}),
                     "failed_generation_ids": [g.id for g in failed_generations],
-                    "error_message": _task_error_summary(failed_generations, "多尺寸生成失败"),
+                    "error_message": _task_error_summary(
+                        failed_generations, "多尺寸生成失败"
+                    ),
                 }
                 run.status = "failed"
                 run.current_step = "multi_size_generation"
@@ -7935,12 +8256,16 @@ async def create_poster_masters(
 
     # 已有 master 行：累加 candidate_index 避免唯一冲突。
     existing_masters = (
-        await db.execute(
-            select(PosterMaster)
-            .where(PosterMaster.workflow_run_id == run.id)
-            .order_by(PosterMaster.candidate_index.asc())
+        (
+            await db.execute(
+                select(PosterMaster)
+                .where(PosterMaster.workflow_run_id == run.id)
+                .order_by(PosterMaster.candidate_index.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     existing_count = len(existing_masters)
 
     master_step.status = "running"
@@ -8045,14 +8370,18 @@ async def approve_poster_master(
         raise _http("master_not_ready", "poster master is not ready to approve", 409)
     # 把其它已选的 master 切回 ready，保证只有 1 张 selected
     other_selected = (
-        await db.execute(
-            select(PosterMaster).where(
-                PosterMaster.workflow_run_id == run.id,
-                PosterMaster.status == "selected",
-                PosterMaster.id != master.id,
+        (
+            await db.execute(
+                select(PosterMaster).where(
+                    PosterMaster.workflow_run_id == run.id,
+                    PosterMaster.status == "selected",
+                    PosterMaster.id != master.id,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for row in other_selected:
         row.status = "ready"
         row.selected_at = None
@@ -8090,7 +8419,7 @@ async def approve_poster_master(
             "selected_master_id": master.id,
             "selected_master_image_id": master.image_id,
             "target_aspects": (run.metadata_jsonb or {}).get("target_aspects")
-                or list(POSTER_DEFAULT_TARGET_ASPECTS),
+            or list(POSTER_DEFAULT_TARGET_ASPECTS),
         }
     run.current_step = "multi_size_generation"
     run.status = "needs_review"
@@ -8146,19 +8475,28 @@ async def create_poster_renders(
     copy_step = await _step(db, run.id, "copy_analysis")
     copy_analysis = copy_step.output_json or {}
     adjustments = str(
-        (await _step(db, run.id, "master_approval")).output_json.get("adjustments") or ""
+        (await _step(db, run.id, "master_approval")).output_json.get("adjustments")
+        or ""
     ).strip()
-    quality_mode = body.quality_mode if body.quality_mode in {"standard", "premium"} else run.quality_mode
+    quality_mode = (
+        body.quality_mode
+        if body.quality_mode in {"standard", "premium"}
+        else run.quality_mode
+    )
 
     conv = await _get_owned_conversation(
         db, user_id=user.id, conversation_id=run.conversation_id or ""
     )
     # 已有 render 行（同 aspect 已生成过则跳过，避免唯一冲突）
     existing_renders = (
-        await db.execute(
-            select(PosterRender).where(PosterRender.workflow_run_id == run.id)
+        (
+            await db.execute(
+                select(PosterRender).where(PosterRender.workflow_run_id == run.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     existing_aspects = {r.aspect_ratio for r in existing_renders}
     pending_aspects = [aspect for aspect in aspects if aspect not in existing_aspects]
 
@@ -8202,7 +8540,11 @@ async def create_poster_renders(
         image_params = _poster_image_params(
             aspect_ratio=aspect, quality_mode=quality_mode, count=1
         )
-        ref_ids = [master.image_id] if body.use_master_as_reference and master.image_id else []
+        ref_ids = (
+            [master.image_id]
+            if body.use_master_as_reference and master.image_id
+            else []
+        )
         size_str = image_params.fixed_size or "auto"
         render = PosterRender(
             workflow_run_id=run.id,

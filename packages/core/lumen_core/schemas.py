@@ -651,7 +651,9 @@ class ApparelModelLibraryGenerateIn(BaseModel):
     + 一个 step + N 个 candidate 任务，每个 candidate 输出一张独立模特肖像。
     """
 
-    age_segment: ModelAgeSegment
+    mode: Literal["text", "reference_image"] = "text"
+    reference_image_id: str | None = Field(default=None, max_length=64)
+    age_segment: ModelAgeSegment | None = None
     gender: Literal["female", "male"] | None = None
     genders: list[Literal["female", "male"]] | None = Field(default=None, max_length=2)
     appearance_direction: str | None = Field(default=None, max_length=80)
@@ -660,6 +662,20 @@ class ApparelModelLibraryGenerateIn(BaseModel):
     count: ModelLibraryGenerateCount = 4
     # 生成完是否对每张自动 vision 打标签（用户筛选/收藏前预填字段，默认开）。
     auto_tag: bool = True
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> "ApparelModelLibraryGenerateIn":
+        if self.mode == "reference_image":
+            if not self.reference_image_id:
+                raise ValueError(
+                    "reference_image_id is required when mode='reference_image'"
+                )
+            return self
+        if self.reference_image_id:
+            raise ValueError("reference_image_id only allowed when mode='reference_image'")
+        if self.age_segment is None:
+            raise ValueError("age_segment is required when mode='text'")
+        return self
 
 
 class ApparelModelLibraryJobItemOut(BaseModel):
@@ -700,6 +716,9 @@ class ApparelModelLibraryJobOut(BaseModel):
     gender: str | None = None
     appearance_direction: str | None = None
     extra_requirements: str | None = None
+    reference_image_id: str | None = None
+    reference_image_url: str | None = None
+    extracted_profile: dict[str, Any] | None = None
     items: list[ApparelModelLibraryJobItemOut] = Field(default_factory=list)
     # dual_race 模式下另一路 provider 的产出。前端展示在「候选区」，不参与 finished_count，可按需入库。
     candidates: list[ApparelModelLibraryJobItemOut] = Field(default_factory=list)

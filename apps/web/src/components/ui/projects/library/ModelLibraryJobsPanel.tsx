@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   Eraser,
   ExternalLink,
+  ImageIcon,
   Library,
   Maximize2,
   RefreshCw,
@@ -36,6 +37,7 @@ import type {
   ModelLibraryItemAgeSegment,
 } from "@/lib/apiClient";
 import {
+  imageBinaryUrl,
   MODEL_LIBRARY_APPEARANCE_LABEL,
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
@@ -317,6 +319,12 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
             <StatusBadge status={job.status} />
             <span aria-hidden className="text-[var(--fg-3)]">·</span>
             <span>{ORIGIN_LABEL[job.origin]}</span>
+            {job.origin === "library_generate" ? (
+              <>
+                <span aria-hidden className="text-[var(--fg-3)]">·</span>
+                <SourceBadge job={job} />
+              </>
+            ) : null}
             {job.project_title ? (
               <>
                 <span aria-hidden className="text-[var(--fg-3)]">·</span>
@@ -340,6 +348,7 @@ function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
         </div>
         <BriefMeta job={job} />
       </header>
+      <ReferenceSummary job={job} compact />
       <ProgressBar value={progress} />
       {job.items.length > 0 ? (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 md:grid-cols-6">
@@ -393,6 +402,12 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
             </span>
             <span aria-hidden className="text-[var(--fg-3)]">·</span>
             <span>{ORIGIN_LABEL[job.origin]}</span>
+            {job.origin === "library_generate" ? (
+              <>
+                <span aria-hidden className="text-[var(--fg-3)]">·</span>
+                <SourceBadge job={job} />
+              </>
+            ) : null}
             {job.project_title ? (
               <>
                 <span aria-hidden className="text-[var(--fg-3)]">·</span>
@@ -448,6 +463,7 @@ function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
           ) : null}
         </div>
       </header>
+      <ReferenceSummary job={job} />
       {job.requested_count > 0 && job.status !== "succeeded" ? (
         <ProgressBar
           value={Math.min(100, Math.round((job.finished_count / job.requested_count) * 100))}
@@ -521,6 +537,96 @@ function CandidatesGroup({
             onOpenLightbox={() => open(item.image_id)}
           />
         ))}
+      </div>
+    </section>
+  );
+}
+
+function SourceBadge({ job }: { job: ApparelModelLibraryJob }) {
+  const reference = Boolean(job.reference_image_id);
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1",
+        reference ? "text-[var(--amber-300)]" : "text-[var(--fg-2)]",
+      )}
+    >
+      {reference ? <ImageIcon className="h-3 w-3" /> : null}
+      {reference ? "参考图" : "文生"}
+    </span>
+  );
+}
+
+function ReferenceSummary({
+  job,
+  compact = false,
+}: {
+  job: ApparelModelLibraryJob;
+  compact?: boolean;
+}) {
+  if (!job.reference_image_id) return null;
+  const profile = job.extracted_profile;
+  const tokens: string[] = [];
+  const age = profile?.age_segment || job.age_segment;
+  if (age) tokens.push(AGE_LABEL[age] ?? age);
+  const gender = profile?.gender || job.gender;
+  if (gender) tokens.push(gender === "male" ? "男" : gender === "female" ? "女" : gender);
+  const appearance = profile?.appearance_direction || job.appearance_direction;
+  if (appearance) {
+    const key = appearance as AppearanceKey;
+    tokens.push(MODEL_LIBRARY_APPEARANCE_LABEL[key] ?? appearance);
+  }
+  for (const tag of profile?.style_tags ?? []) {
+    if (tag && tokens.length < 8) tokens.push(tag);
+  }
+  const imageUrl = job.reference_image_url || imageBinaryUrl(job.reference_image_id);
+  return (
+    <section
+      className={cn(
+        "grid gap-3 border border-[var(--border)] bg-[var(--bg-1)] p-3",
+        compact ? "sm:grid-cols-[72px_minmax(0,1fr)]" : "sm:grid-cols-[88px_minmax(0,1fr)]",
+      )}
+    >
+      <div
+        className={cn(
+          "relative overflow-hidden bg-[var(--bg-2)]",
+          compact ? "aspect-[4/5] w-[72px]" : "aspect-[4/5] w-[88px]",
+        )}
+      >
+        <Image
+          src={imageUrl}
+          alt="参考图"
+          fill
+          unoptimized
+          sizes="88px"
+          className="object-cover"
+        />
+      </div>
+      <div className="min-w-0 self-center">
+        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          参考图识别
+        </p>
+        {tokens.length > 0 ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {tokens.map((token, idx) => (
+              <span
+                key={`${token}-${idx}`}
+                className="border border-[var(--border)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)]"
+              >
+                {token}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-1 text-[12px] text-[var(--fg-3)]">
+            未返回可展示的识别字段
+          </p>
+        )}
+        {profile?.notes ? (
+          <p className="mt-2 line-clamp-2 text-[12px] leading-[1.55] text-[var(--fg-2)]">
+            {profile.notes}
+          </p>
+        ) : null}
       </div>
     </section>
   );
