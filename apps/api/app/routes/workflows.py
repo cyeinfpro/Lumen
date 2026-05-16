@@ -8,6 +8,7 @@ refreshing or closing the browser does not lose progress.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -46,6 +47,7 @@ from lumen_core.constants import (
     ImageSource,
     ImageVisibility,
     Intent,
+    MAX_PROMPT_CHARS,
     Role,
 )
 from lumen_core.models import (
@@ -155,6 +157,17 @@ from ._apparel_library_reference import (
     ReferenceProfile,
     auto_tag_owned_model_library_image,
     extract_reference_profile,
+)
+from ._apparel_scene_planner import (
+    build_garment_lock as _build_garment_lock,
+    compose_image_prompt_with_gpt55 as _compose_image_prompt_with_gpt55,
+    fallback_prompt_composition as _fallback_prompt_composition,
+    fallback_risk_review as _fallback_risk_review,
+    plan_scene_cards_with_gpt55 as _plan_scene_cards_with_gpt55,
+    review_prompt_risk_with_gpt55 as _review_prompt_risk_with_gpt55,
+    resolve_scene_provider_order as _resolve_scene_provider_order,
+    rules_fallback_planning as _rules_fallback_scene_planning,
+    scene_fingerprint as _scene_fingerprint,
 )
 
 
@@ -517,11 +530,34 @@ def _showcase_prompt_brief(
     quality_direction: str,
     render_direction: str,
     style_region: str,
+    scene_card_mode: bool = False,
+    allow_pet: bool = True,
+    allow_background_people: bool = True,
 ) -> str:
     direction = template_direction.strip() or "背景与衣服图片搭配"
     extra_direction = _compact_showcase_user_direction(user_direction, style_region)
     if extra_direction:
         direction = f"{direction}；{extra_direction}"
+    photography_direction = (
+        "1. 摄影执行：按 SceneCard 的机位、距离和镜头感执行，允许真实低角度、俯拍、"
+        "近距离手机抓拍或环境远景；必须保持头身比例自然、透视可信，动作像真实抓拍，"
+        "避免跳跃、转圈、跪趴、后仰、大幅甩头。"
+        if scene_card_mode
+        else "1. 摄影执行：真实模特目录摄影，约 50mm 标准焦段（不要广角拉头身比、不要长焦压扁），平视或胸口高度机位；身体重心可信，动作幅度小，避免跳跃、转圈、跪趴、后仰、大幅甩头。"
+    )
+    if scene_card_mode:
+        extras: list[str] = []
+        if allow_pet:
+            extras.append("低存在感宠物")
+        if allow_background_people:
+            extras.append("远处路人")
+        extras.append("生活道具作为环境辅助")
+        subject_rule = (
+            f"9. 主角只有一位已确认模特；可有{'、'.join(extras)}，"
+            "但不得抢主体或遮挡商品。"
+        )
+    else:
+        subject_rule = "9. 单人照。"
     return "\n".join(
         [
             "请根据这张白底产品图和模特图，生成真实自然的真人模特穿搭图。",
@@ -531,7 +567,7 @@ def _showcase_prompt_brief(
             "不要改款、改色、改廓形、改领口袖型衣长、改图案/logo/印花/文字、改纽扣拉链口袋缝线拼接。",
             "",
             "要求：",
-            "1. 摄影执行：真实模特目录摄影，约 50mm 标准焦段（不要广角拉头身比、不要长焦压扁），平视或胸口高度机位；身体重心可信，动作幅度小，避免跳跃、转圈、跪趴、后仰、大幅甩头。",
+            photography_direction,
             "2. 模特按产品图自然穿着这件衣服，版型贴合，褶皱合理；不要人偶感、不要时装秀台步。",
             f"3. 模特参考模特图，{model_consistency}身材和表情自然。",
             f"4. 配饰：{accessory_direction}（不得遮挡商品）。",
@@ -539,7 +575,7 @@ def _showcase_prompt_brief(
             f"6. 画质：{quality_direction}，{render_direction}。",
             f"7. 构图：{style_region}风格，{pose_direction}，{shot_direction}。",
             f"8. 画面：{framing_direction}；服装主体清晰可见。",
-            "9. 单人照。",
+            subject_rule,
         ]
     )
 
@@ -2831,6 +2867,97 @@ def _candidate_prompt(
     ).strip()
 
 
+def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
+    if not isinstance(scene_card, dict):
+        return ""
+    camera = scene_card.get("camera") if isinstance(scene_card.get("camera"), dict) else {}
+    props = scene_card.get("props")
+    prop_line = (
+        "、".join(str(item).strip() for item in props if str(item).strip())[:120]
+        if isinstance(props, list)
+        else ""
+    )
+    negative = scene_card.get("negative")
+    negative_line = (
+        "；".join(str(item).strip() for item in negative if str(item).strip())[:220]
+        if isinstance(negative, list)
+        else ""
+    )
+
+    def kv(label: str, value: Any) -> str:
+        text = str(value or "").strip()
+        return f"{label}：{text}" if text else ""
+
+    camera_line = " / ".join(
+        str(item).strip()
+        for item in (camera.get("distance"), camera.get("angle"), camera.get("lens_feel"))
+        if str(item or "").strip()
+    )
+    parts = [
+        kv("场景族", scene_card.get("scene_family")),
+        kv("地点", scene_card.get("location")),
+        kv("事件", scene_card.get("micro_event")),
+        kv("机位", camera_line),
+        kv("动作", scene_card.get("pose")),
+        kv("动态", scene_card.get("motion")),
+        kv("道具", prop_line),
+        kv("光线", scene_card.get("lighting")),
+        kv("构图", scene_card.get("composition")),
+        kv("商品可见性", scene_card.get("product_visibility")),
+        kv("本张禁令", negative_line),
+    ]
+    return "；".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _truncate_prompt_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[: max(0, limit)]
+    return text[: limit - 1] + "…"
+
+
+def _join_lock_items(value: Any, *, max_items: int = 8, max_len: int = 40) -> str:
+    if not isinstance(value, list):
+        return ""
+    return "、".join(
+        _truncate_prompt_text(str(item).strip(), max_len)
+        for item in value[:max_items]
+        if str(item).strip()
+    )
+
+
+def _showcase_garment_lock_prefix(
+    *,
+    garment_lock: dict[str, Any] | None,
+    product_preserve: str,
+    model_consistency: str,
+) -> str:
+    if not isinstance(garment_lock, dict):
+        return (
+            "【最高优先级：商品 1:1 还原】"
+            f"衣服以白底产品图为唯一来源，重点保留：{product_preserve}。"
+            "不得改款、改色、改廓形、改领口袖型衣长、改图案/logo、"
+            "改纽扣拉链口袋缝线拼接。\n"
+            f"【模特一致】{model_consistency}"
+        )
+    preserve = _join_lock_items(garment_lock.get("must_preserve"))
+    visibility = _join_lock_items(garment_lock.get("visibility_priority"), max_items=6)
+    mutation_bans = _join_lock_items(garment_lock.get("mutation_bans"))
+    occlusion = _truncate_prompt_text(
+        str(garment_lock.get("occlusion_policy") or "").strip(), 220
+    )
+    return (
+        "【最高优先级：商品 1:1 还原】"
+        f"商品身份：{garment_lock.get('core_identity') or garment_lock.get('category') or '服饰'}。"
+        f"必须保留：{preserve or product_preserve}。"
+        f"重点可见区域：{visibility or '正面主体、领口、袖口、整体廓形'}。"
+        f"禁止：{mutation_bans or '改款、改色、改廓形、增删图案或结构'}。"
+        f"{occlusion}\n"
+        f"【模特一致】{model_consistency}"
+    )
+
+
 def _showcase_prompt(
     *,
     product_analysis: dict[str, Any],
@@ -2844,6 +2971,11 @@ def _showcase_prompt(
     age_segment: str | None = None,
     aspect_ratio: str = "4:5",
     scene_environment: str = "indoor",
+    scene_card: dict[str, Any] | None = None,
+    garment_lock: dict[str, Any] | None = None,
+    composed_prompt: str | None = None,
+    allow_pet: bool = True,
+    allow_background_people: bool = True,
 ) -> str:
     brief = selected_candidate.model_brief_json or {}
     summary = str(brief.get("summary") or user_prompt or "自然电商模特")
@@ -2892,11 +3024,33 @@ def _showcase_prompt(
         pose_direction = f"{pose_direction}，{soft}"
     quality_direction = "4K 终稿" if final_quality == "4k" else "高质量"
     style_region = _style_region_from_text(summary)
-    return _showcase_prompt_brief(
+    lock_prefix = (
+        _showcase_garment_lock_prefix(
+            garment_lock=garment_lock,
+            product_preserve=product_preserve,
+            model_consistency=model_consistency,
+        )
+        if garment_lock is not None
+        else ""
+    )
+    if composed_prompt and composed_prompt.strip():
+        prefix = (
+            f"{lock_prefix}\n\n【GPT-5.5 单张执行 Prompt】\n"
+            if lock_prefix
+            else "【GPT-5.5 单张执行 Prompt】\n"
+        )
+        if len(prefix) > MAX_PROMPT_CHARS - 600:
+            prefix = _truncate_prompt_text(prefix, MAX_PROMPT_CHARS - 600)
+        return prefix + composed_prompt.strip()[: max(0, MAX_PROMPT_CHARS - len(prefix))]
+    template_direction = _template_requirement(
+        template, product_analysis, scene_environment
+    )
+    scene_direction = _showcase_scene_card_direction(scene_card)
+    if scene_direction:
+        template_direction = f"{template_direction}；{scene_direction}"
+    body = _showcase_prompt_brief(
         user_direction=user_prompt,
-        template_direction=_template_requirement(
-            template, product_analysis, scene_environment
-        ),
+        template_direction=template_direction,
         product_preserve=product_preserve,
         accessory_direction=accessory_direction,
         model_consistency=model_consistency,
@@ -2906,7 +3060,16 @@ def _showcase_prompt(
         quality_direction=quality_direction,
         render_direction=_showcase_render_direction(template, scene_environment),
         style_region=style_region,
+        scene_card_mode=bool(scene_direction),
+        allow_pet=allow_pet,
+        allow_background_people=allow_background_people,
     )
+    if not lock_prefix:
+        return body
+    prefix = f"{lock_prefix}\n\n"
+    if len(prefix) > MAX_PROMPT_CHARS - 600:
+        prefix = _truncate_prompt_text(prefix, MAX_PROMPT_CHARS - 600)
+    return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
 
 
 def _showcase_default_variant(
@@ -2948,6 +3111,299 @@ def _showcase_pick_shot_variants(
         ),
     )
     return list(zip(plan, variants))
+
+
+async def _prepare_showcase_preflight_impl(
+    *,
+    db: AsyncSession,
+    product_analysis: dict[str, Any],
+    selected_candidate: ModelCandidate,
+    accessory_plan: dict[str, Any],
+    template: str,
+    shot_picks: list[tuple[ShotClass, ShotVariant]],
+    age_segment: str | None,
+    final_quality: str,
+    user_prompt: str,
+    aspect_ratio: str,
+    scene_environment: str,
+    scene_strategy: str,
+    scene_variety: str,
+    scene_planner: str,
+    continuity_anchor: str,
+    allow_pet: bool,
+    allow_background_people: bool,
+) -> dict[str, Any]:
+    brief = selected_candidate.model_brief_json or {}
+    model_summary = str(brief.get("summary") or user_prompt or "自然电商模特")
+    garment_lock = _build_garment_lock(product_analysis)
+    provider_order = None
+    if scene_planner != "rules_fallback":
+        try:
+            provider_order = await _resolve_scene_provider_order(db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "apparel scene provider resolution failed (will retry per call): %s",
+                exc,
+            )
+            provider_order = None
+    if scene_planner == "rules_fallback":
+        planning = _rules_fallback_scene_planning(
+            product_analysis=product_analysis,
+            template=template,
+            scene_environment=scene_environment,
+            shot_picks=[(cls, dict(variant)) for cls, variant in shot_picks],
+            aspect_ratio=aspect_ratio,
+            user_prompt=user_prompt,
+            accessory_plan=accessory_plan,
+            allow_pet=allow_pet,
+            continuity_anchor=continuity_anchor,
+        )
+    else:
+        planning = await _plan_scene_cards_with_gpt55(
+            db,
+            product_analysis=product_analysis,
+            garment_lock=garment_lock,
+            model_summary=model_summary,
+            template=template,
+            scene_environment=scene_environment,
+            shot_picks=[(cls, dict(variant)) for cls, variant in shot_picks],
+            aspect_ratio=aspect_ratio,
+            output_count=len(shot_picks),
+            user_prompt=user_prompt,
+            accessory_plan=accessory_plan,
+            scene_strategy=scene_strategy,
+            scene_variety=scene_variety,
+            continuity_anchor=continuity_anchor,
+            allow_pet=allow_pet,
+            allow_background_people=allow_background_people,
+            provider_order=provider_order,
+        )
+    scene_cards = list(planning.get("scene_cards") or [])
+    if len(scene_cards) != len(shot_picks):
+        planning = _rules_fallback_scene_planning(
+            product_analysis=product_analysis,
+            template=template,
+            scene_environment=scene_environment,
+            shot_picks=[(cls, dict(variant)) for cls, variant in shot_picks],
+            aspect_ratio=aspect_ratio,
+            user_prompt=user_prompt,
+            accessory_plan=accessory_plan,
+            allow_pet=allow_pet,
+            continuity_anchor=continuity_anchor,
+        )
+        scene_cards = list(planning.get("scene_cards") or [])
+
+    batch_context = {
+        "series_concept": planning.get("series_concept"),
+        "scene_fingerprints": planning.get("scene_fingerprints"),
+        "scene_strategy": scene_strategy,
+        "scene_variety": scene_variety,
+    }
+    gpt_parallelism = 1 if provider_order is None else min(4, max(1, len(shot_picks)))
+    gpt_semaphore = asyncio.Semaphore(gpt_parallelism)
+
+    async def prepare_one_prompt(
+        idx: int,
+        shot_type: ShotClass,
+        variant: ShotVariant,
+        scene_card: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        base_prompt = _showcase_prompt(
+            product_analysis=product_analysis,
+            selected_candidate=selected_candidate,
+            accessory_plan=accessory_plan,
+            template=template,
+            shot_type=shot_type,
+            shot_variant=variant,
+            age_segment=age_segment,
+            final_quality=final_quality,
+            user_prompt=user_prompt,
+            aspect_ratio=aspect_ratio,
+            scene_environment=scene_environment,
+            scene_card=scene_card,
+            garment_lock=garment_lock,
+            allow_pet=allow_pet,
+            allow_background_people=allow_background_people,
+        )
+        composition = _fallback_prompt_composition(
+            base_prompt=base_prompt,
+            scene_card=scene_card,
+            reason="composer_skipped",
+        )
+        review = _fallback_risk_review(scene_card=scene_card, reason="review_skipped")
+        final_prompt = base_prompt
+        if scene_planner == "gpt55_preflight":
+            async with gpt_semaphore:
+                composition = await _compose_image_prompt_with_gpt55(
+                    db,
+                    base_prompt=base_prompt,
+                    product_analysis=product_analysis,
+                    garment_lock=garment_lock,
+                    model_summary=model_summary,
+                    scene_card=scene_card,
+                    shot_class=shot_type,
+                    template=template,
+                    aspect_ratio=aspect_ratio,
+                    final_quality=final_quality,
+                    provider_order=provider_order,
+                )
+            final_prompt = _showcase_prompt(
+                product_analysis=product_analysis,
+                selected_candidate=selected_candidate,
+                accessory_plan=accessory_plan,
+                template=template,
+                shot_type=shot_type,
+                shot_variant=variant,
+                age_segment=age_segment,
+                final_quality=final_quality,
+                user_prompt=user_prompt,
+                aspect_ratio=aspect_ratio,
+                scene_environment=scene_environment,
+                scene_card=scene_card,
+                garment_lock=garment_lock,
+                composed_prompt=str(composition.get("final_prompt") or ""),
+                allow_pet=allow_pet,
+                allow_background_people=allow_background_people,
+            )
+            async with gpt_semaphore:
+                review = await _review_prompt_risk_with_gpt55(
+                    db,
+                    final_prompt=final_prompt,
+                    garment_lock=garment_lock,
+                    scene_card=scene_card,
+                    batch_context=batch_context,
+                    provider_order=provider_order,
+                )
+            if review.get("must_rewrite"):
+                rewrite_instruction = str(review.get("rewrite_instruction") or "").strip()
+                if not rewrite_instruction:
+                    rewrite_instruction = (
+                        "降低风险：保留当前商品和模特一致性，简化动作、道具和遮挡关系，"
+                        "确保衣服主体、领口、袖口、图案/logo、纽扣、口袋和整体廓形清楚可见。"
+                    )
+                async with gpt_semaphore:
+                    rewritten = await _compose_image_prompt_with_gpt55(
+                        db,
+                        base_prompt=base_prompt,
+                        product_analysis=product_analysis,
+                        garment_lock=garment_lock,
+                        model_summary=model_summary,
+                        scene_card=scene_card,
+                        shot_class=shot_type,
+                        template=template,
+                        aspect_ratio=aspect_ratio,
+                        final_quality=final_quality,
+                        rewrite_instruction=rewrite_instruction,
+                        provider_order=provider_order,
+                    )
+                rewritten_prompt = _showcase_prompt(
+                    product_analysis=product_analysis,
+                    selected_candidate=selected_candidate,
+                    accessory_plan=accessory_plan,
+                    template=template,
+                    shot_type=shot_type,
+                    shot_variant=variant,
+                    age_segment=age_segment,
+                    final_quality=final_quality,
+                    user_prompt=user_prompt,
+                    aspect_ratio=aspect_ratio,
+                    scene_environment=scene_environment,
+                    scene_card=scene_card,
+                    garment_lock=garment_lock,
+                    composed_prompt=str(rewritten.get("final_prompt") or ""),
+                    allow_pet=allow_pet,
+                    allow_background_people=allow_background_people,
+                )
+                async with gpt_semaphore:
+                    rewritten_review = await _review_prompt_risk_with_gpt55(
+                        db,
+                        final_prompt=rewritten_prompt,
+                        garment_lock=garment_lock,
+                        scene_card=scene_card,
+                        batch_context=batch_context,
+                        provider_order=provider_order,
+                    )
+                if not rewritten_review.get("must_rewrite"):
+                    composition = rewritten
+                    final_prompt = rewritten_prompt
+                    review = rewritten_review
+                else:
+                    safe_prompt = _showcase_prompt(
+                        product_analysis=product_analysis,
+                        selected_candidate=selected_candidate,
+                        accessory_plan=accessory_plan,
+                        template=template,
+                        shot_type=shot_type,
+                        shot_variant=variant,
+                        age_segment=age_segment,
+                        final_quality=final_quality,
+                        user_prompt=user_prompt,
+                        aspect_ratio=aspect_ratio,
+                        scene_environment=scene_environment,
+                        garment_lock=garment_lock,
+                        allow_pet=allow_pet,
+                        allow_background_people=allow_background_people,
+                    )
+                    composition = _fallback_prompt_composition(
+                        base_prompt=safe_prompt,
+                        scene_card=scene_card,
+                        reason="rewrite_still_risky; using scene-free safe prompt",
+                    )
+                    review = {
+                        **rewritten_review,
+                        "risk_level": "low",
+                        "must_rewrite": False,
+                        "safe_fallback": True,
+                        "fallback_reason": (
+                            "rewrite_still_risky; using scene-free safe prompt"
+                        ),
+                    }
+                    final_prompt = safe_prompt
+
+        return (
+            {
+                "index": idx,
+                "scene_card_id": scene_card.get("id"),
+                "shot_class": shot_type,
+                **composition,
+                "final_prompt": final_prompt,
+            },
+            {"index": idx, **review},
+            final_prompt,
+        )
+
+    prompt_results = await asyncio.gather(
+        *(
+            prepare_one_prompt(idx, shot_type, variant, scene_card)
+            for idx, ((shot_type, variant), scene_card) in enumerate(
+                zip(shot_picks, scene_cards), start=1
+            )
+        )
+    )
+    per_image_prompts = [item[0] for item in prompt_results]
+    prompt_reviews = [item[1] for item in prompt_results]
+    final_prompts = [item[2] for item in prompt_results]
+    return {
+        "garment_lock": garment_lock,
+        "planning": planning,
+        "scene_cards": scene_cards,
+        "per_image_prompts": per_image_prompts,
+        "prompt_reviews": prompt_reviews,
+        "final_prompts": final_prompts,
+    }
+
+
+async def _prepare_showcase_preflight(**kwargs: Any) -> dict[str, Any]:
+    try:
+        return await asyncio.wait_for(
+            _prepare_showcase_preflight_impl(**kwargs),
+            timeout=90.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("apparel preflight timed out; falling back to rules planning")
+        return await _prepare_showcase_preflight_impl(
+            **{**kwargs, "scene_planner": "rules_fallback"}
+        )
 
 
 def _revision_prompt(
@@ -5540,17 +5996,37 @@ async def create_showcase_images(
             else None
         ),
     )
+    preflight = await _prepare_showcase_preflight(
+        db=db,
+        product_analysis=product_step.output_json or {},
+        selected_candidate=candidate,
+        accessory_plan=accessory_plan,
+        template=body.template,
+        shot_picks=shot_picks,
+        age_segment=age_segment,
+        final_quality=body.final_quality,
+        user_prompt=run.user_prompt,
+        aspect_ratio=body.aspect_ratio,
+        scene_environment=body.scene_environment,
+        scene_strategy=body.scene_strategy,
+        scene_variety=body.scene_variety,
+        scene_planner=body.scene_planner,
+        continuity_anchor=body.continuity_anchor,
+        allow_pet=body.allow_pet,
+        allow_background_people=body.allow_background_people,
+    )
+    scene_cards = list(preflight.get("scene_cards") or [])
+    final_prompts = list(preflight.get("final_prompts") or [])
     existing_task_ids = _dedupe_nonempty(showcase.task_ids or [])
     existing_image_ids = _dedupe_nonempty(showcase.image_ids or [])
     bundles: list[_PublishBundle] = []
     task_ids: list[str] = []
     for idx, (shot_type, variant) in enumerate(shot_picks, start=1):
-        bundle, _, gen_ids = await _create_workflow_task(
-            db=db,
-            user=user,
-            conv=conv,
-            intent=Intent.IMAGE_TO_IMAGE,
-            text=_showcase_prompt(
+        scene_card = scene_cards[idx - 1] if idx - 1 < len(scene_cards) else {}
+        final_prompt = (
+            str(final_prompts[idx - 1])
+            if idx - 1 < len(final_prompts) and final_prompts[idx - 1]
+            else _showcase_prompt(
                 product_analysis=product_step.output_json or {},
                 selected_candidate=candidate,
                 accessory_plan=accessory_plan,
@@ -5562,7 +6038,18 @@ async def create_showcase_images(
                 user_prompt=run.user_prompt,
                 aspect_ratio=body.aspect_ratio,
                 scene_environment=body.scene_environment,
-            ),
+                scene_card=scene_card,
+                garment_lock=preflight.get("garment_lock"),
+                allow_pet=body.allow_pet,
+                allow_background_people=body.allow_background_people,
+            )
+        )
+        bundle, _, gen_ids = await _create_workflow_task(
+            db=db,
+            user=user,
+            conv=conv,
+            intent=Intent.IMAGE_TO_IMAGE,
+            text=final_prompt,
             attachment_ids=ref_ids,
             idempotency_key=f"wf:{run.id[:12]}:shot:{idx}:{new_uuid7()[:8]}",
             workflow_run_id=run.id,
@@ -5584,6 +6071,22 @@ async def create_showcase_images(
                 "workflow_age_segment": age_segment,
                 "workflow_final_quality": body.final_quality,
                 "workflow_scene_environment": body.scene_environment,
+                "workflow_scene_strategy": body.scene_strategy,
+                "workflow_scene_variety": body.scene_variety,
+                "workflow_scene_planner": body.scene_planner,
+                "workflow_scene_planner_effective": (
+                    preflight.get("planning") or {}
+                ).get("planner"),
+                "workflow_scene_card_id": scene_card.get("id"),
+                "workflow_scene_family": scene_card.get("scene_family"),
+                "workflow_camera_angle": (
+                    scene_card.get("camera") or {}
+                ).get("angle")
+                if isinstance(scene_card.get("camera"), dict)
+                else None,
+                "workflow_micro_event": scene_card.get("micro_event"),
+                "workflow_scene_fingerprint": scene_card.get("fingerprint")
+                or _scene_fingerprint(scene_card),
             },
         )
         task_ids.extend(gen_ids)
@@ -5603,6 +6106,22 @@ async def create_showcase_images(
         "final_quality": body.final_quality,
         "output_count": body.output_count,
         "scene_environment": body.scene_environment,
+        "scene_strategy": body.scene_strategy,
+        "scene_variety": body.scene_variety,
+        "scene_planner": body.scene_planner,
+        "continuity_anchor": body.continuity_anchor,
+        "allow_pet": body.allow_pet,
+        "allow_background_people": body.allow_background_people,
+        "garment_lock": preflight.get("garment_lock") or {},
+        "scene_planning": preflight.get("planning") or {},
+        "scene_cards": scene_cards,
+        "scene_fingerprints": (preflight.get("planning") or {}).get(
+            "scene_fingerprints"
+        )
+        or [card.get("fingerprint") or _scene_fingerprint(card) for card in scene_cards],
+        "per_image_prompts": preflight.get("per_image_prompts") or [],
+        "prompt_reviews": preflight.get("prompt_reviews") or [],
+        "planner_version": "apparel-gpt55-preflight-v1",
         "target_image_count": _showcase_target_image_count(
             existing_image_ids=existing_image_ids,
             output_count=body.output_count,

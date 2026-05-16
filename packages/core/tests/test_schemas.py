@@ -93,3 +93,16 @@ def test_showcase_images_accepts_landscape_aspect_ratios():
     for aspect in ("4:3", "3:2", "16:9", "21:9"):
         body = ShowcaseImagesCreateIn(aspect_ratio=aspect)
         assert body.aspect_ratio == aspect
+
+
+def test_showcase_images_defaults_to_gpt55_preflight_scene_planner():
+    from lumen_core.schemas import ShowcaseImagesCreateIn
+
+    body = ShowcaseImagesCreateIn()
+
+    assert body.scene_planner == "gpt55_preflight"
+    assert body.scene_strategy == "natural_series"
+    assert body.scene_variety == "rich"
+    assert body.continuity_anchor == "accessory"
+    assert body.allow_pet is False
+    assert body.allow_background_people is True

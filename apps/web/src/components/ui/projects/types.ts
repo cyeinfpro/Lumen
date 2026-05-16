@@ -106,6 +106,12 @@ export const JSON_KEY_LABEL: Record<string, string> = {
   aspect_ratio: "画幅比例",
   final_quality: "质量模式",
   output_count: "输出数量",
+  scene_strategy: "场景风格",
+  scene_variety: "丰富度",
+  scene_planner: "AI 导演",
+  continuity_anchor: "连续元素",
+  allow_pet: "宠物元素",
+  allow_background_people: "背景路人",
   reference_image_ids: "参考图数量",
   overall: "总体结论",
   average_score: "平均分",
@@ -161,6 +167,31 @@ export const SCENE_ENVIRONMENT_LABELS = [
 ] as const;
 
 export type CreateSceneEnvironment = (typeof SCENE_ENVIRONMENT_LABELS)[number][0];
+
+export const SCENE_STRATEGY_LABELS = [
+  ["natural_series", "自然系列"],
+  ["balanced", "商品优先"],
+  ["editorial_campaign", "品牌大片"],
+] as const;
+
+export type CreateSceneStrategy = (typeof SCENE_STRATEGY_LABELS)[number][0];
+
+export const SCENE_VARIETY_LABELS = [
+  ["rich", "丰富"],
+  ["safe", "稳妥"],
+  ["wild", "大胆"],
+] as const;
+
+export type CreateSceneVariety = (typeof SCENE_VARIETY_LABELS)[number][0];
+
+export const CONTINUITY_ANCHOR_LABELS = [
+  ["accessory", "保留配饰"],
+  ["none", "无连续元素"],
+  ["pet", "加宠物"],
+  ["location_series", "同地点系列"],
+] as const;
+
+export type CreateContinuityAnchor = (typeof CONTINUITY_ANCHOR_LABELS)[number][0];
 
 // 仅这 3 个生活化模板支持 scene_environment 选项；其他模板忽略此字段。
 export const SCENE_ENVIRONMENT_TEMPLATES: ReadonlySet<CreateTemplate> = new Set([
