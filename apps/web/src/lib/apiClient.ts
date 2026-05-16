@@ -668,6 +668,12 @@ export interface CreateShowcaseImagesIn {
   final_quality: "standard" | "high" | "4k";
   output_count: 1 | 2 | 4 | 8 | 16;
   scene_environment?: "indoor" | "outdoor";
+  scene_strategy?: "balanced" | "natural_series" | "editorial_campaign";
+  scene_variety?: "safe" | "rich" | "wild";
+  scene_planner?: "gpt55_preflight" | "gpt55_batch_only" | "rules_fallback";
+  continuity_anchor?: "none" | "accessory" | "pet" | "location_series";
+  allow_pet?: boolean;
+  allow_background_people?: boolean;
 }
 
 export interface ReviseWorkflowImageIn {

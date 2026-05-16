@@ -800,6 +800,18 @@ class ShowcaseImagesCreateIn(BaseModel):
     final_quality: Literal["standard", "high", "4k"] = "high"
     output_count: Literal[1, 2, 4, 8, 16] = 4
     scene_environment: Literal["indoor", "outdoor"] = "indoor"
+    scene_strategy: Literal[
+        "balanced", "natural_series", "editorial_campaign"
+    ] = "natural_series"
+    scene_variety: Literal["safe", "rich", "wild"] = "rich"
+    scene_planner: Literal[
+        "gpt55_preflight", "gpt55_batch_only", "rules_fallback"
+    ] = "gpt55_preflight"
+    continuity_anchor: Literal[
+        "none", "accessory", "pet", "location_series"
+    ] = "accessory"
+    allow_pet: bool = False
+    allow_background_people: bool = True
 
 
 class ImageRevisionIn(BaseModel):

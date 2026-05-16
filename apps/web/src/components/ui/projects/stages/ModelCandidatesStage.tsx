@@ -32,19 +32,27 @@ import {
 } from "../components/SelectableImageGrid";
 import { RunningState, StageFrame } from "../components/StageFrame";
 import {
+  coerceContinuityAnchor,
+  coerceSceneStrategy,
+  coerceSceneVariety,
+} from "../coercers";
+import {
   ASPECT_RATIO_LABELS,
+  CONTINUITY_ANCHOR_LABELS,
   OUTPUT_COUNT_LABELS,
+  SCENE_STRATEGY_LABELS,
+  SCENE_VARIETY_LABELS,
   SHOT_PLAN_DEFAULT,
   TEMPLATE_LABELS,
   coerceOutputCount,
   type CreateAspectRatio,
+  type CreateContinuityAnchor,
   type CreateOutputCount,
+  type CreateSceneEnvironment,
+  type CreateSceneStrategy,
+  type CreateSceneVariety,
   type CreateTemplate,
 } from "../types";
-
-const OUTPUT_COUNT_SELECT_OPTIONS = OUTPUT_COUNT_LABELS.map(
-  ([value, label]) => [String(value), label] as const,
-);
 import {
   accessorySuggestionText,
   defaultLibraryAgeSegment,
@@ -53,6 +61,10 @@ import {
   stringArray,
   stringValue,
 } from "../utils";
+
+const OUTPUT_COUNT_SELECT_OPTIONS = OUTPUT_COUNT_LABELS.map(
+  ([value, label]) => [String(value), label] as const,
+);
 
 export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const approve = useApproveModelCandidateMutation(workflow.id, {
@@ -100,6 +112,22 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const initialAspectRatio = coerceAspectRatio(showcaseStep?.input_json?.aspect_ratio);
   const initialQuality = coerceQuality(showcaseStep?.input_json?.final_quality);
   const initialOutputCount = coerceOutputCount(showcaseStep?.input_json?.output_count);
+  const initialSceneEnvironment = coerceSceneEnvironment(
+    showcaseStep?.input_json?.scene_environment,
+  );
+  const initialSceneStrategy = coerceSceneStrategy(showcaseStep?.input_json?.scene_strategy);
+  const initialSceneVariety = coerceSceneVariety(showcaseStep?.input_json?.scene_variety);
+  const initialContinuityAnchor = coerceContinuityAnchor(
+    showcaseStep?.input_json?.continuity_anchor,
+  );
+  const initialAllowPet =
+    typeof showcaseStep?.input_json?.allow_pet === "boolean"
+      ? showcaseStep.input_json.allow_pet
+      : initialContinuityAnchor === "pet";
+  const initialAllowBackgroundPeople =
+    typeof showcaseStep?.input_json?.allow_background_people === "boolean"
+      ? showcaseStep.input_json.allow_background_people
+      : true;
   const modelStylePrompt =
     stringValue(approvalStep?.input_json?.style_prompt) ??
     stringValue(candidateStep?.input_json?.style_prompt) ??
@@ -123,7 +151,18 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
   const [aspectRatio, setAspectRatio] = useState<CreateAspectRatio>(initialAspectRatio);
   const [quality, setQuality] = useState<"high" | "4k">(initialQuality);
   const [outputCount, setOutputCount] = useState<CreateOutputCount>(initialOutputCount);
-  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}`;
+  const [sceneStrategy, setSceneStrategy] =
+    useState<CreateSceneStrategy>(initialSceneStrategy);
+  const [sceneVariety, setSceneVariety] = useState<CreateSceneVariety>(initialSceneVariety);
+  const [continuityAnchor, setContinuityAnchor] =
+    useState<CreateContinuityAnchor>(initialContinuityAnchor);
+  const [allowPet, setAllowPet] = useState(initialAllowPet);
+  const [allowBackgroundPeople, setAllowBackgroundPeople] = useState(
+    initialAllowBackgroundPeople,
+  );
+  // currentConfigKey 故意只用 initial*：仅在 step.input_json 改变时 reset 本地表单，
+  // 避免用户改了 dropdown 又被 render-phase reset 覆盖。
+  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}:${initialSceneStrategy}:${initialSceneVariety}:${initialContinuityAnchor}:${initialAllowPet}:${initialAllowBackgroundPeople}`;
   const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
   const [accessoryPrompt, setAccessoryPrompt] = useState(suggestedAccessoryPrompt);
   const [trackedAccessoryPrompt, setTrackedAccessoryPrompt] = useState(suggestedAccessoryPrompt);
@@ -145,6 +184,11 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
     setAspectRatio(initialAspectRatio);
     setQuality(initialQuality);
     setOutputCount(initialOutputCount);
+    setSceneStrategy(initialSceneStrategy);
+    setSceneVariety(initialSceneVariety);
+    setContinuityAnchor(initialContinuityAnchor);
+    setAllowPet(initialAllowPet);
+    setAllowBackgroundPeople(initialAllowBackgroundPeople);
   }
   if (trackedAccessoryPrompt !== suggestedAccessoryPrompt) {
     const previousPrompt = trackedAccessoryPrompt;
@@ -190,6 +234,13 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
       aspect_ratio: aspectRatio,
       final_quality: quality,
       output_count: outputCount,
+      scene_environment: initialSceneEnvironment,
+      scene_strategy: sceneStrategy,
+      scene_variety: sceneVariety,
+      scene_planner: "gpt55_preflight",
+      continuity_anchor: continuityAnchor,
+      allow_pet: allowPet,
+      allow_background_people: allowBackgroundPeople,
     });
   };
 
@@ -430,6 +481,50 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
               options={OUTPUT_COUNT_SELECT_OPTIONS}
             />
           </div>
+          <div className="mt-4 grid gap-x-6 gap-y-4 md:grid-cols-3">
+            <SelectField
+              label="场景风格"
+              value={sceneStrategy}
+              onChange={(value) => setSceneStrategy(value as CreateSceneStrategy)}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+              options={SCENE_STRATEGY_LABELS}
+            />
+            <SelectField
+              label="丰富度"
+              value={sceneVariety}
+              onChange={(value) => setSceneVariety(value as CreateSceneVariety)}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+              options={SCENE_VARIETY_LABELS}
+            />
+            <SelectField
+              label="连续元素"
+              value={continuityAnchor}
+              onChange={(value) => {
+                const next = value as CreateContinuityAnchor;
+                setContinuityAnchor(next);
+                if (next === "pet") setAllowPet(true);
+              }}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+              options={CONTINUITY_ANCHOR_LABELS}
+            />
+          </div>
+          <div className="mt-4 grid gap-x-6 gap-y-3 md:grid-cols-2">
+            <CheckboxField
+              label="允许宠物"
+              checked={allowPet}
+              onChange={(next) => {
+                setAllowPet(next);
+                if (!next && continuityAnchor === "pet") setContinuityAnchor("accessory");
+              }}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+            />
+            <CheckboxField
+              label="允许远处路人"
+              checked={allowBackgroundPeople}
+              onChange={setAllowBackgroundPeople}
+              disabled={createShowcase.isPending || isShowcaseRunning}
+            />
+          </div>
           <p className="mt-2 text-[12px] text-[var(--fg-3)]">张数越多耗时越长</p>
           <Button
             className="mt-5"
@@ -482,7 +577,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
         title="再生成一批展示图？"
         description={`已生成的成品会继续保留，新一轮会按当前选择的模板、${aspectRatio} 画幅和 ${
           quality === "4k" ? "4K 终稿" : "2K 高质量"
-        } 模式追加生成 4 张。`}
+        } 模式追加生成 ${outputCount} 张。`}
         confirmText="追加生成"
         tone="default"
         confirming={createShowcase.isPending}
@@ -525,6 +620,31 @@ function SelectField({
           </option>
         ))}
       </select>
+    </label>
+  );
+}
+
+function CheckboxField({
+  label,
+  checked,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled: boolean;
+}) {
+  return (
+    <label className="inline-flex min-h-10 items-center gap-2 text-[13px] text-[var(--fg-1)]">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        disabled={disabled}
+        className="h-4 w-4 accent-[var(--amber-400)] disabled:opacity-40"
+      />
+      <span>{label}</span>
     </label>
   );
 }
@@ -574,4 +694,8 @@ function coerceAspectRatio(value: unknown): CreateAspectRatio {
 
 function coerceQuality(value: unknown): "high" | "4k" {
   return value === "4k" ? "4k" : "high";
+}
+
+function coerceSceneEnvironment(value: unknown): CreateSceneEnvironment {
+  return value === "outdoor" ? "outdoor" : "indoor";
 }

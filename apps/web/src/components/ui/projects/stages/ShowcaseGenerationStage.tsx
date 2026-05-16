@@ -23,16 +23,27 @@ import { ImageGrid, ReferenceBlock } from "../components/ImageGrid";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { RunningState, StageFrame } from "../components/StageFrame";
 import {
+  coerceContinuityAnchor,
+  coerceSceneStrategy,
+  coerceSceneVariety,
+} from "../coercers";
+import {
   ASPECT_RATIO_LABELS,
   OUTPUT_COUNT_LABELS,
+  CONTINUITY_ANCHOR_LABELS,
   SCENE_ENVIRONMENT_LABELS,
   SCENE_ENVIRONMENT_TEMPLATES,
+  SCENE_STRATEGY_LABELS,
+  SCENE_VARIETY_LABELS,
   SHOT_PLAN_DEFAULT,
   TEMPLATE_LABELS,
   coerceOutputCount,
   type CreateAspectRatio,
+  type CreateContinuityAnchor,
   type CreateOutputCount,
   type CreateSceneEnvironment,
+  type CreateSceneStrategy,
+  type CreateSceneVariety,
   type CreateTemplate,
 } from "../types";
 import { candidateImages, showcaseImages, stepOf, stringValue } from "../utils";
@@ -48,6 +59,19 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const initialQuality = coerceQuality(step?.input_json?.final_quality);
   const initialOutputCount = coerceOutputCount(step?.input_json?.output_count);
   const initialSceneEnvironment = coerceSceneEnvironment(step?.input_json?.scene_environment);
+  const initialSceneStrategy = coerceSceneStrategy(step?.input_json?.scene_strategy);
+  const initialSceneVariety = coerceSceneVariety(step?.input_json?.scene_variety);
+  const initialContinuityAnchor = coerceContinuityAnchor(
+    step?.input_json?.continuity_anchor,
+  );
+  const initialAllowPet =
+    typeof step?.input_json?.allow_pet === "boolean"
+      ? step.input_json.allow_pet
+      : initialContinuityAnchor === "pet";
+  const initialAllowBackgroundPeople =
+    typeof step?.input_json?.allow_background_people === "boolean"
+      ? step.input_json.allow_background_people
+      : true;
   const create = useCreateShowcaseImagesMutation(workflow.id, {
     onError: (err) =>
       toast.error("生成展示图失败", {
@@ -77,8 +101,19 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
   const [outputCount, setOutputCount] = useState<CreateOutputCount>(initialOutputCount);
   const [sceneEnvironment, setSceneEnvironment] =
     useState<CreateSceneEnvironment>(initialSceneEnvironment);
+  const [sceneStrategy, setSceneStrategy] =
+    useState<CreateSceneStrategy>(initialSceneStrategy);
+  const [sceneVariety, setSceneVariety] = useState<CreateSceneVariety>(initialSceneVariety);
+  const [continuityAnchor, setContinuityAnchor] =
+    useState<CreateContinuityAnchor>(initialContinuityAnchor);
+  const [allowPet, setAllowPet] = useState(initialAllowPet);
+  const [allowBackgroundPeople, setAllowBackgroundPeople] = useState(
+    initialAllowBackgroundPeople,
+  );
   const sceneEnvironmentEnabled = SCENE_ENVIRONMENT_TEMPLATES.has(template);
-  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}:${initialSceneEnvironment}`;
+  // currentConfigKey 故意只用 initial*：仅在 step.input_json 改变时 reset 本地表单，
+  // 避免用户改了 dropdown 又被 render-phase reset 覆盖。
+  const currentConfigKey = `${initialTemplate}:${initialAspectRatio}:${initialQuality}:${initialOutputCount}:${initialSceneEnvironment}:${initialSceneStrategy}:${initialSceneVariety}:${initialContinuityAnchor}:${initialAllowPet}:${initialAllowBackgroundPeople}`;
   const [trackedConfigKey, setTrackedConfigKey] = useState(currentConfigKey);
   const [confirmReopen, setConfirmReopen] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
@@ -94,6 +129,11 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
     setQuality(initialQuality);
     setOutputCount(initialOutputCount);
     setSceneEnvironment(initialSceneEnvironment);
+    setSceneStrategy(initialSceneStrategy);
+    setSceneVariety(initialSceneVariety);
+    setContinuityAnchor(initialContinuityAnchor);
+    setAllowPet(initialAllowPet);
+    setAllowBackgroundPeople(initialAllowBackgroundPeople);
   }
   const generated = showcaseImages(workflow);
   const productImages = workflow.product_images;
@@ -114,6 +154,12 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
       final_quality: quality,
       output_count: outputCount,
       scene_environment: sceneEnvironmentEnabled ? sceneEnvironment : "indoor",
+      scene_strategy: sceneStrategy,
+      scene_variety: sceneVariety,
+      scene_planner: "gpt55_preflight",
+      continuity_anchor: continuityAnchor,
+      allow_pet: allowPet,
+      allow_background_people: allowBackgroundPeople,
     });
   };
 
@@ -217,6 +263,50 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
             options={OUTPUT_COUNT_SELECT_OPTIONS}
           />
         </div>
+        <div className="mt-4 grid gap-x-6 gap-y-4 md:grid-cols-3">
+          <SelectField
+            label="场景风格"
+            value={sceneStrategy}
+            onChange={(value) => setSceneStrategy(value as CreateSceneStrategy)}
+            disabled={isRunning}
+            options={SCENE_STRATEGY_LABELS}
+          />
+          <SelectField
+            label="丰富度"
+            value={sceneVariety}
+            onChange={(value) => setSceneVariety(value as CreateSceneVariety)}
+            disabled={isRunning}
+            options={SCENE_VARIETY_LABELS}
+          />
+          <SelectField
+            label="连续元素"
+            value={continuityAnchor}
+            onChange={(value) => {
+              const next = value as CreateContinuityAnchor;
+              setContinuityAnchor(next);
+              if (next === "pet") setAllowPet(true);
+            }}
+            disabled={isRunning}
+            options={CONTINUITY_ANCHOR_LABELS}
+          />
+        </div>
+        <div className="mt-4 grid gap-x-6 gap-y-3 md:grid-cols-2">
+          <CheckboxField
+            label="允许宠物"
+            checked={allowPet}
+            onChange={(next) => {
+              setAllowPet(next);
+              if (!next && continuityAnchor === "pet") setContinuityAnchor("accessory");
+            }}
+            disabled={isRunning}
+          />
+          <CheckboxField
+            label="允许远处路人"
+            checked={allowBackgroundPeople}
+            onChange={setAllowBackgroundPeople}
+            disabled={isRunning}
+          />
+        </div>
         <p className="mt-4 inline-flex flex-wrap items-center gap-2 text-[12px] leading-6 text-[var(--fg-2)]">
           <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
             <Layers className="h-3 w-3" />
@@ -226,6 +316,8 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
           <span>{aspectRatio} 画幅</span>
           <span aria-hidden className="text-[var(--fg-3)]">·</span>
           <span>{quality === "4k" ? "4K 终稿" : "2K 高质量"}</span>
+          <span aria-hidden className="text-[var(--fg-3)]">·</span>
+          <span>{sceneStrategy === "natural_series" ? "GPT-5.5 自然导演" : "GPT-5.5 场景导演"}</span>
           <span aria-hidden className="text-[var(--fg-3)]">·</span>
           <span className="text-[var(--fg-3)]">张数越多耗时越长</span>
         </p>
@@ -359,6 +451,31 @@ function SelectField({
           </option>
         ))}
       </select>
+    </label>
+  );
+}
+
+function CheckboxField({
+  label,
+  checked,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled: boolean;
+}) {
+  return (
+    <label className="inline-flex min-h-10 items-center gap-2 text-[13px] text-[var(--fg-1)]">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        disabled={disabled}
+        className="h-4 w-4 accent-[var(--amber-400)] disabled:opacity-40"
+      />
+      <span>{label}</span>
     </label>
   );
 }
