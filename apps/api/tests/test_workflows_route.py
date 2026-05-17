@@ -1727,15 +1727,15 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
 
     assert "城市斑马线" in prompt
     assert "牵狗过马路" in prompt
-    assert "high_angle" in prompt
-    assert "严格按 SceneCard" in prompt
+    assert "轻微俯拍" in prompt
+    assert "严格按本张拍摄方案" in prompt
     assert "50mm 标准焦段" not in prompt
     assert "低存在感宠物" in prompt
-    assert "GPT-5.5 单张执行 Prompt" in composed
+    assert "【本张拍摄方案】" in composed
     assert "蓝色格纹衬衫" in composed
-    assert "本张 SceneCard 必须执行" in composed
+    assert "本张拍摄方案必须执行" in composed
     assert "城市斑马线" in composed
-    assert "high_angle" in composed
+    assert "轻微俯拍" in composed
     assert "牵狗过马路" in composed
     assert "不要遮挡胸前" in composed
     assert "【最高优先级：商品 1:1 还原】" in safe
@@ -1862,15 +1862,98 @@ def test_showcase_prompt_composed_scene_card_appends_conflict_guardrails() -> No
         composed_prompt="街边花坛旁轻扶肩带，户外日光街拍。",
     )
 
-    assert "GPT-5.5 单张执行 Prompt" in prompt
+    assert "【本张拍摄方案】" in prompt
     assert "街边花坛旁轻扶肩带" in prompt
-    assert "最终画面只采用这个 SceneCard" in prompt
+    assert "最终画面只采用本张拍摄方案" in prompt
     assert "不得再混入其它地点" in prompt
     assert "本张可见性目标" in prompt
     assert "本张不要强求" in prompt
     assert "背后蝴蝶结" in prompt
     assert "本张画面范围" in prompt
     assert "真实自然儿童摄影质感" in prompt
+
+
+def test_showcase_prompt_expands_gpt55_scene_details_without_internal_terms() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "独立生成 · 儿童", "height_cm": 128},
+    )
+    scene_card = {
+        "id": "side-back-1",
+        "scene_family": "premium_studio",
+        "location": "灰白墙面和木地板的高级棚拍空间",
+        "micro_event": "背向前走半步后自然回望",
+        "camera": {
+            "distance": "full_body",
+            "angle": "side_or_back",
+            "lens_feel": "natural_standard",
+        },
+        "pose": "侧身站位，肩背轮廓完整",
+        "motion": "轻微转身带出侧面或背面廓形",
+        "props": ["白色短袜", "浅色低帮童鞋"],
+        "lighting": "自然窗光或柔和室内暖光，方向明确不过曝",
+        "composition": "侧面或背面廓形清楚，人物完整不切断",
+        "product_visibility": "side_or_back_silhouette",
+        "environment_detail": "灰白墙面、木地板和远处柔和墙角形成真实空间深度",
+        "lighting_detail": "主光从左前方侧窗落下，肩背和裙摆有柔和明暗层次",
+        "camera_detail": "平视全身机位，镜头与人物保持真实距离，头脚完整不切断",
+        "composition_detail": "转身方向一侧留出空间，背面结构不被头发遮挡",
+        "creative_intent": "用转身回望的瞬间制造侧背面廓形张力",
+        "natural_detail": "回望幅度很小，像走动中自然被叫住，不做舞台式扭身",
+        "negative": ["画面里不要出现镜子或镜面反射"],
+    }
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={
+            "category": "女童短袖假两件背带连衣裙",
+            "must_preserve": [
+                "白色圆领短袖上衣",
+                "浅蓝色牛仔A字裙身",
+                "一红一浅黄的异色背带",
+                "前胸雏菊刺绣和白色花形扣饰",
+                "前片立体毛绒小熊贴布与小口袋",
+                "背后交叉背带和牛仔蝴蝶结",
+                "裙摆彩色波浪缝线",
+                "牛仔布纹理与明线缝合感",
+            ],
+        },
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="premium_studio",
+        shot_type="side_or_back",
+        final_quality="high",
+        scene_card=scene_card,
+        garment_lock={
+            "core_identity": "女童短袖假两件背带连衣裙",
+            "must_preserve": [
+                "白色圆领短袖上衣",
+                "浅蓝色牛仔A字裙身",
+                "一红一浅黄的异色背带",
+                "前胸雏菊刺绣和白色花形扣饰",
+                "前片立体毛绒小熊贴布与小口袋",
+                "背后交叉背带和牛仔蝴蝶结",
+                "裙摆彩色波浪缝线",
+                "牛仔布纹理与明线缝合感",
+            ],
+            "visibility_priority": ["正面胸口", "领口", "口袋", "袖口和袖型"],
+            "mutation_bans": ["改颜色", "改廓形", "新增图案/logo"],
+            "occlusion_policy": "手、头发和道具不得遮挡商品主体。",
+        },
+    )
+
+    assert "SceneCard" not in prompt
+    assert prompt.count("【商品 1:1 还原") == 0
+    assert prompt.count("【最高优先级：商品 1:1 还原】") == 1
+    assert "灰白墙面、木地板和远处柔和墙角形成真实空间深度" in prompt
+    assert "主光从左前方侧窗落下" in prompt
+    assert "平视全身机位，镜头与人物保持真实距离" in prompt
+    assert "转身方向一侧留出空间" in prompt
+    assert "摄影意图" in prompt
+    assert "用转身回望的瞬间制造侧背面廓形张力" in prompt
+    assert "回望幅度很小" in prompt
+    assert "背后交叉背带和牛仔蝴蝶结" in prompt
+    assert "本张不要强求" in prompt
+    assert "前胸雏菊刺绣和白色花形扣饰" in prompt
 
 
 def test_showcase_prompt_clamps_oversized_garment_lock() -> None:
@@ -1949,7 +2032,14 @@ async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_revie
         return {
             "scene_card_id": scene_card["id"],
             "status": "ok",
-            "final_prompt": f"最终单张 prompt {scene_card['id']}，衣服主体清楚。",
+            "shooting_brief": (
+                f"窗边侧光拍摄方案 {scene_card['id']}，按照自然事件展开，"
+                "人物在真实空间里小步停住，衣服主体清楚。"
+            ),
+            "final_prompt": (
+                f"窗边侧光拍摄方案 {scene_card['id']}，按照自然事件展开，"
+                "人物在真实空间里小步停住，衣服主体清楚。"
+            ),
             "product_visibility_checklist": ["衣服主体清楚"],
             "negative_prompt_notes": [],
             "regenerate_if": [],
@@ -1996,9 +2086,10 @@ async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_revie
     assert len(preflight["scene_cards"]) == 2
     assert len(preflight["per_image_prompts"]) == 2
     assert len(preflight["prompt_reviews"]) == 2
-    assert "GPT-5.5 单张执行 Prompt" in preflight["final_prompts"][0]
+    assert "【本张拍摄方案】" in preflight["final_prompts"][0]
+    assert "窗边侧光拍摄方案 scene-1" in preflight["final_prompts"][0]
     assert "蓝色格纹" in preflight["final_prompts"][0]
-    assert "本张 SceneCard 必须执行" in preflight["final_prompts"][0]
+    assert "本张拍摄方案必须执行" in preflight["final_prompts"][0]
     assert "自然事件 1" in preflight["final_prompts"][0]
 
 
@@ -2108,15 +2199,16 @@ async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instructio
     async def fake_compose(*args: Any, **kwargs: Any) -> dict[str, Any]:
         rewrite_instruction = kwargs.get("rewrite_instruction")
         rewrite_instructions.append(rewrite_instruction)
-        final_prompt = (
-            "改写后的安全 prompt，饮料移到身体侧边，衣服主体、胸前、领口、袖口和纽扣清楚。"
+        shooting_brief = (
+            "改写后的安全拍摄方案，饮料移到身体侧边，衣服主体、胸前、领口、袖口和纽扣清楚。"
             if rewrite_instruction
-            else "初稿 prompt，饮料靠近胸前，可能遮挡商品。"
+            else "初稿拍摄方案，饮料靠近胸前，可能遮挡商品。"
         )
         return {
             "scene_card_id": scene_card["id"],
             "status": "ok",
-            "final_prompt": final_prompt,
+            "shooting_brief": shooting_brief,
+            "final_prompt": shooting_brief,
             "product_visibility_checklist": ["衣服主体清楚"],
             "negative_prompt_notes": [],
             "regenerate_if": [],
@@ -2174,7 +2266,7 @@ async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instructio
     assert len(rewrite_instructions) == 2
     assert rewrite_instructions[0] is None
     assert rewrite_instructions[1]
-    assert "改写后的安全 prompt" in preflight["final_prompts"][0]
+    assert "改写后的安全拍摄方案" in preflight["final_prompts"][0]
 
 
 @pytest.mark.asyncio
@@ -2223,7 +2315,8 @@ async def test_prepare_showcase_preflight_falls_back_when_rewrite_still_risky(
         return {
             "scene_card_id": scene_card["id"],
             "status": "ok",
-            "final_prompt": "高风险 prompt，手和饮料仍在胸前。",
+            "shooting_brief": "高风险拍摄方案，手和饮料仍在胸前。",
+            "final_prompt": "高风险拍摄方案，手和饮料仍在胸前。",
             "product_visibility_checklist": [],
             "negative_prompt_notes": [],
             "regenerate_if": [],
