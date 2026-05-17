@@ -61,6 +61,17 @@ SHOT_CLASS_ORDER: tuple[ShotClass, ...] = (
     "side_or_back",
 )
 
+_FRONT_BIASED_SHOT_SEQUENCE: tuple[ShotClass, ...] = (
+    "front_full_body",
+    "natural_pose",
+    "detail_half_body",
+    "front_full_body",
+    "natural_pose",
+    "detail_half_body",
+    "front_full_body",
+    "side_or_back",
+)
+
 
 def resolve_pool_band(age_segment: AgeSegment | str | None) -> PoolBand:
     """模特库 7 段 → 3 个池子段。"""
@@ -85,28 +96,18 @@ def age_soft_constraint(age_segment: AgeSegment | str | None) -> str:
 
 
 def shot_class_distribution(output_count: int) -> list[ShotClass]:
-    """决定 N 张图分配到 4 类机位。
+    """决定 N 张图分配到各类机位，默认更偏正面商品展示。
 
     1: 1 张正面全身商品展示
     2: 1 正面 + 1 动作
-    4: 4 类各 1
-    8: 4 类各 2
-    16: 4 类各 4（用尽池子）
-    其他: 按 4 类轮询补齐
+    4: 正面/自然/细节/正面，不主动给背面
+    8: 仅 1 张侧背补充
+    16: 仅 2 张侧背补充
+    其他: 按正面加权序列轮询补齐
     """
-    if output_count <= 1:
-        return ["front_full_body"]
-    if output_count == 2:
-        return ["front_full_body", "natural_pose"]
-    if output_count == 4:
-        return list(SHOT_CLASS_ORDER)
-    if output_count == 8:
-        return [c for c in SHOT_CLASS_ORDER for _ in range(2)]
-    if output_count == 16:
-        return [c for c in SHOT_CLASS_ORDER for _ in range(4)]
     plan: list[ShotClass] = []
     while len(plan) < output_count:
-        plan.extend(SHOT_CLASS_ORDER)
+        plan.extend(_FRONT_BIASED_SHOT_SEQUENCE)
     return plan[:output_count]
 
 
@@ -163,7 +164,7 @@ def select_variants(
                 product_used += 1
 
     if target_product and product_used < target_product:
-        # 有机会就把 tone 替换成 product，从池子里挑没用过的
+        # 有机会就把 tone 替换成 product；池子太小时允许复用 product 变体。
         used_labels = {s["label"] for s in selections if s is not None}
         for idx, current in enumerate(selections):
             if product_used >= target_product:
@@ -176,6 +177,12 @@ def select_variants(
                 for v in (pool.get(shot_class) or [])
                 if v["framing"] == "product_first" and v["label"] not in used_labels
             ]
+            if not candidates:
+                candidates = [
+                    v
+                    for v in (pool.get(shot_class) or [])
+                    if v["framing"] == "product_first"
+                ]
             if not candidates:
                 continue
             picked = rng.choice(candidates)

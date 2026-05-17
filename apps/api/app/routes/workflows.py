@@ -200,7 +200,6 @@ DEFAULT_SHOT_PLAN = [
     "front_full_body",
     "natural_pose",
     "detail_half_body",
-    "side_or_back",
 ]
 
 MODEL_LIBRARY_ROOT_KEY = "apparel-model-library"
@@ -2903,6 +2902,7 @@ def _showcase_scene_label(value: Any) -> str:
         "half_body": "半身入镜",
         "upper_body": "上半身近景",
         "front_full_body": "正面全身",
+        "front_three_quarter": "三分之二正面",
         "side_or_back": "侧面或背面角度",
         "side_or_back_silhouette": "侧面或背面廓形",
         "upper_body_detail": "上半身细节",
@@ -3432,32 +3432,45 @@ def _showcase_prompt(
             prefix = _truncate_prompt_text(prefix, MAX_PROMPT_CHARS - 600)
         body = composed_prompt.strip()
         if scene_direction:
-            scene_framing = _showcase_scene_framing_direction(
-                scene_card, framing_direction
-            )
-            scene_render = _showcase_scene_render_direction(
-                scene_card,
-                age_segment=age_segment,
-                model_summary=summary,
-            )
+            seed_parts: list[str] = []
+            if isinstance(scene_card, dict):
+                camera = (
+                    scene_card.get("camera")
+                    if isinstance(scene_card.get("camera"), dict)
+                    else {}
+                )
+                camera_seed = "，".join(
+                    _showcase_scene_label(item)
+                    for item in (
+                        camera.get("distance"),
+                        camera.get("angle"),
+                        camera.get("lens_feel"),
+                    )
+                    if str(item or "").strip()
+                )
+                seed_parts = [
+                    str(scene_card.get("location") or "").strip(),
+                    str(scene_card.get("micro_event") or "").strip(),
+                    camera_seed,
+                ]
+            seed_line = "；".join(part for part in seed_parts if part)
             scene_rules = [
                 "【本张拍摄方案必须执行】",
-                f"{scene_direction}。",
-                "最终画面只采用本张拍摄方案的地点、生活事件、动作动态、机位和光线；"
-                "不得再混入其它地点、花坛/街边/棚拍等旧模板场景。",
-                f"本张可见性目标：{visible_preserve}。",
+                "最终画面只采用上方短摄影方案的场景、动作、神态、构图、光线和镜头；"
+                "不得混入其它地点、动作、旧模板文案或普通棚拍站姿。",
+                f"本张商品可见性：{visible_preserve}。",
             ]
+            if shot_type != "side_or_back":
+                scene_rules.append(
+                    "本张视角：正面或三分之二正面优先，脸和商品主体清楚；"
+                    "不要背影、背向或以后背作为主视角。"
+                )
+            if seed_line:
+                scene_rules.append(f"本张场景种子：{seed_line}。")
             if deferred_preserve:
                 scene_rules.append(
                     f"本张不要强求：{deferred_preserve}；这些留给其它角度，不要为它们破坏当前镜头。"
                 )
-            scene_rules.extend(
-                [
-                    f"本张画面范围：{scene_framing}。",
-                    f"本张画质：{scene_render}。",
-                    "不得退回普通站姿、棚拍硬 pose 或与其它图片重复的同一动作。",
-                ]
-            )
             body = f"{body}\n\n" + "".join(scene_rules)
         return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
     template_direction = _template_requirement(
@@ -3476,6 +3489,11 @@ def _showcase_prompt(
             scene_card, framing_direction
         )
         shot_direction = f"本张可见性目标：{visible_preserve}"
+        if shot_type != "side_or_back":
+            shot_direction = (
+                "正面或三分之二正面，脸和商品主体清楚；不要背影或后背主视角；"
+                f"{shot_direction}"
+            )
         if deferred_preserve:
             shot_direction = f"{shot_direction}；本张不要强求：{deferred_preserve}"
         camera_direction = _showcase_scene_card_camera_direction(scene_card)

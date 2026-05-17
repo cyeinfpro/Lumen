@@ -106,3 +106,8 @@ def test_showcase_images_defaults_to_gpt55_preflight_scene_planner():
     assert body.continuity_anchor == "accessory"
     assert body.allow_pet is False
     assert body.allow_background_people is True
+    assert body.shot_plan == [
+        "front_full_body",
+        "natural_pose",
+        "detail_half_body",
+    ]
