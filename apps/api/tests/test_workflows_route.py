@@ -1015,9 +1015,7 @@ async def test_create_showcase_images_queues_gpt55_preflight_in_background(
         assert run_id == "run-1"
         return candidate
 
-    async def fake_conversation(
-        db: Any, *, user_id: str, conversation_id: str
-    ) -> Any:
+    async def fake_conversation(db: Any, *, user_id: str, conversation_id: str) -> Any:
         assert user_id == "user-1"
         assert conversation_id == "conv-1"
         return conv
@@ -1665,7 +1663,11 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
         "scene_family": "urban_street",
         "location": "城市斑马线",
         "micro_event": "牵狗过马路时回头",
-        "camera": {"distance": "full_body", "angle": "high_angle", "lens_feel": "phone"},
+        "camera": {
+            "distance": "full_body",
+            "angle": "high_angle",
+            "lens_feel": "phone",
+        },
         "pose": "小步向前",
         "motion": "自然走动",
         "props": ["狗", "牵引绳"],
@@ -1741,6 +1743,134 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
     assert "宠物" not in safe
     assert "路人" not in safe
     assert "None" not in sparse_scene
+
+
+def test_showcase_prompt_scene_card_overrides_conflicting_template_scene() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "独立生成 · 儿童", "height_cm": 128},
+    )
+    scene_card = {
+        "id": "detail-half-1",
+        "scene_family": "designed_lifestyle",
+        "location": "酒店大堂边缘的安静区域",
+        "micro_event": "手指轻触衣摆边缘展示面料垂感",
+        "camera": {
+            "distance": "half_body",
+            "angle": "eye_level",
+            "lens_feel": "natural_standard",
+        },
+        "pose": "半身微侧，手部动作避开胸前主体",
+        "motion": "手指轻整理细节，衣服纹理和结构清楚",
+        "props": ["白色短袜", "浅色低帮童鞋"],
+        "lighting": "酒店大堂窗边柔和侧光",
+        "composition": "半身到大腿上方，胸前和衣摆都入镜",
+        "product_visibility": "upper_body_detail",
+        "negative": ["不要让手遮挡胸前贴布和扣饰"],
+    }
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={
+            "category": "女童短袖假两件背带连衣裙",
+            "must_preserve": [
+                "白色圆领短袖上衣",
+                "浅蓝色牛仔A字裙身",
+                "一红一浅黄的异色背带",
+                "前胸雏菊刺绣和白色花形扣饰",
+                "前片立体毛绒小熊贴布与小口袋",
+                "背后交叉背带和牛仔蝴蝶结",
+                "裙摆彩色波浪缝线",
+                "牛仔布纹理与明线缝合感",
+            ],
+        },
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="urban_commute",
+        shot_type="detail_half_body",
+        final_quality="high",
+        scene_card=scene_card,
+        garment_lock={
+            "core_identity": "女童短袖假两件背带连衣裙",
+            "must_preserve": [
+                "白色圆领短袖上衣",
+                "浅蓝色牛仔A字裙身",
+                "一红一浅黄的异色背带",
+                "前胸雏菊刺绣和白色花形扣饰",
+                "前片立体毛绒小熊贴布与小口袋",
+                "背后交叉背带和牛仔蝴蝶结",
+                "裙摆彩色波浪缝线",
+                "牛仔布纹理与明线缝合感",
+            ],
+            "visibility_priority": ["正面胸口", "领口", "口袋", "袖口和袖型"],
+            "mutation_bans": ["改颜色", "改廓形", "新增图案/logo"],
+            "occlusion_policy": "手、头发和道具不得遮挡商品主体。",
+        },
+    )
+
+    assert "酒店大堂边缘的安静区域" in prompt
+    assert "手指轻触衣摆边缘展示面料垂感" in prompt
+    assert "本张必须清楚可见" in prompt
+    assert "一红一浅黄的异色背带" in prompt
+    assert "前胸雏菊刺绣和白色花形扣饰" in prompt
+    assert "前片立体毛绒小熊贴布与小口袋" in prompt
+    assert "本张不要强求" in prompt
+    assert "背后交叉背带和牛仔蝴蝶结" in prompt
+    assert "本张不要强求】背后交叉背带和牛仔蝴蝶结" in prompt
+    assert "街边花坛" not in prompt
+    assert "户外日光带明确方向" not in prompt
+    assert "真实街头摄影质感" not in prompt
+    assert "半身到大腿上方构图" in prompt
+    assert "真实自然儿童摄影质感" in prompt
+    assert "低存在感宠物" not in prompt
+    assert "远处路人" not in prompt
+
+
+def test_showcase_prompt_composed_scene_card_appends_conflict_guardrails() -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "独立生成 · 儿童", "height_cm": 128},
+    )
+    scene_card = {
+        "id": "detail-half-1",
+        "scene_family": "designed_lifestyle",
+        "location": "酒店大堂边缘的安静区域",
+        "micro_event": "轻触衣摆边缘",
+        "camera": {"distance": "half_body", "angle": "eye_level"},
+        "pose": "半身微侧",
+        "motion": "手指轻整理细节",
+        "lighting": "窗边柔和侧光",
+        "composition": "半身到大腿上方",
+        "product_visibility": "upper_body_detail",
+        "negative": ["不要遮挡胸前"],
+    }
+
+    prompt = workflows._showcase_prompt(  # noqa: SLF001
+        product_analysis={"must_preserve": ["正面刺绣", "背后蝴蝶结", "裙摆彩色线"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="urban_commute",
+        shot_type="detail_half_body",
+        final_quality="high",
+        scene_card=scene_card,
+        garment_lock={
+            "core_identity": "女童背带裙",
+            "must_preserve": ["正面刺绣", "背后蝴蝶结", "裙摆彩色线"],
+            "visibility_priority": ["正面胸口"],
+            "mutation_bans": ["改颜色"],
+            "occlusion_policy": "不要遮挡胸前。",
+        },
+        composed_prompt="街边花坛旁轻扶肩带，户外日光街拍。",
+    )
+
+    assert "GPT-5.5 单张执行 Prompt" in prompt
+    assert "街边花坛旁轻扶肩带" in prompt
+    assert "最终画面只采用这个 SceneCard" in prompt
+    assert "不得再混入其它地点" in prompt
+    assert "本张可见性目标" in prompt
+    assert "本张不要强求" in prompt
+    assert "背后蝴蝶结" in prompt
+    assert "本张画面范围" in prompt
+    assert "真实自然儿童摄影质感" in prompt
 
 
 def test_showcase_prompt_clamps_oversized_garment_lock() -> None:
