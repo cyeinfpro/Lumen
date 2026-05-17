@@ -533,13 +533,14 @@ def _showcase_prompt_brief(
     scene_card_mode: bool = False,
     allow_pet: bool = True,
     allow_background_people: bool = True,
+    include_product_lock: bool = True,
 ) -> str:
     direction = template_direction.strip() or "背景与衣服图片搭配"
     extra_direction = _compact_showcase_user_direction(user_direction, style_region)
     if extra_direction:
         direction = f"{direction}；{extra_direction}"
     photography_direction = (
-        "1. 摄影执行：严格按 SceneCard 的地点、生活事件、机位、距离、镜头感、"
+        "1. 摄影执行：严格按本张拍摄方案的地点、生活事件、机位、距离、镜头感、"
         "动作和动态执行，允许真实低角度、俯拍、近距离手机抓拍或环境远景；"
         "必须保持头身比例自然、透视可信，动作像真实抓拍；不得退回普通棚拍站姿，"
         "不得和其它图片重复同一地点、同一站姿、同一手部动作；"
@@ -571,13 +572,20 @@ def _showcase_prompt_brief(
         if scene_card_mode
         else f"重点保留：{product_preserve}，每一项必须清晰可见。"
     )
-    return "\n".join(
+    lines = [
+        "请根据这张白底产品图和模特图，生成真实自然的真人模特穿搭图。",
+        "",
+    ]
+    if include_product_lock:
+        lines.extend(
+            [
+                f"【商品 1:1 还原（最高优先级）】衣服以白底产品图为唯一来源，模特图只用于复刻人物身份。"
+                f"{product_lock_line}不要改款、改色、改廓形、改领口袖型衣长、改图案/logo/印花/文字、改纽扣拉链口袋缝线拼接。",
+                "",
+            ]
+        )
+    lines.extend(
         [
-            "请根据这张白底产品图和模特图，生成真实自然的真人模特穿搭图。",
-            "",
-            f"【商品 1:1 还原（最高优先级）】衣服以白底产品图为唯一来源，模特图只用于复刻人物身份。"
-            f"{product_lock_line}不要改款、改色、改廓形、改领口袖型衣长、改图案/logo/印花/文字、改纽扣拉链口袋缝线拼接。",
-            "",
             "要求：",
             photography_direction,
             "2. 模特按产品图自然穿着这件衣服，版型贴合，褶皱合理；不要人偶感、不要时装秀台步。",
@@ -590,6 +598,7 @@ def _showcase_prompt_brief(
             subject_rule,
         ]
     )
+    return "\n".join(lines)
 
 
 def _infer_age(text: str) -> int | None:
@@ -2879,6 +2888,38 @@ def _candidate_prompt(
     ).strip()
 
 
+def _showcase_scene_label(value: Any) -> str:
+    text = str(value or "").strip()
+    labels = {
+        "clean_ecommerce": "简洁电商棚拍",
+        "premium_studio": "高级棚拍",
+        "designed_lifestyle": "设计感生活场景",
+        "urban_street": "城市街拍",
+        "daily_life": "日常生活场景",
+        "outdoor_daily": "户外日常场景",
+        "phone_snapshot": "手机抓拍感",
+        "social_seeding": "种草分享场景",
+        "full_body": "全身入镜",
+        "half_body": "半身入镜",
+        "upper_body": "上半身近景",
+        "front_full_body": "正面全身",
+        "side_or_back": "侧面或背面角度",
+        "side_or_back_silhouette": "侧面或背面廓形",
+        "upper_body_detail": "上半身细节",
+        "detail_half_body": "半身细节",
+        "eye_level": "平视",
+        "high_angle": "轻微俯拍",
+        "low_angle": "低角度",
+        "slight_side": "轻微侧向",
+        "natural_standard": "自然标准镜头",
+        "handheld_standard": "手持标准镜头",
+        "phone": "手机抓拍镜头",
+        "vertical": "竖构图",
+        "landscape": "横构图",
+    }
+    return labels.get(text, text.replace("_", " "))
+
+
 def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
     if not isinstance(scene_card, dict):
         return ""
@@ -2902,8 +2943,8 @@ def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
         text = str(value or "").strip()
         return f"{label}：{text}" if text else ""
 
-    camera_line = " / ".join(
-        str(item).strip()
+    camera_line = "，".join(
+        _showcase_scene_label(item)
         for item in (
             camera.get("distance"),
             camera.get("angle"),
@@ -2911,20 +2952,77 @@ def _showcase_scene_card_direction(scene_card: dict[str, Any] | None) -> str:
         )
         if str(item or "").strip()
     )
+    detail_parts = [
+        kv("环境层次", scene_card.get("environment_detail")),
+        kv("光线细节", scene_card.get("lighting_detail")),
+        kv("镜头细节", scene_card.get("camera_detail")),
+        kv("构图细节", scene_card.get("composition_detail")),
+        kv("摄影意图", scene_card.get("creative_intent")),
+        kv("自然细节", scene_card.get("natural_detail")),
+    ]
     parts = [
-        kv("场景族", scene_card.get("scene_family")),
-        kv("地点", scene_card.get("location")),
-        kv("事件", scene_card.get("micro_event")),
-        kv("机位", camera_line),
-        kv("动作", scene_card.get("pose")),
-        kv("动态", scene_card.get("motion")),
-        kv("道具", prop_line),
+        kv("场景风格", _showcase_scene_label(scene_card.get("scene_family"))),
+        kv("拍摄地点", scene_card.get("location")),
+        kv("生活事件", scene_card.get("micro_event")),
+        kv("镜头机位", camera_line),
+        kv("动作姿势", scene_card.get("pose")),
+        kv("动态瞬间", scene_card.get("motion")),
+        kv("搭配道具", prop_line),
         kv("光线", scene_card.get("lighting")),
+        *detail_parts,
         kv("构图", scene_card.get("composition")),
-        kv("商品可见性", scene_card.get("product_visibility")),
-        kv("本张禁令", negative_line),
+        kv("本张商品呈现", _showcase_scene_label(scene_card.get("product_visibility"))),
+        kv("禁令", negative_line),
     ]
     return "；".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _showcase_scene_card_scene_direction(scene_card: dict[str, Any] | None) -> str:
+    if not isinstance(scene_card, dict):
+        return ""
+    parts = [
+        str(scene_card.get("location") or "").strip(),
+        str(scene_card.get("micro_event") or "").strip(),
+        str(scene_card.get("environment_detail") or "").strip(),
+    ]
+    creative_intent = str(scene_card.get("creative_intent") or "").strip()
+    if creative_intent:
+        parts.append(f"摄影意图：{creative_intent}")
+    props = scene_card.get("props")
+    if isinstance(props, list):
+        prop_line = "、".join(str(item).strip() for item in props if str(item).strip())
+        if prop_line:
+            parts.append(f"可出现低存在感搭配道具：{prop_line}")
+    return "；".join(part for part in parts if part)
+
+
+def _showcase_scene_card_action_direction(scene_card: dict[str, Any] | None) -> str:
+    if not isinstance(scene_card, dict):
+        return ""
+    parts = [
+        str(scene_card.get("pose") or "").strip(),
+        str(scene_card.get("motion") or "").strip(),
+        str(scene_card.get("natural_detail") or "").strip(),
+    ]
+    return "；".join(part for part in parts if part)
+
+
+def _showcase_scene_card_camera_direction(scene_card: dict[str, Any] | None) -> str:
+    if not isinstance(scene_card, dict):
+        return ""
+    camera = (
+        scene_card.get("camera") if isinstance(scene_card.get("camera"), dict) else {}
+    )
+    camera_parts = [
+        _showcase_scene_label(camera.get("distance")),
+        _showcase_scene_label(camera.get("angle")),
+        _showcase_scene_label(camera.get("lens_feel")),
+    ]
+    parts = [
+        " / ".join(part for part in camera_parts if part),
+        str(scene_card.get("camera_detail") or "").strip(),
+    ]
+    return "；".join(part for part in parts if part)
 
 
 def _showcase_scene_card_text(scene_card: dict[str, Any] | None) -> str:
@@ -2940,6 +3038,12 @@ def _showcase_scene_card_text(scene_card: dict[str, Any] | None) -> str:
         "lighting",
         "composition",
         "product_visibility",
+        "environment_detail",
+        "lighting_detail",
+        "camera_detail",
+        "composition_detail",
+        "creative_intent",
+        "natural_detail",
     ):
         value = scene_card.get(key)
         if isinstance(value, str) and value.strip():
@@ -2980,11 +3084,14 @@ def _showcase_scene_render_direction(
     lighting = ""
     if isinstance(scene_card, dict):
         lighting = str(scene_card.get("lighting") or "").strip()
+        lighting_detail = str(scene_card.get("lighting_detail") or "").strip()
+    else:
+        lighting_detail = ""
     light_part = (
-        f"严格按 SceneCard 光线执行（{lighting}）"
-        if lighting
-        else "严格按 SceneCard 光线执行"
+        f"严格按本张光线执行（{lighting}）" if lighting else "严格按本张光线执行"
     )
+    if lighting_detail:
+        light_part = f"{light_part}；{lighting_detail}"
     if _is_child_showcase(age_segment, model_summary):
         return (
             f"真实自然儿童摄影质感，{light_part}；儿童肤质自然，有轻微真实皮肤纹理、"
@@ -3004,19 +3111,25 @@ def _showcase_scene_framing_direction(
     text = _showcase_scene_card_text(scene_card)
     if not text:
         return fallback
+    composition_detail = ""
+    if isinstance(scene_card, dict):
+        composition_detail = str(scene_card.get("composition_detail") or "").strip()
     wants_hem = _text_has_any(text, ("裙摆", "衣摆", "下摆", "hem"))
     if _text_has_any(text, ("full_body", "全身", "head_to_toe")):
-        return "按 SceneCard 做全身构图，头脚完整、透视自然，商品整体廓形和主要细节清楚"
+        base = "按本张方案做全身构图，头脚完整、透视自然，商品整体廓形和主要细节清楚"
+        return f"{base}；{composition_detail}" if composition_detail else base
     if wants_hem:
-        return (
-            "按 SceneCard 做半身到大腿上方构图，画面必须包含手部动作和被展示的衣摆/裙摆区域，"
+        base = (
+            "按本张方案做半身到大腿上方构图，画面必须包含手部动作和被展示的衣摆/裙摆区域，"
             "不要裁掉正在展示的商品细节"
         )
+        return f"{base}；{composition_detail}" if composition_detail else base
     if _text_has_any(text, ("upper_body", "half_body", "close", "胸", "半身", "近景")):
-        return (
-            "按 SceneCard 做上半身或半身近景，头顶和肩肘留边，胸前、领口、袖口、"
+        base = (
+            "按本张方案做上半身或半身近景，头顶和肩肘留边，胸前、领口、袖口、"
             "口袋、纽扣/扣饰和图案/贴布细节清楚"
         )
+        return f"{base}；{composition_detail}" if composition_detail else base
     return fallback
 
 
@@ -3043,9 +3156,12 @@ def _showcase_visibility_policy(
 
     text = _showcase_scene_card_text(scene_card)
     is_back_or_side = shot_type == "side_or_back" or _text_has_any(
-        text, ("背", "背后", "后片", "侧面", "side", "back")
+        text, ("背后", "后背", "背面", "后片", "侧面", "side", "back")
     )
     wants_hem = _text_has_any(text, ("裙摆", "衣摆", "下摆", "衣长", "hem"))
+    wants_full_body = shot_type in {"front_full_body", "side_or_back"} or _text_has_any(
+        text, ("full_body", "全身", "head_to_toe")
+    )
     is_upper_or_detail = shot_type == "detail_half_body" or _text_has_any(
         text, ("upper_body", "half_body", "close", "胸", "半身", "近景")
     )
@@ -3071,15 +3187,37 @@ def _showcase_visibility_policy(
     )
     lower_tokens = ("裙", "裙摆", "衣摆", "下摆", "裤", "衣长", "廓形")
     back_detail_tokens = ("背后", "后背", "背面", "后片", "交叉", "蝴蝶结")
+    front_detail_tokens = ("前胸", "正面胸", "胸口", "前片", "正面", "胸袋")
+    side_visible_tokens = (
+        "上衣",
+        "裙身",
+        "裙",
+        "衣摆",
+        "裙摆",
+        "下摆",
+        "背带",
+        "袖",
+        "领",
+        "廓形",
+        "纹理",
+        "明线",
+        "缝线",
+        "牛仔布",
+    )
 
     visible: list[str] = []
     deferred: list[str] = []
     for item in preserve_items:
         item_is_back_detail = _text_has_any(item, back_detail_tokens)
+        item_is_front_detail = _text_has_any(item, front_detail_tokens)
         if is_back_or_side:
             if item_is_back_detail:
                 visible.append(item)
-            elif len(visible) < 4 and not _text_has_any(item, ("前胸", "正面胸")):
+            elif item_is_front_detail:
+                deferred.append(item)
+            elif _text_has_any(item, side_visible_tokens):
+                visible.append(item)
+            elif _text_has_any(item, lower_tokens) and (wants_hem or wants_full_body):
                 visible.append(item)
             else:
                 deferred.append(item)
@@ -3134,6 +3272,24 @@ def _join_lock_items(value: Any, *, max_items: int = 8, max_len: int = 40) -> st
     )
 
 
+def _showcase_occlusion_for_current_view(occlusion: str, deferred_line: str) -> str:
+    text = occlusion.strip()
+    if not text:
+        return ""
+    if not _text_has_any(deferred_line, ("前胸", "前片", "胸口", "正面")):
+        return text
+    text = re.sub(
+        r"；?胸前、领口、袖口、口袋、纽扣和图案/logo必须清楚可见。?",
+        "",
+        text,
+    ).strip("；。")
+    view_rule = (
+        "本张只要求当前角度入镜的领口、袖口、背带/后片、裙摆/下摆和布料纹理清楚；"
+        "正面胸口、前片口袋或贴布细节可由其它角度展示"
+    )
+    return f"{text}；{view_rule}。" if text else f"{view_rule}。"
+
+
 def _showcase_garment_lock_prefix(
     *,
     garment_lock: dict[str, Any] | None,
@@ -3166,6 +3322,7 @@ def _showcase_garment_lock_prefix(
     occlusion = _truncate_prompt_text(
         str(garment_lock.get("occlusion_policy") or "").strip(), 220
     )
+    occlusion = _showcase_occlusion_for_current_view(occlusion, deferred_line)
     visible_text = visible_line or visibility or "正面主体、领口、袖口、整体廓形"
     text = (
         "【最高优先级：商品 1:1 还原】"
@@ -3267,9 +3424,9 @@ def _showcase_prompt(
     scene_direction = _showcase_scene_card_direction(scene_card)
     if composed_prompt and composed_prompt.strip():
         prefix = (
-            f"{lock_prefix}\n\n【GPT-5.5 单张执行 Prompt】\n"
+            f"{lock_prefix}\n\n【本张拍摄方案】\n"
             if lock_prefix
-            else "【GPT-5.5 单张执行 Prompt】\n"
+            else "【本张拍摄方案】\n"
         )
         if len(prefix) > MAX_PROMPT_CHARS - 600:
             prefix = _truncate_prompt_text(prefix, MAX_PROMPT_CHARS - 600)
@@ -3284,9 +3441,9 @@ def _showcase_prompt(
                 model_summary=summary,
             )
             scene_rules = [
-                "【本张 SceneCard 必须执行】",
+                "【本张拍摄方案必须执行】",
                 f"{scene_direction}。",
-                "最终画面只采用这个 SceneCard 的地点、生活事件、动作动态、机位和光线；"
+                "最终画面只采用本张拍摄方案的地点、生活事件、动作动态、机位和光线；"
                 "不得再混入其它地点、花坛/街边/棚拍等旧模板场景。",
                 f"本张可见性目标：{visible_preserve}。",
             ]
@@ -3308,7 +3465,8 @@ def _showcase_prompt(
     )
     render_direction = _showcase_render_direction(template, scene_environment)
     if scene_direction:
-        template_direction = scene_direction
+        scene_only_direction = _showcase_scene_card_scene_direction(scene_card)
+        template_direction = scene_only_direction or scene_direction
         render_direction = _showcase_scene_render_direction(
             scene_card,
             age_segment=age_segment,
@@ -3320,8 +3478,12 @@ def _showcase_prompt(
         shot_direction = f"本张可见性目标：{visible_preserve}"
         if deferred_preserve:
             shot_direction = f"{shot_direction}；本张不要强求：{deferred_preserve}"
+        camera_direction = _showcase_scene_card_camera_direction(scene_card)
+        if camera_direction:
+            shot_direction = f"{camera_direction}；{shot_direction}"
         pose_direction = (
-            "只执行 SceneCard 的动作和动态，不混入其它模板动作或旧 shot 文案"
+            _showcase_scene_card_action_direction(scene_card)
+            or "只执行本张拍摄方案的动作和动态，不混入其它模板动作或旧 shot 文案"
         )
     body = _showcase_prompt_brief(
         user_direction=user_prompt,
@@ -3338,6 +3500,7 @@ def _showcase_prompt(
         scene_card_mode=bool(scene_direction),
         allow_pet=allow_pet,
         allow_background_people=allow_background_people,
+        include_product_lock=not bool(lock_prefix),
     )
     if not lock_prefix:
         return body
@@ -3386,6 +3549,24 @@ def _showcase_pick_shot_variants(
         ),
     )
     return list(zip(plan, variants))
+
+
+def _composition_shooting_brief(composition: dict[str, Any]) -> str:
+    if not isinstance(composition, dict) or composition.get("status") == "fallback":
+        return ""
+    brief = str(
+        composition.get("shooting_brief") or composition.get("final_prompt") or ""
+    ).strip()
+    if not brief:
+        return ""
+    full_prompt_markers = (
+        "【最高优先级：商品",
+        "【商品 1:1",
+        "请根据这张白底产品图",
+    )
+    if any(marker in brief for marker in full_prompt_markers):
+        return ""
+    return brief
 
 
 async def _prepare_showcase_preflight_impl(
@@ -3526,6 +3707,7 @@ async def _prepare_showcase_preflight_impl(
                     final_quality=final_quality,
                     provider_order=provider_order,
                 )
+            shooting_brief = _composition_shooting_brief(composition)
             final_prompt = _showcase_prompt(
                 product_analysis=product_analysis,
                 selected_candidate=selected_candidate,
@@ -3540,7 +3722,7 @@ async def _prepare_showcase_preflight_impl(
                 scene_environment=scene_environment,
                 scene_card=scene_card,
                 garment_lock=garment_lock,
-                composed_prompt=str(composition.get("final_prompt") or ""),
+                composed_prompt=shooting_brief,
                 allow_pet=allow_pet,
                 allow_background_people=allow_background_people,
             )
@@ -3577,6 +3759,7 @@ async def _prepare_showcase_preflight_impl(
                         rewrite_instruction=rewrite_instruction,
                         provider_order=provider_order,
                     )
+                rewritten_brief = _composition_shooting_brief(rewritten)
                 rewritten_prompt = _showcase_prompt(
                     product_analysis=product_analysis,
                     selected_candidate=selected_candidate,
@@ -3591,7 +3774,7 @@ async def _prepare_showcase_preflight_impl(
                     scene_environment=scene_environment,
                     scene_card=scene_card,
                     garment_lock=garment_lock,
-                    composed_prompt=str(rewritten.get("final_prompt") or ""),
+                    composed_prompt=rewritten_brief,
                     allow_pet=allow_pet,
                     allow_background_people=allow_background_people,
                 )

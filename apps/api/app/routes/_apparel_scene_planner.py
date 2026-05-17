@@ -160,6 +160,49 @@ _FALLBACK_LOCATION_POOLS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_FALLBACK_ENVIRONMENT_DETAILS: dict[str, tuple[str, ...]] = {
+    "clean_ecommerce": (
+        "背景只保留浅色墙面和地面交界线，空间干净但不死白",
+        "地面有轻微真实阴影，服装边缘和背景分离清楚",
+        "画面没有多余陈列，留出呼吸感让商品成为第一视觉",
+    ),
+    "premium_studio": (
+        "灰白墙面、木地板和远处柔和墙角形成真实空间深度",
+        "背景有极简家具或墙面转角的低存在感层次，不抢服装",
+        "地板反光很弱，人物脚下有自然落影，棚拍空间不空洞",
+    ),
+    "urban_street": (
+        "远处店招、橱窗或街沿虚化成城市层次，主体周围保持干净",
+        "地面斑马线、路缘或玻璃反光提供生活感，但不贴近衣服主体",
+        "背景路人只在远处虚化出现，画面重点仍在模特和服装",
+    ),
+    "outdoor_daily": (
+        "树影、步道和远处建筑形成轻微纵深，背景不过度杂乱",
+        "脚下地面和身后绿植有真实距离，人物不会贴在背景上",
+        "远景保留日常环境线索，前景不遮挡服装主体",
+    ),
+    "designed_lifestyle": (
+        "室内软装、墙面和地面材质形成生活质感，布置克制干净",
+        "背景只保留一两个低存在感物件，空间真实但不喧宾夺主",
+        "人物离背景有一小段距离，形成自然景深和空间层次",
+    ),
+    "daily_life": (
+        "生活物件保持在远处或边缘，像真实家居随手拍但不凌乱",
+        "窗边、地面和家具边线形成真实室内空间，不做空白棚拍",
+        "背景有轻微日常痕迹，所有道具都避开服装主体",
+    ),
+    "phone_snapshot": (
+        "背景有轻微手机抓拍的不完美边缘和真实空间线索",
+        "远处环境自然虚化，主体周围不堆道具",
+        "画面像朋友随手记录，保留真实距离和轻微生活感",
+    ),
+    "social_seeding": (
+        "背景有精品店或咖啡店的低存在感氛围，主体周围干净",
+        "玻璃、绿植或门框只作为边缘层次，不遮挡衣服",
+        "空间有轻微打卡感，但动作保持日常自然",
+    ),
+}
+
 _FALLBACK_EVENTS_BY_SHOT: dict[str, tuple[str, ...]] = {
     "front_full_body": (
         "刚走到地点中央时短暂停步看向镜头",
@@ -449,6 +492,18 @@ def fallback_scene_cards_from_pool(
             "lighting": _fallback_lighting(template, scene_environment),
             "composition": _composition_for_shot(shot_class),
             "product_visibility": _product_visibility_for_shot(shot_class),
+            "environment_detail": _fallback_environment_detail(family, index=index),
+            "lighting_detail": _fallback_lighting_detail(
+                template, scene_environment, family=family, index=index
+            ),
+            "camera_detail": _camera_detail_for_shot(shot_class, camera, index=index),
+            "composition_detail": _composition_detail_for_shot(
+                shot_class, aspect_ratio=aspect_ratio, index=index
+            ),
+            "creative_intent": _creative_intent_for_shot(
+                shot_class, family=family, index=index
+            ),
+            "natural_detail": _natural_detail_for_shot(shot_class, index=index),
             "negative": [
                 "不要改变商品颜色、版型、图案/logo、纽扣、口袋或缝线",
                 "不要让手、包带、头发、宠物或道具遮挡商品主体",
@@ -563,6 +618,170 @@ def _fallback_lighting(template: str, scene_environment: str) -> str:
     return "自然窗光或柔和室内暖光，方向明确不过曝"
 
 
+def _fallback_environment_detail(family: str, *, index: int) -> str:
+    options = (
+        _FALLBACK_ENVIRONMENT_DETAILS.get(family)
+        or _FALLBACK_ENVIRONMENT_DETAILS["designed_lifestyle"]
+    )
+    return _stable_cycle(options, index=index, seed=f"{family}|environment")
+
+
+def _fallback_lighting_detail(
+    template: str,
+    scene_environment: str,
+    *,
+    family: str,
+    index: int,
+) -> str:
+    if template in {"white_ecommerce", "premium_studio"} or family in {
+        "clean_ecommerce",
+        "premium_studio",
+    }:
+        options = (
+            "主光从左前方或侧窗方向落下，脸部和衣服有柔和明暗层次",
+            "柔光不过曝，肩线、裙摆和地面落影都能看出真实方向",
+            "光线干净但不全脸均匀，衣服纹理和缝线有轻微高光",
+        )
+    elif scene_environment == "outdoor" or family in {"urban_street", "outdoor_daily"}:
+        options = (
+            "自然侧光穿过建筑或树影，脸部一侧略亮一侧略暗",
+            "地面和背景有真实投影，衣服边缘被自然光勾出轮廓",
+            "日光方向明确但不过曝，皮肤和布料都保留真实明暗变化",
+        )
+    else:
+        options = (
+            "窗边柔光从斜前方进入，墙面和地面有轻微渐变阴影",
+            "室内暖光和自然光混合但不偏色，衣服颜色保持准确",
+            "背景略暗一档，主体服装细节保持清楚",
+        )
+    return _stable_cycle(options, index=index, seed=f"{template}|{family}|lighting")
+
+
+def _camera_detail_for_shot(
+    shot_class: str, camera: dict[str, Any], *, index: int
+) -> str:
+    angle = clean_text(camera.get("angle"), max_len=40)
+    distance = clean_text(camera.get("distance"), max_len=40)
+    if shot_class == "detail_half_body":
+        options = (
+            "镜头靠近到半身距离，视角稳定不过度广角，手部动作和商品细节同框",
+            "平视或轻微胸口高度机位，背景轻微虚化，服装细节优先清晰",
+            "近距离手机抓拍感但透视自然，肩膀和手肘不顶边",
+        )
+    elif shot_class == "side_or_back":
+        options = (
+            "全身侧后角度，镜头与人物保持真实距离，头脚完整不切断",
+            "平视全身机位，身体转动方向清楚，背面结构和侧面廓形都能读出来",
+            "镜头略偏人物行进方向，保留回望空间和脚下落点",
+        )
+    elif shot_class == "natural_pose":
+        options = (
+            "手持标准镜头距离，人物占画面主要高度，动作像刚被定格",
+            "镜头略跟随人物移动，保留一点环境但不压过衣服",
+            "平视略偏侧机位，身体重心和步伐方向可信",
+        )
+    else:
+        options = (
+            "全身标准距离，头脚完整，镜头不拉长头身比",
+            "平视机位，人物竖向落在画面中轴附近，服装整体清楚",
+            "自然标准镜头，背景留白适度，主体比例真实",
+        )
+    detail = _stable_cycle(options, index=index, seed=f"{shot_class}|camera")
+    if angle or distance:
+        return f"{detail}；基础机位为 {distance or '自然距离'}、{angle or '自然视角'}"
+    return detail
+
+
+def _composition_detail_for_shot(
+    shot_class: str, *, aspect_ratio: str, index: int
+) -> str:
+    if shot_class == "detail_half_body":
+        options = (
+            "画面从头顶到大腿上方留边，胸前、领口、袖口和手部动作都在清晰区域",
+            "模特略落在一侧三分线，另一侧留出干净背景呼吸感",
+            "前景最多只有轻微虚化边缘，不压住商品主体",
+        )
+    elif shot_class == "side_or_back":
+        options = (
+            "人物完整落在画面中部，转身方向一侧留出空间，背面结构不被头发遮挡",
+            "侧后廓形和脚下落点同时可见，背景线条不要穿过头部或衣服主体",
+            "全身构图稳定，肩背、腰线、裙摆或裤脚都有清楚边界",
+        )
+    elif shot_class == "natural_pose":
+        options = (
+            "人物占画面约六成高度，环境只提供生活线索，服装始终是视觉中心",
+            "动作方向前方留白，手臂和道具避开胸前主体",
+            "轻微抓拍偏移但不歪斜，头顶和脚下都有自然边距",
+        )
+    else:
+        options = (
+            "竖构图头脚完整，肩部和脚下都不贴边，商品主体占画面主要面积",
+            "人物轻微偏离中线形成自然商业摄影构图，对侧保留呼吸感",
+            "背景线条简洁，视线先落在服装颜色、版型和主要细节上",
+        )
+    detail = _stable_cycle(options, index=index, seed=f"{shot_class}|composition")
+    return f"{detail}；适配 {aspect_ratio} 画幅"
+
+
+def _creative_intent_for_shot(shot_class: str, *, family: str, index: int) -> str:
+    options_by_shot = {
+        "front_full_body": (
+            "用克制的环境肖像感呈现服装，像真实生活里被光线和空间自然托住的一瞬",
+            "把完整廓形放进有呼吸感的空间关系里，让商品准确同时画面有安静张力",
+            "用决定性停步瞬间代替摆拍，让人物、光线和服装线条形成自然平衡",
+        ),
+        "natural_pose": (
+            "抓住动作半拍之间的真实停顿，画面像生活纪实而不是模特指令",
+            "用身体重心和环境留白制造轻微叙事感，让服装成为生活片段的一部分",
+            "让人物和背景形成自然关系，保留一点不完美的抓拍边缘来增加真实感",
+        ),
+        "detail_half_body": (
+            "用近距离观察感呈现衣料和手部微动作，像摄影师捕捉到的安静细节",
+            "把商品细节放在真实光线和皮肤质感里，避免硬说明式特写",
+            "让手指、布料受力和表情构成一个小叙事，而不是单纯展示局部",
+        ),
+        "side_or_back": (
+            "用转身回望的瞬间制造侧背面廓形张力，像被自然叫住的真实片刻",
+            "把背面结构和空间方向放在同一条视觉动线上，画面有作品感但不夸张",
+            "用肩背线条、脚步落点和光影边缘建立安静的摄影叙事",
+        ),
+    }
+    options = options_by_shot.get(shot_class) or options_by_shot["natural_pose"]
+    intent = _stable_cycle(options, index=index, seed=f"{shot_class}|creative")
+    if family in {"urban_street", "outdoor_daily", "phone_snapshot"}:
+        return f"{intent}，保留街头或户外的偶然性和真实空气感"
+    if family in {"premium_studio", "clean_ecommerce"}:
+        return f"{intent}，构图和光线要像高级摄影作品但仍然服务商品"
+    return f"{intent}，场景质感要丰富但不抢衣服主体"
+
+
+def _natural_detail_for_shot(shot_class: str, *, index: int) -> str:
+    options_by_shot = {
+        "front_full_body": (
+            "表情像刚停下来被叫住，嘴角和眼神放松，不做夸张营业笑",
+            "手指自然弯曲，肩颈放松，衣摆和袖口有真实垂坠褶皱",
+            "站姿有轻微重心差，脚尖方向和身体朝向不完全一致",
+        ),
+        "natural_pose": (
+            "动作停在半拍之间，眼神没有刻意盯镜头，像真实生活抓拍",
+            "手部保持低位或轻触边缘，身体有小幅移动带来的自然褶皱",
+            "头发和衣服边缘有细小飞散感，但不遮挡商品关键区域",
+        ),
+        "detail_half_body": (
+            "手指只是轻轻整理，不按压、不挡住胸前主体，表情专注但自然",
+            "近景保留儿童或真人的自然皮肤和碎发，服装细节不被美颜抹平",
+            "肩颈和手腕有真实微动作，布料受力和褶皱方向可信",
+        ),
+        "side_or_back": (
+            "回望幅度很小，像走动中自然被叫住，不做舞台式扭身",
+            "头发避开背部关键结构，肩背和背带/后片轮廓清楚",
+            "脚步有前后落差，衣摆随转身产生轻微自然摆动",
+        ),
+    }
+    options = options_by_shot.get(shot_class) or options_by_shot["natural_pose"]
+    return _stable_cycle(options, index=index, seed=f"{shot_class}|natural")
+
+
 def _motion_for_shot(shot_class: str, *, index: int = 1) -> str:
     motions = _FALLBACK_MOTIONS_BY_SHOT.get(shot_class, ())
     motion = _stable_cycle(motions, index=index, seed=f"{shot_class}|motion")
@@ -665,7 +884,7 @@ async def plan_scene_cards_with_gpt55(
         ],
         "fallback_guardrails": {
             "do_not_copy": "不要照抄模板 shot label；你需要重新导演每张图的真实地点、事件、动作和机位。",
-            "safe_if_needed": "如果上游失败，本地规则才会兜底；正常情况下以你的 SceneCard 为准。",
+            "safe_if_needed": "如果上游失败，本地规则才会兜底；正常情况下以你的单张拍摄方案为准。",
         },
     }
     instructions = _director_instructions(output_count)
@@ -750,15 +969,26 @@ def _fallback_planning_result(
 def _director_instructions(output_count: int) -> str:
     return (
         "你是服饰电商真人模特图的拍摄导演。你要为整批图片生成自然、不重复、"
-        "像真实拍摄分镜的 SceneCards。场景、姿势、微动作、镜头全部由你决定，"
+        "像真实拍摄分镜的单张拍摄方案。场景、姿势、微动作、镜头全部由你决定，"
         "不要照抄 shot_plan 的标签或 fallback 文案。必须只输出 JSON 对象，不要 Markdown。\n"
         f"scene_cards 必须正好 {output_count} 条，且第 i 条必须严格对应 "
         "shot_plan[i]，id 用 shot_plan[i].shot_class 加 '-' 加索引，例如 "
         "detail_half_body-3。禁止重排 shot_plan 顺序。\n"
         "字段：series_concept, continuity_anchors, scene_cards, risk_notes。\n"
         "每个 scene_card 字段必须有 id, scene_family, location, micro_event, camera, "
-        "pose, motion, props, lighting, composition, product_visibility, negative。\n"
+        "pose, motion, props, lighting, composition, product_visibility, "
+        "environment_detail, lighting_detail, camera_detail, composition_detail, "
+        "creative_intent, natural_detail, negative。\n"
         "camera 必须有 distance, angle, lens_feel, orientation。\n"
+        "creative_intent 要写这张图的摄影作品想法，例如决定性瞬间、空间张力、"
+        "光影叙事、人物与环境关系或真实生活观察；不要模仿或引用具体摄影师姓名、"
+        "杂志名、品牌名。"
+        "environment_detail 要写真实空间层次、背景材质、前中后景关系；"
+        "lighting_detail 要写光线方向、阴影、高光和不过曝控制；"
+        "camera_detail 要写镜头距离、透视、机位高度和抓拍感；"
+        "composition_detail 要写主体位置、留白、裁切边界和背景不抢主体；"
+        "natural_detail 要写表情、手指、身体重心、衣料受力/褶皱等自然细节。"
+        "这些字段要具体到可拍摄，不要写抽象词如高级、自然、好看。"
         "最高优先级：商品还原，不能改颜色、版型、领口、袖型、衣长、图案/logo、"
         "纽扣、口袋、缝线。动作和道具不得遮挡商品主体。"
         "每张 micro_event 必须是具体生活事件，不能直接复制 variant_label 或写成"
@@ -767,6 +997,75 @@ def _director_instructions(output_count: int) -> str:
         "可以有连续元素，但不能让宠物、包、饮料、手机抢主体。"
         "童装/儿童必须年龄合适，不能成人化。"
     )
+
+
+def _sanitize_shooting_brief(value: Any, *, max_len: int = 1800) -> str:
+    text = clean_text(value, max_len=max_len)
+    return (
+        text.replace("SceneCard", "本张拍摄方案")
+        .replace("scene_card", "拍摄方案")
+        .replace("shot_plan", "拍摄计划")
+        .replace("final_prompt", "拍摄方案")
+    )
+
+
+def _coerce_candidate_briefs(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    briefs: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            text = (
+                item.get("shooting_brief")
+                or item.get("brief")
+                or item.get("description")
+                or item.get("text")
+            )
+        else:
+            text = item
+        brief = _sanitize_shooting_brief(text, max_len=900)
+        if brief:
+            briefs.append(brief)
+        if len(briefs) >= 3:
+            break
+    return briefs
+
+
+def _coerce_selection_scores(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    numeric_keys = (
+        "product_visibility",
+        "naturalness",
+        "photographic_quality",
+        "variety",
+        "risk_control",
+        "total",
+    )
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        row: dict[str, Any] = {
+            "candidate": clean_text(
+                item.get("candidate") or item.get("id") or index, max_len=30
+            )
+            or str(index)
+        }
+        for key in numeric_keys:
+            if key not in item:
+                continue
+            try:
+                row[key] = round(float(item.get(key)), 2)
+            except (TypeError, ValueError):
+                row[key] = clean_text(item.get(key), max_len=20)
+        reason = clean_text(item.get("reason"), max_len=140)
+        if reason:
+            row["reason"] = reason
+        out.append(row)
+        if len(out) >= 3:
+            break
+    return out
 
 
 async def compose_image_prompt_with_gpt55(
@@ -784,30 +1083,102 @@ async def compose_image_prompt_with_gpt55(
     rewrite_instruction: str | None = None,
     provider_order: list[ProviderDefinition] | None = None,
 ) -> dict[str, Any]:
+    camera = (
+        scene_card.get("camera") if isinstance(scene_card.get("camera"), dict) else {}
+    )
     payload = {
-        "base_prompt": base_prompt,
-        "product_analysis": product_analysis,
-        "garment_lock": garment_lock,
-        "model_summary": model_summary,
-        "scene_card": scene_card,
-        "shot_class": shot_class,
-        "template": template,
-        "aspect_ratio": aspect_ratio,
-        "final_quality": final_quality,
+        "product_context": {
+            "category": clean_text(product_analysis.get("category"), max_len=120)
+            or clean_text(garment_lock.get("core_identity"), max_len=120),
+            "core_identity": clean_text(garment_lock.get("core_identity"), max_len=160),
+            "current_view_visibility": clean_text(
+                scene_card.get("product_visibility"), max_len=80
+            ),
+        },
+        "model_context": clean_text(model_summary, max_len=180),
+        "seed_keywords": {
+            "scene_family": clean_text(scene_card.get("scene_family"), max_len=80),
+            "location": clean_text(scene_card.get("location"), max_len=140),
+            "micro_event": clean_text(scene_card.get("micro_event"), max_len=180),
+            "camera": {
+                "distance": clean_text(camera.get("distance"), max_len=60),
+                "angle": clean_text(camera.get("angle"), max_len=60),
+                "lens_feel": clean_text(camera.get("lens_feel"), max_len=80),
+                "orientation": clean_text(camera.get("orientation"), max_len=40),
+            },
+            "pose": clean_text(scene_card.get("pose"), max_len=180),
+            "motion": clean_text(scene_card.get("motion"), max_len=180),
+            "props": coerce_string_list(
+                scene_card.get("props"), max_items=5, max_len=80
+            ),
+            "lighting": clean_text(scene_card.get("lighting"), max_len=160),
+            "composition": clean_text(scene_card.get("composition"), max_len=180),
+            "environment_detail": clean_text(
+                scene_card.get("environment_detail"), max_len=220
+            ),
+            "lighting_detail": clean_text(
+                scene_card.get("lighting_detail"), max_len=220
+            ),
+            "camera_detail": clean_text(scene_card.get("camera_detail"), max_len=220),
+            "composition_detail": clean_text(
+                scene_card.get("composition_detail"), max_len=220
+            ),
+            "creative_intent": clean_text(
+                scene_card.get("creative_intent"), max_len=220
+            ),
+            "natural_detail": clean_text(scene_card.get("natural_detail"), max_len=220),
+            "negative": coerce_string_list(
+                scene_card.get("negative"), max_items=8, max_len=100
+            ),
+        },
+        "request": {
+            "shot_class": shot_class,
+            "template_hint": template,
+            "aspect_ratio": aspect_ratio,
+            "final_quality": final_quality,
+            "system_will_append_product_lock": True,
+            "candidate_count": 3,
+            "selection_metrics": [
+                "商品当前可见性",
+                "动作自然度",
+                "摄影作品感",
+                "与同批其它图的差异度",
+                "遮挡和改款风险",
+            ],
+            "system_prompt_chars": len(base_prompt),
+        },
         "rewrite_instruction": rewrite_instruction or "",
     }
     instructions = (
-        "你是服饰图像生成 prompt 编排师。请把 SceneCard 编排成单张图片模型"
-        "可执行的中文 final_prompt。必须只输出 JSON 对象，不要 Markdown。\n"
-        "字段：final_prompt, product_visibility_checklist, negative_prompt_notes, regenerate_if。\n"
-        "final_prompt 必须自然、有具体拍摄事件和镜头，但商品还原优先级最高。"
-        "必须保留 scene_card 的 location、micro_event、pose、motion、camera，不得简化成普通站姿。"
-        "SceneCard 是本张唯一场景来源：不要把 base_prompt、template 或 shot label 里的其它地点、"
-        "花坛、街边、棚拍、户外/室内光线等混进 final_prompt，除非它们已经出现在 scene_card。"
-        "本张只要求清楚呈现当前镜头能看到的商品细节；半身/上身近景不要强求背后、裙摆、"
-        "全身廓形等不可见细节。"
-        "不要引入没有要求的新服装图案、logo、口袋、腰带或遮挡道具。"
-        "如果有 rewrite_instruction，必须按它降低风险。"
+        "你是服饰真人图的拍摄导演，只负责把少量场景关键词扩展成单张"
+        "自然摄影拍摄方案。系统稍后会把商品 1:1 还原、模特一致、禁改项"
+        "和遮挡规则确定性拼接到最终生图 prompt；你不要重写这些商品约束。"
+        "必须只输出 JSON 对象，不要 Markdown。\n"
+        "字段：candidate_briefs, selected_candidate_index, selection_scores, "
+        "shooting_brief, scene_keywords, composition_keywords, lighting_keywords, "
+        "action_keywords, photographic_idea_keywords, product_visibility_checklist, "
+        "negative_prompt_notes, regenerate_if。\n"
+        "先生成 3 个互不重复的 candidate_briefs，每个候选 120-320 字，"
+        "都必须满足 seed_keywords，但摄影意图、构图重心、动作瞬间或光线关系要有明显差异。"
+        "再按 selection_metrics 自评打分，选择总分最高且风险最低的一版作为 shooting_brief。"
+        "selection_scores 每项包含 candidate, product_visibility, naturalness, "
+        "photographic_quality, variety, risk_control, total, reason，分数 0-10。"
+        "shooting_brief 写 180-520 字中文，只写本张的场景、生活事件、机位、"
+        "镜头距离、透视、光线方向、空间层次、构图、动作瞬间、表情和衣料自然受力。"
+        "必须有摄影作品感：像成熟摄影师完成的服饰纪实或环境肖像，包含一个清楚的"
+        "摄影意图，例如决定性瞬间、空间张力、光影叙事、人物与环境关系、真实生活观察；"
+        "不要模仿或引用具体摄影师姓名、杂志名、品牌名。"
+        "必须保留 seed_keywords 里的 location、micro_event、pose、motion、camera，"
+        "creative_intent，但要把它们扩展成可直接拍摄的自然画面，不得简化成普通站姿。"
+        "只用 seed_keywords 作为场景来源；不要混入其它地点、花坛、街边、棚拍、"
+        "户外/室内光线，除非它们已经在 seed_keywords 里。"
+        "不要输出或提到 SceneCard、scene_card、shot_plan、template、final_prompt "
+        "等内部词。不要写“商品身份/必须保留/禁止改色/禁改款/模特一致”等条款，"
+        "不要枚举商品所有细节；只能用“商品主体、当前角度可见的服装结构、衣料纹理”"
+        "这类泛称。"
+        "本张只要求当前镜头能看到的商品区域清楚；半身/上身近景不要强求背后、裙摆、"
+        "全身廓形等不可见细节。不要引入新图案、logo、口袋、腰带或遮挡道具。"
+        "如果有 rewrite_instruction，按它改写 shooting_brief 来降低风险。"
     )
     try:
         raw = await _call_gpt55_json(
@@ -818,13 +1189,42 @@ async def compose_image_prompt_with_gpt55(
             max_output_tokens=2600,
             provider_order=provider_order,
         )
-        final_prompt = clean_text(raw.get("final_prompt"), max_len=MAX_PROMPT_CHARS)
-        if len(final_prompt) < 80:
-            raise ValueError("final prompt too short")
+        shooting_brief = _sanitize_shooting_brief(
+            raw.get("shooting_brief") or raw.get("final_prompt"),
+            max_len=min(1800, MAX_PROMPT_CHARS),
+        )
+        candidate_briefs = _coerce_candidate_briefs(raw.get("candidate_briefs"))
+        if shooting_brief and shooting_brief not in candidate_briefs:
+            candidate_briefs = [*candidate_briefs, shooting_brief][:3]
+        if len(shooting_brief) < 60:
+            raise ValueError("shooting brief too short")
         return {
             "scene_card_id": clean_text(scene_card.get("id"), max_len=80),
             "status": "ok",
-            "final_prompt": final_prompt,
+            "shooting_brief": shooting_brief,
+            "final_prompt": shooting_brief,
+            "candidate_briefs": candidate_briefs,
+            "selected_candidate_index": clean_text(
+                raw.get("selected_candidate_index") or raw.get("selected_candidate"),
+                max_len=20,
+            )
+            or None,
+            "selection_scores": _coerce_selection_scores(raw.get("selection_scores")),
+            "scene_keywords": coerce_string_list(
+                raw.get("scene_keywords"), max_items=8, max_len=80
+            ),
+            "composition_keywords": coerce_string_list(
+                raw.get("composition_keywords"), max_items=8, max_len=80
+            ),
+            "lighting_keywords": coerce_string_list(
+                raw.get("lighting_keywords"), max_items=8, max_len=80
+            ),
+            "action_keywords": coerce_string_list(
+                raw.get("action_keywords"), max_items=8, max_len=80
+            ),
+            "photographic_idea_keywords": coerce_string_list(
+                raw.get("photographic_idea_keywords"), max_items=8, max_len=80
+            ),
             "product_visibility_checklist": coerce_string_list(
                 raw.get("product_visibility_checklist"), max_items=8, max_len=100
             ),
@@ -854,7 +1254,16 @@ def fallback_prompt_composition(
     return {
         "scene_card_id": clean_text(scene_card.get("id"), max_len=80),
         "status": "fallback",
-        "final_prompt": base_prompt[:MAX_PROMPT_CHARS],
+        "shooting_brief": "",
+        "final_prompt": "",
+        "candidate_briefs": [],
+        "selected_candidate_index": None,
+        "selection_scores": [],
+        "scene_keywords": [],
+        "composition_keywords": [],
+        "lighting_keywords": [],
+        "action_keywords": [],
+        "photographic_idea_keywords": [],
         "product_visibility_checklist": [],
         "negative_prompt_notes": coerce_string_list(
             scene_card.get("negative"), max_items=8, max_len=100
@@ -1021,6 +1430,24 @@ def _normalize_scene_cards(
             "product_visibility": clean_text(raw.get("product_visibility"), max_len=80)
             or fallback.get("product_visibility")
             or "front_full_body",
+            "environment_detail": clean_text(raw.get("environment_detail"), max_len=220)
+            or fallback.get("environment_detail")
+            or "背景保留真实空间层次，干净但不空洞，所有环境元素都不遮挡商品主体",
+            "lighting_detail": clean_text(raw.get("lighting_detail"), max_len=220)
+            or fallback.get("lighting_detail")
+            or "光线方向明确，脸部和衣服有真实明暗层次，商品颜色不过曝不偏色",
+            "camera_detail": clean_text(raw.get("camera_detail"), max_len=220)
+            or fallback.get("camera_detail")
+            or "镜头距离和透视自然，头身比例可信，动作像真实抓拍",
+            "composition_detail": clean_text(raw.get("composition_detail"), max_len=220)
+            or fallback.get("composition_detail")
+            or "主体位置稳定，头顶、肩肘和脚下留边，背景不抢服装",
+            "creative_intent": clean_text(raw.get("creative_intent"), max_len=220)
+            or fallback.get("creative_intent")
+            or "用真实生活里的决定性瞬间和克制构图呈现服装，让画面有作品感但不抢商品",
+            "natural_detail": clean_text(raw.get("natural_detail"), max_len=220)
+            or fallback.get("natural_detail")
+            or "表情、手指、身体重心和衣料褶皱都自然可信，不做僵硬摆拍",
             "negative": coerce_string_list(
                 raw.get("negative"), max_items=8, max_len=100
             )
