@@ -9,7 +9,9 @@ refreshing or closing the browser does not lose progress.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import io
 import json
 import logging
 import os
@@ -181,6 +183,7 @@ SHOT_POOL_BY_BAND: dict[str, ShotPool] = {
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 logger = logging.getLogger(__name__)
 
+_SHOWCASE_GPT55_REFERENCE_MAX_BYTES = 900_000
 
 WORKFLOW_TYPE = "apparel_model_showcase"
 WORKFLOW_STEPS = [
@@ -566,20 +569,17 @@ def _showcase_prompt_brief(
         )
     else:
         subject_rule = "9. 单人照。"
-    product_lock_line = (
-        f"本张必须清楚可见：{product_preserve}。"
-        if scene_card_mode
-        else f"重点保留：{product_preserve}，每一项必须清晰可见。"
-    )
     lines = [
         "请根据这张白底产品图和模特图，生成真实自然的真人模特穿搭图。",
         "",
     ]
     if include_product_lock:
+        compact_product_preserve = _compact_lock_text(product_preserve)
         lines.extend(
             [
-                f"【商品 1:1 还原（最高优先级）】衣服以白底产品图为唯一来源，模特图只用于复刻人物身份。"
-                f"{product_lock_line}不要改款、改色、改廓形、改领口袖型衣长、改图案/logo/印花/文字、改纽扣拉链口袋缝线拼接。",
+                "【商品 1:1 锁定】以商品图为准，保持同款同色同廓形；"
+                f"本张重点清楚：{compact_product_preserve or '商品主体'}。"
+                "不得改款改色，不增删图案/logo、口袋、扣件或缝线。",
                 "",
             ]
         )
@@ -943,6 +943,118 @@ def _storage_path(storage_key: str) -> Path:
     except ValueError:
         raise _http("invalid_path", "storage path escapes root", 400)
     return path
+
+
+def _showcase_gpt55_reference_data_url(image: Image, raw: bytes) -> str | None:
+    if not raw:
+        return None
+    try:
+        with PILImage.open(io.BytesIO(raw)) as original:
+            original.load()
+            last_payload: bytes | None = None
+            for max_side, quality in ((1280, 88), (1024, 82), (768, 76)):
+                with original.copy() as im:
+                    im.thumbnail((max_side, max_side))
+                    if im.mode in {"RGBA", "LA"} or "transparency" in im.info:
+                        rgba = im.convert("RGBA")
+                        rgb = PILImage.new("RGB", rgba.size, (255, 255, 255))
+                        rgb.paste(rgba, mask=rgba.getchannel("A"))
+                        rgba.close()
+                    else:
+                        rgb = im.convert("RGB")
+                    buf = io.BytesIO()
+                    with rgb:
+                        rgb.save(buf, format="JPEG", quality=quality, optimize=True)
+                    last_payload = buf.getvalue()
+                    if len(last_payload) <= _SHOWCASE_GPT55_REFERENCE_MAX_BYTES:
+                        b64 = base64.b64encode(last_payload).decode("ascii")
+                        return f"data:image/jpeg;base64,{b64}"
+            logger.info(
+                "showcase gpt55 reference too large after downsample image_id=%s bytes=%s",
+                getattr(image, "id", ""),
+                len(last_payload or b""),
+            )
+            return None
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "showcase gpt55 reference downsample failed image_id=%s err=%s",
+            getattr(image, "id", ""),
+            exc,
+        )
+        return None
+
+
+async def _showcase_gpt55_reference_images(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    product_image_ids: Iterable[str],
+    model_image_id: str | None,
+) -> dict[str, Any]:
+    product_ids = _dedupe_nonempty(product_image_ids)[:2]
+    ids = _dedupe_nonempty([*product_ids, model_image_id or ""])
+    if not ids:
+        return {"images": [], "skips": []}
+    rows = (
+        (
+            await db.execute(
+                select(Image).where(
+                    Image.id.in_(ids),
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_id = {row.id: row for row in rows}
+    product_id_set = set(product_ids)
+    refs: list[dict[str, str]] = []
+    skips: list[dict[str, str]] = []
+    for image_id in ids:
+        if image_id in product_id_set:
+            product_index = product_ids.index(image_id) + 1
+            label = "商品图" if len(product_ids) == 1 else f"商品图 {product_index}"
+        else:
+            label = "已确认模特图"
+        image = by_id.get(image_id)
+        storage_key = str(getattr(image, "storage_key", "") or "").strip()
+        if image is None:
+            skips.append(
+                {"image_id": image_id, "label": label, "reason": "image_not_found"}
+            )
+            continue
+        if not storage_key:
+            skips.append(
+                {"image_id": image_id, "label": label, "reason": "missing_storage_key"}
+            )
+            continue
+        try:
+            raw = await asyncio.to_thread(_storage_path(storage_key).read_bytes)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "showcase gpt55 reference read failed image_id=%s key=%s err=%s",
+                image_id,
+                storage_key,
+                exc,
+            )
+            skips.append(
+                {"image_id": image_id, "label": label, "reason": "storage_read_failed"}
+            )
+            continue
+        image_url = _showcase_gpt55_reference_data_url(image, raw)
+        if not image_url:
+            skips.append(
+                {
+                    "image_id": image_id,
+                    "label": label,
+                    "reason": "preprocess_failed_or_too_large",
+                }
+            )
+            continue
+        refs.append({"label": label, "image_url": image_url})
+    return {"images": refs, "skips": skips}
 
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
@@ -3247,9 +3359,9 @@ def _showcase_visibility_policy(
             visible = [str(item).strip() for item in priority if str(item).strip()]
     if not visible:
         visible = ["本张入镜的商品主体、领口、袖口、口袋/扣饰和布料纹理"]
-    visible_text = "、".join(_truncate_prompt_text(item, 42) for item in visible[:6])
+    visible_text = "、".join(_truncate_prompt_text(item, 30) for item in visible[:5])
     deferred_text = "、".join(
-        _truncate_prompt_text(item, 42) for item in deferred[:5] if item not in visible
+        _truncate_prompt_text(item, 30) for item in deferred[:3] if item not in visible
     )
     return visible_text, deferred_text
 
@@ -3262,7 +3374,7 @@ def _truncate_prompt_text(text: str, limit: int) -> str:
     return text[: limit - 1] + "…"
 
 
-def _join_lock_items(value: Any, *, max_items: int = 8, max_len: int = 40) -> str:
+def _join_lock_items(value: Any, *, max_items: int = 4, max_len: int = 28) -> str:
     if not isinstance(value, list):
         return ""
     return "、".join(
@@ -3270,6 +3382,32 @@ def _join_lock_items(value: Any, *, max_items: int = 8, max_len: int = 40) -> st
         for item in value[:max_items]
         if str(item).strip()
     )
+
+
+def _compact_lock_text(value: Any, *, max_items: int = 4, max_len: int = 28) -> str:
+    if isinstance(value, list):
+        return _join_lock_items(value, max_items=max_items, max_len=max_len)
+    if isinstance(value, str):
+        parts = [
+            part.strip() for part in re.split(r"[、,，;；]+", value) if part.strip()
+        ]
+        return _join_lock_items(parts, max_items=max_items, max_len=max_len)
+    return ""
+
+
+def _compact_product_identity(
+    garment_lock: dict[str, Any] | None,
+    product_preserve: str,
+) -> str:
+    if isinstance(garment_lock, dict):
+        category = str(garment_lock.get("category") or "").strip()
+        if category and category != "服饰":
+            return _truncate_prompt_text(category, 48)
+        core = str(garment_lock.get("core_identity") or "").strip()
+        if core:
+            return _truncate_prompt_text(core.split("、")[0].strip() or core, 48)
+    first = product_preserve.split("、")[0].strip() if product_preserve else ""
+    return _truncate_prompt_text(first or "这件服饰", 48)
 
 
 def _showcase_occlusion_for_current_view(occlusion: str, deferred_line: str) -> str:
@@ -3300,42 +3438,30 @@ def _showcase_garment_lock_prefix(
 ) -> str:
     visible_line = (visible_preserve or "").strip()
     deferred_line = (deferred_preserve or "").strip()
+    compact_visible = _compact_lock_text(visible_line or product_preserve, max_items=5)
+    compact_deferred_note = (
+        "\n【其它细节】其它角度细节交给其它图，本张不为它们牺牲自然动作。"
+        if deferred_line
+        else ""
+    )
     if not isinstance(garment_lock, dict):
         text = (
-            "【最高优先级：商品 1:1 还原】"
-            f"衣服以白底产品图为唯一来源，重点保留：{product_preserve}。"
-            "不得改款、改色、改廓形、改领口袖型衣长、改图案/logo、"
-            "改纽扣拉链口袋缝线拼接。\n"
+            "【商品 1:1 锁定】以商品图为准，保持同款同色同廓形；"
+            f"本张重点清楚：{compact_visible or '商品主体'}。"
+            "不得改款改色，不增删图案/logo、口袋、扣件或缝线；手、头发和道具不遮挡主体。\n"
             f"【模特一致】{model_consistency}"
         )
-        if visible_line:
-            text = text.replace(
-                f"重点保留：{product_preserve}。",
-                f"本张必须清楚可见：{visible_line}。",
-            )
-        if deferred_line:
-            text += f"\n【本张不要强求】{deferred_line} 可由其它角度展示，本张不为它们牺牲自然动作。"
-        return text
-    preserve = _join_lock_items(garment_lock.get("must_preserve"))
-    visibility = _join_lock_items(garment_lock.get("visibility_priority"), max_items=6)
-    mutation_bans = _join_lock_items(garment_lock.get("mutation_bans"))
-    occlusion = _truncate_prompt_text(
-        str(garment_lock.get("occlusion_policy") or "").strip(), 220
-    )
-    occlusion = _showcase_occlusion_for_current_view(occlusion, deferred_line)
-    visible_text = visible_line or visibility or "正面主体、领口、袖口、整体廓形"
+        return f"{text}{compact_deferred_note}"
+    identity = _compact_product_identity(garment_lock, product_preserve)
+    visibility = _join_lock_items(garment_lock.get("visibility_priority"), max_items=3)
+    visible_text = compact_visible or visibility or "商品主体"
     text = (
-        "【最高优先级：商品 1:1 还原】"
-        f"商品身份：{garment_lock.get('core_identity') or garment_lock.get('category') or '服饰'}。"
-        f"全局必须保留：{preserve or product_preserve}。"
-        f"本张必须清楚可见：{visible_text}。"
-        f"禁止：{mutation_bans or '改款、改色、改廓形、增删图案或结构'}。"
-        f"{occlusion}\n"
+        f"【商品 1:1 锁定】以商品图为准还原{identity}，保持同款同色同廓形；"
+        f"本张重点清楚：{visible_text}。"
+        "不得改款改色，不增删图案/logo、口袋、扣件或缝线；手、头发和道具不遮挡主体。\n"
         f"【模特一致】{model_consistency}"
     )
-    if deferred_line:
-        text += f"\n【本张不要强求】{deferred_line} 可由其它角度展示，本张不为它们牺牲自然动作。"
-    return text
+    return f"{text}{compact_deferred_note}"
 
 
 def _showcase_prompt(
@@ -3458,7 +3584,11 @@ def _showcase_prompt(
                 "【本张拍摄方案必须执行】",
                 "最终画面只采用上方短摄影方案的场景、动作、神态、构图、光线和镜头；"
                 "不得混入其它地点、动作、旧模板文案或普通棚拍站姿。",
-                f"本张商品可见性：{visible_preserve}。",
+                (
+                    "商品主体清楚，不遮挡。"
+                    if lock_prefix
+                    else f"本张商品重点：{_compact_lock_text(visible_preserve) or visible_preserve}。"
+                ),
             ]
             if shot_type != "side_or_back":
                 scene_rules.append(
@@ -3468,9 +3598,7 @@ def _showcase_prompt(
             if seed_line:
                 scene_rules.append(f"本张场景种子：{seed_line}。")
             if deferred_preserve:
-                scene_rules.append(
-                    f"本张不要强求：{deferred_preserve}；这些留给其它角度，不要为它们破坏当前镜头。"
-                )
+                scene_rules.append("其它角度细节交给其它图，不要为它们破坏当前镜头。")
             body = f"{body}\n\n" + "".join(scene_rules)
         return prefix + body[: max(0, MAX_PROMPT_CHARS - len(prefix))]
     template_direction = _template_requirement(
@@ -3495,7 +3623,7 @@ def _showcase_prompt(
                 f"{shot_direction}"
             )
         if deferred_preserve:
-            shot_direction = f"{shot_direction}；本张不要强求：{deferred_preserve}"
+            shot_direction = f"{shot_direction}；其它角度细节不强求"
         camera_direction = _showcase_scene_card_camera_direction(scene_card)
         if camera_direction:
             shot_direction = f"{camera_direction}；{shot_direction}"
@@ -3606,6 +3734,8 @@ async def _prepare_showcase_preflight_impl(
     continuity_anchor: str,
     allow_pet: bool,
     allow_background_people: bool,
+    reference_images: list[dict[str, str]] | None = None,
+    reference_image_skips: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     brief = selected_candidate.model_brief_json or {}
     model_summary = str(brief.get("summary") or user_prompt or "自然电商模特")
@@ -3653,6 +3783,7 @@ async def _prepare_showcase_preflight_impl(
             allow_pet=allow_pet,
             allow_background_people=allow_background_people,
             provider_order=provider_order,
+            reference_images=reference_images,
         )
     scene_cards = list(planning.get("scene_cards") or [])
     if len(scene_cards) != len(shot_picks):
@@ -3724,6 +3855,7 @@ async def _prepare_showcase_preflight_impl(
                     aspect_ratio=aspect_ratio,
                     final_quality=final_quality,
                     provider_order=provider_order,
+                    reference_images=reference_images,
                 )
             shooting_brief = _composition_shooting_brief(composition)
             final_prompt = _showcase_prompt(
@@ -3776,6 +3908,7 @@ async def _prepare_showcase_preflight_impl(
                         final_quality=final_quality,
                         rewrite_instruction=rewrite_instruction,
                         provider_order=provider_order,
+                        reference_images=reference_images,
                     )
                 rewritten_brief = _composition_shooting_brief(rewritten)
                 rewritten_prompt = _showcase_prompt(
@@ -3873,6 +4006,12 @@ async def _prepare_showcase_preflight_impl(
         "per_image_prompts": per_image_prompts,
         "prompt_reviews": prompt_reviews,
         "final_prompts": final_prompts,
+        "gpt55_reference_image_labels": [
+            str(ref.get("label") or "").strip()
+            for ref in (reference_images or [])
+            if str(ref.get("label") or "").strip()
+        ],
+        "gpt55_reference_image_skips": list(reference_image_skips or []),
     }
 
 
@@ -6487,6 +6626,14 @@ def _showcase_request_input_json(
                 ],
                 "per_image_prompts": preflight.get("per_image_prompts") or [],
                 "prompt_reviews": preflight.get("prompt_reviews") or [],
+                "gpt55_reference_image_labels": preflight.get(
+                    "gpt55_reference_image_labels"
+                )
+                or [],
+                "gpt55_reference_image_skips": preflight.get(
+                    "gpt55_reference_image_skips"
+                )
+                or [],
             }
         )
     else:
@@ -6543,14 +6690,18 @@ async def _showcase_generation_context(
     selected_accessory_image_id = (approval.input_json or {}).get(
         "selected_accessory_image_id"
     )
+    selected_accessory_ref_id = (
+        selected_accessory_image_id
+        if isinstance(selected_accessory_image_id, str)
+        else None
+    )
+    model_reference_image_id = (
+        selected_accessory_ref_id or candidate.contact_sheet_image_id
+    )
     ref_ids = _showcase_reference_image_ids(
         product_image_ids=run.product_image_ids,
         model_image_id=candidate.contact_sheet_image_id,
-        selected_accessory_image_id=(
-            selected_accessory_image_id
-            if isinstance(selected_accessory_image_id, str)
-            else None
-        ),
+        selected_accessory_image_id=selected_accessory_ref_id,
     )
     return {
         "run": run,
@@ -6563,6 +6714,7 @@ async def _showcase_generation_context(
         "approval": approval,
         "accessory_plan": accessory_plan,
         "ref_ids": ref_ids,
+        "gpt55_model_image_id": model_reference_image_id,
     }
 
 
@@ -6697,6 +6849,14 @@ async def _dispatch_showcase_images_generation(
 
     product_step: WorkflowStep = context["product_step"]
     candidate: ModelCandidate = context["candidate"]
+    reference_payload = await _showcase_gpt55_reference_images(
+        db,
+        user_id=user.id,
+        product_image_ids=context["run"].product_image_ids or [],
+        model_image_id=context["gpt55_model_image_id"],
+    )
+    reference_images = list(reference_payload.get("images") or [])
+    reference_image_skips = list(reference_payload.get("skips") or [])
     preflight = await _prepare_showcase_preflight(
         db=db,
         product_analysis=product_step.output_json or {},
@@ -6715,6 +6875,8 @@ async def _dispatch_showcase_images_generation(
         continuity_anchor=body.continuity_anchor,
         allow_pet=body.allow_pet,
         allow_background_people=body.allow_background_people,
+        reference_images=reference_images,
+        reference_image_skips=reference_image_skips,
     )
 
     context = await _showcase_generation_context(

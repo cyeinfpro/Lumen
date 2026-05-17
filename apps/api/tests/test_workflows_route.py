@@ -880,6 +880,65 @@ def test_product_analysis_prompt_requests_styling_recommendations() -> None:
     assert "必须只返回一个 JSON object" in prompt
 
 
+def test_showcase_gpt55_reference_data_url_downsamples_and_skips_bad_raw() -> None:
+    import io
+
+    from PIL import Image as PILImage
+
+    buf = io.BytesIO()
+    PILImage.new("RGBA", (1800, 1200), (255, 0, 0, 128)).save(buf, format="PNG")
+    image = SimpleNamespace(id="img-1", mime="image/png")
+
+    data_url = workflows._showcase_gpt55_reference_data_url(  # noqa: SLF001
+        image, buf.getvalue()
+    )
+
+    assert data_url is not None
+    assert data_url.startswith("data:image/jpeg;base64,")
+    payload = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+    assert len(payload) <= workflows._SHOWCASE_GPT55_REFERENCE_MAX_BYTES  # noqa: SLF001
+    assert (
+        workflows._showcase_gpt55_reference_data_url(image, b"not an image")  # noqa: SLF001
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_showcase_gpt55_reference_images_returns_local_skip_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    from PIL import Image as PILImage
+
+    monkeypatch.setattr(workflows.settings, "storage_root", str(tmp_path))
+    PILImage.new("RGB", (64, 64), (12, 34, 56)).save(tmp_path / "good.png")
+    db = _Db(
+        [
+            SimpleNamespace(id="prod-ok", storage_key="good.png", mime="image/png"),
+            SimpleNamespace(
+                id="model-missing-storage", storage_key="", mime="image/png"
+            ),
+        ]
+    )
+
+    result = await workflows._showcase_gpt55_reference_images(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        product_image_ids=["prod-ok", "prod-missing"],
+        model_image_id="model-missing-storage",
+    )
+
+    assert [item["label"] for item in result["images"]] == ["商品图 1"]
+    assert result["skips"] == [
+        {"image_id": "prod-missing", "label": "商品图 2", "reason": "image_not_found"},
+        {
+            "image_id": "model-missing-storage",
+            "label": "已确认模特图",
+            "reason": "missing_storage_key",
+        },
+    ]
+
+
 def test_workflow_image_params_use_high_quality_jpeg() -> None:
     params = workflows._image_params(aspect_ratio="4:5", count=1, render_quality="high")  # noqa: SLF001
 
@@ -1548,7 +1607,7 @@ def test_showcase_prompt_uses_user_direction_for_scene_and_action() -> None:
     assert "要求：" in prompt
     assert "明亮松弛" in prompt
     assert "明亮松弛的日常随拍氛围" in prompt
-    assert "重点保留：lapel shape、button position、pocket placement" in prompt
+    assert "本张重点清楚：lapel shape、button position、pocket placement" in prompt
     assert "少量自然搭配" in prompt
     assert "small earrings" not in prompt
     assert "优先参考它" in prompt
@@ -1624,7 +1683,7 @@ def test_showcase_prompt_respects_explicit_non_european_style_region() -> None:
     )
 
     assert "亚洲风格" in prompt
-    assert "重点保留：颜色、版型、款式" in prompt
+    assert "本张重点清楚：颜色、版型、款式" in prompt
 
 
 def test_showcase_prompts_assign_distinct_actions_per_shot() -> None:
@@ -1737,8 +1796,8 @@ def test_showcase_prompt_includes_scene_card_direction_and_garment_lock() -> Non
     assert "城市斑马线" in composed
     assert "轻微俯拍" in composed
     assert "牵狗过马路" in composed
-    assert "不要遮挡胸前" in composed
-    assert "【最高优先级：商品 1:1 还原】" in safe
+    assert "商品主体清楚，不遮挡" in composed
+    assert "【商品 1:1 锁定】" in safe
     assert "蓝色格纹衬衫" in safe
     assert "宠物" not in safe
     assert "路人" not in safe
@@ -1809,13 +1868,12 @@ def test_showcase_prompt_scene_card_overrides_conflicting_template_scene() -> No
 
     assert "酒店大堂边缘的安静区域" in prompt
     assert "手指轻触衣摆边缘展示面料垂感" in prompt
-    assert "本张必须清楚可见" in prompt
+    assert "本张重点清楚" in prompt
     assert "一红一浅黄的异色背带" in prompt
     assert "前胸雏菊刺绣和白色花形扣饰" in prompt
     assert "前片立体毛绒小熊贴布与小口袋" in prompt
-    assert "本张不要强求" in prompt
-    assert "背后交叉背带和牛仔蝴蝶结" in prompt
-    assert "本张不要强求】背后交叉背带和牛仔蝴蝶结" in prompt
+    assert "其它角度细节" in prompt
+    assert "本张不要强求" not in prompt
     assert "街边花坛" not in prompt
     assert "户外日光带明确方向" not in prompt
     assert "真实街头摄影质感" not in prompt
@@ -1866,9 +1924,9 @@ def test_showcase_prompt_composed_scene_card_appends_conflict_guardrails() -> No
     assert "街边花坛旁轻扶肩带" in prompt
     assert "最终画面只采用上方短摄影方案" in prompt
     assert "不得混入其它地点" in prompt
-    assert "本张商品可见性" in prompt
-    assert "本张不要强求" in prompt
-    assert "背后蝴蝶结" in prompt
+    assert "商品主体清楚，不遮挡" in prompt
+    assert "其它角度细节" in prompt
+    assert "本张不要强求" not in prompt
     assert "本张画面范围" not in prompt
     assert "真实自然儿童摄影质感" not in prompt
 
@@ -1943,7 +2001,7 @@ def test_showcase_prompt_expands_gpt55_scene_details_without_internal_terms() ->
 
     assert "SceneCard" not in prompt
     assert prompt.count("【商品 1:1 还原") == 0
-    assert prompt.count("【最高优先级：商品 1:1 还原】") == 1
+    assert prompt.count("【商品 1:1 锁定】") == 1
     assert "灰白墙面、木地板和远处柔和墙角形成真实空间深度" in prompt
     assert "主光从左前方侧窗落下" in prompt
     assert "平视全身机位，镜头与人物保持真实距离" in prompt
@@ -1952,8 +2010,8 @@ def test_showcase_prompt_expands_gpt55_scene_details_without_internal_terms() ->
     assert "用转身回望的瞬间制造侧背面廓形张力" in prompt
     assert "回望幅度很小" in prompt
     assert "背后交叉背带和牛仔蝴蝶结" in prompt
-    assert "本张不要强求" in prompt
-    assert "前胸雏菊刺绣和白色花形扣饰" in prompt
+    assert "其它角度细节" in prompt
+    assert "本张不要强求" not in prompt
 
 
 def test_showcase_prompt_clamps_oversized_garment_lock() -> None:
@@ -2362,7 +2420,7 @@ async def test_prepare_showcase_preflight_falls_back_when_rewrite_still_risky(
     assert preflight["prompt_reviews"][0]["safe_fallback"] is True
     assert preflight["prompt_reviews"][0]["risk_level"] == "low"
     assert "GPT-5.5 单张执行 Prompt" not in preflight["final_prompts"][0]
-    assert "【最高优先级：商品 1:1 还原】" in preflight["final_prompts"][0]
+    assert "【商品 1:1 锁定】" in preflight["final_prompts"][0]
 
 
 @pytest.mark.asyncio
@@ -2574,7 +2632,7 @@ def test_natural_phone_snapshot_template_uses_real_phone_constraints() -> None:
     assert "自然碎发" in prompt
     assert "衣服真实褶皱" in prompt
     assert "社交媒体截图界面" in prompt
-    assert "重点保留：蓝色薄纱、蓬蓬裙摆" in prompt
+    assert "本张重点清楚：蓝色薄纱、蓬蓬裙摆" in prompt
     assert "帆布包" not in prompt
     assert "超写实商业摄影" not in prompt
     assert "适合亚马逊电商主图" not in prompt

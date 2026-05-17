@@ -44,6 +44,22 @@ _PROVIDER_RR_LOCK = asyncio.Lock()
 _DIRECTOR_MODEL = "gpt-5.5"
 _FALLBACK_MODEL = "gpt-5.4"
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+_REFERENCE_IMAGE_RETRY_STATUS = {400, 413, 415, 422}
+_REFERENCE_IMAGE_RETRY_TOKENS = (
+    "input_image",
+    "image_url",
+    "data url",
+    "data_url",
+    "base64",
+    "image too large",
+    "too large",
+    "invalid image",
+    "invalid_image",
+    "unsupported image",
+    "unsupported_file",
+    "content part",
+    "invalid request",
+)
 
 _SHOT_CAMERA = {
     "front_full_body": {
@@ -355,6 +371,79 @@ def coerce_bool(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return False
+
+
+_GENERIC_PRODUCT_KEYWORDS = {
+    "unknown",
+    "需人工复核",
+    "服饰",
+    "颜色",
+    "版型",
+    "款式",
+    "廓形",
+    "领口",
+    "袖型",
+    "衣长",
+    "面料观感",
+    "图案/logo",
+    "纽扣/拉链/口袋/缝线",
+    "可见商品细节",
+}
+
+
+def _append_product_keyword(out: list[str], value: Any, *, max_len: int = 50) -> None:
+    text = clean_text(value, max_len=max_len)
+    if not text or text.lower() == "unknown" or text in _GENERIC_PRODUCT_KEYWORDS:
+        return
+    if text not in out:
+        out.append(text)
+
+
+def compact_product_context_for_gpt55(
+    product_analysis: dict[str, Any],
+    garment_lock: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Small product hint for GPT-5.5 director/composer prompts.
+
+    Full product fidelity constraints are appended later by the deterministic
+    workflow prompt layer. GPT-5.5 only needs enough product context to choose a
+    compatible scene and avoid blocking the visible garment area.
+    """
+
+    garment_lock = garment_lock or {}
+    category = (
+        clean_text(product_analysis.get("category"), max_len=80)
+        or clean_text(garment_lock.get("category"), max_len=80)
+        or clean_text(garment_lock.get("core_identity"), max_len=80)
+        or "服饰"
+    )
+    keywords: list[str] = []
+    for key in ("color", "material_guess", "silhouette"):
+        _append_product_keyword(keywords, product_analysis.get(key))
+    for key in ("key_details", "must_preserve"):
+        for item in coerce_string_list(
+            product_analysis.get(key), max_items=6, max_len=50
+        ):
+            _append_product_keyword(keywords, item)
+            if len(keywords) >= 5:
+                break
+        if len(keywords) >= 5:
+            break
+    if not keywords:
+        for item in coerce_string_list(
+            garment_lock.get("must_preserve"), max_items=5, max_len=50
+        ):
+            _append_product_keyword(keywords, item)
+            if len(keywords) >= 5:
+                break
+    return {
+        "category": category,
+        "visual_keywords": keywords[:5],
+        "scene_fit_hint": clean_text(
+            product_analysis.get("background_recommendation"), max_len=140
+        ),
+        "role": "只作为服装风格和可见区域提示；不要输出商品还原条款或细节清单。",
+    }
 
 
 def build_garment_lock(product_analysis: dict[str, Any]) -> dict[str, Any]:
@@ -842,6 +931,7 @@ async def plan_scene_cards_with_gpt55(
     allow_pet: bool,
     allow_background_people: bool,
     provider_order: list[ProviderDefinition] | None = None,
+    reference_images: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     fallback_cards = fallback_scene_cards_from_pool(
         product_analysis=product_analysis,
@@ -857,10 +947,7 @@ async def plan_scene_cards_with_gpt55(
         scene_variety=scene_variety,
     )
     payload = {
-        "product": {
-            "analysis": product_analysis,
-            "garment_lock": garment_lock,
-        },
+        "product": compact_product_context_for_gpt55(product_analysis, garment_lock),
         "model": {"summary": model_summary},
         "request": {
             "count": output_count,
@@ -900,6 +987,7 @@ async def plan_scene_cards_with_gpt55(
             payload=payload,
             max_output_tokens=3600 if output_count <= 8 else 6000,
             provider_order=provider_order,
+            reference_images=reference_images,
         )
         cards = _normalize_scene_cards(
             raw.get("scene_cards"), fallback_cards, shot_picks
@@ -918,6 +1006,10 @@ async def plan_scene_cards_with_gpt55(
             "scene_cards": cards,
             "scene_fingerprints": fingerprints,
             "risk_notes": coerce_string_list(raw.get("risk_notes"), max_items=8),
+            "reference_image_fallback_reason": clean_text(
+                raw.get("reference_image_fallback_reason"), max_len=300
+            )
+            or None,
             "fallback_reason": None,
         }
     except Exception as exc:  # noqa: BLE001
@@ -975,6 +1067,12 @@ def _director_instructions(output_count: int) -> str:
         "你是服饰电商真人模特图的拍摄导演。你要为整批图片生成自然、不重复、"
         "像真实拍摄分镜的单张拍摄方案。场景、姿势、微动作、镜头全部由你决定，"
         "不要照抄 shot_plan 的标签或 fallback 文案。必须只输出 JSON 对象，不要 Markdown。\n"
+        "如果输入里带有参考图，参考图会标注为商品图和已确认模特图；你必须直接观察"
+        "服饰风格、模特年龄感、身材比例、发型气质和二者搭配关系，再设计更适合这组搭配的"
+        "电商宣传照场景、动作、神态、构图和光线。不要描述或复述衣服细节，"
+        "商品还原约束会由系统后续拼接。\n"
+        "目标是摄影大师级的商业环境肖像：要有张力、活力、动态感和超真实摄影质感，"
+        "但不引用具体摄影师、品牌或杂志名。\n"
         f"scene_cards 必须正好 {output_count} 条，且第 i 条必须严格对应 "
         "shot_plan[i]，id 用 shot_plan[i].shot_class 加 '-' 加索引，例如 "
         "detail_half_body-3。禁止重排 shot_plan 顺序。\n"
@@ -997,8 +1095,9 @@ def _director_instructions(output_count: int) -> str:
         "composition_detail 要写主体位置、留白、裁切边界和背景不抢主体；"
         "natural_detail 要写表情、手指、身体重心、衣料受力/褶皱等自然细节。"
         "这些字段要具体到可拍摄，不要写抽象词如高级、自然、好看。"
-        "最高优先级：商品还原，不能改颜色、版型、领口、袖型、衣长、图案/logo、"
-        "纽扣、口袋、缝线。动作和道具不得遮挡商品主体。"
+        "product 只有少量服装关键词，只用于判断风格、年龄感和当前角度可见区域；"
+        "不要输出商品身份、必须保留、禁止改色、禁改款等商品还原条款，"
+        "也不要枚举商品细节。动作和道具不得遮挡商品主体。"
         "每张 micro_event 必须是具体生活事件，不能直接复制 variant_label 或写成"
         "正面全身/自然动作/自然站姿。camera angle/distance、地点、身体重心、"
         "手部动作至少两项要变化，禁止整批退回普通棚拍站姿。"
@@ -1090,15 +1189,15 @@ async def compose_image_prompt_with_gpt55(
     final_quality: str,
     rewrite_instruction: str | None = None,
     provider_order: list[ProviderDefinition] | None = None,
+    reference_images: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     camera = (
         scene_card.get("camera") if isinstance(scene_card.get("camera"), dict) else {}
     )
+    product_context = compact_product_context_for_gpt55(product_analysis, garment_lock)
     payload = {
         "product_context": {
-            "category": clean_text(product_analysis.get("category"), max_len=120)
-            or clean_text(garment_lock.get("core_identity"), max_len=120),
-            "core_identity": clean_text(garment_lock.get("core_identity"), max_len=160),
+            **product_context,
             "current_view_visibility": clean_text(
                 scene_card.get("product_visibility"), max_len=80
             ),
@@ -1167,6 +1266,11 @@ async def compose_image_prompt_with_gpt55(
         "自然摄影拍摄方案。系统稍后会把商品 1:1 还原、模特一致、禁改项"
         "和遮挡规则确定性拼接到最终生图 prompt；你不要重写这些商品约束。"
         "必须只输出 JSON 对象，不要 Markdown。\n"
+        "如果输入里带有商品图和已确认模特图，先观察两张图的实际搭配关系、年龄感、"
+        "体态比例和气质，再把 seed_keywords 扩展成适合 GPT Image 2 的生图摄影提示词。"
+        "不要描述衣服本身，不要列商品细节。\n"
+        "最终 shooting_brief 要比普通电商站姿更有创造性：更明确的瞬间、更大胆但可信的"
+        "机位/光影/留白、更强的动态张力，同时保持超真实摄影和商品主体清楚。\n"
         "字段：candidate_briefs, selected_candidate_index, selection_scores, "
         "shooting_brief, scene_keywords, composition_keywords, lighting_keywords, "
         "action_keywords, photographic_idea_keywords, product_visibility_checklist, "
@@ -1177,7 +1281,9 @@ async def compose_image_prompt_with_gpt55(
         "selection_scores 每项包含 candidate, product_visibility, naturalness, "
         "photographic_quality, variety, risk_control, total, reason，分数 0-10。"
         "shooting_brief 写 120-260 字中文，保持像真实生图提示词一样短而有力；"
-        "只写本张的场景、动作、神态、构图、光线、镜头、动态张力和真实摄影质感。"
+        "product_context 只有少量服装关键词，用来判断场景气质和避免遮挡；"
+        "不要把它扩写成商品清单。只写本张的场景、动作、神态、构图、光线、"
+        "镜头、动态张力和真实摄影质感。"
         "必须有摄影作品感：像成熟摄影师完成的服饰纪实或环境肖像，包含一个清楚的"
         "摄影意图，例如决定性瞬间、空间张力、光影叙事、人物与环境关系、真实生活观察；"
         "不要模仿或引用具体摄影师姓名、杂志名、品牌名。"
@@ -1207,6 +1313,7 @@ async def compose_image_prompt_with_gpt55(
             payload=payload,
             max_output_tokens=2600,
             provider_order=provider_order,
+            reference_images=reference_images,
         )
         shooting_brief = _sanitize_shooting_brief(
             raw.get("shooting_brief") or raw.get("final_prompt"),
@@ -1253,6 +1360,10 @@ async def compose_image_prompt_with_gpt55(
             "regenerate_if": coerce_string_list(
                 raw.get("regenerate_if"), max_items=8, max_len=120
             ),
+            "reference_image_fallback_reason": clean_text(
+                raw.get("reference_image_fallback_reason"), max_len=300
+            )
+            or None,
             "fallback_reason": None,
         }
     except Exception as exc:  # noqa: BLE001
@@ -1638,6 +1749,7 @@ async def _call_gpt55_json(
     payload: dict[str, Any],
     max_output_tokens: int,
     provider_order: list[ProviderDefinition] | None = None,
+    reference_images: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     providers = (
         list(provider_order)
@@ -1670,7 +1782,11 @@ async def _call_gpt55_json(
     last_error = "unknown"
     for provider in providers:
         provider_fatal = False
+        reference_image_fallback_reason: str | None = None
         for attempt in attempts:
+            attempt_reference_images = (
+                None if reference_image_fallback_reason else reference_images
+            )
             try:
                 text = await _call_responses_text(
                     provider=provider,
@@ -1679,15 +1795,54 @@ async def _call_gpt55_json(
                     instructions=instructions,
                     payload=payload,
                     max_output_tokens=max_output_tokens,
+                    reference_images=attempt_reference_images,
                 )
                 data = _extract_json_object(text)
                 if isinstance(data, dict):
+                    if reference_image_fallback_reason:
+                        data.setdefault(
+                            "reference_image_fallback_reason",
+                            reference_image_fallback_reason[:300],
+                        )
                     return data
                 raise ValueError("json root is not object")
             except Exception as exc:  # noqa: BLE001
                 last_error = f"{provider.name}/{attempt['name']}: {exc}"
                 logger.info("gpt55 json attempt failed: %s", last_error)
-                if not _should_try_next_attempt(exc):
+                decision_exc = exc
+                if attempt_reference_images and _should_retry_without_reference_images(
+                    exc
+                ):
+                    reference_image_fallback_reason = last_error[:300]
+                    try:
+                        logger.info(
+                            "gpt55 json retrying without reference images: %s",
+                            last_error,
+                        )
+                        text = await _call_responses_text(
+                            provider=provider,
+                            attempt=attempt,
+                            purpose=purpose,
+                            instructions=instructions,
+                            payload=payload,
+                            max_output_tokens=max_output_tokens,
+                            reference_images=None,
+                        )
+                        data = _extract_json_object(text)
+                        if isinstance(data, dict):
+                            data.setdefault(
+                                "reference_image_fallback_reason",
+                                reference_image_fallback_reason,
+                            )
+                            return data
+                        raise ValueError("json root is not object")
+                    except Exception as text_exc:  # noqa: BLE001
+                        last_error = (
+                            f"{provider.name}/{attempt['name']} text-only: {text_exc}"
+                        )
+                        logger.info("gpt55 text-only retry failed: %s", last_error)
+                        decision_exc = text_exc
+                if not _should_try_next_attempt(decision_exc):
                     provider_fatal = True
                     break
         if provider_fatal:
@@ -1703,19 +1858,39 @@ async def _call_responses_text(
     instructions: str,
     payload: dict[str, Any],
     max_output_tokens: int,
+    reference_images: list[dict[str, str]] | None = None,
 ) -> str:
+    content: list[dict[str, Any]] = []
+    for index, ref in enumerate(reference_images or [], start=1):
+        image_url = str(ref.get("image_url") or ref.get("url") or "").strip()
+        if not image_url:
+            continue
+        label = clean_text(ref.get("label"), max_len=80) or f"参考图 {index}"
+        content.extend(
+            [
+                {
+                    "type": "input_text",
+                    "text": (
+                        f"参考图 {index}：{label}。请只用于观察搭配、模特气质、"
+                        "比例、姿态和摄影适配，不要在输出中复述图片细节。"
+                    ),
+                },
+                {"type": "input_image", "image_url": image_url},
+            ]
+        )
+    content.append(
+        {
+            "type": "input_text",
+            "text": json.dumps(payload, ensure_ascii=False),
+        }
+    )
     body: dict[str, Any] = {
         "model": attempt["model"],
         "instructions": instructions,
         "input": [
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": json.dumps(payload, ensure_ascii=False),
-                    }
-                ],
+                "content": content,
             }
         ],
         "stream": False,
@@ -1758,6 +1933,16 @@ class _UpstreamHTTPError(Exception):
     def __init__(self, status_code: int, detail: str) -> None:
         super().__init__(f"http {status_code}: {detail}")
         self.status_code = status_code
+        self.detail = detail
+
+
+def _should_retry_without_reference_images(exc: Exception) -> bool:
+    if not isinstance(exc, _UpstreamHTTPError):
+        return False
+    if exc.status_code not in _REFERENCE_IMAGE_RETRY_STATUS:
+        return False
+    detail = str(getattr(exc, "detail", "") or exc).lower()
+    return any(token in detail for token in _REFERENCE_IMAGE_RETRY_TOKENS)
 
 
 def _should_try_next_attempt(exc: Exception) -> bool:

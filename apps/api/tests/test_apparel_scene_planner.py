@@ -43,6 +43,78 @@ async def test_call_gpt55_json_skips_attempts_on_401(
     assert calls == ["gpt55-priority", "gpt55-priority"]
 
 
+@pytest.mark.asyncio
+async def test_call_gpt55_json_retries_text_only_when_reference_image_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference_images = [{"label": "商品图", "image_url": "data:image/jpeg;base64,x"}]
+    calls: list[list[dict[str, str]] | None] = []
+
+    async def fake_call(*args: Any, **kwargs: Any) -> str:
+        calls.append(kwargs.get("reference_images"))
+        if len(calls) == 1:
+            raise scene_planner._UpstreamHTTPError(
+                400, "unsupported input_image data URL"
+            )
+        return '{"ok": true}'
+
+    monkeypatch.setattr(scene_planner, "_call_responses_text", fake_call)
+
+    result = await scene_planner._call_gpt55_json(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        purpose="test",
+        instructions="return json",
+        payload={},
+        max_output_tokens=200,
+        provider_order=[fake_provider("p1")],
+        reference_images=reference_images,
+    )
+
+    assert calls == [reference_images, None]
+    assert result["ok"] is True
+    assert "reference_image_fallback_reason" in result
+
+
+@pytest.mark.asyncio
+async def test_call_gpt55_json_continues_attempts_after_text_only_retry_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference_images = [{"label": "商品图", "image_url": "data:image/jpeg;base64,x"}]
+    calls: list[tuple[str, list[dict[str, str]] | None]] = []
+
+    async def fake_call(*args: Any, **kwargs: Any) -> str:
+        attempt_name = kwargs["attempt"]["name"]
+        refs = kwargs.get("reference_images")
+        calls.append((attempt_name, refs))
+        if len(calls) == 1:
+            raise scene_planner._UpstreamHTTPError(
+                400, "unsupported input_image data URL"
+            )
+        if len(calls) == 2:
+            raise scene_planner._UpstreamHTTPError(500, "temporary upstream error")
+        return '{"ok": true}'
+
+    monkeypatch.setattr(scene_planner, "_call_responses_text", fake_call)
+
+    result = await scene_planner._call_gpt55_json(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        purpose="test",
+        instructions="return json",
+        payload={},
+        max_output_tokens=200,
+        provider_order=[fake_provider("p1")],
+        reference_images=reference_images,
+    )
+
+    assert calls == [
+        ("gpt55-priority", reference_images),
+        ("gpt55-priority", None),
+        ("gpt55-standard", None),
+    ]
+    assert result["ok"] is True
+    assert "reference_image_fallback_reason" in result
+
+
 def test_normalize_scene_cards_aligns_by_product_visibility_and_dedupes() -> None:
     shot_picks = [
         ("front_full_body", {"label": "正面全身"}),
@@ -190,6 +262,127 @@ def test_fallback_scene_cards_use_real_events_not_shot_labels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scene_director_receives_compact_product_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "series_concept": "有活力的儿童环境肖像",
+            "continuity_anchors": [],
+            "scene_cards": [
+                {
+                    "id": "front_full_body-1",
+                    "scene_family": "outdoor_daily",
+                    "location": "树影步道边",
+                    "micro_event": "向镜头方向小步跑近后自然停住",
+                    "camera": {
+                        "distance": "full_body",
+                        "angle": "front_three_quarter",
+                        "lens_feel": "handheld_standard",
+                        "orientation": "vertical",
+                    },
+                    "pose": "身体三分之二正面，双手自然低位",
+                    "motion": "刚停住的轻微惯性带出衣摆褶皱",
+                    "props": ["白色短袜"],
+                    "lighting": "树影下的自然侧逆光",
+                    "composition": "人物完整入镜，商品主体清楚",
+                    "product_visibility": "front_full_body",
+                    "environment_detail": "远处绿植和步道形成前后景层次",
+                    "lighting_detail": "侧逆光勾出肩线，脸部有真实明暗",
+                    "camera_detail": "平视标准镜头，轻微手持抓拍感",
+                    "composition_detail": "人物落在右侧三分线，左侧留出行进空间",
+                    "creative_intent": "用小步停住的决定性瞬间制造童装活力",
+                    "natural_detail": "表情松弛，手指自然弯曲，衣料褶皱可信",
+                    "negative": ["不要遮挡商品主体"],
+                }
+            ],
+            "risk_notes": [],
+        }
+
+    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
+
+    result = await scene_planner.plan_scene_cards_with_gpt55(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        product_analysis={
+            "category": "女童短袖假两件背带连衣裙",
+            "color": "白色上衣和浅蓝色牛仔裙",
+            "material_guess": "牛仔布",
+            "silhouette": "A 字裙身",
+            "key_details": [
+                "异色背带",
+                "毛绒小熊贴布",
+                "雏菊刺绣",
+                "白色花形扣饰",
+            ],
+            "must_preserve": [
+                "白色圆领短袖上衣",
+                "浅蓝色牛仔A字裙身",
+                "一红一浅黄的异色背带",
+                "前片立体毛绒小熊贴布与小口袋",
+                "背后交叉背带和牛仔蝴蝶结",
+                "裙摆彩色波浪缝线",
+            ],
+            "risks": ["背带颜色容易被改错"],
+            "background_recommendation": "明亮、有童趣但干净的生活化氛围",
+        },
+        garment_lock={
+            "core_identity": "女童短袖假两件背带连衣裙、白色圆领短袖上衣、浅蓝色牛仔A字裙身",
+            "must_preserve": ["白色圆领短袖上衣", "浅蓝色牛仔A字裙身"],
+            "occlusion_policy": "手、头发、包带、宠物不得遮挡商品主体",
+            "mutation_bans": ["改颜色", "改廓形"],
+        },
+        model_summary="独立生成 · 儿童",
+        template="lifestyle",
+        scene_environment="outdoor",
+        shot_picks=[
+            ("front_full_body", {"label": "正面全身", "framing": "product_first"})
+        ],
+        aspect_ratio="4:5",
+        output_count=1,
+        user_prompt="要活力街拍感",
+        accessory_plan={"items": ["白色短袜"]},
+        scene_strategy="editorial_campaign",
+        scene_variety="rich",
+        continuity_anchor="none",
+        allow_pet=False,
+        allow_background_people=False,
+        reference_images=[
+            {"label": "商品图", "image_url": "data:image/jpeg;base64,product"},
+            {"label": "已确认模特图", "image_url": "data:image/jpeg;base64,model"},
+        ],
+    )
+
+    payload = captured["payload"]
+    product = payload["product"]
+    assert product["category"] == "女童短袖假两件背带连衣裙"
+    assert product["visual_keywords"] == [
+        "白色上衣和浅蓝色牛仔裙",
+        "牛仔布",
+        "A 字裙身",
+        "异色背带",
+        "毛绒小熊贴布",
+    ]
+    assert "analysis" not in product
+    assert "garment_lock" not in product
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "must_preserve" not in payload_text
+    assert "occlusion_policy" not in payload_text
+    assert "mutation_bans" not in payload_text
+    assert "背带颜色容易被改错" not in payload_text
+    assert "少量服装关键词" in captured["instructions"]
+    assert "已确认模特图" in captured["instructions"]
+    assert captured["reference_images"] == [
+        {"label": "商品图", "image_url": "data:image/jpeg;base64,product"},
+        {"label": "已确认模特图", "image_url": "data:image/jpeg;base64,model"},
+    ]
+    assert "最高优先级" not in captured["instructions"]
+    assert result["planner_status"] == "ok"
+
+
+@pytest.mark.asyncio
 async def test_prompt_composer_expands_only_shooting_brief(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -284,12 +477,23 @@ async def test_prompt_composer_expands_only_shooting_brief(
         template="premium_studio",
         aspect_ratio="4:5",
         final_quality="high",
+        reference_images=[
+            {"label": "商品图", "image_url": "data:image/jpeg;base64,product"},
+            {"label": "已确认模特图", "image_url": "data:image/jpeg;base64,model"},
+        ],
     )
 
     payload = captured["payload"]
     assert "base_prompt" not in payload
     assert payload["request"]["system_will_append_product_lock"] is True
     assert payload["request"]["candidate_count"] == 3
+    assert "core_identity" not in payload["product_context"]
+    assert payload["product_context"]["visual_keywords"] == ["蓝色牛仔", "异色背带"]
+    assert "GPT Image 2" in captured["instructions"]
+    assert captured["reference_images"] == [
+        {"label": "商品图", "image_url": "data:image/jpeg;base64,product"},
+        {"label": "已确认模特图", "image_url": "data:image/jpeg;base64,model"},
+    ]
     assert "must_preserve" not in json.dumps(payload, ensure_ascii=False)
     assert "完整系统 prompt" not in json.dumps(payload, ensure_ascii=False)
     assert result["shooting_brief"].startswith("窗边自然侧光")
