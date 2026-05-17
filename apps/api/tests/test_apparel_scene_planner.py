@@ -106,6 +106,52 @@ def test_normalize_scene_cards_aligns_by_product_visibility_and_dedupes() -> Non
     assert "变体 3" in cards[2]["micro_event"]
 
 
+def test_normalize_scene_cards_forces_non_side_shots_front_facing() -> None:
+    raw_cards = [
+        {
+            "id": "natural_pose-1",
+            "scene_family": "street",
+            "location": "树影步道",
+            "micro_event": "背向前走半步后回望",
+            "camera": {"distance": "full_body", "angle": "side_or_back"},
+            "pose": "背向镜头回头",
+            "motion": "侧后转身带出后背轮廓",
+            "lighting": "侧光",
+            "composition": "后背作为主视角",
+            "product_visibility": "side_or_back_silhouette",
+            "camera_detail": "侧后角度，背面结构清楚",
+        }
+    ]
+    fallback_cards = [
+        {
+            "id": "fallback-natural",
+            "scene_family": "street",
+            "location": "树影步道",
+            "micro_event": "沿着场景向前走时被自然抓拍",
+            "camera": {"distance": "full_body", "angle": "front_three_quarter"},
+            "pose": "身体三分之二正面，手部保持低位",
+            "motion": "正面微侧移动带出衣服褶皱",
+            "lighting": "侧光",
+            "composition": "脸部和商品主体清楚",
+            "product_visibility": "front_full_body",
+            "camera_detail": "平视三分之二正面机位",
+        }
+    ]
+
+    cards = scene_planner._normalize_scene_cards(
+        raw_cards,
+        fallback_cards,
+        [("natural_pose", {"label": "自然动作", "framing": "tone_first"})],
+    )
+
+    card = cards[0]
+    assert card["camera"]["angle"] == "front_three_quarter"
+    assert card["product_visibility"] == "front_full_body"
+    assert "背向" not in card["pose"]
+    assert "侧后" not in card["motion"]
+    assert any("不要背影" in item for item in card["negative"])
+
+
 def test_fallback_scene_cards_use_real_events_not_shot_labels() -> None:
     shot_picks = [
         ("front_full_body", {"label": "正面全身", "framing": "product_first"}),

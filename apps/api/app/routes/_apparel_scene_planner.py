@@ -54,7 +54,7 @@ _SHOT_CAMERA = {
     },
     "natural_pose": {
         "distance": "full_body",
-        "angle": "slight_side",
+        "angle": "front_three_quarter",
         "lens_feel": "handheld_standard",
         "orientation": "vertical",
     },
@@ -208,7 +208,7 @@ _FALLBACK_EVENTS_BY_SHOT: dict[str, tuple[str, ...]] = {
         "刚走到地点中央时短暂停步看向镜头",
         "等人时自然站定，身体重心落在一侧",
         "从门口走出后停下整理步伐",
-        "穿过光影区域时回头确认镜头",
+        "穿过光影区域时抬眼看向镜头",
         "在路边停住，手臂自然垂落不遮挡衣服",
     ),
     "natural_pose": (
@@ -216,7 +216,7 @@ _FALLBACK_EVENTS_BY_SHOT: dict[str, tuple[str, ...]] = {
         "低头看了一眼手机又抬眼",
         "和镜头外的人轻声回应",
         "一只手轻扶衣摆边缘但不遮挡主体",
-        "转身准备离开时被自然抓拍",
+        "沿着场景向前走时被自然抓拍",
     ),
     "detail_half_body": (
         "抬手轻整理袖口，胸前和领口保持清楚",
@@ -242,10 +242,10 @@ _FALLBACK_POSES_BY_SHOT: dict[str, tuple[str, ...]] = {
         "步伐刚停下的全身姿态",
     ),
     "natural_pose": (
-        "身体三分之二侧向，头部自然转回",
+        "身体三分之二正面，头部自然看向镜头附近",
         "轻微前行动作，手部保持低位",
         "上半身放松，视线偏离镜头一点",
-        "自然转身中的松弛姿态",
+        "正面微侧的小幅移动姿态",
     ),
     "detail_half_body": (
         "半身微侧，手部动作避开胸前主体",
@@ -270,7 +270,7 @@ _FALLBACK_MOTIONS_BY_SHOT: dict[str, tuple[str, ...]] = {
     ),
     "natural_pose": (
         "小步前行中的自然定格",
-        "轻微转身带出衣服褶皱",
+        "正面微侧移动带出衣服褶皱",
         "手部低位小动作，主体不被遮挡",
         "视线和身体方向不同步的抓拍感",
     ),
@@ -678,7 +678,7 @@ def _camera_detail_for_shot(
         options = (
             "手持标准镜头距离，人物占画面主要高度，动作像刚被定格",
             "镜头略跟随人物移动，保留一点环境但不压过衣服",
-            "平视略偏侧机位，身体重心和步伐方向可信",
+            "平视三分之二正面机位，身体重心和步伐方向可信",
         )
     else:
         options = (
@@ -873,6 +873,10 @@ async def plan_scene_cards_with_gpt55(
             "allow_pet": allow_pet,
             "allow_background_people": allow_background_people,
             "user_direction": user_prompt,
+            "front_view_policy": (
+                "默认正面或三分之二正面；只有 shot_class=side_or_back "
+                "才允许侧背或背面作为主视角。"
+            ),
         },
         "shot_plan": [
             {
@@ -974,6 +978,10 @@ def _director_instructions(output_count: int) -> str:
         f"scene_cards 必须正好 {output_count} 条，且第 i 条必须严格对应 "
         "shot_plan[i]，id 用 shot_plan[i].shot_class 加 '-' 加索引，例如 "
         "detail_half_body-3。禁止重排 shot_plan 顺序。\n"
+        "默认视角偏正面：除 shot_class 为 side_or_back 的少量补充图外，"
+        "scene_card 必须是正面或三分之二正面，脸部和商品正面主体清楚。"
+        "不要把 front_full_body、natural_pose、detail_half_body 写成背影、"
+        "背向前走、后背主视角或纯侧面轮廓。\n"
         "字段：series_concept, continuity_anchors, scene_cards, risk_notes。\n"
         "每个 scene_card 字段必须有 id, scene_family, location, micro_event, camera, "
         "pose, motion, props, lighting, composition, product_visibility, "
@@ -1138,6 +1146,11 @@ async def compose_image_prompt_with_gpt55(
             "final_quality": final_quality,
             "system_will_append_product_lock": True,
             "candidate_count": 3,
+            "view_policy": (
+                "side_or_back_allowed"
+                if shot_class == "side_or_back"
+                else "front_or_three_quarter_required"
+            ),
             "selection_metrics": [
                 "商品当前可见性",
                 "动作自然度",
@@ -1158,16 +1171,22 @@ async def compose_image_prompt_with_gpt55(
         "shooting_brief, scene_keywords, composition_keywords, lighting_keywords, "
         "action_keywords, photographic_idea_keywords, product_visibility_checklist, "
         "negative_prompt_notes, regenerate_if。\n"
-        "先生成 3 个互不重复的 candidate_briefs，每个候选 120-320 字，"
+        "先生成 3 个互不重复的 candidate_briefs，每个候选 120-260 字，"
         "都必须满足 seed_keywords，但摄影意图、构图重心、动作瞬间或光线关系要有明显差异。"
         "再按 selection_metrics 自评打分，选择总分最高且风险最低的一版作为 shooting_brief。"
         "selection_scores 每项包含 candidate, product_visibility, naturalness, "
         "photographic_quality, variety, risk_control, total, reason，分数 0-10。"
-        "shooting_brief 写 180-520 字中文，只写本张的场景、生活事件、机位、"
-        "镜头距离、透视、光线方向、空间层次、构图、动作瞬间、表情和衣料自然受力。"
+        "shooting_brief 写 120-260 字中文，保持像真实生图提示词一样短而有力；"
+        "只写本张的场景、动作、神态、构图、光线、镜头、动态张力和真实摄影质感。"
         "必须有摄影作品感：像成熟摄影师完成的服饰纪实或环境肖像，包含一个清楚的"
         "摄影意图，例如决定性瞬间、空间张力、光影叙事、人物与环境关系、真实生活观察；"
         "不要模仿或引用具体摄影师姓名、杂志名、品牌名。"
+        "语言风格参考：高级儿童时装品牌大片、真实动态抓拍、低机位儿童视角、"
+        "黄昏逆光/几何阴影/大面积留白/前景虚化/高速快门/35mm/50mm/70mm 镜头等具体摄影词；"
+        "不要写成规则清单，不要用模板编号，不要解释意图。"
+        "除非 request.shot_class 是 side_or_back 或 seed_keywords.camera.angle 明确为 side_or_back，"
+        "candidate_briefs 和 shooting_brief 必须保持正面或三分之二正面，"
+        "脸部和商品主体清楚；不要写背影、背向前走、后背主视角或纯侧面轮廓。"
         "必须保留 seed_keywords 里的 location、micro_event、pose、motion、camera，"
         "creative_intent，但要把它们扩展成可直接拍摄的自然画面，不得简化成普通站姿。"
         "只用 seed_keywords 作为场景来源；不要混入其它地点、花坛、街边、棚拍、"
@@ -1339,6 +1358,94 @@ def fallback_risk_review(
     }
 
 
+_BACK_VIEW_TEXT_TOKENS = (
+    "背影",
+    "背向",
+    "背对",
+    "背面",
+    "后背",
+    "背后",
+    "侧后",
+    "from behind",
+    "back view",
+    "rear view",
+    "back-facing",
+)
+_SIDE_BACK_VIEW_TOKENS = (
+    *_BACK_VIEW_TEXT_TOKENS,
+    "side_or_back",
+    "side view",
+    "profile view",
+    "pure side",
+    "纯侧面",
+    "侧面轮廓",
+    "侧背",
+)
+
+
+def _has_view_token(value: Any, tokens: tuple[str, ...]) -> bool:
+    text = str(value or "").lower()
+    return any(token.lower() in text for token in tokens)
+
+
+def _front_replacement(
+    fallback: dict[str, Any],
+    key: str,
+    default: str,
+    *,
+    max_len: int = 220,
+) -> str:
+    replacement = clean_text(fallback.get(key), max_len=max_len)
+    if replacement and not _has_view_token(replacement, _SIDE_BACK_VIEW_TOKENS):
+        return replacement
+    return default
+
+
+def _enforce_front_view_for_non_side_card(
+    card: dict[str, Any],
+    fallback: dict[str, Any],
+    shot_class: str,
+) -> None:
+    if shot_class == "side_or_back":
+        return
+    camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    if _has_view_token(camera.get("angle"), _SIDE_BACK_VIEW_TOKENS):
+        fallback_camera = (
+            fallback.get("camera") if isinstance(fallback.get("camera"), dict) else {}
+        )
+        fallback_angle = clean_text(fallback_camera.get("angle"), max_len=40)
+        camera["angle"] = (
+            fallback_angle
+            if fallback_angle
+            and not _has_view_token(fallback_angle, _SIDE_BACK_VIEW_TOKENS)
+            else "front_three_quarter"
+        )
+        card["camera"] = camera
+
+    if _has_view_token(card.get("product_visibility"), _SIDE_BACK_VIEW_TOKENS):
+        card["product_visibility"] = _product_visibility_for_shot(shot_class)
+
+    replacements = {
+        "micro_event": "正面微侧行走中被自然抓拍",
+        "pose": "身体三分之二正面，手部低位不遮挡商品主体",
+        "motion": "正面小幅移动带出衣料自然褶皱",
+        "composition": "脸部和商品主体清楚，人物完整入镜，背景只作氛围",
+        "camera_detail": "平视或轻微低机位的三分之二正面镜头，透视自然",
+        "composition_detail": "主体正面区域清楚，头顶肩肘和脚下留边，背景不抢服装",
+        "creative_intent": "用正面抓拍里的决定性瞬间呈现服装，让画面有作品感但不牺牲商品",
+        "natural_detail": "表情、手指、身体重心和衣料褶皱都自然可信，商品主体无遮挡",
+    }
+    for key, default in replacements.items():
+        if _has_view_token(card.get(key), _SIDE_BACK_VIEW_TOKENS):
+            card[key] = _front_replacement(fallback, key, default)
+
+    negative = coerce_string_list(card.get("negative"), max_items=8, max_len=100)
+    front_negative = "非侧背补充图不要背影、背向或以后背作为主视角"
+    if front_negative not in negative:
+        negative.append(front_negative)
+    card["negative"] = negative[:8]
+
+
 def _normalize_scene_cards(
     raw_cards: Any,
     fallback_cards: list[dict[str, Any]],
@@ -1466,6 +1573,7 @@ def _normalize_scene_cards(
             card.get("motion"), shot_class=shot_class, label=shot_label
         ):
             card["motion"] = fallback.get("motion") or card["motion"]
+        _enforce_front_view_for_non_side_card(card, fallback, shot_class)
         card["fingerprint"] = scene_fingerprint(card)
         normalized.append(card)
     return _dedupe_scene_cards(normalized, fallback_cards)

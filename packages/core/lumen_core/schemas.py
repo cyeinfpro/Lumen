@@ -672,7 +672,9 @@ class ApparelModelLibraryGenerateIn(BaseModel):
                 )
             return self
         if self.reference_image_id:
-            raise ValueError("reference_image_id only allowed when mode='reference_image'")
+            raise ValueError(
+                "reference_image_id only allowed when mode='reference_image'"
+            )
         if self.age_segment is None:
             raise ValueError("age_segment is required when mode='text'")
         return self
@@ -791,7 +793,6 @@ class ShowcaseImagesCreateIn(BaseModel):
             "front_full_body",
             "natural_pose",
             "detail_half_body",
-            "side_or_back",
         ],
         min_length=1,
         max_length=4,
@@ -800,16 +801,16 @@ class ShowcaseImagesCreateIn(BaseModel):
     final_quality: Literal["standard", "high", "4k"] = "high"
     output_count: Literal[1, 2, 4, 8, 16] = 4
     scene_environment: Literal["indoor", "outdoor"] = "indoor"
-    scene_strategy: Literal[
-        "balanced", "natural_series", "editorial_campaign"
-    ] = "natural_series"
+    scene_strategy: Literal["balanced", "natural_series", "editorial_campaign"] = (
+        "natural_series"
+    )
     scene_variety: Literal["safe", "rich", "wild"] = "rich"
-    scene_planner: Literal[
-        "gpt55_preflight", "gpt55_batch_only", "rules_fallback"
-    ] = "gpt55_preflight"
-    continuity_anchor: Literal[
-        "none", "accessory", "pet", "location_series"
-    ] = "accessory"
+    scene_planner: Literal["gpt55_preflight", "gpt55_batch_only", "rules_fallback"] = (
+        "gpt55_preflight"
+    )
+    continuity_anchor: Literal["none", "accessory", "pet", "location_series"] = (
+        "accessory"
+    )
     allow_pet: bool = False
     allow_background_people: bool = True
 

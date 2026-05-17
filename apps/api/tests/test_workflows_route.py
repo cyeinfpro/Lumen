@@ -1864,13 +1864,13 @@ def test_showcase_prompt_composed_scene_card_appends_conflict_guardrails() -> No
 
     assert "【本张拍摄方案】" in prompt
     assert "街边花坛旁轻扶肩带" in prompt
-    assert "最终画面只采用本张拍摄方案" in prompt
-    assert "不得再混入其它地点" in prompt
-    assert "本张可见性目标" in prompt
+    assert "最终画面只采用上方短摄影方案" in prompt
+    assert "不得混入其它地点" in prompt
+    assert "本张商品可见性" in prompt
     assert "本张不要强求" in prompt
     assert "背后蝴蝶结" in prompt
-    assert "本张画面范围" in prompt
-    assert "真实自然儿童摄影质感" in prompt
+    assert "本张画面范围" not in prompt
+    assert "真实自然儿童摄影质感" not in prompt
 
 
 def test_showcase_prompt_expands_gpt55_scene_details_without_internal_terms() -> None:
@@ -2847,7 +2847,7 @@ def test_pick_shot_variants_is_deterministic_for_same_seed() -> None:
     assert [v["label"] for _, v in a] != [v["label"] for _, v in c]
 
 
-def test_pick_shot_variants_covers_all_four_classes_when_output_4() -> None:
+def test_pick_shot_variants_prefers_front_views_when_output_4() -> None:
     picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
         template="lifestyle",
         age_segment="young_adult",
@@ -2855,12 +2855,13 @@ def test_pick_shot_variants_covers_all_four_classes_when_output_4() -> None:
         seed_key="cover-test",
     )
     classes = [cls for cls, _ in picks]
-    assert set(classes) == {
+    assert classes == [
         "front_full_body",
         "natural_pose",
         "detail_half_body",
-        "side_or_back",
-    }
+        "front_full_body",
+    ]
+    assert "side_or_back" not in classes
 
 
 @pytest.mark.parametrize(
@@ -2980,7 +2981,7 @@ def test_framing_direction_for_tone_first_emphasizes_environment() -> None:
 def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(
     age_segment: str,
 ) -> None:
-    """child 每类只 3 条、toddler 每类只 2 条，请求 16 张需循环复用变体而不是少返回。"""
+    """child/toddler 池较小，请求 16 张需循环复用变体且只少量补侧背。"""
     picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
         template="premium_studio",
         age_segment=age_segment,
@@ -2989,13 +2990,10 @@ def test_pick_shot_variants_returns_full_count_when_pool_smaller_than_plan(
     )
     assert len(picks) == 16
     classes = [cls for cls, _ in picks]
-    for cls_name in (
-        "front_full_body",
-        "natural_pose",
-        "detail_half_body",
-        "side_or_back",
-    ):
-        assert classes.count(cls_name) == 4, f"{cls_name} should appear 4 times"
+    assert classes.count("front_full_body") == 6
+    assert classes.count("natural_pose") == 4
+    assert classes.count("detail_half_body") == 4
+    assert classes.count("side_or_back") == 2
     # 至少 2 张 product_first（min_product_first 保证）
     product = sum(1 for _, v in picks if v["framing"] == "product_first")
     assert product >= 2

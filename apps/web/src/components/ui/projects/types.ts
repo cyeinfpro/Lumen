@@ -214,7 +214,6 @@ export const SHOT_PLAN_DEFAULT = [
   "front_full_body",
   "natural_pose",
   "detail_half_body",
-  "side_or_back",
 ] as const;
 
 // ============================================================================
