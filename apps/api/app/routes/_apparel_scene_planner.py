@@ -289,7 +289,9 @@ def clean_string_list(
     return out
 
 
-def coerce_string_list(value: Any, *, max_items: int = 8, max_len: int = 80) -> list[str]:
+def coerce_string_list(
+    value: Any, *, max_items: int = 8, max_len: int = 80
+) -> list[str]:
     if isinstance(value, list):
         return clean_string_list(value, max_items=max_items, max_len=max_len)
     if isinstance(value, str) and value.strip():
@@ -397,7 +399,10 @@ def fallback_scene_cards_from_pool(
 ) -> list[dict[str, Any]]:
     category = clean_text(product_analysis.get("category"), max_len=80) or "服饰"
     base_family = _TEMPLATE_FAMILY.get(template, template)
-    if scene_environment == "outdoor" and base_family in {"daily_life", "phone_snapshot"}:
+    if scene_environment == "outdoor" and base_family in {
+        "daily_life",
+        "phone_snapshot",
+    }:
         base_family = "outdoor_daily"
     accessories = coerce_string_list(accessory_plan.get("items"), max_items=4)
     cards: list[dict[str, Any]] = []
@@ -418,10 +423,15 @@ def fallback_scene_cards_from_pool(
         if aspect_ratio in {"16:9", "21:9", "4:3", "3:2"}:
             camera["orientation"] = "landscape"
         props = list(accessories)
-        if allow_pet and continuity_anchor == "pet" and family not in {
-            "clean_ecommerce",
-            "premium_studio",
-        }:
+        if (
+            allow_pet
+            and continuity_anchor == "pet"
+            and family
+            not in {
+                "clean_ecommerce",
+                "premium_studio",
+            }
+        ):
             props.append("低存在感宠物")
         card = {
             "id": f"fallback-{index:02d}-{shot_class}",
@@ -792,6 +802,10 @@ async def compose_image_prompt_with_gpt55(
         "字段：final_prompt, product_visibility_checklist, negative_prompt_notes, regenerate_if。\n"
         "final_prompt 必须自然、有具体拍摄事件和镜头，但商品还原优先级最高。"
         "必须保留 scene_card 的 location、micro_event、pose、motion、camera，不得简化成普通站姿。"
+        "SceneCard 是本张唯一场景来源：不要把 base_prompt、template 或 shot label 里的其它地点、"
+        "花坛、街边、棚拍、户外/室内光线等混进 final_prompt，除非它们已经出现在 scene_card。"
+        "本张只要求清楚呈现当前镜头能看到的商品细节；半身/上身近景不要强求背后、裙摆、"
+        "全身廓形等不可见细节。"
         "不要引入没有要求的新服装图案、logo、口袋、腰带或遮挡道具。"
         "如果有 rewrite_instruction，必须按它降低风险。"
     )
@@ -1004,9 +1018,7 @@ def _normalize_scene_cards(
             "composition": clean_text(raw.get("composition"), max_len=180)
             or fallback.get("composition")
             or "商品主体清晰",
-            "product_visibility": clean_text(
-                raw.get("product_visibility"), max_len=80
-            )
+            "product_visibility": clean_text(raw.get("product_visibility"), max_len=80)
             or fallback.get("product_visibility")
             or "front_full_body",
             "negative": coerce_string_list(
@@ -1068,9 +1080,7 @@ def _unique_fingerprints(cards: list[dict[str, Any]]) -> list[str]:
 
 async def resolve_scene_provider_order(db: AsyncSession) -> list[ProviderDefinition]:
     spec_providers = get_spec("providers")
-    raw_providers = (
-        await get_setting(db, spec_providers) if spec_providers else None
-    )
+    raw_providers = await get_setting(db, spec_providers) if spec_providers else None
     providers, _proxies, errors = build_effective_provider_config(
         raw_providers=raw_providers,
         legacy_base_url=(
