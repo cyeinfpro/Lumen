@@ -414,8 +414,8 @@ export function ApparelWorkflowNewPage() {
             </Link>
           </header>
 
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">
-            <section className="grid gap-5 md:gap-6">
+          <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">
+            <section className="grid min-w-0 gap-5 md:gap-6">
               {/* Upload */}
               <SectionHeader
                 eyebrow="N°01 — 上传"
@@ -599,11 +599,11 @@ export function ApparelWorkflowNewPage() {
                   />
                 </div>
 
-                <div className="border-t border-[var(--border)] pt-4">
+                <div className="min-w-0 border-t border-[var(--border)] pt-4">
                   <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
                     组合提示词
                   </p>
-                  <p className="mt-2 text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                  <p className="mt-2 break-words text-[13px] leading-[1.7] text-[var(--fg-1)]">
                     {composedPrompt}
                   </p>
                 </div>
@@ -613,7 +613,7 @@ export function ApparelWorkflowNewPage() {
                 <div className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5">
                   <div className="flex items-start gap-3">
                     <X className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
-                    <div>
+                    <div className="min-w-0">
                       <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--danger)]">
                         错误
                       </p>
@@ -883,11 +883,11 @@ function FilePortrait({
       </div>
 
       {/* meta row */}
-      <div className="mt-3 flex items-baseline justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+      <div className="mt-3 flex min-w-0 items-baseline justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
         <span className={cn("truncate", statusToneText)} title={item.file.name}>
           {statusLabel}
         </span>
-        <span className="tabular-nums">{formatBytes(item.file.size)}</span>
+        <span className="shrink-0 tabular-nums">{formatBytes(item.file.size)}</span>
       </div>
       <p
         className="mt-1 truncate text-[12px] text-[var(--fg-1)]"
@@ -944,7 +944,7 @@ function ParamSelect({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="block">
+    <label className="block min-w-0">
       <span className="flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
         <span>{label}</span>
         {chineseLabel && chineseLabel !== label ? (

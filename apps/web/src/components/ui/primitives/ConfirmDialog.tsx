@@ -143,7 +143,7 @@ export function ConfirmDialog({
               "sm:rounded-[var(--radius-dialog)]",
             )}
           >
-            <div className="mobile-dialog-scroll min-h-0 overflow-y-auto pr-0.5">
+            <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto pr-0.5">
               <h2
                 id="confirm-dialog-title"
                 className={cn(

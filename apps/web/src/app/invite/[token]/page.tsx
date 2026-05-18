@@ -54,8 +54,8 @@ export default function InvitePage({
   const showSkeleton = useDelayedFlag(q.isLoading, 180);
 
   return (
-    <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
-      <main className="flex-1 flex flex-col items-center justify-center px-4 py-10 md:py-16 safe-x">
+    <div className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <main className="flex min-h-0 flex-1 flex-col items-center justify-start overflow-y-auto overscroll-contain px-4 py-8 safe-x md:justify-center md:py-16">
         <motion.div
           initial={false}
           animate={{ opacity: 1, y: 0 }}

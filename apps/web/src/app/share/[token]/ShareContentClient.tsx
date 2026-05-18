@@ -565,6 +565,12 @@ function ShareLightbox({
   }, []);
 
   if (!image) return null;
+  const lightboxStyle = {
+    "--share-lightbox-top-space": "calc(env(safe-area-inset-top, 0px) + 4.75rem)",
+    "--share-lightbox-footer-space": multiple
+      ? "calc(var(--mobile-dialog-footer-pad-bottom) + 8.75rem)"
+      : "calc(var(--mobile-dialog-footer-pad-bottom) + 4.5rem)",
+  } as React.CSSProperties;
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (!multiple || (event.pointerType === "mouse" && event.button !== 0)) return;
@@ -607,6 +613,7 @@ function ShareLightbox({
     <div
       ref={dialogRootRef}
       tabIndex={-1}
+      style={lightboxStyle}
       className="fixed inset-0 z-[var(--z-lightbox,80)] flex bg-black text-white share-dialog-in outline-none"
       role="dialog"
       aria-modal="true"
@@ -617,7 +624,7 @@ function ShareLightbox({
       </span>
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(242,169,58,0.10),transparent_28rem),linear-gradient(180deg,rgba(255,255,255,0.05),transparent_35%)]" />
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 border-b border-white/10 bg-black/45 px-3 pb-3 pt-[calc(env(safe-area-inset-top,0px)+0.75rem)] backdrop-blur-xl mobile-perf-surface">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 border-b border-white/10 bg-black/45 px-3 pb-2 pt-[calc(env(safe-area-inset-top,0px)+0.5rem)] backdrop-blur-xl mobile-perf-surface sm:pb-3 sm:pt-[calc(env(safe-area-inset-top,0px)+0.75rem)]">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0 rounded-full border border-white/10 bg-white/10 px-3 py-2 text-xs font-mono tabular-nums text-white/80">
             {index + 1}/{images.length}
@@ -680,7 +687,12 @@ function ShareLightbox({
       )}
 
       <div
-        className="relative z-10 flex min-h-0 w-full flex-1 touch-pan-y select-none items-center justify-center px-3 pb-[calc(var(--mobile-dialog-bottom-gap)+10.25rem)] pt-[calc(env(safe-area-inset-top,0px)+5rem)] sm:px-16 sm:pb-28 sm:pt-24"
+        className={cn(
+          "relative z-10 flex min-h-0 w-full flex-1 touch-pan-y select-none items-center justify-center px-3 pt-[var(--share-lightbox-top-space)] sm:px-16 sm:pt-24",
+          multiple
+            ? "pb-[var(--share-lightbox-footer-space)] sm:pb-36"
+            : "pb-[var(--share-lightbox-footer-space)] sm:pb-28",
+        )}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -714,13 +726,13 @@ function ShareLightbox({
         <ShareFilmstrip images={images} activeIndex={index} onSelect={onSelect} />
       )}
 
-      <div className="absolute inset-x-0 bottom-0 z-20 border-t border-white/10 bg-black/[0.72] px-3 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-3 backdrop-blur-xl mobile-perf-surface sm:pb-[calc(env(safe-area-inset-bottom,0px)+0.75rem)]">
+      <div className="absolute inset-x-0 bottom-0 z-20 border-t border-white/10 bg-black/[0.72] px-3 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-2 backdrop-blur-xl mobile-perf-surface sm:pb-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] sm:pt-3">
         <div className="mx-auto flex w-full max-w-4xl items-center gap-2">
           <button
             type="button"
             onClick={() => onDownload(image)}
             disabled={downloading}
-            className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-70"
+            className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--color-lumen-amber)] px-4 text-sm font-medium text-black transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-70 sm:h-11"
           >
             {downloading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -733,13 +745,13 @@ function ShareLightbox({
             href={image.image_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex h-11 items-center justify-center gap-1.5 rounded-lg border border-white/15 bg-white/10 px-3 text-sm text-white transition-colors hover:bg-white/15"
+            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-white/15 bg-white/10 px-3 text-sm text-white transition-colors hover:bg-white/15 sm:h-11"
           >
             <ExternalLink className="h-4 w-4" />
             原图
           </a>
         </div>
-        <div className="mx-auto mt-2 flex w-full max-w-4xl flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] text-white/[0.62]">
+        <div className="mx-auto mt-2 hidden w-full max-w-4xl flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] text-white/[0.62] sm:flex">
           <span className="font-mono tabular-nums">
             {image.width} x {image.height} · {image.mime}
           </span>
@@ -766,8 +778,8 @@ function ShareFilmstrip({
   onSelect: (index: number) => void;
 }) {
   return (
-    <div className="absolute inset-x-0 bottom-[calc(var(--mobile-dialog-bottom-gap)+6.4rem)] z-20 sm:bottom-[calc(env(safe-area-inset-bottom,0px)+5.8rem)]">
-      <div className="mx-auto flex max-w-4xl gap-2 overflow-x-auto px-3 py-2 no-scrollbar">
+    <div className="absolute inset-x-0 bottom-[calc(var(--mobile-dialog-footer-pad-bottom)+3.75rem)] z-20 sm:bottom-[calc(env(safe-area-inset-bottom,0px)+5.8rem)]">
+      <div className="mx-auto flex max-w-4xl scroll-px-3 gap-2 overflow-x-auto px-3 py-2 no-scrollbar">
         {images.map((image, index) => (
           <button
             key={image.id}
@@ -1030,7 +1042,8 @@ function lightboxImageFrameStyle(image: PublicShareImageOut): React.CSSPropertie
   return {
     aspectRatio: `${image.width} / ${image.height}`,
     width: `min(96vw, ${image.width}px)`,
-    maxHeight: "calc(100dvh - 11rem)",
+    maxHeight:
+      "calc(100dvh - var(--share-lightbox-top-space, 5rem) - var(--share-lightbox-footer-space, 11rem))",
   };
 }
 

@@ -351,8 +351,8 @@ export default function MemorySettingsPage() {
           </section>
         )}
 
-        <section className="grid gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
-          <aside className="space-y-3">
+        <section className="grid min-w-0 gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
+          <aside className="min-w-0 space-y-3">
             <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-3">
               <button
                 type="button"
@@ -406,7 +406,7 @@ export default function MemorySettingsPage() {
             </div>
           </aside>
 
-          <div className="space-y-5">
+          <div className="min-w-0 space-y-5">
             <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -714,28 +714,35 @@ export default function MemorySettingsPage() {
 function CapabilityModal({ onClose }: { onClose: () => void }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-sm mobile-dialog-shell sm:items-center"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md surface-dialog rounded-[var(--radius-dialog)] p-5"
+        className="mobile-dialog-panel flex w-full max-w-md flex-col overflow-hidden rounded-t-[var(--radius-dialog)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] p-5 shadow-[var(--shadow-3)] sm:rounded-[var(--radius-dialog)] sm:border-b"
         onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="memory-capability-title"
       >
-        <div className="mb-2 flex items-center gap-2">
-          <AlertTriangle className="h-5 w-5 text-warning" />
-          <h3 className="type-card-title">需要 embedding provider</h3>
+        <div className="mobile-dialog-scroll min-h-0 overflow-y-auto pr-0.5">
+          <div className="mb-2 flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-warning" />
+            <h3 id="memory-capability-title" className="type-card-title">
+              需要 embedding provider
+            </h3>
+          </div>
+          <p className="type-body-sm leading-6 text-[var(--fg-1)]">
+            启用前需在管理员后台为某个 provider 勾选 “embedding” 用途；记忆的写入、检索、抽取均依赖向量。
+          </p>
         </div>
-        <p className="type-body-sm leading-6 text-[var(--fg-1)]">
-          启用前需在管理员后台为某个 provider 勾选 “embedding” 用途；记忆的写入、检索、抽取均依赖向量。
-        </p>
-        <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+        <div className="mobile-dialog-footer -mx-5 mt-5 flex shrink-0 flex-col gap-2 border-t border-[var(--border)] px-5 pt-3 sm:mx-0 sm:flex-row sm:justify-end sm:border-t-0 sm:px-0 sm:pt-0">
           <Button variant="outline" size="md" onClick={onClose}>
             {copy.action.confirm}
           </Button>
           <Link
             href="/admin"
             onClick={onClose}
-            className="inline-flex h-9 items-center justify-center rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-black"
+            className="inline-flex h-10 items-center justify-center rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-black sm:h-9"
           >
             去管理员后台
           </Link>

@@ -123,6 +123,7 @@ export function PosterMasterGenerationStage({ workflow }: { workflow: WorkflowRu
           loading={create.isPending}
           onClick={more}
           leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+          className="w-full sm:w-auto"
         >
           再生成 4 张
         </Button>

@@ -675,7 +675,7 @@ export function RequestEventsPanel() {
           />
         ) : (
           <>
-            <div className="hidden">
+            <div className="hidden overflow-x-auto [-webkit-overflow-scrolling:touch] lg:block">
               <table className="w-full min-w-[1040px] text-sm">
                 <thead className="sticky top-0 z-10 border-b border-white/10 bg-[var(--bg-1)]/95 text-xs uppercase tracking-wider text-[var(--fg-1)] backdrop-blur">
                   <tr>
@@ -772,7 +772,7 @@ export function RequestEventsPanel() {
               </table>
             </div>
 
-            <ul className="divide-y divide-white/5">
+            <ul className="divide-y divide-white/5 lg:hidden">
               {filtered.map((event) => {
                 const expanded = expandedId === event.id;
                 const detailId = `request-event-mobile-detail-${event.id}`;

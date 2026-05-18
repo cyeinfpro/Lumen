@@ -314,11 +314,11 @@ function SystemPromptDialog({
         aria-modal={embedded ? undefined : true}
         aria-labelledby="system-prompt-title"
         className={cn(
-          "relative grid w-full overflow-hidden",
+          "mobile-dialog-panel relative grid w-full overflow-hidden",
           embedded
             ? "min-h-[620px] h-[calc(100dvh-14rem)] rounded-[var(--radius-dialog)] max-sm:min-h-0 max-sm:h-[calc(100dvh-10rem)]"
-            : "h-[760px] max-h-[calc(100dvh-1.5rem)] max-w-5xl rounded-t-[var(--radius-sheet)] sm:rounded-[var(--radius-sheet)] max-sm:h-auto max-sm:max-h-[var(--mobile-dialog-max-height)] max-sm:border-b-0",
-          "grid-rows-[minmax(180px,240px)_minmax(0,1fr)] md:grid-rows-1",
+            : "h-[var(--mobile-dialog-max-height)] max-w-5xl rounded-t-[var(--radius-sheet)] border-b-0 sm:h-[760px] sm:max-h-[calc(100dvh-1.5rem)] sm:rounded-[var(--radius-sheet)] sm:border-b",
+          "grid-rows-[minmax(112px,180px)_minmax(0,1fr)] md:grid-rows-1",
           "border border-[var(--border)] bg-[var(--bg-0)]/95 backdrop-blur-2xl",
           !embedded && "shadow-[var(--shadow-3)]",
           "md:grid-cols-[280px_minmax(0,1fr)]",

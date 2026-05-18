@@ -125,7 +125,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
           className="mt-3 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] disabled:opacity-40"
           placeholder="逗号或顿号分隔，例如 白色运动鞋、小发夹"
         />
-        <p className="mt-3 max-w-2xl text-[12px] leading-6 text-[var(--fg-2)]">
+        <p className="mt-3 max-w-2xl break-words text-[12px] leading-6 text-[var(--fg-2)]">
           模特方案图未试穿商品，仅用于确认模特形象。确认模特后会基于该模特生成带配饰的白底四宫格参考图，最终展示图会参考你选中的配饰方案。
         </p>
       </section>

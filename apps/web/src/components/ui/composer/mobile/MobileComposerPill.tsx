@@ -57,6 +57,7 @@ import { MaskCanvas } from "../MaskCanvas";
 
 interface MobileComposerPillProps {
   onSubmit: () => void | Promise<void>;
+  onMetricsChange?: (metrics: { height: number; bottom: number }) => void;
 }
 
 type ComposerMode = "chat" | "image";
@@ -110,7 +111,10 @@ function parseSlash(text: string): {
   };
 }
 
-export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
+export function MobileComposerPill({
+  onSubmit,
+  onMetricsChange,
+}: MobileComposerPillProps) {
   const text = useChatStore((s) => s.composer.text);
   const setText = useChatStore((s) => s.setText);
   const setForceIntent = useChatStore((s) => s.setForceIntent);
@@ -157,8 +161,8 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
   const [shutterBurst, setShutterBurst] = useState(false);
   const { haptic } = useHaptic();
   const expandedMaxHeight = keyboardOffset
-    ? `calc(100dvh - ${keyboardOffset}px - 16px)`
-    : "calc(100dvh - 96px - env(safe-area-inset-bottom, 0px))";
+    ? `calc(100dvh - ${keyboardOffset}px - env(safe-area-inset-top, 0px) - var(--system-banner-height, 0px) - 56px)`
+    : "calc(100dvh - env(safe-area-inset-top, 0px) - var(--system-banner-height, 0px) - 96px - env(safe-area-inset-bottom, 0px))";
   const promptTooLong = isPromptTooLong(text);
   const shouldShowCount = text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
 
@@ -206,6 +210,41 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
       // Some Android WebViews can throw while IME composition is settling.
     }
   }, [expanded]);
+
+  useLayoutEffect(() => {
+    if (!onMetricsChange) return;
+    const root = rootRef.current;
+    if (!root || typeof window === "undefined") return;
+
+    let raf = 0;
+    const measure = () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(() => {
+        raf = 0;
+        const rect = root.getBoundingClientRect();
+        onMetricsChange({
+          height: Math.ceil(rect.height),
+          bottom: Math.ceil(Math.max(0, window.innerHeight - rect.bottom)),
+        });
+      });
+    };
+
+    const ro = new ResizeObserver(measure);
+    ro.observe(root);
+    const vv = window.visualViewport;
+    window.addEventListener("resize", measure);
+    vv?.addEventListener("resize", measure);
+    vv?.addEventListener("scroll", measure);
+    measure();
+
+    return () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+      vv?.removeEventListener("resize", measure);
+      vv?.removeEventListener("scroll", measure);
+    };
+  }, [expanded, keyboardOffset, onMetricsChange]);
 
   // ———— textarea 自动增高（展开态）———— rAF 防抖避免每次击键都强制 reflow
   useEffect(() => {
@@ -437,7 +476,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
         onDragLeave={handleDragLeave}
         onDrop={(e) => void handleDrop(e)}
         className={cn(
-          "fixed left-0 right-0 mx-3",
+          "fixed inset-x-3 mx-auto max-w-[616px]",
           "overflow-hidden",
           "rounded-xl backdrop-blur-xl mobile-perf-surface",
           "bg-[var(--bg-1)]/88 supports-[not(backdrop-filter:blur(1px))]:bg-[var(--bg-1)]/95",
@@ -546,7 +585,7 @@ export function MobileComposerPill({ onSubmit }: MobileComposerPillProps) {
         {/* 展开态 */}
         {expanded && (
           <div
-            className="flex max-h-[inherit] flex-col overflow-y-auto overscroll-contain"
+            className="flex max-h-[inherit] min-h-0 flex-col overflow-y-auto overscroll-contain touch-pan-y"
             style={{
               paddingBottom: keyboardOffset
                 ? "12px"

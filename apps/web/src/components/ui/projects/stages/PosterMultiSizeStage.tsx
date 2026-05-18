@@ -168,11 +168,12 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
           })}
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="mt-5 grid grid-cols-1 gap-3 min-[420px]:flex min-[420px]:flex-wrap min-[420px]:items-center">
           <Button
             variant="primary"
             loading={create.isPending}
             onClick={onTriggerGenerate}
+            className="w-full min-[420px]:w-auto"
             leftIcon={<Sparkles className="h-4 w-4" />}
           >
             {hasRenders ? "生成所选新尺寸" : "生成多尺寸成品"}
@@ -302,7 +303,7 @@ function ReviseDialog({
       role="dialog"
       aria-modal="true"
       aria-label="返修"
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-modal)] flex items-end justify-center bg-black/55 backdrop-blur-sm md:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/55 backdrop-blur-sm md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
@@ -315,13 +316,13 @@ function ReviseDialog({
           <h2 className="type-section-title mt-1">单张返修</h2>
         </header>
 
-        <div className="px-5 py-4">
-          <div className="inline-flex rounded-full border border-[var(--border)] p-0.5">
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="grid grid-cols-2 rounded-full border border-[var(--border)] p-0.5">
             <button
               type="button"
               onClick={() => onScopeChange("background")}
               className={cn(
-                "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                 scope === "background"
                   ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -334,7 +335,7 @@ function ReviseDialog({
               type="button"
               onClick={() => onScopeChange("style")}
               className={cn(
-                "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                 scope === "style"
                   ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -364,8 +365,8 @@ function ReviseDialog({
           </label>
         </div>
 
-        <footer className="mobile-dialog-footer flex items-center justify-end gap-2 border-t border-[var(--border)] px-5 py-3">
-          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-1 gap-2 border-t border-[var(--border)] px-5 py-3 sm:flex sm:items-center sm:justify-end">
+          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy} className="w-full sm:w-auto">
             取消
           </Button>
           <Button
@@ -374,6 +375,7 @@ function ReviseDialog({
             loading={busy}
             onClick={onSubmit}
             disabled={!instruction.trim()}
+            className="w-full sm:w-auto"
           >
             派发返修
           </Button>

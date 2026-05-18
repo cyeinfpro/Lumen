@@ -296,7 +296,7 @@ export function CommandPalette() {
   const searchRow = (
     <div
       className={cn(
-        "flex min-h-14 items-center gap-3 border-b border-[var(--border)] px-4",
+        "flex min-h-14 shrink-0 items-center gap-3 border-b border-[var(--border)] px-4",
         // 移动端粘顶：BottomSheet 内容长时不让搜索框滚走
         !isDesktop && "sticky top-0 z-10 bg-[var(--bg-1)]",
       )}
@@ -343,9 +343,8 @@ export function CommandPalette() {
       role="listbox"
       aria-label="命令"
       className={cn(
-        "p-2",
-        // 桌面：max-h + 内滚；移动：交给 BottomSheet 自身的 overflow
-        isDesktop ? "max-h-[55vh] overflow-y-auto" : "min-h-0 flex-1",
+        "mobile-dialog-scroll min-h-0 p-2",
+        isDesktop ? "!max-h-[55vh]" : "flex-1",
       )}
     >
       {filteredCommands.length > 0 ? (
@@ -431,7 +430,7 @@ export function CommandPalette() {
 
   const shortcutHelp = (
     <div
-      className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border)] px-4 py-3 text-[11px] text-[var(--fg-2)]"
+      className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border)] px-4 py-3 text-[11px] text-[var(--fg-2)]"
       aria-label="快捷键"
     >
       <span className="inline-flex items-center gap-1.5">
@@ -464,7 +463,7 @@ export function CommandPalette() {
         snapPoints={["75%"]}
       >
         <div
-          className="flex min-h-0 flex-1 flex-col"
+          className="flex h-full min-h-0 flex-1 flex-col overflow-hidden"
           onKeyDown={handleKeyDown}
         >
           {searchRow}

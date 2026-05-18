@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import {
+  type CSSProperties,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import { LandscapeBanner } from "./LandscapeBanner";
 import { MobileStudioTopBar } from "./MobileStudioTopBar";
@@ -29,6 +36,21 @@ export function MobileStudio() {
   // runtime_defaults 由 RuntimeDefaultsBootstrap（layout 级）统一同步到 store
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [composerMetrics, setComposerMetrics] = useState({
+    height: 48,
+    bottom: 54,
+  });
+  const handleComposerMetricsChange = useCallback(
+    (next: { height: number; bottom: number }) => {
+      setComposerMetrics((prev) =>
+        Math.abs(prev.height - next.height) < 1 &&
+        Math.abs(prev.bottom - next.bottom) < 1
+          ? prev
+          : next,
+      );
+    },
+    [],
+  );
   const search = useSearchParams();
   const scrollTo = search.get("scrollTo");
   const scrollSignature = useMemo(() => {
@@ -147,17 +169,27 @@ export function MobileStudio() {
   const isEmpty = messages.length === 0;
 
   return (
-    <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)]">
+    <div
+      className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
+      style={
+        {
+          "--mobile-composer-height": `${composerMetrics.height}px`,
+          "--mobile-composer-bottom": `${composerMetrics.bottom}px`,
+        } as CSSProperties
+      }
+    >
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <LandscapeBanner />
       <MobileStudioTopBar />
 
       <main
         ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y"
         style={{
           paddingBottom:
-            "calc(48px + 48px + 12px + env(safe-area-inset-bottom, 0px))",
+            "calc(var(--mobile-composer-bottom, 54px) + var(--mobile-composer-height, 48px) + 12px)",
+          scrollPaddingBottom:
+            "calc(var(--mobile-composer-bottom, 54px) + var(--mobile-composer-height, 48px) + 20px)",
         }}
       >
         <div
@@ -189,7 +221,10 @@ export function MobileStudio() {
         </div>
       </main>
 
-      <MobileComposerPill onSubmit={() => sendMessage()} />
+      <MobileComposerPill
+        onSubmit={() => sendMessage()}
+        onMetricsChange={handleComposerMetricsChange}
+      />
       <MobileTabBar />
     </div>
   );

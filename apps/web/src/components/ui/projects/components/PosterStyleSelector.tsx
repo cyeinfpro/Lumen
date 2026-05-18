@@ -66,7 +66,7 @@ export function PosterStyleSelector({
       role="dialog"
       aria-modal="true"
       aria-label="选择风格"
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-modal)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

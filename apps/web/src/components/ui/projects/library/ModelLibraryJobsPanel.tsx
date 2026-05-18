@@ -611,7 +611,7 @@ function ReferenceSummary({
             {tokens.map((token, idx) => (
               <span
                 key={`${token}-${idx}`}
-                className="border border-[var(--border)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)]"
+                className="max-w-full break-words border border-[var(--border)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)]"
               >
                 {token}
               </span>
@@ -775,8 +775,8 @@ function JobThumb({
         </span>
       </button>
       {!compact ? (
-        <div className="mt-2.5 flex items-center justify-between gap-2">
-          <span className="truncate font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+        <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2">
+          <span className="min-w-0 flex-1 truncate font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
             {[appearanceLabel, item.style_tags.slice(0, 2).join("、")]
               .filter(Boolean)
               .join(" · ") || "未识别"}
@@ -786,7 +786,7 @@ function JobThumb({
               type="button"
               aria-label="收藏入库"
               onClick={() => setSaveOpen(true)}
-              className="inline-flex h-7 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+              className="inline-flex h-7 shrink-0 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 min-[390px]:tracking-[0.16em]"
             >
               <Bookmark className="h-3 w-3" />
               入库
@@ -993,7 +993,7 @@ function SaveJobItemDialog({
             入库后再跑一次自动识别
           </label>
         </div>
-        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] px-5 py-4 md:flex md:justify-end">
+        <footer className="mobile-dialog-footer grid shrink-0 grid-cols-1 gap-2 border-t border-[var(--border)] px-5 py-4 min-[380px]:grid-cols-2 md:flex md:justify-end">
           <Button variant="outline" onClick={onClose} className="w-full md:w-auto">
             取消
           </Button>

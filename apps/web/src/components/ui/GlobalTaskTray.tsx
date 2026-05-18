@@ -156,7 +156,7 @@ export function GlobalTaskTray() {
           // 移动端展开：作为底部 sheet 铺满底部。
           // 桌面端：右下角
           expanded
-            ? "inset-x-0 bottom-0 sm:inset-x-auto sm:bottom-6 sm:right-6 sm:left-auto flex flex-col items-stretch sm:items-end"
+            ? "inset-x-0 bottom-0 mobile-dialog-shell flex flex-col items-stretch justify-end sm:inset-x-auto sm:bottom-6 sm:right-6 sm:left-auto sm:items-end sm:justify-start sm:p-0"
             : "bottom-[calc(6.5rem+env(safe-area-inset-bottom))] sm:bottom-6 right-4 sm:right-6 left-auto flex flex-col items-end",
         )}
         initial={{ y: 40, opacity: 0 }}
@@ -177,8 +177,7 @@ export function GlobalTaskTray() {
                 "w-full rounded-t-2xl sm:rounded-2xl",
                 "sm:w-80 sm:mb-3",
                 "border border-[var(--border)] bg-[var(--surface)] backdrop-blur-xl shadow-lumen-card",
-                "overflow-hidden",
-                "pb-[env(safe-area-inset-bottom)] sm:pb-0",
+                "mobile-dialog-sheet flex min-h-0 flex-col overflow-hidden",
               )}
               role="region"
               aria-label="任务托盘"
@@ -187,7 +186,7 @@ export function GlobalTaskTray() {
               <div className="sm:hidden flex justify-center pt-2 pb-1" aria-hidden>
                 <span className="block w-10 h-1 rounded-full bg-white/20" />
               </div>
-              <header className="flex items-center gap-2 px-3 py-2.5 border-b border-[var(--border-subtle)]">
+              <header className="flex shrink-0 items-center gap-2 px-3 py-2.5 border-b border-[var(--border-subtle)]">
                 <span
                   className={cn(
                     "w-2 h-2 rounded-full shrink-0",
@@ -219,7 +218,7 @@ export function GlobalTaskTray() {
               </header>
 
               <ul
-                className="p-2 space-y-1.5 max-h-[min(70dvh,480px)] sm:max-h-[50vh] overflow-y-auto"
+                className="mobile-dialog-scroll min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2 sm:max-h-[50vh]"
                 aria-live="polite"
               >
                 <AnimatePresence initial={false}>

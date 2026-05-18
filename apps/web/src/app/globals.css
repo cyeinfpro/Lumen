@@ -218,10 +218,18 @@
     --mobile-dialog-margin-top: max(0.75rem, env(safe-area-inset-top, 0px));
     --mobile-dialog-bottom-gap: max(1rem, env(safe-area-inset-bottom, 0px));
     --mobile-dialog-footer-pad-bottom: calc(0.875rem + var(--mobile-dialog-bottom-gap));
-    --mobile-dialog-max-height: calc(100dvh - var(--mobile-dialog-margin-top) - var(--mobile-dialog-bottom-gap));
-    --mobile-dialog-sheet-max-height: min(88dvh, var(--mobile-dialog-max-height));
+    --mobile-dialog-viewport-height: 100vh;
+    --mobile-dialog-max-height: calc(var(--mobile-dialog-viewport-height) - var(--mobile-dialog-margin-top) - var(--mobile-dialog-bottom-gap));
+    --mobile-dialog-sheet-max-height: min(88vh, var(--mobile-dialog-max-height));
     --mobile-tabbar-height: calc(56px + env(safe-area-inset-bottom, 0px));
     --project-mobile-cta-height: calc(84px + env(safe-area-inset-bottom, 0px));
+  }
+
+  @supports (height: 100dvh) {
+    :root {
+      --mobile-dialog-viewport-height: 100dvh;
+      --mobile-dialog-sheet-max-height: min(88dvh, var(--mobile-dialog-max-height));
+    }
   }
 
   /* .dark 保留作 opt-in：与 :root 等价，便于 <html class="dark"> 现有写法继续 work */
@@ -730,19 +738,30 @@
     padding-right: var(--mobile-dialog-margin-x);
     padding-bottom: var(--mobile-dialog-bottom-gap);
     padding-left: var(--mobile-dialog-margin-x);
+    min-height: 0;
+    box-sizing: border-box;
   }
   .mobile-dialog-panel {
     max-height: var(--mobile-dialog-max-height);
+    min-height: 0;
+    max-width: 100%;
   }
   .mobile-dialog-sheet {
     max-height: var(--mobile-dialog-sheet-max-height);
+    min-height: 0;
+    max-width: 100%;
   }
   .mobile-dialog-footer {
     padding-bottom: var(--mobile-dialog-footer-pad-bottom);
+    box-sizing: border-box;
   }
   .mobile-dialog-scroll {
+    min-height: 0;
+    max-height: 100%;
+    overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: contain;
+    overflow-wrap: anywhere;
   }
   @media (max-width: 767.98px) {
     .data-stack-on-mobile {
@@ -1054,6 +1073,18 @@
 }
 .lumen-md > * + * { margin-top: 0.85rem; }
 .lumen-md p { margin: 0; max-width: 65ch; }
+.lumen-md > .overflow-x-auto {
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+.lumen-md p,
+.lumen-md li,
+.lumen-md blockquote,
+.lumen-md td,
+.lumen-md th {
+  overflow-wrap: anywhere;
+}
 .lumen-md.lumen-md-desktop-compact {
   line-height: 1.46;
 }
@@ -1121,6 +1152,9 @@
   border-radius: 8px;
   padding: 0.875rem 1rem;
   overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
   margin: 0;
   font-size: 0.85rem;
   line-height: 1.6;
@@ -1134,6 +1168,7 @@
 }
 .lumen-md table {
   width: 100%;
+  min-width: max-content;
   border-collapse: collapse;
   font-size: 0.9rem;
 }
@@ -1155,6 +1190,7 @@
 }
 .lumen-md img {
   max-width: 100%;
+  height: auto;
   border-radius: 6px;
 }
 .lumen-md input[type="checkbox"] {

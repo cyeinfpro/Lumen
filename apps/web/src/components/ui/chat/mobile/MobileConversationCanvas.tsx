@@ -366,7 +366,7 @@ function JumpToLatestButton({
   if (!visible) return null;
 
   return (
-    <div className="fixed left-1/2 bottom-[calc(112px+env(safe-area-inset-bottom,0px))] z-30 -translate-x-1/2">
+    <div className="fixed left-1/2 bottom-[calc(var(--mobile-composer-bottom,54px)+var(--mobile-composer-height,48px)+12px)] z-30 -translate-x-1/2">
       <Button
         size="sm"
         variant="secondary"
@@ -507,7 +507,7 @@ function AssistantTurn({
             className={cn(
               "text-[15px] leading-[1.55] min-w-0 break-words [overflow-wrap:anywhere] flex-1",
               "text-[var(--fg-0)]",
-              "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_img]:max-w-full [&_img]:h-auto",
+              "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:overscroll-x-contain [&_code]:break-words [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_img]:max-w-full [&_img]:h-auto",
               isFailedText && "text-[var(--danger)]",
             )}
             style={{ fontFamily: "var(--font-body)" }}

@@ -87,15 +87,15 @@ export function MobileStudioTopBar() {
     <>
       <MobileTopBar
         left={
-          <div className="flex items-center gap-1 min-w-0">
+          <div className="flex min-w-0 items-center gap-1">
             <Pressable
               size="default"
-              minHit={true}
+              minHit={false}
               pressScale="tight"
               haptic="light"
               onPress={() => setDrawerOpen(true)}
               aria-label="打开会话列表"
-              className="rounded-full w-9 h-9 -ml-1 text-[var(--fg-1)]"
+              className="rounded-full w-9 h-9 -ml-1 shrink-0 text-[var(--fg-1)]"
             >
               <PanelLeft className="w-[18px] h-[18px]" />
             </Pressable>
@@ -106,9 +106,9 @@ export function MobileStudioTopBar() {
               haptic="light"
               onPress={() => setDrawerOpen(true)}
               aria-label="切换会话"
-              className="flex items-center gap-1 min-w-0 pl-1 pr-1.5 -mx-1 h-9 rounded-[var(--radius-control)]"
+              className="flex h-9 min-w-0 max-w-full items-center gap-1 -mx-1 rounded-[var(--radius-control)] pl-1 pr-1.5"
             >
-              <span className="truncate text-[15px] font-medium text-[var(--fg-0)] max-w-[55vw]">
+              <span className="max-w-[42vw] truncate text-[15px] font-medium text-[var(--fg-0)] [@media(max-width:390px)]:max-w-[30vw]">
                 {currentTitle}
               </span>
               <ChevronDown className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
@@ -119,7 +119,7 @@ export function MobileStudioTopBar() {
           <>
             <Pressable
               size="default"
-              minHit={true}
+              minHit={false}
               pressScale="tight"
               haptic="light"
               onPress={() => setFast(!fast)}
@@ -128,7 +128,13 @@ export function MobileStudioTopBar() {
             >
               <FastLamp on={fast} />
             </Pressable>
-            {!running.any && <ContextWindowMeter stats={contextStats} compact />}
+            {!running.any && (
+              <ContextWindowMeter
+                stats={contextStats}
+                compact
+                className="hidden min-[430px]:inline-flex"
+              />
+            )}
             <ConversationMemoryButton compact />
             <AnimatePresence>
               {running.any && (
@@ -140,7 +146,7 @@ export function MobileStudioTopBar() {
                 >
                   <Pressable
                     size="default"
-                    minHit={true}
+                    minHit={false}
                     pressScale="tight"
                     haptic="light"
                     onPress={() => setTaskTrayMinimized(false)}
@@ -157,7 +163,8 @@ export function MobileStudioTopBar() {
               label="新建对话"
               onPress={handleNewConv}
               disabled={createMut.isPending}
-              className="ml-0.5 disabled:opacity-50"
+              minHit={false}
+              className="ml-0.5 h-9 w-9 disabled:opacity-50"
             />
             <Link
               href="/me"

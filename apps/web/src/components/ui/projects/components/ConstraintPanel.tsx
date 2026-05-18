@@ -33,27 +33,27 @@ function ConstraintBody({ workflow }: { workflow: WorkflowRun }) {
   const qualitySummary = stepOf(workflow, "quality_review")?.output_json ?? {};
 
   return (
-    <div>
+    <div className="min-w-0">
       <InfoPanel title="商品原图">
         <ImageGrid images={workflow.product_images} compact />
       </InfoPanel>
       <InfoPanel title="商品还原点">
-        <p className="whitespace-pre-wrap">{jsonValue(product.must_preserve)}</p>
+        <p className="whitespace-pre-wrap break-words">{jsonValue(product.must_preserve)}</p>
       </InfoPanel>
       <InfoPanel title="推荐背景">
-        <p className="whitespace-pre-wrap">{jsonValue(product.background_recommendation)}</p>
+        <p className="whitespace-pre-wrap break-words">{jsonValue(product.background_recommendation)}</p>
       </InfoPanel>
       <InfoPanel title="已确认模特">
-        <p>{selected ? `方案 ${selected.candidate_index}` : "未确认"}</p>
+        <p className="break-words">{selected ? `方案 ${selected.candidate_index}` : "未确认"}</p>
       </InfoPanel>
       <InfoPanel title="配饰四宫格">
-        <p className="whitespace-pre-wrap">{jsonValue(accessory)}</p>
+        <p className="whitespace-pre-wrap break-words">{jsonValue(accessory)}</p>
       </InfoPanel>
       <InfoPanel title="输出规格">
-        <p className="whitespace-pre-wrap">{jsonValue(outputSpecs)}</p>
+        <p className="whitespace-pre-wrap break-words">{jsonValue(outputSpecs)}</p>
       </InfoPanel>
       <InfoPanel title="质检摘要">
-        <p className="whitespace-pre-wrap">{jsonValue(qualitySummary)}</p>
+        <p className="whitespace-pre-wrap break-words">{jsonValue(qualitySummary)}</p>
       </InfoPanel>
     </div>
   );
@@ -118,7 +118,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
         snapPoints={["80%", "60%"]}
       >
         <DrawerHeader onClose={onClose} />
-        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5">
+        <div className="min-w-0 px-5 pb-[var(--mobile-dialog-footer-pad-bottom)]">
           <ConstraintBody workflow={workflow} />
         </div>
       </BottomSheet>
@@ -153,7 +153,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
             )}
           >
             <DrawerHeader onClose={onClose} />
-            <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-6">
+            <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-6">
               <ConstraintBody workflow={workflow} />
             </div>
           </motion.aside>

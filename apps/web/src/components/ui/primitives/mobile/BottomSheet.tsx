@@ -284,7 +284,7 @@ export function BottomSheet({
               "rounded-t-[var(--radius-sheet)] bg-[var(--bg-1)] border-t border-[var(--border-subtle)]",
               "shadow-[0_-24px_64px_-12px_rgba(0,0,0,0.8)]",
               "mobile-perf-surface",
-              "flex flex-col",
+              "flex min-h-0 flex-col overflow-hidden",
               currentHeightPx == null ? "mobile-dialog-sheet" : "max-h-[var(--mobile-dialog-max-height)]",
               "safe-x",
               "focus:outline-none",
@@ -315,7 +315,7 @@ export function BottomSheet({
               dragConstraints={{ top: 0, bottom: 0 }}
               dragElastic={bodyDragLocked ? 0 : { top: 0, bottom: 0.4 }}
               onDragEnd={handleDragEnd}
-              className="flex-1 min-h-0 flex flex-col"
+              className="flex min-h-0 flex-1 flex-col overflow-hidden"
             >
               <div
                 ref={contentRef}
