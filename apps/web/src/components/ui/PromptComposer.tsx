@@ -381,9 +381,14 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
             exit={{ opacity: 0, y: 8, scale: 0.96 }}
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
             role="status"
+            style={
+              {
+                "--keyboard-offset": `${keyboardOffset}px`,
+              } as React.CSSProperties
+            }
             className={cn(
-              "fixed left-[calc(50%+var(--sidebar-w)/2)] -translate-x-1/2 z-[60]",
-              "bottom-[calc(var(--composer-bottom,9rem)+env(safe-area-inset-bottom))]",
+              "fixed left-[calc(50%+var(--sidebar-w)/2)] -translate-x-1/2 z-[var(--z-tray,50)]",
+              "bottom-[calc(var(--composer-bottom,9rem)+env(safe-area-inset-bottom)+var(--keyboard-offset,0px))]",
               "px-3.5 py-1.5 rounded-full text-xs font-medium",
               "bg-[var(--bg-1)]/95 border border-[var(--border)] text-[var(--fg-0)]",
               "shadow-lg shadow-black/25 backdrop-blur-md",
@@ -409,8 +414,9 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
         }
         className={cn(
           // 跟随主内容区居中：main 区域 = 视口去掉 Sidebar 宽度（--sidebar-w，桌面端 18rem，移动端 0）
-          "fixed left-[calc(50%+var(--sidebar-w)/2)] -translate-x-1/2 z-50",
+          "fixed left-[calc(50%+var(--sidebar-w)/2)] -translate-x-1/2 z-[var(--z-composer,40)]",
           "w-[min(calc(100vw-var(--sidebar-w)-1rem),48rem)] lg:w-[min(calc(100vw-var(--sidebar-w)-2rem),56rem)]",
+          "max-h-[calc(100dvh-var(--system-banner-height,0px)-var(--keyboard-offset,0px)-2rem)]",
           "bottom-[calc(0.75rem+env(safe-area-inset-bottom)+var(--keyboard-offset,0px))] sm:bottom-[calc(1.5rem+env(safe-area-inset-bottom)+var(--keyboard-offset,0px))]",
           "rounded-[var(--radius-sheet)] shadow-[0_24px_80px_-26px_rgba(0,0,0,0.75),0_0_0_1px_rgba(255,255,255,0.04)]",
           "border transition-[border-color,background-color,box-shadow] duration-300",
@@ -546,7 +552,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
               aria-label="输入提示词"
               className={cn(
                 "w-full bg-transparent resize-none outline-none",
-                "text-[15px] leading-6 text-[var(--fg-0)] placeholder:text-neutral-500",
+                "text-[15px] leading-6 text-[var(--fg-0)] placeholder:text-[var(--fg-3)]",
                 "py-1 min-h-[56px]",
               )}
               rows={2}
@@ -557,7 +563,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
-                  className="absolute right-0 bottom-0 text-[10px] font-mono tabular-nums text-neutral-500 pointer-events-none"
+                  className="absolute right-0 bottom-0 text-[10px] font-mono tabular-nums text-[var(--fg-3)] pointer-events-none"
                   aria-live="polite"
                 >
                   {charCount}
@@ -602,7 +608,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           </ComposerIcon>
 
           {/* 分隔竖线，提升工具条层级感 */}
-          <div className="w-px h-5 bg-white/10 mx-0.5" aria-hidden />
+          <div className="w-px h-5 bg-[var(--border)] mx-0.5" aria-hidden />
 
           <ModeSwitcher />
           {mode !== "chat" && <AspectRatioPicker />}
@@ -612,21 +618,27 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           {mode !== "image" && <ReasoningEffortPicker />}
           {mode !== "image" && <WebSearchToggle />}
           <FastToggle />
-          {estimatedCharge && (
-            <span className="shrink-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/5 px-2.5 py-1 text-[11px] tabular-nums text-[var(--fg-2)]">
-              {estimatedCharge}
-            </span>
-          )}
-
-          {/* 右侧发送区（弹性填充） */}
-          <div className="min-w-3 flex-1" />
-
-          <SendButton
-            canSubmit={canSubmit}
-            isSending={isSending}
-            onClick={() => void handleSubmit()}
-            title={disabledTitle}
-          />
+          <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
+            {estimatedCharge && (
+              <span
+                className={cn(
+                  "max-w-[148px] shrink truncate rounded-[var(--radius-control)] border border-[var(--border)]",
+                  "bg-[color-mix(in_srgb,var(--fg-0)_5%,transparent)] px-2.5 py-1 text-[11px] tabular-nums",
+                  estimatedCharge === "价格未配置"
+                    ? "text-[var(--warning-fg)]"
+                    : "text-[var(--fg-2)]",
+                )}
+              >
+                {estimatedCharge}
+              </span>
+            )}
+            <SendButton
+              canSubmit={canSubmit}
+              isSending={isSending}
+              onClick={() => void handleSubmit()}
+              title={disabledTitle}
+            />
+          </div>
         </div>
 
         {/* 拖拽高亮层 */}
@@ -693,7 +705,7 @@ function ComposerIcon({
       transition={{ type: "spring", stiffness: 400, damping: 25 }}
       className={cn(
         "inline-flex items-center justify-center w-9 h-9 rounded-full",
-        "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/8",
+        "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         "aria-disabled:pointer-events-none disabled:opacity-40 disabled:cursor-not-allowed",
       )}
@@ -721,7 +733,7 @@ function FastToggle() {
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         fast
           ? "bg-success-soft border-success-border text-success"
-          : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10 hover:text-[var(--fg-0)]",
+          : "bg-[color-mix(in_srgb,var(--fg-0)_5%,transparent)] border-[var(--border)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
       )}
     >
       <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -750,7 +762,7 @@ function WebSearchToggle() {
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
         webSearch
           ? "bg-info-soft border-info-border text-info"
-          : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10 hover:text-[var(--fg-0)]",
+          : "bg-[color-mix(in_srgb,var(--fg-0)_5%,transparent)] border-[var(--border)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
       )}
     >
       <Globe2 className="w-3.5 h-3.5" aria-hidden />
@@ -793,7 +805,7 @@ function SendButton({
               "shadow-[0_0_18px_rgba(242,169,58,0.35)] hover:shadow-[0_0_22px_rgba(242,169,58,0.5)]",
               "cursor-pointer",
             ].join(" ")
-          : "bg-white/6 text-[var(--fg-2)] cursor-not-allowed shadow-none",
+          : "bg-[var(--bg-2)] text-[var(--fg-2)] cursor-not-allowed shadow-none",
       )}
     >
       {isSending ? (
@@ -807,7 +819,7 @@ function SendButton({
           "hidden sm:inline-flex items-center h-5 px-1 rounded font-mono text-[10px] border",
           canSubmit
             ? "bg-[var(--bg-0)]/20 border-[var(--bg-0)]/20 text-black/70"
-            : "bg-white/5 border-[var(--border-subtle)] text-[var(--fg-2)]",
+            : "bg-[var(--bg-2)] border-[var(--border-subtle)] text-[var(--fg-2)]",
         )}
         aria-hidden
       >

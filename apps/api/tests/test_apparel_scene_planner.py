@@ -18,6 +18,16 @@ def fake_provider(name: str) -> ProviderDefinition:
     )
 
 
+def test_gpt55_call_timeout_warns_on_unknown_purpose(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="app.routes._apparel_scene_planner")
+
+    assert scene_planner._gpt55_call_timeout_seconds("new_unmapped_purpose") == 75.0
+    assert "unknown GPT-5.5 call purpose" in caplog.text
+    assert "new_unmapped_purpose" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_call_gpt55_json_skips_attempts_on_401(
     monkeypatch: pytest.MonkeyPatch,
@@ -261,6 +271,30 @@ def test_fallback_scene_cards_use_real_events_not_shot_labels() -> None:
     assert all(card["natural_detail"] for card in cards)
 
 
+def test_fallback_scene_card_shooting_brief_skips_empty_sentence_pairs() -> None:
+    brief = scene_planner._fallback_scene_card_shooting_brief(  # noqa: SLF001
+        {
+            "location": None,
+            "micro_event": None,
+            "pose": "",
+            "motion": None,
+            "camera": {},
+            "camera_detail": None,
+            "lighting_detail": "",
+            "composition_detail": "",
+            "creative_intent": "",
+            "natural_detail": "",
+        },
+        shot_class="front_full_body",
+    )
+
+    assert "，。" not in brief
+    assert "；。" not in brief
+    assert not brief.startswith(("，", "。", "；"))
+    assert "自然标准镜头" in brief
+    assert "保持正面或三分之二正面" in brief
+
+
 @pytest.mark.asyncio
 async def test_scene_director_receives_compact_product_context(
     monkeypatch: pytest.MonkeyPatch,
@@ -486,10 +520,11 @@ async def test_prompt_composer_expands_only_shooting_brief(
     payload = captured["payload"]
     assert "base_prompt" not in payload
     assert payload["request"]["system_will_append_product_lock"] is True
-    assert payload["request"]["candidate_count"] == 3
+    assert payload["request"]["candidate_count"] == 1
     assert "core_identity" not in payload["product_context"]
     assert payload["product_context"]["visual_keywords"] == ["蓝色牛仔", "异色背带"]
     assert "GPT Image 2" in captured["instructions"]
+    assert "只输出 1 条最终 shooting_brief" in captured["instructions"]
     assert captured["reference_images"] == [
         {"label": "商品图", "image_url": "data:image/jpeg;base64,product"},
         {"label": "已确认模特图", "image_url": "data:image/jpeg;base64,model"},

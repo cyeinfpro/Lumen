@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, CreditCard, Gift, RefreshCw } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, CreditCard, Gift, RefreshCw } from "lucide-react";
 
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button, Card, toast } from "@/components/ui/primitives";
@@ -17,6 +17,7 @@ import {
   getMe,
 } from "@/lib/apiClient";
 import { errorToText, mapError } from "@/lib/errors";
+import { formatRmb } from "@/lib/money";
 
 function formatKind(kind: string): string {
   const labels: Record<string, string> = {
@@ -113,7 +114,7 @@ export default function WalletPage() {
   const redeemMut = useMutation({
     mutationFn: () => redeemCode(code),
     onSuccess: async (out) => {
-      const amountText = `+¥${Number(out.amount.rmb).toFixed(2)}`;
+      const amountText = `+¥${formatRmb(out.amount.rmb)}`;
       setCode("");
       setMessage(amountText);
       toast.success("兑换成功", { description: amountText });
@@ -138,7 +139,7 @@ export default function WalletPage() {
           </p>
           <Link
             href="/me"
-            className="inline-flex h-8 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-white/4"
+            className="inline-flex h-8 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
           >
             返回我的
           </Link>
@@ -165,28 +166,29 @@ export default function WalletPage() {
         </header>
 
         {low && (
-          <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 text-sm text-[var(--danger-fg)]">
-            余额不足，4K 图或多图任务可能无法生成。请先兑换充值或联系管理员。
+          <div className="flex items-center gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 text-sm text-[var(--danger-fg)]">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>余额不足，4K 图或多图任务可能无法生成。请先兑换充值或联系管理员。</span>
           </div>
         )}
 
         <div className="grid gap-4 md:grid-cols-[1fr_1.2fr]">
-          <Card variant="default" padding="lg" className="space-y-4">
+          <Card variant="default" padding="lg" className="min-h-[180px] space-y-4">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-white/5">
+              <div className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]">
                 <CreditCard className="h-4 w-4" />
               </div>
               <div>
                 <p className="type-caption text-[var(--fg-2)]">可用余额</p>
-                <p className={low ? "type-page-title-sm text-[var(--danger-fg)]" : "type-page-title-sm"}>
-                  {walletQ.isLoading ? "…" : `¥${Number(wallet?.balance?.rmb ?? 0).toFixed(2)}`}
+                <p className={low ? "type-page-title-sm font-mono tabular-nums text-[var(--danger-fg)]" : "type-page-title-sm font-mono tabular-nums"}>
+                  {walletQ.isLoading ? "…" : `¥${formatRmb(wallet?.balance?.rmb)}`}
                 </p>
               </div>
             </div>
             <p className="type-body-sm text-[var(--fg-2)]">
-              预扣 ¥{Number(wallet?.hold?.rmb ?? 0).toFixed(2)}
+              预扣 ¥{formatRmb(wallet?.hold?.rmb)}
             </p>
-            <p className="type-caption text-[var(--fg-2)]">
+            <p className="type-caption font-mono tabular-nums text-[var(--fg-2)]">
               24h 变化 +¥{stats24h.topup.toFixed(2)} / -¥{stats24h.spend.toFixed(2)}
             </p>
           </Card>
@@ -196,24 +198,26 @@ export default function WalletPage() {
               e.preventDefault();
               redeemMut.mutate();
             }}
-            className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-5 space-y-3"
+            className="grid min-h-[180px] grid-rows-[auto_1fr_auto] gap-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-5"
           >
             <div className="flex items-center gap-2 type-overline">
               <Gift className="h-3.5 w-3.5" />
               兑换码
             </div>
-            <input
-              value={code}
-              onChange={(e) => setCode(normalizeCode(e.target.value))}
-              placeholder="LMN-XXXX-XXXX-XXXX-XXXX"
-              className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base tracking-[0.08em] outline-none focus:border-[var(--accent)]/50"
-            />
-            {message && (
-              <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
-                <Check className="h-4 w-4" />
-                {message}
-              </div>
-            )}
+            <div className="space-y-2">
+              <input
+                value={code}
+                onChange={(e) => setCode(normalizeCode(e.target.value))}
+                placeholder="LMN-XXXX-XXXX-XXXX-XXXX"
+                className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base tracking-[0.06em] outline-none focus:border-[var(--accent)]/50 sm:text-lg"
+              />
+              {message && (
+                <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
+                  <Check className="h-4 w-4" />
+                  {message}
+                </div>
+              )}
+            </div>
             <Button
               type="submit"
               variant="primary"
@@ -275,7 +279,7 @@ export default function WalletPage() {
                 return (
                   <div
                     key={key}
-                    className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3"
+                    className="min-h-[112px] rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3"
                   >
                     <div className="flex items-center justify-between text-xs text-[var(--fg-2)]">
                       <span>{key} 限额</span>
@@ -284,7 +288,7 @@ export default function WalletPage() {
                         {win?.limit_micro ? `¥${microMoney(win.limit_micro)}` : "不限"}
                       </span>
                     </div>
-                    <div className="mt-2 h-1.5 rounded-full bg-white/10">
+                    <div className="mt-2 h-1.5 rounded-full bg-[var(--bg-2)]">
                       <div
                         className="h-full rounded-full bg-[var(--accent)]"
                         style={{ width: `${pct}%` }}
@@ -314,14 +318,14 @@ export default function WalletPage() {
               刷新
             </Button>
           </div>
-          <div className="flex flex-wrap gap-2 border-b border-[var(--border-subtle)] px-4 py-3">
+          <div className="scrollbar-thin flex flex-nowrap gap-2 overflow-x-auto overscroll-x-contain border-b border-[var(--border-subtle)] px-4 py-3">
             {TX_KIND_FILTERS.map((item) => (
               <button
                 key={item.key}
                 type="button"
                 onClick={() => setTxKind(item.key)}
                 className={[
-                  "rounded-full border px-3 py-1 text-xs",
+                  "shrink-0 rounded-full border px-3 py-1 text-xs",
                   txKind === item.key
                     ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
                     : "border-[var(--border)] text-[var(--fg-2)]",
@@ -335,17 +339,17 @@ export default function WalletPage() {
             {txItems.map((tx) => (
               <div key={tx.id} className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3">
                 <div className="min-w-0">
-                  <p className="type-body-sm text-[var(--fg-0)]">{formatKind(tx.kind)}</p>
+                  <p className="truncate type-body-sm text-[var(--fg-0)]">{formatKind(tx.kind)}</p>
                   <p className="type-caption text-[var(--fg-2)]">
                     {new Date(tx.created_at).toLocaleString()}
                   </p>
                 </div>
                 <div className="text-right tabular-nums">
                   <p className={tx.amount.micro >= 0 ? "text-success" : "text-[var(--fg-0)]"}>
-                    {tx.amount.micro >= 0 ? "+" : ""}¥{Number(tx.amount.rmb).toFixed(2)}
+                    {tx.amount.micro >= 0 ? "+" : ""}¥{formatRmb(tx.amount.rmb)}
                   </p>
                   <p className="type-caption text-[var(--fg-2)]">
-                    余额 ¥{Number(tx.balance_after.rmb).toFixed(2)}
+                    余额 ¥{formatRmb(tx.balance_after.rmb)}
                   </p>
                 </div>
               </div>
@@ -380,7 +384,7 @@ export default function WalletPage() {
                 navigator.clipboard
                   .writeText(
                     redemptionItems
-                      .map((item) => `${new Date(item.redeemed_at).toLocaleString()} ¥${Number(item.amount.rmb).toFixed(2)}`)
+                      .map((item) => `${new Date(item.redeemed_at).toLocaleString()} ¥${formatRmb(item.amount.rmb)}`)
                       .join("\n"),
                   )
                   .then(() => toast.success("兑换记录已复制"))
@@ -400,8 +404,8 @@ export default function WalletPage() {
                   </p>
                 </div>
                 <div className="text-right tabular-nums">
-                  <p className="text-success">+¥{Number(item.amount.rmb).toFixed(2)}</p>
-                  <p className="type-caption text-[var(--fg-2)]">{item.code_id}</p>
+                  <p className="text-success">+¥{formatRmb(item.amount.rmb)}</p>
+                  <p className="max-w-[44vw] truncate type-caption text-[var(--fg-2)] md:max-w-none">{item.code_id}</p>
                 </div>
               </div>
             ))}

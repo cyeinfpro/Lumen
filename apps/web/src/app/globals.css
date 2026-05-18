@@ -206,10 +206,12 @@
     --z-composer: 40;
     --z-composer-expanded: 45;
     --z-tray: 50;
+    --z-banner: 85;
     /* lightbox 需要压过模态弹窗，但仍低于 toast */
     --z-lightbox: 95;
     --z-dialog: 90;
     --z-toast: 100;
+    --system-banner-height: 0px;
 
     /* 移动端弹窗避让：给底部 home indicator / 浏览器工具栏 / 浮层留出稳定空间。 */
     --mobile-dialog-margin-x: 0px;
@@ -741,6 +743,59 @@
   .mobile-dialog-scroll {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+  }
+  @media (max-width: 767.98px) {
+    .data-stack-on-mobile {
+      overflow-x: visible;
+    }
+    .data-stack-on-mobile table,
+    .data-stack-on-mobile thead,
+    .data-stack-on-mobile tbody,
+    .data-stack-on-mobile tr,
+    .data-stack-on-mobile td {
+      display: block;
+    }
+    .data-stack-on-mobile table {
+      min-width: 0 !important;
+      width: 100%;
+    }
+    .data-stack-on-mobile thead {
+      display: none;
+    }
+    .data-stack-on-mobile tbody {
+      display: grid;
+      gap: 0.5rem;
+    }
+    .data-stack-on-mobile tr {
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-card);
+      background: color-mix(in srgb, var(--bg-0) 72%, transparent);
+      padding: 0.75rem;
+    }
+    .data-stack-on-mobile tr > td {
+      display: grid;
+      grid-template-columns: minmax(6.5rem, 0.45fr) minmax(0, 1fr);
+      gap: 0.75rem;
+      align-items: center;
+      border: 0;
+      padding: 0.35rem 0;
+      min-width: 0;
+    }
+    .data-stack-on-mobile td::before {
+      content: attr(data-label);
+      min-width: 0;
+      color: var(--fg-2);
+      font-size: 0.75rem;
+      line-height: 1.25rem;
+    }
+    .data-stack-on-mobile td[data-actions="true"] {
+      display: flex;
+      justify-content: flex-end;
+      padding-top: 0.75rem;
+    }
+    .data-stack-on-mobile td[data-actions="true"]::before {
+      content: none;
+    }
   }
   .project-mobile-scroll {
     padding-bottom: calc(var(--mobile-tabbar-height) + 1.5rem);

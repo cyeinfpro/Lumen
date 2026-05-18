@@ -18,10 +18,13 @@ import {
 import { ActionSheet } from "@/components/ui/primitives/mobile";
 import {
   getMe,
+  getMyWallet,
   listMemoryStaging,
   logout,
   type AuthUser,
 } from "@/lib/apiClient";
+import pkg from "../../../../package.json";
+import { formatRmb } from "@/lib/money";
 import { useSystemPromptsQuery } from "@/lib/queries";
 import { logWarn } from "@/lib/logger";
 import { useChatStore } from "@/store/useChatStore";
@@ -30,7 +33,7 @@ import { AccountRow } from "./AccountRow";
 
 type AuthUserMaybeAdmin = AuthUser & { role?: "admin" | "member" };
 
-const APP_VERSION = "v1.0.47";
+const APP_VERSION = `v${process.env.NEXT_PUBLIC_LUMEN_VERSION ?? pkg.version}`;
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -52,6 +55,17 @@ export function AccountCenter() {
   });
   const isAdmin = meQuery.data?.role === "admin";
   const accountMode = meQuery.data?.account_mode ?? "wallet";
+  const walletQuery = useQuery({
+    queryKey: ["me", "wallet"],
+    queryFn: getMyWallet,
+    enabled: accountMode === "wallet",
+    retry: false,
+    staleTime: 30_000,
+  });
+  const walletBalance =
+    walletQuery.data?.balance == null
+      ? undefined
+      : `¥${formatRmb(walletQuery.data.balance.rmb)}`;
 
   const promptsQuery = useSystemPromptsQuery();
   const promptCount = promptsQuery.data?.items?.length ?? 0;
@@ -98,17 +112,12 @@ export function AccountCenter() {
           label="用量统计"
           grouped
         />
-        <AccountRow
-          href="/settings/privacy"
-          icon={<Lock className="w-4 h-4" />}
-          label="隐私 & 数据"
-          grouped
-        />
         {accountMode === "wallet" ? (
           <AccountRow
             href="/me/wallet"
             icon={<CreditCard className="w-4 h-4" />}
             label="钱包"
+            description={walletBalance}
             grouped
           />
         ) : (
@@ -119,6 +128,12 @@ export function AccountCenter() {
             grouped
           />
         )}
+        <AccountRow
+          href="/settings/privacy"
+          icon={<Lock className="w-4 h-4" />}
+          label="隐私 & 数据"
+          grouped
+        />
         <AccountRow
           href="/settings/memory"
           icon={<Brain className="w-4 h-4" />}

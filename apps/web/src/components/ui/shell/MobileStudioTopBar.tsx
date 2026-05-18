@@ -128,7 +128,7 @@ export function MobileStudioTopBar() {
             >
               <FastLamp on={fast} />
             </Pressable>
-            <ContextWindowMeter stats={contextStats} compact />
+            {!running.any && <ContextWindowMeter stats={contextStats} compact />}
             <ConversationMemoryButton compact />
             <AnimatePresence>
               {running.any && (
