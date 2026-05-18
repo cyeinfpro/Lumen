@@ -675,6 +675,12 @@ class Generation(Base, TimestampMixin):
         lazy="raise",
     )
 
+    @property
+    def parent_generation_id(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("parent_generation_id")
+        return value if isinstance(value, str) and value else None
+
 
 class Completion(Base, TimestampMixin):
     __tablename__ = "completions"

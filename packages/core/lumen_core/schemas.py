@@ -234,6 +234,7 @@ class GenerationOut(BaseOut):
     message_id: str
     user_api_credential_id: str | None = None
     upstream_supplier_id: str | None = None
+    parent_generation_id: str | None = None
     action: str
     prompt: str
     size_requested: str
