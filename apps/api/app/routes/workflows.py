@@ -184,7 +184,7 @@ logger = logging.getLogger(__name__)
 _SHOWCASE_GPT55_REFERENCE_MAX_BYTES = 900_000
 _SHOWCASE_PREFLIGHT_TIMEOUT_ENV = "LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC"
 _SHOWCASE_PREFLIGHT_BASE_TIMEOUT_SEC = 240.0
-_SHOWCASE_PREFLIGHT_GPT_MIN_TIMEOUT_SEC = 480.0
+_SHOWCASE_PREFLIGHT_GPT_MIN_TIMEOUT_SEC = 840.0
 _SHOWCASE_PREFLIGHT_GPT_PER_SHOT_TIMEOUT_SEC = 90.0
 _SHOWCASE_GPT_PARALLELISM_ENV = "LUMEN_SHOWCASE_GPT_PARALLELISM"
 _SHOWCASE_GPT_DEFAULT_PARALLELISM = 6
@@ -3731,7 +3731,9 @@ def _guarded_shooting_brief(
     rewrite_instruction: str,
 ) -> str:
     brief = shooting_brief.strip()
-    instruction = rewrite_instruction.strip() or (
+    instruction = _preserve_safe_motion_rewrite_instruction(
+        rewrite_instruction.strip()
+    ) or (
         "简化动作和道具关系，避免任何手、头发、宠物、饮料杯、手机、包带或前景物遮挡商品主体。"
     )
     replaces_scene = _rewrite_instruction_replaces_scene_or_composition(instruction)
@@ -3743,6 +3745,8 @@ def _guarded_shooting_brief(
     )
     guard = lead + (
         f"只把可能造成遮挡、改款或动作过复杂的部分按此改写：{instruction}。"
+        "保留安全动态能量，优先使用走近、落步、半转回头、双手低位摆动、"
+        "衣摆或发丝轻动等不会遮挡商品主体的抓拍瞬间；不要退回僵硬静态站姿。"
         "如上方摄影方案与本安全覆盖冲突，以本安全覆盖为准；"
         "手、头发、道具和前景不得遮挡商品主体，当前角度可见的服装结构、领口、袖口、"
         "口袋、图案/扣件和布料纹理必须清楚。"
@@ -3750,6 +3754,63 @@ def _guarded_shooting_brief(
     if replaces_scene:
         return guard
     return f"{brief}\n\n{guard}" if brief else guard
+
+
+_STATIC_REWRITE_REPLACEMENTS = (
+    (
+        "改为稳定的正面或三分之二正面站定展示",
+        "改为正面或三分之二正面的安全动态抓拍，脚步刚落地，双手低位避开商品主体",
+    ),
+    (
+        "稳定的正面或三分之二正面站定展示",
+        "正面或三分之二正面的安全动态抓拍，脚步刚落地，双手低位避开商品主体",
+    ),
+    (
+        "稳定站定展示",
+        "安全动态抓拍，脚步刚落地，身体重心有真实变化",
+    ),
+    (
+        "站定展示",
+        "安全动态展示，脚步刚落地，身体重心有真实变化",
+    ),
+    (
+        "静态展示",
+        "安全动态抓拍",
+    ),
+    (
+        "只保留轻微落步感",
+        "保留清楚但安全的落步动态，脚步、衣摆和发丝都有自然方向感",
+    ),
+    (
+        "双手远离胸口和裙身主体",
+        "双手保持低位或打开在身体两侧，避开胸口、图案、口袋和裙身主体",
+    ),
+    (
+        "双手远离胸口和衣身主体",
+        "双手保持低位或打开在身体两侧，避开胸口、图案、口袋和衣身主体",
+    ),
+)
+
+
+def _preserve_safe_motion_rewrite_instruction(instruction: str) -> str:
+    text = instruction.strip()
+    if not text:
+        return ""
+    for static_text, dynamic_text in _STATIC_REWRITE_REPLACEMENTS:
+        text = text.replace(static_text, dynamic_text)
+    static_tokens = (
+        "稳定站定",
+        "站定展示",
+        "静态站姿",
+        "普通站姿",
+        "僵硬静态",
+    )
+    if any(token in text for token in static_tokens):
+        text = (
+            f"{text}；同时必须保留安全动态抓拍感：脚步刚落地、半转回头或向镜头走近，"
+            "手、头发和道具避开商品主体。"
+        )
+    return text
 
 
 def _rewrite_instruction_replaces_scene_or_composition(instruction: str) -> bool:
