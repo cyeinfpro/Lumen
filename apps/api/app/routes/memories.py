@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.constants import EVENTS_STREAM_PREFIX, conv_channel
+from lumen_core.constants import conv_channel, user_channel
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -30,6 +30,7 @@ from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..redis_client import get_redis
 from ..runtime_settings import embedding_provider_available
+from ..sse_publish import publish_sse_event
 
 
 router = APIRouter(tags=["memories"])
@@ -316,20 +317,14 @@ def _audit(
 
 
 async def _publish_account_settings_updated(redis: Any, user_id: str) -> None:
-    data = json.dumps(
-        {"event": "account_settings_updated", "data": {"user_id": user_id}},
-        separators=(",", ":"),
-    )
     try:
-        pipe = redis.pipeline(transaction=False)
-        pipe.publish(f"user:{user_id}", data)
-        pipe.xadd(
-            f"{EVENTS_STREAM_PREFIX}{user_id}",
-            {"event": "account_settings_updated", "data": data},
-            maxlen=10000,
-            approximate=True,
+        await publish_sse_event(
+            redis,
+            user_id=user_id,
+            channel=user_channel(user_id),
+            event_name="account_settings_updated",
+            data={"user_id": user_id},
         )
-        await pipe.execute()
     except Exception:
         return
 
@@ -341,20 +336,14 @@ async def _publish_conversation_memory_updated(
     conversation_id: str,
     payload: dict[str, Any],
 ) -> None:
-    data = json.dumps(
-        {"event": "conversation.memory.updated", "data": payload},
-        separators=(",", ":"),
-    )
     try:
-        pipe = redis.pipeline(transaction=False)
-        pipe.publish(conv_channel(conversation_id), data)
-        pipe.xadd(
-            f"{EVENTS_STREAM_PREFIX}{user_id}",
-            {"event": "conversation.memory.updated", "data": data},
-            maxlen=10000,
-            approximate=True,
+        await publish_sse_event(
+            redis,
+            user_id=user_id,
+            channel=conv_channel(conversation_id),
+            event_name="conversation.memory.updated",
+            data=payload,
         )
-        await pipe.execute()
     except Exception:
         return
 

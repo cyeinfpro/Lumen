@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+import signal
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..deps import AdminUser, verify_csrf
+from ..services.system_lock import LockBusy, SystemOperationLockService
 from ._admin_common import admin_http as _http, write_admin_audit_isolated
 
 
@@ -34,6 +37,10 @@ _TIMESTAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{6}$")
 # 备份点配对一致性窗口：PG 和 Redis 文件 mtime 偏差应 ≤ 该秒数。
 _PAIR_MTIME_WINDOW_SEC = 600
 _BACKUP_TIMEOUT_SECONDS = 180
+_MAINTENANCE_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
+_BACKUP_RUNNING_MARKER = ".backup.running"
+_RESTORE_RUNNING_MARKER = ".restore.running"
+_UPDATE_RUNNING_MARKER = ".update.running"
 
 
 class _ScriptResult(NamedTuple):
@@ -81,6 +88,91 @@ def _backup_root() -> Path:
     return Path(settings.backup_root).expanduser()
 
 
+def _maintenance_marker_path(name: str) -> Path:
+    return _backup_root() / name
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _marker_is_stale(started_at: str | None) -> bool:
+    if not started_at:
+        return False
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    age = datetime.now(timezone.utc) - started.astimezone(timezone.utc)
+    return age.total_seconds() > _MAINTENANCE_MARKER_STALE_AFTER_SECONDS
+
+
+def _read_pid_marker(path: Path) -> bool:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return False
+    pid = 0
+    started_at: str | None = None
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if key == "pid":
+            try:
+                pid = int(value)
+            except ValueError:
+                pid = 0
+        elif key == "started_at":
+            started_at = value.strip() or None
+    if pid and _pid_is_running(pid) and not _marker_is_stale(started_at):
+        return True
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return False
+
+
+def _write_pid_marker(path: Path, pid: int, started_at: datetime) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_text(
+        f"pid={pid}\nstarted_at={started_at.isoformat()}\n",
+        encoding="utf-8",
+    )
+    _chmod_tolerate_eperm(tmp, 0o600)
+    tmp.replace(path)
+
+
+def _unlink_marker(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _maintenance_marker_busy() -> bool:
+    return any(
+        _read_pid_marker(_maintenance_marker_path(name))
+        for name in (
+            _UPDATE_RUNNING_MARKER,
+            _BACKUP_RUNNING_MARKER,
+            _RESTORE_RUNNING_MARKER,
+        )
+    )
+
+
 def _discover_scripts_dir() -> Path:
     configured = settings.lumen_scripts_dir.strip()
     if configured:
@@ -111,15 +203,23 @@ async def _run_script(script: Path, *args: str, timeout: int) -> _ScriptResult:
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         try:
-            proc.kill()
+            os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        await proc.wait()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except TimeoutError:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await proc.wait()
         raise
     return _ScriptResult(
         returncode=int(proc.returncode or 0),
@@ -228,22 +328,101 @@ class BackupNowOut(BaseModel):
     stderr_tail: str | None = None
 
 
+async def _find_latest_paired_backup_after(started_at: datetime) -> str | None:
+    backup_root = _backup_root()
+    pg_dir = backup_root / "pg"
+    redis_dir = backup_root / "redis"
+    if not pg_dir.is_dir() or not redis_dir.is_dir():
+        return None
+    started_ts = started_at.timestamp() - 2
+    candidates: list[tuple[float, str]] = []
+    for p in pg_dir.iterdir():
+        ts = _parse_ts(p.name, ".pg.dump.gz")
+        if ts is None:
+            continue
+        redis_file = redis_dir / f"{ts}.redis.tgz"
+        if not redis_file.is_file():
+            continue
+        try:
+            pg_stat = p.stat()
+            redis_stat = redis_file.stat()
+        except OSError:
+            continue
+        newest_mtime = max(pg_stat.st_mtime, redis_stat.st_mtime)
+        if newest_mtime >= started_ts:
+            candidates.append((newest_mtime, ts))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _timestamp_from_backup_stdout(stdout: str, started_at: datetime) -> str | None:
+    for line in reversed((stdout or "").splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                ts = payload.get("timestamp")
+                if isinstance(ts, str) and _TIMESTAMP_RE.fullmatch(ts):
+                    return ts
+        if "complete" in line and "backup " in line:
+            parts = line.split()
+            # 形如 "[backup ...] backup 20260424-123000 complete"
+            for i, token in enumerate(parts):
+                if token == "backup" and i + 1 < len(parts):
+                    ts = parts[i + 1].rstrip(":")
+                    if _TIMESTAMP_RE.fullmatch(ts):
+                        return ts
+    return None
+
+
 @router.post("/now", response_model=BackupNowOut, dependencies=[Depends(verify_csrf)])
 async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
     backup_script = _backup_script()
     if not backup_script.is_file():
         raise _http("script_missing", f"missing {backup_script}", 500)
+    lock_service = SystemOperationLockService(
+        fallback_busy=_maintenance_marker_busy,
+    )
+    try:
+        lock = await lock_service.acquire(
+            operation="backup", owner=str(admin.id), ttl_sec=_BACKUP_TIMEOUT_SECONDS + 30
+        )
+    except LockBusy:
+        raise _http(
+            "maintenance_busy",
+            "another maintenance operation is running",
+            409,
+        )
+    marker = _maintenance_marker_path(_BACKUP_RUNNING_MARKER)
+    _write_pid_marker(marker, os.getpid(), datetime.now(timezone.utc))
+    succeeded = False
+    release_reason = "backup_failed"
+    started_at = datetime.now(timezone.utc)
     try:
         proc = await _run_script(
             backup_script,
             timeout=_BACKUP_TIMEOUT_SECONDS,
         )
     except TimeoutError:
+        release_reason = "backup_timeout"
+        _unlink_marker(marker)
+        await lock_service.release(lock, succeeded=False, reason=release_reason)
         raise _http(
             "backup_timeout",
             f"backup exceeded {_BACKUP_TIMEOUT_SECONDS}s",
             504,
         )
+    except Exception:
+        release_reason = "backup_failed"
+        _unlink_marker(marker)
+        await lock_service.release(lock, succeeded=False, reason=release_reason)
+        raise
+    _unlink_marker(marker)
 
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "")[-1000:]
@@ -253,27 +432,30 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
             event_type="admin.backup.create.fail",
             details={"returncode": proc.returncode},
         )
+        await lock_service.release(lock, succeeded=False, reason=release_reason)
         return BackupNowOut(ok=False, stderr_tail=tail)
 
-    # 从 stdout 找最后一条 "backup <ts> complete"
-    ts = None
-    for line in (proc.stdout or "").splitlines()[::-1]:
-        if "complete" in line and "backup " in line:
-            parts = line.split()
-            # 形如 "[backup ...] backup 20260424-123000 complete"
-            for i, t in enumerate(parts):
-                if t == "backup" and i + 1 < len(parts) and parts[i + 1] != "":
-                    if parts[i + 1] != "complete":
-                        ts = parts[i + 1].rstrip(":")
-                        break
-            if ts:
-                break
+    ts = _timestamp_from_backup_stdout(proc.stdout, started_at)
+    if ts is None:
+        ts = await _find_latest_paired_backup_after(started_at)
+    if ts is None:
+        await lock_service.release(
+            lock, succeeded=False, reason="backup_timestamp_missing"
+        )
+        raise _http(
+            "backup_timestamp_missing",
+            "backup completed but timestamp was not found",
+            500,
+        )
+    succeeded = True
+    release_reason = "backup_complete"
     await write_admin_audit_isolated(
         request,
         admin,
         event_type="admin.backup.create",
         details={"timestamp": ts},
     )
+    await lock_service.release(lock, succeeded=succeeded, reason=release_reason)
     return BackupNowOut(ok=True, timestamp=ts)
 
 
@@ -289,12 +471,27 @@ class RestoreOut(BaseModel):
 async def restore_backup(
     body: RestoreIn, request: Request, admin: AdminUser
 ) -> RestoreOut:
+    lock_service = SystemOperationLockService(
+        fallback_busy=_maintenance_marker_busy,
+    )
+    try:
+        lock = await lock_service.acquire(
+            operation="restore", owner=str(admin.id), ttl_sec=300
+        )
+    except LockBusy:
+        raise _http(
+            "maintenance_busy",
+            "another maintenance operation is running",
+            409,
+        )
     restore_script = _restore_script()
     if not restore_script.is_file():
+        await lock_service.release(lock, succeeded=False, reason="script_missing")
         raise _http("script_missing", f"missing {restore_script}", 500)
 
     ts = body.timestamp.strip()
     if not _TIMESTAMP_RE.fullmatch(ts):
+        await lock_service.release(lock, succeeded=False, reason="invalid_timestamp")
         raise _http("invalid_timestamp", "timestamp must match YYYYMMDD-HHMMSS", 400)
 
     backup_root = _backup_root().resolve()
@@ -308,15 +505,19 @@ async def restore_backup(
         pg.resolve().relative_to(backup_root)
         rd.resolve().relative_to(backup_root)
     except (ValueError, OSError):
+        await lock_service.release(lock, succeeded=False, reason="invalid_path")
         raise _http("invalid_path", "backup path escapes root", 400)
     if not pg.is_file() or not rd.is_file():
+        await lock_service.release(lock, succeeded=False, reason="backup_not_found")
         raise _http("backup_not_found", f"no paired backup for {ts}", 404)
 
     try:
         skew = int(abs(pg.stat().st_mtime - rd.stat().st_mtime))
     except OSError as exc:
+        await lock_service.release(lock, succeeded=False, reason="backup_stat_failed")
         raise _http("backup_stat_failed", f"cannot stat backup files: {exc}", 500)
     if skew > _PAIR_MTIME_WINDOW_SEC:
+        await lock_service.release(lock, succeeded=False, reason="backup_inconsistent")
         raise _http(
             "backup_inconsistent",
             f"PG/Redis mtime skew {skew}s exceeds {_PAIR_MTIME_WINDOW_SEC}s window",
@@ -328,17 +529,29 @@ async def restore_backup(
     log_path = backup_root / ".restore.log"
     log_fh = _open_private_append(log_path)
     try:
-        log_fh.write(f"\n=== restore trigger ts={ts} at {datetime.now(timezone.utc).isoformat()} ===\n")
+        log_fh.write(
+            f"\n=== restore trigger ts={ts} "
+            f"at {datetime.now(timezone.utc).isoformat()} ===\n"
+        )
         log_fh.flush()
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["/usr/bin/env", "bash", str(restore_script), ts],
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
         )
+        _write_pid_marker(
+            _maintenance_marker_path(_RESTORE_RUNNING_MARKER),
+            proc.pid,
+            datetime.now(timezone.utc),
+        )
+    except Exception:
+        await lock_service.release(lock, succeeded=False, reason="restore_launch_failed")
+        raise
     finally:
         log_fh.close()
+    await lock_service.release(lock, succeeded=True, reason="restore_launched")
     await write_admin_audit_isolated(
         request,
         admin,

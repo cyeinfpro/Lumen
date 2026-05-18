@@ -176,6 +176,36 @@ async def test_resolve_user_credential_runtime_builds_resolved_provider(
 
 
 @pytest.mark.asyncio
+async def test_supplier_base_url_validation_is_ttl_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_assert_public_http_target(raw: str, **kwargs: Any) -> str:
+        calls.append((raw, kwargs))
+        return raw.rstrip("/")
+
+    byok_runtime.clear_base_url_validation_cache()
+    monkeypatch.setattr(
+        byok_runtime,
+        "assert_public_http_target",
+        fake_assert_public_http_target,
+    )
+
+    first = await byok_runtime._validate_supplier_base_url(
+        "https://upstream.example/v1/"
+    )
+    second = await byok_runtime._validate_supplier_base_url(
+        "https://upstream.example/v1/"
+    )
+
+    assert first == "https://upstream.example/v1"
+    assert second == first
+    assert len(calls) == 1
+    byok_runtime.clear_base_url_validation_cache()
+
+
+@pytest.mark.asyncio
 async def test_resolve_user_credential_runtime_decrypt_mismatch_does_not_mark_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

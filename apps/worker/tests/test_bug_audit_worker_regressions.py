@@ -142,3 +142,33 @@ async def test_account_limiter_daily_expiry_stays_in_the_future() -> None:
     assert redis.eval_args is not None
     day_expire_at = int(redis.eval_args[-1])
     assert day_expire_at > int(now)
+
+
+@pytest.mark.asyncio
+async def test_image_queue_lock_release_uses_owner_cas() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.eval_args: tuple[Any, ...] | None = None
+
+        async def set(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
+        async def eval(self, *args: Any) -> int:
+            self.eval_args = args
+            return 0
+
+    redis = Redis()
+
+    async with generation._image_queue_lock(redis):
+        pass
+
+    assert redis.eval_args is not None
+    assert redis.eval_args[1] == 1
+    assert redis.eval_args[2] == "generation:image_queue:lock"
+
+
+def test_image_queue_reserve_has_atomic_lua_path() -> None:
+    source = inspect.getsource(generation._reserve_image_queue_slot)
+
+    assert "_RESERVE_IMAGE_SLOT_LUA" in source
+    assert "redis.zadd(provider_zset" in source

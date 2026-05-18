@@ -45,6 +45,19 @@ def _has_public_hostname(url: str) -> bool:
     return not (ip.is_private or ip.is_loopback or ip.is_link_local)
 
 
+def _is_dev_env() -> bool:
+    return settings.app_env.strip().lower() in {"dev", "development", "local", "test"}
+
+
+def _allowed_request_origin(origin: str) -> bool:
+    allowed = {
+        item.strip().rstrip("/")
+        for item in (settings.cors_allow_origins or "").split(",")
+        if item.strip()
+    }
+    return "*" in allowed or origin.rstrip("/") in allowed
+
+
 def _first_header_value(value: str | None) -> str | None:
     if value is None:
         return None
@@ -125,14 +138,19 @@ async def _configured_public_base_url(db: AsyncSession) -> str | None:
     return _normalize_public_base_url(row)
 
 
-async def resolve_public_base_url(request: Request, db: AsyncSession) -> str:
+async def resolve_public_base_url(
+    request: Request,
+    db: AsyncSession,
+    *,
+    allow_request_origin: bool = False,
+) -> str:
     """Resolve the web root used for copied invitation/share URLs.
 
     Priority:
     1. DB-backed site.public_base_url override.
     2. Public PUBLIC_BASE_URL env / Settings fallback.
-    3. Current browser/proxy origin.
-    4. Non-public PUBLIC_BASE_URL env / Settings fallback.
+    3. Explicitly allowed browser/proxy origin in dev/test or opt-in flows.
+    4. Local dev fallback. Production must configure a public URL.
     """
     configured = await _configured_public_base_url(db)
     if configured:
@@ -142,11 +160,20 @@ async def resolve_public_base_url(request: Request, db: AsyncSession) -> str:
     if fallback and _has_public_hostname(fallback):
         return fallback
 
-    request_origin = request_public_origin(request)
-    if request_origin:
+    request_origin = request_public_origin(request) if allow_request_origin else None
+    if (
+        request_origin
+        and _is_dev_env()
+        and _allowed_request_origin(request_origin)
+    ):
         return request_origin
 
-    return fallback or settings.public_base_url.rstrip("/")
+    if not _is_dev_env():
+        raise RuntimeError(
+            "PUBLIC_BASE_URL or site.public_base_url is required in production"
+        )
+
+    return fallback or "http://localhost:3000"
 
 
 __all__ = [

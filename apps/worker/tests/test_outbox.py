@@ -34,11 +34,17 @@ class FakeRedis:
     async def get(self, key: str):
         return self.keys.get(key)
 
-    async def enqueue_job(self, job_name: str, task_id: str):
+    async def enqueue_job(self, job_name: str, task_id: str, **_kwargs):
         if self.fail_enqueue:
             raise RuntimeError("redis unavailable")
         self.enqueued.append((job_name, task_id))
         return SimpleNamespace(job_id=f"job:{task_id}")
+
+    async def eval(self, _script: str, _keys: int, key: str, field: str, ttl: str):
+        value = int(self.keys.get(f"{key}:{field}") or 0) + 1
+        self.keys[f"{key}:{field}"] = str(value)
+        self.keys[f"{key}:ttl"] = str(ttl)
+        return value
 
     async def hincrby(self, _key: str, _field: str, _amount: int):
         return 1

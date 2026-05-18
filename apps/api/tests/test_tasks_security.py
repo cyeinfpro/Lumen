@@ -64,6 +64,11 @@ async def test_retry_generation_locks_row_and_clears_cancel_key(
         def add(self, row: Any) -> None:
             self.added.append(row)
 
+        async def flush(self) -> None:
+            for item in self.added:
+                if getattr(item, "id", None) is None:
+                    item.id = "outbox-1"
+
         async def commit(self) -> None:
             self.committed = True
 
@@ -135,6 +140,75 @@ async def test_cancel_running_generation_sets_cancel_without_commit(
 
 
 @pytest.mark.asyncio
+async def test_release_generation_queue_state_removes_task_members() -> None:
+    class Pipe:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        def zrem(self, key: str, member: str) -> None:
+            self.calls.append(("zrem", key, member))
+
+        def delete(self, key: str) -> None:
+            self.calls.append(("delete", key))
+
+        async def execute(self) -> None:
+            self.calls.append(("execute",))
+
+    class Redis:
+        def __init__(self) -> None:
+            self.pipe = Pipe()
+
+        async def get(self, key: str) -> str:
+            assert key == "generation:image_queue:task_provider:gen-1"
+            return "provider-1"
+
+        def pipeline(self, *, transaction: bool = False) -> Pipe:
+            assert transaction is False
+            return self.pipe
+
+    redis = Redis()
+
+    await tasks._release_generation_queue_state(redis, "gen-1")
+
+    assert ("zrem", "generation:image_queue:active", "gen-1") in redis.pipe.calls
+    assert (
+        "zrem",
+        "generation:image_queue:provider_active:provider-1",
+        "gen-1",
+    ) in redis.pipe.calls
+    assert ("delete", "generation:image_queue:task_provider:gen-1") in redis.pipe.calls
+    assert ("delete", "task:gen-1:lease") in redis.pipe.calls
+
+
+@pytest.mark.asyncio
+async def test_release_generation_queue_state_without_pipeline() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        async def get(self, key: str) -> str:
+            self.calls.append(("get", key))
+            return "provider-1"
+
+        async def zrem(self, key: str, member: str) -> None:
+            self.calls.append(("zrem", key, member))
+
+        async def delete(self, key: str) -> None:
+            self.calls.append(("delete", key))
+
+    redis = Redis()
+
+    await tasks._release_generation_queue_state(redis, "gen-1")
+
+    assert (
+        "zrem",
+        "generation:image_queue:provider_active:provider-1",
+        "gen-1",
+    ) in redis.calls
+    assert ("delete", "task:gen-1:lease") in redis.calls
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_scopes_generation_and_completion_queries_to_user() -> None:
     db = _CapturingDb()
     user = SimpleNamespace(id="user-1")
@@ -160,7 +234,7 @@ async def test_list_my_active_tasks_scopes_queries_to_user() -> None:
     assert "completions.user_id" in rendered[1]
     compiled = [statement.compile(dialect=postgresql.dialect()) for statement in db.statements]
     assert all(" LIMIT " in str(statement).upper() for statement in compiled)
-    assert all(25 in statement.params.values() for statement in compiled)
+    assert all(50 in statement.params.values() for statement in compiled)
 
 
 @pytest.mark.asyncio

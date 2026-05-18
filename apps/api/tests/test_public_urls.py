@@ -71,7 +71,14 @@ async def test_resolve_public_base_url_prefers_db_override() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_public_base_url_uses_request_before_env() -> None:
+async def test_resolve_public_base_url_can_use_allowed_request_origin_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        public_urls.settings,
+        "cors_allow_origins",
+        "https://lumen.example.com",
+    )
     request = _request(
         [
             (b"origin", b"https://lumen.example.com"),
@@ -80,7 +87,9 @@ async def test_resolve_public_base_url_uses_request_before_env() -> None:
     )
 
     assert (
-        await resolve_public_base_url(request, _Db(None))  # type: ignore[arg-type]
+        await resolve_public_base_url(
+            request, _Db(None), allow_request_origin=True  # type: ignore[arg-type]
+        )
         == "https://lumen.example.com"
     )
 
@@ -103,7 +112,7 @@ async def test_resolve_public_base_url_prefers_public_env_over_internal_request(
 
 
 @pytest.mark.asyncio
-async def test_resolve_public_base_url_prefers_public_request_over_internal_env(
+async def test_resolve_public_base_url_does_not_trust_request_origin_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -115,5 +124,17 @@ async def test_resolve_public_base_url_prefers_public_request_over_internal_env(
 
     assert (
         await resolve_public_base_url(request, _Db(None))  # type: ignore[arg-type]
-        == "https://lumen.example.com"
+        == "http://192.0.2.1:3000"
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_public_base_url_requires_config_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(public_urls.settings, "app_env", "prod")
+    monkeypatch.setattr(public_urls.settings, "public_base_url", "http://localhost:3000")
+    request = _request([(b"origin", b"https://evil.example")])
+
+    with pytest.raises(RuntimeError):
+        await resolve_public_base_url(request, _Db(None))  # type: ignore[arg-type]

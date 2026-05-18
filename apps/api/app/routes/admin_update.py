@@ -47,6 +47,7 @@ from .admin_proxies import _load_proxies
 from .admin_backups import (
     _chmod_tolerate_eperm,
     _discover_scripts_dir,
+    _maintenance_marker_busy,
     _open_private_append,
 )
 
@@ -1619,6 +1620,12 @@ async def trigger_update(
         raise _http(
             "update_running", f"Lumen update is already running (pid {marker.pid})", 409
         )
+    if await asyncio.to_thread(_maintenance_marker_busy):
+        raise _http(
+            "maintenance_busy",
+            "another maintenance operation is running",
+            409,
+        )
 
     channel = (body.channel or await _update_channel(db)).strip().lower()
     if channel not in {"stable", "main", "pinned", "minor", "major"}:
@@ -1675,7 +1682,7 @@ async def trigger_update(
         return replayed
 
     lock_service = SystemOperationLockService(
-        fallback_busy=lambda: _read_marker() is not None
+        fallback_busy=lambda: _read_marker() is not None or _maintenance_marker_busy()
     )
     lock = None
     try:
@@ -1694,6 +1701,8 @@ async def trigger_update(
     proc: subprocess.Popen[bytes] | None = None
     unit: str | None = None
     pid: int = 0
+    launched = False
+    release_reason = "launch_failed"
     try:
         log_fh.write(
             "\n=== update trigger "
@@ -1777,10 +1786,15 @@ async def trigger_update(
             )
             pid = proc.pid
             _write_marker(pid, started_at.isoformat())
+        if unit is not None or pid:
+            launched = True
+            release_reason = "launched"
     finally:
         log_fh.close()
         if lock is not None:
-            await lock_service.release(lock, succeeded=True, reason="launched")
+            await lock_service.release(
+                lock, succeeded=launched, reason=release_reason
+            )
 
     response = UpdateTriggerOut(
         accepted=True,

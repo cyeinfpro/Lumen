@@ -27,6 +27,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
     DEFAULT_CHAT_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL,
@@ -34,7 +35,6 @@ from lumen_core.constants import (
     EV_COMP_QUEUED,
     EV_CONV_MSG_APPENDED,
     EV_GEN_QUEUED,
-    EVENTS_STREAM_PREFIX,
     CompletionStage,
     CompletionStatus,
     GenerationAction,
@@ -92,6 +92,7 @@ from ..intent import resolve_intent
 from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
 from ..runtime_settings import embedding_provider_available, get_setting
+from ..sse_publish import publish_sse_event, publish_sse_events
 
 
 router = APIRouter()
@@ -1141,6 +1142,11 @@ async def _create_assistant_task(
         ev = OutboxEvent(kind=p["kind"], payload=p, published_at=None)
         db.add(ev)
         outbox_rows.append(ev)
+    if outbox_rows:
+        await db.flush()
+        for payload, row in zip(outbox_payloads, outbox_rows, strict=False):
+            payload["outbox_id"] = str(row.id)
+            row.payload = dict(payload)
 
     return AssistantTaskResult(
         assistant_msg=assistant_msg,
@@ -1162,26 +1168,34 @@ async def _publish_message_appended(
     if not message_ids:
         return
     try:
-        pipe = redis.pipeline(transaction=False)
-        for message_id in message_ids:
-            evt_data = json.dumps(
-                {
-                    "event": EV_CONV_MSG_APPENDED,
-                    "data": {
-                        "conversation_id": conv_id,
-                        "message_id": message_id,
-                    },
+        if len(message_ids) == 1:
+            message_id = message_ids[0]
+            await publish_sse_event(
+                redis,
+                user_id=user_id,
+                channel=conv_channel(conv_id),
+                event_name=EV_CONV_MSG_APPENDED,
+                data={
+                    "conversation_id": conv_id,
+                    "message_id": message_id,
                 },
-                separators=(",", ":"),
             )
-            pipe.publish(conv_channel(conv_id), evt_data)
-            pipe.xadd(
-                f"{EVENTS_STREAM_PREFIX}{user_id}",
-                {"event": EV_CONV_MSG_APPENDED, "data": evt_data},
-                maxlen=10000,
-                approximate=True,
+        else:
+            await publish_sse_events(
+                redis,
+                [
+                    {
+                        "user_id": user_id,
+                        "channel": conv_channel(conv_id),
+                        "event_name": EV_CONV_MSG_APPENDED,
+                        "data": {
+                            "conversation_id": conv_id,
+                            "message_id": message_id,
+                        },
+                    }
+                    for message_id in message_ids
+                ],
             )
-        await pipe.execute()
     except Exception:
         logger.warning(
             "publish_message_appended failed user=%s conv=%s messages=%s",
@@ -1207,9 +1221,9 @@ async def _publish_assistant_task(
     Failures are logged; the outbox publisher will catch up. Caller must
     commit the transaction *before* invoking this.
     """
+    _ = outbox_rows
     try:
         pool = await get_arq_pool()
-        pipe = redis.pipeline(transaction=False)
         for p in outbox_payloads:
             fn_name = (
                 "run_completion" if p["kind"] == "completion" else "run_generation"
@@ -1221,30 +1235,25 @@ async def _publish_assistant_task(
             defer_s = p.get("defer_s")
             if isinstance(defer_s, (int, float)) and defer_s > 0:
                 enqueue_kwargs["_defer_by"] = float(defer_s)
+            enqueue_kwargs["_job_id"] = arq_job_id(
+                p["kind"], p["task_id"], p.get("outbox_id")
+            )
             await pool.enqueue_job(fn_name, p["task_id"], **enqueue_kwargs)
 
             ev_name = EV_COMP_QUEUED if p["kind"] == "completion" else EV_GEN_QUEUED
             id_field = "completion_id" if p["kind"] == "completion" else "generation_id"
-            evt_data = json.dumps(
-                {
-                    "event": ev_name,
-                    "data": {
-                        id_field: p["task_id"],
-                        "message_id": assistant_msg_id,
-                        "conversation_id": conv_id,
-                        "kind": p["kind"],
-                    },
+            await publish_sse_event(
+                redis,
+                user_id=user_id,
+                channel=task_channel(p["task_id"]),
+                event_name=ev_name,
+                data={
+                    id_field: p["task_id"],
+                    "message_id": assistant_msg_id,
+                    "conversation_id": conv_id,
+                    "kind": p["kind"],
                 },
-                separators=(",", ":"),
             )
-            pipe.publish(task_channel(p["task_id"]), evt_data)
-            pipe.xadd(
-                f"{EVENTS_STREAM_PREFIX}{user_id}",
-                {"event": ev_name, "data": evt_data},
-                maxlen=10000,
-                approximate=True,
-            )
-        await pipe.execute()
     except Exception:
         # Why: Outbox publisher will catch up later; surface in logs so silent
         # publish failures are observable without rolling back committed work.
