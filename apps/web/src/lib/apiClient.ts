@@ -284,6 +284,7 @@ export interface BackendGeneration {
   message_id: string;
   user_api_credential_id?: string | null;
   upstream_supplier_id?: string | null;
+  parent_generation_id?: string | null;
   action: string;
   prompt: string;
   size_requested: string;

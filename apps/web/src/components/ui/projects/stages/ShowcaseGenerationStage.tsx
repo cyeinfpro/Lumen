@@ -21,6 +21,7 @@ import {
 import type { BackendImageMeta, WorkflowRun } from "@/lib/apiClient";
 import { ImageGrid, ReferenceBlock } from "../components/ImageGrid";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
+import { ShowcaseTaskProgress } from "../components/ShowcaseTaskProgress";
 import { RunningState, StageFrame } from "../components/StageFrame";
 import {
   coerceContinuityAnchor,
@@ -352,6 +353,10 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
           </Button>
         ) : null}
       </section>
+
+      {hasGenerationStarted && step ? (
+        <ShowcaseTaskProgress workflow={workflow} step={step} images={generated} />
+      ) : null}
 
       {hasGenerationStarted ? (
         <section className="border-t border-[var(--border)] py-5">

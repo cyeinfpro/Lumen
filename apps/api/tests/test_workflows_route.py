@@ -1112,6 +1112,9 @@ async def test_create_showcase_images_queues_gpt55_preflight_in_background(
     assert showcase.task_ids == []
     assert showcase.output_json == {}
     assert showcase.input_json["preflight_status"] == "queued"
+    assert showcase.input_json["active_task_ids"] == []
+    assert showcase.input_json["active_output_count"] == 2
+    assert showcase.input_json["baseline_image_count"] == 1
     assert showcase.input_json["target_image_count"] == 3
     assert showcase.input_json["reference_image_ids"] == ["product-1", "model-1"]
     assert quality.status == "waiting_input"
@@ -1125,6 +1128,88 @@ async def test_create_showcase_images_queues_gpt55_preflight_in_background(
     assert args[1] == "run-1"
     assert args[2]["output_count"] == 2
     assert args[3] == showcase.input_json["generation_request_id"]
+
+
+def test_showcase_preflight_timeout_scales_for_large_gpt55_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC", raising=False)
+
+    assert (
+        workflows._showcase_preflight_timeout_seconds(  # noqa: SLF001
+            scene_planner="gpt55_preflight",
+            shot_count=16,
+        )
+        == 1680.0
+    )
+    assert (
+        workflows._showcase_preflight_timeout_seconds(  # noqa: SLF001
+            scene_planner="rules_fallback",
+            shot_count=16,
+        )
+        == 240.0
+    )
+
+
+def test_showcase_gpt_parallelism_serializes_when_provider_order_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUMEN_SHOWCASE_GPT_PARALLELISM", "8")
+
+    assert (
+        workflows._showcase_gpt_parallelism(  # noqa: SLF001
+            8,
+            provider_order=None,
+        )
+        == 1
+    )
+    assert (
+        workflows._showcase_gpt_parallelism(  # noqa: SLF001
+            8,
+            provider_order=[SimpleNamespace(name="p1")],
+        )
+        == 8
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_showcase_preflight_marks_timeout_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_wait_for(awaitable: Any, timeout: float) -> Any:
+        assert timeout == 1.0
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    async def fake_impl(**kwargs: Any) -> dict[str, Any]:
+        planner = str(kwargs["scene_planner"])
+        calls.append(planner)
+        return {
+            "planning": {
+                "planner": "rules_fallback",
+                "fallback_reason": "rules_fallback_requested",
+            },
+            "scene_cards": [],
+            "final_prompts": [],
+        }
+
+    monkeypatch.setenv("LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC", "0.001")
+    monkeypatch.setattr(workflows.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(workflows, "_prepare_showcase_preflight_impl", fake_impl)
+
+    result = await workflows._prepare_showcase_preflight(  # noqa: SLF001
+        scene_planner="gpt55_preflight",
+        shot_picks=[("front_full_body", {"label": "正面", "framing": "product_first"})],
+    )
+
+    assert calls == ["rules_fallback"]
+    assert result["preflight_timed_out"] is True
+    assert result["planning"]["planner"] == "rules_fallback"
+    assert result["planning"]["requested_planner"] == "gpt55_preflight"
+    assert result["planning"]["fallback_reason"] == "preflight_timeout_after_1s"
+    assert result["planning"]["timeout_seconds"] == 1.0
 
 
 @pytest.mark.asyncio
@@ -1334,6 +1419,139 @@ async def test_build_run_out_includes_model_library_reference_images(
 
 
 @pytest.mark.asyncio
+async def test_build_run_out_includes_dual_race_bonus_generations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    run = SimpleNamespace(
+        id="run-1",
+        conversation_id=None,
+        user_id="user-1",
+        type="apparel_model_showcase",
+        status="running",
+        title="服饰模特展示图",
+        user_prompt="clean studio",
+        product_image_ids=[],
+        current_step="showcase_generation",
+        quality_mode="premium",
+        metadata_jsonb={},
+        created_at=now,
+        updated_at=now,
+    )
+    step = SimpleNamespace(
+        id="step-1",
+        workflow_run_id="run-1",
+        step_key="showcase_generation",
+        status="running",
+        input_json={"active_task_ids": ["gen-1"], "output_count": 1},
+        output_json={},
+        task_ids=["gen-1"],
+        image_ids=[],
+        approved_at=None,
+        approved_by=None,
+        created_at=now,
+        updated_at=now,
+    )
+    base = _generation_row(
+        id="gen-1",
+        status=workflows.GenerationStatus.FAILED.value,
+        parent_generation_id=None,
+        is_dual_race_bonus=False,
+        now=now,
+    )
+    bonus = _generation_row(
+        id="bonus-1",
+        status=workflows.GenerationStatus.SUCCEEDED.value,
+        parent_generation_id="gen-1",
+        is_dual_race_bonus=True,
+        now=now,
+    )
+
+    async def fake_sync(_db: Any, _run: Any) -> None:
+        return None
+
+    async def fake_load_steps(_db: Any, _run_id: str) -> list[Any]:
+        return [step]
+
+    async def fake_load_quality_reports(_db: Any, _run_id: str) -> list[Any]:
+        return []
+
+    async def fake_generation_rows(
+        _db: Any,
+        *,
+        user_id: str,
+        task_ids: list[str],
+        include_dual_bonus: bool,
+    ) -> list[Any]:
+        assert user_id == "user-1"
+        assert task_ids == ["gen-1"]
+        assert include_dual_bonus is True
+        return [base, bonus]
+
+    async def fake_image_out_map(_db: Any, images: list[Any]) -> dict[str, Any]:
+        assert images == []
+        return {}
+
+    monkeypatch.setattr(workflows, "_sync_workflow_outputs", fake_sync)
+    monkeypatch.setattr(workflows, "_load_steps", fake_load_steps)
+    monkeypatch.setattr(workflows, "_load_quality_reports", fake_load_quality_reports)
+    monkeypatch.setattr(
+        workflows,
+        "_workflow_generation_rows_from_task_ids",
+        fake_generation_rows,
+    )
+    monkeypatch.setattr(workflows, "_image_out_map", fake_image_out_map)
+
+    db = _Db([], responses=[[], []])
+
+    async def fake_refresh(_row: Any) -> None:
+        return None
+
+    db.refresh = fake_refresh  # type: ignore[attr-defined]
+
+    out = await workflows._build_run_out(db, run)  # noqa: SLF001
+
+    assert [generation.id for generation in out.generations] == ["gen-1", "bonus-1"]
+    assert out.generations[1].parent_generation_id == "gen-1"
+    assert out.generations[1].is_dual_race_bonus is True
+
+
+def _generation_row(
+    *,
+    id: str,
+    status: str,
+    parent_generation_id: str | None,
+    is_dual_race_bonus: bool,
+    now: datetime,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=id,
+        message_id="msg-1",
+        user_api_credential_id=None,
+        upstream_supplier_id=None,
+        parent_generation_id=parent_generation_id,
+        action="edit",
+        prompt="prompt",
+        size_requested="auto",
+        aspect_ratio="4:5",
+        input_image_ids=[],
+        primary_input_image_id=None,
+        mask_image_id=None,
+        status=status,
+        progress_stage="finalizing",
+        attempt=1,
+        error_code=None,
+        error_message=None,
+        started_at=now,
+        finished_at=now,
+        is_dual_race_bonus=is_dual_race_bonus,
+        billing_free=is_dual_race_bonus,
+        billing_label="free" if is_dual_race_bonus else None,
+        billing_exempt_reason="dual_race_loser" if is_dual_race_bonus else None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_sync_showcase_failure_records_generation_error_message() -> None:
     run = SimpleNamespace(
         id="run-1",
@@ -1378,6 +1596,53 @@ async def test_sync_showcase_failure_records_generation_error_message() -> None:
     assert showcase_step.output_json["error_message"] == (
         "upstream_error: provider timeout"
     )
+    assert run.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_sync_showcase_canceled_generation_marks_terminal_failure() -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        current_step="showcase_generation",
+        status="running",
+    )
+    showcase_step = SimpleNamespace(
+        step_key="showcase_generation",
+        status="running",
+        input_json={"target_image_count": 1, "output_count": 1},
+        output_json={},
+        task_ids=["gen-1"],
+        image_ids=[],
+    )
+    steps = [
+        SimpleNamespace(step_key="model_approval", task_ids=[]),
+        showcase_step,
+    ]
+    db = _Db(
+        [],
+        responses=[
+            steps,  # _load_steps
+            [],  # model candidates
+            [
+                SimpleNamespace(
+                    id="gen-1",
+                    status=workflows.GenerationStatus.CANCELED.value,
+                    error_code=None,
+                    error_message=None,
+                )
+            ],
+            [],  # dual-race bonus generations
+            [],  # images
+        ],
+    )
+
+    await workflows._sync_workflow_outputs(db, run)  # noqa: SLF001
+
+    assert showcase_step.status == "failed"
+    assert showcase_step.output_json["canceled_generation_ids"] == ["gen-1"]
+    assert "failed_generation_ids" not in showcase_step.output_json
+    assert showcase_step.output_json["error_message"] == "展示图生成失败或取消"
     assert run.status == "failed"
 
 
@@ -2327,8 +2592,22 @@ async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instructio
     assert "改写后的安全拍摄方案" in preflight["final_prompts"][0]
 
 
+def test_guarded_shooting_brief_allows_scene_rewrite_without_old_scene() -> None:
+    guarded = workflows._guarded_shooting_brief(  # noqa: SLF001
+        "咖啡店窗边拍摄，模特拿咖啡杯靠近胸前，窗边侧光。",
+        rewrite_instruction=(
+            "更换场景和构图以避免重复，改为图书馆过道自然整理衣袖。"
+        ),
+    )
+
+    assert "咖啡店窗边" not in guarded
+    assert "拿咖啡杯靠近胸前" not in guarded
+    assert "保留上方摄影方案里的场景" not in guarded
+    assert "图书馆过道" in guarded
+
+
 @pytest.mark.asyncio
-async def test_prepare_showcase_preflight_falls_back_when_rewrite_still_risky(
+async def test_prepare_showcase_preflight_keeps_guarded_composer_when_rewrite_still_risky(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = SimpleNamespace(
@@ -2417,8 +2696,17 @@ async def test_prepare_showcase_preflight_falls_back_when_rewrite_still_risky(
     )
 
     assert preflight["prompt_reviews"][0]["must_rewrite"] is False
-    assert preflight["prompt_reviews"][0]["safe_fallback"] is True
-    assert preflight["prompt_reviews"][0]["risk_level"] == "low"
+    assert preflight["prompt_reviews"][0]["safe_fallback"] is False
+    assert preflight["prompt_reviews"][0]["guarded_composer"] is True
+    assert preflight["prompt_reviews"][0]["risk_level"] == "medium"
+    assert preflight["per_image_prompts"][0]["status"] == "guarded"
+    assert preflight["per_image_prompts"][0]["risk_guard_applied"] is True
+    assert "高风险拍摄方案" in preflight["final_prompts"][0]
+    assert "安全覆盖" in preflight["final_prompts"][0]
+    assert "移开饮料" in preflight["final_prompts"][0]
+    assert "本张场景种子" not in preflight["final_prompts"][0]
+    assert "街角" not in preflight["final_prompts"][0]
+    assert "手拿饮料靠近胸前" not in preflight["final_prompts"][0]
     assert "GPT-5.5 单张执行 Prompt" not in preflight["final_prompts"][0]
     assert "【商品 1:1 锁定】" in preflight["final_prompts"][0]
 
@@ -2428,7 +2716,7 @@ async def test_prepare_showcase_preflight_timeout_falls_back_to_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_wait_for(awaitable: Any, timeout: float) -> Any:
-        assert timeout == 240.0
+        assert timeout == 480.0
         awaitable.close()
         raise asyncio.TimeoutError
 
@@ -2466,6 +2754,9 @@ async def test_prepare_showcase_preflight_timeout_falls_back_to_rules(
     )
 
     assert preflight["planning"]["planner"] == "rules_fallback"
+    assert preflight["planning"]["requested_planner"] == "gpt55_preflight"
+    assert preflight["planning"]["fallback_reason"] == "preflight_timeout_after_480s"
+    assert preflight["preflight_timed_out"] is True
 
 
 @pytest.mark.asyncio

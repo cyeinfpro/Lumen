@@ -184,6 +184,12 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 logger = logging.getLogger(__name__)
 
 _SHOWCASE_GPT55_REFERENCE_MAX_BYTES = 900_000
+_SHOWCASE_PREFLIGHT_TIMEOUT_ENV = "LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC"
+_SHOWCASE_PREFLIGHT_BASE_TIMEOUT_SEC = 240.0
+_SHOWCASE_PREFLIGHT_GPT_MIN_TIMEOUT_SEC = 480.0
+_SHOWCASE_PREFLIGHT_GPT_PER_SHOT_TIMEOUT_SEC = 90.0
+_SHOWCASE_GPT_PARALLELISM_ENV = "LUMEN_SHOWCASE_GPT_PARALLELISM"
+_SHOWCASE_GPT_DEFAULT_PARALLELISM = 6
 
 WORKFLOW_TYPE = "apparel_model_showcase"
 WORKFLOW_STEPS = [
@@ -2775,10 +2781,12 @@ async def _workflow_generation_rows_from_task_ids(
     base_generations = list(
         (
             await db.execute(
-                select(Generation).where(
+                select(Generation)
+                .where(
                     Generation.user_id == user_id,
                     Generation.id.in_(task_ids),
                 )
+                .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
         )
         .scalars()
@@ -3715,6 +3723,136 @@ def _composition_shooting_brief(composition: dict[str, Any]) -> str:
     return brief
 
 
+def _guarded_shooting_brief(
+    shooting_brief: str,
+    *,
+    rewrite_instruction: str,
+) -> str:
+    brief = shooting_brief.strip()
+    instruction = rewrite_instruction.strip() or (
+        "简化动作和道具关系，避免任何手、头发、宠物、饮料杯、手机、包带或前景物遮挡商品主体。"
+    )
+    replaces_scene = _rewrite_instruction_replaces_scene_or_composition(instruction)
+    lead = (
+        "安全覆盖：以本安全覆盖重写当前拍摄方案；允许更换场景、构图、光线、镜头、"
+        "空间层次、自然情绪、动作和道具；"
+        if replaces_scene
+        else "安全覆盖：上方摄影方案只保留与本安全覆盖不冲突的安全元素；"
+    )
+    guard = lead + (
+        f"只把可能造成遮挡、改款或动作过复杂的部分按此改写：{instruction}。"
+        "如上方摄影方案与本安全覆盖冲突，以本安全覆盖为准；"
+        "手、头发、道具和前景不得遮挡商品主体，当前角度可见的服装结构、领口、袖口、"
+        "口袋、图案/扣件和布料纹理必须清楚。"
+    )
+    if replaces_scene:
+        return guard
+    return f"{brief}\n\n{guard}" if brief else guard
+
+
+def _rewrite_instruction_replaces_scene_or_composition(instruction: str) -> bool:
+    text = instruction.strip().lower()
+    if not text:
+        return False
+    preserve_phrases = (
+        "不要改变场景",
+        "不用改变场景",
+        "无需改变场景",
+        "不改变场景",
+        "保留场景",
+        "保留地点",
+        "keep the scene",
+        "do not change the scene",
+        "don't change the scene",
+    )
+    if any(phrase in text for phrase in preserve_phrases):
+        return False
+    scene_terms = (
+        "场景",
+        "地点",
+        "环境",
+        "构图",
+        "机位",
+        "镜头",
+        "光线",
+        "scene",
+        "location",
+        "setting",
+        "composition",
+        "framing",
+        "camera",
+        "lighting",
+    )
+    change_terms = (
+        "改",
+        "换",
+        "替换",
+        "更换",
+        "重新",
+        "另一",
+        "另一个",
+        "新的",
+        "不同",
+        "避免重复",
+        "重复",
+        "change",
+        "replace",
+        "switch",
+        "rewrite",
+        "new",
+        "different",
+        "avoid repetition",
+        "repetition",
+    )
+    return any(term in text for term in scene_terms) and any(
+        term in text for term in change_terms
+    )
+
+
+def _showcase_preflight_timeout_seconds(
+    *, scene_planner: str, shot_count: int
+) -> float:
+    raw_timeout = os.environ.get(_SHOWCASE_PREFLIGHT_TIMEOUT_ENV)
+    if raw_timeout:
+        try:
+            return max(1.0, float(raw_timeout))
+        except (TypeError, ValueError):
+            logger.warning(
+                "invalid %s=%r; using dynamic default",
+                _SHOWCASE_PREFLIGHT_TIMEOUT_ENV,
+                raw_timeout,
+            )
+    if scene_planner != "gpt55_preflight":
+        return _SHOWCASE_PREFLIGHT_BASE_TIMEOUT_SEC
+    return max(
+        _SHOWCASE_PREFLIGHT_GPT_MIN_TIMEOUT_SEC,
+        _SHOWCASE_PREFLIGHT_BASE_TIMEOUT_SEC
+        + max(1, shot_count) * _SHOWCASE_PREFLIGHT_GPT_PER_SHOT_TIMEOUT_SEC,
+    )
+
+
+def _showcase_gpt_parallelism(
+    shot_count: int,
+    *,
+    provider_order: list[Any] | None = None,
+) -> int:
+    if provider_order is None:
+        return 1
+    raw_parallelism = os.environ.get(_SHOWCASE_GPT_PARALLELISM_ENV)
+    if raw_parallelism:
+        try:
+            configured = int(raw_parallelism)
+        except (TypeError, ValueError):
+            logger.warning(
+                "invalid %s=%r; using default",
+                _SHOWCASE_GPT_PARALLELISM_ENV,
+                raw_parallelism,
+            )
+        else:
+            return max(1, min(16, configured, max(1, shot_count)))
+    return max(1, min(_SHOWCASE_GPT_DEFAULT_PARALLELISM, max(1, shot_count)))
+
+
 async def _prepare_showcase_preflight_impl(
     *,
     db: AsyncSession,
@@ -3808,7 +3946,10 @@ async def _prepare_showcase_preflight_impl(
         "scene_strategy": scene_strategy,
         "scene_variety": scene_variety,
     }
-    gpt_parallelism = 1 if provider_order is None else min(4, max(1, len(shot_picks)))
+    gpt_parallelism = _showcase_gpt_parallelism(
+        len(shot_picks),
+        provider_order=provider_order,
+    )
     gpt_semaphore = asyncio.Semaphore(gpt_parallelism)
 
     async def prepare_one_prompt(
@@ -3943,7 +4084,18 @@ async def _prepare_showcase_preflight_impl(
                     final_prompt = rewritten_prompt
                     review = rewritten_review
                 else:
-                    safe_prompt = _showcase_prompt(
+                    guarded_source = rewritten
+                    guarded_brief = rewritten_brief or _composition_shooting_brief(
+                        composition
+                    )
+                    guarded_brief = _guarded_shooting_brief(
+                        guarded_brief,
+                        rewrite_instruction=str(
+                            rewritten_review.get("rewrite_instruction")
+                            or rewrite_instruction
+                        ),
+                    )
+                    guarded_prompt = _showcase_prompt(
                         product_analysis=product_analysis,
                         selected_candidate=selected_candidate,
                         accessory_plan=accessory_plan,
@@ -3955,26 +4107,33 @@ async def _prepare_showcase_preflight_impl(
                         user_prompt=user_prompt,
                         aspect_ratio=aspect_ratio,
                         scene_environment=scene_environment,
-                        scene_card=scene_card,
+                        scene_card=None,
                         garment_lock=garment_lock,
+                        composed_prompt=guarded_brief,
                         allow_pet=allow_pet,
                         allow_background_people=allow_background_people,
                     )
-                    composition = _fallback_prompt_composition(
-                        base_prompt=safe_prompt,
-                        scene_card=scene_card,
-                        reason="rewrite_still_risky; using scene-card safe prompt",
-                    )
-                    review = {
-                        **rewritten_review,
-                        "risk_level": "low",
-                        "must_rewrite": False,
-                        "safe_fallback": True,
+                    composition = {
+                        **guarded_source,
+                        "status": "guarded",
+                        "shooting_brief": guarded_brief,
+                        "final_prompt": guarded_brief,
+                        "risk_guard_applied": True,
                         "fallback_reason": (
-                            "rewrite_still_risky; using scene-card safe prompt"
+                            "rewrite_still_risky; kept composer with safety guard"
                         ),
                     }
-                    final_prompt = safe_prompt
+                    review = {
+                        **rewritten_review,
+                        "risk_level": "medium",
+                        "must_rewrite": False,
+                        "safe_fallback": False,
+                        "guarded_composer": True,
+                        "fallback_reason": (
+                            "rewrite_still_risky; kept composer with safety guard"
+                        ),
+                    }
+                    final_prompt = guarded_prompt
 
         return (
             {
@@ -4016,22 +4175,37 @@ async def _prepare_showcase_preflight_impl(
 
 
 async def _prepare_showcase_preflight(**kwargs: Any) -> dict[str, Any]:
-    try:
-        timeout_seconds = float(
-            os.environ.get("LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC", "240")
-        )
-    except (TypeError, ValueError):
-        timeout_seconds = 240.0
+    scene_planner = str(kwargs.get("scene_planner") or "")
+    shot_count = len(kwargs.get("shot_picks") or []) or 1
+    timeout_seconds = _showcase_preflight_timeout_seconds(
+        scene_planner=scene_planner,
+        shot_count=shot_count,
+    )
     try:
         return await asyncio.wait_for(
             _prepare_showcase_preflight_impl(**kwargs),
             timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
-        logger.warning("apparel preflight timed out; falling back to rules planning")
-        return await _prepare_showcase_preflight_impl(
+        logger.warning(
+            "apparel preflight timed out after %.1fs; falling back to rules planning",
+            timeout_seconds,
+        )
+        fallback = await _prepare_showcase_preflight_impl(
             **{**kwargs, "scene_planner": "rules_fallback"}
         )
+        planning = dict(fallback.get("planning") or {})
+        planning.update(
+            {
+                "planner": "rules_fallback",
+                "requested_planner": scene_planner or None,
+                "fallback_reason": f"preflight_timeout_after_{timeout_seconds:g}s",
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        fallback["planning"] = planning
+        fallback["preflight_timed_out"] = True
+        return fallback
 
 
 def _revision_prompt(
@@ -4914,16 +5088,25 @@ async def _sync_workflow_outputs(
             for generation in generations
             if generation.status == GenerationStatus.FAILED.value
         ]
+        canceled = [
+            generation
+            for generation in generations
+            if generation.status == GenerationStatus.CANCELED.value
+        ]
+        terminal_problems = [*failed, *canceled]
         has_enough_output_images = len(image_ids) >= expected
         if showcase_step.status in {"running", "failed"} and has_enough_output_images:
             showcase_step.status = "completed"
-            if failed:
+            if terminal_problems:
                 output_json = dict(showcase_step.output_json or {})
-                output_json["failed_generation_ids"] = [g.id for g in failed]
+                if failed:
+                    output_json["failed_generation_ids"] = [g.id for g in failed]
+                if canceled:
+                    output_json["canceled_generation_ids"] = [g.id for g in canceled]
                 output_json["succeeded_generation_ids"] = [g.id for g in succeeded]
                 output_json["error_message"] = _task_error_summary(
-                    failed,
-                    "部分展示图生成失败",
+                    terminal_problems,
+                    "部分展示图生成失败或取消",
                 )
                 output_json["recovered_by_bonus_images"] = True
                 showcase_step.output_json = output_json
@@ -4939,16 +5122,20 @@ async def _sync_workflow_outputs(
             else:
                 run.current_step = "showcase_generation"
             run.status = "needs_review"
-        elif showcase_step.status == "running" and failed and not active:
+        elif showcase_step.status == "running" and terminal_problems and not active:
             showcase_step.status = "failed"
-            showcase_step.output_json = {
-                "failed_generation_ids": [g.id for g in failed],
+            output_json = {
                 "succeeded_generation_ids": [g.id for g in succeeded],
                 "error_message": _task_error_summary(
-                    failed,
-                    "展示图生成失败",
+                    terminal_problems,
+                    "展示图生成失败或取消",
                 ),
             }
+            if failed:
+                output_json["failed_generation_ids"] = [g.id for g in failed]
+            if canceled:
+                output_json["canceled_generation_ids"] = [g.id for g in canceled]
+            showcase_step.output_json = output_json
             run.status = "failed"
         elif showcase_step.status == "completed" and quality_step:
             quality_step.image_ids = image_ids
@@ -5320,19 +5507,11 @@ async def _build_run_out(db: AsyncSession, run: WorkflowRun) -> WorkflowRunOut:
 
     generations: list[Generation] = []
     if all_task_ids:
-        generations = list(
-            (
-                await db.execute(
-                    select(Generation)
-                    .where(
-                        Generation.id.in_(all_task_ids),
-                        Generation.user_id == run.user_id,
-                    )
-                    .order_by(Generation.created_at.asc(), Generation.id.asc())
-                )
-            )
-            .scalars()
-            .all()
+        generations = await _workflow_generation_rows_from_task_ids(
+            db,
+            user_id=run.user_id,
+            task_ids=list(all_task_ids),
+            include_dual_bonus=True,
         )
     if all_task_ids:
         owned_images = list(
@@ -6582,6 +6761,7 @@ def _showcase_request_input_json(
     ref_ids: list[str],
     existing_image_ids: list[str],
     preflight_status: str,
+    active_task_ids: list[str] | None = None,
     preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scene_cards = list((preflight or {}).get("scene_cards") or [])
@@ -6607,6 +6787,9 @@ def _showcase_request_input_json(
         "generation_request_id": request_id,
         "preflight_status": preflight_status,
         "planner_version": "apparel-gpt55-preflight-v1",
+        "active_task_ids": active_task_ids or [],
+        "active_output_count": body.output_count,
+        "baseline_image_count": len(_dedupe_nonempty(existing_image_ids)),
         "target_image_count": _showcase_target_image_count(
             existing_image_ids=existing_image_ids,
             output_count=body.output_count,
@@ -6626,6 +6809,7 @@ def _showcase_request_input_json(
                 ],
                 "per_image_prompts": preflight.get("per_image_prompts") or [],
                 "prompt_reviews": preflight.get("prompt_reviews") or [],
+                "preflight_timed_out": bool(preflight.get("preflight_timed_out")),
                 "gpt55_reference_image_labels": preflight.get(
                     "gpt55_reference_image_labels"
                 )
@@ -6645,6 +6829,7 @@ def _showcase_request_input_json(
                 "scene_fingerprints": [],
                 "per_image_prompts": [],
                 "prompt_reviews": [],
+                "preflight_timed_out": False,
             }
         )
     return payload
@@ -6984,6 +7169,7 @@ async def _dispatch_showcase_images_generation(
             ref_ids=context["ref_ids"],
             existing_image_ids=existing_image_ids,
             preflight_status="dispatched",
+            active_task_ids=task_ids,
             preflight=preflight,
         ),
         **({"preflight_started_at": started_at} if started_at else {}),
@@ -7164,6 +7350,14 @@ async def revise_showcase_image(
     )
     showcase.task_ids = [*(showcase.task_ids or []), *gen_ids]
     showcase.status = "running"
+    showcase.input_json = {
+        **(showcase.input_json or {}),
+        "active_task_ids": gen_ids,
+        "active_output_count": len(gen_ids) or 1,
+        "active_task_kind": "revision",
+        "baseline_image_count": len(_dedupe_nonempty(showcase.image_ids or [])),
+        "preflight_status": "dispatched",
+    }
     quality = await _step(db, run.id, "quality_review")
     quality.status = "waiting_input"
     quality.input_json = {
