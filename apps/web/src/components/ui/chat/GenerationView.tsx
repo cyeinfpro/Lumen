@@ -73,8 +73,11 @@ export function GenerationView({
     gen.error_code && hasErrorMessage(gen.error_code)
       ? getErrorMessage(gen.error_code)
       : gen.error_code
-        ? (errorCodeToMessage(gen.error_code) ?? gen.error_message ?? "未知错误")
-        : (gen.error_message ?? "未知错误");
+        ? (errorCodeToMessage(gen.error_code) ??
+            gen.diagnostics?.safe_error_summary ??
+            gen.error_message ??
+            "未知错误")
+        : (gen.diagnostics?.safe_error_summary ?? gen.error_message ?? "未知错误");
 
   if (gen.status === "queued" || gen.status === "running") {
     return (

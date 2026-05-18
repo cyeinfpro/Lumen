@@ -56,7 +56,8 @@ export const TaskItem = memo(function TaskItem({
   // 状态文字
   let statusText: string;
   if (failed) {
-    statusText = gen.error_message ?? "生成失败";
+    statusText =
+      gen.diagnostics?.safe_error_summary ?? gen.error_message ?? "生成失败";
   } else if (canceled) {
     statusText = "已取消";
   } else if (succeeded) {

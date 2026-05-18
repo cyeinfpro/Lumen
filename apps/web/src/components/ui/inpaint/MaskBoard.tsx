@@ -18,7 +18,7 @@
 //
 // 已知 V1 边界：撤销栈仅维护本次会话；二次 mount 是空白画布。
 
-import { Eraser, Loader2, Paintbrush, RotateCcw, Undo2 } from "lucide-react";
+import { Eraser, Loader2, Paintbrush, RotateCcw, Scan, Undo2 } from "lucide-react";
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -31,7 +31,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Image as KonvaImage, Layer, Line, Stage } from "react-konva";
+import { Group, Image as KonvaImage, Layer, Line, Stage } from "react-konva";
 import type Konva from "konva";
 
 import { Button, IconButton } from "@/components/ui/primitives";
@@ -50,6 +50,9 @@ const STROKE_MIN_DELTA_SQ = 1.44; // 1.2px 平方；同笔内距离过近的点�
 const COVERAGE_SAMPLE_STRIDE = 3; // 每 3x3 取 1 个像素（仅 liveCoverage 使用）
 const IMAGE_RETRY_DELAYS = [120, 320, 1000] as const;
 const STROKES_DEBOUNCE_MS = 380; // onStrokesChange 去抖：避免逐点触发存储
+const MIN_VIEW_SCALE = 1;
+const MAX_VIEW_SCALE = 6;
+const PINCH_MIN_DISTANCE = 8;
 
 // 数字键 1-9 → 画笔预设大小
 const BRUSH_PRESETS: Record<string, number> = {
@@ -102,6 +105,23 @@ interface MaskBoardProps {
   style?: CSSProperties;
 }
 
+interface StagePoint {
+  x: number;
+  y: number;
+}
+
+interface ViewTransform {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+interface PinchGesture {
+  startDistance: number;
+  startLocalCenter: StagePoint;
+  startView: ViewTransform;
+}
+
 function isTouchDevice(): boolean {
   if (typeof window === "undefined") return false;
   return "ontouchstart" in window || (navigator.maxTouchPoints ?? 0) > 0;
@@ -109,6 +129,53 @@ function isTouchDevice(): boolean {
 
 function clampBrush(v: number): number {
   return Math.max(MIN_BRUSH, Math.min(MAX_BRUSH, Math.round(v)));
+}
+
+function defaultViewTransform(): ViewTransform {
+  return { x: 0, y: 0, scale: 1 };
+}
+
+function clampPoint(point: StagePoint, width: number, height: number): StagePoint {
+  return {
+    x: Math.max(0, Math.min(width, point.x)),
+    y: Math.max(0, Math.min(height, point.y)),
+  };
+}
+
+function distance(a: StagePoint, b: StagePoint): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function midpoint(a: StagePoint, b: StagePoint): StagePoint {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function clampViewTransform(
+  view: ViewTransform,
+  width: number,
+  height: number,
+): ViewTransform {
+  if (!width || !height) return defaultViewTransform();
+  const scale = Math.max(MIN_VIEW_SCALE, Math.min(MAX_VIEW_SCALE, view.scale));
+  const minX = Math.min(0, width - width * scale);
+  const minY = Math.min(0, height - height * scale);
+  return {
+    scale,
+    x: Math.max(minX, Math.min(0, view.x)),
+    y: Math.max(minY, Math.min(0, view.y)),
+  };
+}
+
+function pointFromPointerEvent(
+  event: PointerEvent,
+  stage: Konva.Stage | null,
+): StagePoint | null {
+  const rect = stage?.container().getBoundingClientRect();
+  if (!rect) return null;
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
 }
 
 // 估算 imgEl 的平均亮度，用于决定 mask 颜色（暗图用 cyan，亮图用 red）。
@@ -176,7 +243,15 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
     } | null>(null);
     const [imgFadeIn, setImgFadeIn] = useState(false);
     const [luminance, setLuminance] = useState<number>(0.6);
+    const [view, setView] = useState<ViewTransform>(() =>
+      defaultViewTransform(),
+    );
+    const viewRef = useRef<ViewTransform>(view);
     const drawingRef = useRef(false);
+    const touchStrokeStartedRef = useRef(false);
+    const activeTouchPointsRef = useRef<Map<number, StagePoint>>(new Map());
+    const pinchGestureRef = useRef<PinchGesture | null>(null);
+    const suppressTouchDrawRef = useRef(false);
     const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // React 19：imageSrc 变更时 prev-check 同步 reset state，不在 effect 里 setState。
@@ -189,7 +264,12 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
       setImgFadeIn(false);
       setStrokes(initialStrokes ?? []);
       setRetryAttempt(0);
+      setView(defaultViewTransform());
     }
+
+    useEffect(() => {
+      viewRef.current = view;
+    }, [view]);
 
     // ———— 加载原图（含 3 次退避重试） ————
     // effect 跑在 [imageSrc, retryAttempt] 上：onerror 失败时 setRetryAttempt+1 触发重新加载。
@@ -275,7 +355,26 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
       };
     }, [imgEl, containerDims]);
 
+    const displayKey = `${displayDims.width}x${displayDims.height}`;
+    const [prevDisplayKey, setPrevDisplayKey] = useState(displayKey);
+    if (prevDisplayKey !== displayKey) {
+      setPrevDisplayKey(displayKey);
+      setView(defaultViewTransform());
+    }
+
+    useEffect(() => {
+      drawingRef.current = false;
+      activeTouchPointsRef.current.clear();
+      pinchGestureRef.current = null;
+      suppressTouchDrawRef.current = false;
+      touchStrokeStartedRef.current = false;
+    }, [displayKey, imageSrc]);
+
     const hasStroke = strokes.length > 0;
+    const viewIsFit =
+      Math.abs(view.scale - 1) < 0.001 &&
+      Math.abs(view.x) < 0.5 &&
+      Math.abs(view.y) < 0.5;
 
     // ———— 全局快捷键 ————
     // B/E 切工具，Z 撤销，[/] 调大小，1-9 预设大小
@@ -339,6 +438,90 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
       return () => clearTimeout(id);
     }, [strokes, onStrokesChange]);
 
+    const imagePointFromStagePoint = useCallback(
+      (point: StagePoint): StagePoint => {
+        const current = viewRef.current;
+        const local = {
+          x: (point.x - current.x) / current.scale,
+          y: (point.y - current.y) / current.scale,
+        };
+        return clampPoint(local, displayDims.width, displayDims.height);
+      },
+      [displayDims.height, displayDims.width],
+    );
+
+    const stagePointFromImagePoint = useCallback((point: StagePoint): StagePoint => {
+      const current = viewRef.current;
+      return {
+        x: point.x * current.scale + current.x,
+        y: point.y * current.scale + current.y,
+      };
+    }, []);
+
+    const cancelTouchStrokeForGesture = useCallback(() => {
+      drawingRef.current = false;
+      setCursor(null);
+      if (!touchStrokeStartedRef.current) return;
+      setStrokes((prev) => {
+        const last = prev[prev.length - 1];
+        if (!last || last.points.length > 2) return prev;
+        return prev.slice(0, -1);
+      });
+      touchStrokeStartedRef.current = false;
+    }, []);
+
+    const updatePinchGesture = useCallback(() => {
+      const points = Array.from(activeTouchPointsRef.current.values());
+      if (points.length < 2) return;
+      const a = points[0];
+      const b = points[1];
+      const nextDistance = distance(a, b);
+      if (nextDistance < PINCH_MIN_DISTANCE) return;
+      const nextCenter = midpoint(a, b);
+      let gesture = pinchGestureRef.current;
+      if (!gesture) {
+        const startView = viewRef.current;
+        gesture = {
+          startDistance: nextDistance,
+          startLocalCenter: {
+            x: (nextCenter.x - startView.x) / startView.scale,
+            y: (nextCenter.y - startView.y) / startView.scale,
+          },
+          startView,
+        };
+        pinchGestureRef.current = gesture;
+      }
+      const nextScale = Math.max(
+        MIN_VIEW_SCALE,
+        Math.min(
+          MAX_VIEW_SCALE,
+          gesture.startView.scale * (nextDistance / gesture.startDistance),
+        ),
+      );
+      setView(
+        clampViewTransform(
+          {
+            scale: nextScale,
+            x: nextCenter.x - gesture.startLocalCenter.x * nextScale,
+            y: nextCenter.y - gesture.startLocalCenter.y * nextScale,
+          },
+          displayDims.width,
+          displayDims.height,
+        ),
+      );
+    }, [displayDims.height, displayDims.width]);
+
+    const finishTouchPointer = useCallback((pointerId: number) => {
+      activeTouchPointsRef.current.delete(pointerId);
+      if (activeTouchPointsRef.current.size < 2) {
+        pinchGestureRef.current = null;
+      }
+      if (activeTouchPointsRef.current.size === 0) {
+        suppressTouchDrawRef.current = false;
+        touchStrokeStartedRef.current = false;
+      }
+    }, []);
+
     // ———— 笔画事件 ————
     // pen 启用笔压感：radius = brushSize * (0.4 + pressure * 0.6)，0.4..1x 之间
     // mouse / touch 设备 pressure 不可信，固定 1x
@@ -346,12 +529,34 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
       (e: Konva.KonvaEventObject<PointerEvent>) => {
         if (disabled) return;
         const stage = e.target.getStage();
-        const pos = stage?.getPointerPosition();
-        if (!pos) return;
         const native = e.evt as PointerEvent;
+        const stagePoint = pointFromPointerEvent(native, stageRef.current);
+        if (native.pointerType === "touch" && stagePoint) {
+          native.preventDefault();
+          activeTouchPointsRef.current.set(native.pointerId, stagePoint);
+          if (activeTouchPointsRef.current.size >= 2) {
+            suppressTouchDrawRef.current = true;
+            cancelTouchStrokeForGesture();
+            updatePinchGesture();
+            return;
+          }
+          if (suppressTouchDrawRef.current) return;
+        }
+        const pointer = stagePoint ?? stage?.getPointerPosition();
+        if (!pointer) return;
+        const pos = imagePointFromStagePoint(pointer);
+        if (
+          pos.x < 0 ||
+          pos.y < 0 ||
+          pos.x > displayDims.width ||
+          pos.y > displayDims.height
+        ) {
+          return;
+        }
         // 仅主键 / 触摸 / 笔触发笔画；忽略右键
         if (native.button !== undefined && native.button > 0) return;
         drawingRef.current = true;
+        touchStrokeStartedRef.current = native.pointerType === "touch";
         const isPen = native.pointerType === "pen";
         const pressure =
           typeof native.pressure === "number" ? native.pressure : 0;
@@ -366,20 +571,46 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
           { tool, radius: effectiveRadius, points: [pos.x, pos.y] },
         ]);
       },
-      [tool, brushSize, disabled],
+      [
+        brushSize,
+        cancelTouchStrokeForGesture,
+        disabled,
+        displayDims.height,
+        displayDims.width,
+        imagePointFromStagePoint,
+        tool,
+        updatePinchGesture,
+      ],
     );
 
     const handlePointerMove = useCallback(
       (e: Konva.KonvaEventObject<PointerEvent>) => {
         if (disabled) return;
         const stage = e.target.getStage();
-        const pos = stage?.getPointerPosition();
-        if (!pos) return;
         const native = e.evt as PointerEvent;
+        const stagePoint = pointFromPointerEvent(native, stageRef.current);
+        if (native.pointerType === "touch" && stagePoint) {
+          native.preventDefault();
+          activeTouchPointsRef.current.set(native.pointerId, stagePoint);
+          if (
+            activeTouchPointsRef.current.size >= 2 ||
+            pinchGestureRef.current
+          ) {
+            suppressTouchDrawRef.current = true;
+            cancelTouchStrokeForGesture();
+            updatePinchGesture();
+            return;
+          }
+          if (suppressTouchDrawRef.current) return;
+        }
+        const pointer = stagePoint ?? stage?.getPointerPosition();
+        if (!pointer) return;
+        const pos = imagePointFromStagePoint(pointer);
         const pt =
           (native.pointerType as "mouse" | "pen" | "touch" | undefined) ??
           "mouse";
-        setCursor({ x: pos.x, y: pos.y, pointerType: pt });
+        const cursorPoint = stagePointFromImagePoint(pos);
+        setCursor({ x: cursorPoint.x, y: cursorPoint.y, pointerType: pt });
         if (!drawingRef.current) return;
         // stroke 抽稀：与上一点距离 < 1.2px 时不 push
         setStrokes((prev) => {
@@ -397,17 +628,33 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
           return [...prev.slice(0, -1), next];
         });
       },
-      [disabled],
+      [
+        cancelTouchStrokeForGesture,
+        disabled,
+        imagePointFromStagePoint,
+        stagePointFromImagePoint,
+        updatePinchGesture,
+      ],
     );
 
-    const handlePointerUp = useCallback(() => {
+    const handlePointerUp = useCallback((e: Konva.KonvaEventObject<PointerEvent>) => {
+      const native = e.evt as PointerEvent;
+      if (native.pointerType === "touch") {
+        finishTouchPointer(native.pointerId);
+      }
       drawingRef.current = false;
-    }, []);
+      touchStrokeStartedRef.current = false;
+    }, [finishTouchPointer]);
 
-    const handlePointerLeave = useCallback(() => {
+    const handlePointerLeave = useCallback((e: Konva.KonvaEventObject<PointerEvent>) => {
+      const native = e.evt as PointerEvent;
+      if (native.pointerType === "touch") {
+        finishTouchPointer(native.pointerId);
+        return;
+      }
       drawingRef.current = false;
       setCursor(null);
-    }, []);
+    }, [finishTouchPointer]);
 
     const handleUndo = useCallback(() => {
       setStrokes((prev) => prev.slice(0, -1));
@@ -415,6 +662,15 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
 
     const handleReset = useCallback(() => {
       setStrokes([]);
+    }, []);
+
+    const handleFitView = useCallback(() => {
+      activeTouchPointsRef.current.clear();
+      pinchGestureRef.current = null;
+      suppressTouchDrawRef.current = false;
+      touchStrokeStartedRef.current = false;
+      drawingRef.current = false;
+      setView(defaultViewTransform());
     }, []);
 
     // 画板上的滚轮：调画笔大小，吃掉默认页面滚动
@@ -640,31 +896,46 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                   onPointerLeave={handlePointerLeave}
+                  onPointerCancel={handlePointerUp}
                 >
                   <Layer listening={false}>
-                    <KonvaImage
-                      image={imgEl}
-                      width={displayDims.width}
-                      height={displayDims.height}
-                    />
+                    <Group
+                      x={view.x}
+                      y={view.y}
+                      scaleX={view.scale}
+                      scaleY={view.scale}
+                    >
+                      <KonvaImage
+                        image={imgEl}
+                        width={displayDims.width}
+                        height={displayDims.height}
+                      />
+                    </Group>
                   </Layer>
                   <Layer listening={false}>
-                    {strokes.map((s, i) => (
-                      <Line
-                        key={i}
-                        points={s.points}
-                        stroke={overlayColor}
-                        strokeWidth={s.radius * 2}
-                        tension={0}
-                        lineCap="round"
-                        lineJoin="round"
-                        globalCompositeOperation={
-                          s.tool === "brush"
-                            ? "source-over"
-                            : "destination-out"
-                        }
-                      />
-                    ))}
+                    <Group
+                      x={view.x}
+                      y={view.y}
+                      scaleX={view.scale}
+                      scaleY={view.scale}
+                    >
+                      {strokes.map((s, i) => (
+                        <Line
+                          key={i}
+                          points={s.points}
+                          stroke={overlayColor}
+                          strokeWidth={s.radius * 2}
+                          tension={0}
+                          lineCap="round"
+                          lineJoin="round"
+                          globalCompositeOperation={
+                            s.tool === "brush"
+                              ? "source-over"
+                              : "destination-out"
+                          }
+                        />
+                      ))}
+                    </Group>
                   </Layer>
                 </Stage>
 
@@ -676,10 +947,10 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
                       aria-hidden
                       className="pointer-events-none absolute"
                       style={{
-                        left: cursor.x - brushSize,
-                        top: cursor.y - brushSize,
-                        width: brushSize * 2,
-                        height: brushSize * 2,
+                        left: cursor.x - brushSize * view.scale,
+                        top: cursor.y - brushSize * view.scale,
+                        width: brushSize * 2 * view.scale,
+                        height: brushSize * 2 * view.scale,
                         borderRadius: "50%",
                         border: `1.5px solid ${cursorStroke}`,
                         background:
@@ -703,6 +974,17 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
             disabled={disabled}
             isDarkBg={isDarkBg}
           />
+
+          <IconButton
+            variant="ghost"
+            onClick={handleFitView}
+            disabled={!imgEl || viewIsFit}
+            aria-label="适应画布"
+            tooltip={`适应画布 (${Math.round(view.scale * 100)}%)`}
+            className="rounded-full"
+          >
+            <Scan className="w-4 h-4" />
+          </IconButton>
 
           <IconButton
             variant="ghost"

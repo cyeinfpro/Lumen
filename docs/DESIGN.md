@@ -490,7 +490,7 @@ users ─┬─< conversations ─< messages ─┬─< completions   (文本回
 {
   "idempotency_key": "uuid-client-generated",
   "text": "根据这张草图，先说你看到了什么，再画一个更精致的版本",
-  "attachment_image_ids": ["uuid1"],       // 可空；有图不代表一定出图
+  "attachment_image_ids": ["uuid1"],       // 可空；最多 16 张参考图；有图不代表一定出图
 
   "intent": "auto" | "chat" | "vision_qa" | "text_to_image" | "image_to_image",
   // auto = 由后端意图路由推断（见 §22）
@@ -1023,7 +1023,7 @@ Inside the masked region, {user_intent}. Preserve everything outside the mask ex
 - **职责**：用户输入区，粘合「文本 + 参考图 + 参数」为一次提交
 - **Props/State**：`conversationId`、`defaultParams`、`onSubmit`
 - **子件**：
-  - `AttachmentTray`：已经附加的参考图缩略图 + ×
+  - `AttachmentTray`：已经附加的参考图缩略图 + ×；常规生图/视觉问答最多 16 张参考图
   - `AspectRatioPicker`：弹出小面板，预设 + 自定义；**下方实时预览「将发送尺寸：1664×944 auto」**
   - `StylePresetMenu`：风格预设（扁平插画 / 纪实摄影 / 水墨 / 3D 渲染 / ...）注入到 prompt 末尾
   - `AdvancedDrawer`：种子（UI 提供但标灰"网关不保证"）、system prompt、负面提示
@@ -1031,6 +1031,8 @@ Inside the masked region, {user_intent}. Preserve everything outside the mask ex
   - `⌘/Ctrl + Enter` 发送；`Enter` 换行
   - 粘贴图片自动成为参考图
   - 拖拽文件到编辑器 → 参考图
+- **多参考图上限**：普通生图/视觉问答最多 16 张参考图；依据是 OpenAI [Images edit API](https://platform.openai.com/docs/api-reference/images/createEdit) 对 GPT image models 的 16 张输入图上限，以及 [gpt-image-2 model card](https://developers.openai.com/api/docs/models/gpt-image-2) 对 `v1/images/edits` 的支持。
+- **局部修改约束**：带 `mask_image_id` 的 inpaint 请求仍只允许 1 张主参考图，mask 始终绑定该图。
 - **错误态**：上游 rate limit 时禁用 send + 显示预计可重试时间（不做购买 CTA）
 
 ### 12.2 `ConversationCanvas` + `MessageBubble`

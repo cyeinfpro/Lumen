@@ -12,10 +12,12 @@ from enum import StrEnum
 MAX_PROMPT_CHARS = 10_000
 
 # 单条消息最多携带的参考图数量。前端 Composer、API schema 和 worker 入参共用。
-MAX_MESSAGE_ATTACHMENTS = 4
+# 对齐 gpt-image-2 多参考图能力；局部 inpaint 仍要求单参考图 + mask。
+MAX_MESSAGE_ATTACHMENTS = 16
 
 
 # --- intent / messages ---
+
 
 class Intent(StrEnum):
     CHAT = "chat"
@@ -40,6 +42,7 @@ class MessageStatus(StrEnum):
 
 
 # --- tasks ---
+
 
 class GenerationStatus(StrEnum):
     QUEUED = "queued"
@@ -148,7 +151,9 @@ class GenerationErrorCode(StrEnum):
     PROVIDER_EXHAUSTED = "provider_exhausted"
     NETWORK_TRANSIENT = "network_transient"
     NO_PROVIDERS = "no_providers"
-    NO_MASK_CAPABLE_PROVIDER = "no_mask_capable_provider"  # inpaint 任务无 file 模式 provider
+    NO_MASK_CAPABLE_PROVIDER = (
+        "no_mask_capable_provider"  # inpaint 任务无 file 模式 provider
+    )
     ALL_DIRECT_IMAGE_PROVIDERS_FAILED = "all_direct_image_providers_failed"
     REFERENCE_TIMEOUT = "reference_timeout"
     SHA_ECHO = "sha_echo"
@@ -169,7 +174,9 @@ class GenerationErrorCode(StrEnum):
     UPSTREAM_RATE_LIMITED = "upstream_rate_limited"  # 上游 429
     UPSTREAM_SERVER_ERROR = "upstream_server_error"  # 上游 5xx
     UPSTREAM_AUTH_ERROR = "upstream_auth_error"  # 上游 401/403
-    UPSTREAM_CANCELLED = "upstream_cancelled"  # 用户主动取消（区分 worker 内部 CANCELLED）
+    UPSTREAM_CANCELLED = (
+        "upstream_cancelled"  # 用户主动取消（区分 worker 内部 CANCELLED）
+    )
     UPSTREAM_NETWORK_ERROR = "upstream_network_error"  # 连接失败 / DNS / TLS
     UPSTREAM_PAYLOAD_TOO_LARGE = "upstream_payload_too_large"  # 上游 413（罕见但要兜）
     UPSTREAM_CONTEXT_TOO_LONG = "upstream_context_too_long"  # context_length_exceeded
@@ -220,12 +227,15 @@ QUEUE_COMPLETIONS = "queue:completions"
 # SSE 回放 stream（每用户）：events:user:{uid}，MAXLEN≈24h
 EVENTS_STREAM_PREFIX = "events:user:"
 
+
 # PubSub 通道（实时推送）
 def task_channel(task_id: str) -> str:
     return f"task:{task_id}"
 
+
 def user_channel(user_id: str) -> str:
     return f"user:{user_id}"
+
 
 def conv_channel(conv_id: str) -> str:
     return f"conv:{conv_id}"

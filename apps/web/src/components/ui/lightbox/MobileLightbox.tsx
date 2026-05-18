@@ -48,6 +48,7 @@ import {
 import { flushSync } from "react-dom";
 
 import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { DURATION, EASE, SPRING } from "@/lib/motion";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
@@ -270,24 +271,7 @@ function triggerAnchorDownload(
 }
 
 async function writeClipboardText(text: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    const ok = document.execCommand("copy");
-    if (!ok) throw new Error("copy command failed");
-  } finally {
-    document.body.removeChild(textarea);
-  }
+  await copyTextToClipboard(text);
 }
 
 export function MobileLightbox() {

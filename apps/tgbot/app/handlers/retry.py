@@ -10,6 +10,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
+from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
 
 from ..api_client import ApiError, LumenApi, make_idempotency_key
 from ..tracker import TaskTrack, tracker
@@ -44,9 +45,7 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
         # 种子里不要拌 cb.id —— Telegram 每次点同一按钮 cb.id 都不同，会让
         # 服务端 idempotency 去重失效（双击/网络重发都建任务）。用稳定 (chat,
         # gen) 作为种子，重复点击就是同一 key。
-        "idempotency_key": make_idempotency_key(
-            "retry", msg.chat.id, gen_id
-        ),
+        "idempotency_key": make_idempotency_key("retry", msg.chat.id, gen_id),
         "prompt": prompt,
         "aspect_ratio": gen.get("aspect_ratio") or "1:1",
         "render_quality": gen.get("render_quality") or "high",
@@ -54,8 +53,10 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
         "resolution": resolution_from_size(gen.get("size_requested") or ""),
         "output_format": gen.get("output_format") or "jpeg",
         "fast": bool(gen.get("fast", False)),
-        # API 端 max_length=4；老 gen 可能存了 >4 条，截到 4 避免 422
-        "attachment_image_ids": list(gen.get("input_image_ids") or [])[:4],
+        # API 端有参考图数量上限；老 gen 可能存了更多，截断避免 422。
+        "attachment_image_ids": list(gen.get("input_image_ids") or [])[
+            :MAX_MESSAGE_ATTACHMENTS
+        ],
     }
 
     try:

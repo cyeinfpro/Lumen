@@ -1,5 +1,17 @@
 // Lightbox 内部共享类型（CustomEvent 契约 + panel 展示用）。
 
+export type LightboxParamBag = Record<string, unknown>;
+
+export interface LightboxProviderAttempt {
+  provider?: string | null;
+  route?: string | null;
+  endpoint?: string | null;
+  proxy?: string | null;
+  status?: string | null;
+  duration_ms?: number | null;
+  error_summary?: string | null;
+}
+
 export interface LightboxItem {
   id: string;
   /** 下载 / 外链查看用的原始图 URL（通常是 /api/images/{id}/binary）。 */
@@ -16,8 +28,14 @@ export interface LightboxItem {
   height?: number;
   aspect_ratio?: string;
   size_actual?: string;
+  size_requested?: string;
   seed?: string | number;
   quality?: string;
+  render_quality?: string;
+  output_format?: string;
+  output_compression?: number | string | null;
+  background?: string;
+  moderation?: string;
   fast?: boolean;
   /** 生成模型名或模型 id，按调用方已有数据透传展示。 */
   model?: string;
@@ -33,6 +51,35 @@ export interface LightboxItem {
   file_name?: string;
   created_at?: string;
   updated_at?: string;
+  /** 上游返回的改写提示词；兼容未来后端直接透传。 */
+  revised_prompt?: string | null;
+  /** 用户请求参数与实际生效参数；也可能藏在 metadata/upstream_request 里。 */
+  requested_params?: LightboxParamBag | null;
+  request_params?: LightboxParamBag | null;
+  effective_params?: LightboxParamBag | null;
+  actual_params?: LightboxParamBag | null;
+  /** 上游运行痕迹；字段都是可选的，旧数据不返回时静默隐藏。 */
+  provider?: string | null;
+  upstream_provider?: string | null;
+  actual_provider?: string | null;
+  initial_provider?: string | null;
+  first_provider?: string | null;
+  proxy_name?: string | null;
+  proxy_enabled?: boolean | null;
+  duration_ms?: number | null;
+  upstream_duration_ms?: number | null;
+  upstream_duration_seconds?: number | null;
+  elapsed_ms?: number | null;
+  failover?: boolean | null;
+  provider_failover?: boolean | null;
+  failover_count?: number | null;
+  debug_id?: string | null;
+  trace_id?: string | null;
+  request_id?: string | null;
+  provider_attempts?: LightboxProviderAttempt[];
+  safe_error_summary?: string | null;
+  upstream_error_summary?: string | null;
+  error_summary?: string | null;
   metadata?: Record<string, unknown>;
 }
 

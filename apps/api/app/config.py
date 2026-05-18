@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     image_channel: str = Field(default="auto", alias="IMAGE_CHANNEL")
     image_engine: str = Field(default="responses", alias="IMAGE_ENGINE")
     image_job_base_url: str = "https://image-job.example.com"
+    # 与 worker 同名；默认前端/API 只消费脱敏后的 generation diagnostics。
+    expose_provider_diagnostics: bool = False
 
     session_secret: str = ""
     session_ttl_min: int = 60 * 24 * 7  # 7 天
@@ -199,9 +201,13 @@ class Settings(BaseSettings):
             )
         if not is_dev:
             if not smtp_host:
-                raise ValueError("SMTP_HOST must be set outside development for password reset email")
+                raise ValueError(
+                    "SMTP_HOST must be set outside development for password reset email"
+                )
             if not smtp_from:
-                raise ValueError("SMTP_FROM_EMAIL must be set outside development for password reset email")
+                raise ValueError(
+                    "SMTP_FROM_EMAIL must be set outside development for password reset email"
+                )
             secret = self.session_secret.strip()
             if not secret:
                 raise ValueError("SESSION_SECRET must be set outside development")
@@ -211,7 +217,9 @@ class Settings(BaseSettings):
             }:
                 raise ValueError("SESSION_SECRET must be changed outside development")
             if len(secret) < 32:
-                raise ValueError("SESSION_SECRET must be at least 32 characters outside development")
+                raise ValueError(
+                    "SESSION_SECRET must be at least 32 characters outside development"
+                )
             img_secret = self.image_proxy_secret.strip()
             if img_secret and len(img_secret) < 32:
                 raise ValueError(

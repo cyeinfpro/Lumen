@@ -146,9 +146,9 @@ export function DevelopingCard({
           <p className="text-body-sm text-[var(--danger)] font-medium">
             生成失败
           </p>
-          {gen.error_message && (
+          {(gen.diagnostics?.safe_error_summary || gen.error_message) && (
             <p className="text-caption text-[var(--fg-1)] text-center max-w-[90%] break-words [overflow-wrap:anywhere]">
-              {gen.error_message}
+              {gen.diagnostics?.safe_error_summary ?? gen.error_message}
             </p>
           )}
           <button

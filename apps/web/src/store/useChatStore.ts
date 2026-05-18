@@ -19,6 +19,11 @@ import {
   isPromptTooLong,
 } from "@/lib/promptLimits";
 import {
+  findInvalidImageMentionLabels,
+  remapPromptImageMentions,
+  serializePromptImageMentionsForRequest,
+} from "@/lib/promptImageMentions";
+import {
   MAX_UPLOAD_SOURCE_BYTES,
   maxUploadSourceMessage,
   setMaxUploadSourceBytes,
@@ -30,6 +35,8 @@ import type {
   CompletionToolCall,
   Generation,
   GeneratedImage,
+  ImageGenerationDiagnostics,
+  ImageProviderAttempt,
   ImageParams,
   Intent,
   MaskState,
@@ -142,6 +149,7 @@ interface ChatState {
   setImageGeneration: (v: boolean) => void;
   addAttachment: (att: AttachmentImage) => void;
   removeAttachment: (id: string) => void;
+  moveAttachment: (id: string, targetId: string) => void;
   setMask: (mask: MaskState) => void;
   clearMask: () => void;
   clearComposer: () => void;
@@ -513,6 +521,30 @@ function optionalString(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function optionalRecord(value: unknown): Record<string, unknown> | undefined {
+  if (Array.isArray(value)) {
+    logWarn("optional record payload dropped an array", {
+      scope: "chat",
+      code: "optional_record_array",
+      extra: { length: value.length },
+    });
+    return undefined;
+  }
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function optionalRecordArray(value: unknown): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const records = value.filter(
+    (item): item is Record<string, unknown> =>
+      Boolean(item) && typeof item === "object" && !Array.isArray(item),
+  );
+  return records.length > 0 ? records : undefined;
+}
+
 function billingMetaFromPayload(
   payload: {
     is_dual_race_bonus?: unknown;
@@ -543,6 +575,99 @@ function billingMetaFromPayload(
     billing_exempt_reason:
       optionalString(payload.billing_exempt_reason) ??
       optionalString(metadata?.billing_exempt_reason),
+  };
+}
+
+type GenerationExplainabilityMeta = Pick<
+  Generation,
+  | "diagnostics"
+  | "revised_prompt"
+  | "requested_params"
+  | "effective_params"
+  | "provider_attempts"
+>;
+
+function generationExplainabilityFromBackend(
+  generation: BackendGeneration,
+): GenerationExplainabilityMeta {
+  const diagnostics = optionalRecord(
+    generation.diagnostics,
+  ) as ImageGenerationDiagnostics | undefined;
+  const providerAttempts =
+    optionalRecordArray(generation.provider_attempts) ??
+    optionalRecordArray(diagnostics?.provider_attempts);
+  return {
+    diagnostics: diagnostics ?? undefined,
+    revised_prompt:
+      generation.revised_prompt ?? diagnostics?.revised_prompt ?? undefined,
+    requested_params:
+      optionalRecord(generation.requested_params) ??
+      optionalRecord(diagnostics?.requested_params) ??
+      undefined,
+    effective_params:
+      optionalRecord(generation.effective_params) ??
+      optionalRecord(diagnostics?.effective_params) ??
+      undefined,
+    provider_attempts: providerAttempts as ImageProviderAttempt[] | undefined,
+  };
+}
+
+function generationExplainabilityFromPayload(
+  payload: Record<string, unknown>,
+): GenerationExplainabilityMeta {
+  const diagnostics = optionalRecord(payload.diagnostics) as
+    | ImageGenerationDiagnostics
+    | undefined;
+  const providerAttempts =
+    optionalRecordArray(payload.provider_attempts) ??
+    optionalRecordArray(diagnostics?.provider_attempts);
+  return {
+    diagnostics: diagnostics ?? undefined,
+    revised_prompt: optionalString(payload.revised_prompt) ?? diagnostics?.revised_prompt,
+    requested_params:
+      optionalRecord(payload.requested_params) ??
+      optionalRecord(diagnostics?.requested_params) ??
+      undefined,
+    effective_params:
+      optionalRecord(payload.effective_params) ??
+      optionalRecord(diagnostics?.effective_params) ??
+      undefined,
+    provider_attempts: providerAttempts as ImageProviderAttempt[] | undefined,
+  };
+}
+
+function mergeExplainabilityIntoImage(
+  image: GeneratedImage | undefined,
+  meta: GenerationExplainabilityMeta,
+): GeneratedImage | undefined {
+  if (!image) return undefined;
+  const hasMeta =
+    meta.diagnostics ||
+    meta.revised_prompt ||
+    meta.requested_params ||
+    meta.effective_params ||
+    meta.provider_attempts;
+  if (!hasMeta) return image;
+  const metadata = { ...(image.metadata_jsonb ?? {}) };
+  if (meta.diagnostics && metadata.generation_diagnostics == null) {
+    metadata.generation_diagnostics = meta.diagnostics;
+  }
+  if (meta.revised_prompt && metadata.revised_prompt == null) {
+    metadata.revised_prompt = meta.revised_prompt;
+  }
+  if (meta.requested_params && metadata.requested_params == null) {
+    metadata.requested_params = meta.requested_params;
+  }
+  if (meta.effective_params && metadata.effective_params == null) {
+    metadata.effective_params = meta.effective_params;
+  }
+  if (meta.provider_attempts && metadata.provider_attempts == null) {
+    metadata.provider_attempts = meta.provider_attempts;
+  }
+  return {
+    ...image,
+    ...meta,
+    metadata_jsonb: metadata,
   };
 }
 
@@ -1505,6 +1630,14 @@ function buildMessageListState(
         : undefined;
       const existing = existingGens[g.id];
       const generationBillingMeta = billingMetaFromPayload(g);
+      const generationExplainability = generationExplainabilityFromBackend(g);
+      const imageWithExplainability = mergeExplainabilityIntoImage(
+        builtImage ?? existing?.image,
+        generationExplainability,
+      );
+      if (imageWithExplainability) {
+        newImagesById[imageWithExplainability.id] = imageWithExplainability;
+      }
       const merged: Generation = {
         id: g.id,
         message_id: g.message_id,
@@ -1529,7 +1662,7 @@ function buildMessageListState(
           g.progress_stage,
           existing?.stage ?? "finalizing",
         ),
-        image: builtImage ?? existing?.image,
+        image: imageWithExplainability ?? existing?.image,
         error_code: g.error_code ?? undefined,
         error_message: g.error_message ?? undefined,
         attempt:
@@ -1538,6 +1671,7 @@ function buildMessageListState(
             : (existing?.attempt ?? 0),
         started_at: isoToMs(g.started_at),
         finished_at: g.finished_at ? isoToMs(g.finished_at) : undefined,
+        ...generationExplainability,
         ...generationBillingMeta,
       };
       const useExisting =
@@ -1805,28 +1939,35 @@ function createChatStore() {
       set((s) => ({ composer: { ...s.composer, imageGeneration: v } })),
     addAttachment: (att) =>
       set((s) => {
-        if (s.composer.attachments.some((a) => a.id === att.id)) return s;
-        if (s.composer.attachments.length >= MAX_COMPOSER_ATTACHMENTS) {
+        const previousAttachments = s.composer.attachments;
+        if (previousAttachments.some((a) => a.id === att.id)) return s;
+        if (previousAttachments.length >= MAX_COMPOSER_ATTACHMENTS) {
           return {
             composerError: `最多添加 ${MAX_COMPOSER_ATTACHMENTS} 张参考图`,
           };
         }
+        const nextAttachments = [...previousAttachments, att];
         // 局部修改 mask 仅允许单张参考图：第二张加入时自动清除已设置的 mask。
         const nextMask =
-          s.composer.attachments.length === 0 ? s.composer.mask : null;
+          previousAttachments.length === 0 ? s.composer.mask : null;
         return {
           composer: {
             ...s.composer,
-            attachments: [...s.composer.attachments, att],
+            text: remapPromptImageMentions(
+              s.composer.text,
+              previousAttachments,
+              nextAttachments,
+            ),
+            attachments: nextAttachments,
             mask: nextMask,
           },
         };
       }),
     removeAttachment: (id) =>
       set((s) => {
-        const nextAttachments = s.composer.attachments.filter(
-          (a) => a.id !== id,
-        );
+        const previousAttachments = s.composer.attachments;
+        const nextAttachments = previousAttachments.filter((a) => a.id !== id);
+        if (nextAttachments.length === previousAttachments.length) return s;
         // mask 跟着第一张参考图：若被删的是 mask 绑定的那张，或剩余张数为 0，
         // 都要把 mask 清掉，避免脏 mask_image_id 跟着发出去。
         const nextMask =
@@ -1839,8 +1980,36 @@ function createChatStore() {
         return {
           composer: {
             ...s.composer,
+            text: remapPromptImageMentions(
+              s.composer.text,
+              previousAttachments,
+              nextAttachments,
+            ),
             attachments: nextAttachments,
             mask: nextMask,
+          },
+        };
+      }),
+    moveAttachment: (id, targetId) =>
+      set((s) => {
+        if (id === targetId) return s;
+        const previousAttachments = s.composer.attachments;
+        const from = previousAttachments.findIndex((a) => a.id === id);
+        const to = previousAttachments.findIndex((a) => a.id === targetId);
+        if (from < 0 || to < 0 || from === to) return s;
+        const nextAttachments = [...previousAttachments];
+        const [moved] = nextAttachments.splice(from, 1);
+        if (!moved) return s;
+        nextAttachments.splice(to, 0, moved);
+        return {
+          composer: {
+            ...s.composer,
+            text: remapPromptImageMentions(
+              s.composer.text,
+              previousAttachments,
+              nextAttachments,
+            ),
+            attachments: nextAttachments,
           },
         };
       }),
@@ -1882,6 +2051,14 @@ function createChatStore() {
             : s.composerError,
         composer: {
           ...s.composer,
+          text:
+            s.composer.attachments.length >= MAX_COMPOSER_ATTACHMENTS
+              ? s.composer.text
+              : remapPromptImageMentions(
+                  s.composer.text,
+                  s.composer.attachments,
+                  [att, ...s.composer.attachments],
+                ),
           attachments:
             s.composer.attachments.length >= MAX_COMPOSER_ATTACHMENTS
               ? s.composer.attachments
@@ -2094,11 +2271,28 @@ function createChatStore() {
       } = composerToSend;
       const params = normalizeImageParams(rawParams);
       const text = rawText.trim();
+      const invalidMentionLabels = findInvalidImageMentionLabels(
+        text,
+        attachments.length,
+      );
+      if (invalidMentionLabels.length > 0) {
+        const preview = invalidMentionLabels.slice(0, 3).join("、");
+        const suffix = invalidMentionLabels.length > 3 ? " 等" : "";
+        set({
+          composerError: `参考图引用无效：${preview}${suffix}，请先移除或补齐附件`,
+        });
+        untrackSendRequest();
+        return;
+      }
+      const requestText = serializePromptImageMentionsForRequest(
+        text,
+        attachments,
+      );
       if (!text && attachments.length === 0) {
         untrackSendRequest();
         return;
       }
-      if (isPromptTooLong(text)) {
+      if (isPromptTooLong(requestText)) {
         set({ composerError: PROMPT_TOO_LONG_MESSAGE });
         untrackSendRequest();
         return;
@@ -2169,7 +2363,7 @@ function createChatStore() {
               id,
               message_id: optimisticAssistantId,
               action,
-              prompt: text,
+              prompt: requestText,
               size_requested: sizeRequested,
               aspect_ratio: params.aspect_ratio,
               input_image_ids: attachments.map((a) => a.id),
@@ -2227,7 +2421,7 @@ function createChatStore() {
 
       const body: PostMessageIn = {
         idempotency_key: uuid(),
-        text,
+        text: requestText,
         // generated 参考图的 a.id 是本地 uuid（用于 composer 增删管理），真实后端
         // image_id 在 source_image_id；upload 路径下两者相同（id = 后端 image_id）。
         attachment_image_ids: attachments.map((a) => a.source_image_id ?? a.id),
@@ -2314,12 +2508,16 @@ function createChatStore() {
         }
 
         // 2) 校正 id：把乐观条目替换成后端权威条目
-        const realUser = adaptBackendUserMessage(
-          out.user_message,
-          attachments,
-          params,
-          intent,
-        );
+        const realUser = {
+          ...adaptBackendUserMessage(
+            out.user_message,
+            attachments,
+            params,
+            intent,
+          ),
+          // UI 保留原始 @图N 文本；请求体里的 [image N] 只给后端/模型看。
+          text,
+        };
         const genIds = out.generation_ids ?? [];
         // chat / vision_qa 只会有 completion_id；text_to_image / image_to_image 只会有 generation_ids
         const completionId = !isImage
@@ -3099,6 +3297,21 @@ function createChatStore() {
             }
             const src =
               first.data_url ?? first.url ?? imageBinaryUrl(first.image_id);
+            const generationExplainability = generationExplainabilityFromPayload(payload);
+            const imageMetadata = { ...(first.metadata_jsonb ?? {}) };
+            if (
+              generationExplainability.diagnostics &&
+              imageMetadata.generation_diagnostics == null
+            ) {
+              imageMetadata.generation_diagnostics =
+                generationExplainability.diagnostics;
+            }
+            if (
+              generationExplainability.revised_prompt &&
+              imageMetadata.revised_prompt == null
+            ) {
+              imageMetadata.revised_prompt = generationExplainability.revised_prompt;
+            }
             let w = 0;
             let h = 0;
             if (typeof first.actual_size === "string") {
@@ -3127,7 +3340,9 @@ function createChatStore() {
               size_requested: "auto",
               size_actual: first.actual_size ?? "unknown",
               filename: first.filename,
-              metadata_jsonb: first.metadata_jsonb ?? null,
+              metadata_jsonb:
+                Object.keys(imageMetadata).length > 0 ? imageMetadata : null,
+              ...generationExplainability,
               ...billingMetaFromPayload(first, first.metadata_jsonb),
             };
           }
@@ -3211,6 +3426,8 @@ function createChatStore() {
               patch.substage = "partial_received";
               if (!(gen.started_at > 0)) patch.started_at = eventNow;
             } else if (eventName === "generation.succeeded" && pendingImage) {
+              const generationExplainability =
+                generationExplainabilityFromPayload(payload);
               // 用 gen.primary_input_image_id 兜底 parent_image_id / size_requested
               const finalImg: GeneratedImage = {
                 ...pendingImage,
@@ -3224,12 +3441,20 @@ function createChatStore() {
               patch.status = "succeeded";
               patch.stage = "finalizing";
               patch.finished_at = eventNow;
+              Object.assign(patch, generationExplainability);
             } else if (eventName === "generation.failed") {
+              const generationExplainability =
+                generationExplainabilityFromPayload(payload);
               patch.status = "failed";
               patch.stage = "finalizing";
               patch.error_code = get_id("code") ?? "generation_failed";
-              patch.error_message = get_id("message") ?? "生成失败";
+              patch.error_message =
+                optionalString(generationExplainability.diagnostics?.safe_error_summary) ??
+                get_id("safe_error_summary") ??
+                get_id("message") ??
+                "生成失败";
               patch.finished_at = eventNow;
+              Object.assign(patch, generationExplainability);
             } else if (eventName === "generation.retrying") {
               patch.status = "queued";
               patch.stage = "queued";
@@ -3794,6 +4019,7 @@ function createChatStore() {
                 "generations",
                 gid,
               )) as BackendGeneration;
+              const freshExplainability = generationExplainabilityFromBackend(fresh);
               const local = get().generations[gid];
               if (!local) return;
               const isTerminal =
@@ -3835,6 +4061,7 @@ function createChatStore() {
                             : local.attempt,
                         error_code: fresh.error_code ?? undefined,
                         error_message: fresh.error_message ?? undefined,
+                        ...freshExplainability,
                         finished_at: finishedAt,
                       },
                     },
@@ -3868,6 +4095,7 @@ function createChatStore() {
                             : local.attempt,
                         error_code: fresh.error_code ?? undefined,
                         error_message: fresh.error_message ?? undefined,
+                        ...freshExplainability,
                       },
                     },
                   }));
@@ -3965,6 +4193,7 @@ function createChatStore() {
         let changed = false;
         for (const g of incoming) {
           const prev = existing[g.id];
+          const generationExplainability = generationExplainabilityFromBackend(g);
           // 已知 task 且仍 inflight：本地权威，避免 hydrate 覆盖刚收到的 SSE 增量
           if (
             prev &&
@@ -3993,6 +4222,7 @@ function createChatStore() {
             image: prev?.image,
             error_code: g.error_code ?? undefined,
             error_message: g.error_message ?? undefined,
+            ...generationExplainability,
             attempt:
               typeof g.attempt === "number" && Number.isFinite(g.attempt)
                 ? g.attempt
