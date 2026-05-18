@@ -92,10 +92,23 @@ class _Pipe:
 class _Redis:
     def __init__(self) -> None:
         self.pipe = _Pipe()
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
     def pipeline(self, *, transaction: bool = False) -> _Pipe:
         assert transaction is False
         return self.pipe
+
+    async def eval(self, *args: Any, **kwargs: Any) -> str:
+        self.calls.append(("eval", args, kwargs))
+        return "1710000000000-0"
+
+    async def xadd(self, *args: Any, **kwargs: Any) -> str:
+        self.calls.append(("xadd", args, kwargs))
+        return "1710000000000-0"
+
+    async def publish(self, *args: Any, **kwargs: Any) -> int:
+        self.calls.append(("publish", args, kwargs))
+        return 1
 
 
 def _conv() -> SimpleNamespace:
@@ -1268,17 +1281,79 @@ async def test_publish_message_appended_payload_contains_conversation_and_messag
         message_ids=["msg-1"],
     )
 
-    assert redis.pipe.executed is True
-    publish = redis.pipe.calls[0]
-    xadd = redis.pipe.calls[1]
+    xadd = redis.calls[0]
+    publish = redis.calls[1]
+    assert xadd[0] == "eval"
     assert publish[1][0] == "conv:conv-1"
     publish_payload = json.loads(publish[1][1])
-    assert publish_payload == {
-        "event": "conv.message.appended",
-        "data": {"conversation_id": "conv-1", "message_id": "msg-1"},
-    }
-    assert xadd[1][0] == "events:user:user-1"
-    assert xadd[1][1]["event"] == "conv.message.appended"
+    assert publish_payload["event"] == "conv.message.appended"
+    assert publish_payload["sse_id"] == "1710000000000-0"
+    assert publish_payload["data"]["conversation_id"] == "conv-1"
+    assert publish_payload["data"]["message_id"] == "msg-1"
+    assert publish_payload["data"]["event_id"] == publish_payload["event_id"]
+
+
+@pytest.mark.asyncio
+async def test_publish_message_appended_batches_multiple_messages() -> None:
+    class Pipe:
+        def __init__(self, stream_ids: list[str]) -> None:
+            self.stream_ids = stream_ids
+            self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+        def eval(self, *args: Any, **kwargs: Any) -> None:
+            self.calls.append(("eval", args, kwargs))
+
+        def publish(self, *args: Any, **kwargs: Any) -> None:
+            self.calls.append(("publish", args, kwargs))
+
+        async def execute(self) -> list[str]:
+            if self.calls and self.calls[0][0] == "eval":
+                return self.stream_ids
+            return []
+
+    class Redis:
+        def __init__(self) -> None:
+            self.pipes: list[Pipe] = []
+
+        def pipeline(self, *, transaction: bool = False) -> Pipe:
+            assert transaction is False
+            pipe = Pipe(
+                ["1710000000000-0", "1710000000000-1"]
+                if not self.pipes
+                else []
+            )
+            self.pipes.append(pipe)
+            return pipe
+
+        async def eval(self, *_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("batch path should use pipeline eval")
+
+        async def publish(self, *_args: Any, **_kwargs: Any) -> int:
+            raise AssertionError("batch path should use pipeline publish")
+
+    redis = Redis()
+
+    await messages._publish_message_appended(
+        redis=redis,
+        user_id="user-1",
+        conv_id="conv-1",
+        message_ids=["msg-1", "msg-2"],
+    )
+
+    assert len(redis.pipes) == 2
+    assert [call[0] for call in redis.pipes[0].calls] == ["eval", "eval"]
+    assert [call[0] for call in redis.pipes[1].calls] == ["publish", "publish"]
+    publish_payloads = [
+        json.loads(call[1][1]) for call in redis.pipes[1].calls
+    ]
+    assert [payload["sse_id"] for payload in publish_payloads] == [
+        "1710000000000-0",
+        "1710000000000-1",
+    ]
+    assert [payload["data"]["message_id"] for payload in publish_payloads] == [
+        "msg-1",
+        "msg-2",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1363,6 +1438,42 @@ async def test_publish_assistant_task_does_not_rollback_on_redis_failure(
     )
 
     assert db.rolled_back is False
+
+
+@pytest.mark.asyncio
+async def test_publish_assistant_task_uses_existing_payload_outbox_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enqueued: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    class _Pool:
+        async def enqueue_job(self, *args: Any, **kwargs: Any) -> None:
+            enqueued.append(("enqueue_job", args, kwargs))
+
+    async def fake_get_arq_pool() -> _Pool:
+        return _Pool()
+
+    monkeypatch.setattr(messages, "get_arq_pool", fake_get_arq_pool)
+    row = SimpleNamespace(id="outbox-1", payload={"persisted": True})
+
+    await messages._publish_assistant_task(
+        db=_Db([]),  # type: ignore[arg-type]
+        redis=_Redis(),
+        user_id="user-1",
+        conv_id="conv-1",
+        assistant_msg_id="assistant-1",
+        outbox_payloads=[
+            {
+                "task_id": "task-1",
+                "kind": "generation",
+                "outbox_id": "outbox-1",
+            }
+        ],
+        outbox_rows=[row],  # type: ignore[list-item]
+    )
+
+    assert row.payload == {"persisted": True}
+    assert enqueued[0][2]["_job_id"] == "lumen:generation:task-1:outbox:outbox-1"
 
 
 # ---------------------------------------------------------------------------

@@ -88,6 +88,7 @@ _RETRIABLE_ERROR_CODES: frozenset[str] = frozenset(
         # 让 task 层 backoff 后再来一轮。
         EC.ALL_ACCOUNTS_FAILED.value,
         EC.ACCOUNT_IMAGE_QUOTA_EXCEEDED.value,
+        EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
         # 本地 sem 排队等待超时（4K/大图并发 = 1，前一张还没跑完）。retriable 让
         # arq 退避后重新入队；与上游 rate_limit_error 区分开避免误读监控。
         EC.LOCAL_QUEUE_FULL.value,

@@ -15,7 +15,8 @@ from typing import Any
 
 import pytest
 
-from app import account_limiter
+from app import account_limiter, upstream
+from lumen_core.constants import GenerationErrorCode as EC
 
 
 class FakeRedis:
@@ -299,8 +300,8 @@ async def test_record_then_check_quota_round_trip() -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_image_call_swallow_redis_errors() -> None:
-    """Redis 抖动时 record 不应让主路径失败。"""
+async def test_record_image_call_fails_closed_on_redis_errors() -> None:
+    """Redis 抖动时 record 不能留下半状态；调用方应按不可用处理。"""
 
     class BrokenRedis:
         async def zadd(self, *_a: Any, **_kw: Any) -> int:
@@ -315,8 +316,41 @@ async def test_record_image_call_swallow_redis_errors() -> None:
         async def expireat(self, *_a: Any, **_kw: Any) -> int:
             raise RuntimeError("redis down")
 
-    # 不应该抛
-    await account_limiter.record_image_call(BrokenRedis(), "acc1", task_id="t")
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.record_image_call(BrokenRedis(), "acc1", task_id="t")
+
+
+@pytest.mark.asyncio
+async def test_upstream_accounting_unavailable_becomes_task_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_record_image_call(*_args: Any, **_kwargs: Any) -> None:
+        raise account_limiter.AccountLimiterUnavailable("redis down")
+
+    class Pool:
+        def get_redis(self) -> object:
+            return object()
+
+    monkeypatch.setattr(account_limiter, "record_image_call", fake_record_image_call)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await upstream._record_admin_image_call_or_raise(
+            Pool(),
+            "acc1",
+            task_id="task-1",
+        )
+
+    assert exc_info.value.error_code == EC.QUOTA_ACCOUNTING_UNAVAILABLE.value
+    assert exc_info.value.payload["retry_after"] == (
+        account_limiter.REDIS_ERROR_RETRY_AFTER_S
+    )
+    assert (
+        upstream._should_continue_image_provider_failover(
+            exc_info.value,
+            retriable=True,
+        )
+        is False
+    )
 
 
 # --- pytest-asyncio 兼容 ----------------------------------------------------

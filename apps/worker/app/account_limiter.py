@@ -78,6 +78,10 @@ _UNIT_SECONDS: dict[str, int] = {
 }
 
 
+class AccountLimiterUnavailable(RuntimeError):
+    """Quota accounting could not be recorded reliably."""
+
+
 def _today_utc_key(now: float) -> str:
     return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%d")
 
@@ -211,23 +215,19 @@ async def _record_image_call_fallback(
     member: str,
     cur_now: float,
 ) -> None:
-    try:
-        await redis.zadd(ts_key, {member: cur_now})
-    except Exception:  # noqa: BLE001
-        pass
-    # ZSET 最多保 2 天，给最长 1d 窗口留缓冲
-    try:
-        await redis.expire(ts_key, _TS_TTL_S)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        await redis.incr(day_key)
-    except Exception:  # noqa: BLE001
+    pipe_fn = getattr(redis, "pipeline", None)
+    if callable(pipe_fn):
+        pipe = pipe_fn(transaction=True)
+        pipe.zadd(ts_key, {member: cur_now})
+        pipe.expire(ts_key, _TS_TTL_S)
+        pipe.incr(day_key)
+        pipe.expireat(day_key, _daily_expire_at(cur_now))
+        await pipe.execute()
         return
-    try:
-        await redis.expireat(day_key, _daily_expire_at(cur_now))
-    except Exception:  # noqa: BLE001
-        pass
+    await redis.zadd(ts_key, {member: cur_now})
+    await redis.expire(ts_key, _TS_TTL_S)
+    await redis.incr(day_key)
+    await redis.expireat(day_key, _daily_expire_at(cur_now))
 
 
 async def check_quota(
@@ -328,8 +328,7 @@ async def record_image_call(
     入账：ZADD <ts_key> {member: cur_now} + INCR <daily_key>
     member 用 task_id（保证唯一）；没传时退化为 ts:<秒.6>。
 
-    redis=None / 任何 redis 错误 → 静默吞掉：quota 是软约束，Redis 抖动不应让
-    主路径失败。
+    redis=None → 启动早期或测试短路；Redis 错误 → fail closed，避免配额计数漂移。
     """
     if redis is None:
         return
@@ -352,20 +351,24 @@ async def record_image_call(
                 str(day_expire_at),
             )
             return
-        except Exception:  # noqa: BLE001
-            return
-    await _record_image_call_fallback(
-        redis,
-        ts_key=ts_key,
-        day_key=day_key,
-        member=member,
-        cur_now=cur_now,
-    )
+        except Exception as exc:  # noqa: BLE001
+            raise AccountLimiterUnavailable("quota accounting unavailable") from exc
+    try:
+        await _record_image_call_fallback(
+            redis,
+            ts_key=ts_key,
+            day_key=day_key,
+            member=member,
+            cur_now=cur_now,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise AccountLimiterUnavailable("quota accounting unavailable") from exc
 
 
 __all__ = [
     "parse_rate_limit",
     "check_quota",
     "record_image_call",
+    "AccountLimiterUnavailable",
     "REDIS_ERROR_RETRY_AFTER_S",
 ]

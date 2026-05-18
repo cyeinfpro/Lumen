@@ -1087,28 +1087,72 @@ async def _acquire_completion_xact_lock(session: Any, completion_id: str) -> Non
 # Lease helpers
 # ---------------------------------------------------------------------------
 
+_RELEASE_LEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+_RENEW_LEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+return 0
+"""
+
+_RUNNING_COMPLETION_STATUSES = (
+    CompletionStatus.QUEUED.value,
+    CompletionStatus.STREAMING.value,
+)
+
 
 async def _acquire_lease(redis: Any, task_id: str, worker_id: str) -> None:
-    await redis.set(f"task:{task_id}:lease", worker_id, ex=_LEASE_TTL_S)
+    ok = await redis.set(f"task:{task_id}:lease", worker_id, ex=_LEASE_TTL_S, nx=True)
+    if not ok:
+        raise _LeaseLost(f"lease already held task={task_id}")
 
 
-async def _release_lease(redis: Any, task_id: str) -> None:
+async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
     try:
-        await redis.delete(f"task:{task_id}:lease")
+        await redis.eval(
+            _RELEASE_LEASE_LUA,
+            1,
+            f"task:{task_id}:lease",
+            worker_id,
+        )
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("completion lease release failed task=%s", task_id, exc_info=True)
 
 
 async def _lease_renewer(
-    redis: Any, task_id: str, lease_lost: asyncio.Event | None = None
+    redis: Any,
+    task_id: str,
+    worker_id: str,
+    lease_lost: asyncio.Event | None = None,
 ) -> None:
-    """每 30s EXPIRE 一次。被 cancel 时优雅退出；连续 3 次失败设置 lease_lost。"""
+    """每 30s owner-CAS 续租一次；连续 3 次 Redis 失败或 owner 丢失即退出。"""
     consecutive_failures = 0
     try:
         while True:
             await asyncio.sleep(_LEASE_RENEW_S)
             try:
-                await redis.expire(f"task:{task_id}:lease", _LEASE_TTL_S)
+                ok = await redis.eval(
+                    _RENEW_LEASE_LUA,
+                    1,
+                    f"task:{task_id}:lease",
+                    worker_id,
+                    str(_LEASE_TTL_S),
+                )
+                if int(ok or 0) != 1:
+                    if lease_lost is not None:
+                        lease_lost.set()
+                    logger.warning(
+                        "completion lease ownership lost task=%s worker=%s",
+                        task_id,
+                        worker_id,
+                    )
+                    return
                 consecutive_failures = 0
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
@@ -2425,6 +2469,7 @@ async def _flush_completion_text(
                     .where(
                         Completion.id == task_id,
                         Completion.attempt == attempt_epoch,
+                        Completion.status == CompletionStatus.STREAMING.value,
                     )
                     .values(text=text)
                 )
@@ -2562,7 +2607,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     # --- 2. lease ---
     await _acquire_lease(redis, task_id, worker_id)
     lease_lost = asyncio.Event()
-    renewer = asyncio.create_task(_lease_renewer(redis, task_id, lease_lost))
+    renewer = asyncio.create_task(_lease_renewer(redis, task_id, worker_id, lease_lost))
 
     # --- 3. publish started / restarted ---
     if was_restarted:
@@ -2941,12 +2986,15 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 我又写了 SUCCEEDED"的双写。
         if lease_lost.is_set():
             raise _LeaseLost("lease lost before success commit")
+        if await _is_cancelled(redis, task_id):
+            raise _TaskCancelled("cancelled before success commit")
         async with SessionLocal() as session:
             res = await session.execute(
                 update(Completion)
                 .where(
                     Completion.id == task_id,
                     Completion.attempt == attempt_epoch,
+                    Completion.status.in_(_RUNNING_COMPLETION_STATUSES),
                 )
                 .values(
                     status=CompletionStatus.SUCCEEDED.value,
@@ -3091,6 +3139,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     .where(
                         Completion.id == task_id,
                         Completion.attempt == attempt_epoch,
+                        Completion.status.in_(_RUNNING_COMPLETION_STATUSES),
                     )
                     .values(
                         status=CompletionStatus.CANCELED.value,
@@ -3181,6 +3230,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     .where(
                         Completion.id == task_id,
                         Completion.attempt == attempt_epoch,
+                        Completion.status.in_(_RUNNING_COMPLETION_STATUSES),
                     )
                     .values(
                         status=CompletionStatus.QUEUED.value,
@@ -3201,7 +3251,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     return
 
             renewer.cancel()
-            await _release_lease(redis, task_id)
+            await _release_lease(redis, task_id, worker_id)
 
             try:
                 await redis.enqueue_job(
@@ -3218,6 +3268,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 .where(
                     Completion.id == task_id,
                     Completion.attempt == attempt_epoch,
+                    Completion.status.in_(_RUNNING_COMPLETION_STATUSES),
                 )
                 .values(
                     status=CompletionStatus.FAILED.value,
@@ -3285,7 +3336,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await renewer
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
-        release_future = asyncio.ensure_future(_release_lease(redis, task_id))
+        release_future = asyncio.ensure_future(_release_lease(redis, task_id, worker_id))
         try:
             await asyncio.shield(release_future)
         except asyncio.CancelledError:

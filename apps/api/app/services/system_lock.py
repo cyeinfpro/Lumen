@@ -39,6 +39,8 @@ class SystemOperationLockService:
         ttl_sec: int = 1800,
     ) -> SystemLock:
         token = f"{owner}:{operation}:{datetime.now(timezone.utc).isoformat()}"
+        if self.fallback_busy is not None and self.fallback_busy():
+            raise LockBusy("system operation already running")
         try:
             ok = await get_redis().set(self.key, token, nx=True, ex=ttl_sec)
         except Exception:

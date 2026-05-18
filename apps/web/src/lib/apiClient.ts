@@ -1449,7 +1449,8 @@ export type TaskResponse<K extends TaskKind = TaskKind> =
   K extends "generations" ? BackendGeneration : BackendCompletion;
 
 export interface TaskActionResponse {
-  status: TaskStatus;
+  status: TaskStatus | "canceling";
+  cancel_requested?: boolean;
 }
 
 export interface TaskItemResponse {

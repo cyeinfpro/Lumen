@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from app.routes import tasks
-from lumen_core.constants import GenerationStage, GenerationStatus
+from lumen_core.constants import CompletionStatus, GenerationStage, GenerationStatus
 
 
 class _Result:
@@ -31,6 +31,11 @@ class _Db:
 
     def add(self, value: Any) -> None:
         self.added.append(value)
+
+    async def flush(self) -> None:
+        for item in self.added:
+            if getattr(item, "id", None) is None:
+                item.id = "outbox-1"
 
     async def commit(self) -> None:
         self.committed = True
@@ -124,7 +129,12 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
     assert len(db.added) == 1
     assert published == [
         (
-            {"task_id": "gen-1", "user_id": "user-1", "kind": "generation"},
+            {
+                "task_id": "gen-1",
+                "user_id": "user-1",
+                "kind": "generation",
+                "outbox_id": "outbox-1",
+            },
             "assistant-1",
         )
     ]
@@ -165,6 +175,31 @@ async def test_cancel_running_generation_keeps_row_active_until_worker_stops(
 
 
 @pytest.mark.asyncio
+async def test_cancel_streaming_completion_returns_canceling_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = _Redis()
+    monkeypatch.setattr(tasks, "get_redis", lambda: redis)
+    comp = SimpleNamespace(
+        id="comp-1",
+        user_id="user-1",
+        status=CompletionStatus.STREAMING.value,
+    )
+    db = _Db([_Result(comp)])
+
+    out = await tasks.cancel_completion(
+        "comp-1",
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"status": "canceling", "cancel_requested": True}
+    assert comp.status == CompletionStatus.STREAMING.value
+    assert db.committed is False
+    assert redis.calls == [("set", "task:comp-1:cancel", "1", 3600)]
+
+
+@pytest.mark.asyncio
 async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,8 +226,8 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
     assert gen.finished_at is not None
     assert redis.calls == [
         ("get", "generation:image_queue:task_provider:gen-1"),
-        ("zrem", "generation:image_queue:active", "provider-a"),
-        ("delete", "generation:image_queue:provider:provider-a"),
+        ("zrem", "generation:image_queue:active", "gen-1"),
+        ("zrem", "generation:image_queue:provider_active:provider-a", "gen-1"),
         ("delete", "generation:image_queue:task_provider:gen-1"),
         ("delete", "task:gen-1:lease"),
     ]

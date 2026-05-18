@@ -18,13 +18,12 @@ import uuid
 from typing import Any
 import asyncio
 
-from lumen_core.constants import EVENTS_STREAM_PREFIX
+from lumen_core.constants import EVENTS_STREAM_MAXLEN, EVENTS_STREAM_PREFIX
 from lumen_core.models import OutboxDeadLetter
 
 logger = logging.getLogger(__name__)
 
 # 24h 粗略上限——redis 的 MAXLEN ~ 是近似修剪
-_EVENTS_STREAM_MAXLEN = 86400
 _EVENTS_DLQ_MAXLEN = 1000
 _EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
 _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
@@ -51,8 +50,9 @@ redis.call('SET', KEYS[2], stream_id, 'EX', tonumber(ARGV[5]))
 return stream_id
 """
 
-# GEN-P2 ts_ms 单调：进程内 last value，wall clock 回退（NTP 校时 / 闰秒）时
-# 至少递增 1ms，保证前端按 ts_ms 排序的事件不会乱序。
+# GEN-P2 ts_ms 单调：仅保证当前 worker 进程内 last value。多 API/worker
+# 进程间不可比较；前端需要用 Redis stream id 做 replay cursor / 严格排序，
+# ts_ms 只作为显示/粗略时间提示。
 _LAST_TS_MS = 0
 # P2-3: 多 publish_event 并发时 _LAST_TS_MS 的读改写非原子，可能被覆盖导致
 # 两条事件拿到同一 ts_ms。改用 asyncio.Lock：worker 单 loop 下没有跨 loop 风险，
@@ -103,7 +103,7 @@ async def _xadd_event_once(
                 "data": payload_json,
                 "event_id": event_id,
             },
-            maxlen=_EVENTS_STREAM_MAXLEN,
+            maxlen=EVENTS_STREAM_MAXLEN,
             approximate=True,
         )
     else:
@@ -115,7 +115,7 @@ async def _xadd_event_once(
             event_id,
             event_name,
             payload_json,
-            str(_EVENTS_STREAM_MAXLEN),
+            str(EVENTS_STREAM_MAXLEN),
             str(_EVENTS_DEDUPE_TTL_SECONDS),
         )
     if isinstance(stream_id, bytes):

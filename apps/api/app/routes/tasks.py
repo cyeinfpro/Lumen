@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
     CompletionStage,
     CompletionStatus,
-    EVENTS_STREAM_PREFIX,
     EV_COMP_QUEUED,
     EV_GEN_QUEUED,
     GenerationStage,
@@ -34,14 +33,68 @@ from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..observability import task_publish_errors_total
 from ..redis_client import get_redis
+from ..sse_publish import publish_sse_event
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_IMAGE_QUEUE_ACTIVE_KEY = "generation:image_queue:active"
+_IMAGE_QUEUE_TASK_PROVIDER_PREFIX = "generation:image_queue:task_provider:"
+_IMAGE_QUEUE_PROVIDER_ACTIVE_PREFIX = "generation:image_queue:provider_active:"
+_DUAL_RACE_SENTINEL_PREFIX = "__dr:"
+
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
     return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
+
+
+def _image_task_provider_key(task_id: str) -> str:
+    return f"{_IMAGE_QUEUE_TASK_PROVIDER_PREFIX}{task_id}"
+
+
+def _image_provider_active_key(provider_name: str) -> str:
+    return f"{_IMAGE_QUEUE_PROVIDER_ACTIVE_PREFIX}{provider_name}"
+
+
+def _redis_text(value: object) -> str | None:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return value
+    return None
+
+
+async def _release_generation_queue_state(redis: Any, task_id: str) -> None:
+    task_provider_key = _image_task_provider_key(task_id)
+    provider_name = _redis_text(await redis.get(task_provider_key))
+    pipe_fn = getattr(redis, "pipeline", None)
+    pipe = pipe_fn(transaction=False) if callable(pipe_fn) else None
+
+    async def _zrem(key: str, member: str) -> None:
+        if pipe is not None:
+            pipe.zrem(key, member)
+        else:
+            await redis.zrem(key, member)
+
+    async def _delete(key: str) -> None:
+        if pipe is not None:
+            pipe.delete(key)
+        else:
+            await redis.delete(key)
+
+    if provider_name:
+        if provider_name.startswith(_DUAL_RACE_SENTINEL_PREFIX):
+            await _zrem(_IMAGE_QUEUE_ACTIVE_KEY, provider_name)
+        else:
+            await _zrem(_IMAGE_QUEUE_ACTIVE_KEY, task_id)
+            await _zrem(_image_provider_active_key(provider_name), task_id)
+    else:
+        await _zrem(_IMAGE_QUEUE_ACTIVE_KEY, task_id)
+    await _delete(task_provider_key)
+    await _delete(f"task:{task_id}:lease")
+    if pipe is not None:
+        await pipe.execute()
 
 
 # ---------- generations ----------
@@ -106,22 +159,8 @@ async def cancel_generation(
     # Queued tasks do not have an upstream process to stop. Clear any stale
     # image_queue side state so a canceled queued row cannot keep capacity.
     try:
-        task_provider_key = f"generation:image_queue:task_provider:{gen.id}"
         if was_queued:
-            raw = await redis.get(task_provider_key)
-            provider_name: str | None = None
-            if isinstance(raw, bytes):
-                provider_name = raw.decode("utf-8", "replace")
-            elif isinstance(raw, str):
-                provider_name = raw
-            if provider_name:
-                await redis.zrem("generation:image_queue:active", provider_name)
-                if not provider_name.startswith("__dr:"):
-                    await redis.delete(
-                        f"generation:image_queue:provider:{provider_name}"
-                    )
-                await redis.delete(task_provider_key)
-            await redis.delete(f"task:{gen.id}:lease")
+            await _release_generation_queue_state(redis, gen.id)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "cancel image_queue release failed gen=%s err=%s",
@@ -169,7 +208,11 @@ async def retry_generation(
     gen.finished_at = None
 
     payload = {"task_id": gen.id, "user_id": user.id, "kind": "generation"}
-    db.add(OutboxEvent(kind="generation", payload=payload, published_at=None))
+    outbox = OutboxEvent(kind="generation", payload=payload, published_at=None)
+    db.add(outbox)
+    await db.flush()
+    payload["outbox_id"] = str(outbox.id)
+    outbox.payload = dict(payload)
     await db.commit()
 
     # best-effort publish
@@ -202,7 +245,7 @@ async def cancel_completion(
     comp_id: str,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> dict[str, str]:
+) -> dict[str, object]:
     comp = (
         await db.execute(
             select(Completion).where(
@@ -219,16 +262,18 @@ async def cancel_completion(
         raise _http("not_cancelable", f"status is {comp.status}", 409)
 
     redis = get_redis()
-    was_streaming = comp.status == CompletionStatus.STREAMING.value
-    comp.status = CompletionStatus.CANCELED.value
-    comp.finished_at = datetime.now(timezone.utc)
-    await db.commit()
-    if was_streaming:
+    if comp.status == CompletionStatus.STREAMING.value:
         try:
             await redis.set(f"task:{comp.id}:cancel", "1", ex=3600)
         except Exception as exc:  # noqa: BLE001
             logger.warning("cancel flag write failed comp=%s err=%s", comp.id, exc)
             raise _http("cancel_unavailable", "cancel signal unavailable", 503) from exc
+        return {"status": "canceling", "cancel_requested": True}
+
+    comp.status = CompletionStatus.CANCELED.value
+    comp.progress_stage = CompletionStage.FINALIZING.value
+    comp.finished_at = datetime.now(timezone.utc)
+    await db.commit()
     return {"status": comp.status}
 
 
@@ -266,7 +311,11 @@ async def retry_completion(
     comp.finished_at = None
 
     payload = {"task_id": comp.id, "user_id": user.id, "kind": "completion"}
-    db.add(OutboxEvent(kind="completion", payload=payload, published_at=None))
+    outbox = OutboxEvent(kind="completion", payload=payload, published_at=None)
+    db.add(outbox)
+    await db.flush()
+    payload["outbox_id"] = str(outbox.id)
+    outbox.payload = dict(payload)
     await db.commit()
 
     await _publish_queued(payload, comp.message_id)
@@ -287,7 +336,47 @@ async def list_tasks(
 
     gen_stmt = select(Generation).where(Generation.user_id == user.id)
     comp_stmt = select(Completion).where(Completion.user_id == user.id)
-    if status:
+    if status == "active":
+        gen_stmt = gen_stmt.where(
+            Generation.status.in_(
+                [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
+            )
+        )
+        comp_stmt = comp_stmt.where(
+            Completion.status.in_(
+                [CompletionStatus.QUEUED.value, CompletionStatus.STREAMING.value]
+            )
+        )
+    elif status == "terminal":
+        gen_stmt = gen_stmt.where(
+            Generation.status.in_(
+                [
+                    GenerationStatus.SUCCEEDED.value,
+                    GenerationStatus.FAILED.value,
+                    GenerationStatus.CANCELED.value,
+                ]
+            )
+        )
+        comp_stmt = comp_stmt.where(
+            Completion.status.in_(
+                [
+                    CompletionStatus.SUCCEEDED.value,
+                    CompletionStatus.FAILED.value,
+                    CompletionStatus.CANCELED.value,
+                ]
+            )
+        )
+    elif status == GenerationStatus.RUNNING.value:
+        gen_stmt = gen_stmt.where(Generation.status == GenerationStatus.RUNNING.value)
+        comp_stmt = comp_stmt.where(
+            Completion.status == CompletionStatus.STREAMING.value
+        )
+    elif status == CompletionStatus.STREAMING.value:
+        gen_stmt = gen_stmt.where(Generation.status == GenerationStatus.RUNNING.value)
+        comp_stmt = comp_stmt.where(
+            Completion.status == CompletionStatus.STREAMING.value
+        )
+    elif status:
         gen_stmt = gen_stmt.where(Generation.status == status)
         comp_stmt = comp_stmt.where(Completion.status == status)
 
@@ -334,6 +423,9 @@ async def list_my_active_tasks(
 
     前端启动 / SSE 重连时一次性 hydrate 到 store，让 GlobalTaskTray 显示**所有会话**的
     进行中任务（包括其他会话提交后未访问的）。"""
+    # Pull a little extra from each table before the cross-table merge so one
+    # busy task type does not starve the other in the final `limit` window.
+    query_limit = limit * 2
     gens = (
         await db.execute(
             select(Generation).where(
@@ -343,7 +435,7 @@ async def list_my_active_tasks(
                 ),
             )
             .order_by(Generation.created_at.desc())
-            .limit(limit)
+            .limit(query_limit)
         )
     ).scalars().all()
     comps = (
@@ -355,12 +447,27 @@ async def list_my_active_tasks(
                 ),
             )
             .order_by(Completion.created_at.desc())
-            .limit(limit)
+            .limit(query_limit)
         )
     ).scalars().all()
+    items: list[tuple[datetime, str, Generation | Completion]] = []
+    for gen in gens:
+        items.append((gen.created_at, "generation", gen))
+    for comp in comps:
+        items.append((comp.created_at, "completion", comp))
+    items.sort(key=lambda item: item[0], reverse=True)
+    items = items[:limit]
     return ActiveTasksOut(
-        generations=[GenerationOut.model_validate(g) for g in gens],
-        completions=[CompletionOut.model_validate(c) for c in comps],
+        generations=[
+            GenerationOut.model_validate(item)
+            for _created_at, kind, item in items
+            if kind == "generation"
+        ],
+        completions=[
+            CompletionOut.model_validate(item)
+            for _created_at, kind, item in items
+            if kind == "completion"
+        ],
     )
 
 
@@ -374,30 +481,24 @@ async def _publish_queued(payload: dict, message_id: str) -> None:
         fn_name = "run_completion" if kind == "completion" else "run_generation"
         ev_name = EV_COMP_QUEUED if kind == "completion" else EV_GEN_QUEUED
         id_field = "completion_id" if kind == "completion" else "generation_id"
-        evt_data = json.dumps(
-            {
-                "event": ev_name,
-                "data": {
-                    id_field: payload["task_id"],
-                    "message_id": message_id,
-                    "kind": kind,
-                },
-            },
-            separators=(",", ":"),
-        )
         # Enqueue via arq so the Worker's registered functions consume it.
         pool = await get_arq_pool()
-        await pool.enqueue_job(fn_name, payload["task_id"])
-
-        pipe = redis.pipeline(transaction=False)
-        pipe.publish(task_channel(payload["task_id"]), evt_data)
-        pipe.xadd(
-            f"{EVENTS_STREAM_PREFIX}{payload['user_id']}",
-            {"event": ev_name, "data": evt_data},
-            maxlen=10000,
-            approximate=True,
+        await pool.enqueue_job(
+            fn_name,
+            payload["task_id"],
+            _job_id=arq_job_id(kind, payload["task_id"], payload.get("outbox_id")),
         )
-        await pipe.execute()
+        await publish_sse_event(
+            redis,
+            user_id=payload["user_id"],
+            channel=task_channel(payload["task_id"]),
+            event_name=ev_name,
+            data={
+                id_field: payload["task_id"],
+                "message_id": message_id,
+                "kind": kind,
+            },
+        )
     except Exception:
         kind = str(payload.get("kind") or "unknown")
         task_publish_errors_total.labels(kind=kind).inc()

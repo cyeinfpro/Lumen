@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from PIL import Image as PILImage
@@ -139,6 +140,43 @@ class FakeRedis:
     async def expire(self, key: str, ttl: int) -> bool:
         _ = key, ttl
         return True
+
+    async def eval(self, *args: Any) -> int:
+        script = args[0]
+        if script == generation._RELEASE_LEASE_LUA:
+            key = args[2]
+            token = args[3]
+            if self.store.get(key) == token:
+                await self.delete(key)
+                return 1
+            return 0
+        if script != generation._RESERVE_IMAGE_SLOT_LUA:
+            raise NotImplementedError(script)
+        provider_zset = args[2]
+        global_zset = args[3]
+        task_provider_key = args[4]
+        not_before_key = args[5]
+        now = float(args[6])
+        expiry = float(args[7])
+        task_id = str(args[8])
+        provider_name = str(args[9])
+        provider_cap = int(args[10])
+        global_cap = int(args[11])
+        task_provider_ttl = int(args[12])
+        provider_zset_ttl = int(args[13])
+
+        await self.zremrangebyscore(provider_zset, "-inf", now)
+        await self.zremrangebyscore(global_zset, "-inf", now)
+        if await self.zcard(provider_zset) >= provider_cap:
+            return 0
+        if await self.zcard(global_zset) >= global_cap:
+            return 0
+        await self.zadd(provider_zset, {task_id: expiry})
+        await self.expire(provider_zset, provider_zset_ttl)
+        await self.set(task_provider_key, provider_name, ex=task_provider_ttl)
+        await self.zadd(global_zset, {task_id: expiry})
+        await self.delete(not_before_key)
+        return 1
 
     async def enqueue_job(self, name: str, *args, **kwargs):
         self.enqueued.append((name, args, kwargs))
@@ -567,6 +605,50 @@ async def test_image_queue_reserves_different_provider_and_blocks_duplicate_task
     )
     assert redis.store[generation._image_task_provider_key("gen-1")] == "acc2"
     assert "gen-1" in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+
+
+@pytest.mark.asyncio
+async def test_image_queue_non_atomic_reserve_fallback_logs_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app import provider_pool
+
+    class NonAtomicRedis(FakeRedis):
+        eval = None
+
+    redis = NonAtomicRedis()
+
+    async def fake_ready_generation_ids(_redis, _limit: int) -> list[str]:
+        return ["gen-1"]
+
+    class _Pool:
+        async def select(self, **kwargs):
+            assert kwargs["route"] == "image"
+            assert kwargs["task_id"] == "gen-1"
+            return [
+                SimpleNamespace(
+                    name="acc1",
+                    base_url="https://upstream.test",
+                    api_key="k1",
+                    image_concurrency=1,
+                )
+            ]
+
+    async def fake_get_pool():
+        return _Pool()
+
+    monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 4)
+    monkeypatch.setattr(
+        generation, "_ready_queued_generation_ids", fake_ready_generation_ids
+    )
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+
+    with caplog.at_level("WARNING", logger=generation.logger.name):
+        reserved = await generation._reserve_image_queue_slot(redis, "gen-1")
+
+    assert reserved is not None
+    assert "non-atomic fallback path" in caplog.text
 
 
 @pytest.mark.asyncio

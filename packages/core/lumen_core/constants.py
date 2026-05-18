@@ -135,6 +135,7 @@ class GenerationErrorCode(StrEnum):
     IMAGE_GENERATION_FAILED = "image_generation_failed"
     ALL_ACCOUNTS_FAILED = "all_accounts_failed"
     ACCOUNT_IMAGE_QUOTA_EXCEEDED = "account_image_quota_exceeded"
+    QUOTA_ACCOUNTING_UNAVAILABLE = "quota_accounting_unavailable"
     LOCAL_QUEUE_FULL = "local_queue_full"
     DISK_FULL = "disk_full"
     DIRECT_IMAGE_REQUEST_FAILED = "direct_image_request_failed"
@@ -226,6 +227,8 @@ QUEUE_COMPLETIONS = "queue:completions"
 
 # SSE 回放 stream（每用户）：events:user:{uid}，MAXLEN≈24h
 EVENTS_STREAM_PREFIX = "events:user:"
+EVENTS_STREAM_MAXLEN = 86_400
+EVENTS_REPLAY_MAX_SCAN = 5_000
 
 
 # PubSub 通道（实时推送）

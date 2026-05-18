@@ -21,6 +21,7 @@ from typing import Any
 from arq.cron import cron
 from sqlalchemy import or_, select
 
+from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
     CompletionStage,
     CompletionStatus,
@@ -160,6 +161,9 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                         continue
 
                     payload = dict(raw_payload)
+                    payload.setdefault("outbox_id", str(ev_id))
+                    if payload != raw_payload:
+                        row.payload = payload
                     task_id = payload.get("task_id") or payload.get("id")
                     if not task_id or ev_kind not in {"generation", "completion"}:
                         logger.warning(
@@ -189,6 +193,11 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     enqueue_kwargs: dict[str, Any] = {}
                     if isinstance(defer_s, (int, float)) and defer_s > 0:
                         enqueue_kwargs["_defer_by"] = float(defer_s)
+                    enqueue_kwargs["_job_id"] = arq_job_id(
+                        ev_kind,
+                        str(task_id),
+                        str(payload.get("outbox_id") or ev_id),
+                    )
 
                     try:
                         # P1-9: 先用短 TTL 占位；commit 成功后批末统一续期到 24h。

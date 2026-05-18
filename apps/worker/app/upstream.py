@@ -4109,6 +4109,8 @@ def _should_continue_image_provider_failover(
     retriable: bool,
 ) -> bool:
     """True when another image provider may handle the same prompt differently."""
+    if _is_quota_accounting_unavailable(exc):
+        return False
     if retriable:
         return True
     if (
@@ -4507,6 +4509,49 @@ def _is_image_rate_limit_error(exc: BaseException) -> tuple[bool, float | None]:
     return False, None
 
 
+def _is_quota_accounting_unavailable(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, UpstreamError)
+        and exc.error_code == EC.QUOTA_ACCOUNTING_UNAVAILABLE.value
+    )
+
+
+async def _record_admin_image_call_or_raise(
+    pool: Any,
+    provider_name: str,
+    *,
+    task_id: str = "",
+) -> None:
+    from . import account_limiter
+
+    try:
+        await asyncio.shield(
+            account_limiter.record_image_call(
+                _provider_pool_redis(pool),
+                provider_name,
+                task_id=task_id,
+            )
+        )
+    except account_limiter.AccountLimiterUnavailable as exc:
+        retry_after = account_limiter.REDIS_ERROR_RETRY_AFTER_S
+        logger.warning(
+            "quota accounting unavailable provider=%s task=%s retry_after=%.1fs",
+            provider_name,
+            task_id,
+            retry_after,
+        )
+        raise UpstreamError(
+            "quota accounting unavailable",
+            status_code=503,
+            error_code=EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
+            payload={
+                "provider": provider_name,
+                "task_id": task_id,
+                "retry_after": retry_after,
+            },
+        ) from exc
+
+
 async def _direct_generate_image_with_failover(
     *,
     prompt: str,
@@ -4521,7 +4566,6 @@ async def _direct_generate_image_with_failover(
     provider_override: Any | None = None,
 ) -> tuple[str, str | None]:
     """Layer 2 provider failover for direct gpt-image-2 text-to-image."""
-    from . import account_limiter
     from .retry import is_retriable as classify_retriable
 
     pool = await provider_pool.get_pool()
@@ -4575,11 +4619,7 @@ async def _direct_generate_image_with_failover(
                     _pool_report_image_success(
                         pool, provider.name, endpoint_kind="generations"
                     )
-                    await asyncio.shield(
-                        account_limiter.record_image_call(
-                            _provider_pool_redis(pool), provider.name
-                        )
-                    )
+                    await _record_admin_image_call_or_raise(pool, provider.name)
                 await _emit_image_progress(
                     progress_callback,
                     "provider_used",
@@ -4690,6 +4730,8 @@ def _should_continue_image_job_failover(
     retriable: bool,
 ) -> bool:
     """True when endpoint/provider failover may still recover this image job."""
+    if _is_quota_accounting_unavailable(exc):
+        return False
     if retriable:
         return True
     error_class = _image_job_error_class(exc)
@@ -4828,7 +4870,6 @@ async def _image_job_with_failover(
     ``endpoint_preference`` 是普通单路模式的首选 endpoint；失败时仍然尝试另一条
     生图 endpoint，保证 image2 / responses 互为 fallback。
     """
-    from . import account_limiter
     from .retry import is_retriable as classify_retriable
 
     pool = await provider_pool.get_pool()
@@ -5017,11 +5058,7 @@ async def _image_job_with_failover(
                         _pool_report_image_success(
                             pool, provider.name, endpoint_kind=inflight_ek
                         )
-                        await asyncio.shield(
-                            account_limiter.record_image_call(
-                                _provider_pool_redis(pool), provider.name
-                            )
-                        )
+                        await _record_admin_image_call_or_raise(pool, provider.name)
                     await _emit_image_progress(
                         progress_callback,
                         "provider_used",
@@ -5191,7 +5228,6 @@ async def _direct_edit_image_with_failover(
     ``image_edit_input_transport``（自身就是 multipart），所以这里不做 transport
     校验；mask 字段本身在 once 函数内构造 multipart 时按 None / bytes 二态处理。
     """
-    from . import account_limiter
     from .retry import is_retriable as classify_retriable
 
     pool = await provider_pool.get_pool()
@@ -5253,11 +5289,7 @@ async def _direct_edit_image_with_failover(
                     _pool_report_image_success(
                         pool, provider.name, endpoint_kind="generations"
                     )
-                    await asyncio.shield(
-                        account_limiter.record_image_call(
-                            _provider_pool_redis(pool), provider.name
-                        )
-                    )
+                    await _record_admin_image_call_or_raise(pool, provider.name)
                 await _emit_image_progress(
                     progress_callback,
                     "provider_used",
@@ -5359,7 +5391,6 @@ async def _responses_image_stream_with_failover(
     号自动 cooldown，普通失败累计 3 次后 image circuit 熔断 60s。认证 / 参数错等
     terminal 错误不 failover；审核/安全策略类拒绝允许切 provider。
     """
-    from . import account_limiter
     from .retry import is_retriable as classify_retriable
 
     pool = await provider_pool.get_pool()
@@ -5419,12 +5450,10 @@ async def _responses_image_stream_with_failover(
                         pool, provider.name, endpoint_kind="responses"
                     )
                     # 入账：滑动窗口 + 当日计数（rate_limit/daily_quota 都为空时短路不查 Redis）
-                    await asyncio.shield(
-                        account_limiter.record_image_call(
-                            _provider_pool_redis(pool),
-                            provider.name,
-                            task_id=task_id,
-                        )
+                    await _record_admin_image_call_or_raise(
+                        pool,
+                        provider.name,
+                        task_id=task_id,
                     )
                 await _emit_image_progress(
                     progress_callback,

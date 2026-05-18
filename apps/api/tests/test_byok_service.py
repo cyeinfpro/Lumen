@@ -70,8 +70,8 @@ async def test_normalize_base_url_blocks_private_hosts_outside_development(
 ) -> None:
     monkeypatch.setattr(byok_service.settings, "app_env", "production")
 
-    with pytest.raises(ValueError, match="private supplier URLs"):
-        await byok_service.normalize_base_url("http://127.0.0.1:8000/")
+    with pytest.raises(ValueError, match="host is not allowed"):
+        await byok_service.normalize_base_url("https://127.0.0.1:8000/")
 
     monkeypatch.setattr(byok_service.settings, "app_env", "local")
     assert await byok_service.normalize_base_url("http://127.0.0.1:8000/") == (
@@ -107,12 +107,12 @@ async def test_normalize_base_url_blocks_dns_resolution_to_private_ip(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    with pytest.raises(ValueError, match="private supplier URLs"):
+    with pytest.raises(ValueError, match="private address"):
         await byok_service.normalize_base_url("https://rebind.example/v1")
 
 
 @pytest.mark.asyncio
-async def test_normalize_base_url_allows_dns_blips(
+async def test_normalize_base_url_rejects_dns_blips_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(byok_service.settings, "app_env", "production")
@@ -122,9 +122,8 @@ async def test_normalize_base_url_allows_dns_blips(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    assert await byok_service.normalize_base_url("https://upstream.example/v1") == (
-        "https://upstream.example/v1"
-    )
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        await byok_service.normalize_base_url("https://upstream.example/v1")
 
 
 @pytest.mark.asyncio

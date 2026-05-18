@@ -222,6 +222,39 @@ end
 return 0
 """
 
+_RESERVE_IMAGE_SLOT_LUA = """
+local provider_zset = KEYS[1]
+local global_zset = KEYS[2]
+local task_provider_key = KEYS[3]
+local not_before_key = KEYS[4]
+
+local now = tonumber(ARGV[1])
+local expiry = tonumber(ARGV[2])
+local task_id = ARGV[3]
+local provider_name = ARGV[4]
+local provider_cap = tonumber(ARGV[5])
+local global_cap = tonumber(ARGV[6])
+local task_provider_ttl = tonumber(ARGV[7])
+local provider_zset_ttl = tonumber(ARGV[8])
+
+redis.call('ZREMRANGEBYSCORE', provider_zset, '-inf', now)
+redis.call('ZREMRANGEBYSCORE', global_zset, '-inf', now)
+
+if redis.call('ZCARD', provider_zset) >= provider_cap then
+  return 0
+end
+if redis.call('ZCARD', global_zset) >= global_cap then
+  return 0
+end
+
+redis.call('ZADD', provider_zset, expiry, task_id)
+redis.call('EXPIRE', provider_zset, provider_zset_ttl)
+redis.call('SET', task_provider_key, provider_name, 'EX', task_provider_ttl)
+redis.call('ZADD', global_zset, expiry, task_id)
+redis.call('DEL', not_before_key)
+return 1
+"""
+
 
 async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
     try:
@@ -573,9 +606,13 @@ async def _image_queue_lock(redis: Any) -> AsyncIterator[None]:
         yield
     finally:
         try:
-            current = _redis_text(await redis.get(_IMAGE_QUEUE_LOCK_KEY))
-            if current == token:
-                await redis.delete(_IMAGE_QUEUE_LOCK_KEY)
+            eval_fn = getattr(redis, "eval", None)
+            if callable(eval_fn):
+                await eval_fn(_RELEASE_LEASE_LUA, 1, _IMAGE_QUEUE_LOCK_KEY, token)
+            else:
+                current = _redis_text(await redis.get(_IMAGE_QUEUE_LOCK_KEY))
+                if current == token:
+                    await redis.delete(_IMAGE_QUEUE_LOCK_KEY)
         except Exception:  # noqa: BLE001
             logger.warning("image queue lock release failed", exc_info=True)
 
@@ -924,21 +961,46 @@ async def _reserve_image_queue_slot(
             if current >= concurrency:
                 continue
             try:
-                await redis.zadd(provider_zset, {task_id: expiry})
-                # Keep the ZSET TTL ahead of the longest possible task so it
-                # never gets evicted out from under us, but bounded so it
-                # disappears once the provider is fully idle.
-                await redis.expire(provider_zset, _LEASE_TTL_S * 4)
-                await redis.set(
-                    _image_task_provider_key(task_id),
-                    provider_name,
-                    ex=_LEASE_TTL_S,
-                )
-                await redis.zadd(
-                    _IMAGE_QUEUE_ACTIVE_KEY,
-                    {task_id: expiry},
-                )
-                await redis.delete(_image_queue_not_before_key(task_id))
+                eval_fn = getattr(redis, "eval", None)
+                if callable(eval_fn):
+                    ok = await eval_fn(
+                        _RESERVE_IMAGE_SLOT_LUA,
+                        4,
+                        provider_zset,
+                        _IMAGE_QUEUE_ACTIVE_KEY,
+                        _image_task_provider_key(task_id),
+                        _image_queue_not_before_key(task_id),
+                        str(now),
+                        str(expiry),
+                        task_id,
+                        provider_name,
+                        str(concurrency),
+                        str(capacity),
+                        str(_LEASE_TTL_S),
+                        str(_LEASE_TTL_S * 4),
+                    )
+                    if int(ok or 0) != 1:
+                        continue
+                else:
+                    logger.warning(
+                        "image queue reserve using non-atomic fallback path task=%s",
+                        task_id,
+                    )
+                    await redis.zadd(provider_zset, {task_id: expiry})
+                    # Keep the ZSET TTL ahead of the longest possible task so it
+                    # never gets evicted out from under us, but bounded so it
+                    # disappears once the provider is fully idle.
+                    await redis.expire(provider_zset, _LEASE_TTL_S * 4)
+                    await redis.set(
+                        _image_task_provider_key(task_id),
+                        provider_name,
+                        ex=_LEASE_TTL_S,
+                    )
+                    await redis.zadd(
+                        _IMAGE_QUEUE_ACTIVE_KEY,
+                        {task_id: expiry},
+                    )
+                    await redis.delete(_image_queue_not_before_key(task_id))
             except Exception:
                 with suppress(Exception):
                     await redis.zrem(provider_zset, task_id)

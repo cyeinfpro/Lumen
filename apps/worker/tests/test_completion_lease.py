@@ -12,7 +12,7 @@ async def test_completion_lease_renewer_sets_event_and_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class BrokenRedis:
-        async def expire(self, *_args, **_kwargs) -> None:
+        async def eval(self, *_args, **_kwargs) -> None:
             raise RuntimeError("redis down")
 
     async def no_sleep(_seconds: float) -> None:
@@ -21,7 +21,7 @@ async def test_completion_lease_renewer_sets_event_and_exits(
     monkeypatch.setattr(completion.asyncio, "sleep", no_sleep)
     lease_lost = completion.asyncio.Event()
 
-    await completion._lease_renewer(BrokenRedis(), "comp-1", lease_lost)
+    await completion._lease_renewer(BrokenRedis(), "comp-1", "worker-1", lease_lost)
 
     assert lease_lost.is_set()
 
@@ -41,13 +41,16 @@ async def test_completion_lease_renewer_cancellation_safety(
     expire_calls: list[tuple] = []
 
     class HealthyRedis:
-        async def expire(self, *args, **_kwargs) -> None:
+        async def eval(self, *args, **_kwargs) -> int:
             expire_calls.append(args)
+            return 1
 
     lease_lost = completion.asyncio.Event()
 
     task = asyncio.create_task(
-        completion._lease_renewer(HealthyRedis(), "comp-cancel", lease_lost)
+        completion._lease_renewer(
+            HealthyRedis(), "comp-cancel", "worker-1", lease_lost
+        )
     )
     # 让 task 进入 sleep 状态再 cancel
     await asyncio.sleep(0)
@@ -84,13 +87,14 @@ async def test_completion_lease_renewer_clears_fail_streak_on_success(
     call_idx = {"i": 0}
 
     class FlakyRedis:
-        async def expire(self, *_args, **_kwargs) -> None:
+        async def eval(self, *_args, **_kwargs) -> int:
             i = call_idx["i"]
             call_idx["i"] += 1
             # 越界视作 fail（兜底），但 streak=3 会先 return 出来
             ok = sequence[i] if i < len(sequence) else False
             if not ok:
                 raise RuntimeError("redis blip")
+            return 1
 
     async def no_sleep(_seconds: float) -> None:
         return None
@@ -98,10 +102,49 @@ async def test_completion_lease_renewer_clears_fail_streak_on_success(
     monkeypatch.setattr(completion.asyncio, "sleep", no_sleep)
     lease_lost = completion.asyncio.Event()
 
-    await completion._lease_renewer(FlakyRedis(), "comp-streak", lease_lost)
+    await completion._lease_renewer(
+        FlakyRedis(), "comp-streak", "worker-1", lease_lost
+    )
 
     # 关键：必须走完第 5、6、7 步才退（streak 在第 7 步=3）。如果 reset 没生效
     # ，第 5 步就已经是 streak=3 退出，call_idx 只会到 5。
     assert call_idx["i"] == 7
     # 第 7 步触阈值后 lease_lost 才 set
     assert lease_lost.is_set()
+
+
+@pytest.mark.asyncio
+async def test_completion_lease_renewer_exits_on_owner_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        async def eval(self, *_args, **_kwargs) -> int:
+            return 0
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(completion.asyncio, "sleep", no_sleep)
+    lease_lost = completion.asyncio.Event()
+
+    await completion._lease_renewer(Redis(), "comp-owner", "worker-old", lease_lost)
+
+    assert lease_lost.is_set()
+
+
+@pytest.mark.asyncio
+async def test_completion_release_lease_uses_owner_cas() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.eval_args: tuple[object, ...] | None = None
+
+        async def eval(self, *args: object) -> int:
+            self.eval_args = args
+            return 0
+
+    redis = Redis()
+
+    await completion._release_lease(redis, "comp-1", "worker-1")
+
+    assert redis.eval_args is not None
+    assert redis.eval_args[1:4] == (1, "task:comp-1:lease", "worker-1")

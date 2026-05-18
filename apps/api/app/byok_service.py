@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import ipaddress
 import re
-import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy import func, select
@@ -52,6 +48,7 @@ from lumen_core.schemas import (
     ByokPurpose,
     ByokSettingsOut,
 )
+from lumen_core.url_security import assert_public_http_target
 
 from .config import settings
 from .runtime_settings import get_setting  # type: ignore[attr-defined]
@@ -66,20 +63,6 @@ _MODEL_UNAVAILABLE_MARKERS = (
     "does not have access to model",
     "model_not_found",
 )
-_FORBIDDEN_HOST_NETWORKS = (
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("100.64.0.0/10"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("::/128"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-)
-
 
 @dataclass(frozen=True)
 class ValidationOutcome:
@@ -105,62 +88,12 @@ def slugify_supplier(value: str) -> str:
 
 
 async def normalize_base_url(raw: str) -> str:
-    value = raw.strip().rstrip("/")
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("base_url must be an http(s) URL")
-    if parsed.username or parsed.password:
-        raise ValueError("base_url must not contain username or password")
-    host = parsed.hostname or ""
-    if not is_dev_env() and (
-        _is_private_host(host) or await _host_resolves_to_private(host)
-    ):
-        raise ValueError("private supplier URLs are not allowed outside development")
-    return value
-
-
-def _is_forbidden_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-        or any(ip in network for network in _FORBIDDEN_HOST_NETWORKS)
+    return await assert_public_http_target(
+        raw,
+        allow_http=is_dev_env(),
+        allow_private=is_dev_env(),
+        allow_unresolved=is_dev_env(),
     )
-
-
-def _is_private_host(host: str) -> bool:
-    lower = host.strip().lower()
-    if lower in {"localhost", "localhost.localdomain"}:
-        return True
-    if lower.endswith(".localhost") or lower.endswith(".local"):
-        return True
-    try:
-        ip = ipaddress.ip_address(lower.strip("[]"))
-    except ValueError:
-        return False
-    return _is_forbidden_ip(ip)
-
-
-async def _host_resolves_to_private(host: str) -> bool:
-    loop = asyncio.get_running_loop()
-    try:
-        infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        return False
-    for info in infos:
-        sockaddr = info[4]
-        if not sockaddr:
-            continue
-        try:
-            ip = ipaddress.ip_address(str(sockaddr[0]))
-        except ValueError:
-            continue
-        if _is_forbidden_ip(ip):
-            return True
-    return False
 
 
 async def read_byok_settings(db: AsyncSession) -> ByokSettingsOut:
@@ -363,6 +296,8 @@ async def validate_api_key_with_supplier(
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(effective_timeout / 1000),
             proxy=proxy_url,
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
             resp = await client.post(
                 _responses_url(base_url),

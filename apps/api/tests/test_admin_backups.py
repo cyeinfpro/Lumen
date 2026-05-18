@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -120,3 +121,47 @@ async def test_run_script_uses_async_subprocess(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert result.stdout == "backup ok"
     assert result.stderr == ""
+
+
+@pytest.mark.asyncio
+async def test_backup_now_unlinks_marker_before_releasing_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    backup_script = scripts_dir / "backup.sh"
+    backup_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
+
+    release_marker_states: list[bool] = []
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **_kwargs) -> None:
+            marker = admin_backups._maintenance_marker_path(
+                admin_backups._BACKUP_RUNNING_MARKER
+            )
+            release_marker_states.append(marker.exists())
+
+    async def timeout_run_script(*_args, **_kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+    monkeypatch.setattr(admin_backups, "_run_script", timeout_run_script)
+
+    with pytest.raises(Exception) as exc_info:
+        await admin_backups.backup_now(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(id="admin-1"),  # type: ignore[arg-type]
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 504
+    assert release_marker_states == [False]
