@@ -33,6 +33,7 @@ import {
 import type { AdminWalletAuditOut } from "@/lib/types";
 import type { PricingRuleOut, PricingRuleUpsertIn } from "@/lib/types";
 import { Button, Card, toast } from "@/components/ui/primitives";
+import { formatRmb } from "@/lib/money";
 import { RedemptionPanel } from "./RedemptionPanel";
 
 const DEFAULT_IMAGE_THRESHOLDS: Record<string, number> = {
@@ -51,7 +52,7 @@ const SUB_TABS: { key: BillingSubTab; label: string }[] = [
 ];
 
 function money(value?: string | number | null): string {
-  return Number(value ?? 0).toFixed(2);
+  return formatRmb(value);
 }
 
 function microToRmb(value?: string | null): string {
@@ -102,14 +103,21 @@ export function BillingPanel() {
   return (
     <div className="space-y-5">
       <div className="overflow-x-auto scrollbar-thin">
-        <div className="inline-flex rounded-full border border-[var(--border)] bg-white/[0.04] p-1">
+        <div className="inline-flex rounded-full border border-[var(--border)] bg-[var(--bg-2)] p-1">
           {SUB_TABS.map((item) => {
             const active = tab === item.key;
             return (
               <button
                 key={item.key}
                 type="button"
-                onClick={() => setTab(item.key)}
+                onClick={(event) => {
+                  setTab(item.key);
+                  event.currentTarget.scrollIntoView({
+                    behavior: "smooth",
+                    block: "nearest",
+                    inline: "center",
+                  });
+                }}
                 className={[
                   "rounded-full px-3.5 py-1.5 text-sm transition-colors",
                   active
@@ -253,7 +261,7 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
               )}
               <span className="min-w-0">
                 <span className="block text-sm text-[var(--fg-0)]">{item.label}</span>
-                <span className="block truncate text-xs text-[var(--fg-2)]">{item.value}</span>
+                <span className="block whitespace-normal break-words text-xs text-[var(--fg-2)]">{item.value}</span>
               </span>
             </button>
           ))}
@@ -286,7 +294,7 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
         </Card>
       )}
 
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
         <MetricCard
           label="钱包总余额"
           value={`¥${money(overview?.wallet_total_balance.rmb)}`}
@@ -313,11 +321,11 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
         <div className="border-b border-[var(--border-subtle)] px-4 py-3">
           <p className="type-card-title">最近审计</p>
         </div>
-        <div className="max-h-[360px] divide-y divide-[var(--border-subtle)] overflow-auto">
+        <div className="divide-y divide-[var(--border-subtle)] md:max-h-[360px] md:overflow-auto">
           {(overview?.recent_audit_events ?? []).map((event) => (
-            <div key={event.id} className="grid gap-1 px-4 py-3 text-sm md:grid-cols-[180px_220px_1fr]">
-              <span className="text-[var(--fg-2)]">{new Date(event.created_at).toLocaleString()}</span>
-              <span className="font-mono text-xs text-[var(--fg-0)]">{event.event_type}</span>
+            <div key={event.id} className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-3 text-sm">
+              <span className="shrink-0 text-[var(--fg-2)]">{new Date(event.created_at).toLocaleString()}</span>
+              <span className="max-w-full truncate font-mono text-xs text-[var(--fg-0)] md:max-w-[260px]">{event.event_type}</span>
               <span className="truncate text-[var(--fg-2)]">
                 {event.target_user_id ?? event.user_id ?? "-"}
               </span>
@@ -364,7 +372,9 @@ function OverviewSubpanel({ onGoPricing }: { onGoPricing: () => void }) {
           {(orphanQ.data ?? []).map((item) => (
             <div key={item.tx.id} className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[1fr_auto]">
               <div className="min-w-0">
-                <p className="font-mono text-xs text-[var(--fg-0)]">{item.tx.ref_type}:{item.tx.ref_id}</p>
+                <p className="truncate font-mono text-xs text-[var(--fg-0)]" title={`${item.tx.ref_type}:${item.tx.ref_id}`}>
+                  {item.tx.ref_type}:{item.tx.ref_id}
+                </p>
                 <p className="text-[var(--fg-2)]">
                   user {item.user_id} · 预扣 ¥{money(Math.abs(item.tx.amount.micro) / 1_000_000)} · {Math.round(item.age_seconds / 60)} 分钟
                 </p>
@@ -717,7 +727,7 @@ function PricingSubpanel() {
             保存设置
           </Button>
         </div>
-        <div className="grid gap-3 md:grid-cols-5">
+        <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
           <SwitchField
             label="计费开关"
             checked={enabled === "1"}
@@ -763,7 +773,7 @@ function PricingSubpanel() {
                 </p>
               </div>
             </div>
-            <div className="w-full md:w-auto">
+            <div className="flex w-full justify-end sm:w-auto">
               <Button
                 variant={secretConfigured ? "outline" : "primary"}
                 size="md"
@@ -808,18 +818,24 @@ function PricingSubpanel() {
           </Button>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_180px]">
-          <input
-            value={bulkModel}
-            onChange={(e) => setBulkModel(e.target.value)}
-            placeholder="模型，如 claude-sonnet-4-6"
-            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-          <input
-            value={bulkChannel}
-            onChange={(e) => setBulkChannel(e.target.value)}
-            placeholder="channel，可空"
-            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
+          <label className="space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">模型</span>
+            <input
+              value={bulkModel}
+              onChange={(e) => setBulkModel(e.target.value)}
+              placeholder="claude-sonnet-4-6"
+              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+            />
+          </label>
+          <label className="space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">Channel</span>
+            <input
+              value={bulkChannel}
+              onChange={(e) => setBulkChannel(e.target.value)}
+              placeholder="可空"
+              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+            />
+          </label>
         </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[
@@ -871,8 +887,8 @@ function PricingSubpanel() {
             保存尺寸定价
           </Button>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[680px] text-sm">
+        <div className="data-stack-on-mobile md:overflow-x-auto">
+          <table className="w-full text-sm md:min-w-[680px]">
             <thead className="text-left text-[var(--fg-2)]">
               <tr className="border-b border-[var(--border-subtle)]">
                 <th className="px-3 py-2">档位</th>
@@ -884,8 +900,8 @@ function PricingSubpanel() {
             <tbody>
               {imageRows.map(({ tier, row, threshold }) => (
                 <tr key={tier} className="border-b border-[var(--border-subtle)]">
-                  <td className="px-3 py-2 font-mono">{tier}</td>
-                  <td className="px-3 py-2">
+                  <td data-label="档位" className="px-3 py-2 font-mono">{tier}</td>
+                  <td data-label="像素下界" className="px-3 py-2">
                     <input
                       value={imageThresholds[tier] ?? String(threshold)}
                       onChange={(e) =>
@@ -895,7 +911,7 @@ function PricingSubpanel() {
                       className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
                     />
                   </td>
-                  <td className="px-3 py-2">
+                  <td data-label="单价 (¥/张)" className="px-3 py-2">
                     <input
                       value={imagePrices[tier] ?? row?.price.rmb ?? ""}
                       onChange={(e) =>
@@ -906,13 +922,13 @@ function PricingSubpanel() {
                       className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
                     />
                   </td>
-                  <td className="px-3 py-2">{row?.enabled === false ? "停用" : "启用"}</td>
+                  <td data-label="状态" className="px-3 py-2">{row?.enabled === false ? "停用" : "启用"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <div className="grid gap-3 border-t border-[var(--border-subtle)] pt-4 md:grid-cols-[1fr_1fr_auto]">
+        <div className="grid gap-3 border-t border-[var(--border-subtle)] pt-4 sm:grid-cols-[1fr_1fr_auto]">
           <input
             value={newTier}
             onChange={(e) => setNewTier(e.target.value)}
@@ -956,8 +972,8 @@ function PricingSubpanel() {
             保存模型价格
           </Button>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[840px] text-sm">
+        <div className="data-stack-on-mobile md:overflow-x-auto">
+          <table className="w-full text-sm md:min-w-[840px]">
             <thead className="text-left text-[var(--fg-2)]">
               <tr className="border-b border-[var(--border-subtle)]">
                 <th className="px-3 py-2">模型</th>
@@ -973,8 +989,8 @@ function PricingSubpanel() {
                 const enabled = Boolean(row.input?.enabled || row.output?.enabled);
                 return (
                   <tr key={row.model} className="border-b border-[var(--border-subtle)]">
-                    <td className="px-3 py-2 font-mono text-xs">{row.model}</td>
-                    <td className="px-3 py-2">
+                    <td data-label="模型" className="px-3 py-2 font-mono text-xs [overflow-wrap:anywhere]">{row.model}</td>
+                    <td data-label="输入 ¥/1K" className="px-3 py-2">
                       <input
                         value={modelDrafts[`${row.model}:in`] ?? row.input?.price.rmb ?? ""}
                         disabled={!row.input}
@@ -987,7 +1003,7 @@ function PricingSubpanel() {
                         className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50 disabled:opacity-50"
                       />
                     </td>
-                    <td className="px-3 py-2">
+                    <td data-label="输出 ¥/1K" className="px-3 py-2">
                       <input
                         value={modelDrafts[`${row.model}:out`] ?? row.output?.price.rmb ?? ""}
                         disabled={!row.output}
@@ -1000,11 +1016,11 @@ function PricingSubpanel() {
                         className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50 disabled:opacity-50"
                       />
                     </td>
-                    <td className="px-3 py-2">{enabled ? "启用" : "停用"}</td>
-                    <td className="px-3 py-2 text-[var(--fg-2)]">
+                    <td data-label="状态" className="px-3 py-2">{enabled ? "启用" : "停用"}</td>
+                    <td data-label="更新于" className="px-3 py-2 text-[var(--fg-2)]">
                       {row.updated_at ? new Date(row.updated_at).toLocaleString() : "-"}
                     </td>
-                    <td className="px-3 py-2 text-right">
+                    <td data-actions="true" className="px-3 py-2 text-right">
                       <Button
                         variant="outline"
                         size="sm"
@@ -1028,19 +1044,25 @@ function PricingSubpanel() {
           </table>
         </div>
         <div className="grid gap-3 border-t border-[var(--border-subtle)] pt-4 md:grid-cols-[1fr_120px_auto]">
-          <textarea
-            value={priceFile}
-            onChange={(e) => setPriceFile(e.target.value)}
-            rows={5}
-            placeholder="- model: gpt-5.5&#10;  input_usd_per_1m: 5.00&#10;  output_usd_per_1m: 15.00"
-            className="w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-          <input
-            value={rate}
-            onChange={(e) => setRateDraft(e.target.value)}
-            inputMode="decimal"
-            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
+          <label className="space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">价目 YAML / JSON</span>
+            <textarea
+              value={priceFile}
+              onChange={(e) => setPriceFile(e.target.value)}
+              rows={5}
+              placeholder="- model: gpt-5.5&#10;  input_usd_per_1m: 5.00&#10;  output_usd_per_1m: 15.00"
+              className="w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm outline-none focus:border-[var(--accent)]/50"
+            />
+          </label>
+          <label className="space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">USD→RMB</span>
+            <input
+              value={rate}
+              onChange={(e) => setRateDraft(e.target.value)}
+              inputMode="decimal"
+              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+            />
+          </label>
           <Button
             variant="outline"
             size="md"
@@ -1084,12 +1106,12 @@ function SwitchField({
         <span
           className={[
             "relative h-5 w-9 rounded-full transition-colors",
-            checked ? "bg-[var(--accent)]" : "bg-white/10",
+            checked ? "bg-[var(--accent)]" : "bg-[var(--bg-2)]",
           ].join(" ")}
         >
           <span
             className={[
-              "absolute top-0.5 h-4 w-4 rounded-full bg-[var(--bg-0)] transition-transform",
+              "absolute top-0.5 h-4 w-4 rounded-full bg-[var(--fg-0)]/90 transition-transform",
               checked ? "translate-x-4" : "translate-x-0.5",
             ].join(" ")}
           />

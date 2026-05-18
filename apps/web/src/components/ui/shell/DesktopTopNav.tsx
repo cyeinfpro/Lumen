@@ -14,6 +14,7 @@ import { useCallback, useMemo, useRef, type KeyboardEvent, type ReactNode } from
 
 import { IconButton } from "@/components/ui/primitives";
 import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
+import { formatRmb, formatRmbCompact } from "@/lib/money";
 import { SPRING } from "@/lib/motion";
 
 export type DesktopNavTab = "studio" | "projects" | "stream" | "me";
@@ -78,10 +79,14 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
   return (
     <header
       className={[
-        "sticky top-0 z-30 grid w-full h-11 items-center gap-2 px-3 md:px-5",
+        "sticky top-0 grid w-full h-11 items-center gap-2 px-3 md:px-5",
         "grid-cols-[auto_minmax(0,1fr)_auto]",
-        "backdrop-blur-xl bg-[var(--bg-0)]/70 border-b border-white/[0.04]",
+        "backdrop-blur-xl bg-[var(--bg-0)]/70 border-b border-[var(--border-subtle)]",
       ].join(" ")}
+      style={{
+        top: "var(--system-banner-height, 0px)",
+        zIndex: "var(--z-header, 10)",
+      }}
     >
       {/* Left: sidebar toggle + Logo */}
       <div className="flex items-center gap-3 md:gap-4 min-w-0">
@@ -106,7 +111,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
       </div>
 
       {/* Middle: Tabs — 占据中间 1fr，居中显示，可挤压 */}
-      <nav aria-label="主导航" className="flex justify-center min-w-0 overflow-hidden">
+      <nav aria-label="主导航" className="flex min-w-0 flex-1 justify-center overflow-hidden">
         <ul ref={tabsRef} onKeyDown={onTabsKeyDown} className="flex items-center gap-1">
           {TABS.map((tab) => {
             const isActive = tab.key === currentActive;
@@ -142,7 +147,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
       </nav>
 
       {/* Right: slot */}
-      <div className="flex items-center justify-end gap-1.5 text-sm text-[var(--fg-2)] md:gap-2 min-w-0">
+      <div className="flex min-w-0 shrink-0 items-center justify-end gap-2 text-sm text-[var(--fg-2)]">
         <WalletBalancePill />
         {right}
       </div>
@@ -174,24 +179,27 @@ function WalletBalancePill() {
   });
   const wallet = walletQuery.data;
   if (pricingQuery.data?.billing_enabled === false) return null;
-  if (!enabled || !wallet?.balance) return null;
+  if (!enabled || wallet?.balance == null) return null;
   const low =
     wallet.low_balance_threshold?.micro != null &&
     wallet.balance.micro < wallet.low_balance_threshold.micro;
-  const balanceText = Number(wallet.balance.rmb).toFixed(2);
+  const negative = wallet.balance.micro < 0;
+  const balanceText = formatRmb(wallet.balance.rmb);
+  const compactBalanceText = formatRmbCompact(wallet.balance.rmb);
   return (
     <Link
       href="/me/wallet"
       aria-label={low ? `钱包余额低 ¥${balanceText}` : `钱包余额 ¥${balanceText}`}
-      title="钱包"
+      title={`¥${balanceText}`}
       className={[
-        "hidden sm:inline-flex items-center rounded-full border px-2.5 py-1 text-[12px] font-medium tabular-nums",
-        low
+        "hidden max-w-[140px] shrink-0 items-center rounded-full border px-2.5 py-1 text-[12px] font-medium tabular-nums sm:inline-flex",
+        "truncate font-mono",
+        low || negative
           ? "border-danger-border bg-danger-soft text-[var(--danger-fg)]"
-          : "border-[var(--border)] bg-white/5 text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+          : "border-[var(--border)] bg-[color-mix(in_srgb,var(--fg-0)_5%,transparent)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
       ].join(" ")}
     >
-      ¥{balanceText}
+      <span className="inline-block min-w-[88px] truncate text-right">¥{compactBalanceText}</span>
     </Link>
   );
 }

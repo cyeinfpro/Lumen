@@ -31,6 +31,14 @@ const PREFLIGHT_LABEL: Record<string, string> = {
   failed: "场景规划失败",
 };
 
+const PREFLIGHT_PHASE_LABEL: Record<string, string> = {
+  director: "GPT-5.5 规划并扩写",
+  composer: "GPT-5.5 扩写提示词",
+  review: "GPT-5.5 风险复核",
+  fallback: "规则兜底",
+  dispatching: "派发生图任务",
+};
+
 const STATUS_LABEL: Record<string, string> = {
   queued: "排队中",
   running: "生成中",
@@ -122,8 +130,16 @@ export function ShowcaseTaskProgress({
     Math.min(plannedCount, succeededCount),
   );
   const preflightStatus = stringValue(step.input_json?.preflight_status);
+  const preflightPhase = stringValue(step.input_json?.preflight_phase);
+  const preflightPhaseDetail = stringValue(step.input_json?.preflight_phase_detail);
+  const preflightPhaseCurrent = numberValue(step.input_json?.preflight_phase_current);
+  const preflightPhaseTotal = numberValue(step.input_json?.preflight_phase_total);
+  const preflightDisplay = preflightPhaseDetail
+    ? `${PREFLIGHT_PHASE_LABEL[preflightPhase ?? ""] ?? "规划中"} · ${preflightPhaseDetail}`
+    : PREFLIGHT_LABEL[preflightStatus ?? "queued"] ?? "等待场景规划";
   const phase = resolvePhase({
     preflightStatus,
+    preflightDisplay,
     taskCount: tasks.length,
     runningCount,
     failedCount,
@@ -134,6 +150,9 @@ export function ShowcaseTaskProgress({
   });
   const percent = progressPercent({
     preflightStatus,
+    preflightPhase,
+    preflightPhaseCurrent,
+    preflightPhaseTotal,
     taskCount: tasks.length,
     plannedCount,
     progressCount,
@@ -141,6 +160,7 @@ export function ShowcaseTaskProgress({
   });
   const milestones = buildMilestones({
     preflightStatus,
+    preflightDisplay,
     taskCount: tasks.length,
     runningCount,
     failedCount,
@@ -217,7 +237,7 @@ export function ShowcaseTaskProgress({
                 等待派发图像任务
               </p>
               <p className="mt-1 text-[12px] text-[var(--fg-1)]">
-                {PREFLIGHT_LABEL[preflightStatus ?? "queued"] ?? "已提交生成请求"}
+                {preflightDisplay}
               </p>
             </div>
             <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--amber-300)]" />
@@ -360,6 +380,7 @@ function MilestoneIcon({ state }: { state: ProgressState }) {
 
 function buildMilestones({
   preflightStatus,
+  preflightDisplay,
   taskCount,
   runningCount,
   failedCount,
@@ -369,6 +390,7 @@ function buildMilestones({
   stepStatus,
 }: {
   preflightStatus: string | null;
+  preflightDisplay: string;
   taskCount: number;
   runningCount: number;
   failedCount: number;
@@ -390,7 +412,7 @@ function buildMilestones({
     },
     {
       label: "Planning",
-      detail: PREFLIGHT_LABEL[preflightStatus ?? "queued"] ?? "等待场景规划",
+      detail: preflightDisplay,
       state: preflightFailed
         ? "failed"
         : dispatchDone
@@ -425,6 +447,7 @@ function buildMilestones({
 
 function resolvePhase({
   preflightStatus,
+  preflightDisplay,
   taskCount,
   runningCount,
   failedCount,
@@ -434,6 +457,7 @@ function resolvePhase({
   stepStatus,
 }: {
   preflightStatus: string | null;
+  preflightDisplay: string;
   taskCount: number;
   runningCount: number;
   failedCount: number;
@@ -445,7 +469,7 @@ function resolvePhase({
   if (stepStatus === "failed" || preflightStatus === "failed") return "生成任务失败";
   if (plannedCount > 0 && progressCount >= plannedCount) return "本轮成品图已完成";
   if (taskCount === 0) {
-    return PREFLIGHT_LABEL[preflightStatus ?? "queued"] ?? "等待场景规划";
+    return preflightDisplay;
   }
   if (runningCount > 0) return "图像任务正在生成";
   if (failedCount > 0) return "部分图像任务失败";
@@ -455,12 +479,18 @@ function resolvePhase({
 
 function progressPercent({
   preflightStatus,
+  preflightPhase,
+  preflightPhaseCurrent,
+  preflightPhaseTotal,
   taskCount,
   plannedCount,
   progressCount,
   stepStatus,
 }: {
   preflightStatus: string | null;
+  preflightPhase: string | null;
+  preflightPhaseCurrent: number | null;
+  preflightPhaseTotal: number | null;
   taskCount: number;
   plannedCount: number;
   progressCount: number;
@@ -469,6 +499,28 @@ function progressPercent({
   if (stepStatus === "failed" || preflightStatus === "failed") return 100;
   if (plannedCount > 0 && progressCount >= plannedCount) return 100;
   if (taskCount === 0) {
+    if (
+      preflightPhase === "composer" &&
+      preflightPhaseTotal &&
+      preflightPhaseCurrent !== null
+    ) {
+      return Math.max(
+        18,
+        Math.min(42, Math.round(18 + (preflightPhaseCurrent / preflightPhaseTotal) * 24)),
+      );
+    }
+    if (
+      preflightPhase === "review" &&
+      preflightPhaseTotal &&
+      preflightPhaseCurrent !== null
+    ) {
+      return Math.max(
+        42,
+        Math.min(55, Math.round(42 + (preflightPhaseCurrent / preflightPhaseTotal) * 13)),
+      );
+    }
+    if (preflightPhase === "dispatching") return 45;
+    if (preflightPhase === "fallback") return 16;
     return preflightStatus === "running" ? 18 : 8;
   }
   const taskProgress = plannedCount > 0 ? progressCount / plannedCount : 0;

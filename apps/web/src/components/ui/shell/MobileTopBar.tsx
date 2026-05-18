@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
+import { formatRmb, formatRmbCompact } from "@/lib/money";
 
 export interface MobileTopBarProps {
   left?: ReactNode;
@@ -58,10 +59,10 @@ export function MobileTopBar({
       ].join(" ")}
       style={{
         zIndex: "var(--z-header, 10)" as unknown as number,
-        paddingTop: "env(safe-area-inset-top, 0px)",
+        paddingTop: "calc(env(safe-area-inset-top, 0px) + var(--system-banner-height, 0px))",
       }}
     >
-      <div className="relative flex items-center h-10 max-w-[640px] mx-auto px-3 gap-2.5">
+      <div className="relative flex items-center h-10 max-w-[640px] mx-auto px-3 gap-2.5 [@media(max-width:360px)]:gap-1.5">
         <div className="flex-1 min-w-0 flex items-center gap-2">{left}</div>
         <div className="flex items-center gap-1.5">
           <MobileWalletPill />
@@ -97,23 +98,27 @@ function MobileWalletPill() {
   });
   const wallet = walletQuery.data;
   if (pricingQuery.data?.billing_enabled === false) return null;
-  if (!enabled || !wallet?.balance) return null;
+  if (!enabled || wallet?.balance == null) return null;
   const low =
     wallet.low_balance_threshold?.micro != null &&
     wallet.balance.micro < wallet.low_balance_threshold.micro;
-  const balanceText = Number(wallet.balance.rmb).toFixed(2);
+  const negative = wallet.balance.micro < 0;
+  const balanceText = formatRmb(wallet.balance.rmb);
+  const compactBalanceText = formatRmbCompact(wallet.balance.rmb);
   return (
     <Link
       href="/me/wallet"
       aria-label={low ? `钱包余额低 ¥${balanceText}` : `钱包余额 ¥${balanceText}`}
+      title={`¥${balanceText}`}
       className={[
-        "inline-flex h-7 items-center rounded-full border px-2 text-[11px] font-medium tabular-nums",
-        low
+        "inline-flex h-7 max-w-[88px] shrink-0 items-center rounded-full border px-2 text-[11px] font-medium tabular-nums",
+        "truncate font-mono",
+        low || negative
           ? "border-danger-border bg-danger-soft text-[var(--danger-fg)]"
-          : "border-[var(--border)] bg-white/5 text-[var(--fg-1)]",
+          : "border-[var(--border)] bg-[color-mix(in_srgb,var(--fg-0)_5%,transparent)] text-[var(--fg-1)]",
       ].join(" ")}
     >
-      ¥{balanceText}
+      <span className="inline-block min-w-[72px] truncate text-right">¥{compactBalanceText}</span>
     </Link>
   );
 }

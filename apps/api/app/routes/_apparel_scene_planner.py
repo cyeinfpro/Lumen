@@ -44,6 +44,14 @@ _PROVIDER_RR_LOCK = asyncio.Lock()
 _DIRECTOR_MODEL = "gpt-5.5"
 _FALLBACK_MODEL = "gpt-5.4"
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+_GPT55_PROVIDER_LIMIT_ENV = "LUMEN_SHOWCASE_GPT_PROVIDER_LIMIT"
+_GPT55_CALL_TIMEOUT_ENV = "LUMEN_SHOWCASE_GPT_CALL_TIMEOUT_SEC"
+_GPT55_DEFAULT_PROVIDER_LIMIT = 2
+_GPT55_DIRECTOR_TIMEOUT_SEC = 150.0
+_GPT55_COMPOSER_TIMEOUT_SEC = 75.0
+_GPT55_REVIEW_TIMEOUT_SEC = 45.0
+_GPT55_DEFAULT_TIMEOUT_SEC = 75.0
+_GPT55_ATTEMPT_TIMEOUT_SEC = 70.0
 _REFERENCE_IMAGE_RETRY_STATUS = {400, 413, 415, 422}
 _REFERENCE_IMAGE_RETRY_TOKENS = (
     "input_image",
@@ -601,6 +609,10 @@ def fallback_scene_cards_from_pool(
             "source": "rules_fallback",
             "user_direction": clean_text(user_prompt, max_len=120),
         }
+        card["shooting_brief"] = _fallback_scene_card_shooting_brief(
+            card,
+            shot_class=shot_class,
+        )
         card["fingerprint"] = scene_fingerprint(card)
         cards.append(card)
     return cards
@@ -887,6 +899,51 @@ def _composition_for_shot(shot_class: str) -> str:
     return "人物完整入镜，商品主体占画面主要面积，背景只作氛围"
 
 
+def _fallback_scene_card_shooting_brief(
+    card: dict[str, Any],
+    *,
+    shot_class: str,
+) -> str:
+    camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    camera_seed = "，".join(
+        clean_text(item, max_len=50)
+        for item in (
+            camera.get("distance"),
+            camera.get("angle"),
+            camera.get("lens_feel"),
+        )
+        if str(item or "").strip()
+    )
+    view_rule = (
+        "保持正面或三分之二正面，脸和当前角度商品主体清楚"
+        if shot_class != "side_or_back"
+        else "侧面或背面廓形清楚，人物完整不切断"
+    )
+    location = clean_text(card.get("location"), max_len=90)
+    micro_event = clean_text(card.get("micro_event"), max_len=120)
+    pose = clean_text(card.get("pose"), max_len=110)
+    motion = clean_text(card.get("motion"), max_len=110)
+    camera_detail = clean_text(card.get("camera_detail"), max_len=160)
+    natural_detail = clean_text(card.get("natural_detail"), max_len=160)
+    camera_items = [
+        item for item in (camera_seed or "自然标准镜头", camera_detail) if item
+    ]
+    natural_items = [item for item in (natural_detail, view_rule) if item]
+    parts = [
+        f"{'，'.join(item for item in (location, micro_event) if item)}。",
+        f"{'，'.join(item for item in (pose, motion) if item)}。",
+        f"{'；'.join(camera_items)}。",
+        f"{clean_text(card.get('lighting_detail'), max_len=160)}",
+        f"{clean_text(card.get('composition_detail'), max_len=160)}",
+        f"{clean_text(card.get('creative_intent'), max_len=160)}。",
+        f"{'；'.join(natural_items)}。",
+    ]
+    return _sanitize_shooting_brief(
+        "".join(part for part in parts if part.strip("，。；")),
+        max_len=900,
+    )
+
+
 def _product_visibility_for_shot(shot_class: str) -> str:
     if shot_class == "detail_half_body":
         return "upper_body_detail"
@@ -985,7 +1042,7 @@ async def plan_scene_cards_with_gpt55(
             purpose="apparel_scene_director",
             instructions=instructions,
             payload=payload,
-            max_output_tokens=3600 if output_count <= 8 else 6000,
+            max_output_tokens=5200 if output_count <= 8 else 9000,
             provider_order=provider_order,
             reference_images=reference_images,
         )
@@ -1064,9 +1121,11 @@ def _fallback_planning_result(
 
 def _director_instructions(output_count: int) -> str:
     return (
-        "你是服饰电商真人模特图的拍摄导演。你要为整批图片生成自然、不重复、"
-        "像真实拍摄分镜的单张拍摄方案。场景、姿势、微动作、镜头全部由你决定，"
-        "不要照抄 shot_plan 的标签或 fallback 文案。必须只输出 JSON 对象，不要 Markdown。\n"
+        "你是服饰电商真人模特图的拍摄导演兼提示词摄影师。你要一次性为整批图片生成"
+        "自然、不重复、像真实拍摄分镜的单张拍摄方案，并给每张写一条可直接拼接到"
+        "GPT Image 2 生图 prompt 的短摄影提示词 shooting_brief。场景、姿势、微动作、"
+        "镜头和光线全部由你决定，不要照抄 shot_plan 的标签或 fallback 文案。"
+        "必须只输出 JSON 对象，不要 Markdown。\n"
         "如果输入里带有参考图，参考图会标注为商品图和已确认模特图；你必须直接观察"
         "服饰风格、模特年龄感、身材比例、发型气质和二者搭配关系，再设计更适合这组搭配的"
         "电商宣传照场景、动作、神态、构图和光线。不要描述或复述衣服细节，"
@@ -1084,8 +1143,11 @@ def _director_instructions(output_count: int) -> str:
         "每个 scene_card 字段必须有 id, scene_family, location, micro_event, camera, "
         "pose, motion, props, lighting, composition, product_visibility, "
         "environment_detail, lighting_detail, camera_detail, composition_detail, "
-        "creative_intent, natural_detail, negative。\n"
+        "creative_intent, natural_detail, shooting_brief, negative。\n"
         "camera 必须有 distance, angle, lens_feel, orientation。\n"
+        "shooting_brief 是本张最终摄影提示词，只写场景、动作、神态、构图、光线、镜头、"
+        "动态张力和真实摄影质感，120-260 字中文；不要写多个候选，不要自评打分，"
+        "不要写商品清单、商品身份、禁改条款、模特一致条款或内部字段名。\n"
         "creative_intent 要写这张图的摄影作品想法，例如决定性瞬间、空间张力、"
         "光影叙事、人物与环境关系或真实生活观察；不要模仿或引用具体摄影师姓名、"
         "杂志名、品牌名。"
@@ -1244,19 +1306,12 @@ async def compose_image_prompt_with_gpt55(
             "aspect_ratio": aspect_ratio,
             "final_quality": final_quality,
             "system_will_append_product_lock": True,
-            "candidate_count": 3,
+            "candidate_count": 1,
             "view_policy": (
                 "side_or_back_allowed"
                 if shot_class == "side_or_back"
                 else "front_or_three_quarter_required"
             ),
-            "selection_metrics": [
-                "商品当前可见性",
-                "动作自然度",
-                "摄影作品感",
-                "与同批其它图的差异度",
-                "遮挡和改款风险",
-            ],
             "system_prompt_chars": len(base_prompt),
         },
         "rewrite_instruction": rewrite_instruction or "",
@@ -1271,15 +1326,10 @@ async def compose_image_prompt_with_gpt55(
         "不要描述衣服本身，不要列商品细节。\n"
         "最终 shooting_brief 要比普通电商站姿更有创造性：更明确的瞬间、更大胆但可信的"
         "机位/光影/留白、更强的动态张力，同时保持超真实摄影和商品主体清楚。\n"
-        "字段：candidate_briefs, selected_candidate_index, selection_scores, "
-        "shooting_brief, scene_keywords, composition_keywords, lighting_keywords, "
+        "字段：shooting_brief, scene_keywords, composition_keywords, lighting_keywords, "
         "action_keywords, photographic_idea_keywords, product_visibility_checklist, "
         "negative_prompt_notes, regenerate_if。\n"
-        "先生成 3 个互不重复的 candidate_briefs，每个候选 120-260 字，"
-        "都必须满足 seed_keywords，但摄影意图、构图重心、动作瞬间或光线关系要有明显差异。"
-        "再按 selection_metrics 自评打分，选择总分最高且风险最低的一版作为 shooting_brief。"
-        "selection_scores 每项包含 candidate, product_visibility, naturalness, "
-        "photographic_quality, variety, risk_control, total, reason，分数 0-10。"
+        "只输出 1 条最终 shooting_brief，不要先写多个候选，不要自评打分。"
         "shooting_brief 写 120-260 字中文，保持像真实生图提示词一样短而有力；"
         "product_context 只有少量服装关键词，用来判断场景气质和避免遮挡；"
         "不要把它扩写成商品清单。只写本张的场景、动作、神态、构图、光线、"
@@ -1311,7 +1361,7 @@ async def compose_image_prompt_with_gpt55(
             purpose="apparel_prompt_composer",
             instructions=instructions,
             payload=payload,
-            max_output_tokens=2600,
+            max_output_tokens=1400,
             provider_order=provider_order,
             reference_images=reference_images,
         )
@@ -1666,6 +1716,12 @@ def _normalize_scene_cards(
             "natural_detail": clean_text(raw.get("natural_detail"), max_len=220)
             or fallback.get("natural_detail")
             or "表情、手指、身体重心和衣料褶皱都自然可信，不做僵硬摆拍",
+            "shooting_brief": _sanitize_shooting_brief(
+                raw.get("shooting_brief") or raw.get("final_prompt"),
+                max_len=900,
+            )
+            or fallback.get("shooting_brief")
+            or "",
             "negative": coerce_string_list(
                 raw.get("negative"), max_items=8, max_len=100
             )
@@ -1685,6 +1741,16 @@ def _normalize_scene_cards(
         ):
             card["motion"] = fallback.get("motion") or card["motion"]
         _enforce_front_view_for_non_side_card(card, fallback, shot_class)
+        if shot_class != "side_or_back" and _has_view_token(
+            card.get("shooting_brief"),
+            _SIDE_BACK_VIEW_TOKENS,
+        ):
+            card["shooting_brief"] = ""
+        if not card.get("shooting_brief"):
+            card["shooting_brief"] = _fallback_scene_card_shooting_brief(
+                card,
+                shot_class=shot_class,
+            )
         card["fingerprint"] = scene_fingerprint(card)
         normalized.append(card)
     return _dedupe_scene_cards(normalized, fallback_cards)
@@ -1756,6 +1822,7 @@ async def _call_gpt55_json(
         if provider_order is not None
         else await resolve_scene_provider_order(db)
     )
+    providers = _limit_gpt55_providers(providers)
     if not providers:
         raise RuntimeError("no responses provider available")
     primary_effort = "medium" if purpose == "apparel_scene_director" else "low"
@@ -1780,15 +1847,24 @@ async def _call_gpt55_json(
         },
     )
     last_error = "unknown"
+    call_timeout = _gpt55_call_timeout_seconds(purpose)
+    deadline = asyncio.get_running_loop().time() + call_timeout
     for provider in providers:
         provider_fatal = False
         reference_image_fallback_reason: str | None = None
         for attempt in attempts:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"{purpose} exceeded {call_timeout:g}s GPT JSON budget; "
+                    f"last_error={last_error}"
+                )
+            attempt_timeout = min(_GPT55_ATTEMPT_TIMEOUT_SEC, remaining)
             attempt_reference_images = (
                 None if reference_image_fallback_reason else reference_images
             )
             try:
-                text = await _call_responses_text(
+                text = await _call_responses_text_with_timeout(
                     provider=provider,
                     attempt=attempt,
                     purpose=purpose,
@@ -1796,6 +1872,7 @@ async def _call_gpt55_json(
                     payload=payload,
                     max_output_tokens=max_output_tokens,
                     reference_images=attempt_reference_images,
+                    timeout_seconds=attempt_timeout,
                 )
                 data = _extract_json_object(text)
                 if isinstance(data, dict):
@@ -1815,11 +1892,16 @@ async def _call_gpt55_json(
                 ):
                     reference_image_fallback_reason = last_error[:300]
                     try:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            raise _Gpt55CallTimeout(
+                                f"timed out after {call_timeout:g}s total budget"
+                            )
                         logger.info(
                             "gpt55 json retrying without reference images: %s",
                             last_error,
                         )
-                        text = await _call_responses_text(
+                        text = await _call_responses_text_with_timeout(
                             provider=provider,
                             attempt=attempt,
                             purpose=purpose,
@@ -1827,6 +1909,10 @@ async def _call_gpt55_json(
                             payload=payload,
                             max_output_tokens=max_output_tokens,
                             reference_images=None,
+                            timeout_seconds=min(
+                                _GPT55_ATTEMPT_TIMEOUT_SEC,
+                                remaining,
+                            ),
                         )
                         data = _extract_json_object(text)
                         if isinstance(data, dict):
@@ -1848,6 +1934,85 @@ async def _call_gpt55_json(
         if provider_fatal:
             continue
     raise RuntimeError(last_error)
+
+
+class _Gpt55CallTimeout(TimeoutError):
+    pass
+
+
+def _gpt55_provider_limit() -> int:
+    raw_limit = os.environ.get(_GPT55_PROVIDER_LIMIT_ENV)
+    if raw_limit:
+        try:
+            return max(1, min(16, int(raw_limit)))
+        except (TypeError, ValueError):
+            logger.warning(
+                "invalid %s=%r; using default",
+                _GPT55_PROVIDER_LIMIT_ENV,
+                raw_limit,
+            )
+    return _GPT55_DEFAULT_PROVIDER_LIMIT
+
+
+def _limit_gpt55_providers(
+    providers: list[ProviderDefinition],
+) -> list[ProviderDefinition]:
+    if not providers:
+        return providers
+    return providers[: min(len(providers), _gpt55_provider_limit())]
+
+
+def _gpt55_call_timeout_seconds(purpose: str) -> float:
+    raw_timeout = os.environ.get(_GPT55_CALL_TIMEOUT_ENV)
+    if raw_timeout:
+        try:
+            return max(1.0, float(raw_timeout))
+        except (TypeError, ValueError):
+            logger.warning(
+                "invalid %s=%r; using purpose default",
+                _GPT55_CALL_TIMEOUT_ENV,
+                raw_timeout,
+            )
+    if purpose == "apparel_scene_director":
+        return _GPT55_DIRECTOR_TIMEOUT_SEC
+    if purpose == "apparel_prompt_composer":
+        return _GPT55_COMPOSER_TIMEOUT_SEC
+    if purpose == "apparel_prompt_risk_review":
+        return _GPT55_REVIEW_TIMEOUT_SEC
+    logger.warning(
+        "unknown GPT-5.5 call purpose=%r; using default timeout %gs",
+        purpose,
+        _GPT55_DEFAULT_TIMEOUT_SEC,
+    )
+    return _GPT55_DEFAULT_TIMEOUT_SEC
+
+
+async def _call_responses_text_with_timeout(
+    *,
+    provider: ProviderDefinition,
+    attempt: dict[str, Any],
+    purpose: str,
+    instructions: str,
+    payload: dict[str, Any],
+    max_output_tokens: int,
+    reference_images: list[dict[str, str]] | None = None,
+    timeout_seconds: float,
+) -> str:
+    try:
+        return await asyncio.wait_for(
+            _call_responses_text(
+                provider=provider,
+                attempt=attempt,
+                purpose=purpose,
+                instructions=instructions,
+                payload=payload,
+                max_output_tokens=max_output_tokens,
+                reference_images=reference_images,
+            ),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise _Gpt55CallTimeout(f"timed out after {timeout_seconds:g}s") from exc
 
 
 async def _call_responses_text(

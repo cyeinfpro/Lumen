@@ -1151,24 +1151,18 @@ def test_showcase_preflight_timeout_scales_for_large_gpt55_batches(
     )
 
 
-def test_showcase_gpt_parallelism_serializes_when_provider_order_unresolved(
+def test_showcase_gpt_provider_limit_caps_fanout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LUMEN_SHOWCASE_GPT_PARALLELISM", "8")
+    monkeypatch.setenv("LUMEN_SHOWCASE_GPT_PROVIDER_LIMIT", "2")
 
     assert (
-        workflows._showcase_gpt_parallelism(  # noqa: SLF001
-            8,
-            provider_order=None,
-        )
-        == 1
-    )
-    assert (
-        workflows._showcase_gpt_parallelism(  # noqa: SLF001
-            8,
-            provider_order=[SimpleNamespace(name="p1")],
-        )
-        == 8
+        [p.name for p in scene_planner._limit_gpt55_providers([  # noqa: SLF001
+            SimpleNamespace(name="p1"),
+            SimpleNamespace(name="p2"),
+            SimpleNamespace(name="p3"),
+        ])]
+        == ["p1", "p2"]
     )
 
 
@@ -2306,7 +2300,7 @@ def test_showcase_prompt_clamps_oversized_garment_lock() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_review(
+async def test_prepare_showcase_preflight_runs_gpt55_merged_director(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = SimpleNamespace(
@@ -2334,6 +2328,10 @@ async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_revie
                 "lighting": "侧光",
                 "composition": "衣服清楚",
                 "product_visibility": "front_full_body",
+                "shooting_brief": (
+                    f"窗边侧光拍摄方案 scene-{idx}，按照自然事件展开，"
+                    "人物在真实空间里小步停住，衣服主体清楚。"
+                ),
                 "negative": ["不要遮挡商品"],
                 "fingerprint": f"fp-{idx}",
             }
@@ -2350,25 +2348,6 @@ async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_revie
             "fallback_reason": None,
         }
 
-    async def fake_compose(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        scene_card = kwargs["scene_card"]
-        return {
-            "scene_card_id": scene_card["id"],
-            "status": "ok",
-            "shooting_brief": (
-                f"窗边侧光拍摄方案 {scene_card['id']}，按照自然事件展开，"
-                "人物在真实空间里小步停住，衣服主体清楚。"
-            ),
-            "final_prompt": (
-                f"窗边侧光拍摄方案 {scene_card['id']}，按照自然事件展开，"
-                "人物在真实空间里小步停住，衣服主体清楚。"
-            ),
-            "product_visibility_checklist": ["衣服主体清楚"],
-            "negative_prompt_notes": [],
-            "regenerate_if": [],
-            "fallback_reason": None,
-        }
-
     async def fake_review(*args: Any, **kwargs: Any) -> dict[str, Any]:
         scene_card = kwargs["scene_card"]
         return {
@@ -2382,9 +2361,7 @@ async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_revie
         }
 
     monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
-    monkeypatch.setattr(workflows, "_compose_image_prompt_with_gpt55", fake_compose)
     monkeypatch.setattr(workflows, "_review_prompt_risk_with_gpt55", fake_review)
-
     preflight = await workflows._prepare_showcase_preflight(  # noqa: SLF001
         db=SimpleNamespace(),  # type: ignore[arg-type]
         product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹", "胸袋"]},
@@ -2409,6 +2386,9 @@ async def test_prepare_showcase_preflight_runs_gpt55_director_composer_and_revie
     assert len(preflight["scene_cards"]) == 2
     assert len(preflight["per_image_prompts"]) == 2
     assert len(preflight["prompt_reviews"]) == 2
+    assert preflight["prompt_reviews"][0]["status"] == "ok"
+    assert preflight["prompt_reviews"][0]["risk_level"] == "low"
+    assert preflight["per_image_prompts"][0]["status"] == "director_batch"
     assert "【本张拍摄方案】" in preflight["final_prompts"][0]
     assert "窗边侧光拍摄方案 scene-1" in preflight["final_prompts"][0]
     assert "蓝色格纹" in preflight["final_prompts"][0]
@@ -2476,7 +2456,7 @@ async def test_prepare_showcase_preflight_retries_provider_resolution_per_call(
 
 
 @pytest.mark.asyncio
-async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instruction(
+async def test_prepare_showcase_preflight_reviews_director_brief_without_rewrite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = SimpleNamespace(
@@ -2501,11 +2481,10 @@ async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instructio
         "lighting": "侧光",
         "composition": "衣服清楚",
         "product_visibility": "front_full_body",
+        "shooting_brief": "初稿拍摄方案，饮料靠近胸前，可能遮挡商品。",
         "negative": ["不要遮挡商品"],
         "fingerprint": "fp-risky",
     }
-    rewrite_instructions: list[str | None] = []
-    review_calls = 0
 
     async def fake_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {
@@ -2519,38 +2498,7 @@ async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instructio
             "fallback_reason": None,
         }
 
-    async def fake_compose(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        rewrite_instruction = kwargs.get("rewrite_instruction")
-        rewrite_instructions.append(rewrite_instruction)
-        shooting_brief = (
-            "改写后的安全拍摄方案，饮料移到身体侧边，衣服主体、胸前、领口、袖口和纽扣清楚。"
-            if rewrite_instruction
-            else "初稿拍摄方案，饮料靠近胸前，可能遮挡商品。"
-        )
-        return {
-            "scene_card_id": scene_card["id"],
-            "status": "ok",
-            "shooting_brief": shooting_brief,
-            "final_prompt": shooting_brief,
-            "product_visibility_checklist": ["衣服主体清楚"],
-            "negative_prompt_notes": [],
-            "regenerate_if": [],
-            "fallback_reason": None,
-        }
-
     async def fake_review(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        nonlocal review_calls
-        review_calls += 1
-        if review_calls == 1:
-            return {
-                "scene_card_id": scene_card["id"],
-                "status": "ok",
-                "risk_level": "high",
-                "risks": ["饮料可能遮挡商品"],
-                "must_rewrite": True,
-                "rewrite_instruction": "",
-                "fallback_reason": None,
-            }
         return {
             "scene_card_id": scene_card["id"],
             "status": "ok",
@@ -2562,7 +2510,6 @@ async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instructio
         }
 
     monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
-    monkeypatch.setattr(workflows, "_compose_image_prompt_with_gpt55", fake_compose)
     monkeypatch.setattr(workflows, "_review_prompt_risk_with_gpt55", fake_review)
 
     preflight = await workflows._prepare_showcase_preflight(  # noqa: SLF001
@@ -2585,11 +2532,104 @@ async def test_prepare_showcase_preflight_rewrites_when_review_has_no_instructio
         allow_background_people=True,
     )
 
-    assert review_calls == 2
-    assert len(rewrite_instructions) == 2
-    assert rewrite_instructions[0] is None
-    assert rewrite_instructions[1]
-    assert "改写后的安全拍摄方案" in preflight["final_prompts"][0]
+    assert preflight["prompt_reviews"][0]["status"] == "ok"
+    assert preflight["prompt_reviews"][0]["risk_level"] == "low"
+    assert preflight["per_image_prompts"][0]["status"] == "director_batch"
+    assert "初稿拍摄方案" in preflight["final_prompts"][0]
+    assert "改写后的安全拍摄方案" not in preflight["final_prompts"][0]
+
+
+@pytest.mark.asyncio
+async def test_prepare_showcase_preflight_reports_composer_review_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = SimpleNamespace(
+        id="cand-1",
+        model_brief_json={"summary": "clean commute model", "height_cm": 168},
+    )
+    shot_picks = workflows._showcase_pick_shot_variants(  # noqa: SLF001
+        template="urban_commute",
+        age_segment="young_adult",
+        output_count=1,
+        seed_key="progress-hook-test",
+    )
+    scene_card = {
+        "id": "scene-progress",
+        "scene_family": "urban_street",
+        "location": "街角",
+        "micro_event": "整理袖口",
+        "camera": {"distance": "full_body", "angle": "eye_level"},
+        "pose": "自然站定",
+        "motion": "小步",
+        "props": [],
+        "lighting": "侧光",
+        "composition": "衣服清楚",
+        "product_visibility": "front_full_body",
+        "shooting_brief": "街角侧光下自然整理袖口，商品主体清楚。",
+        "negative": ["不要遮挡商品"],
+        "fingerprint": "fp-progress",
+    }
+    progress_events: list[tuple[str, str, int | None, int | None]] = []
+
+    async def fake_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "planner": "gpt55_preflight",
+            "planner_status": "ok",
+            "series_concept": "城市街拍",
+            "continuity_anchors": [],
+            "scene_cards": [scene_card],
+            "scene_fingerprints": ["fp-progress"],
+            "risk_notes": [],
+            "fallback_reason": None,
+        }
+
+    async def fake_review(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "scene_card_id": scene_card["id"],
+            "status": "ok",
+            "risk_level": "low",
+            "risks": [],
+            "must_rewrite": False,
+            "rewrite_instruction": "",
+            "fallback_reason": None,
+        }
+
+    async def progress_hook(
+        phase: str,
+        detail: str,
+        current: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        progress_events.append((phase, detail, current, total))
+
+    monkeypatch.setattr(workflows, "_plan_scene_cards_with_gpt55", fake_plan)
+    monkeypatch.setattr(workflows, "_review_prompt_risk_with_gpt55", fake_review)
+    await workflows._prepare_showcase_preflight(  # noqa: SLF001
+        db=SimpleNamespace(),  # type: ignore[arg-type]
+        product_analysis={"category": "衬衫", "must_preserve": ["蓝色格纹"]},
+        selected_candidate=candidate,  # type: ignore[arg-type]
+        accessory_plan={"enabled": False, "items": [], "strength": "subtle"},
+        template="urban_commute",
+        shot_picks=shot_picks,
+        age_segment="young_adult",
+        final_quality="high",
+        user_prompt="自然街拍",
+        aspect_ratio="4:5",
+        scene_environment="outdoor",
+        scene_strategy="natural_series",
+        scene_variety="rich",
+        scene_planner="gpt55_preflight",
+        continuity_anchor="accessory",
+        allow_pet=False,
+        allow_background_people=True,
+        progress_hook=progress_hook,
+    )
+
+    phases = [event[0] for event in progress_events]
+    assert "director" in phases
+    assert "composer" in phases
+    assert "review" in phases
+    assert phases[-1] == "dispatching"
 
 
 def test_guarded_shooting_brief_allows_scene_rewrite_without_old_scene() -> None:
@@ -2607,7 +2647,7 @@ def test_guarded_shooting_brief_allows_scene_rewrite_without_old_scene() -> None
 
 
 @pytest.mark.asyncio
-async def test_prepare_showcase_preflight_keeps_guarded_composer_when_rewrite_still_risky(
+async def test_prepare_showcase_preflight_uses_director_brief_for_risky_scene(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate = SimpleNamespace(
@@ -2632,6 +2672,7 @@ async def test_prepare_showcase_preflight_keeps_guarded_composer_when_rewrite_st
         "lighting": "侧光",
         "composition": "衣服清楚",
         "product_visibility": "front_full_body",
+        "shooting_brief": "高风险拍摄方案，手和饮料仍在胸前。",
         "negative": ["不要遮挡商品"],
         "fingerprint": "fp-risky",
     }
@@ -2654,6 +2695,14 @@ async def test_prepare_showcase_preflight_keeps_guarded_composer_when_rewrite_st
             "status": "ok",
             "shooting_brief": "高风险拍摄方案，手和饮料仍在胸前。",
             "final_prompt": "高风险拍摄方案，手和饮料仍在胸前。",
+            "candidate_briefs": ["高风险拍摄方案，手和饮料仍在胸前。"],
+            "selected_candidate_index": None,
+            "selection_scores": [],
+            "scene_keywords": [],
+            "composition_keywords": [],
+            "lighting_keywords": [],
+            "action_keywords": [],
+            "photographic_idea_keywords": [],
             "product_visibility_checklist": [],
             "negative_prompt_notes": [],
             "regenerate_if": [],
@@ -2695,19 +2744,13 @@ async def test_prepare_showcase_preflight_keeps_guarded_composer_when_rewrite_st
         allow_background_people=True,
     )
 
-    assert preflight["prompt_reviews"][0]["must_rewrite"] is False
-    assert preflight["prompt_reviews"][0]["safe_fallback"] is False
     assert preflight["prompt_reviews"][0]["guarded_composer"] is True
-    assert preflight["prompt_reviews"][0]["risk_level"] == "medium"
     assert preflight["per_image_prompts"][0]["status"] == "guarded"
     assert preflight["per_image_prompts"][0]["risk_guard_applied"] is True
     assert "高风险拍摄方案" in preflight["final_prompts"][0]
     assert "安全覆盖" in preflight["final_prompts"][0]
     assert "移开饮料" in preflight["final_prompts"][0]
     assert "本张场景种子" not in preflight["final_prompts"][0]
-    assert "街角" not in preflight["final_prompts"][0]
-    assert "手拿饮料靠近胸前" not in preflight["final_prompts"][0]
-    assert "GPT-5.5 单张执行 Prompt" not in preflight["final_prompts"][0]
     assert "【商品 1:1 锁定】" in preflight["final_prompts"][0]
 
 

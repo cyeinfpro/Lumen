@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  MoreHorizontal,
   Copy,
   Download,
   Gift,
@@ -31,6 +32,8 @@ import {
 } from "@/lib/apiClient";
 import type { AdminRedemptionCodeOut, AdminRedemptionCodeCreateOut } from "@/lib/types";
 import { Button, Card, toast } from "@/components/ui/primitives";
+import { ActionSheet, type ActionItem } from "@/components/ui/primitives/mobile";
+import { formatRmb } from "@/lib/money";
 
 type Section = "codes" | "wallets" | "all";
 type CodeStatus = "all" | "active" | "revoked" | "expired" | "exhausted";
@@ -71,7 +74,7 @@ export function RedemptionPanel({ section = "all" }: { section?: Section }) {
 }
 
 function formatMoney(value?: string | null): string {
-  return Number(value ?? 0).toFixed(2);
+  return formatRmb(value);
 }
 
 async function copyText(text: string, label = "已复制") {
@@ -96,6 +99,7 @@ function CodesSubpanel() {
   const [cursor, setCursor] = useState<string | null>(null);
   const [usageCodeId, setUsageCodeId] = useState("");
   const [modal, setModal] = useState<NewCodesModalState | null>(null);
+  const [actionsCode, setActionsCode] = useState<AdminRedemptionCodeOut | null>(null);
 
   const codesQ = useQuery({
     queryKey: ["admin", "redemption-codes", status, q, cursor],
@@ -185,6 +189,56 @@ function CodesSubpanel() {
     const c = Math.max(1, Number(count) || 1);
     return a * c;
   }, [amount, count]);
+  const actionSheetActions = useMemo<ActionItem[]>(() => {
+    if (!actionsCode) return [];
+    const code = actionsCode;
+    const actions: ActionItem[] = [
+      {
+        key: "prefix",
+        label: "复制前缀",
+        icon: <Copy className="h-4 w-4" />,
+        onSelect: () => void copyText(code.code_prefix, "前缀已复制"),
+      },
+    ];
+    if (code.batch_id) {
+      const batchId = code.batch_id;
+      actions.push({
+        key: "redownload",
+        label: "重新查看",
+        icon: <Download className="h-4 w-4" />,
+        disabled: redownloadMut.isPending,
+        onSelect: () => redownloadMut.mutate(batchId),
+      });
+    }
+    actions.push({
+      key: "usage",
+      label: "查看记录",
+      onSelect: () => setUsageCodeId(code.id),
+    });
+    if (!code.revoked_at) {
+      actions.push({
+        key: "revoke",
+        label: "撤销兑换码",
+        icon: <Slash className="h-4 w-4" />,
+        destructive: true,
+        onSelect: () => {
+          if (window.confirm("确认撤销这张兑换码？")) revokeMut.mutate(code.id);
+        },
+      });
+    }
+    if (!code.revoked_at && code.batch_id) {
+      const batchId = code.batch_id;
+      actions.push({
+        key: "revoke-batch",
+        label: "撤销批次",
+        destructive: true,
+        onSelect: () => {
+          if (window.confirm("确认撤销整个批次？")) revokeBatchMut.mutate(batchId);
+        },
+      });
+    }
+    return actions;
+  }, [actionsCode, redownloadMut, revokeBatchMut, revokeMut]);
 
   return (
     <>
@@ -195,7 +249,7 @@ function CodesSubpanel() {
         </div>
         <div className="grid gap-3 md:grid-cols-2">
           <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">面额 (¥/张)</span>
+            <span className="block min-h-4 type-caption text-[var(--fg-2)]">面额 (¥/张)</span>
             <input
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
@@ -204,7 +258,7 @@ function CodesSubpanel() {
             />
           </label>
           <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">数量</span>
+            <span className="block min-h-4 type-caption text-[var(--fg-2)]">数量</span>
             <input
               value={count}
               onChange={(e) => setCount(e.target.value)}
@@ -213,7 +267,7 @@ function CodesSubpanel() {
             />
           </label>
           <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">每码最大兑换次数</span>
+            <span className="block min-h-4 type-caption text-[var(--fg-2)]">每码最大兑换次数</span>
             <input
               value={maxRedemptions}
               onChange={(e) => setMaxRedemptions(e.target.value)}
@@ -222,7 +276,7 @@ function CodesSubpanel() {
             />
           </label>
           <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">有效期</span>
+            <span className="block min-h-4 type-caption text-[var(--fg-2)]">有效期</span>
             <input
               type="datetime-local"
               value={expiresAt}
@@ -235,15 +289,16 @@ function CodesSubpanel() {
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="备注"
-          className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
+          className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm md:max-w-[480px]"
         />
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-col-reverse items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="type-body-sm text-[var(--fg-2)]">
             本批次总价值 ¥{totalValue.toFixed(2)}
           </p>
           <Button
             variant="primary"
             size="md"
+            className="w-full sm:w-auto"
             onClick={() => {
               if ((Number(count) || 1) > 200 && !window.confirm("将生成超过 200 张明文 code，确认继续？")) {
                 return;
@@ -270,7 +325,7 @@ function CodesSubpanel() {
               刷新
             </Button>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="scrollbar-thin flex flex-nowrap items-center gap-2 overflow-x-auto overscroll-x-contain">
             {(Object.keys(STATUS_LABEL) as CodeStatus[]).map((item) => (
               <button
                 key={item}
@@ -280,7 +335,7 @@ function CodesSubpanel() {
                   setCursor(null);
                 }}
                 className={[
-                  "rounded-full border px-3 py-1 text-xs",
+                  "shrink-0 rounded-full border px-3 py-1 text-xs",
                   status === item
                     ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
                     : "border-[var(--border)] text-[var(--fg-2)] hover:text-[var(--fg-0)]",
@@ -304,13 +359,13 @@ function CodesSubpanel() {
               placeholder="搜索前缀或 batch id"
               className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
             />
-            <Button variant="outline" size="md" type="submit" leftIcon={<Search className="h-3.5 w-3.5" />}>
+            <Button variant="outline" size="md" type="submit" fullWidth leftIcon={<Search className="h-3.5 w-3.5" />}>
               搜索
             </Button>
           </form>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px] text-sm">
+        <div className="data-stack-on-mobile md:overflow-x-auto">
+          <table className="w-full text-sm md:min-w-[980px]">
             <thead className="text-left text-[var(--fg-2)]">
               <tr className="border-b border-[var(--border-subtle)]">
                 <th className="px-4 py-2">前缀</th>
@@ -325,81 +380,89 @@ function CodesSubpanel() {
             <tbody>
               {(codesQ.data?.items ?? []).map((code) => (
                 <tr key={code.id} className="border-b border-[var(--border-subtle)]">
-                  <td className="px-4 py-2 font-mono">{code.code_prefix}</td>
-                  <td className="px-4 py-2">¥{formatMoney(code.amount.rmb)}</td>
-                  <td className="px-4 py-2">
-                    {code.redeemed_count}/{code.max_redemptions}
+                  <td data-label="前缀" className="px-4 py-2 font-mono">{code.code_prefix}</td>
+                  <td data-label="面额" className="px-4 py-2 tabular-nums">¥{formatMoney(code.amount.rmb)}</td>
+                  <td data-label="兑换" className="px-4 py-2 tabular-nums">
+                    {code.redeemed_count} / {code.max_redemptions}
                     <span className="ml-1 text-[var(--fg-3)]">可用 {code.usable_count}</span>
                   </td>
-                  <td className="px-4 py-2">{codeStatusLabel(code)}</td>
-                  <td className="px-4 py-2">
+                  <td data-label="状态" className="px-4 py-2">{codeStatusLabel(code)}</td>
+                  <td data-label="批次" className="px-4 py-2">
                     <button
                       type="button"
                       onClick={() => code.batch_id && copyText(code.batch_id, "批次已复制")}
-                      className="max-w-[160px] truncate font-mono text-xs text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+                      className="max-w-full truncate font-mono text-xs text-[var(--fg-1)] hover:text-[var(--fg-0)] md:max-w-[160px]"
                     >
                       {code.batch_id ?? "-"}
                     </button>
                   </td>
-                  <td className="max-w-[180px] truncate px-4 py-2 text-[var(--fg-2)]">
-                    {code.note ?? "-"}
+                  <td data-label="备注" className="px-4 py-2 text-[var(--fg-2)]">
+                    <span className="line-clamp-2 md:block md:max-w-[180px] md:truncate">{code.note ?? "-"}</span>
                   </td>
-                  <td className="px-4 py-2 text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => copyText(code.code_prefix, "前缀已复制")}
-                      leftIcon={<Copy className="h-3.5 w-3.5" />}
-                    >
-                      前缀
-                    </Button>
-                    {code.batch_id && (
+                  <td data-actions="true" className="px-4 py-2 text-right">
+                    <div className="hidden justify-end md:flex md:flex-wrap md:gap-1">
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="ml-1"
-                        onClick={() => redownloadMut.mutate(code.batch_id!)}
-                        loading={redownloadMut.isPending}
+                        onClick={() => copyText(code.code_prefix, "前缀已复制")}
+                        leftIcon={<Copy className="h-3.5 w-3.5" />}
                       >
-                        重新查看
+                        前缀
                       </Button>
-                    )}
-                    {!code.revoked_at && (
+                      {code.batch_id && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => redownloadMut.mutate(code.batch_id!)}
+                          loading={redownloadMut.isPending}
+                        >
+                          重新查看
+                        </Button>
+                      )}
+                      {!code.revoked_at && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            if (window.confirm("确认撤销这张兑换码？")) revokeMut.mutate(code.id);
+                          }}
+                          leftIcon={<Slash className="h-3.5 w-3.5" />}
+                        >
+                          撤销
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setUsageCodeId(code.id)}
+                      >
+                        记录
+                      </Button>
+                      {!code.revoked_at && code.batch_id && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            if (window.confirm("确认撤销整个批次？")) {
+                              revokeBatchMut.mutate(code.batch_id!);
+                            }
+                          }}
+                          loading={revokeBatchMut.isPending}
+                        >
+                          撤销批次
+                        </Button>
+                      )}
+                    </div>
+                    <div className="md:hidden">
                       <Button
                         variant="outline"
                         size="sm"
-                        className="ml-1"
-                        onClick={() => {
-                          if (window.confirm("确认撤销这张兑换码？")) revokeMut.mutate(code.id);
-                        }}
-                        leftIcon={<Slash className="h-3.5 w-3.5" />}
+                        onClick={() => setActionsCode(code)}
+                        leftIcon={<MoreHorizontal className="h-3.5 w-3.5" />}
                       >
-                        撤销
+                        更多
                       </Button>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-1"
-                      onClick={() => setUsageCodeId(code.id)}
-                    >
-                      记录
-                    </Button>
-                    {!code.revoked_at && code.batch_id && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="ml-1"
-                        onClick={() => {
-                          if (window.confirm("确认撤销整个批次？")) {
-                            revokeBatchMut.mutate(code.batch_id!);
-                          }
-                        }}
-                        loading={revokeBatchMut.isPending}
-                      >
-                        撤销批次
-                      </Button>
-                    )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -433,8 +496,8 @@ function CodesSubpanel() {
               关闭
             </Button>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-sm">
+          <div className="data-stack-on-mobile md:overflow-x-auto">
+            <table className="w-full text-sm md:min-w-[720px]">
               <thead className="text-left text-[var(--fg-2)]">
                 <tr className="border-b border-[var(--border-subtle)]">
                   <th className="px-4 py-2">用户</th>
@@ -447,14 +510,14 @@ function CodesSubpanel() {
               <tbody>
                 {(usageQ.data?.items ?? []).map((item) => (
                   <tr key={item.id} className="border-b border-[var(--border-subtle)]">
-                    <td className="px-4 py-2">
-                      <span className="block truncate">{item.user_email ?? item.user_id}</span>
-                      <span className="font-mono text-xs text-[var(--fg-3)]">{item.user_id}</span>
+                    <td data-label="用户" className="px-4 py-2">
+                      <span className="block min-w-0 truncate">{item.user_email ?? item.user_id}</span>
+                      <span className="block min-w-0 truncate font-mono text-xs text-[var(--fg-3)]">{item.user_id}</span>
                     </td>
-                    <td className="px-4 py-2">¥{formatMoney(item.amount.rmb)}</td>
-                    <td className="px-4 py-2 font-mono text-xs">{item.wallet_tx_id}</td>
-                    <td className="px-4 py-2 font-mono text-xs">{item.ip_hash ?? "-"}</td>
-                    <td className="px-4 py-2">{new Date(item.redeemed_at).toLocaleString()}</td>
+                    <td data-label="面额" className="px-4 py-2 tabular-nums">¥{formatMoney(item.amount.rmb)}</td>
+                    <td data-label="流水" className="truncate px-4 py-2 font-mono text-xs">{item.wallet_tx_id}</td>
+                    <td data-label="IP Hash" className="truncate px-4 py-2 font-mono text-xs">{item.ip_hash ?? "-"}</td>
+                    <td data-label="时间" className="px-4 py-2">{new Date(item.redeemed_at).toLocaleString()}</td>
                   </tr>
                 ))}
               </tbody>
@@ -464,6 +527,12 @@ function CodesSubpanel() {
       )}
 
       {modal && <NewCodesModal state={modal} onClose={() => setModal(null)} />}
+      <ActionSheet
+        open={Boolean(actionsCode)}
+        onClose={() => setActionsCode(null)}
+        title={actionsCode?.code_prefix ?? "兑换码"}
+        actions={actionSheetActions}
+      />
     </>
   );
 }
@@ -477,23 +546,23 @@ function NewCodesModal({
 }) {
   const allCodes = state.codes.join("\n");
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4 py-6">
-      <div className="flex max-h-[90dvh] w-full max-w-3xl flex-col rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)]">
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-4">
-          <div>
+    <div className="fixed inset-0 z-[var(--z-dialog,90)] flex items-end justify-center bg-black/60 backdrop-blur-sm mobile-dialog-shell sm:items-center">
+      <div className="mobile-dialog-panel flex w-full max-w-3xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:rounded-[var(--radius-panel)] sm:border-b">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
+          <div className="min-w-0">
             <p className="type-card-title">已生成 {state.codes.length} 张兑换码</p>
-            <p className="type-caption text-[var(--fg-2)]">批次 {state.batchId}</p>
+            <p className="truncate type-caption text-[var(--fg-2)]">批次 {state.batchId}</p>
           </div>
           <button
             type="button"
             aria-label="关闭"
             onClick={onClose}
-            className="rounded-full p-2 text-[var(--fg-2)] hover:bg-white/6 hover:text-[var(--fg-0)]"
+            className="shrink-0 rounded-full p-2 text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="flex flex-wrap gap-2 border-b border-[var(--border)] px-5 py-3">
+        <div className="flex shrink-0 flex-wrap gap-2 border-b border-[var(--border)] px-5 py-3">
           <Button
             variant="primary"
             size="sm"
@@ -523,14 +592,16 @@ function NewCodesModal({
             下载 TXT
           </Button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto p-5">
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-5">
           <div className="space-y-2">
             {state.codes.map((code) => (
               <div
                 key={code}
                 className="grid grid-cols-[1fr_auto] items-center gap-3 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-2"
               >
-                <code className="select-all break-all font-mono text-sm">{code}</code>
+                <code className="min-w-0 select-all overflow-x-auto whitespace-nowrap font-mono text-sm scrollbar-thin">
+                  {code}
+                </code>
                 <Button variant="ghost" size="sm" onClick={() => copyText(code, "兑换码已复制")}>
                   复制
                 </Button>
@@ -538,7 +609,7 @@ function NewCodesModal({
             ))}
           </div>
         </div>
-        <div className="border-t border-[var(--border)] bg-[var(--bg-1)]/72 px-5 py-3 text-xs text-[var(--fg-2)]">
+        <div className="mobile-dialog-footer shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/72 px-5 py-3 text-xs text-[var(--fg-2)]">
           关闭后，5 分钟内可在列表里点“重新查看”再次取回明文；超过窗口后明文不会再被保存。
         </div>
       </div>
@@ -702,7 +773,7 @@ function UserWalletsSubpanel() {
           <div className="space-y-3">
             <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
               <p className="truncate text-sm font-medium text-[var(--fg-0)]">{selected.email}</p>
-              <p className="mt-1 font-mono text-xs text-[var(--fg-3)]">{selected.user_id}</p>
+              <p className="mt-1 truncate font-mono text-xs text-[var(--fg-3)]">{selected.user_id}</p>
               <div className="mt-4 grid gap-2 text-sm">
                 <div className="flex justify-between">
                   <span className="text-[var(--fg-2)]">模式</span>
@@ -718,11 +789,11 @@ function UserWalletsSubpanel() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--fg-2)]">最近充值</span>
-                  <span>{selected.last_topup_at ? new Date(selected.last_topup_at).toLocaleString() : "-"}</span>
+                  <span className="min-w-0 truncate text-right">{selected.last_topup_at ? new Date(selected.last_topup_at).toLocaleString() : "-"}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[var(--fg-2)]">最近扣费</span>
-                  <span>{selected.last_charge_at ? new Date(selected.last_charge_at).toLocaleString() : "-"}</span>
+                  <span className="min-w-0 truncate text-right">{selected.last_charge_at ? new Date(selected.last_charge_at).toLocaleString() : "-"}</span>
                 </div>
               </div>
             </div>
@@ -789,14 +860,14 @@ function UserWalletsSubpanel() {
           </div>
 
           <div className="space-y-4">
-            <div className="flex flex-wrap gap-2">
+            <div className="scrollbar-thin flex flex-nowrap gap-2 overflow-x-auto overscroll-x-contain">
               {Object.entries(TX_KIND_LABEL).map(([key, label]) => (
                 <button
                   key={key}
                   type="button"
                   onClick={() => setTxKind(key)}
                   className={[
-                    "rounded-full border px-3 py-1 text-xs",
+                    "shrink-0 rounded-full border px-3 py-1 text-xs",
                     txKind === key
                       ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
                       : "border-[var(--border)] text-[var(--fg-2)] hover:text-[var(--fg-0)]",
@@ -814,7 +885,7 @@ function UserWalletsSubpanel() {
                 {transactions.map((tx) => (
                   <div key={tx.id} className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3 text-sm">
                     <div className="min-w-0">
-                      <p>{TX_KIND_LABEL[tx.kind] ?? tx.kind}</p>
+                      <p className="truncate">{TX_KIND_LABEL[tx.kind] ?? tx.kind}</p>
                       <p className="truncate font-mono text-xs text-[var(--fg-3)]">
                         {tx.ref_type ?? "-"} {tx.ref_id ?? ""}
                       </p>
@@ -841,8 +912,8 @@ function UserWalletsSubpanel() {
               <div className="divide-y divide-[var(--border-subtle)]">
                 {(selected.redemptions ?? []).map((item) => (
                   <div key={item.id} className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3 text-sm">
-                    <span className="font-mono text-xs">{item.code_id}</span>
-                    <span>¥{formatMoney(item.amount.rmb)}</span>
+                    <span className="min-w-0 truncate font-mono text-xs">{item.code_id}</span>
+                    <span className="tabular-nums">¥{formatMoney(item.amount.rmb)}</span>
                   </div>
                 ))}
                 {(selected.redemptions ?? []).length === 0 && (
