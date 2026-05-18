@@ -114,7 +114,7 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
                 {label}
               </p>
-              <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--fg-0)]">
+              <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--fg-0)]">
                 {jsonValue(step?.output_json?.[key])}
               </p>
             </div>
@@ -161,7 +161,7 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
                 {label}
               </p>
-              <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--fg-1)]">
+              <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--fg-1)]">
                 {jsonValue(step?.output_json?.[key])}
               </p>
             </div>
@@ -169,12 +169,13 @@ export function ProductAnalysisStage({ workflow }: { workflow: WorkflowRun }) {
         </div>
       </details>
 
-      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-[var(--border)] pt-5">
+      <div className="mt-6 grid grid-cols-1 gap-3 border-t border-[var(--border)] pt-5 min-[420px]:flex min-[420px]:flex-wrap min-[420px]:items-center">
         <Button
           variant="primary"
           loading={approve.isPending}
           onClick={submit}
           leftIcon={dirty ? <Check className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+          className="w-full min-[420px]:w-auto"
         >
           {dirty ? "确认修正后的商品约束" : "沿用 AI 建议"}
         </Button>
@@ -208,7 +209,7 @@ function FieldInput({
   placeholder?: string;
 }) {
   return (
-    <label className="block">
+    <label className="block min-w-0">
       <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
         {label}
       </span>

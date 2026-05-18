@@ -143,8 +143,8 @@ export default function SignupPage() {
   const disabled = suppliersQ.isLoading || suppliers.length === 0;
 
   return (
-    <div className="min-h-[100dvh] bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
-      <main className="flex-1 flex items-center justify-center px-4 py-10 safe-x">
+    <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <main className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain px-4 py-8 safe-x md:items-center">
         <div className="w-full max-w-md space-y-7">
           <header className="space-y-2">
             <Link

@@ -265,7 +265,7 @@ export function PosterStyleDetailDrawer({
               </div>
 
               {/* 字段网格 */}
-              <section className="grid grid-cols-2 gap-x-5 gap-y-3 border-t border-[var(--border)] pt-4">
+              <section className="grid grid-cols-1 gap-x-5 gap-y-3 border-t border-[var(--border)] pt-4 min-[380px]:grid-cols-2">
                 <MetaCell label="来源">
                   {sourceLabel(item.source)}
                 </MetaCell>
@@ -274,7 +274,7 @@ export function PosterStyleDetailDrawer({
                 </MetaCell>
                 {item.preset_id ? (
                   <MetaCell label="预设 ID">
-                    <span className="truncate font-mono text-[11px] normal-case">
+                    <span className="block truncate font-mono text-[11px] normal-case">
                       {item.preset_id}
                       {item.version ? ` · v${item.version}` : ""}
                     </span>
@@ -305,7 +305,7 @@ export function PosterStyleDetailDrawer({
                     {item.style_tags.map((tag) => (
                       <span
                         key={tag}
-                        className="inline-flex items-center border border-[var(--border)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)]"
+                        className="inline-flex max-w-full items-center break-words border border-[var(--border)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] min-[390px]:tracking-[0.14em]"
                       >
                         {tag}
                       </span>
@@ -344,7 +344,7 @@ export function PosterStyleDetailDrawer({
               {/* prompt_template */}
               {item.prompt_template ? (
                 <section className="grid gap-2 border-t border-[var(--border)] pt-4">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
                       Prompt 模板
                     </p>
@@ -361,7 +361,7 @@ export function PosterStyleDetailDrawer({
                       {copied ? "已复制" : "复制"}
                     </button>
                   </div>
-                  <p className="whitespace-pre-wrap rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-[13px] leading-relaxed text-[var(--fg-1)]">
+                  <p className="whitespace-pre-wrap break-words rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-[13px] leading-relaxed text-[var(--fg-1)]">
                     {item.prompt_template}
                   </p>
                 </section>
@@ -371,12 +371,12 @@ export function PosterStyleDetailDrawer({
         </div>
 
         {item ? (
-          <footer className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border)] px-5 py-4 md:flex md:items-center md:justify-end">
+          <footer className="mobile-dialog-footer grid shrink-0 grid-cols-1 gap-2 border-t border-[var(--border)] px-5 py-4 min-[380px]:grid-cols-2 md:flex md:items-center md:justify-end">
             <button
               type="button"
               onClick={() => autoTag.mutate()}
               disabled={autoTag.isPending}
-              className="inline-flex h-9 items-center justify-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em]"
             >
               {autoTag.isPending ? (
                 <Spinner size={12} />
@@ -400,7 +400,8 @@ export function PosterStyleDetailDrawer({
               onClick={requestDelete}
               disabled={deleteItem.isPending}
               className={cn(
-                "inline-flex h-9 items-center justify-center gap-1.5 border px-3 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 md:col-span-2",
+                "inline-flex h-9 min-w-0 items-center justify-center gap-1.5 border px-3 font-mono text-[11px] uppercase tracking-[0.12em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em]",
+                item.id.startsWith("user:") ? "min-[380px]:col-span-2 md:col-span-1" : "",
                 confirmingDelete
                   ? "border-[var(--danger)] text-[var(--danger)]"
                   : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--danger)]",
@@ -439,11 +440,11 @@ function MetaCell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-1">
+    <div className="grid min-w-0 gap-1">
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
         {label}
       </p>
-      <p className="font-mono text-[12px] text-[var(--fg-0)]">{children}</p>
+      <p className="min-w-0 break-words font-mono text-[12px] text-[var(--fg-0)]">{children}</p>
     </div>
   );
 }

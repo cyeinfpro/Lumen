@@ -90,7 +90,7 @@ export function SaveCandidateDialog({
   const titlePlaceholder = `方案 ${candidate?.candidate_index ?? ""}`;
 
   const form = (
-    <div className="-mx-1">
+    <div className="-mx-1 min-w-0">
       <Field eyebrow="名称" label="名称">
         <input
           value={title}
@@ -113,7 +113,7 @@ export function SaveCandidateDialog({
               </option>
             ))}
           </select>
-          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          <p className="min-w-0 break-all font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
             <span className="text-[var(--fg-3)]">→ </span>
             {AGE_FOLDER_BY_SEGMENT[ageSegment]}/{gender}
           </p>
@@ -220,14 +220,14 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <section className="border-t border-[var(--border)] px-1 py-3.5 first:border-t-0 first:pt-1">
+    <section className="min-w-0 border-t border-[var(--border)] px-1 py-3.5 first:border-t-0 first:pt-1">
       <header className="mb-2 flex items-baseline justify-between gap-3">
         <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
           {eyebrow}
         </p>
         <p className="text-[11px] text-[var(--fg-2)]">{label}</p>
       </header>
-      {children}
+      <div className="min-w-0">{children}</div>
     </section>
   );
 }

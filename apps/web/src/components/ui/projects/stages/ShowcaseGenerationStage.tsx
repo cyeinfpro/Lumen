@@ -309,7 +309,7 @@ export function ShowcaseGenerationStage({ workflow }: { workflow: WorkflowRun })
             disabled={isRunning}
           />
         </div>
-        <p className="mt-4 inline-flex flex-wrap items-center gap-2 text-[12px] leading-6 text-[var(--fg-2)]">
+        <p className="mt-4 inline-flex min-w-0 flex-wrap items-center gap-2 break-words text-[12px] leading-6 text-[var(--fg-2)]">
           <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
             <Layers className="h-3 w-3" />
             {String(outputCount).padStart(2, "0")} 张
@@ -445,7 +445,7 @@ function SelectField({
   options: ReadonlyArray<readonly [string, string]>;
 }) {
   return (
-    <label className="block">
+    <label className="block min-w-0">
       <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
         {label}
       </span>
@@ -453,7 +453,7 @@ function SelectField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
+        className="mt-2 h-10 w-full min-w-0 border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
       >
         {options.map(([optionValue, optionLabel]) => (
           <option key={optionValue} value={optionValue} className="bg-[var(--bg-1)]">
@@ -485,7 +485,7 @@ function CheckboxField({
         disabled={disabled}
         className="h-4 w-4 accent-[var(--amber-400)] disabled:opacity-40"
       />
-      <span>{label}</span>
+      <span className="min-w-0 break-words">{label}</span>
     </label>
   );
 }

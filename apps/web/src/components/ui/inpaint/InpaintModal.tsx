@@ -521,6 +521,7 @@ function InpaintModalInner() {
             className={cn(
               "shrink-0 flex flex-col gap-3 p-3 sm:p-4",
               "md:w-[320px] md:max-w-[320px]",
+              "max-md:max-h-[min(44dvh,20rem)]",
               "bg-[var(--bg-0)]",
               "mobile-dialog-scroll overflow-y-auto",
               "border-t border-[var(--border-subtle)] md:border-t-0",

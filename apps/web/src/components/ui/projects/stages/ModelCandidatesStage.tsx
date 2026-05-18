@@ -377,7 +377,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
             确认模特并继续
           </Button>
         </div>
-        <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+        <p className="mt-3 min-w-0 break-words font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
           配饰方向 ·{" "}
           <span className="text-[var(--fg-1)] normal-case tracking-normal">
             {accessoryEnabled ? accessoryItems.join("、") || "自动推荐" : "已关闭"}
@@ -527,7 +527,7 @@ export function ModelCandidatesStage({ workflow }: { workflow: WorkflowRun }) {
           </div>
           <p className="mt-2 text-[12px] text-[var(--fg-3)]">张数越多耗时越长</p>
           <Button
-            className="mt-5"
+            className="mt-5 w-full sm:w-auto"
             variant="primary"
             loading={createShowcase.isPending}
             disabled={isShowcaseRunning}
@@ -604,7 +604,7 @@ function SelectField({
   options: ReadonlyArray<readonly [string, string]>;
 }) {
   return (
-    <label className="block">
+    <label className="block min-w-0">
       <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
         {label}
       </span>
@@ -612,7 +612,7 @@ function SelectField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
+        className="mt-2 h-10 w-full min-w-0 border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
       >
         {options.map(([optionValue, optionLabel]) => (
           <option key={optionValue} value={optionValue} className="bg-[var(--bg-1)]">
@@ -644,7 +644,7 @@ function CheckboxField({
         disabled={disabled}
         className="h-4 w-4 accent-[var(--amber-400)] disabled:opacity-40"
       />
-      <span>{label}</span>
+      <span className="min-w-0 break-words">{label}</span>
     </label>
   );
 }

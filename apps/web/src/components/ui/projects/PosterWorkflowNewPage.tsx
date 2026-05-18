@@ -318,8 +318,8 @@ export function PosterWorkflowNewPage() {
             </Link>
           </header>
 
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">
-            <section className="grid gap-5 md:gap-6">
+          <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8">
+            <section className="grid min-w-0 gap-5 md:gap-6">
               {/* Copy */}
               <SectionHeader
                 eyebrow="N°01 — 文案"
@@ -414,7 +414,7 @@ export function PosterWorkflowNewPage() {
                 className="border-t border-[var(--border)] pt-5"
               >
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-left">
-                  <div>
+                  <div className="min-w-0">
                     <p className="type-page-kicker">N°04 — 品牌（可选）</p>
                     <h2 className="type-section-title mt-2 md:text-[22px]">
                       品牌资产
@@ -448,11 +448,11 @@ export function PosterWorkflowNewPage() {
                 </div>
 
                 <div className="mt-5 grid gap-x-8 gap-y-5 md:grid-cols-2">
-                  <label className="block">
+                  <label className="block min-w-0">
                     <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
                       主色
                     </span>
-                    <div className="mt-2 flex items-center gap-3">
+                    <div className="mt-2 flex min-w-0 items-center gap-3">
                       <input
                         type="color"
                         value={primaryColor || "#ffd166"}
@@ -466,11 +466,11 @@ export function PosterWorkflowNewPage() {
                         }
                         maxLength={24}
                         placeholder="#FFD166 / amber"
-                        className="h-10 flex-1 border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                        className="h-10 min-w-0 flex-1 border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
                       />
                     </div>
                   </label>
-                  <label className="block">
+                  <label className="block min-w-0">
                     <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
                       字体
                     </span>
@@ -490,7 +490,7 @@ export function PosterWorkflowNewPage() {
               {/* Quality + title */}
               <SectionHeader eyebrow="N°05 — 设置" title="项目设置" />
               <div className="-mt-2 grid gap-5 md:grid-cols-2">
-                <label className="block">
+                <label className="block min-w-0">
                   <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
                     标题
                   </span>
@@ -677,7 +677,7 @@ function StyleSummary({
   const coverUrl =
     style.display_url || style.cover_image_url || style.thumb_url || "";
   return (
-    <div className="grid grid-cols-[88px_minmax(0,1fr)_auto] gap-3 border-b border-[var(--border)] pb-3">
+    <div className="grid min-w-0 grid-cols-[72px_minmax(0,1fr)_auto] gap-3 border-b border-[var(--border)] pb-3 sm:grid-cols-[88px_minmax(0,1fr)_auto]">
       <div className="relative aspect-square overflow-hidden bg-[var(--bg-2)]">
         {coverUrl ? (
           <Image
@@ -704,9 +704,9 @@ function StyleSummary({
             {style.style_tags.slice(0, 6).map((tag) => (
               <span
                 key={tag}
-                className="inline-flex items-center rounded-full border border-[var(--border)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]"
+                className="inline-flex max-w-full items-center rounded-full border border-[var(--border)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]"
               >
-                {tag}
+                <span className="truncate">{tag}</span>
               </span>
             ))}
           </div>

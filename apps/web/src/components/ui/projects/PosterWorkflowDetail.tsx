@@ -293,7 +293,7 @@ function PosterDetailHeader({
               className="group/title flex min-w-0 cursor-pointer items-baseline gap-2 text-left focus-visible:outline-none"
               aria-label="编辑项目名称"
             >
-              <h1 className="type-page-title line-clamp-2 md:line-clamp-1">
+              <h1 className="type-page-title min-w-0 break-words line-clamp-2 md:line-clamp-1">
                 {workflowTitle}
               </h1>
               <Pencil className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] opacity-0 transition-opacity group-hover/title:opacity-100" />
@@ -325,7 +325,7 @@ function PosterDetailHeader({
         ) : null}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 self-start md:self-center">
+      <div className="flex min-w-0 flex-wrap items-center gap-2 self-start md:self-center">
         <button
           type="button"
           onClick={onOpenDrawer}
@@ -352,7 +352,7 @@ function PosterDetailHeader({
           {menuOpen ? (
             <div
               role="menu"
-              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] rounded-lg border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
+              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
             >
               {confirmDelete ? (
                 <div className="grid gap-2 p-2">

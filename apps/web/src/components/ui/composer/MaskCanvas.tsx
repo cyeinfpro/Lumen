@@ -110,8 +110,8 @@ function MaskCanvasInner({
         className={cn(
           "fixed inset-0 z-[var(--z-dialog)]",
           "bg-black/72 backdrop-blur-md",
-          "flex items-center justify-center",
-          "p-3 sm:p-6",
+          "mobile-dialog-shell flex items-end justify-center sm:items-center",
+          "px-3 sm:p-6",
         )}
       >
         <motion.div
@@ -123,10 +123,10 @@ function MaskCanvasInner({
           exit={{ opacity: 0, scale: 0.96, y: 8 }}
           transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
           className={cn(
-            "w-full max-w-[860px]",
-            "max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-3rem)]",
+            "mobile-dialog-panel w-full max-w-[860px]",
+            "h-[var(--mobile-dialog-max-height)] sm:h-auto sm:max-h-[calc(100dvh-3rem)]",
             "flex flex-col overflow-hidden",
-            "rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]",
+            "rounded-t-[var(--radius-sheet)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] sm:rounded-[var(--radius-dialog)] sm:border-b",
             "shadow-[var(--shadow-2)]",
           )}
         >
@@ -158,7 +158,7 @@ function MaskCanvasInner({
           </div>
 
           {/* 画板（hasStroke 状态由 MaskBoard 的 onStatsChange 回调同步） */}
-          <div className="flex-1 min-h-0 overflow-auto p-3 sm:p-4 bg-[var(--bg-1)]">
+          <div className="mobile-dialog-scroll flex-1 min-h-0 overflow-auto p-3 sm:p-4 bg-[var(--bg-1)]">
             {!imageSrc ? (
               <div className="flex items-center gap-2 text-sm text-[var(--fg-1)]">
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -197,7 +197,7 @@ function MaskCanvasInner({
           </AnimatePresence>
 
           {/* 底部操作 */}
-          <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-[var(--border-subtle)]">
+          <div className="mobile-dialog-footer flex items-center justify-end gap-2 px-4 py-3 border-t border-[var(--border-subtle)]">
             <Button
               variant="ghost"
               size="sm"

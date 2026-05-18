@@ -293,7 +293,7 @@ export function MobileConversationDrawer({
             exit={{ x: "-100%" }}
             transition={{ type: "spring", stiffness: 380, damping: 34 }}
             className={cn(
-              "fixed top-0 left-0 bottom-0 z-[61] flex flex-col",
+              "fixed top-0 left-0 bottom-0 z-[61] flex min-h-0 max-h-[100dvh] flex-col",
               "w-[min(360px,92vw)] bg-[var(--bg-1)]",
               "border-r border-[var(--border-subtle)] shadow-[var(--shadow-3)]",
               "overflow-hidden",
@@ -304,7 +304,7 @@ export function MobileConversationDrawer({
             }}
           >
             {/* Header */}
-            <div className="px-4 pt-3 pb-2 flex items-center justify-between">
+            <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)] flex items-center justify-center shadow-[0_0_10px_var(--amber-glow)]">
                   <Sparkles
@@ -335,7 +335,7 @@ export function MobileConversationDrawer({
             </div>
 
             {/* New conversation CTA */}
-            <div className="px-4 pb-3">
+            <div className="shrink-0 px-4 pb-3">
               <Pressable
                 size="default"
                 minHit={false}
@@ -361,7 +361,7 @@ export function MobileConversationDrawer({
             </div>
 
             {/* Search */}
-            <div className="px-4 pb-3">
+            <div className="shrink-0 px-4 pb-3">
               <div
                 className={cn(
                   "flex items-center gap-2 h-10 px-3 rounded-full",
@@ -377,7 +377,7 @@ export function MobileConversationDrawer({
                   placeholder="搜索会话标题"
                   aria-label="搜索会话"
                   className={cn(
-                    "flex-1 bg-transparent text-[14px] text-[var(--fg-0)]",
+                    "min-w-0 flex-1 bg-transparent text-[14px] text-[var(--fg-0)]",
                     "placeholder:text-[var(--fg-2)] outline-none",
                   )}
                 />
@@ -398,7 +398,7 @@ export function MobileConversationDrawer({
             </div>
 
             {/* Segmented */}
-            <div className="px-4 pb-2">
+            <div className="shrink-0 px-4 pb-2">
               <SegmentedControl<TabKind>
                 value={tab}
                 onChange={setTab}
@@ -419,7 +419,7 @@ export function MobileConversationDrawer({
             </div>
 
             {/* List */}
-            <div className="flex-1 overflow-y-auto overscroll-contain">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y">
               {isInitialLoading && <ListSkeleton />}
 
               {!isInitialLoading && list.isError && (

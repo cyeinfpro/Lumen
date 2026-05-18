@@ -198,10 +198,10 @@ export function PosterStyleBrowser({
     <div className={cn("flex min-h-0 flex-1 flex-col gap-3", className)}>
       {/* mobile header */}
       <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-[var(--border)] pb-2 md:hidden">
-        <div className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+        <div className="min-w-0 flex-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
           <p className="min-w-0 truncate">{syncSummary}</p>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2">
           {renderBrowserActions()}
         </div>
       </header>
@@ -323,13 +323,13 @@ export function PosterStyleBrowser({
             ) : (
               <div className="grid gap-3">
                 {deletableIds.length > 0 ? (
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-y border-[var(--border)] py-1.5">
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-y border-[var(--border)] py-1.5">
                     <button
                       type="button"
                       onClick={() =>
                         setSelectedIds(allVisibleSelected ? [] : deletableIds)
                       }
-                      className="inline-flex h-8 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
+                      className="inline-flex h-8 min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
                     >
                       {allVisibleSelected ? (
                         <CheckSquare className="h-3.5 w-3.5 text-[var(--amber-300)]" />
@@ -341,7 +341,7 @@ export function PosterStyleBrowser({
                         : "选择"}
                     </button>
                     {selectedDeletableIds.length > 0 ? (
-                      <div className="flex items-center gap-2">
+                      <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
                           onClick={() => setSelectedIds([])}
@@ -569,21 +569,21 @@ function PosterStyleCard({
         </span>
       </button>
 
-      <div className="mt-2 grid gap-0.5">
-        <p className="line-clamp-1 text-[13px] font-medium leading-[1.3] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
+      <div className="mt-2 grid min-w-0 gap-0.5">
+        <p className="line-clamp-1 min-w-0 break-words text-[13px] font-medium leading-[1.3] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
           {item.title}
         </p>
         {item.mood ? (
-          <p className="line-clamp-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          <p className="line-clamp-1 min-w-0 break-words font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
             {item.mood}
           </p>
         ) : null}
         {item.style_tags.length > 0 ? (
-          <p className="line-clamp-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          <p className="line-clamp-1 min-w-0 break-words font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
             {item.style_tags.slice(0, 3).join(" · ")}
           </p>
         ) : (
-          <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+          <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-3)] min-[390px]:tracking-[0.16em]">
             未打标
           </p>
         )}
@@ -754,4 +754,3 @@ function MobileFilterSheet({
     </div>
   );
 }
-

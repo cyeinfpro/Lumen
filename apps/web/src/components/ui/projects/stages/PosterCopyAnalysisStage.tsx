@@ -114,7 +114,7 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
                 <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
                   {label}
                 </p>
-                <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-6 text-[var(--fg-0)]">
+                <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--fg-0)]">
                   {original || "未识别"}
                 </p>
               </div>
@@ -134,7 +134,7 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
               setOverrides((prev) => ({ ...prev, [key]: next }));
             if (kind === "textarea") {
               return (
-                <label key={`edit-${key}`} className="block md:col-span-2">
+                <label key={`edit-${key}`} className="block min-w-0 md:col-span-2">
                   <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
                     {label}
                   </span>
@@ -149,7 +149,7 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
               );
             }
             return (
-              <label key={`edit-${key}`} className="block">
+              <label key={`edit-${key}`} className="block min-w-0">
                 <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
                   {label}
                 </span>
@@ -165,12 +165,13 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
         </div>
       </section>
 
-      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-[var(--border)] pt-5">
+      <div className="mt-6 grid grid-cols-1 gap-3 border-t border-[var(--border)] pt-5 min-[420px]:flex min-[420px]:flex-wrap min-[420px]:items-center">
         <Button
           variant="primary"
           loading={approve.isPending}
           onClick={submit}
           leftIcon={dirty ? <Check className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+          className="w-full min-[420px]:w-auto"
         >
           {dirty ? "确认修正后的文案" : "沿用 AI 切分"}
         </Button>

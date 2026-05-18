@@ -471,14 +471,17 @@ function SaveSelectionModal({
   };
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 px-4 sm:items-center"
+      role="dialog"
+      aria-modal="true"
+      aria-label="保存记忆"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 px-4 sm:items-center"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-[var(--radius-dialog)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-5 shadow-[var(--shadow-3)]"
+        className="mobile-dialog-panel flex w-full max-w-md flex-col overflow-hidden rounded-t-[var(--radius-dialog)] border border-b-0 border-[var(--border-subtle)] bg-[var(--bg-1)] shadow-[var(--shadow-3)] sm:rounded-[var(--radius-dialog)] sm:border-b"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-5 py-4">
           <h3 className="flex items-center gap-2 type-card-title">
             <BookmarkPlus className="h-4 w-4 text-[var(--color-lumen-amber)]" />
             记下这段
@@ -492,52 +495,54 @@ function SaveSelectionModal({
             <X className="h-4 w-4" />
           </IconButton>
         </div>
-        <div className="mb-3 flex flex-wrap gap-1.5">
-          {MEMORY_TYPE_OPTIONS.map((option) => (
-            <Button
-              key={option.value}
-              size="sm"
-              variant={type === option.value ? "secondary" : "ghost"}
-              onClick={() => setType(option.value)}
-              className={cn(
-                "h-7 px-2.5 text-[11px]",
-                type === option.value
-                  ? "border-[var(--color-lumen-amber)]/40 bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)]"
-                  : "border border-white/10 text-[var(--fg-1)]",
-              )}
-            >
-              {option.label}
-            </Button>
-          ))}
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {MEMORY_TYPE_OPTIONS.map((option) => (
+              <Button
+                key={option.value}
+                size="sm"
+                variant={type === option.value ? "secondary" : "ghost"}
+                onClick={() => setType(option.value)}
+                className={cn(
+                  "h-8 px-2.5 text-[11px]",
+                  type === option.value
+                    ? "border-[var(--color-lumen-amber)]/40 bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)]"
+                    : "border border-[var(--border)] text-[var(--fg-1)]",
+                )}
+              >
+                {option.label}
+              </Button>
+            ))}
+          </div>
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value.slice(0, 200))}
+            rows={4}
+            className="mb-2 w-full resize-y rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-2 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+            placeholder="例:偏好简洁回答"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--fg-2)]">
+            <span>{content.length}/200</span>
+            {scopesQ.data && scopesQ.data.length > 0 && (
+              <select
+                value={scopeId ?? ""}
+                onChange={(e) => setScopeId(e.target.value || null)}
+                className="h-8 max-w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-1.5 text-[11px] text-[var(--fg-1)] outline-none"
+              >
+                <option value="">默认作用域</option>
+                {scopesQ.data
+                  .filter((scope) => !scope.is_default)
+                  .map((scope) => (
+                    <option key={scope.id} value={scope.id}>
+                      {scope.emoji ? `${scope.emoji} ` : ""}
+                      {scope.name}
+                    </option>
+                  ))}
+              </select>
+            )}
+          </div>
         </div>
-        <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value.slice(0, 200))}
-          rows={3}
-          className="mb-2 w-full rounded-[var(--radius-card)] border border-white/10 bg-white/[0.03] px-3 py-2 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
-          placeholder="例:偏好简洁回答"
-        />
-        <div className="mb-4 flex items-center justify-between gap-2 text-[11px] text-[var(--fg-2)]">
-          <span>{content.length}/200</span>
-          {scopesQ.data && scopesQ.data.length > 0 && (
-            <select
-              value={scopeId ?? ""}
-              onChange={(e) => setScopeId(e.target.value || null)}
-              className="h-7 rounded-[var(--radius-control)] border border-white/10 bg-white/[0.03] px-1.5 text-[11px] text-[var(--fg-1)] outline-none"
-            >
-              <option value="">默认作用域</option>
-              {scopesQ.data
-                .filter((scope) => !scope.is_default)
-                .map((scope) => (
-                  <option key={scope.id} value={scope.id}>
-                    {scope.emoji ? `${scope.emoji} ` : ""}
-                    {scope.name}
-                  </option>
-                ))}
-            </select>
-          )}
-        </div>
-        <div className="flex justify-end gap-2">
+        <div className="mobile-dialog-footer grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--border-subtle)] px-5 py-3">
           <Button
             type="button"
             variant="outline"

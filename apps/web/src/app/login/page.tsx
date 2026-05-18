@@ -99,13 +99,13 @@ function LoginInner() {
   };
 
   return (
-    <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)] flex flex-col">
-      <main className="flex-1 grid grid-cols-1 md:grid-cols-2 min-h-0">
+    <div className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto overscroll-contain md:grid-cols-2">
         {/* —— 左：品牌区（仅桌面） —— */}
         <BrandPanel />
 
         {/* —— 右：登录表单 —— */}
-        <section className="flex items-center justify-center px-4 py-10 md:py-16 safe-x">
+        <section className="flex min-h-full items-start justify-center px-4 py-8 safe-x md:items-center md:py-16">
           <motion.div
             initial={false}
             animate={{ opacity: 1, y: 0 }}

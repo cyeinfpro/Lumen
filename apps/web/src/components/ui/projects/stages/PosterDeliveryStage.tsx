@@ -88,13 +88,14 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
       title="交付"
       subtitle="批量下载所有尺寸，或单张右键另存。"
       actions={
-        <div className="flex flex-wrap gap-2">
+        <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:flex sm:flex-wrap">
           <Button
             variant="primary"
             size="sm"
             onClick={downloadAll}
             leftIcon={<Download className="h-3.5 w-3.5" />}
             disabled={!renders.length}
+            className="w-full sm:w-auto"
           >
             全部下载
           </Button>
@@ -103,6 +104,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
             size="sm"
             onClick={copySummary}
             leftIcon={<Copy className="h-3.5 w-3.5" />}
+            className="w-full sm:w-auto"
           >
             复制信息
           </Button>

@@ -237,7 +237,7 @@ function JobCard({
             </span>
             <span>{POSTER_STYLE_CATEGORY_LABEL[job.category]}</span>
           </div>
-          <p className="mt-2 truncate text-[14px] font-medium text-[var(--fg-0)]">
+          <p className="mt-2 min-w-0 truncate text-[14px] font-medium text-[var(--fg-0)]">
             {job.title || "未命名风格"}
           </p>
           <p className="mt-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
@@ -270,7 +270,7 @@ function JobCard({
         </p>
       ) : null}
       {job.prompt ? (
-        <p className="line-clamp-2 max-w-xl text-[12px] leading-[1.6] text-[var(--fg-2)]">
+        <p className="line-clamp-2 max-w-xl break-words text-[12px] leading-[1.6] text-[var(--fg-2)]">
           {job.prompt}
         </p>
       ) : null}
@@ -281,7 +281,7 @@ function JobCard({
           {job.style_tags.map((tag) => (
             <span
               key={tag}
-              className="inline-flex items-center border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)]"
+              className="inline-flex max-w-full items-center break-words border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] min-[390px]:tracking-[0.14em]"
             >
               {tag}
             </span>

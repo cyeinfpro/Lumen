@@ -31,14 +31,14 @@ function PosterConstraintBody({ workflow }: { workflow: WorkflowRun }) {
   );
 
   return (
-    <div>
+    <div className="min-w-0">
       <InfoPanel title="原始文案">
-        <p className="whitespace-pre-wrap text-[13px] leading-[1.7] text-[var(--fg-1)]">
+        <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.7] text-[var(--fg-1)]">
           {workflow.user_prompt || "未录入"}
         </p>
       </InfoPanel>
       <InfoPanel title="选定风格">
-        <p className="whitespace-pre-wrap">
+        <p className="whitespace-pre-wrap break-words">
           {typeof styleSummary.title === "string" && styleSummary.title
             ? String(styleSummary.title)
             : "未指定"}
@@ -50,18 +50,18 @@ function PosterConstraintBody({ workflow }: { workflow: WorkflowRun }) {
         ) : null}
       </InfoPanel>
       <InfoPanel title="目标尺寸">
-        <p className="whitespace-pre-wrap">
+        <p className="whitespace-pre-wrap break-words">
           {targetAspects.length ? targetAspects.join("、") : "未指定"}
         </p>
       </InfoPanel>
       <InfoPanel title="文案切分">
-        <p className="whitespace-pre-wrap">{jsonValue(copyAnalysis)}</p>
+        <p className="whitespace-pre-wrap break-words">{jsonValue(copyAnalysis)}</p>
       </InfoPanel>
       <InfoPanel title="品牌资产">
-        <p className="whitespace-pre-wrap">{jsonValue(brandAssets)}</p>
+        <p className="whitespace-pre-wrap break-words">{jsonValue(brandAssets)}</p>
       </InfoPanel>
       <InfoPanel title="选定母版">
-        <p>
+        <p className="break-words">
           {selectedMaster
             ? `候选 ${selectedMaster.candidate_index}（${selectedMaster.id.slice(0, 8)}）`
             : "未选定"}
@@ -127,7 +127,7 @@ export function PosterConstraintDrawer({
         snapPoints={["80%", "60%"]}
       >
         <DrawerHeader onClose={onClose} />
-        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5">
+        <div className="min-w-0 px-5 pb-[var(--mobile-dialog-footer-pad-bottom)]">
           <PosterConstraintBody workflow={workflow} />
         </div>
       </BottomSheet>
@@ -162,7 +162,7 @@ export function PosterConstraintDrawer({
             )}
           >
             <DrawerHeader onClose={onClose} />
-            <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-6">
+            <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-6">
               <PosterConstraintBody workflow={workflow} />
             </div>
           </motion.aside>

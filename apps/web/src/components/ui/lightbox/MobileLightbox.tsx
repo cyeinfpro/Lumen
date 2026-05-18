@@ -1151,7 +1151,6 @@ export function MobileLightbox() {
       className="fixed inset-0 overflow-hidden outline-none"
       style={{
         zIndex: "var(--z-lightbox, 80)" as unknown as number,
-        touchAction: "none",
       }}
     >
       <span id={dialogTitleId} className="sr-only">
@@ -1418,10 +1417,12 @@ export function MobileLightbox() {
         className={cn(
           "absolute inset-x-0 bottom-0 px-3 pt-6",
           "pb-[var(--mobile-dialog-footer-pad-bottom)]",
+          "mobile-dialog-scroll max-h-[min(48dvh,24rem)] overflow-y-auto overscroll-contain",
           "bg-gradient-to-t from-black/65 via-black/30 to-transparent",
-          "pointer-events-none",
+          "pointer-events-auto",
           !chromeVisible && "pointer-events-none",
         )}
+        style={{ touchAction: "pan-y" }}
       >
         {total > 1 && (
           <div className="mx-auto mb-3.5 flex max-w-[34rem] gap-2.5 overflow-x-auto px-1 py-1 no-scrollbar pointer-events-auto">

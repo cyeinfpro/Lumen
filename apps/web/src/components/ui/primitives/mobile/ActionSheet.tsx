@@ -79,7 +79,7 @@ export function ActionSheet({
         </ul>
       </div>
       {/* spec §9.4：取消按钮单独一格，与 actions 之间 12px 间隙（iOS 标配） */}
-      <div className="px-4 pb-3 pt-3">
+      <div className="sticky bottom-0 z-10 px-4 pb-3 pt-3 bg-[var(--bg-1)]">
         <Pressable
           size="large"
           pressScale="soft"

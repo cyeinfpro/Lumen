@@ -62,9 +62,11 @@ export function MobileTopBar({
         paddingTop: "calc(env(safe-area-inset-top, 0px) + var(--system-banner-height, 0px))",
       }}
     >
-      <div className="relative flex items-center h-10 max-w-[640px] mx-auto px-3 gap-2.5 [@media(max-width:360px)]:gap-1.5">
-        <div className="flex-1 min-w-0 flex items-center gap-2">{left}</div>
-        <div className="flex items-center gap-1.5">
+      <div className="relative flex min-h-11 items-center max-w-[640px] mx-auto px-3 gap-2 [@media(max-width:390px)]:gap-1.5">
+        <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
+          {left}
+        </div>
+        <div className="flex min-w-0 shrink-0 items-center justify-end gap-1 [@media(max-width:390px)]:gap-0.5">
           <MobileWalletPill />
           {right}
         </div>
@@ -111,14 +113,17 @@ function MobileWalletPill() {
       aria-label={low ? `钱包余额低 ¥${balanceText}` : `钱包余额 ¥${balanceText}`}
       title={`¥${balanceText}`}
       className={[
-        "inline-flex h-7 max-w-[88px] shrink-0 items-center rounded-full border px-2 text-[11px] font-medium tabular-nums",
+        "inline-flex h-7 max-w-[88px] shrink items-center rounded-full border px-2 text-[11px] font-medium tabular-nums",
+        "[@media(max-width:390px)]:max-w-[64px] [@media(max-width:360px)]:hidden",
         "truncate font-mono",
         low || negative
           ? "border-danger-border bg-danger-soft text-[var(--danger-fg)]"
           : "border-[var(--border)] bg-[color-mix(in_srgb,var(--fg-0)_5%,transparent)] text-[var(--fg-1)]",
       ].join(" ")}
     >
-      <span className="inline-block min-w-[72px] truncate text-right">¥{compactBalanceText}</span>
+      <span className="inline-block min-w-0 max-w-full truncate text-right">
+        ¥{compactBalanceText}
+      </span>
     </Link>
   );
 }

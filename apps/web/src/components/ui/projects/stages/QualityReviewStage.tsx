@@ -325,17 +325,18 @@ export function QualityReviewStage({ workflow }: { workflow: WorkflowRun }) {
             disabled={isGenerating}
           />
         </div>
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="mt-5 grid grid-cols-1 gap-3 min-[420px]:flex min-[420px]:flex-wrap min-[420px]:items-center">
           <Button
             variant="outline"
             loading={create.isPending}
             disabled={isGenerating}
             onClick={() => setConfirmRegenerate(true)}
             leftIcon={<Shirt className="h-4 w-4" />}
+            className="w-full min-[420px]:w-auto"
           >
             继续再生成 {outputCount} 张
           </Button>
-          <p className="inline-flex flex-wrap items-center gap-2 text-[12px] leading-6 text-[var(--fg-2)]">
+          <p className="inline-flex min-w-0 flex-wrap items-center gap-2 break-words text-[12px] leading-6 text-[var(--fg-2)]">
             <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
               <Layers className="h-3 w-3" />
               追加 {String(outputCount).padStart(2, "0")} 张
@@ -359,7 +360,7 @@ export function QualityReviewStage({ workflow }: { workflow: WorkflowRun }) {
           onChange={(event) => setInstruction(event.target.value)}
           className="mt-3 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
         />
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="mt-5 grid grid-cols-1 gap-3 min-[420px]:flex min-[420px]:flex-wrap min-[420px]:items-center">
           <Button
             variant="outline"
             loading={revise.isPending}
@@ -372,6 +373,7 @@ export function QualityReviewStage({ workflow }: { workflow: WorkflowRun }) {
               })
             }
             leftIcon={<RefreshCw className="h-4 w-4" />}
+            className="w-full min-[420px]:w-auto"
           >
             文字返修
           </Button>
@@ -381,6 +383,7 @@ export function QualityReviewStage({ workflow }: { workflow: WorkflowRun }) {
             disabled={isGenerating || images.length === 0}
             onClick={() => setConfirmDeliver(true)}
             leftIcon={<Check className="h-4 w-4" />}
+            className="w-full min-[420px]:w-auto"
           >
             确认交付
           </Button>
@@ -453,7 +456,7 @@ function SelectField({
   options: ReadonlyArray<readonly [string, string]>;
 }) {
   return (
-    <label className="block">
+    <label className="block min-w-0">
       <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
         {label}
       </span>
@@ -461,7 +464,7 @@ function SelectField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
+        className="mt-2 h-10 w-full min-w-0 border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
       >
         {options.map(([optionValue, optionLabel]) => (
           <option key={optionValue} value={optionValue} className="bg-[var(--bg-1)]">
@@ -493,7 +496,7 @@ function CheckboxField({
         disabled={disabled}
         className="h-4 w-4 accent-[var(--amber-400)] disabled:opacity-40"
       />
-      <span>{label}</span>
+      <span className="min-w-0 break-words">{label}</span>
     </label>
   );
 }
