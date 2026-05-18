@@ -1138,6 +1138,13 @@ def test_showcase_preflight_timeout_scales_for_large_gpt55_batches(
     assert (
         workflows._showcase_preflight_timeout_seconds(  # noqa: SLF001
             scene_planner="gpt55_preflight",
+            shot_count=5,
+        )
+        == 840.0
+    )
+    assert (
+        workflows._showcase_preflight_timeout_seconds(  # noqa: SLF001
+            scene_planner="gpt55_preflight",
             shot_count=16,
         )
         == 1680.0
@@ -2646,6 +2653,23 @@ def test_guarded_shooting_brief_allows_scene_rewrite_without_old_scene() -> None
     assert "图书馆过道" in guarded
 
 
+def test_guarded_shooting_brief_preserves_safe_motion_energy() -> None:
+    guarded = workflows._guarded_shooting_brief(  # noqa: SLF001
+        "模特向镜头走近，脚步刚落地，衣摆和发丝有自然摆动。",
+        rewrite_instruction=(
+            "改为稳定的正面或三分之二正面站定展示，只保留轻微落步感；"
+            "双手远离胸口和裙身主体。"
+        ),
+    )
+
+    assert "稳定的正面或三分之二正面站定展示" not in guarded
+    assert "只保留轻微落步感" not in guarded
+    assert "安全动态抓拍" in guarded
+    assert "保留安全动态能量" in guarded
+    assert "不要退回僵硬静态站姿" in guarded
+    assert "双手保持低位或打开在身体两侧" in guarded
+
+
 @pytest.mark.asyncio
 async def test_prepare_showcase_preflight_uses_director_brief_for_risky_scene(
     monkeypatch: pytest.MonkeyPatch,
@@ -2759,7 +2783,7 @@ async def test_prepare_showcase_preflight_timeout_falls_back_to_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_wait_for(awaitable: Any, timeout: float) -> Any:
-        assert timeout == 480.0
+        assert timeout == 840.0
         awaitable.close()
         raise asyncio.TimeoutError
 
@@ -2798,7 +2822,7 @@ async def test_prepare_showcase_preflight_timeout_falls_back_to_rules(
 
     assert preflight["planning"]["planner"] == "rules_fallback"
     assert preflight["planning"]["requested_planner"] == "gpt55_preflight"
-    assert preflight["planning"]["fallback_reason"] == "preflight_timeout_after_480s"
+    assert preflight["planning"]["fallback_reason"] == "preflight_timeout_after_840s"
     assert preflight["preflight_timed_out"] is True
 
 
@@ -2826,6 +2850,37 @@ async def test_prompt_risk_review_treats_string_false_as_false(
 
     assert review["risk_level"] == "low"
     assert review["must_rewrite"] is False
+
+
+@pytest.mark.asyncio
+async def test_prompt_risk_review_preserves_safe_dynamic_motion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured["instructions"] = kwargs["instructions"]
+        return {
+            "risk_level": "medium",
+            "risks": ["手部接近商品主体"],
+            "must_rewrite": True,
+            "rewrite_instruction": "双手保持低位，保留落步动态。",
+        }
+
+    monkeypatch.setattr(scene_planner, "_call_gpt55_json", fake_call)
+
+    review = await scene_planner.review_prompt_risk_with_gpt55(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        final_prompt="向镜头走近，脚步刚落地，衣摆有自然摆动。",
+        garment_lock={"must_preserve": ["胸前图案"]},
+        scene_card={"id": "scene-1"},
+        batch_context={},
+    )
+
+    assert review["must_rewrite"] is True
+    assert "中等动态本身不是风险" in captured["instructions"]
+    assert "禁止要求改成“稳定站定”" in captured["instructions"]
+    assert "安全动态抓拍" in captured["instructions"]
 
 
 def test_accessory_preview_prompt_is_model_quad_with_accessories_only() -> None:

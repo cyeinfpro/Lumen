@@ -52,6 +52,8 @@ _GPT55_COMPOSER_TIMEOUT_SEC = 75.0
 _GPT55_REVIEW_TIMEOUT_SEC = 45.0
 _GPT55_DEFAULT_TIMEOUT_SEC = 75.0
 _GPT55_ATTEMPT_TIMEOUT_SEC = 70.0
+_GPT55_DIRECTOR_RETRY_ENV = "LUMEN_SHOWCASE_GPT_DIRECTOR_RETRIES"
+_GPT55_DIRECTOR_DEFAULT_RETRIES = 1
 _REFERENCE_IMAGE_RETRY_STATUS = {400, 413, 415, 422}
 _REFERENCE_IMAGE_RETRY_TOKENS = (
     "input_image",
@@ -229,47 +231,47 @@ _FALLBACK_ENVIRONMENT_DETAILS: dict[str, tuple[str, ...]] = {
 
 _FALLBACK_EVENTS_BY_SHOT: dict[str, tuple[str, ...]] = {
     "front_full_body": (
-        "刚走到地点中央时短暂停步看向镜头",
-        "等人时自然站定，身体重心落在一侧",
-        "从门口走出后停下整理步伐",
-        "穿过光影区域时抬眼看向镜头",
-        "在路边停住，手臂自然垂落不遮挡衣服",
+        "从画面外小步走进光线里，刚被镜头叫住",
+        "顺着场景向前走近两步，在脚步落地瞬间抬眼",
+        "从门口轻快走出，身体还带着向前的惯性",
+        "穿过光影区域时回头看向镜头，脚步还没完全停稳",
+        "沿着背景线条小跑后放慢，手臂自然摆动但不遮挡衣服",
     ),
     "natural_pose": (
-        "走了两步后自然放慢脚步",
-        "低头看了一眼手机又抬眼",
-        "和镜头外的人轻声回应",
-        "一只手轻扶衣摆边缘但不遮挡主体",
-        "沿着场景向前走时被自然抓拍",
+        "向镜头走近时突然被叫住，眼神刚转回来",
+        "绕过场景边缘半步转身，衣摆跟着轻轻摆动",
+        "和镜头外的人回应后笑着继续往前走",
+        "一只手在身体侧边带起衣摆外缘，避开商品主体",
+        "沿着场景向前走时被高速快门自然抓拍",
     ),
     "detail_half_body": (
         "抬手轻整理袖口，胸前和领口保持清楚",
-        "手指轻触衣摆边缘展示面料垂感",
+        "手指从衣摆外缘掠过展示面料垂感",
         "肩颈放松地看向一侧，衣领细节清楚",
         "低头检查纽扣或拉链，手不压住主体",
-        "自然抬臂调整发丝，手臂避开胸前图案",
+        "自然抬臂把发丝拨到肩后，手臂避开胸前图案",
     ),
     "side_or_back": (
-        "侧身迈上一步时回头",
-        "从座位旁起身转向镜头",
-        "看向橱窗时身体保持侧面轮廓",
-        "转过街角前短暂停住",
-        "背向前走半步后自然回望",
+        "侧身迈上一步时自然回头，脚步仍在移动",
+        "从座位旁起身转向镜头，衣摆有轻微摆动",
+        "看向橱窗时半转身体，侧面轮廓被光线勾出",
+        "转过街角前被叫住，身体还保留转身惯性",
+        "背向前走半步后自然回望，后脚刚离开地面",
     ),
 }
 
 _FALLBACK_POSES_BY_SHOT: dict[str, tuple[str, ...]] = {
     "front_full_body": (
-        "一脚在前的自然全身站姿，肩颈放松",
-        "身体微微侧向镜头，双手自然垂落",
-        "重心落在后脚，前脚轻点地面",
-        "步伐刚停下的全身姿态",
+        "一脚刚落在前方的全身动态姿态，肩颈放松",
+        "身体三分之二正面向镜头走近，双手在低位自然摆动",
+        "重心正从后脚转到前脚，前脚轻点地面",
+        "步伐刚停下但身体仍有前进惯性的全身姿态",
     ),
     "natural_pose": (
-        "身体三分之二正面，头部自然看向镜头附近",
-        "轻微前行动作，手部保持低位",
-        "上半身放松，视线偏离镜头一点",
-        "正面微侧的小幅移动姿态",
+        "身体三分之二正面移动中回头，头部自然看向镜头附近",
+        "轻快前行动作，手部保持低位并避开商品主体",
+        "上半身放松向前带动，视线偏离镜头一点",
+        "正面微侧的小幅移动姿态，脚步方向和视线形成张力",
     ),
     "detail_half_body": (
         "半身微侧，手部动作避开胸前主体",
@@ -287,16 +289,16 @@ _FALLBACK_POSES_BY_SHOT: dict[str, tuple[str, ...]] = {
 
 _FALLBACK_MOTIONS_BY_SHOT: dict[str, tuple[str, ...]] = {
     "front_full_body": (
-        "刚停住的轻微惯性，衣摆有自然垂坠",
-        "低幅度呼吸感，身体重心真实",
-        "脚步从移动到停下，动作幅度很小",
-        "手臂自然摆动到身体两侧",
+        "脚步落地的瞬间被凝住，衣摆有清楚的自然摆动",
+        "身体向镜头前进的惯性仍在，重心真实可见",
+        "从移动到停下的半拍，动作幅度中等但商品主体清楚",
+        "手臂随步伐自然摆到身体两侧，避开胸前和图案区域",
     ),
     "natural_pose": (
-        "小步前行中的自然定格",
-        "正面微侧移动带出衣服褶皱",
-        "手部低位小动作，主体不被遮挡",
-        "视线和身体方向不同步的抓拍感",
+        "小步前行中的自然定格，脚尖和衣摆都带出方向感",
+        "正面微侧移动带出衣服褶皱和身体节奏",
+        "手部低位随步伐摆动，主体不被遮挡",
+        "视线和身体方向不同步的高速抓拍感",
     ),
     "detail_half_body": (
         "手指轻整理细节，衣服纹理和结构清楚",
@@ -990,19 +992,6 @@ async def plan_scene_cards_with_gpt55(
     provider_order: list[ProviderDefinition] | None = None,
     reference_images: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    fallback_cards = fallback_scene_cards_from_pool(
-        product_analysis=product_analysis,
-        template=template,
-        scene_environment=scene_environment,
-        shot_picks=shot_picks,
-        aspect_ratio=aspect_ratio,
-        user_prompt=user_prompt,
-        accessory_plan=accessory_plan,
-        allow_pet=allow_pet,
-        continuity_anchor=continuity_anchor,
-        scene_strategy=scene_strategy,
-        scene_variety=scene_variety,
-    )
     payload = {
         "product": compact_product_context_for_gpt55(product_analysis, garment_lock),
         "model": {"summary": model_summary},
@@ -1017,6 +1006,13 @@ async def plan_scene_cards_with_gpt55(
             "allow_pet": allow_pet,
             "allow_background_people": allow_background_people,
             "user_direction": user_prompt,
+            "creativity_mode": (
+                "bold_distinctive"
+                if scene_variety == "wild"
+                else "safe_controlled"
+                if scene_variety == "safe"
+                else "rich_varied"
+            ),
             "front_view_policy": (
                 "默认正面或三分之二正面；只有 shot_class=side_or_back "
                 "才允许侧背或背面作为主视角。"
@@ -1036,42 +1032,89 @@ async def plan_scene_cards_with_gpt55(
         },
     }
     instructions = _director_instructions(output_count)
-    try:
-        raw = await _call_gpt55_json(
-            db,
-            purpose="apparel_scene_director",
-            instructions=instructions,
-            payload=payload,
-            max_output_tokens=5200 if output_count <= 8 else 9000,
-            provider_order=provider_order,
-            reference_images=reference_images,
-        )
-        cards = _normalize_scene_cards(
-            raw.get("scene_cards"), fallback_cards, shot_picks
-        )
-        if len(cards) != output_count:
-            raise ValueError("scene card count mismatch")
-        fingerprints = _unique_fingerprints(cards)
-        return {
-            "planner": "gpt55_preflight",
-            "planner_status": "ok",
-            "series_concept": clean_text(raw.get("series_concept"), max_len=160)
-            or "自然服饰展示拍摄",
-            "continuity_anchors": coerce_string_list(
-                raw.get("continuity_anchors"), max_items=6
-            ),
-            "scene_cards": cards,
-            "scene_fingerprints": fingerprints,
-            "risk_notes": coerce_string_list(raw.get("risk_notes"), max_items=8),
-            "reference_image_fallback_reason": clean_text(
-                raw.get("reference_image_fallback_reason"), max_len=300
+    retry_errors: list[str] = []
+    retry_rounds = 1 + _gpt55_director_retry_count()
+    last_error = ""
+    for round_index in range(retry_rounds):
+        try:
+            raw = await _call_gpt55_json(
+                db,
+                purpose="apparel_scene_director",
+                instructions=_director_retry_instructions(
+                    instructions,
+                    round_index=round_index,
+                    last_error=last_error,
+                ),
+                payload=_director_retry_payload(
+                    payload,
+                    round_index=round_index,
+                    last_error=last_error,
+                ),
+                max_output_tokens=5200 if output_count <= 8 else 9000,
+                provider_order=provider_order,
+                reference_images=reference_images,
             )
-            or None,
-            "fallback_reason": None,
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("apparel scene director fallback: %s", exc)
-        return _fallback_planning_result(fallback_cards, reason=str(exc))
+            cards = _normalize_scene_cards(raw.get("scene_cards"), shot_picks)
+            if len(cards) != output_count:
+                raise ValueError("scene card count mismatch")
+            fingerprints = _unique_fingerprints(cards)
+            return {
+                "planner": "gpt55_preflight",
+                "planner_status": "ok",
+                "series_concept": clean_text(raw.get("series_concept"), max_len=160)
+                or "自然服饰展示拍摄",
+                "continuity_anchors": coerce_string_list(
+                    raw.get("continuity_anchors"), max_items=6
+                ),
+                "scene_cards": cards,
+                "scene_fingerprints": fingerprints,
+                "risk_notes": coerce_string_list(raw.get("risk_notes"), max_items=8),
+                "reference_image_fallback_reason": clean_text(
+                    raw.get("reference_image_fallback_reason"), max_len=300
+                )
+                or None,
+                "fallback_reason": None,
+                "director_attempts_made": round_index + 1,
+                "director_retry_count": len(retry_errors),
+                "director_retry_errors": retry_errors,
+            }
+        except Exception as exc:  # noqa: BLE001
+            last_error = clean_text(str(exc), max_len=500) or exc.__class__.__name__
+            retry_errors.append(last_error)
+            if round_index + 1 < retry_rounds:
+                logger.warning(
+                    "apparel scene director retry %s/%s after failure: %s",
+                    round_index + 2,
+                    retry_rounds,
+                    last_error,
+                )
+                continue
+            logger.warning(
+                "apparel scene director fallback after %s rounds: %s",
+                retry_rounds,
+                last_error,
+            )
+    fallback_cards = fallback_scene_cards_from_pool(
+        product_analysis=product_analysis,
+        template=template,
+        scene_environment=scene_environment,
+        shot_picks=shot_picks,
+        aspect_ratio=aspect_ratio,
+        user_prompt=user_prompt,
+        accessory_plan=accessory_plan,
+        allow_pet=allow_pet,
+        continuity_anchor=continuity_anchor,
+        scene_strategy=scene_strategy,
+        scene_variety=scene_variety,
+    )
+    fallback = _fallback_planning_result(
+        fallback_cards,
+        reason=f"gpt55_director_retry_exhausted: {last_error}",
+    )
+    fallback["director_attempts_made"] = len(retry_errors)
+    fallback["director_retry_count"] = len(retry_errors)
+    fallback["director_retry_errors"] = retry_errors
+    return fallback
 
 
 def rules_fallback_planning(
@@ -1119,6 +1162,90 @@ def _fallback_planning_result(
     }
 
 
+def _gpt55_director_retry_count() -> int:
+    raw_retries = os.environ.get(_GPT55_DIRECTOR_RETRY_ENV)
+    if raw_retries:
+        try:
+            return max(0, min(5, int(raw_retries)))
+        except (TypeError, ValueError):
+            logger.warning(
+                "invalid %s=%r; using default",
+                _GPT55_DIRECTOR_RETRY_ENV,
+                raw_retries,
+            )
+    return _GPT55_DIRECTOR_DEFAULT_RETRIES
+
+
+def _director_retry_payload(
+    payload: dict[str, Any],
+    *,
+    round_index: int,
+    last_error: str,
+) -> dict[str, Any]:
+    if round_index <= 0:
+        return payload
+    failure_summary = _director_retry_failure_summary(last_error)
+    return {
+        **payload,
+        "retry_context": {
+            "attempt": round_index + 1,
+            "previous_failure": failure_summary,
+            "correction_required": (
+                "修正上一轮失败点，重新完整输出整批 scene_cards。"
+                "不要省字段、不要用泛化动作、不要重复地点/动作/指纹，"
+                "非 side_or_back 镜头不得写背影或纯侧面；"
+                "wild/bold 模式仍要保留独特视觉钩子。"
+            ),
+        },
+    }
+
+
+def _director_retry_instructions(
+    instructions: str,
+    *,
+    round_index: int,
+    last_error: str,
+) -> str:
+    if round_index <= 0:
+        return instructions
+    error = _director_retry_failure_summary(last_error)
+    return (
+        f"{instructions}\n\n"
+        f"【重试修正】这是第 {round_index + 1} 轮导演请求。上一轮失败原因：{error}。"
+        "这一次必须针对失败原因完整修正并重新输出整批 JSON，不要只输出补丁。"
+        "所有 required fields 都要具体可拍摄；micro_event、pose、motion 不能写成"
+        "自然站姿、正面全身、商品展示这类泛化词；不得重复地点、动作或构图；"
+        "除 shot_class=side_or_back 外，不得把主视角写成背影、背向、后背或纯侧面。"
+    )
+
+
+def _director_retry_failure_summary(error: str) -> str:
+    text = str(error or "").strip().lower()
+    if not text:
+        return "上一轮输出未通过校验，请重新输出完整 JSON。"
+    if "incomplete gpt scene_card" in text:
+        return "上一轮有 scene_card 字段不完整，请补齐所有必填字段和 camera 子字段。"
+    if "missing gpt scene_card" in text or "scene card count mismatch" in text:
+        return "上一轮 scene_cards 数量不完整，请严格按 shot_plan 输出每一张。"
+    if "generic gpt micro_event" in text:
+        return "上一轮 micro_event 太泛，请改成具体生活事件。"
+    if "generic gpt pose" in text:
+        return "上一轮 pose 太泛，请改成具体身体朝向、重心和手部位置。"
+    if "generic gpt motion" in text:
+        return "上一轮 motion 太泛，请改成具体可见动态。"
+    if "back/side view" in text:
+        return "上一轮非侧背镜头使用了背面或纯侧面主视角，请改为正面或三分之二正面。"
+    if "duplicate gpt scene fingerprint" in text:
+        return "上一轮有重复场景或动作，请让每张地点、事件、机位和构图明显不同。"
+    if "json" in text:
+        return "上一轮 JSON 无法解析或结构不正确，请只输出完整 JSON 对象。"
+    if "timeout" in text or "timed out" in text or "exceeded" in text:
+        return "上一轮上游调用超时，请更简洁地输出完整 JSON。"
+    if "http" in text or "upstream" in text or "provider" in text:
+        return "上一轮上游模型调用失败，请重新输出完整 JSON。"
+    return "上一轮输出未通过校验，请重新输出完整 JSON。"
+
+
 def _director_instructions(output_count: int) -> str:
     return (
         "你是服饰电商真人模特图的拍摄导演兼提示词摄影师。你要一次性为整批图片生成"
@@ -1132,6 +1259,11 @@ def _director_instructions(output_count: int) -> str:
         "商品还原约束会由系统后续拼接。\n"
         "目标是摄影大师级的商业环境肖像：要有张力、活力、动态感和超真实摄影质感，"
         "但不引用具体摄影师、品牌或杂志名。\n"
+        "活力不是大幅夸张摆拍，而是清楚的中等动态瞬间：走近、起步、落步、半转、"
+        "回头、轻快跨步、衣摆摆动、发丝轻动、回应镜头外的人。front_full_body 和 "
+        "natural_pose 不能退成静态站姿；除非商品极易被遮挡，否则每张都要有可见的"
+        "身体重心变化或脚步方向。detail_half_body 也要有手指、肩颈或眼神的动作半拍。"
+        "任何动态都必须让手、头发、道具避开胸前、图案、口袋和商品主体。\n"
         f"scene_cards 必须正好 {output_count} 条，且第 i 条必须严格对应 "
         "shot_plan[i]，id 用 shot_plan[i].shot_class 加 '-' 加索引，例如 "
         "detail_half_body-3。禁止重排 shot_plan 顺序。\n"
@@ -1163,6 +1295,15 @@ def _director_instructions(output_count: int) -> str:
         "每张 micro_event 必须是具体生活事件，不能直接复制 variant_label 或写成"
         "正面全身/自然动作/自然站姿。camera angle/distance、地点、身体重心、"
         "手部动作至少两项要变化，禁止整批退回普通棚拍站姿。"
+        "如果 request.variety 是 wild 或 request.creativity_mode 是 bold_distinctive，"
+        "你必须显著提高独特性：每张至少有一个清楚的视觉钩子，由你基于参考图和商品气质"
+        "即时构思，例如非常规但合理的地点、强图形光影、低机位、运动定格、色块留白、"
+        "前后景层次或戏剧性构图。不要从模板或固定地点池选场景；不要输出普通试衣间、"
+        "普通窗边、普通街角、普通棚拍站姿。大胆仍要真实、儿童合适、商品主体清楚，"
+        "不能靠遮挡道具、怪异姿势或换商品来制造独特。"
+        "不要使用“稳定站定展示”“只保留轻微落步感”这类会杀掉动作能量的方案；"
+        "需要降低风险时，改为安全动态抓拍，例如双手低位、手臂打开、脚步刚落地、"
+        "半转回头或向镜头走近。"
         "可以有连续元素，但不能让宠物、包、饮料、手机抢主体。"
         "童装/儿童必须年龄合适，不能成人化。"
     )
@@ -1353,7 +1494,9 @@ async def compose_image_prompt_with_gpt55(
         "这类泛称。"
         "本张只要求当前镜头能看到的商品区域清楚；半身/上身近景不要强求背后、裙摆、"
         "全身廓形等不可见细节。不要引入新图案、logo、口袋、腰带或遮挡道具。"
-        "如果有 rewrite_instruction，按它改写 shooting_brief 来降低风险。"
+        "如果有 rewrite_instruction，按它改写 shooting_brief 来降低风险；"
+        "但风险改写只能移动手、头发、道具和前景位置，或降低遮挡动作幅度，"
+        "不得把原本的行走、落步、半转、回头等动态改成静态站姿。"
     )
     try:
         raw = await _call_gpt55_json(
@@ -1473,7 +1616,12 @@ async def review_prompt_risk_with_gpt55(
         "必须只输出 JSON 对象，不要 Markdown。字段：risk_level, risks, "
         "must_rewrite, rewrite_instruction。risk_level 只能 low/medium/high。"
         "若 prompt 可能改商品、遮挡商品主体、动作过复杂、和批次重复、或宠物/道具抢主体，"
-        "必须标记风险并给出简短 rewrite_instruction。"
+        "必须标记风险并给出简短 rewrite_instruction。中等动态本身不是风险："
+        "走近、落步、半转、回头、衣摆摆动、发丝轻动都应保留。"
+        "rewrite_instruction 只能具体移动手、头发、道具、前景或调整机位以避开商品主体；"
+        "禁止要求改成“稳定站定”“站定展示”“静态展示”或“只保留轻微落步感”。"
+        "如果动作会遮挡，改成安全动态抓拍，例如双手低位、手臂打开、脚步刚落地、"
+        "半转回头或向镜头走近，同时保持商品主体清楚。"
     )
     try:
         raw = await _call_gpt55_json(
@@ -1549,67 +1697,64 @@ def _has_view_token(value: Any, tokens: tuple[str, ...]) -> bool:
     return any(token.lower() in text for token in tokens)
 
 
-def _front_replacement(
-    fallback: dict[str, Any],
-    key: str,
-    default: str,
-    *,
-    max_len: int = 220,
-) -> str:
-    replacement = clean_text(fallback.get(key), max_len=max_len)
-    if replacement and not _has_view_token(replacement, _SIDE_BACK_VIEW_TOKENS):
-        return replacement
-    return default
+def _required_gpt_scene_fields_missing(card: dict[str, Any]) -> list[str]:
+    required = (
+        "location",
+        "micro_event",
+        "pose",
+        "motion",
+        "lighting",
+        "composition",
+        "environment_detail",
+        "lighting_detail",
+        "camera_detail",
+        "composition_detail",
+        "creative_intent",
+        "natural_detail",
+        "shooting_brief",
+    )
+    missing = [
+        key
+        for key in required
+        if not str(card.get(key) or "").strip()
+    ]
+    camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
+    for key in ("distance", "angle", "lens_feel", "orientation"):
+        if not str(camera.get(key) or "").strip():
+            missing.append(f"camera.{key}")
+    return missing
 
 
-def _enforce_front_view_for_non_side_card(
-    card: dict[str, Any],
-    fallback: dict[str, Any],
-    shot_class: str,
-) -> None:
+def _reject_side_back_for_non_side_card(card: dict[str, Any], shot_class: str) -> None:
     if shot_class == "side_or_back":
         return
     camera = card.get("camera") if isinstance(card.get("camera"), dict) else {}
-    if _has_view_token(camera.get("angle"), _SIDE_BACK_VIEW_TOKENS):
-        fallback_camera = (
-            fallback.get("camera") if isinstance(fallback.get("camera"), dict) else {}
-        )
-        fallback_angle = clean_text(fallback_camera.get("angle"), max_len=40)
-        camera["angle"] = (
-            fallback_angle
-            if fallback_angle
-            and not _has_view_token(fallback_angle, _SIDE_BACK_VIEW_TOKENS)
-            else "front_three_quarter"
-        )
-        card["camera"] = camera
-
-    if _has_view_token(card.get("product_visibility"), _SIDE_BACK_VIEW_TOKENS):
-        card["product_visibility"] = _product_visibility_for_shot(shot_class)
-
-    replacements = {
-        "micro_event": "正面微侧行走中被自然抓拍",
-        "pose": "身体三分之二正面，手部低位不遮挡商品主体",
-        "motion": "正面小幅移动带出衣料自然褶皱",
-        "composition": "脸部和商品主体清楚，人物完整入镜，背景只作氛围",
-        "camera_detail": "平视或轻微低机位的三分之二正面镜头，透视自然",
-        "composition_detail": "主体正面区域清楚，头顶肩肘和脚下留边，背景不抢服装",
-        "creative_intent": "用正面抓拍里的决定性瞬间呈现服装，让画面有作品感但不牺牲商品",
-        "natural_detail": "表情、手指、身体重心和衣料褶皱都自然可信，商品主体无遮挡",
+    checked = {
+        "camera.angle": camera.get("angle"),
+        "product_visibility": card.get("product_visibility"),
+        "micro_event": card.get("micro_event"),
+        "pose": card.get("pose"),
+        "motion": card.get("motion"),
+        "composition": card.get("composition"),
+        "camera_detail": card.get("camera_detail"),
+        "composition_detail": card.get("composition_detail"),
+        "creative_intent": card.get("creative_intent"),
+        "natural_detail": card.get("natural_detail"),
+        "shooting_brief": card.get("shooting_brief"),
     }
-    for key, default in replacements.items():
-        if _has_view_token(card.get(key), _SIDE_BACK_VIEW_TOKENS):
-            card[key] = _front_replacement(fallback, key, default)
-
-    negative = coerce_string_list(card.get("negative"), max_items=8, max_len=100)
-    front_negative = "非侧背补充图不要背影、背向或以后背作为主视角"
-    if front_negative not in negative:
-        negative.append(front_negative)
-    card["negative"] = negative[:8]
+    offenders = [
+        key
+        for key, value in checked.items()
+        if _has_view_token(value, _SIDE_BACK_VIEW_TOKENS)
+    ]
+    if offenders:
+        raise ValueError(
+            f"non-side GPT scene_card uses back/side view in {', '.join(offenders)}"
+        )
 
 
 def _normalize_scene_cards(
     raw_cards: Any,
-    fallback_cards: list[dict[str, Any]],
     shot_picks: list[tuple[str, dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     cards = raw_cards if isinstance(raw_cards, list) else []
@@ -1644,7 +1789,6 @@ def _normalize_scene_cards(
 
     normalized: list[dict[str, Any]] = []
     for index, raw in enumerate(aligned):
-        fallback = fallback_cards[index] if index < len(fallback_cards) else {}
         shot_class = shot_picks[index][0] if index < len(shot_picks) else ""
         shot_label = (
             clean_text(shot_picks[index][1].get("label"), max_len=160)
@@ -1652,127 +1796,81 @@ def _normalize_scene_cards(
             else ""
         )
         if not isinstance(raw, dict):
-            raw = {}
+            raise ValueError(f"missing GPT scene_card for shot {index + 1}")
         camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
         card = {
             "id": clean_text(raw.get("id"), max_len=80)
-            or fallback.get("id")
             or f"scene-{index + 1:02d}",
             "scene_family": clean_text(raw.get("scene_family"), max_len=60)
-            or fallback.get("scene_family")
-            or "daily_life",
-            "location": clean_text(raw.get("location"), max_len=120)
-            or fallback.get("location")
-            or "真实生活场景",
-            "micro_event": clean_text(raw.get("micro_event"), max_len=160)
-            or fallback.get("micro_event")
-            or "自然穿搭抓拍",
+            or "gpt55_scene",
+            "location": clean_text(raw.get("location"), max_len=120),
+            "micro_event": clean_text(raw.get("micro_event"), max_len=160),
             "camera": {
-                "distance": clean_text(camera.get("distance"), max_len=40)
-                or (fallback.get("camera") or {}).get("distance")
-                or "full_body",
-                "angle": clean_text(camera.get("angle"), max_len=40)
-                or (fallback.get("camera") or {}).get("angle")
-                or "eye_level",
-                "lens_feel": clean_text(camera.get("lens_feel"), max_len=60)
-                or (fallback.get("camera") or {}).get("lens_feel")
-                or "natural_standard",
-                "orientation": clean_text(camera.get("orientation"), max_len=40)
-                or (fallback.get("camera") or {}).get("orientation")
-                or "vertical",
+                "distance": clean_text(camera.get("distance"), max_len=40),
+                "angle": clean_text(camera.get("angle"), max_len=40),
+                "lens_feel": clean_text(camera.get("lens_feel"), max_len=60),
+                "orientation": clean_text(camera.get("orientation"), max_len=40),
             },
-            "pose": clean_text(raw.get("pose"), max_len=160)
-            or fallback.get("pose")
-            or "自然站姿",
-            "motion": clean_text(raw.get("motion"), max_len=160)
-            or fallback.get("motion")
-            or "小幅自然动作",
-            "props": coerce_string_list(raw.get("props"), max_items=6, max_len=50)
-            or list(fallback.get("props") or []),
-            "lighting": clean_text(raw.get("lighting"), max_len=120)
-            or fallback.get("lighting")
-            or "自然光",
-            "composition": clean_text(raw.get("composition"), max_len=180)
-            or fallback.get("composition")
-            or "商品主体清晰",
+            "pose": clean_text(raw.get("pose"), max_len=160),
+            "motion": clean_text(raw.get("motion"), max_len=160),
+            "props": coerce_string_list(raw.get("props"), max_items=6, max_len=50),
+            "lighting": clean_text(raw.get("lighting"), max_len=120),
+            "composition": clean_text(raw.get("composition"), max_len=180),
             "product_visibility": clean_text(raw.get("product_visibility"), max_len=80)
-            or fallback.get("product_visibility")
-            or "front_full_body",
-            "environment_detail": clean_text(raw.get("environment_detail"), max_len=220)
-            or fallback.get("environment_detail")
-            or "背景保留真实空间层次，干净但不空洞，所有环境元素都不遮挡商品主体",
-            "lighting_detail": clean_text(raw.get("lighting_detail"), max_len=220)
-            or fallback.get("lighting_detail")
-            or "光线方向明确，脸部和衣服有真实明暗层次，商品颜色不过曝不偏色",
-            "camera_detail": clean_text(raw.get("camera_detail"), max_len=220)
-            or fallback.get("camera_detail")
-            or "镜头距离和透视自然，头身比例可信，动作像真实抓拍",
-            "composition_detail": clean_text(raw.get("composition_detail"), max_len=220)
-            or fallback.get("composition_detail")
-            or "主体位置稳定，头顶、肩肘和脚下留边，背景不抢服装",
-            "creative_intent": clean_text(raw.get("creative_intent"), max_len=220)
-            or fallback.get("creative_intent")
-            or "用真实生活里的决定性瞬间和克制构图呈现服装，让画面有作品感但不抢商品",
-            "natural_detail": clean_text(raw.get("natural_detail"), max_len=220)
-            or fallback.get("natural_detail")
-            or "表情、手指、身体重心和衣料褶皱都自然可信，不做僵硬摆拍",
+            or _product_visibility_for_shot(shot_class),
+            "environment_detail": clean_text(raw.get("environment_detail"), max_len=220),
+            "lighting_detail": clean_text(raw.get("lighting_detail"), max_len=220),
+            "camera_detail": clean_text(raw.get("camera_detail"), max_len=220),
+            "composition_detail": clean_text(raw.get("composition_detail"), max_len=220),
+            "creative_intent": clean_text(raw.get("creative_intent"), max_len=220),
+            "natural_detail": clean_text(raw.get("natural_detail"), max_len=220),
             "shooting_brief": _sanitize_shooting_brief(
                 raw.get("shooting_brief") or raw.get("final_prompt"),
                 max_len=900,
-            )
-            or fallback.get("shooting_brief")
-            or "",
+            ),
             "negative": coerce_string_list(
                 raw.get("negative"), max_items=8, max_len=100
-            )
-            or list(fallback.get("negative") or []),
+            ),
             "source": "gpt55",
         }
+        missing = _required_gpt_scene_fields_missing(card)
+        if missing:
+            raise ValueError(
+                f"incomplete GPT scene_card for shot {index + 1}: {', '.join(missing)}"
+            )
         if _is_generic_scene_text(
             card.get("micro_event"), shot_class=shot_class, label=shot_label
         ):
-            card["micro_event"] = fallback.get("micro_event") or card["micro_event"]
+            raise ValueError(
+                f"generic GPT micro_event for shot {index + 1}: {card.get('micro_event')}"
+            )
         if _is_generic_scene_text(
             card.get("pose"), shot_class=shot_class, label=shot_label
         ):
-            card["pose"] = fallback.get("pose") or card["pose"]
+            raise ValueError(
+                f"generic GPT pose for shot {index + 1}: {card.get('pose')}"
+            )
         if _is_generic_scene_text(
             card.get("motion"), shot_class=shot_class, label=shot_label
         ):
-            card["motion"] = fallback.get("motion") or card["motion"]
-        _enforce_front_view_for_non_side_card(card, fallback, shot_class)
-        if shot_class != "side_or_back" and _has_view_token(
-            card.get("shooting_brief"),
-            _SIDE_BACK_VIEW_TOKENS,
-        ):
-            card["shooting_brief"] = ""
-        if not card.get("shooting_brief"):
-            card["shooting_brief"] = _fallback_scene_card_shooting_brief(
-                card,
-                shot_class=shot_class,
+            raise ValueError(
+                f"generic GPT motion for shot {index + 1}: {card.get('motion')}"
             )
+        _reject_side_back_for_non_side_card(card, shot_class)
         card["fingerprint"] = scene_fingerprint(card)
         normalized.append(card)
-    return _dedupe_scene_cards(normalized, fallback_cards)
+    return _assert_unique_scene_fingerprints(normalized)
 
 
-def _dedupe_scene_cards(
-    cards: list[dict[str, Any]], fallback_cards: list[dict[str, Any]]
+def _assert_unique_scene_fingerprints(
+    cards: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for index, card in enumerate(cards):
         fingerprint = scene_fingerprint(card)
         if fingerprint in seen:
-            if index < len(fallback_cards):
-                card = dict(fallback_cards[index])
-                card["source"] = "rules_fallback_dedupe"
-                fingerprint = scene_fingerprint(card)
-                if fingerprint in seen:
-                    card["micro_event"] = (
-                        f"{card.get('micro_event') or '自然穿搭抓拍'}（变体 {index + 1}）"
-                    )[:160]
-                    fingerprint = scene_fingerprint(card)
+            raise ValueError(f"duplicate GPT scene fingerprint at shot {index + 1}")
         seen.add(fingerprint)
         card["fingerprint"] = fingerprint
         out.append(card)
