@@ -2,20 +2,39 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  BookmarkPlus,
   Check,
   CheckSquare,
+  Download,
+  FolderPlus,
   Image as ImageIcon,
+  Loader2,
   Maximize2,
   MessageSquare,
   Share2,
   Sparkles,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
 
-import { imageBinaryUrl, imageVariantUrl } from "@/lib/apiClient";
-import { useCreateMultiShareMutation } from "@/lib/queries";
+import {
+  apiFetchNoContent,
+  imageBinaryUrl,
+  imageVariantUrl,
+  type ApparelModelLibraryItemCreateIn,
+  type ModelLibraryItemAgeSegment,
+} from "@/lib/apiClient";
+import {
+  useCreateApparelModelLibraryItemMutation,
+  useCreateMultiShareMutation,
+} from "@/lib/queries";
+import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
+import {
+  getLightboxDownloadFilename,
+  triggerImageDownload,
+} from "@/components/ui/lightbox/utils";
 import { shareOrCopyLink } from "@/lib/shareLink";
 import { cn } from "@/lib/utils";
 import type { Generation, Message } from "@/lib/types";
@@ -23,6 +42,24 @@ import { useUiStore } from "@/store/useUiStore";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
 
 type GalleryFilter = "all" | "upload" | "generated";
+type GalleryBulkAction = "delete" | "favorite" | "export" | null;
+type GalleryFavoriteGender = "female" | "male";
+
+const FAVORITE_AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
+  ["user_favorites", "用户收藏"],
+  ["toddler", "幼儿"],
+  ["child", "儿童"],
+  ["teen", "青少年"],
+  ["young_adult", "青年"],
+  ["adult", "熟龄"],
+  ["middle_aged", "中年"],
+  ["senior", "老年"],
+];
+
+const FAVORITE_GENDER_OPTIONS: Array<[GalleryFavoriteGender, string]> = [
+  ["female", "女"],
+  ["male", "男"],
+];
 
 interface ConversationImageGalleryProps {
   messages: Message[];
@@ -232,6 +269,28 @@ function openGallery(images: GalleryImage[], initialId: string) {
   useUiStore.getState().openLightboxFromItems(items, initialId);
 }
 
+function deleteGalleryImage(imageId: string) {
+  return apiFetchNoContent(`/images/${encodeURIComponent(imageId)}`, {
+    method: "DELETE",
+  });
+}
+
+function favoriteSourceFor(
+  image: GalleryImage,
+): ApparelModelLibraryItemCreateIn["source"] {
+  return image.source === "upload" ? "user_upload" : "generated";
+}
+
+function favoriteTitleFor(
+  image: GalleryImage,
+  index: number,
+  total: number,
+): string {
+  const base = image.alt.trim().replace(/\s+/g, " ").slice(0, 36);
+  if (base) return total > 1 ? `${base} #${index + 1}` : base;
+  return `${image.sourceLabel}图片 ${image.shareImageId.slice(0, 8)}`;
+}
+
 export function ConversationImageGallery({
   messages,
   generations,
@@ -240,31 +299,57 @@ export function ConversationImageGallery({
   const [filter, setFilter] = useState<GalleryFilter>("all");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [hiddenImageIds, setHiddenImageIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [favoriteDialogOpen, setFavoriteDialogOpen] = useState(false);
+  const [favoriteAgeSegment, setFavoriteAgeSegment] =
+    useState<ModelLibraryItemAgeSegment>("user_favorites");
+  const [favoriteGender, setFavoriteGender] =
+    useState<GalleryFavoriteGender>("female");
+  const [bulkAction, setBulkAction] = useState<GalleryBulkAction>(null);
   const createMultiShareMutation = useCreateMultiShareMutation();
+  const createFavoriteMutation = useCreateApparelModelLibraryItemMutation();
   const masonryRef = useRef<HTMLDivElement | null>(null);
   const [columnCount, setColumnCount] = useState(5);
   const allImages = useMemo(
     () => collectConversationImages(messages, generations),
     [messages, generations],
   );
-  const uploadCount = allImages.filter((image) => image.source === "upload").length;
-  const generatedCount = allImages.filter(
+  const galleryImages = useMemo(
+    () => allImages.filter((image) => !hiddenImageIds.has(image.shareImageId)),
+    [allImages, hiddenImageIds],
+  );
+  const uploadCount = galleryImages.filter((image) => image.source === "upload").length;
+  const generatedCount = galleryImages.filter(
     (image) => image.source === "generated",
   ).length;
   const visibleImages = useMemo(
     () =>
       filter === "all"
-        ? allImages
-        : allImages.filter((image) => image.source === filter),
-    [allImages, filter],
+        ? galleryImages
+        : galleryImages.filter((image) => image.source === filter),
+    [galleryImages, filter],
   );
-  const selectedImageIds = useMemo(() => {
+  const selectedImages = useMemo(() => {
     if (selectedIds.size === 0) return [];
-    return allImages
-      .map((image) => image.shareImageId)
-      .filter((imageId, index, arr) => selectedIds.has(imageId) && arr.indexOf(imageId) === index);
-  }, [allImages, selectedIds]);
+    const seen = new Set<string>();
+    const items: GalleryImage[] = [];
+    for (const image of galleryImages) {
+      if (!selectedIds.has(image.shareImageId) || seen.has(image.shareImageId)) {
+        continue;
+      }
+      seen.add(image.shareImageId);
+      items.push(image);
+    }
+    return items;
+  }, [galleryImages, selectedIds]);
+  const selectedImageIds = useMemo(() => {
+    return selectedImages.map((image) => image.shareImageId);
+  }, [selectedImages]);
   const selectionActive = selectionMode || selectedImageIds.length > 0;
+  const bulkBusy = bulkAction !== null || createMultiShareMutation.isPending;
   const toggleSelectedImage = useCallback((imageId: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -294,6 +379,104 @@ export function ConversationImageGallery({
       pushMobileToast("分享链接生成失败", "danger");
     }
   }, [clearSelection, createMultiShareMutation, selectedImageIds]);
+  const exportSelectedImages = useCallback(async () => {
+    if (selectedImages.length === 0 || bulkAction !== null) return;
+    setBulkAction("export");
+    try {
+      let exported = 0;
+      for (const image of selectedImages) {
+        await triggerImageDownload(
+          image.src,
+          getLightboxDownloadFilename(image.item),
+        );
+        exported += 1;
+      }
+      pushMobileToast(`已开始导出 ${exported} 张图片`, "success");
+      clearSelection();
+    } catch {
+      pushMobileToast("部分图片导出失败", "danger");
+    } finally {
+      setBulkAction(null);
+    }
+  }, [bulkAction, clearSelection, selectedImages]);
+  const deleteSelectedImages = useCallback(async () => {
+    if (selectedImageIds.length === 0 || bulkAction !== null) return;
+    setBulkAction("delete");
+    const results = await Promise.allSettled(
+      selectedImageIds.map((imageId) => deleteGalleryImage(imageId)),
+    );
+    const deletedIds = selectedImageIds.filter(
+      (_imageId, index) => results[index]?.status === "fulfilled",
+    );
+    const failedIds = selectedImageIds.filter(
+      (_imageId, index) => results[index]?.status === "rejected",
+    );
+    if (deletedIds.length > 0) {
+      setHiddenImageIds((prev) => {
+        const next = new Set(prev);
+        for (const imageId of deletedIds) next.add(imageId);
+        return next;
+      });
+    }
+    if (failedIds.length === 0) {
+      pushMobileToast(`已删除 ${deletedIds.length} 张图片`, "success");
+      setDeleteDialogOpen(false);
+      clearSelection();
+    } else if (deletedIds.length > 0) {
+      pushMobileToast(
+        `已删除 ${deletedIds.length} 张，${failedIds.length} 张失败`,
+        "warning",
+      );
+      setSelectedIds(new Set(failedIds));
+    } else {
+      pushMobileToast("删除失败", "danger");
+    }
+    setBulkAction(null);
+  }, [bulkAction, clearSelection, selectedImageIds]);
+  const favoriteSelectedImages = useCallback(async () => {
+    if (selectedImages.length === 0 || bulkAction !== null) return;
+    setBulkAction("favorite");
+    const total = selectedImages.length;
+    const results = await Promise.allSettled(
+      selectedImages.map((image, index) =>
+        createFavoriteMutation.mutateAsync({
+          source: favoriteSourceFor(image),
+          image_id: image.shareImageId,
+          title: favoriteTitleFor(image, index, total),
+          age_segment: favoriteAgeSegment,
+          gender: favoriteGender,
+          appearance_direction: null,
+          style_tags: [],
+          auto_tag: true,
+        }),
+      ),
+    );
+    const failedIds = selectedImages
+      .filter((_image, index) => results[index]?.status === "rejected")
+      .map((image) => image.shareImageId);
+    const savedCount = total - failedIds.length;
+    if (failedIds.length === 0) {
+      pushMobileToast(`已收藏 ${savedCount} 张到模特库`, "success");
+      setFavoriteDialogOpen(false);
+      clearSelection();
+    } else if (savedCount > 0) {
+      pushMobileToast(
+        `已收藏 ${savedCount} 张，${failedIds.length} 张失败`,
+        "warning",
+      );
+      setSelectedIds(new Set(failedIds));
+    } else {
+      pushMobileToast("收藏失败", "danger");
+    }
+    setBulkAction(null);
+  }, [
+    bulkAction,
+    clearSelection,
+    createFavoriteMutation,
+    favoriteAgeSegment,
+    favoriteGender,
+    selectedImages,
+  ]);
   const masonryColumns = useMemo(
     () => distributeByEstimatedHeight(visibleImages, columnCount),
     [visibleImages, columnCount],
@@ -312,7 +495,7 @@ export function ConversationImageGallery({
     return () => observer.disconnect();
   }, []);
 
-  if (allImages.length === 0) {
+  if (galleryImages.length === 0) {
     return (
       <section
         id="conversation-image-gallery"
@@ -354,37 +537,65 @@ export function ConversationImageGallery({
             本会话图片
           </h2>
           <p className="mt-0.5 text-[11px] text-[var(--fg-2)]">
-            {allImages.length} 张图片 · {uploadCount} 张上传 · {generatedCount} 张生成
+            {galleryImages.length} 张图片 · {uploadCount} 张上传 · {generatedCount} 张生成
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {selectedImageIds.length > 0 ? (
             <>
-              <button
-                type="button"
+              <GalleryActionButton
+                tone="accent"
                 onClick={shareSelectedImages}
-                disabled={createMultiShareMutation.isPending}
-                className={cn(
-                  "inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[11px]",
-                  "border border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.15)] text-[var(--amber-300)]",
-                  "hover:bg-[rgba(242,169,58,0.22)] transition-colors disabled:opacity-60",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                )}
+                disabled={bulkBusy}
+                loading={createMultiShareMutation.isPending}
+                icon={<Share2 className="h-3.5 w-3.5" aria-hidden />}
               >
-                <Share2 className="h-3.5 w-3.5" aria-hidden />
                 {createMultiShareMutation.isPending
                   ? "分享中"
                   : `分享 ${selectedImageIds.length} 张`}
-              </button>
+              </GalleryActionButton>
+              <GalleryActionButton
+                onClick={() => setFavoriteDialogOpen(true)}
+                disabled={bulkBusy}
+                loading={bulkAction === "favorite"}
+                icon={<BookmarkPlus className="h-3.5 w-3.5" aria-hidden />}
+              >
+                收藏
+              </GalleryActionButton>
+              <GalleryActionButton
+                onClick={() => void exportSelectedImages()}
+                disabled={bulkBusy}
+                loading={bulkAction === "export"}
+                icon={<Download className="h-3.5 w-3.5" aria-hidden />}
+              >
+                导出
+              </GalleryActionButton>
+              <GalleryActionButton
+                disabled
+                title="当前缺少明确的加入项目 API"
+                icon={<FolderPlus className="h-3.5 w-3.5" aria-hidden />}
+              >
+                加入项目
+              </GalleryActionButton>
+              <GalleryActionButton
+                tone="danger"
+                onClick={() => setDeleteDialogOpen(true)}
+                disabled={bulkBusy}
+                loading={bulkAction === "delete"}
+                icon={<Trash2 className="h-3.5 w-3.5" aria-hidden />}
+              >
+                删除
+              </GalleryActionButton>
               <button
                 type="button"
                 onClick={clearSelection}
                 aria-label="取消选择"
+                disabled={bulkBusy}
                 className={cn(
                   "inline-flex h-7 w-7 items-center justify-center rounded-lg",
                   "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-                  "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] transition-colors",
+                  "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] transition-colors disabled:opacity-55",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                 )}
               >
@@ -412,12 +623,12 @@ export function ConversationImageGallery({
           <div
             role="tablist"
             aria-label="图片来源"
-            className="flex gap-1 rounded-lg border border-white/5 bg-white/[0.03] p-0.5"
+            className="flex gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-1)] p-0.5"
           >
             <FilterButton
               active={filter === "all"}
               label="全部"
-              count={allImages.length}
+              count={galleryImages.length}
               onClick={() => setFilter("all")}
             />
             <FilterButton
@@ -550,7 +761,151 @@ export function ConversationImageGallery({
           </div>
         ))}
       </div>
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title="删除选中的图片"
+        description={
+          <span>
+            将从图片库删除 {selectedImageIds.length} 张图片。已发送的会话文字仍会保留，
+            但这些图片的原图链接会失效。
+          </span>
+        }
+        tone="danger"
+        confirmText="删除"
+        confirming={bulkAction === "delete"}
+        onConfirm={deleteSelectedImages}
+      />
+
+      <ConfirmDialog
+        open={favoriteDialogOpen}
+        onOpenChange={setFavoriteDialogOpen}
+        title="收藏到模特库"
+        description={
+          <FavoriteOptionsForm
+            count={selectedImageIds.length}
+            ageSegment={favoriteAgeSegment}
+            gender={favoriteGender}
+            onAgeSegmentChange={setFavoriteAgeSegment}
+            onGenderChange={setFavoriteGender}
+          />
+        }
+        confirmText="收藏"
+        confirming={bulkAction === "favorite"}
+        onConfirm={favoriteSelectedImages}
+      />
     </section>
+  );
+}
+
+function GalleryActionButton({
+  children,
+  icon,
+  tone = "default",
+  loading,
+  disabled,
+  title,
+  onClick,
+}: {
+  children: React.ReactNode;
+  icon: React.ReactNode;
+  tone?: "default" | "accent" | "danger";
+  loading?: boolean;
+  disabled?: boolean;
+  title?: string;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || loading}
+      title={title}
+      className={cn(
+        "inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[11px]",
+        "border transition-colors disabled:cursor-not-allowed disabled:opacity-55",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        tone === "accent"
+          ? "border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.15)] text-[var(--amber-300)] hover:bg-[rgba(242,169,58,0.22)]"
+          : tone === "danger"
+            ? "border-danger-border bg-danger-soft text-danger hover:brightness-110"
+            : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+      )}
+    >
+      {loading ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+      ) : (
+        icon
+      )}
+      {children}
+    </button>
+  );
+}
+
+function FavoriteOptionsForm({
+  count,
+  ageSegment,
+  gender,
+  onAgeSegmentChange,
+  onGenderChange,
+}: {
+  count: number;
+  ageSegment: ModelLibraryItemAgeSegment;
+  gender: GalleryFavoriteGender;
+  onAgeSegmentChange: (value: ModelLibraryItemAgeSegment) => void;
+  onGenderChange: (value: GalleryFavoriteGender) => void;
+}) {
+  return (
+    <div className="mt-3 space-y-3">
+      <p className="text-[12px] leading-5 text-[var(--fg-1)]">
+        将 {count} 张图片加入用户收藏，并自动识别气质标签。
+      </p>
+      <label className="block">
+        <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          年龄段
+        </span>
+        <select
+          value={ageSegment}
+          onChange={(event) =>
+            onAgeSegmentChange(event.target.value as ModelLibraryItemAgeSegment)
+          }
+          className={cn(
+            "h-9 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-0)] px-2.5",
+            "text-[13px] text-[var(--fg-0)] focus:border-[var(--border-amber)] focus:outline-none",
+          )}
+        >
+          {FAVORITE_AGE_OPTIONS.map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div>
+        <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          性别
+        </span>
+        <div className="flex gap-2">
+          {FAVORITE_GENDER_OPTIONS.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={gender === value}
+              onClick={() => onGenderChange(value)}
+              className={cn(
+                "inline-flex h-8 items-center rounded-lg border px-3 text-[12px] transition-colors",
+                gender === value
+                  ? "border-[var(--border-amber)] bg-[var(--amber-soft)] text-[var(--amber-300)]"
+                  : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -575,7 +930,7 @@ function FilterButton({
         "inline-flex h-7 items-center gap-1 rounded-md px-2.5 text-[11px] transition-colors",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
         active
-          ? "bg-white/10 text-[var(--fg-0)]"
+          ? "bg-[var(--bg-2)] text-[var(--fg-0)]"
           : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
       )}
     >

@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.constants import (
     EXPLICIT_ALIGN,
     MAX_EXPLICIT_PIXELS,
+    MAX_MESSAGE_ATTACHMENTS,
     MAX_EXPLICIT_SIDE,
     MIN_EXPLICIT_PIXELS,
 )
@@ -75,7 +76,9 @@ router_bot = APIRouter()
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
+    return HTTPException(
+        status_code=http, detail={"error": {"code": code, "message": msg}}
+    )
 
 
 _LINK_CODE_TTL_SECONDS = 600  # 10 min
@@ -127,10 +130,14 @@ def _aspect_ratio_to_size(ratio: str, max_long_side: int) -> str:
     short_side = max(EXPLICIT_ALIGN, (short_side // EXPLICIT_ALIGN) * EXPLICIT_ALIGN)
 
     # 像素下限保护：极端窄比例 + 1K 可能跌到 MIN 之下，按比例放大短边对齐
-    while long_side * short_side < MIN_EXPLICIT_PIXELS and long_side < MAX_EXPLICIT_SIDE:
+    while (
+        long_side * short_side < MIN_EXPLICIT_PIXELS and long_side < MAX_EXPLICIT_SIDE
+    ):
         long_side += EXPLICIT_ALIGN
         short_side = int(round(long_side * short_r / long_r))
-        short_side = max(EXPLICIT_ALIGN, (short_side // EXPLICIT_ALIGN) * EXPLICIT_ALIGN)
+        short_side = max(
+            EXPLICIT_ALIGN, (short_side // EXPLICIT_ALIGN) * EXPLICIT_ALIGN
+        )
 
     if ra >= rb:
         return f"{long_side}x{short_side}"
@@ -143,7 +150,9 @@ def _align_pair(a: int, b: int) -> str:
     return f"{a}x{b}"
 
 
-async def _get_or_create_tg_conversation(db: AsyncSession, user_id: str) -> Conversation:
+async def _get_or_create_tg_conversation(
+    db: AsyncSession, user_id: str
+) -> Conversation:
     conv = (
         await db.execute(
             select(Conversation)
@@ -195,14 +204,18 @@ class BindOut(BaseModel):
 class GenerateIn(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=64)
     prompt: str = Field(min_length=1, max_length=10000)
-    aspect_ratio: Literal["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "4:5"] = "1:1"
+    aspect_ratio: Literal[
+        "1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "4:5"
+    ] = "1:1"
     render_quality: Literal["low", "medium", "high", "auto"] = "high"
     count: int = Field(default=1, ge=1, le=16)
     resolution: Literal["1k", "2k", "4k"] = "2k"
     output_format: Literal["png", "jpeg", "webp"] = "jpeg"
     fast: bool = False
     # 当带 attachment_image_ids 时切到 image_to_image 意图（迭代/编辑）
-    attachment_image_ids: list[str] = Field(default_factory=list, max_length=4)
+    attachment_image_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_MESSAGE_ATTACHMENTS
+    )
 
 
 class GenerateOut(BaseModel):
@@ -255,7 +268,11 @@ class TaskListOut(BaseModel):
 # ---------- /me/telegram/link-code ----------
 
 
-@router_me.post("/me/telegram/link-code", response_model=LinkCodeOut, dependencies=[Depends(verify_csrf)])
+@router_me.post(
+    "/me/telegram/link-code",
+    response_model=LinkCodeOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def create_link_code(user: CurrentUser) -> LinkCodeOut:
     """Web 用户生成一次性 TG 绑定码，10 分钟有效。
 
@@ -268,7 +285,9 @@ async def create_link_code(user: CurrentUser) -> LinkCodeOut:
     from ..config import settings
 
     if not settings.telegram_bot_shared_secret.strip():
-        raise _http("telegram_disabled", "telegram bot integration is not configured", 503)
+        raise _http(
+            "telegram_disabled", "telegram bot integration is not configured", 503
+        )
     code = _gen_link_code()
     redis = get_redis()
     await redis.set(_link_code_key(code), user.id, ex=_LINK_CODE_TTL_SECONDS)
@@ -284,7 +303,9 @@ async def create_link_code(user: CurrentUser) -> LinkCodeOut:
 # ---------- /telegram/bind ----------
 
 
-@router_bot.post("/telegram/bind", response_model=BindOut, dependencies=[Depends(require_bot_token)])
+@router_bot.post(
+    "/telegram/bind", response_model=BindOut, dependencies=[Depends(require_bot_token)]
+)
 async def bind_telegram(
     request: Request,
     body: BindIn,
@@ -346,7 +367,9 @@ async def bind_telegram(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise _http("bind_conflict", "binding conflict, retry the link flow", 409) from exc
+        raise _http(
+            "bind_conflict", "binding conflict, retry the link flow", 409
+        ) from exc
 
     logger.info("telegram bind: user=%s chat=%s", user_id, body.chat_id)
     return BindOut(user_id=user.id, email=user.email, display_name=user.display_name)
@@ -450,13 +473,17 @@ async def runtime_config(
     avoid 是逗号分隔的 proxy name 列表（最近失败的），用来在 pool 里跳过它们。
     """
     redis = get_redis()
-    enabled_raw = (await _get_setting_str(db, "telegram.bot_enabled", "1")).strip().lower()
+    enabled_raw = (
+        (await _get_setting_str(db, "telegram.bot_enabled", "1")).strip().lower()
+    )
     bot_enabled = enabled_raw not in {"0", "false", "no", ""}
     bot_token = await _get_setting_str(db, "telegram.bot_token")
     bot_username = await _get_setting_str(db, "telegram.bot_username")
     allowed_user_ids = await _get_setting_str(db, "telegram.allowed_user_ids")
     proxy_names_raw = await _get_setting_str(db, "telegram.proxy_names")
-    strategy = (await _get_setting_str(db, "telegram.proxy_strategy")) or DEFAULT_STRATEGY
+    strategy = (
+        await _get_setting_str(db, "telegram.proxy_strategy")
+    ) or DEFAULT_STRATEGY
     failure_threshold = await _get_setting_int(db, "proxies.failure_threshold", 3)
     cooldown_seconds = await _get_setting_int(db, "proxies.cooldown_seconds", 60)
 
@@ -506,7 +533,9 @@ async def runtime_config(
 async def access_config(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RuntimeAccessOut:
-    enabled_raw = (await _get_setting_str(db, "telegram.bot_enabled", "1")).strip().lower()
+    enabled_raw = (
+        (await _get_setting_str(db, "telegram.bot_enabled", "1")).strip().lower()
+    )
     bot_enabled = enabled_raw not in {"0", "false", "no", ""}
     allowed_user_ids = await _get_setting_str(db, "telegram.allowed_user_ids")
     return RuntimeAccessOut(
@@ -582,7 +611,9 @@ async def enhance_prompt(
         raise _http("enhance_failed", error or "empty enhanced result", 502)
     logger.info(
         "telegram enhance: user=%s in_len=%d out_len=%d",
-        user.id, len(body.text), len(enhanced),
+        user.id,
+        len(body.text),
+        len(enhanced),
     )
     return EnhancePromptOut(enhanced=enhanced)
 
@@ -645,15 +676,19 @@ async def get_generation(
     if gen is None:
         raise _http("not_found", "generation not found", 404)
     image_ids = (
-        await db.execute(
-            select(Image.id)
-            .where(
-                Image.owner_generation_id == gen_id,
-                Image.deleted_at.is_(None),
+        (
+            await db.execute(
+                select(Image.id)
+                .where(
+                    Image.owner_generation_id == gen_id,
+                    Image.deleted_at.is_(None),
+                )
+                .order_by(Image.created_at.asc())
             )
-            .order_by(Image.created_at.asc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     upstream = gen.upstream_request if isinstance(gen.upstream_request, dict) else {}
     return GenerationStatusOut(
         id=gen.id,
@@ -684,13 +719,17 @@ async def list_tasks(
 ) -> TaskListOut:
     limit = max(1, min(50, limit))
     rows = (
-        await db.execute(
-            select(Generation)
-            .where(Generation.user_id == user.id)
-            .order_by(desc(Generation.created_at))
-            .limit(limit)
+        (
+            await db.execute(
+                select(Generation)
+                .where(Generation.user_id == user.id)
+                .order_by(desc(Generation.created_at))
+                .limit(limit)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not rows:
         return TaskListOut(items=[])
     gen_ids = [g.id for g in rows]

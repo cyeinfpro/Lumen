@@ -8,6 +8,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent,
   useCallback,
   useEffect,
@@ -46,6 +47,7 @@ import {
   PROMPT_TOO_LONG_MESSAGE,
   isPromptTooLong,
 } from "@/lib/promptLimits";
+import { insertImageMentionToken } from "@/lib/promptImageMentions";
 import { useHaptic } from "@/hooks/useHaptic";
 import { DURATION, EASE, SPRING } from "@/lib/motion";
 import {
@@ -120,6 +122,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const setMode = useChatStore((s) => s.setMode);
   const attachments = useChatStore((s) => s.composer.attachments);
   const removeAttachment = useChatStore((s) => s.removeAttachment);
+  const moveAttachment = useChatStore((s) => s.moveAttachment);
   const aspect = useChatStore((s) => s.composer.params.aspect_ratio);
   const setAspectRatio = useChatStore((s) => s.setAspectRatio);
   const count = useChatStore((s) => s.composer.params.count ?? 1);
@@ -156,6 +159,9 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const [aspectPopoverOpen, setAspectPopoverOpen] = useState(false);
   const [reasoningPopoverOpen, setReasoningPopoverOpen] = useState(false);
   const [shutterBurst, setShutterBurst] = useState(false);
+  const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(
+    null,
+  );
   const { haptic } = useHaptic();
   const promptTooLong = isPromptTooLong(text);
   const shouldShowCount = text.length > MAX_PROMPT_CHARS * 0.8 || promptTooLong;
@@ -170,6 +176,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   const didMountRef = useRef(false);
   const shutterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepthRef = useRef(0);
+  const draggingAttachmentIdRef = useRef<string | null>(null);
 
   // 展开/折叠 haptic（桌面无感，保留兼容）
   useEffect(() => {
@@ -210,6 +217,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
       isComposingRef.current = false;
       submittingRef.current = false;
       dragDepthRef.current = 0;
+      draggingAttachmentIdRef.current = null;
       if (shutterTimerRef.current) {
         clearTimeout(shutterTimerRef.current);
         shutterTimerRef.current = null;
@@ -424,6 +432,70 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
     }
   }, [originalText, setText, haptic]);
 
+  const insertImageMention = useCallback(
+    (imageNumber: number) => {
+      const current = useChatStore.getState().composer.text;
+      const el = textareaRef.current;
+      const result = insertImageMentionToken(
+        current,
+        imageNumber,
+        el?.selectionStart,
+        el?.selectionEnd,
+      );
+      setExpanded(true);
+      setText(result.text);
+      requestAnimationFrame(() => {
+        const target = textareaRef.current;
+        if (!target) return;
+        target.focus();
+        target.setSelectionRange(result.selectionStart, result.selectionEnd);
+      });
+    },
+    [setText],
+  );
+
+  const handleAttachmentDragStart = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>, id: string) => {
+      event.stopPropagation();
+      draggingAttachmentIdRef.current = id;
+      setDraggingAttachmentId(id);
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", id);
+    },
+    [],
+  );
+
+  const handleAttachmentDragOver = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!draggingAttachmentIdRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
+    },
+    [],
+  );
+
+  const handleAttachmentDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>, targetId: string) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const sourceId =
+        draggingAttachmentIdRef.current ||
+        event.dataTransfer.getData("text/plain");
+      if (sourceId && sourceId !== targetId) {
+        moveAttachment(sourceId, targetId);
+      }
+      draggingAttachmentIdRef.current = null;
+      setDraggingAttachmentId(null);
+    },
+    [moveAttachment],
+  );
+
+  const handleAttachmentDragEnd = useCallback(() => {
+    draggingAttachmentIdRef.current = null;
+    setDraggingAttachmentId(null);
+  }, []);
+
   const expandAndFocus = () => {
     setExpanded(true);
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -563,9 +635,19 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                 return (
                   <div
                     key={att.id}
+                    draggable={attachments.length > 1}
+                    onDragStart={(event) =>
+                      handleAttachmentDragStart(event, att.id)
+                    }
+                    onDragOver={handleAttachmentDragOver}
+                    onDrop={(event) => handleAttachmentDrop(event, att.id)}
+                    onDragEnd={handleAttachmentDragEnd}
                     className={cn(
                       "relative shrink-0 w-16 h-16 rounded-xl overflow-hidden",
                       "border bg-[var(--bg-2)]",
+                      attachments.length > 1 &&
+                        "cursor-grab active:cursor-grabbing",
+                      draggingAttachmentId === att.id && "opacity-55",
                       showMaskBadge
                         ? "border-[var(--amber-400)]/70"
                         : "border-[var(--border-subtle)]",
@@ -575,9 +657,25 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                     <img
                       src={att.data_url}
                       alt=""
+                      draggable={false}
                       className="w-full h-full object-cover"
                       loading="lazy"
                     />
+                    <button
+                      type="button"
+                      onClick={() => insertImageMention(idx + 1)}
+                      aria-label={`插入 @图${idx + 1}`}
+                      title={`插入 @图${idx + 1}`}
+                      className={cn(
+                        "absolute top-0.5 left-0.5 h-5 px-1 rounded-[var(--radius-control)]",
+                        "bg-[var(--bg-0)]/80 text-[10px] font-semibold text-[var(--amber-400)]",
+                        "backdrop-blur-sm leading-none",
+                        "active:scale-[0.94] transition-transform",
+                      )}
+                      style={{ fontFamily: "var(--font-mono)" }}
+                    >
+                      @图{idx + 1}
+                    </button>
                     {showMaskBadge && (
                       <button
                         type="button"

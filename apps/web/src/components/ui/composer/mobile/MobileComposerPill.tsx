@@ -7,6 +7,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   type ChangeEvent,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -47,6 +48,7 @@ import {
   PROMPT_TOO_LONG_MESSAGE,
   isPromptTooLong,
 } from "@/lib/promptLimits";
+import { insertImageMentionToken } from "@/lib/promptImageMentions";
 import { useHaptic } from "@/hooks/useHaptic";
 import { DURATION, EASE } from "@/lib/motion";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
@@ -97,6 +99,9 @@ const RENDER_QUALITY_OPTIONS: { value: RenderQualityChoice; label: string }[] = 
   { value: "high", label: "高" },
 ];
 
+const ATTACHMENT_REORDER_LONG_PRESS_MS = 220;
+const ATTACHMENT_REORDER_MOVE_SLOP_PX = 10;
+
 // 斜杠命令：/ask → chat；/image → image
 function parseSlash(text: string): {
   stripped: string;
@@ -122,6 +127,7 @@ export function MobileComposerPill({
   const setMode = useChatStore((s) => s.setMode);
   const attachments = useChatStore((s) => s.composer.attachments);
   const removeAttachment = useChatStore((s) => s.removeAttachment);
+  const moveAttachment = useChatStore((s) => s.moveAttachment);
   const aspect = useChatStore((s) => s.composer.params.aspect_ratio);
   const setAspectRatio = useChatStore((s) => s.setAspectRatio);
   const count = useChatStore((s) => s.composer.params.count ?? 1);
@@ -159,6 +165,12 @@ export function MobileComposerPill({
   const [aspectSheetOpen, setAspectSheetOpen] = useState(false);
   const [reasoningSheetOpen, setReasoningSheetOpen] = useState(false);
   const [shutterBurst, setShutterBurst] = useState(false);
+  const [draggingAttachmentId, setDraggingAttachmentId] = useState<string | null>(
+    null,
+  );
+  const [reorderTargetAttachmentId, setReorderTargetAttachmentId] = useState<
+    string | null
+  >(null);
   const { haptic } = useHaptic();
   const expandedMaxHeight = keyboardOffset
     ? `calc(100dvh - ${keyboardOffset}px - env(safe-area-inset-top, 0px) - var(--system-banner-height, 0px) - 56px)`
@@ -177,6 +189,21 @@ export function MobileComposerPill({
   const enhanceAbortRef = useRef<AbortController | null>(null);
   const shutterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepthRef = useRef(0);
+  const draggingAttachmentIdRef = useRef<string | null>(null);
+  const attachmentReorderStateRef = useRef<{
+    pointerId: number;
+    sourceId: string;
+    startX: number;
+    startY: number;
+    active: boolean;
+    lastTargetId: string | null;
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null>(null);
+  const attachmentReorderListenersRef = useRef<{
+    move: ((event: PointerEvent) => void) | null;
+    end: ((event: PointerEvent) => void) | null;
+  } | null>(null);
+  const suppressNextAttachmentClickRef = useRef(false);
 
   // 展开/折叠 haptic（跳过首次 mount）
   useEffect(() => {
@@ -264,6 +291,19 @@ export function MobileComposerPill({
       isComposingRef.current = false;
       submittingRef.current = false;
       dragDepthRef.current = 0;
+      draggingAttachmentIdRef.current = null;
+      const reorder = attachmentReorderStateRef.current;
+      if (reorder?.timer) clearTimeout(reorder.timer);
+      const listeners = attachmentReorderListenersRef.current;
+      if (listeners?.move) {
+        window.removeEventListener("pointermove", listeners.move);
+      }
+      if (listeners?.end) {
+        window.removeEventListener("pointerup", listeners.end);
+        window.removeEventListener("pointercancel", listeners.end);
+      }
+      attachmentReorderListenersRef.current = null;
+      attachmentReorderStateRef.current = null;
       if (shutterTimerRef.current) {
         clearTimeout(shutterTimerRef.current);
         shutterTimerRef.current = null;
@@ -448,6 +488,159 @@ export function MobileComposerPill({
       }
     },
     [setText, originalText, isEnhancing],
+  );
+
+  const insertImageMention = useCallback(
+    (imageNumber: number) => {
+      const current = useChatStore.getState().composer.text;
+      const el = textareaRef.current ?? collapsedTextareaRef.current;
+      const result = insertImageMentionToken(
+        current,
+        imageNumber,
+        el?.selectionStart,
+        el?.selectionEnd,
+      );
+      setExpanded(true);
+      setText(result.text);
+      if (originalText !== null && !isEnhancing) {
+        setOriginalText(null);
+      }
+      requestAnimationFrame(() => {
+        const target = textareaRef.current;
+        if (!target) return;
+        target.focus({ preventScroll: true });
+        target.setSelectionRange(result.selectionStart, result.selectionEnd);
+      });
+    },
+    [isEnhancing, originalText, setText],
+  );
+
+  const resetAttachmentReorder = useCallback(
+    (commit: boolean) => {
+      const state = attachmentReorderStateRef.current;
+      if (!state) return;
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+      const listeners = attachmentReorderListenersRef.current;
+      if (listeners?.move) {
+        window.removeEventListener("pointermove", listeners.move);
+      }
+      if (listeners?.end) {
+        window.removeEventListener("pointerup", listeners.end);
+        window.removeEventListener("pointercancel", listeners.end);
+      }
+      attachmentReorderListenersRef.current = null;
+      attachmentReorderStateRef.current = null;
+      if (
+        commit &&
+        state.active &&
+        state.lastTargetId &&
+        state.lastTargetId !== state.sourceId
+      ) {
+        moveAttachment(state.sourceId, state.lastTargetId);
+      }
+      if (state.active) {
+        suppressNextAttachmentClickRef.current = true;
+      }
+      draggingAttachmentIdRef.current = null;
+      setDraggingAttachmentId(null);
+      setReorderTargetAttachmentId(null);
+    },
+    [moveAttachment],
+  );
+
+  const beginAttachmentReorder = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>, id: string) => {
+      if (attachments.length <= 1) return;
+      if (!event.isPrimary || event.button !== 0) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-composer-attachment-action='true']")) return;
+      if (attachmentReorderStateRef.current) return;
+
+      const state = {
+        pointerId: event.pointerId,
+        sourceId: id,
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        lastTargetId: null,
+        timer: null as ReturnType<typeof setTimeout> | null,
+      };
+      attachmentReorderStateRef.current = state;
+
+      const moveListener = (nativeEvent: PointerEvent) => {
+        const current = attachmentReorderStateRef.current;
+        if (!current || nativeEvent.pointerId !== current.pointerId) return;
+
+        const dx = nativeEvent.clientX - current.startX;
+        const dy = nativeEvent.clientY - current.startY;
+        if (!current.active) {
+          if (Math.hypot(dx, dy) > ATTACHMENT_REORDER_MOVE_SLOP_PX) {
+            resetAttachmentReorder(false);
+          }
+          return;
+        }
+
+        nativeEvent.preventDefault();
+        const element = document.elementFromPoint(
+          nativeEvent.clientX,
+          nativeEvent.clientY,
+        );
+        const tile = element instanceof Element
+          ? (element.closest("[data-composer-attachment-id]") as HTMLElement | null)
+          : null;
+        const targetId = tile?.dataset.composerAttachmentId ?? null;
+        const nextTargetId =
+          targetId && targetId !== current.sourceId ? targetId : null;
+        current.lastTargetId = nextTargetId;
+        setReorderTargetAttachmentId(nextTargetId);
+      };
+
+      const endListener = (nativeEvent: PointerEvent) => {
+        const current = attachmentReorderStateRef.current;
+        if (!current || nativeEvent.pointerId !== current.pointerId) return;
+        if (current.active) nativeEvent.preventDefault();
+        resetAttachmentReorder(current.active);
+      };
+
+      attachmentReorderListenersRef.current = {
+        move: moveListener,
+        end: endListener,
+      };
+      window.addEventListener("pointermove", moveListener, { passive: false });
+      window.addEventListener("pointerup", endListener);
+      window.addEventListener("pointercancel", endListener);
+
+      state.timer = setTimeout(() => {
+        const current = attachmentReorderStateRef.current;
+        if (
+          !current ||
+          current.pointerId !== state.pointerId ||
+          current.sourceId !== id
+        ) {
+          return;
+        }
+        current.active = true;
+        current.timer = null;
+        draggingAttachmentIdRef.current = current.sourceId;
+        setDraggingAttachmentId(current.sourceId);
+        setReorderTargetAttachmentId(null);
+        haptic("light");
+      }, ATTACHMENT_REORDER_LONG_PRESS_MS);
+    },
+    [attachments.length, haptic, resetAttachmentReorder],
+  );
+
+  const handleAttachmentClickCapture = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (!suppressNextAttachmentClickRef.current) return;
+      suppressNextAttachmentClickRef.current = false;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [],
   );
 
   const handleCollapsedFocus = () => {
@@ -641,9 +834,20 @@ export function MobileComposerPill({
                   return (
                     <div
                       key={att.id}
+                      data-composer-attachment-id={att.id}
+                      onPointerDown={(event) =>
+                        beginAttachmentReorder(event, att.id)
+                      }
+                      onClickCapture={handleAttachmentClickCapture}
+                      aria-grabbed={draggingAttachmentId === att.id || undefined}
                       className={cn(
                         "relative shrink-0 w-12 h-12 rounded-lg overflow-hidden",
                         "border bg-[var(--bg-2)]",
+                        attachments.length > 1 &&
+                          "cursor-grab active:cursor-grabbing",
+                        draggingAttachmentId === att.id && "opacity-55 scale-[0.98]",
+                        reorderTargetAttachmentId === att.id &&
+                          "ring-2 ring-[var(--amber-400)]/70",
                         showMaskBadge
                           ? "border-[var(--amber-400)]/70"
                           : "border-[var(--border-subtle)]",
@@ -653,12 +857,30 @@ export function MobileComposerPill({
                       <img
                         src={att.data_url}
                         alt=""
+                        draggable={false}
                         className="w-full h-full object-cover"
                         loading="lazy"
                       />
+                      <button
+                        type="button"
+                        data-composer-attachment-action="true"
+                        onClick={() => insertImageMention(idx + 1)}
+                        aria-label={`插入 @图${idx + 1}`}
+                        title={`插入 @图${idx + 1}`}
+                        className={cn(
+                          "absolute top-0.5 left-0.5 h-4 px-1 rounded-[var(--radius-control)]",
+                          "bg-[var(--bg-0)]/80 text-[8px] font-semibold text-[var(--amber-400)]",
+                          "backdrop-blur-sm leading-none",
+                          "active:scale-[0.94] transition-transform",
+                        )}
+                        style={{ fontFamily: "var(--font-mono)" }}
+                      >
+                        @图{idx + 1}
+                      </button>
                       {showMaskBadge && (
                         <button
                           type="button"
+                          data-composer-attachment-action="true"
                           onClick={() => inpaint.openInpaint()}
                           aria-label="重新涂抹 mask"
                           className={cn(
@@ -672,6 +894,7 @@ export function MobileComposerPill({
                       )}
                       <button
                         type="button"
+                        data-composer-attachment-action="true"
                         onClick={() => removeAttachment(att.id)}
                         aria-label="移除参考图"
                         className={cn(

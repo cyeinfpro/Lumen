@@ -46,6 +46,7 @@ def test_post_message_prompt_limit_uses_shared_constant():
     from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS
     from lumen_core.schemas import PostMessageIn
 
+    assert MAX_MESSAGE_ATTACHMENTS == 16
     PostMessageIn(idempotency_key="idem", text="x" * MAX_PROMPT_CHARS)
     PostMessageIn(
         idempotency_key="idem",

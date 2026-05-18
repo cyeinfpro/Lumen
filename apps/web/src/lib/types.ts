@@ -75,6 +75,45 @@ export interface MaskState {
   target_attachment_id: string;
 }
 
+export interface ImageProviderAttempt {
+  provider?: string | null;
+  route?: string | null;
+  endpoint?: string | null;
+  proxy?: string | null;
+  status?: string | null;
+  duration_ms?: number | null;
+  error_summary?: string | null;
+}
+
+export interface ImageGenerationDiagnostics {
+  revised_prompt?: string | null;
+  requested_params?: Record<string, unknown> | null;
+  request_params?: Record<string, unknown> | null;
+  effective_params?: Record<string, unknown> | null;
+  actual_params?: Record<string, unknown> | null;
+  provider?: string | null;
+  upstream_provider?: string | null;
+  actual_provider?: string | null;
+  initial_provider?: string | null;
+  first_provider?: string | null;
+  proxy_name?: string | null;
+  proxy_enabled?: boolean | null;
+  duration_ms?: number | null;
+  upstream_duration_ms?: number | null;
+  upstream_duration_seconds?: number | null;
+  elapsed_ms?: number | null;
+  failover?: boolean | null;
+  provider_failover?: boolean | null;
+  failover_count?: number | null;
+  debug_id?: string | null;
+  trace_id?: string | null;
+  request_id?: string | null;
+  provider_attempts?: ImageProviderAttempt[];
+  safe_error_summary?: string | null;
+  upstream_error_summary?: string | null;
+  error_summary?: string | null;
+}
+
 export interface GeneratedImage {
   id: string;
   data_url: string;
@@ -96,6 +135,13 @@ export interface GeneratedImage {
   billing_free?: boolean;
   billing_label?: string;
   billing_exempt_reason?: string;
+  diagnostics?: ImageGenerationDiagnostics | null;
+  revised_prompt?: string | null;
+  requested_params?: Record<string, unknown> | null;
+  request_params?: Record<string, unknown> | null;
+  effective_params?: Record<string, unknown> | null;
+  actual_params?: Record<string, unknown> | null;
+  provider_attempts?: ImageProviderAttempt[];
 }
 
 export type GenerationStatus =
@@ -143,6 +189,13 @@ export interface Generation {
   image?: GeneratedImage;
   error_code?: string;
   error_message?: string;
+  diagnostics?: ImageGenerationDiagnostics | null;
+  revised_prompt?: string | null;
+  requested_params?: Record<string, unknown> | null;
+  request_params?: Record<string, unknown> | null;
+  effective_params?: Record<string, unknown> | null;
+  actual_params?: Record<string, unknown> | null;
+  provider_attempts?: ImageProviderAttempt[];
   attempt: number;
   max_attempts?: number;
   retry_eta?: number;

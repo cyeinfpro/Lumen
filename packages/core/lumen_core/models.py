@@ -681,6 +681,62 @@ class Generation(Base, TimestampMixin):
         value = request.get("parent_generation_id")
         return value if isinstance(value, str) and value else None
 
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        raw = request.get("generation_diagnostics")
+        if isinstance(raw, dict):
+            return raw
+        out: dict[str, Any] = {}
+        for key in (
+            "revised_prompt",
+            "requested_params",
+            "effective_params",
+            "provider_attempts",
+            "provider",
+            "actual_provider",
+            "upstream_route",
+            "actual_route",
+            "actual_endpoint",
+            "proxy_name",
+            "proxy_enabled",
+            "duration_ms",
+            "upstream_duration_ms",
+            "failover",
+            "failover_count",
+            "debug_id",
+            "trace_id",
+            "request_id",
+            "safe_error_summary",
+            "upstream_error_summary",
+            "error_summary",
+        ):
+            if key in request:
+                out[key] = request[key]
+        return out
+
+    @property
+    def revised_prompt(self) -> str | None:
+        value = self.diagnostics.get("revised_prompt")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def requested_params(self) -> dict[str, Any] | None:
+        value = self.diagnostics.get("requested_params")
+        return value if isinstance(value, dict) else None
+
+    @property
+    def effective_params(self) -> dict[str, Any] | None:
+        value = self.diagnostics.get("effective_params")
+        return value if isinstance(value, dict) else None
+
+    @property
+    def provider_attempts(self) -> list[dict[str, Any]]:
+        value = self.diagnostics.get("provider_attempts")
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
 
 class Completion(Base, TimestampMixin):
     __tablename__ = "completions"

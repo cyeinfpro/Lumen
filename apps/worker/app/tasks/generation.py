@@ -2286,6 +2286,289 @@ def _image_request_options(
     return options
 
 
+_DIAG_STRING_LIMIT = 500
+_DIAG_COLLECTION_LIMIT = 20
+_PROVIDER_ATTEMPT_ERROR_LIMIT = 300
+_PRIVATE_DIAGNOSTIC_KEYS = {
+    "provider",
+    "actual_provider",
+    "actual_endpoint",
+    "proxy_name",
+    "proxy_enabled",
+    "debug_id",
+}
+_PRIVATE_PROVIDER_ATTEMPT_KEYS = {
+    "provider",
+    "actual_provider",
+    "endpoint",
+    "actual_endpoint",
+    "proxy_name",
+    "proxy_enabled",
+}
+_PRIVATE_PROVIDER_PROGRESS_KEYS = _PRIVATE_PROVIDER_ATTEMPT_KEYS | {
+    "from_provider",
+    "from_endpoint",
+}
+
+
+def _compact_diag_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return value[:_DIAG_STRING_LIMIT]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_compact_diag_value(item) for item in value[:_DIAG_COLLECTION_LIMIT]]
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_diag_value(item)
+            for key, item in list(value.items())[:_DIAG_COLLECTION_LIMIT]
+        }
+    return value
+
+
+def _compact_provider_attempt(
+    attempt: dict[str, Any],
+    *,
+    expose_provider_diagnostics: bool,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in attempt.items():
+        key_text = str(key)
+        if (
+            not expose_provider_diagnostics
+            and key_text in _PRIVATE_PROVIDER_ATTEMPT_KEYS
+        ):
+            continue
+        compacted = _compact_diag_value(value)
+        if key_text == "error_summary" and isinstance(compacted, str):
+            compacted = compacted.replace("\n", " ")[:_PROVIDER_ATTEMPT_ERROR_LIMIT]
+        out[key_text] = compacted
+    return out
+
+
+def _compact_provider_attempts(
+    attempts: list[dict[str, Any]] | None,
+    *,
+    expose_provider_diagnostics: bool,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for attempt in attempts or []:
+        if not isinstance(attempt, dict):
+            continue
+        compacted = _compact_provider_attempt(
+            attempt,
+            expose_provider_diagnostics=expose_provider_diagnostics,
+        )
+        if compacted:
+            out.append(compacted)
+        if len(out) >= 12:
+            break
+    return out
+
+
+def _sanitize_generation_diagnostics_payload(
+    diagnostics: dict[str, Any],
+    *,
+    expose_provider_diagnostics: bool,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in diagnostics.items():
+        if not expose_provider_diagnostics and key in _PRIVATE_DIAGNOSTIC_KEYS:
+            continue
+        if key == "provider_attempts" and isinstance(value, list):
+            attempts = _compact_provider_attempts(
+                value,
+                expose_provider_diagnostics=expose_provider_diagnostics,
+            )
+            if attempts:
+                out[key] = attempts
+            continue
+        out[key] = _compact_diag_value(value)
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _sanitize_generation_upstream_request(
+    upstream_request: dict[str, Any],
+    *,
+    expose_provider_diagnostics: bool,
+) -> dict[str, Any]:
+    out = dict(upstream_request)
+    if not expose_provider_diagnostics:
+        for key in _PRIVATE_DIAGNOSTIC_KEYS:
+            out.pop(key, None)
+    attempts = out.get("provider_attempts")
+    if isinstance(attempts, list):
+        compact_attempts = _compact_provider_attempts(
+            attempts,
+            expose_provider_diagnostics=expose_provider_diagnostics,
+        )
+        if compact_attempts:
+            out["provider_attempts"] = compact_attempts
+        else:
+            out.pop("provider_attempts", None)
+    diagnostics = out.get("generation_diagnostics")
+    if isinstance(diagnostics, dict):
+        out["generation_diagnostics"] = _sanitize_generation_diagnostics_payload(
+            diagnostics,
+            expose_provider_diagnostics=expose_provider_diagnostics,
+        )
+    return out
+
+
+def _sanitize_provider_progress_payload(
+    payload: dict[str, Any],
+    *,
+    expose_provider_diagnostics: bool,
+) -> dict[str, Any]:
+    out = dict(payload)
+    if not expose_provider_diagnostics:
+        for key in _PRIVATE_PROVIDER_PROGRESS_KEYS:
+            out.pop(key, None)
+    reason = out.get("reason")
+    if reason is not None:
+        compacted = _compact_diag_value(reason)
+        if isinstance(compacted, str):
+            compacted = compacted.replace("\n", " ")[:_PROVIDER_ATTEMPT_ERROR_LIMIT]
+        out["reason"] = compacted
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _image_requested_params_snapshot(
+    upstream_request: dict[str, Any] | None,
+    *,
+    size: str,
+    aspect_ratio: str,
+    action: str,
+    input_count: int,
+    has_mask: bool,
+) -> dict[str, Any]:
+    req = upstream_request if isinstance(upstream_request, dict) else {}
+    out: dict[str, Any] = {
+        "size": size,
+        "aspect_ratio": aspect_ratio,
+        "action": action,
+        "input_image_count": input_count,
+        "has_mask": has_mask,
+    }
+    for key in (
+        "fast",
+        "responses_model",
+        "render_quality",
+        "output_format",
+        "output_compression",
+        "background",
+        "moderation",
+        "billing_tier",
+    ):
+        if key in req:
+            out[key] = _compact_diag_value(req[key])
+    return out
+
+
+def _image_effective_params_snapshot(
+    image_request_options: dict[str, Any] | None,
+    *,
+    size: str,
+    width: int | None = None,
+    height: int | None = None,
+    mime: str | None = None,
+) -> dict[str, Any]:
+    opts = image_request_options if isinstance(image_request_options, dict) else {}
+    out: dict[str, Any] = {"size": size}
+    for key in (
+        "fast",
+        "responses_model",
+        "render_quality",
+        "output_format",
+        "output_compression",
+        "background",
+        "moderation",
+    ):
+        if key in opts:
+            out[key] = _compact_diag_value(opts[key])
+    if width and height:
+        out["size_actual"] = f"{width}x{height}"
+    if mime:
+        out["mime"] = mime
+    return out
+
+
+def _safe_generation_error_summary(
+    *,
+    code: str | None,
+    message: str | None,
+    status_code: Any = None,
+) -> str:
+    parts: list[str] = []
+    if code:
+        parts.append(str(code)[:120])
+    if status_code is not None:
+        parts.append(f"http {status_code}")
+    if message:
+        parts.append(str(message).replace("\n", " ")[:300])
+    return " · ".join(parts) if parts else "unknown generation error"
+
+
+def _build_generation_diagnostics(
+    *,
+    requested_params: dict[str, Any],
+    effective_params: dict[str, Any] | None = None,
+    revised_prompt: str | None = None,
+    provider: str | None = None,
+    upstream_route: str | None = None,
+    actual_route: str | None = None,
+    actual_source: str | None = None,
+    actual_endpoint: str | None = None,
+    provider_attempts: list[dict[str, Any]] | None = None,
+    upstream_duration_ms: int | None = None,
+    duration_ms: int | None = None,
+    debug_id: str | None = None,
+    error_summary: str | None = None,
+    expose_provider_diagnostics: bool = False,
+) -> dict[str, Any]:
+    attempts = provider_attempts or []
+    failover_count = sum(
+        1
+        for attempt in attempts
+        if str(attempt.get("status") or "").lower() in {"failover", "failed"}
+    )
+    out: dict[str, Any] = {
+        "requested_params": requested_params,
+        "debug_id": debug_id,
+    }
+    if effective_params:
+        out["effective_params"] = effective_params
+    if revised_prompt:
+        out["revised_prompt"] = revised_prompt
+    if provider:
+        out["provider"] = provider
+        out["actual_provider"] = provider
+    if upstream_route:
+        out["upstream_route"] = upstream_route
+    if actual_route:
+        out["actual_route"] = actual_route
+    if actual_source:
+        out["actual_source"] = actual_source
+    if actual_endpoint:
+        out["actual_endpoint"] = actual_endpoint
+    if attempts:
+        out["provider_attempts"] = attempts[:12]
+    if failover_count:
+        out["failover"] = True
+        out["failover_count"] = failover_count
+    if upstream_duration_ms is not None:
+        out["upstream_duration_ms"] = upstream_duration_ms
+    if duration_ms is not None:
+        out["duration_ms"] = duration_ms
+    if error_summary:
+        out["safe_error_summary"] = error_summary
+        out["error_summary"] = error_summary
+    return _sanitize_generation_diagnostics_payload(
+        out,
+        expose_provider_diagnostics=expose_provider_diagnostics,
+    )
+
+
 async def _ensure_generation_attempt_current(
     session: Any, task_id: str, attempt_epoch: int
 ) -> None:
@@ -3708,6 +3991,16 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         False  # 新同步路径不存在 partial，永远为 False（保留变量给下方 classify 用）
     )
     image_iter: AsyncIterator[tuple[str, str | None]] | None = None
+    provider_attempt_log: list[dict[str, Any]] = []
+    upstream_duration_ms: int | None = None
+    requested_params_for_diag = _image_requested_params_snapshot(
+        gen_upstream_request_snapshot,
+        size=size_requested,
+        aspect_ratio=aspect_ratio,
+        action=action,
+        input_count=len(input_image_ids),
+        has_mask=bool(mask_image_id),
+    )
 
     try:
         # 新 API 不支持 size="auto"，强制走 fixed 模式（让 resolve_size 走预设/比例回退）
@@ -3819,6 +4112,14 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         ] = value
                 return
             if event_type == "endpoint_failover":
+                provider_attempt_log.append(
+                    {
+                        "provider": _redis_text(event.get("provider")),
+                        "route": event.get("route") or "image_jobs",
+                        "status": "failover",
+                        "error_summary": _redis_text(event.get("reason")),
+                    }
+                )
                 # Inner-loop endpoint switch (generations ↔ responses) on the
                 # same provider — keep semantics close to provider_failover so
                 # the front-end can render a similar pill.
@@ -3827,18 +4128,23 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     user_id,
                     channel,
                     EV_GEN_PROGRESS,
-                    {
-                        "generation_id": task_id,
-                        "message_id": message_id,
-                        "stage": GenerationStage.RENDERING.value,
-                        "substage": GenerationStage.PROVIDER_SELECTED.value,
-                        "endpoint_failover": True,
-                        "provider": event.get("provider"),
-                        "from_endpoint": event.get("from_endpoint"),
-                        "remaining": event.get("remaining"),
-                        "reason": event.get("reason"),
-                        "route": event.get("route") or "image_jobs",
-                    },
+                    _sanitize_provider_progress_payload(
+                        {
+                            "generation_id": task_id,
+                            "message_id": message_id,
+                            "stage": GenerationStage.RENDERING.value,
+                            "substage": GenerationStage.PROVIDER_SELECTED.value,
+                            "endpoint_failover": True,
+                            "provider": event.get("provider"),
+                            "from_endpoint": event.get("from_endpoint"),
+                            "remaining": event.get("remaining"),
+                            "reason": event.get("reason"),
+                            "route": event.get("route") or "image_jobs",
+                        },
+                        expose_provider_diagnostics=(
+                            settings.expose_provider_diagnostics
+                        ),
+                    ),
                 )
                 return
             if event_type == "provider_used":
@@ -3856,6 +4162,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         if value:
                             metadata[target_key] = value
                     provider_used_events.append(metadata)
+                    provider_attempt_log.append({**metadata, "status": "used"})
                     # 同步把当前 lane 的 provider 落到 in-flight 快照里。
                     inflight_update: dict[str, str] = {}
                     route_text = metadata.get("route") or ""
@@ -3926,6 +4233,14 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 # 会覆盖回 active。这样 admin 列表能看到"X 切走了，正在选下一个"。
                 from_provider = _redis_text(event.get("from_provider"))
                 route_text = _redis_text(event.get("route")) or ""
+                provider_attempt_log.append(
+                    {
+                        "provider": from_provider,
+                        "route": route_text or None,
+                        "status": "failover",
+                        "error_summary": _redis_text(event.get("reason")),
+                    }
+                )
                 inflight_update: dict[str, str] = {}
                 if is_dual_race:
                     lane_field = _classify_inflight_lane(route_text, "")
@@ -3942,17 +4257,22 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     user_id,
                     channel,
                     EV_GEN_PROGRESS,
-                    {
-                        "generation_id": task_id,
-                        "message_id": message_id,
-                        "stage": GenerationStage.RENDERING.value,
-                        "substage": GenerationStage.PROVIDER_SELECTED.value,
-                        "provider_failover": True,
-                        "from_provider": event.get("from_provider"),
-                        "remaining": event.get("remaining"),
-                        "reason": event.get("reason"),
-                        "route": event.get("route") or "responses",
-                    },
+                    _sanitize_provider_progress_payload(
+                        {
+                            "generation_id": task_id,
+                            "message_id": message_id,
+                            "stage": GenerationStage.RENDERING.value,
+                            "substage": GenerationStage.PROVIDER_SELECTED.value,
+                            "provider_failover": True,
+                            "from_provider": event.get("from_provider"),
+                            "remaining": event.get("remaining"),
+                            "reason": event.get("reason"),
+                            "route": event.get("route") or "responses",
+                        },
+                        expose_provider_diagnostics=(
+                            settings.expose_provider_diagnostics
+                        ),
+                    ),
                 )
 
         async with asyncio.timeout_at(_task_deadline):
@@ -3987,6 +4307,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     # attempt == 1 首次（不打散）；>= 2 每次都用不同 prompt_cache_key /
                     # reasoning.effort，绕开 ChatGPT codex 端的"故障 cache"和 sub2api sticky session。
                     retry_attempt_token = push_image_retry_attempt(attempt)
+                    upstream_started = time.monotonic()
                     try:
                         if action == GenerationAction.EDIT:
                             if not ref_for_body:
@@ -4053,6 +4374,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             status_code=200,
                         )
                     b64_result, revised_prompt = first_pair
+                    upstream_duration_ms = int(
+                        max(0.0, time.monotonic() - upstream_started) * 1000
+                    )
                     winner_provider_event = pop_provider_used_event()
                     actual_upstream_provider = winner_provider_event.get("provider")
                     actual_upstream_route = winner_provider_event.get("route")
@@ -4207,6 +4531,30 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             request=gen_upstream_request_snapshot,
             prompt=prompt,
         )
+        effective_params_for_diag = _image_effective_params_snapshot(
+            image_request_options,
+            size=inpaint_size_override or resolved.size,
+            width=width,
+            height=height,
+            mime=orig_mime,
+        )
+        generation_diagnostics = _build_generation_diagnostics(
+            requested_params=requested_params_for_diag,
+            effective_params=effective_params_for_diag,
+            revised_prompt=revised_prompt,
+            provider=actual_upstream_provider
+            or (upstream_provider_label if not is_dual_race else None),
+            upstream_route=image_route,
+            actual_route=actual_upstream_route,
+            actual_source=actual_upstream_source,
+            actual_endpoint=actual_upstream_endpoint,
+            provider_attempts=provider_attempt_log,
+            upstream_duration_ms=upstream_duration_ms,
+            duration_ms=int(max(0.0, time.monotonic() - _task_start) * 1000),
+            debug_id=task_id,
+            expose_provider_diagnostics=settings.expose_provider_diagnostics,
+        )
+        image_metadata = dict(model_metadata)
         if model_metadata:
             try:
                 with PILImage.open(io.BytesIO(raw_image)) as im:
@@ -4224,6 +4572,9 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     task_id,
                     exc,
                 )
+        image_metadata["generation_diagnostics"] = generation_diagnostics
+        if revised_prompt:
+            image_metadata["revised_prompt"] = revised_prompt
         key_orig = f"u/{user_id}/g/{task_id}/orig.{orig_ext}"
         key_display = f"u/{user_id}/g/{task_id}/display2048.webp"
         key_preview = f"u/{user_id}/g/{task_id}/preview1024.webp"
@@ -4282,7 +4633,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     sha256=sha,
                     blurhash=blurhash_str,
                     visibility="private",
-                    metadata_jsonb=model_metadata,
+                    metadata_jsonb=image_metadata,
                 )
                 session.add(img)
                 session.add(
@@ -4323,6 +4674,14 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 upstream_req["size_actual"] = f"{width}x{height}"
                 upstream_req["mime"] = orig_mime
                 upstream_req["upstream_route"] = image_route
+                upstream_req["requested_params"] = requested_params_for_diag
+                upstream_req["effective_params"] = effective_params_for_diag
+                upstream_req["generation_diagnostics"] = generation_diagnostics
+                upstream_req["debug_id"] = task_id
+                if upstream_duration_ms is not None:
+                    upstream_req["upstream_duration_ms"] = upstream_duration_ms
+                if provider_attempt_log:
+                    upstream_req["provider_attempts"] = provider_attempt_log[:12]
                 if actual_upstream_provider:
                     upstream_req["provider"] = actual_upstream_provider
                     upstream_req["actual_provider"] = actual_upstream_provider
@@ -4348,6 +4707,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 if image_job_meta:
                     for key, value in image_job_meta.items():
                         upstream_req[key] = value
+                upstream_req = _sanitize_generation_upstream_request(
+                    upstream_req,
+                    expose_provider_diagnostics=settings.expose_provider_diagnostics,
+                )
                 parent_upstream_request_for_bonus = dict(upstream_req)
 
                 result = await session.execute(
@@ -4380,6 +4743,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             "preview_url": f"/api/images/{image_id}/variants/preview1024",
                             "thumb_url": f"/api/images/{image_id}/variants/thumb256",
                             "filename": model_metadata.get("suggested_filename"),
+                            "metadata_jsonb": image_metadata,
                         }
                     )
                     content["images"] = images_list
@@ -4474,9 +4838,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         "preview_url": f"/api/images/{image_id}/variants/preview1024",
                         "thumb_url": f"/api/images/{image_id}/variants/thumb256",
                         "filename": model_metadata.get("suggested_filename"),
+                        "metadata_jsonb": image_metadata,
                     }
                 ],
                 "final_size": f"{width}x{height}",
+                "diagnostics": generation_diagnostics,
             },
         )
         _task_outcome = "succeeded"
@@ -4692,6 +5058,40 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             else str(exc)[:2000]
         )
         error_details = _safe_generation_error_details(exc)
+        safe_error_summary = _safe_generation_error_summary(
+            code=str(err_code) if err_code else None,
+            message=err_msg,
+            status_code=getattr(exc, "status_code", None),
+        )
+        error_diagnostics = _build_generation_diagnostics(
+            requested_params=requested_params_for_diag,
+            provider=(
+                None
+                if _is_dual_race_sentinel(reserved_provider_name)
+                else reserved_provider_name
+            ),
+            upstream_route=image_route,
+            provider_attempts=provider_attempt_log,
+            upstream_duration_ms=upstream_duration_ms,
+            duration_ms=int(max(0.0, time.monotonic() - _task_start) * 1000),
+            debug_id=task_id,
+            error_summary=safe_error_summary,
+            expose_provider_diagnostics=settings.expose_provider_diagnostics,
+        )
+        error_upstream_request = dict(gen_upstream_request_snapshot or {})
+        error_upstream_request["upstream_route"] = image_route
+        error_upstream_request["generation_diagnostics"] = error_diagnostics
+        error_upstream_request["requested_params"] = requested_params_for_diag
+        error_upstream_request["debug_id"] = task_id
+        error_upstream_request["safe_error_summary"] = safe_error_summary
+        if provider_attempt_log:
+            error_upstream_request["provider_attempts"] = provider_attempt_log[:12]
+        if upstream_duration_ms is not None:
+            error_upstream_request["upstream_duration_ms"] = upstream_duration_ms
+        error_upstream_request = _sanitize_generation_upstream_request(
+            error_upstream_request,
+            expose_provider_diagnostics=settings.expose_provider_diagnostics,
+        )
 
         moderation_upgrade = False
         if (
@@ -4761,6 +5161,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             progress_stage=GenerationStage.QUEUED,
                             error_code=err_code,
                             error_message=err_msg,
+                            upstream_request=error_upstream_request,
                         )
                     )
                     _ensure_generation_updated(result, task_id, attempt)
@@ -4855,6 +5256,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         finished_at=datetime.now(timezone.utc),
                         error_code=err_code,
                         error_message=err_msg,
+                        upstream_request=error_upstream_request,
                     )
                 )
                 _ensure_generation_updated(result, task_id, attempt)
@@ -4890,6 +5292,8 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 "code": err_code,
                 "message": err_msg,
                 "retriable": False,
+                "diagnostics": error_diagnostics,
+                "safe_error_summary": safe_error_summary,
                 **({"error_details": error_details} if error_details else {}),
             },
         )

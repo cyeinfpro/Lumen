@@ -302,6 +302,11 @@ export interface BackendGeneration {
   billing_free?: boolean;
   billing_label?: string | null;
   billing_exempt_reason?: string | null;
+  diagnostics?: Record<string, unknown>;
+  revised_prompt?: string | null;
+  requested_params?: Record<string, unknown> | null;
+  effective_params?: Record<string, unknown> | null;
+  provider_attempts?: Array<Record<string, unknown>>;
 }
 
 export interface BackendCompletion {

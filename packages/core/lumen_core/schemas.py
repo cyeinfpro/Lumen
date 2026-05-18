@@ -253,6 +253,11 @@ class GenerationOut(BaseOut):
     billing_free: bool = False
     billing_label: str | None = None
     billing_exempt_reason: str | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    revised_prompt: str | None = None
+    requested_params: dict[str, Any] | None = None
+    effective_params: dict[str, Any] | None = None
+    provider_attempts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CompletionOut(BaseOut):
