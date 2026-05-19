@@ -246,6 +246,7 @@ def _request_provider(upstream_request: dict[str, Any] | None) -> str | None:
     if not isinstance(upstream_request, dict):
         return None
     for key in (
+        "request_event_provider",
         "actual_provider",
         "provider",
         "upstream_provider",
@@ -255,7 +256,40 @@ def _request_provider(upstream_request: dict[str, Any] | None) -> str | None:
         provider = _json_str(upstream_request, key)
         if provider and provider not in {"dual_race", "dual_race_bonus"}:
             return provider
+    provider = _request_provider_from_attempts(
+        upstream_request.get("provider_attempts")
+    )
+    if provider:
+        return provider
+    diagnostics = upstream_request.get("generation_diagnostics")
+    if isinstance(diagnostics, dict):
+        for key in ("actual_provider", "provider"):
+            provider = _json_str(diagnostics, key)
+            if provider and provider not in {"dual_race", "dual_race_bonus"}:
+                return provider
+        provider = _request_provider_from_attempts(diagnostics.get("provider_attempts"))
+        if provider:
+            return provider
     return None
+
+
+def _request_provider_from_attempts(attempts: Any) -> str | None:
+    if not isinstance(attempts, list):
+        return None
+    fallback: str | None = None
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        provider = _json_str(
+            attempt, "request_event_provider", "actual_provider", "provider"
+        )
+        if not provider or provider in {"dual_race", "dual_race_bonus"}:
+            continue
+        status = (_json_str(attempt, "status") or "").lower()
+        if status == "used":
+            return provider
+        fallback = provider
+    return fallback
 
 
 def _request_route(upstream_request: dict[str, Any] | None) -> str | None:
@@ -552,6 +586,7 @@ def _safe_upstream_details(upstream_request: dict[str, Any] | None) -> dict[str,
         "output_compression",
         "output_format",
         "render_quality",
+        "request_event_provider",
         "responses_model",
         "revised_prompt",
         "route",

@@ -2505,6 +2505,31 @@ def _sanitize_generation_upstream_request(
     return out
 
 
+def _request_event_provider_from_attempts(
+    attempts: list[dict[str, Any]] | None,
+) -> str | None:
+    """Best-effort provider for admin request-events after diagnostic redaction.
+
+    The canonical source is the winning provider_used event. This helper is a
+    narrow fallback for failure paths or unusual callback ordering where the
+    final event was not promoted to top-level fields.
+    """
+    fallback: str | None = None
+    for attempt in attempts or []:
+        if not isinstance(attempt, dict):
+            continue
+        provider = _redis_text(
+            attempt.get("provider") or attempt.get("actual_provider")
+        )
+        if not provider or provider in {"dual_race", "dual_race_bonus"}:
+            continue
+        status = str(attempt.get("status") or "").strip().lower()
+        if status == "used":
+            return provider
+        fallback = provider
+    return fallback
+
+
 def _sanitize_provider_progress_payload(
     payload: dict[str, Any],
     *,
@@ -3334,10 +3359,12 @@ async def _handle_dual_race_bonus_image(
                 if upstream_provider:
                     bonus_upstream_req["provider"] = upstream_provider
                     bonus_upstream_req["actual_provider"] = upstream_provider
+                    bonus_upstream_req["request_event_provider"] = upstream_provider
                 else:
                     # Do not inherit the winner's provider from the parent row.
                     bonus_upstream_req.pop("provider", None)
                     bonus_upstream_req.pop("actual_provider", None)
+                    bonus_upstream_req.pop("request_event_provider", None)
                 if upstream_actual_route:
                     bonus_upstream_req["actual_route"] = upstream_actual_route
                 if upstream_actual_source:
@@ -4781,6 +4808,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     upstream_req["upstream_duration_ms"] = upstream_duration_ms
                 if provider_attempt_log:
                     upstream_req["provider_attempts"] = provider_attempt_log[:12]
+                request_event_provider = (
+                    actual_upstream_provider
+                    or (upstream_provider_label if not is_dual_race else None)
+                    or _request_event_provider_from_attempts(provider_attempt_log)
+                )
                 if actual_upstream_provider:
                     upstream_req["provider"] = actual_upstream_provider
                     upstream_req["actual_provider"] = actual_upstream_provider
@@ -4789,6 +4821,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 else:
                     upstream_req.pop("provider", None)
                     upstream_req.pop("actual_provider", None)
+                if request_event_provider:
+                    upstream_req["request_event_provider"] = request_event_provider
+                else:
+                    upstream_req.pop("request_event_provider", None)
                 if actual_upstream_route:
                     upstream_req["actual_route"] = actual_upstream_route
                 if actual_upstream_source:
@@ -5187,6 +5223,17 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             error_upstream_request["provider_attempts"] = provider_attempt_log[:12]
         if upstream_duration_ms is not None:
             error_upstream_request["upstream_duration_ms"] = upstream_duration_ms
+        error_request_event_provider = (
+            None
+            if _is_dual_race_sentinel(reserved_provider_name)
+            else reserved_provider_name
+        ) or _request_event_provider_from_attempts(provider_attempt_log)
+        if error_request_event_provider:
+            error_upstream_request["request_event_provider"] = (
+                error_request_event_provider
+            )
+        else:
+            error_upstream_request.pop("request_event_provider", None)
         error_upstream_request = _sanitize_generation_upstream_request(
             error_upstream_request,
             expose_provider_diagnostics=settings.expose_provider_diagnostics,

@@ -178,12 +178,61 @@ def test_request_provider_prefers_actual_provider_over_dual_race_strategy() -> N
         admin._request_provider(
             {
                 "provider": "dual_race",
+                "request_event_provider": "winner-provider",
+            }
+        )
+        == "winner-provider"
+    )
+    assert (
+        admin._request_provider(
+            {
+                "provider": "dual_race",
                 "actual_provider": "shanghai-provider",
             }
         )
         == "shanghai-provider"
     )
     assert admin._request_provider({"provider": "dual_race"}) is None
+
+
+def test_request_provider_can_read_legacy_diagnostics_provider() -> None:
+    assert (
+        admin._request_provider(
+            {
+                "provider": "dual_race",
+                "generation_diagnostics": {"actual_provider": "diag-provider"},
+            }
+        )
+        == "diag-provider"
+    )
+
+
+def test_request_provider_can_fallback_to_provider_attempts() -> None:
+    assert (
+        admin._request_provider(
+            {
+                "provider": "dual_race",
+                "provider_attempts": [
+                    {"provider": "first-failed", "status": "failover"},
+                    {"provider": "winner-provider", "status": "used"},
+                ],
+            }
+        )
+        == "winner-provider"
+    )
+    assert (
+        admin._request_provider(
+            {
+                "provider": "dual_race",
+                "generation_diagnostics": {
+                    "provider_attempts": [
+                        {"actual_provider": "diag-winner", "status": "used"}
+                    ]
+                },
+            }
+        )
+        == "diag-winner"
+    )
 
 
 def test_build_live_lanes_single_provider_snapshot() -> None:
