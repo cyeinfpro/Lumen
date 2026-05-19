@@ -89,3 +89,46 @@ def test_build_generation_diagnostics_can_expose_provider_details() -> None:
         diagnostics["provider_attempts"][0]["endpoint"]
         == "https://internal.example/v1/images"
     )
+
+
+def test_sanitize_upstream_request_preserves_request_event_provider() -> None:
+    upstream_request = generation._sanitize_generation_upstream_request(
+        {
+            "provider": "secret-provider",
+            "actual_provider": "secret-provider",
+            "request_event_provider": "secret-provider",
+            "actual_endpoint": "https://internal.example/v1/images",
+            "upstream_route": "dual_race",
+        },
+        expose_provider_diagnostics=False,
+    )
+
+    assert "provider" not in upstream_request
+    assert "actual_provider" not in upstream_request
+    assert "actual_endpoint" not in upstream_request
+    assert upstream_request["request_event_provider"] == "secret-provider"
+    assert upstream_request["upstream_route"] == "dual_race"
+
+
+def test_request_event_provider_from_attempts_prefers_used_attempt() -> None:
+    assert (
+        generation._request_event_provider_from_attempts(
+            [
+                {"provider": "failed-provider", "status": "failover"},
+                {"provider": "winner-provider", "status": "used"},
+            ]
+        )
+        == "winner-provider"
+    )
+    assert (
+        generation._request_event_provider_from_attempts(
+            [{"provider": "last-known-provider", "status": "failover"}]
+        )
+        == "last-known-provider"
+    )
+    assert (
+        generation._request_event_provider_from_attempts(
+            [{"provider": "dual_race", "status": "used"}]
+        )
+        is None
+    )
