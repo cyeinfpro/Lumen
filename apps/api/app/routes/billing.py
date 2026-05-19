@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,7 @@ from ..services.redemption_secret import (
 
 
 router = APIRouter(tags=["billing"])
+logger = logging.getLogger(__name__)
 _billing_cache_service: BillingCacheService | None = None
 _CHARGE_KINDS = ("charge", "charge_completion")
 
@@ -2237,8 +2239,13 @@ async def admin_create_redemption_codes(
             redis = get_redis()
             await redis.delete(_DOWNLOAD_TOKEN_PREFIX + token)
             await redis.delete(_PLAINTEXT_BATCH_PREFIX + batch_id)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.warning(
+                "redemption plaintext cache cleanup failed batch_id=%s token=%s",
+                batch_id,
+                token,
+                exc_info=True,
+            )
         raise
     response.headers["Cache-Control"] = "no-store"
     return AdminRedemptionCodeCreateOut(

@@ -201,8 +201,11 @@ class _StaleGenerationAttempt(Exception):
 async def _is_cancelled(redis: Any, task_id: str) -> bool:
     try:
         v = await redis.get(f"task:{task_id}:cancel")
-    except Exception:  # noqa: BLE001
-        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "generation cancel check failed closed task=%s err=%s", task_id, exc
+        )
+        return True
     return bool(v)
 
 
@@ -212,12 +215,21 @@ async def _is_cancelled(redis: Any, task_id: str) -> bool:
 
 
 async def _acquire_lease(redis: Any, task_id: str, worker_id: str) -> None:
-    await redis.set(f"task:{task_id}:lease", worker_id, ex=_LEASE_TTL_S)
+    ok = await redis.set(f"task:{task_id}:lease", worker_id, ex=_LEASE_TTL_S, nx=True)
+    if not ok:
+        raise _LeaseLost(f"lease already held task={task_id}")
 
 
 _RELEASE_LEASE_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+_RENEW_LEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 end
 return 0
 """
@@ -262,22 +274,23 @@ async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
         if callable(eval_fn):
             await eval_fn(_RELEASE_LEASE_LUA, 1, f"task:{task_id}:lease", worker_id)
             return
-        current = await redis.get(f"task:{task_id}:lease")
-        if _redis_text(current) == worker_id:
-            await redis.delete(f"task:{task_id}:lease")
+        logger.warning(
+            "generation lease release skipped without atomic CAS task=%s", task_id
+        )
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("generation lease release failed task=%s", task_id, exc_info=True)
 
 
 async def _lease_renewer(
     redis: Any,
     task_id: str,
+    worker_id: str,
     lease_lost: asyncio.Event | None = None,
     *,
     extra_lease_keys: list[str] | None = None,
     image_provider_name: str | None = None,
 ) -> None:
-    """每 30s 续约一次。被 cancel 时优雅退出；连续 3 次失败设置 lease_lost。
+    """每 30s owner-CAS 续约一次。被 cancel 时优雅退出；连续 3 次失败设置 lease_lost。
 
     Renews three things in lock-step so a long-running task never gets evicted:
     1. The worker lease (`task:{id}:lease`) and any caller-supplied extra keys.
@@ -290,7 +303,22 @@ async def _lease_renewer(
         while True:
             await asyncio.sleep(_LEASE_RENEW_S)
             try:
-                await redis.expire(f"task:{task_id}:lease", _LEASE_TTL_S)
+                renewed = await redis.eval(
+                    _RENEW_LEASE_LUA,
+                    1,
+                    f"task:{task_id}:lease",
+                    worker_id,
+                    _LEASE_TTL_S,
+                )
+                if int(renewed or 0) == 0:
+                    if lease_lost is not None:
+                        lease_lost.set()
+                    logger.warning(
+                        "generation lease ownership lost task=%s worker=%s",
+                        task_id,
+                        worker_id,
+                    )
+                    return
                 for key in extra_lease_keys or []:
                     await redis.expire(key, _LEASE_TTL_S)
                 # in-flight provider 快照随 lease 续命（admin 列表才能持续看到）
@@ -3930,7 +3958,15 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     )
 
     # --- 3. lease + 续租协程 ---
-    await _acquire_lease(redis, task_id, worker_id)
+    try:
+        await _acquire_lease(redis, task_id, worker_id)
+    except _LeaseLost as exc:
+        logger.info("generation lease already held task=%s err=%s", task_id, exc)
+        _task_outcome = "lease_held"
+        await _release_image_queue_slot(
+            redis, task_id=task_id, provider_name=reserved_provider_name
+        )
+        return
 
     async with SessionLocal() as session:
         # P1-10: skip_locked=True 同上——并发 worker 抢锁失败时不阻塞。
@@ -3999,6 +4035,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         _lease_renewer(
             redis,
             task_id,
+            worker_id,
             lease_lost,
             # task_provider 反向索引仍是 SET key，需要 EXPIRE 续命；ZSET 槽位
             # 续命交给 lease_renewer 内部按 image_provider_name 分支处理。

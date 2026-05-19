@@ -11,6 +11,7 @@ we follow that pattern for compatibility with the rest of the suite.
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -166,6 +167,16 @@ def test_poster_style_categories_constant_covers_normalizer_outputs() -> None:
         assert plib._normalize_category(value) in POSTER_STYLE_CATEGORIES
 
 
+def test_sha256_file_reads_incrementally(tmp_path: Path) -> None:
+    path = tmp_path / "style.bin"
+    path.write_bytes((b"abc123" * 20_000) + b"tail")
+
+    assert (
+        poster_styles._sha256_file(path)
+        == hashlib.sha256(path.read_bytes()).hexdigest()
+    )
+
+
 def test_metadata_from_meta_json_returns_none_without_preset_id() -> None:
     meta_no_id = {"title": "Untitled", "category": "illustration"}
     out = plib._metadata_from_meta_json(meta_no_id, directory=None)
@@ -299,7 +310,10 @@ def test_item_out_from_preset_routes_use_library_endpoints() -> None:
     out = poster_styles._item_out_from_preset(raw)
     assert out.id == "preset:flat_illustration:v1"
     assert out.source == "preset"
-    assert out.cover_image_url == "/api/poster-styles/items/preset:flat_illustration:v1/binary"
+    assert (
+        out.cover_image_url
+        == "/api/poster-styles/items/preset:flat_illustration:v1/binary"
+    )
     assert out.thumb_url == "/api/poster-styles/items/preset:flat_illustration:v1/thumb"
     assert len(out.samples) == 1
     assert (
@@ -330,7 +344,9 @@ def test_item_out_from_preset_without_samples_has_no_broken_cover_url() -> None:
 # --------------------------- List filter / sync state ----------------------
 
 
-def test_filter_preset_items_by_category_and_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_filter_preset_items_by_category_and_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     items = [
         {
             "id": "preset:a:v1",
@@ -367,7 +383,9 @@ def test_filter_preset_items_by_category_and_tag(monkeypatch: pytest.MonkeyPatch
 async def test_sync_state_out_reports_can_sync_for_admin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(poster_styles, "_library_sync_state_path", lambda: tmp_path / "missing.json")
+    monkeypatch.setattr(
+        poster_styles, "_library_sync_state_path", lambda: tmp_path / "missing.json"
+    )
 
     async def _admin_only_mode(_db: Any) -> str:
         return "admin_only"
@@ -383,7 +401,9 @@ async def test_sync_state_out_reports_can_sync_for_admin(
 async def test_sync_state_out_anyone_can_sync_when_mode_open(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(poster_styles, "_library_sync_state_path", lambda: tmp_path / "missing.json")
+    monkeypatch.setattr(
+        poster_styles, "_library_sync_state_path", lambda: tmp_path / "missing.json"
+    )
 
     async def _open_mode(_db: Any) -> str:
         return "any_authenticated"
@@ -397,7 +417,9 @@ async def test_sync_state_out_anyone_can_sync_when_mode_open(
 async def test_sync_state_out_disabled_blocks_everyone(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(poster_styles, "_library_sync_state_path", lambda: tmp_path / "missing.json")
+    monkeypatch.setattr(
+        poster_styles, "_library_sync_state_path", lambda: tmp_path / "missing.json"
+    )
 
     async def _disabled_mode(_db: Any) -> str:
         return "disabled"
@@ -449,7 +471,9 @@ async def test_sync_short_circuits_on_recent_success(
 
 
 @pytest.mark.asyncio
-async def test_delete_user_item_calls_db_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_delete_user_item_calls_db_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     row = _user_item("user:to-delete")
     db = _StubDb(
         response_batches=[
@@ -490,9 +514,9 @@ async def test_delete_preset_item_inserts_hidden_row(
         db, user_id="user-1", item_id="preset:flat:v1"
     )
     assert ok is True
-    assert any(
-        isinstance(row, PosterStyleHiddenPreset) for row in db.added
-    ), "preset deletion must insert a PosterStyleHiddenPreset row"
+    assert any(isinstance(row, PosterStyleHiddenPreset) for row in db.added), (
+        "preset deletion must insert a PosterStyleHiddenPreset row"
+    )
 
 
 @pytest.mark.asyncio
@@ -521,9 +545,9 @@ async def test_delete_preset_item_does_not_duplicate_existing_hide(
         db, user_id="user-1", item_id="preset:flat:v1"
     )
     assert ok is True
-    assert not any(
-        isinstance(row, PosterStyleHiddenPreset) for row in db.added
-    ), "already-hidden preset must not insert a duplicate row"
+    assert not any(isinstance(row, PosterStyleHiddenPreset) for row in db.added), (
+        "already-hidden preset must not insert a duplicate row"
+    )
 
 
 # --------------------------- Auto-tag persistence ---------------------------
@@ -536,7 +560,9 @@ async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
     row = _user_item()
     db = _StubDb(response_batches=[[row]])
 
-    async def _empty_upstream(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
+    async def _empty_upstream(
+        _db: Any, *, image_id: str, user_id: str
+    ) -> dict[str, Any]:
         return {}
 
     monkeypatch.setattr(
@@ -638,7 +664,9 @@ async def test_generate_endpoint_publishes_created_generation_tasks(
 
     db = _StubDb()
     user = _member_user()
-    body = PosterStyleGenerateIn(title="复古风格", prompt="生成一张复古促销海报", count=1)
+    body = PosterStyleGenerateIn(
+        title="复古风格", prompt="生成一张复古促销海报", count=1
+    )
 
     out = await poster_styles.generate_poster_style_samples(body, user, db)  # type: ignore[arg-type]
 

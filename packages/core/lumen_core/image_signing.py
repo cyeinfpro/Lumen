@@ -27,6 +27,9 @@ SIG_HEX_LEN = 24
 # 默认 24h；调用方可缩短（短期分享）或延长（永久 embed，但仍受 secret 轮转影响）。
 DEFAULT_TTL_SEC = 24 * 60 * 60
 
+# 调用方显式传入 now_ms 时，最多允许和本机时钟相差 5 分钟。
+MAX_NOW_MS_SKEW_MS = 5 * 60 * 1000
+
 # 允许出现在签名 URL 里的 variant 名。`orig` 走 Image.storage_key；其余走 ImageVariant。
 ALLOWED_VARIANTS: frozenset[str] = frozenset(
     {"orig", "display2048", "preview1024", "thumb256"}
@@ -60,6 +63,23 @@ def _validate_inputs(image_id: str, variant: str) -> None:
         raise ImageSigningError(
             f"invalid variant: {variant!r}; allowed={sorted(ALLOWED_VARIANTS)}"
         )
+
+
+def _current_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _validated_signing_now_ms(now_ms: int | None) -> int:
+    current = _current_ms()
+    if now_ms is None:
+        return current
+    try:
+        value = int(now_ms)
+    except (TypeError, ValueError) as exc:
+        raise ImageSigningError(f"invalid now_ms: {now_ms!r}") from exc
+    if abs(value - current) > MAX_NOW_MS_SKEW_MS:
+        raise ImageSigningError("now_ms must be within 5 minutes of current time")
+    return value
 
 
 def compute_image_sig(
@@ -97,7 +117,7 @@ def sign_image_url_query(
         raise ImageSigningError(f"ttl_sec must be positive, got {ttl_sec}")
     if ttl_sec > 30 * 24 * 60 * 60:
         raise ImageSigningError(f"ttl_sec must be <= 30 days, got {ttl_sec}")
-    base_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    base_ms = _validated_signing_now_ms(now_ms)
     exp_ms = base_ms + ttl_sec * 1000
     sig = compute_image_sig(image_id, variant, exp_ms, secret)
     return exp_ms, sig
@@ -153,6 +173,7 @@ __all__ = [
     "ALLOWED_VARIANTS",
     "DEFAULT_TTL_SEC",
     "ImageSigningError",
+    "MAX_NOW_MS_SKEW_MS",
     "SIG_HEX_LEN",
     "build_signed_path",
     "compute_image_sig",

@@ -69,6 +69,8 @@ type SSEBroadcastPayload = {
   sentAt: number;
 };
 
+type SeenEventResult = "accepted" | "duplicate" | "untracked";
+
 function createBroadcastSourceId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -244,22 +246,25 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     qcRef.current = qc;
   }, [qc]);
 
-  const markEventSeen = useCallback((data: unknown, eventId?: string) => {
-    const id = payloadEventId(data, eventId);
-    if (!id) return null;
+  const markEventSeen = useCallback(
+    (data: unknown, eventId?: string): SeenEventResult => {
+      const id = payloadEventId(data, eventId);
+      if (!id) return "untracked";
 
-    const seen = seenEventIdsRef.current;
-    if (seen.has(id)) return false;
+      const seen = seenEventIdsRef.current;
+      if (seen.has(id)) return "duplicate";
 
-    seen.add(id);
-    const queue = seenEventIdQueueRef.current;
-    queue.push(id);
-    while (queue.length > MAX_SEEN_SSE_EVENT_IDS) {
-      const old = queue.shift();
-      if (old) seen.delete(old);
-    }
-    return true;
-  }, []);
+      seen.add(id);
+      const queue = seenEventIdQueueRef.current;
+      queue.push(id);
+      while (queue.length > MAX_SEEN_SSE_EVENT_IDS) {
+        const old = queue.shift();
+        if (old) seen.delete(old);
+      }
+      return "accepted";
+    },
+    [],
+  );
 
   const channels = useMemo(() => {
     const out: string[] = [];
@@ -316,14 +321,17 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       name: string,
       data: unknown,
       eventId?: string,
-      opts?: { broadcast?: boolean },
+      opts?: { broadcast?: boolean; source?: "sse" | "broadcast" },
     ) => {
-      const accepted = markEventSeen(data, eventId);
-      if (accepted === false) return;
+      const seenResult = markEventSeen(data, eventId);
+      if (seenResult === "duplicate") return;
+      if (seenResult === "untracked" && opts?.source === "broadcast") {
+        return;
+      }
 
       applySSEEventWithSideEffects(name, data);
 
-      if (accepted === null) return;
+      if (seenResult === "untracked") return;
       if (opts?.broadcast === false) return;
       try {
         broadcastRef.current?.postMessage({
@@ -354,6 +362,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       if (message.source === broadcastSourceId) return;
       deliverSSEEvent(message.name, message.data, message.eventId, {
         broadcast: false,
+        source: "broadcast",
       });
     };
 

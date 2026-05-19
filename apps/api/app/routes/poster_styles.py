@@ -240,9 +240,9 @@ def _write_bytes_replace(path: Path, data: bytes) -> None:
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        data, ensure_ascii=False, indent=2, sort_keys=True
-    ).encode("utf-8")
+    payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode(
+        "utf-8"
+    )
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )
@@ -268,9 +268,7 @@ def _read_json_file(path: Path, default: dict[str, Any]) -> dict[str, Any]:
             "invalid_index", f"invalid poster style index: {path.name}", 500
         ) from exc
     if not isinstance(data, dict):
-        raise _http(
-            "invalid_index", f"invalid poster style index: {path.name}", 500
-        )
+        raise _http("invalid_index", f"invalid poster style index: {path.name}", 500)
     return data
 
 
@@ -523,9 +521,7 @@ def _item_out_from_preset(raw: dict[str, Any]) -> PosterStyleItemOut:
         title=str(raw.get("title") or "").strip()[:120] or "未命名风格",
         category=_normalize_category(raw.get("category")),  # type: ignore[arg-type]
         mood=_clean_optional_text(raw.get("mood"), max_len=120),
-        prompt_template=_clean_optional_text(
-            raw.get("prompt_template"), max_len=2000
-        ),
+        prompt_template=_clean_optional_text(raw.get("prompt_template"), max_len=2000),
         palette=_normalize_palette(raw.get("palette") or []),
         recommended_aspects=_normalize_recommended_aspects(
             raw.get("recommended_aspects") or []
@@ -555,16 +551,18 @@ def _item_out_from_preset(raw: dict[str, Any]) -> PosterStyleItemOut:
 # ----- 列表 / 过滤 helpers --------------------------------------------------
 
 
-async def _load_user_hidden_preset_ids(
-    db: AsyncSession, user_id: str
-) -> set[str]:
+async def _load_user_hidden_preset_ids(db: AsyncSession, user_id: str) -> set[str]:
     rows = (
-        await db.execute(
-            select(PosterStyleHiddenPreset.preset_id).where(
-                PosterStyleHiddenPreset.user_id == user_id
+        (
+            await db.execute(
+                select(PosterStyleHiddenPreset.preset_id).where(
+                    PosterStyleHiddenPreset.user_id == user_id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {pid for pid in rows if isinstance(pid, str)}
 
 
@@ -638,9 +636,9 @@ async def _load_user_items(
     if category != "all":
         stmt = stmt.where(PosterStyleItem.category == category)
     rows = list(
-        (
-            await db.execute(stmt.order_by(desc(PosterStyleItem.created_at)))
-        ).scalars().all()
+        (await db.execute(stmt.order_by(desc(PosterStyleItem.created_at))))
+        .scalars()
+        .all()
     )
     if q.strip():
         query = q.strip().lower()
@@ -659,8 +657,7 @@ async def _load_user_items(
         rows = [
             row
             for row in rows
-            if tag_set
-            & {str(t).strip().lower() for t in (row.style_tags or [])}
+            if tag_set & {str(t).strip().lower() for t in (row.style_tags or [])}
         ]
     return rows
 
@@ -713,7 +710,9 @@ async def _fetch_bytes(client: httpx.AsyncClient, url: str) -> bytes:
     return resp.content
 
 
-async def _fetch_meta_json(client: httpx.AsyncClient, entry: dict[str, Any]) -> dict[str, Any] | None:
+async def _fetch_meta_json(
+    client: httpx.AsyncClient, entry: dict[str, Any]
+) -> dict[str, Any] | None:
     """从 GitHub Contents API 拿到 meta.json 文件实体，下载 raw 并解析为 dict。"""
     download_url = str(entry.get("download_url") or "").strip()
     if not download_url:
@@ -721,7 +720,9 @@ async def _fetch_meta_json(client: httpx.AsyncClient, entry: dict[str, Any]) -> 
     try:
         raw = await _fetch_bytes(client, download_url)
     except Exception as exc:  # noqa: BLE001
-        logger.info("poster style: meta.json download failed url=%s err=%s", download_url, exc)
+        logger.info(
+            "poster style: meta.json download failed url=%s err=%s", download_url, exc
+        )
         return None
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -775,9 +776,7 @@ async def _sync_library_presets_from_github_folder(
             age = (_now() - last_attempt).total_seconds()
             if age < POSTER_STYLE_SYNC_FAILURE_COOLDOWN_S:
                 return _cached_sync_response(state)
-        return await _do_sync_library_presets(
-            contents_url, state, proxy_url=proxy_url
-        )
+        return await _do_sync_library_presets(contents_url, state, proxy_url=proxy_url)
 
 
 def _build_preset_entry(
@@ -820,12 +819,8 @@ def _preset_changed(prev: dict[str, Any], cur: dict[str, Any]) -> bool:
         return True
     raw_prev = prev.get("samples")
     raw_cur = cur.get("samples")
-    prev_samples: list[dict[str, Any]] = (
-        raw_prev if isinstance(raw_prev, list) else []
-    )
-    cur_samples: list[dict[str, Any]] = (
-        raw_cur if isinstance(raw_cur, list) else []
-    )
+    prev_samples: list[dict[str, Any]] = raw_prev if isinstance(raw_prev, list) else []
+    cur_samples: list[dict[str, Any]] = raw_cur if isinstance(raw_cur, list) else []
     if len(prev_samples) != len(cur_samples):
         return True
     for a, b in zip(prev_samples, cur_samples):
@@ -900,9 +895,7 @@ async def _do_sync_library_presets(
                     errors.append(f"{dir_name}: meta.json missing or invalid")
                     continue
                 category_hint = _category_from_folder_name(dir_name)
-                parsed = _metadata_from_meta_json(
-                    meta, category_hint=category_hint
-                )
+                parsed = _metadata_from_meta_json(meta, category_hint=category_hint)
                 if parsed is None:
                     skipped += 1
                     errors.append(f"{dir_name}: meta.json has no preset_id")
@@ -1107,12 +1100,22 @@ async def _find_preset_item(
     return None
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _open_storage_file(storage_key: str) -> tuple[Path, str, str]:
     path = _storage_path(storage_key)
     if not path.is_file():
         raise _http("not_found", "library binary missing", 404)
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    return path, _guess_mime(path), sha
+    return path, _guess_mime(path), _sha256_file(path)
 
 
 def _stream_file(path: Path) -> Iterable[bytes]:
@@ -1160,14 +1163,18 @@ async def _validate_owned_image_ids(
     if not cleaned:
         return []
     rows = (
-        await db.execute(
-            select(Image.id).where(
-                Image.id.in_(cleaned),
-                Image.user_id == user_id,
-                Image.deleted_at.is_(None),
+        (
+            await db.execute(
+                select(Image.id).where(
+                    Image.id.in_(cleaned),
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     owned = {iid for iid in rows if isinstance(iid, str)}
     missing = [iid for iid in cleaned if iid not in owned]
     if missing:
@@ -1425,7 +1432,9 @@ async def patch_poster_style_item(
     if body.palette is not None:
         row.palette = _normalize_palette(body.palette)
     if body.recommended_aspects is not None:
-        row.recommended_aspects = _normalize_recommended_aspects(body.recommended_aspects)
+        row.recommended_aspects = _normalize_recommended_aspects(
+            body.recommended_aspects
+        )
     if body.style_tags is not None:
         row.style_tags = _normalize_style_tags(body.style_tags)
     await db.commit()
@@ -1817,9 +1826,7 @@ def _poster_style_job_status(
     return "queued"
 
 
-async def _job_from_run(
-    db: AsyncSession, *, run: WorkflowRun
-) -> PosterStyleJobOut:
+async def _job_from_run(db: AsyncSession, *, run: WorkflowRun) -> PosterStyleJobOut:
     step = (
         await db.execute(
             select(WorkflowStep).where(
@@ -1857,7 +1864,9 @@ async def _job_from_run(
                             Generation.user_id == run.user_id,
                         )
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
             active = [
                 g
@@ -1865,7 +1874,9 @@ async def _job_from_run(
                 if g.status
                 in {GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value}
             ]
-            failed = [g for g in generations if g.status == GenerationStatus.FAILED.value]
+            failed = [
+                g for g in generations if g.status == GenerationStatus.FAILED.value
+            ]
             if failed and not active and finished < requested:
                 if step_status == "running":
                     step_status = "failed"
@@ -1874,7 +1885,9 @@ async def _job_from_run(
                         str(getattr(g, "error_message", "") or "").strip()
                         for g in failed
                     ]
-                    error_message = "；".join([m for m in msgs if m])[:400] or "生成失败"
+                    error_message = (
+                        "；".join([m for m in msgs if m])[:400] or "生成失败"
+                    )
 
     job_status = _poster_style_job_status(
         step_status=step_status,
@@ -1885,7 +1898,8 @@ async def _job_from_run(
     if image_ids:
         row = (
             await db.execute(
-                select(PosterStyleItem.id).where(
+                select(PosterStyleItem.id)
+                .where(
                     PosterStyleItem.user_id == run.user_id,
                     PosterStyleItem.cover_image_id.in_(image_ids),
                 )
@@ -1935,7 +1949,9 @@ async def list_poster_style_jobs(
                 .order_by(desc(WorkflowRun.updated_at), desc(WorkflowRun.id))
                 .limit(fetch_limit)
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     jobs: list[PosterStyleJobOut] = []
     for run in runs:
@@ -2038,9 +2054,7 @@ async def _api_call_poster_style_tagging_upstream(
     image_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
     spec_providers = get_spec("providers")
-    raw_providers = (
-        await get_setting(db, spec_providers) if spec_providers else None
-    )
+    raw_providers = await get_setting(db, spec_providers) if spec_providers else None
     providers, _proxies, _errors = build_effective_provider_config(
         raw_providers=raw_providers,
         legacy_base_url=(
@@ -2091,7 +2105,11 @@ async def _api_call_poster_style_tagging_upstream(
                 proxy=proxy_url,
             ) as client:
                 base = provider.base_url.rstrip("/")
-                url = f"{base}/v1/responses" if not base.endswith("/v1") else f"{base}/responses"
+                url = (
+                    f"{base}/v1/responses"
+                    if not base.endswith("/v1")
+                    else f"{base}/responses"
+                )
                 resp = await client.post(
                     url,
                     json=body,
@@ -2205,7 +2223,11 @@ async def _auto_tag_poster_style_item(
         style_tags_iter = []
     style_tags = _normalize_style_tags(style_tags_iter)
     category_raw = raw_payload.get("category")
-    category = _normalize_category(category_raw) if isinstance(category_raw, str) else "user_favorites"
+    category = (
+        _normalize_category(category_raw)
+        if isinstance(category_raw, str)
+        else "user_favorites"
+    )
     mood = _clean_optional_text(raw_payload.get("mood"), max_len=120)
     palette = _normalize_palette(raw_payload.get("palette") or [])
     notes = _clean_optional_text(raw_payload.get("notes"), max_len=400)
@@ -2261,9 +2283,7 @@ async def auto_tag_poster_style_item(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PosterStyleAutoTagOut:
-    return await _auto_tag_poster_style_item(
-        db=db, user_id=user.id, item_id=item_id
-    )
+    return await _auto_tag_poster_style_item(db=db, user_id=user.id, item_id=item_id)
 
 
 # ----- 详情（catch-all：放在最后避免吃掉 /sync-presets / /jobs / /items 路径） -----

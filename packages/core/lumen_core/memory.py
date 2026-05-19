@@ -39,7 +39,7 @@ AUTO_HINT_RE = re.compile(
 )
 PII_RE = re.compile(
     r"(密码|口令|验证码|身份证|银行卡|信用卡|API\s*key|api[_ -]?key|sk-[A-Za-z0-9]{12,}|"
-    r"\b\d{6}\b|(?:\+?\d[\d -]{8,}\d)|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}.*(?:密码|password))",
+    r"(?:\+?\d[\d -]{8,}\d)|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}.*(?:密码|password))",
     re.IGNORECASE,
 )
 NEGATION_RE = re.compile(r"(不喜欢|不要|别|never|don't|do not|stop)", re.IGNORECASE)
@@ -123,7 +123,12 @@ def infer_memory_type(text: str) -> MemoryType:
 
 def normalize_candidate_content(text: str, memory_type: MemoryType) -> str:
     raw = text or ""
-    raw = re.sub(r"^(请你|请|以后|以后都|从此|总是|永远|记住|remember|always|never)\s*[:：,，]?", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(
+        r"^(请你|请|以后|以后都|从此|总是|永远|记住|remember|always|never)\s*[:：,，]?",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
     raw = raw.strip()
     if memory_type == "profile":
         tail = _after_marker(raw, ("我是", "I am", "I'm"))
@@ -134,7 +139,9 @@ def normalize_candidate_content(text: str, memory_type: MemoryType) -> str:
         if tail:
             raw = "正在做" + tail
     elif memory_type == "avoid":
-        tail = _after_marker(raw, ("不要", "不喜欢", "don't", "do not", "never", "stop"))
+        tail = _after_marker(
+            raw, ("不要", "不喜欢", "don't", "do not", "never", "stop")
+        )
         if tail and not raw.startswith(("不要", "不喜欢")):
             raw = "不要" + tail
     elif memory_type == "preference":
@@ -144,7 +151,9 @@ def normalize_candidate_content(text: str, memory_type: MemoryType) -> str:
     return compact_content(raw)
 
 
-def extract_memories(text: str, *, explicit_only: bool = False) -> tuple[list[ExtractedMemory], bool]:
+def extract_memories(
+    text: str, *, explicit_only: bool = False
+) -> tuple[list[ExtractedMemory], bool]:
     """Extract memory candidates without calling an upstream model.
 
     Returns (candidates, rejected_pii). The caller decides whether candidates

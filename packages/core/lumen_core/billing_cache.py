@@ -13,6 +13,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .models import UserApiCredential, UserWallet
 
 
+_WINDOW_INCREMENT_LUA = """
+local key = KEYS[1]
+local now_ts = tonumber(ARGV[1]) or 0
+local amount = tonumber(ARGV[2]) or 0
+local limit_5h = tonumber(ARGV[3]) or 0
+local limit_1d = tonumber(ARGV[4]) or 0
+local limit_7d = tonumber(ARGV[5]) or 0
+local expire_sec = tonumber(ARGV[6]) or 0
+
+local labels = {"5h", "1d", "7d"}
+local ttls = {5 * 3600, 24 * 3600, 7 * 24 * 3600}
+local limits = {limit_5h, limit_1d, limit_7d}
+
+for i, label in ipairs(labels) do
+  local started_field = "window_" .. label .. "_started_at_unix"
+  local usage_field = "usage_" .. label
+  local started = tonumber(redis.call("HGET", key, started_field) or "0") or 0
+  if started <= 0 or now_ts - started >= ttls[i] then
+    redis.call("HSET", key, started_field, now_ts)
+    redis.call("HSET", key, usage_field, amount)
+  else
+    redis.call("HINCRBY", key, usage_field, amount)
+  end
+  redis.call("HSET", key, "limit_" .. label .. "_micro", limits[i])
+end
+
+if expire_sec > 0 then
+  redis.call("EXPIRE", key, expire_sec)
+end
+return 1
+"""
+
+
 def _hash_value(payload: dict[Any, Any], key: str) -> Any:
     if key in payload:
         return payload.get(key)
@@ -109,29 +142,17 @@ class BillingCacheService:
         limits = limits or {}
         try:
             key = self._window_key(key_id)
-            payload = await self.redis.hgetall(key)
-            pipe = self.redis.pipeline(transaction=True)
-            for label, ttl in (
-                ("5h", 5 * 3600),
-                ("1d", 24 * 3600),
-                ("7d", 7 * 24 * 3600),
-            ):
-                started_field = f"window_{label}_started_at_unix"
-                usage_field = f"usage_{label}"
-                try:
-                    started = (
-                        int(_hash_value(payload, started_field) or 0) if payload else 0
-                    )
-                except (TypeError, ValueError):
-                    started = 0
-                if started <= 0 or ts - started >= ttl:
-                    pipe.hset(key, started_field, ts)
-                    pipe.hset(key, usage_field, int(amount_micro))
-                else:
-                    pipe.hincrby(key, usage_field, int(amount_micro))
-                pipe.hset(key, f"limit_{label}_micro", int(limits.get(label) or 0))
-            pipe.expire(key, 7 * 24 * 3600 + self.window_ttl_sec)
-            await pipe.execute()
+            await self.redis.eval(
+                _WINDOW_INCREMENT_LUA,
+                1,
+                key,
+                ts,
+                int(amount_micro),
+                int(limits.get("5h") or 0),
+                int(limits.get("1d") or 0),
+                int(limits.get("7d") or 0),
+                7 * 24 * 3600 + self.window_ttl_sec,
+            )
         except Exception:
             return
 

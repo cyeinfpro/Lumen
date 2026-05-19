@@ -11,7 +11,9 @@ from lumen_core.memory import (
 
 
 def test_explicit_remember_directive_extracts_as_directive() -> None:
-    items, rejected_pii = extract_memories("记住：以后回答不要使用感叹号", explicit_only=True)
+    items, rejected_pii = extract_memories(
+        "记住：以后回答不要使用感叹号", explicit_only=True
+    )
 
     assert rejected_pii is False
     assert len(items) == 1
@@ -27,6 +29,10 @@ def test_vague_future_statement_is_not_directive() -> None:
 def test_pii_detection_blocks_sensitive_memory() -> None:
     assert has_pii("记住我的密码是 123456") is True
     assert extract_memories("记住我的密码是 123456", explicit_only=True) == ([], True)
+
+
+def test_pii_detection_does_not_block_plain_six_digit_numbers() -> None:
+    assert has_pii("订单号是 202506，项目代号是 123456") is False
 
 
 def test_deterministic_embedding_literal_is_vector_sized() -> None:

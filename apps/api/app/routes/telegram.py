@@ -83,6 +83,7 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
 
 _LINK_CODE_TTL_SECONDS = 600  # 10 min
 _LINK_CODE_REDIS_PREFIX = "tg:link:"
+_LINK_CODE_CLAIM_SUFFIX = ":claim"
 _TG_CONV_TITLE = "Telegram Bot"
 _TG_CONV_MARKER = {"telegram": True}
 _BOT_BIND_CODE_LIMITER = RateLimiter(
@@ -90,10 +91,84 @@ _BOT_BIND_CODE_LIMITER = RateLimiter(
     refill_per_sec=30 / 60,
     always_on=True,
 )
+_CLAIM_LINK_CODE_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return {0, ''}
+end
+if redis.call('SET', KEYS[2], ARGV[1], 'NX', 'EX', tonumber(ARGV[2])) then
+  return {1, raw}
+end
+return {2, ''}
+"""
 
 
 def _link_code_key(code: str) -> str:
     return f"{_LINK_CODE_REDIS_PREFIX}{code}"
+
+
+def _link_code_claim_key(code: str) -> str:
+    return f"{_link_code_key(code)}{_LINK_CODE_CLAIM_SUFFIX}"
+
+
+def _decode_redis_text(value: object) -> str:
+    return value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+
+
+async def _claim_link_code(redis: object, code: str, *, owner: str) -> str | None:
+    key = _link_code_key(code)
+    claim_key = _link_code_claim_key(code)
+    eval_fn = getattr(redis, "eval", None)
+    if callable(eval_fn):
+        result = await eval_fn(
+            _CLAIM_LINK_CODE_LUA,
+            2,
+            key,
+            claim_key,
+            owner,
+            str(_LINK_CODE_TTL_SECONDS),
+        )
+        if isinstance(result, (list, tuple)) and result:
+            status = int(result[0])
+            if status == 0:
+                return None
+            if status == 2:
+                raise _http(
+                    "code_in_use", "binding code is already being consumed", 409
+                )
+            return _decode_redis_text(result[1])
+
+    raw = await redis.get(key)  # type: ignore[attr-defined]
+    if raw is None:
+        return None
+    set_fn = getattr(redis, "set", None)
+    if callable(set_fn):
+        claimed = await set_fn(
+            claim_key,
+            owner,
+            ex=_LINK_CODE_TTL_SECONDS,
+            nx=True,
+        )
+        if claimed is False or claimed == 0:
+            raise _http("code_in_use", "binding code is already being consumed", 409)
+    return _decode_redis_text(raw)
+
+
+async def _release_link_code_claim(redis: object, code: str) -> None:
+    try:
+        await redis.delete(_link_code_claim_key(code))  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "telegram link code claim release failed code=%s err=%s", code, exc
+        )
+
+
+async def _consume_link_code(redis: object, code: str) -> None:
+    try:
+        await redis.delete(_link_code_key(code), _link_code_claim_key(code))  # type: ignore[attr-defined]
+    except TypeError:
+        await redis.delete(_link_code_key(code))  # type: ignore[attr-defined]
+        await redis.delete(_link_code_claim_key(code))  # type: ignore[attr-defined]
 
 
 def _gen_link_code() -> str:
@@ -312,9 +387,12 @@ async def bind_telegram(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BindOut:
     redis = get_redis()
-    key = _link_code_key(body.code)
-    raw = await redis.get(key)
-    if raw is None:
+    user_id = await _claim_link_code(
+        redis,
+        body.code,
+        owner=f"chat:{body.chat_id}",
+    )
+    if user_id is None:
         # Why: key is IP-only. Including `len:{len(body.code)}` partitions
         # the bucket per code length, letting an attacker brute-force in
         # parallel across lengths and bypass the rate limit.
@@ -323,9 +401,6 @@ async def bind_telegram(
             f"rl:telegram:bind:{require_client_ip(request)}",
         )
         raise _http("invalid_code", "binding code is invalid or expired", 400)
-    user_id = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
-    # 一次性消费：删 key 后再写表，失败回滚把 key 写回（best-effort）
-    await redis.delete(key)
 
     from lumen_core.models import User
 
@@ -335,6 +410,7 @@ async def bind_telegram(
         )
     ).scalar_one_or_none()
     if user is None:
+        await _release_link_code_claim(redis, body.code)
         raise _http("user_not_found", "user no longer exists", 404)
 
     # upsert by chat_id：同一 chat 重新绑可换 user
@@ -367,9 +443,20 @@ async def bind_telegram(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
+        await _release_link_code_claim(redis, body.code)
         raise _http(
             "bind_conflict", "binding conflict, retry the link flow", 409
         ) from exc
+    except Exception:
+        await db.rollback()
+        await _release_link_code_claim(redis, body.code)
+        raise
+    try:
+        await _consume_link_code(redis, body.code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "telegram link code cleanup failed code=%s err=%s", body.code, exc
+        )
 
     logger.info("telegram bind: user=%s chat=%s", user_id, body.chat_id)
     return BindOut(user_id=user.id, email=user.email, display_name=user.display_name)

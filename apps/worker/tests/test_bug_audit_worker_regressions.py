@@ -7,8 +7,9 @@ from typing import Any
 
 import pytest
 
-from app import account_limiter, upstream
-from app.tasks import completion, generation
+from app import account_limiter, sse_publish, upstream
+from app.provider_pool import ProviderConfig, ProviderPool
+from app.tasks import completion, generation, memory_extraction
 
 
 def test_completion_charge_uses_same_session_before_success_commit() -> None:
@@ -31,6 +32,93 @@ def test_generation_retry_delay_is_jittered() -> None:
     assert "jitter" in helper_source.lower()
     assert "random.uniform" in helper_source
     assert "_retry_delay_seconds(attempt)" in runner_source
+
+
+def test_provider_pool_weighted_round_robin_honors_weights() -> None:
+    pool = ProviderPool()
+    group = [
+        ProviderConfig(
+            name="heavy",
+            base_url="https://heavy.example",
+            api_key="sk-heavy",
+            priority=10,
+            weight=3,
+        ),
+        ProviderConfig(
+            name="light",
+            base_url="https://light.example",
+            api_key="sk-light",
+            priority=10,
+            weight=1,
+        ),
+    ]
+
+    first_choices = [pool._weighted_round_robin(group)[0].name for _ in range(8)]
+
+    assert first_choices.count("heavy") == 6
+    assert first_choices.count("light") == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_checks_fail_closed_when_redis_errors() -> None:
+    class BrokenRedis:
+        async def get(self, _key: str) -> str:
+            raise RuntimeError("redis unavailable")
+
+    redis = BrokenRedis()
+
+    assert await generation._is_cancelled(redis, "gen-1") is True
+    assert await completion._is_cancelled(redis, "comp-1") is True
+
+
+@pytest.mark.asyncio
+async def test_generation_lease_acquire_uses_nx() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] | None = None
+
+        async def set(self, *_args: Any, **kwargs: Any) -> bool:
+            self.kwargs = kwargs
+            return False
+
+    redis = Redis()
+
+    with pytest.raises(generation._LeaseLost):
+        await generation._acquire_lease(redis, "gen-1", "worker-1")
+
+    assert redis.kwargs is not None
+    assert redis.kwargs["nx"] is True
+
+
+@pytest.mark.asyncio
+async def test_generation_release_lease_requires_atomic_cas() -> None:
+    class RedisWithoutEval:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        async def get(self, _key: str) -> str:
+            return "worker-1"
+
+        async def delete(self, key: str) -> int:
+            self.deleted.append(key)
+            return 1
+
+    redis = RedisWithoutEval()
+
+    await generation._release_lease(redis, "gen-1", "worker-1")
+
+    assert redis.deleted == []
+
+
+def test_sse_timestamp_lock_is_eagerly_initialized() -> None:
+    assert sse_publish._TS_LOCK is not None
+    assert hasattr(sse_publish._TS_LOCK, "acquire")
+
+
+def test_memory_topic_key_normalizes_unicode() -> None:
+    assert memory_extraction._topic_key("Cafe\u0301") == memory_extraction._topic_key(
+        "Café"
+    )
 
 
 class _FakeClosableClient:

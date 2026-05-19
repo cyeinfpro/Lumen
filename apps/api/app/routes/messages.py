@@ -82,6 +82,7 @@ from lumen_core import billing as billing_core
 
 from ..arq_pool import get_arq_pool
 from ..audit import hash_email, write_audit
+
 # Why: read_byok_settings is re-exported here so existing tests that
 # monkeypatch `messages.read_byok_settings` keep working. Production code on
 # this path uses read_byok_settings_cached (TTL ~30 s) — see review #20.
@@ -120,6 +121,7 @@ async def _lock_idempotency_key(
     # same key, which still hash identically. So 32-bit hash collisions only
     # slow, never corrupt.
     await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(lock_key))))
+
 
 # Why: align with the global ``MAX_PROMPT_CHARS`` so server-side truncation
 # matches the validation cap exposed to clients. Previously this was a local
@@ -160,9 +162,7 @@ _TRANSPARENT_BACKGROUND_NEGATIVE_RE = re.compile(
 # 去除 C0 控制字符（\x00-\x1f）+ DEL（\x7f），但保留 \t (9) / \n (10) / \r (13)
 # 以允许多行 prompt 的正常换行。prompt-injection 防御的目标是阻止像 \x1b 这种
 # 终端转义、\x00 空字节注入，而不是把用户合法的换行也搞丢。
-_SYSTEM_PROMPT_CONTROL_TRANSLATION = {
-    i: " " for i in range(32) if i not in (9, 10, 13)
-}
+_SYSTEM_PROMPT_CONTROL_TRANSLATION = {i: " " for i in range(32) if i not in (9, 10, 13)}
 _SYSTEM_PROMPT_CONTROL_TRANSLATION[127] = " "
 
 
@@ -224,6 +224,44 @@ async def _billing_image_thresholds(db: AsyncSession) -> dict[str, int]:
 
 def _billing_http_error(exc: billing_core.BillingError) -> HTTPException:
     return _http(exc.code, exc.message, exc.status_code)
+
+
+async def _ensure_chat_wallet_preflight(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    user_email: str | None,
+    account_mode: str,
+    model: str,
+) -> None:
+    if account_mode != "wallet" or not await _billing_enabled(db):
+        return
+    wallet = await billing_core.get_wallet(db, user_id, lock=True)
+    if wallet.balance_micro < 10_000:
+        raise _http(
+            "INSUFFICIENT_BALANCE",
+            "insufficient wallet balance",
+            402,
+        )
+    cost_preview = await billing_core.estimate_completion_cost(
+        db,
+        model=model,
+        tokens_in=1,
+        tokens_out=1,
+    )
+    if cost_preview <= 0:
+        await write_audit(
+            db,
+            event_type="pricing.not_configured",
+            user_id=user_id,
+            actor_email_hash=hash_email(user_email),
+            details={
+                "scope": "chat_model",
+                "model": model,
+                "route": "messages.preflight",
+            },
+            autocommit=False,
+        )
 
 
 def _requested_image_billing_tier(image_params: ImageParamsIn) -> str | None:
@@ -316,7 +354,9 @@ def _image_upstream_request(
 ) -> dict[str, Any]:
     render_quality = _resolve_image_render_quality(image_params, resolved_size)
     background = _resolve_image_background(image_params, prompt)
-    output_format_is_explicit = image_params.output_format in _IMAGE_OUTPUT_FORMAT_VALUES
+    output_format_is_explicit = (
+        image_params.output_format in _IMAGE_OUTPUT_FORMAT_VALUES
+    )
     output_format = (
         image_params.output_format
         if output_format_is_explicit
@@ -552,7 +592,9 @@ async def _memory_undo_token(payload: dict[str, Any]) -> str | None:
         return None
 
 
-async def _disable_memory_for_conversation(conversation_id: str, memory_id: str) -> None:
+async def _disable_memory_for_conversation(
+    conversation_id: str, memory_id: str
+) -> None:
     try:
         key = f"memory:conversation:{conversation_id}:disabled"
         pipe = get_redis().pipeline(transaction=False)
@@ -684,7 +726,10 @@ async def _apply_explicit_memory_write(
         )
     if not candidates:
         if writes:
-            assistant_msg.content = {**(assistant_msg.content or {}), "memory_writes": writes}
+            assistant_msg.content = {
+                **(assistant_msg.content or {}),
+                "memory_writes": writes,
+            }
         return
 
     default_scope = await _default_memory_scope(db, user.id)
@@ -702,15 +747,19 @@ async def _apply_explicit_memory_write(
             scope = active_scope
     for candidate in candidates:
         existing = (
-            await db.execute(
-                select(UserMemory).where(
-                    UserMemory.user_id == user.id,
-                    UserMemory.type == candidate.type,
-                    UserMemory.disabled.is_(False),
-                    UserMemory.superseded_by.is_(None),
+            (
+                await db.execute(
+                    select(UserMemory).where(
+                        UserMemory.user_id == user.id,
+                        UserMemory.type == candidate.type,
+                        UserMemory.disabled.is_(False),
+                        UserMemory.superseded_by.is_(None),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         duplicate = next(
             (
                 m
@@ -807,7 +856,10 @@ async def _apply_explicit_memory_write(
             }
         )
     if writes:
-        assistant_msg.content = {**(assistant_msg.content or {}), "memory_writes": writes}
+        assistant_msg.content = {
+            **(assistant_msg.content or {}),
+            "memory_writes": writes,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -856,7 +908,10 @@ async def _resolve_task_credential_pin(
     active_row = (
         await db.execute(
             select(UserApiCredential, ApiSupplierTemplate)
-            .join(ApiSupplierTemplate, ApiSupplierTemplate.id == UserApiCredential.supplier_id)
+            .join(
+                ApiSupplierTemplate,
+                ApiSupplierTemplate.id == UserApiCredential.supplier_id,
+            )
             .where(
                 UserApiCredential.user_id == user_id,
                 UserApiCredential.status == "active",
@@ -866,7 +921,7 @@ async def _resolve_task_credential_pin(
             )
             .order_by(UserApiCredential.created_at.desc())
             .limit(1)
-            )
+        )
     ).first()
     if active_row is not None:
         active, supplier = active_row
@@ -917,6 +972,7 @@ async def _create_assistant_task(
     system_prompt: str | None,
     attachment_ids: list[str],
     text: str,
+    user_email: str | None = None,
     default_image_output_format: str = _DEFAULT_IMAGE_OUTPUT_FORMAT,
     mask_image_id: str | None = None,
 ) -> AssistantTaskResult:
@@ -946,17 +1002,6 @@ async def _create_assistant_task(
         except Exception as e:  # noqa: BLE001
             raise _http("invalid_size", f"size resolve failed: {e}", 422)
 
-    assistant_msg = Message(
-        conversation_id=conv.id,
-        role=Role.ASSISTANT.value,
-        content={},
-        parent_message_id=user_msg.id,
-        intent=intent.value,
-        status=MessageStatus.PENDING.value,
-    )
-    db.add(assistant_msg)
-    await db.flush()
-
     completion_id: str | None = None
     generation_ids: list[str] = []
     outbox_payloads: list[dict[str, Any]] = []
@@ -975,6 +1020,26 @@ async def _create_assistant_task(
             if credential_pin
             else DEFAULT_CHAT_MODEL
         )
+        await _ensure_chat_wallet_preflight(
+            db,
+            user_id=user_id,
+            user_email=user_email,
+            account_mode=account_mode,
+            model=task_chat_model,
+        )
+
+    assistant_msg = Message(
+        conversation_id=conv.id,
+        role=Role.ASSISTANT.value,
+        content={},
+        parent_message_id=user_msg.id,
+        intent=intent.value,
+        status=MessageStatus.PENDING.value,
+    )
+    db.add(assistant_msg)
+    await db.flush()
+
+    if intent in (Intent.CHAT, Intent.VISION_QA):
         comp = Completion(
             message_id=assistant_msg.id,
             user_id=user_id,
@@ -1032,7 +1097,10 @@ async def _create_assistant_task(
         if not billing_enabled:
             estimated_micro, estimated_tier = (0, "free")
         elif billing_tier is not None:
-            estimated_micro, estimated_tier = await billing_core.estimate_image_cost_for_tier(
+            (
+                estimated_micro,
+                estimated_tier,
+            ) = await billing_core.estimate_image_cost_for_tier(
                 db,
                 tier=billing_tier,
                 n=1,
@@ -1050,8 +1118,7 @@ async def _create_assistant_task(
             # and would produce upstream 400s. fast_chat_model is reserved
             # for chat-only fast tier and is intentionally NOT used here.
             upstream_request["responses_model"] = (
-                credential_pin.default_image_model
-                or credential_pin.default_chat_model
+                credential_pin.default_image_model or credential_pin.default_chat_model
             )
         if upstream_request.get("background") == "transparent":
             prompt_full += _transparent_background_prompt_suffix()
@@ -1387,15 +1454,19 @@ async def _lookup_idempotent_post(
     gen_hits: list[Generation] = []
     if gen_anchor is not None:
         gen_hits = (
-            await db.execute(
-                select(Generation)
-                .where(
-                    Generation.user_id == user_id,
-                    Generation.message_id == anchor_msg_id,
+            (
+                await db.execute(
+                    select(Generation)
+                    .where(
+                        Generation.user_id == user_id,
+                        Generation.message_id == anchor_msg_id,
+                    )
+                    .order_by(Generation.created_at.asc(), Generation.id.asc())
                 )
-                .order_by(Generation.created_at.asc(), Generation.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     user_msg = None
     if assistant_msg.parent_message_id:
         user_msg = (
@@ -1473,9 +1544,7 @@ async def submit_user_message(
         raise _http("not_found", "conversation not found", 404)
 
     # ---- idempotency short-circuit (best-effort: skips an INSERT round trip) ---
-    prior = await _lookup_idempotent_post(
-        db, user.id, conv_id, body.idempotency_key
-    )
+    prior = await _lookup_idempotent_post(db, user.id, conv_id, body.idempotency_key)
     if prior is not None:
         return prior
 
@@ -1489,16 +1558,24 @@ async def submit_user_message(
     attachment_ids = list(body.attachment_image_ids or [])
     if attachment_ids:
         rows = (
-            await db.execute(
-                select(Image.id).where(
-                    Image.id.in_(attachment_ids),
-                    Image.user_id == user.id,
-                    Image.deleted_at.is_(None),
+            (
+                await db.execute(
+                    select(Image.id).where(
+                        Image.id.in_(attachment_ids),
+                        Image.user_id == user.id,
+                        Image.deleted_at.is_(None),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if len(rows) != len(attachment_ids):
-            raise _http("invalid_attachment", "one or more attachment images are not owned or were deleted", 400)
+            raise _http(
+                "invalid_attachment",
+                "one or more attachment images are not owned or were deleted",
+                400,
+            )
 
     # ---- mask 字段归一（intent 解析前只做 strip，规约移到 intent 后） ----
     mask_image_id = (body.mask_image_id or "").strip() or None
@@ -1592,35 +1669,6 @@ async def submit_user_message(
             conv=conv,
             explicit_prompt=chat_params.system_prompt,
         )
-        if getattr(user, "account_mode", "wallet") == "wallet" and await _billing_enabled(db):
-            # Why: lock=True so concurrent chat submissions from the same user
-            # serialize on the wallet row. Without the lock, N parallel chats
-            # all see the same pre-charge balance and overdraw together; design
-            # §6.3.2 tolerates a single transient overdraw but not N.
-            wallet = await billing_core.get_wallet(db, user.id, lock=True)
-            if wallet.balance_micro < 10_000:
-                raise _http(
-                    "INSUFFICIENT_BALANCE",
-                    "insufficient wallet balance",
-                    402,
-                )
-            cost_preview = await billing_core.estimate_completion_cost(
-                db,
-                model=DEFAULT_CHAT_MODEL,
-                tokens_in=1,
-                tokens_out=1,
-            )
-            if cost_preview <= 0:
-                await _audit_billing_gap(
-                    db,
-                    event_type="pricing.not_configured",
-                    user=user,
-                    details={
-                        "scope": "chat_model",
-                        "model": DEFAULT_CHAT_MODEL,
-                        "route": "messages.preflight",
-                    },
-                )
     default_image_output_format = _DEFAULT_IMAGE_OUTPUT_FORMAT
     if intent in (Intent.TEXT_TO_IMAGE, Intent.IMAGE_TO_IMAGE):
         spec = get_spec("image.output_format")
@@ -1650,6 +1698,7 @@ async def submit_user_message(
     result = await _create_assistant_task(
         db=db,
         user_id=user.id,
+        user_email=user.email,
         account_mode=getattr(user, "account_mode", "wallet"),
         conv=conv,
         user_msg=user_msg,
@@ -1802,14 +1851,18 @@ async def create_silent_generation(
     attachment_ids = list(body.attachment_image_ids or [])
     if attachment_ids:
         rows = (
-            await db.execute(
-                select(Image.id).where(
-                    Image.id.in_(attachment_ids),
-                    Image.user_id == user.id,
-                    Image.deleted_at.is_(None),
+            (
+                await db.execute(
+                    select(Image.id).where(
+                        Image.id.in_(attachment_ids),
+                        Image.user_id == user.id,
+                        Image.deleted_at.is_(None),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if len(rows) != len(attachment_ids):
             raise _http("invalid_attachment", "attachment not owned or deleted", 400)
 

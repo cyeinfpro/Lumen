@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.provider_pool import ProviderPool
-from app.provider_pool import ProviderConfig, ResolvedProvider
+from app.provider_pool import ProviderConfig, ProviderHealth, ResolvedProvider
 from app.config import BYOK_DEV_MASTER_SECRET, Settings
 
 
@@ -29,6 +29,19 @@ def test_worker_non_dev_rejects_byok_dev_fallback_secret() -> None:
         Settings(
             app_env="prod",
             byok_api_key_master_secret=BYOK_DEV_MASTER_SECRET,
+        )
+
+
+def test_worker_default_redis_url_matches_password_protected_dev_redis() -> None:
+    assert Settings().redis_url == "redis://:lumen-redis-dev-password@localhost:6379/0"
+
+
+def test_worker_non_dev_rejects_image_job_example_placeholder() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="prod",
+            byok_api_key_master_secret="x" * 32,
+            image_job_base_url="https://image-job.example.com",
         )
 
 
@@ -79,8 +92,7 @@ async def test_provider_pool_uses_configured_providers_without_legacy_merge(
     providers = await ProviderPool()._load_config()
 
     assert [
-        (p.name, p.base_url, p.api_key, p.priority, p.weight)
-        for p in providers
+        (p.name, p.base_url, p.api_key, p.priority, p.weight) for p in providers
     ] == [
         ("primary", "https://primary.example", "sk-primary", 10, 2),
     ]
@@ -299,3 +311,47 @@ async def test_provider_pool_uses_legacy_env_only_when_providers_absent(
     assert [(p.name, p.base_url, p.api_key) for p in providers] == [
         ("default", "https://legacy.example", "sk-legacy")
     ]
+
+
+@pytest.mark.asyncio
+async def test_provider_pool_reload_cleans_orphan_health_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool
+
+    pool = ProviderPool()
+    pool._health = {
+        "old": ProviderHealth(),
+        "valid": ProviderHealth(),
+        "invalid": ProviderHealth(),
+    }
+
+    async def fake_load_provider_config():
+        return [
+            ProviderConfig(
+                name="valid",
+                base_url="https://valid.example",
+                api_key="sk-valid",
+            ),
+            ProviderConfig(
+                name="invalid",
+                base_url="https://invalid.example",
+                api_key="sk-invalid",
+            ),
+        ], {}
+
+    async def fake_validate_provider_base_url(raw_base: str) -> str:
+        if "invalid" in raw_base:
+            raise ValueError("bad upstream")
+        return raw_base
+
+    monkeypatch.setattr(pool, "_load_provider_config", fake_load_provider_config)
+    monkeypatch.setattr(
+        provider_pool,
+        "_validate_provider_base_url",
+        fake_validate_provider_base_url,
+    )
+
+    await pool._maybe_reload()
+
+    assert set(pool._health) == {"valid"}

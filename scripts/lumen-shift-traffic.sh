@@ -30,9 +30,12 @@ else
 fi
 
 tmp="$(mktemp "${nginx_conf}.XXXXXX")"
-backup="$(mktemp "${nginx_conf}.bak.XXXXXX")"
+backup=""
 cleanup() {
-    rm -f "${tmp}" "${backup}"
+    rm -f "${tmp}"
+    if [ -n "${backup}" ]; then
+        rm -f "${backup}"
+    fi
 }
 trap cleanup EXIT
 
@@ -46,13 +49,16 @@ upstream lumen_api {
 EOF
 
 if [ -f "${nginx_conf}" ]; then
+    backup="$(mktemp "${nginx_conf}.bak.XXXXXX")"
     cp "${nginx_conf}" "${backup}"
-else
-    : > "${backup}"
 fi
 install -m 0644 "${tmp}" "${nginx_conf}"
 if ! "${nginx_bin}" -t; then
-    install -m 0644 "${backup}" "${nginx_conf}"
+    if [ -n "${backup}" ]; then
+        install -m 0644 "${backup}" "${nginx_conf}"
+    else
+        rm -f "${nginx_conf}"
+    fi
     "${nginx_bin}" -t >/dev/null 2>&1 || true
     exit 1
 fi

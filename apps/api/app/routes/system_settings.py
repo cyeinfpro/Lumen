@@ -45,7 +45,20 @@ async def _validate_threshold_pricing_alignment(
     db: AsyncSession,
     raw_thresholds: str,
 ) -> None:
-    parsed = json.loads(raw_thresholds)
+    try:
+        parsed = json.loads(raw_thresholds)
+    except json.JSONDecodeError as exc:
+        raise _http(
+            "INVALID_THRESHOLDS_JSON",
+            "billing.image_size_thresholds must be valid JSON",
+            422,
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise _http(
+            "INVALID_THRESHOLDS_JSON",
+            "billing.image_size_thresholds must be a JSON object",
+            422,
+        )
     enabled_keys = set(
         (
             await db.execute(

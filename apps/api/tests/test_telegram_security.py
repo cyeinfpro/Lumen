@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import Request
@@ -77,6 +78,80 @@ async def test_bind_invalid_code_counts_against_code_limiter(
 
     assert getattr(excinfo.value, "status_code", None) == 400
     assert limiter.keys == ["rl:telegram:bind:127.0.0.1"]
+
+
+@pytest.mark.asyncio
+async def test_bind_db_failure_releases_claim_without_deleting_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.values = {telegram._link_code_key("code-1"): "user-1"}  # noqa: SLF001
+            self.deleted: list[str] = []
+
+        async def get(self, key: str) -> str | None:
+            return self.values.get(key)
+
+        async def set(self, key: str, value: str, **_kwargs: Any) -> bool:
+            self.values[key] = value
+            return True
+
+        async def delete(self, key: str) -> int:
+            self.deleted.append(key)
+            self.values.pop(key, None)
+            return 1
+
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self) -> None:
+            self.results = [
+                SimpleNamespace(
+                    id="user-1",
+                    email="u@example.com",
+                    display_name="User",
+                    deleted_at=None,
+                ),
+                None,
+                None,
+            ]
+            self.rolled_back = False
+
+        async def execute(self, _stmt: Any) -> Result:
+            return Result(self.results.pop(0))
+
+        def add(self, _value: Any) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            raise RuntimeError("deadlock")
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    redis = Redis()
+    monkeypatch.setattr(telegram, "get_redis", lambda: redis)
+
+    db = Db()
+    with pytest.raises(RuntimeError):
+        await telegram.bind_telegram(
+            _request(),
+            telegram.BindIn(chat_id="chat-1", code="code-1"),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert db.rolled_back is True
+    assert telegram._link_code_key("code-1") in redis.values  # noqa: SLF001
+    assert telegram._link_code_claim_key("code-1") in redis.deleted  # noqa: SLF001
+    assert telegram._link_code_key("code-1") not in redis.deleted  # noqa: SLF001
 
 
 @pytest.mark.asyncio

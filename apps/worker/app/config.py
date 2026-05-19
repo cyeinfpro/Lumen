@@ -10,6 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
 BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
+_DEFAULT_REDIS_PASSWORD = "lumen-redis-dev-password"
+_DEFAULT_REDIS_URL = f"redis://:{_DEFAULT_REDIS_PASSWORD}@localhost:6379/0"
+_DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
 
 
 class Settings(BaseSettings):
@@ -18,7 +21,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql+asyncpg://lumen:lumen@localhost:5432/lumen"
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = _DEFAULT_REDIS_URL
 
     providers: str = ""
     # 探活默认值（runtime_settings DB 优先，这里是 env / 启动 fallback）
@@ -36,7 +39,7 @@ class Settings(BaseSettings):
     image_primary_route: str = "responses"
     image_channel: str = Field(default="auto", alias="IMAGE_CHANNEL")
     image_engine: str = Field(default="responses", alias="IMAGE_ENGINE")
-    image_job_base_url: str = "https://image-job.example.com"
+    image_job_base_url: str = _DEFAULT_IMAGE_JOB_BASE_URL
 
     storage_root: str = "/opt/lumendata/storage"
 
@@ -81,6 +84,11 @@ class Settings(BaseSettings):
             raise ValueError("EDIT_RACE_LANES must be at least 1")
         env = self.app_env.strip().lower()
         is_dev = env in {"dev", "development", "local", "test"}
+        image_job_base = self.image_job_base_url.strip().rstrip("/")
+        if not is_dev and image_job_base == _DEFAULT_IMAGE_JOB_BASE_URL:
+            raise ValueError(
+                "IMAGE_JOB_BASE_URL must not use the example.com placeholder outside development"
+            )
         secret = (self.byok_api_key_master_secret or "").strip()
         # dev/test：未设时 fallback 到与 API 端一致的 deterministic dummy
         # （prod 严禁使用，必须显式 ≥ 32 chars）。

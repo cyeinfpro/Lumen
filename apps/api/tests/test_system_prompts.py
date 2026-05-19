@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
+
 from lumen_core.models import Conversation, SystemPrompt, User
 from lumen_core.schemas import ConversationOut, SystemPromptOut
 
 from app.routes.messages import choose_system_prompt
+from app.routes import system_prompts
 
 
 def test_system_prompt_model_has_owner_content_and_default_references() -> None:
@@ -60,3 +63,21 @@ def test_choose_system_prompt_prefers_explicit_then_conversation_then_global() -
         )
         == "global"
     )
+
+
+def test_system_prompt_integrity_uses_structured_constraint_name() -> None:
+    class Diag:
+        constraint_name = "uq_system_prompts_user_name"
+
+    class Orig(Exception):
+        diag = Diag()
+
+        def __repr__(self) -> str:
+            return "different-message"
+
+    http = system_prompts._classify_integrity(  # noqa: SLF001
+        IntegrityError("insert", {}, Orig())
+    )
+
+    assert http.status_code == 409
+    assert http.detail["error"]["code"] == "duplicate_name"

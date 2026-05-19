@@ -15,12 +15,15 @@ def _prod_kwargs() -> dict[str, str]:
         "byok_api_key_master_secret": "b" * 32,
         "database_url": "postgresql+asyncpg://lumen_prod:secret@localhost:5432/lumen",
         "redis_url": "redis://:redis-prod-password@localhost:6379/0",
+        "image_job_base_url": "https://image-jobs.example.net",
         "smtp_host": "smtp.example.com",
         "smtp_from_email": "noreply@example.com",
     }
 
 
-def test_non_dev_requires_explicit_session_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_non_dev_requires_explicit_session_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("SESSION_SECRET", raising=False)
     with pytest.raises(ValidationError):
         Settings(app_env="prod", _env_file=None)
@@ -105,9 +108,25 @@ def test_non_dev_rejects_default_postgres_credentials() -> None:
         Settings(**kwargs)
 
 
+def test_non_dev_rejects_default_postgres_password_with_custom_user() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["database_url"] = "postgresql+asyncpg://custom:lumen@localhost:5432/lumen"
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
 def test_non_dev_rejects_default_redis_password() -> None:
     kwargs = _prod_kwargs()
     kwargs["redis_url"] = "redis://:lumen-redis-dev-password@localhost:6379/0"
+
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)
+
+
+def test_non_dev_rejects_placeholder_image_job_base_url() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["image_job_base_url"] = "https://image-job.example.com"
 
     with pytest.raises(ValidationError):
         Settings(**kwargs)
@@ -123,11 +142,7 @@ def test_settings_env_files_support_explicit_env_file(
 
 
 def test_providers_accept_http_base_url() -> None:
-    raw = (
-        '[{"name":"internal",'
-        '"base_url":"http://10.0.0.8:8000/v1",'
-        '"api_key":"sk"}]'
-    )
+    raw = '[{"name":"internal","base_url":"http://10.0.0.8:8000/v1","api_key":"sk"}]'
 
     assert validate_providers(raw) == raw
 

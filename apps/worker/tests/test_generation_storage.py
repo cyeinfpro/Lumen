@@ -393,7 +393,7 @@ async def test_lease_renewer_sets_event_without_raising(
     monkeypatch.setattr(generation, "_LEASE_RENEW_S", 0)
     lease_lost = asyncio.Event()
 
-    await generation._lease_renewer(_Redis(), "gen-1", lease_lost)
+    await generation._lease_renewer(_Redis(), "gen-1", "worker-1", lease_lost)
 
     assert lease_lost.is_set()
 
@@ -508,7 +508,9 @@ async def test_image_queue_kick_skips_not_before_tasks(
     async def fake_queued_generation_ids(_limit: int) -> list[str]:
         return ["gen-old", "gen-ready"]
 
-    monkeypatch.setattr(generation, "_queued_generation_ids", fake_queued_generation_ids)
+    monkeypatch.setattr(
+        generation, "_queued_generation_ids", fake_queued_generation_ids
+    )
 
     await generation._kick_image_queue(redis)
 
@@ -600,9 +602,7 @@ async def test_image_queue_reserves_different_provider_and_blocks_duplicate_task
     assert reserved is not None
     assert reserved.name == "acc2"
     assert duplicate is None
-    assert (
-        "gen-1" in redis.zsets[generation._image_provider_active_key("acc2")]
-    )
+    assert "gen-1" in redis.zsets[generation._image_provider_active_key("acc2")]
     assert redis.store[generation._image_task_provider_key("gen-1")] == "acc2"
     assert "gen-1" in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
 
@@ -754,9 +754,7 @@ async def test_image_queue_per_provider_concurrency_admits_multiple(
     assert [name for _, name in admitted] == ["solo", "solo", "solo"]
     # 4th task can't be admitted — concurrency cap reached on the only provider.
     assert "gen-4" in queue
-    assert (
-        len(redis.zsets[generation._image_provider_active_key("solo")]) == 3
-    )
+    assert len(redis.zsets[generation._image_provider_active_key("solo")]) == 3
 
 
 def test_image_queue_capacity_allows_high_provider_concurrency(
@@ -1176,7 +1174,9 @@ async def test_await_with_lease_guard_aborts_work() -> None:
         await asyncio.sleep(10)
         return "done"
 
-    task = asyncio.create_task(generation._await_with_lease_guard(slow_work(), lease_lost))
+    task = asyncio.create_task(
+        generation._await_with_lease_guard(slow_work(), lease_lost)
+    )
     await started.wait()
     lease_lost.set()
 

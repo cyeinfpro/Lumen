@@ -77,7 +77,9 @@ def test_classify_user_credential_error_handles_auth_and_rate_limit() -> None:
     assert unrelated_code is None
 
 
-def test_classify_user_credential_error_does_not_use_message_when_status_known() -> None:
+def test_classify_user_credential_error_does_not_use_message_when_status_known() -> (
+    None
+):
     """Status 200 + 'rate limit' in message must NOT escalate (review #21).
 
     Heuristic message matching only kicks in when status_code AND error_code
@@ -116,7 +118,9 @@ def test_byok_error_to_generation_code_maps_user_key_failures() -> None:
     assert byok_runtime.byok_error_to_generation_code("key_rate_limited") == (
         EC.UPSTREAM_RATE_LIMITED.value
     )
-    assert byok_runtime.byok_error_to_generation_code("other") == EC.UPSTREAM_ERROR.value
+    assert (
+        byok_runtime.byok_error_to_generation_code("other") == EC.UPSTREAM_ERROR.value
+    )
     assert (
         byok_runtime.byok_error_to_generation_code("byok_master_secret_mismatch")
         == EC.UPSTREAM_ERROR.value
@@ -130,6 +134,17 @@ def test_is_byok_provider_recognizes_user_prefix() -> None:
     assert not byok_runtime.is_byok_provider(SimpleNamespace(name="openai-paid"))
     assert not byok_runtime.is_byok_provider(SimpleNamespace(name=""))
     assert not byok_runtime.is_byok_provider(SimpleNamespace())
+
+
+def test_base_url_validation_cache_clear_uses_shared_lock() -> None:
+    cache_key = ("https://upstream.example", False)
+    with byok_runtime._BASE_URL_VALIDATION_CACHE_LOCK:
+        byok_runtime._BASE_URL_VALIDATION_CACHE[cache_key] = (999999.0, "cached")
+
+    byok_runtime.clear_base_url_validation_cache()
+
+    assert byok_runtime._BASE_URL_VALIDATION_CACHE == {}
+    assert hasattr(byok_runtime._BASE_URL_VALIDATION_CACHE_LOCK, "acquire")
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +171,10 @@ async def test_resolve_user_credential_runtime_builds_resolved_provider(
         proxy_name=None,
         image_concurrency_per_key=3,
         purposes=["chat"],
-        capabilities_jsonb={"image_jobs_enabled": True, "image_jobs_endpoint": "responses"},
+        capabilities_jsonb={
+            "image_jobs_enabled": True,
+            "image_jobs_endpoint": "responses",
+        },
     )
     db = _Db([_Result((credential, supplier))])
 
@@ -292,9 +310,7 @@ async def test_resolve_user_credential_runtime_rate_limited_in_window(
 ) -> None:
     """rate_limited_until 在未来 → SELECT 拿不到行 → 第二次 get 拿原始行 → 抛 key_rate_limited."""
     pytest.importorskip("cryptography")
-    monkeypatch.setattr(
-        byok_runtime.settings, "byok_api_key_master_secret", "y" * 32
-    )
+    monkeypatch.setattr(byok_runtime.settings, "byok_api_key_master_secret", "y" * 32)
     raw_credential = SimpleNamespace(
         id="cred-rate-limited",
         rate_limited_until=datetime.now(timezone.utc) + timedelta(minutes=2),
@@ -318,9 +334,7 @@ async def test_resolve_user_credential_runtime_inactive_raises(
 ) -> None:
     """rate_limited_until 为 None 但 select 仍空（status invalid / supplier disabled） → 403."""
     pytest.importorskip("cryptography")
-    monkeypatch.setattr(
-        byok_runtime.settings, "byok_api_key_master_secret", "z" * 32
-    )
+    monkeypatch.setattr(byok_runtime.settings, "byok_api_key_master_secret", "z" * 32)
     db = _Db(results=[_Result(None)], raw_credential=None)
     with pytest.raises(UpstreamError) as exc_info:
         await byok_runtime.resolve_user_credential_runtime(

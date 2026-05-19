@@ -36,6 +36,13 @@ def _nested(mapping: dict[str, Any], *keys: str) -> Any:
     return cur
 
 
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 @dataclass(frozen=True)
 class UsageTokens:
     input_tokens: int
@@ -174,61 +181,81 @@ def parse_usage(provider: str, usage: dict[str, Any] | None) -> UsageTokens:
     provider_norm = (provider or "").lower()
 
     raw_input = _nonnegative(
-        usage.get("input_tokens")
-        or usage.get("prompt_tokens")
-        or usage.get("promptTokenCount")
+        _first_present(
+            usage.get("input_tokens"),
+            usage.get("prompt_tokens"),
+            usage.get("promptTokenCount"),
+        )
     )
     raw_output = _nonnegative(
-        usage.get("output_tokens")
-        or usage.get("completion_tokens")
-        or usage.get("candidatesTokenCount")
+        _first_present(
+            usage.get("output_tokens"),
+            usage.get("completion_tokens"),
+            usage.get("candidatesTokenCount"),
+        )
     )
 
-    anthropic_cache_read = _nonnegative(
-        usage.get("cache_read_input_tokens")
-        or usage.get("cache_read_tokens")
+    raw_anthropic_cache_read = _first_present(
+        usage.get("cache_read_input_tokens"),
+        usage.get("cache_read_tokens"),
     )
+    anthropic_cache_read = _nonnegative(raw_anthropic_cache_read)
     anthropic_cache_create = _nonnegative(
-        usage.get("cache_creation_input_tokens")
-        or usage.get("cache_creation_tokens")
+        _first_present(
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_creation_tokens"),
+        )
     )
     cache_5m = _nonnegative(
-        _nested(usage, "cache_creation", "ephemeral_5m_input_tokens")
-        or usage.get("cache_creation_5m_input_tokens")
-        or usage.get("cache_creation_5m_tokens")
+        _first_present(
+            _nested(usage, "cache_creation", "ephemeral_5m_input_tokens"),
+            usage.get("cache_creation_5m_input_tokens"),
+            usage.get("cache_creation_5m_tokens"),
+        )
     )
     cache_1h = _nonnegative(
-        _nested(usage, "cache_creation", "ephemeral_1h_input_tokens")
-        or usage.get("cache_creation_1h_input_tokens")
-        or usage.get("cache_creation_1h_tokens")
+        _first_present(
+            _nested(usage, "cache_creation", "ephemeral_1h_input_tokens"),
+            usage.get("cache_creation_1h_input_tokens"),
+            usage.get("cache_creation_1h_tokens"),
+        )
     )
-    cached_details = _nonnegative(
-        _nested(usage, "input_tokens_details", "cached_tokens")
-        or _nested(usage, "prompt_tokens_details", "cached_tokens")
-        or usage.get("cached_tokens")
-        or usage.get("cachedContentTokenCount")
+    raw_cached_details = _first_present(
+        _nested(usage, "input_tokens_details", "cached_tokens"),
+        _nested(usage, "prompt_tokens_details", "cached_tokens"),
+        usage.get("cached_tokens"),
+        usage.get("cachedContentTokenCount"),
     )
+    cached_details = _nonnegative(raw_cached_details)
 
     reasoning_tokens = _nonnegative(
-        _nested(usage, "output_tokens_details", "reasoning_tokens")
-        or _nested(usage, "completion_tokens_details", "reasoning_tokens")
-        or usage.get("reasoning_tokens")
+        _first_present(
+            _nested(usage, "output_tokens_details", "reasoning_tokens"),
+            _nested(usage, "completion_tokens_details", "reasoning_tokens"),
+            usage.get("reasoning_tokens"),
+        )
     )
     image_output_tokens = _nonnegative(
-        _nested(usage, "output_tokens_details", "image_tokens")
-        or _nested(usage, "completion_tokens_details", "image_tokens")
-        or usage.get("image_output_tokens")
-        or usage.get("image_tokens")
+        _first_present(
+            _nested(usage, "output_tokens_details", "image_tokens"),
+            _nested(usage, "completion_tokens_details", "image_tokens"),
+            usage.get("image_output_tokens"),
+            usage.get("image_tokens"),
+        )
     )
 
     if cache_5m or cache_1h:
         anthropic_cache_create = max(anthropic_cache_create, cache_5m + cache_1h)
 
-    cache_read = anthropic_cache_read or cached_details
+    cache_read = (
+        anthropic_cache_read if raw_anthropic_cache_read is not None else cached_details
+    )
     input_tokens = raw_input
     is_anthropic = "anthropic" in provider_norm or "claude" in provider_norm
-    if cached_details and not is_anthropic:
-        input_tokens = max(0, raw_input - cached_details)
+    if not is_anthropic:
+        total_cached = max(cached_details, anthropic_cache_read)
+        if total_cached:
+            input_tokens = max(0, raw_input - total_cached)
 
     # Some gateways use `cache_creation_input_tokens` without duration buckets.
     cache_creation = anthropic_cache_create
@@ -245,7 +272,7 @@ def parse_usage(provider: str, usage: dict[str, Any] | None) -> UsageTokens:
 
 
 def _cost(tokens: int, rate_per_1k_micro: int) -> int:
-    return (max(0, int(tokens)) * max(0, int(rate_per_1k_micro))) // 1000
+    return (max(0, int(tokens)) * max(0, int(rate_per_1k_micro)) + 500) // 1000
 
 
 def _apply_multiplier(value: int, multiplier_x10000: int) -> int:
@@ -301,8 +328,12 @@ def compute_breakdown(
     output_cost = _cost(output_text_tokens, output_rate)
     cache_read_cost = _cost(usage.cache_read_tokens, cache_read_rate)
 
-    cache_creation_bucketed = usage.cache_creation_5m_tokens + usage.cache_creation_1h_tokens
-    cache_creation_unbucketed = max(0, usage.cache_creation_tokens - cache_creation_bucketed)
+    cache_creation_bucketed = (
+        usage.cache_creation_5m_tokens + usage.cache_creation_1h_tokens
+    )
+    cache_creation_unbucketed = max(
+        0, usage.cache_creation_tokens - cache_creation_bucketed
+    )
     cache_creation_cost = (
         _cost(cache_creation_unbucketed, pricing.cache_creation_per_1k_micro)
         + _cost(usage.cache_creation_5m_tokens, pricing.cache_creation_5m_per_1k_micro)

@@ -28,6 +28,24 @@ DRY_RUN="${DRY_RUN:-0}"
 log()  { printf '[fix-redis %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 fail() { printf '[fix-redis ERROR] %s\n' "$*" >&2; exit 1; }
 
+env_file_value() {
+    local key="$1" file="$2" line value first last
+    line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$file" | head -n1 || true)"
+    [ -n "$line" ] || return 0
+    value="${line#*=}"
+    # Strip surrounding whitespace and one layer of standard shell quotes.
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [ "${#value}" -ge 2 ]; then
+        first="${value:0:1}"
+        last="${value: -1}"
+        if { [ "$first" = "'" ] && [ "$last" = "'" ]; } || { [ "$first" = '"' ] && [ "$last" = '"' ]; }; then
+            value="${value:1:${#value}-2}"
+        fi
+    fi
+    printf '%s' "$value"
+}
+
 # 0. 前置检查
 command -v docker >/dev/null 2>&1 || fail "docker 不可用"
 command -v awk    >/dev/null 2>&1 || fail "awk 不可用"
@@ -89,11 +107,17 @@ fi
 log "使用 .env: $SHARED"
 
 # 1. 从 REDIS_URL 解析嵌入密码
-P_URL="$(sed -n 's|^REDIS_URL=redis://:||p' "$SHARED" | head -n1 | sed 's|@.*||')"
+REDIS_URL_VALUE="$(env_file_value REDIS_URL "$SHARED")"
+if [ "$REDIS_URL_VALUE" = "${REDIS_URL_VALUE#redis://:}" ]; then
+    P_URL=""
+else
+    P_URL="${REDIS_URL_VALUE#redis://:}"
+    P_URL="${P_URL%%@*}"
+fi
 [ -n "$P_URL" ] || fail "无法从 REDIS_URL 解析嵌入密码；期望格式 REDIS_URL=redis://:<pwd>@host:port/db"
 
 # 2. 当前 REDIS_PASSWORD
-P_NOW="$(sed -n 's/^REDIS_PASSWORD=//p' "$SHARED" | head -n1)"
+P_NOW="$(env_file_value REDIS_PASSWORD "$SHARED")"
 
 # 3. 已一致 → noop
 if [ "$P_URL" = "$P_NOW" ]; then
@@ -128,14 +152,18 @@ log "备份：$bak"
 
 tmp="$(mktemp)"
 awk -v v="$P_URL" '
-    /^REDIS_PASSWORD=/ { print "REDIS_PASSWORD=" v; next }
+    /^[[:space:]]*(export[[:space:]]+)?REDIS_PASSWORD[[:space:]]*=/ {
+        prefix = ($0 ~ /^[[:space:]]*export[[:space:]]+/) ? "export " : ""
+        print prefix "REDIS_PASSWORD=" v
+        next
+    }
     { print }
 ' "$SHARED" > "$tmp"
 mv "$tmp" "$SHARED"
 chmod 600 "$SHARED"
 
 # 7. 校验
-P_VERIFY="$(sed -n 's/^REDIS_PASSWORD=//p' "$SHARED" | head -n1)"
+P_VERIFY="$(env_file_value REDIS_PASSWORD "$SHARED")"
 [ "$P_VERIFY" = "$P_URL" ] || fail "写入未生效（请回滚：cp ${bak} ${SHARED}）"
 
 log "OK: REDIS_PASSWORD 已对齐 REDIS_URL 嵌入密码"

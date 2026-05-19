@@ -203,7 +203,7 @@ class ProviderPool:
         self._config_loaded_at: float = 0.0
         self._config_lock = asyncio.Lock()
         self._stats_lock = threading.Lock()
-        self._rr_counters: dict[int, int] = {}
+        self._rr_state: dict[int, dict[str, int]] = {}
         # arq ctx['redis']；由 generation 任务在执行前 attach_redis() 注入。
         # 没注入时 image route 的 quota 检查会短路（让 limiter 不阻塞主路径）。
         self._redis: Any = None
@@ -334,6 +334,12 @@ class ProviderPool:
                 del self._health[removed]
             for name in new_names - old_names:
                 self._health[name] = ProviderHealth()
+            for prio, state in list(self._rr_state.items()):
+                for name in list(state.keys()):
+                    if name not in new_names:
+                        del state[name]
+                if not state:
+                    del self._rr_state[prio]
 
             changed = [p.name for p in self._providers] != [p.name for p in validated]
             self._providers = validated
@@ -443,25 +449,45 @@ class ProviderPool:
         if len(group) <= 1:
             return list(group)
         prio = group[0].priority
-        total_weight = sum(p.weight for p in group)
-        counter = self._rr_counters.get(prio, 0)
-
-        expanded: list[ProviderConfig] = []
+        state = self._rr_state.setdefault(prio, {})
         for p in group:
-            expanded.extend([p] * p.weight)
+            state.setdefault(p.name, 0)
 
-        offset = counter % max(total_weight, 1)
-        rotated = expanded[offset:] + expanded[:offset]
+        def weight(p: ProviderConfig) -> int:
+            return max(1, int(p.weight or 1))
 
-        seen: set[str] = set()
-        result: list[ProviderConfig] = []
-        for p in rotated:
-            if p.name not in seen:
-                seen.add(p.name)
-                result.append(p)
+        total_weight = sum(weight(p) for p in group)
 
-        self._rr_counters[prio] = counter + 1
-        return result
+        def pick_next(
+            candidates: list[ProviderConfig],
+            current: dict[str, int],
+            *,
+            subtract_total: int,
+        ) -> ProviderConfig:
+            for p in candidates:
+                current[p.name] = current.get(p.name, 0) + weight(p)
+            order_index = {p.name: idx for idx, p in enumerate(group)}
+            selected = max(
+                candidates,
+                key=lambda p: (current[p.name], weight(p), -order_index[p.name]),
+            )
+            current[selected.name] -= subtract_total
+            return selected
+
+        first = pick_next(group, state, subtract_total=total_weight)
+        ordered = [first]
+        remaining = [p for p in group if p.name != first.name]
+        local_state = dict(state)
+        while remaining:
+            remaining_total = sum(weight(p) for p in remaining)
+            selected = pick_next(
+                remaining,
+                local_state,
+                subtract_total=remaining_total,
+            )
+            ordered.append(selected)
+            remaining = [p for p in remaining if p.name != selected.name]
+        return ordered
 
     @staticmethod
     def _is_open(h: ProviderHealth, now: float) -> bool:
