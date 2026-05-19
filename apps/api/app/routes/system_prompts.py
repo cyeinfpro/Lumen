@@ -37,10 +37,27 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
 
 
 def _classify_integrity(exc: IntegrityError) -> HTTPException:
+    constraint_name = _constraint_name(exc)
+    if constraint_name == _UNIQUE_NAME_CONSTRAINT:
+        return _http("duplicate_name", "system prompt name already exists", 409)
     text = f"{exc.orig!r}" if exc.orig is not None else str(exc)
+    # SQLite does not expose named unique constraints in the same structured
+    # way as PostgreSQL; retain a text fallback for local tests/dev.
     if _UNIQUE_NAME_CONSTRAINT in text:
         return _http("duplicate_name", "system prompt name already exists", 409)
     return _http("integrity_error", "could not persist system prompt", 409)
+
+
+def _constraint_name(exc: IntegrityError) -> str | None:
+    orig = exc.orig
+    diag = getattr(orig, "diag", None)
+    value = getattr(diag, "constraint_name", None)
+    if isinstance(value, str) and value:
+        return value
+    value = getattr(orig, "constraint_name", None)
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def _to_out(prompt: SystemPrompt, default_id: str | None) -> SystemPromptOut:
@@ -71,12 +88,16 @@ async def list_system_prompts(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SystemPromptListOut:
     rows = (
-        await db.execute(
-            select(SystemPrompt)
-            .where(SystemPrompt.user_id == user.id)
-            .order_by(desc(SystemPrompt.updated_at), desc(SystemPrompt.id))
+        (
+            await db.execute(
+                select(SystemPrompt)
+                .where(SystemPrompt.user_id == user.id)
+                .order_by(desc(SystemPrompt.updated_at), desc(SystemPrompt.id))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return SystemPromptListOut(
         items=[_to_out(p, user.default_system_prompt_id) for p in rows],
         default_id=user.default_system_prompt_id,
@@ -116,7 +137,9 @@ async def create_system_prompt(
     return _to_out(prompt, user.default_system_prompt_id)
 
 
-@router.patch("/{prompt_id}", response_model=SystemPromptOut, dependencies=[Depends(verify_csrf)])
+@router.patch(
+    "/{prompt_id}", response_model=SystemPromptOut, dependencies=[Depends(verify_csrf)]
+)
 async def patch_system_prompt(
     prompt_id: str,
     body: SystemPromptPatchIn,
@@ -180,7 +203,11 @@ async def delete_system_prompt(
     await db.commit()
 
 
-@router.post("/{prompt_id}/default", response_model=SystemPromptOut, dependencies=[Depends(verify_csrf)])
+@router.post(
+    "/{prompt_id}/default",
+    response_model=SystemPromptOut,
+    dependencies=[Depends(verify_csrf)],
+)
 async def set_default_system_prompt(
     prompt_id: str,
     user: CurrentUser,

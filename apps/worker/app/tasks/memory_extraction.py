@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import secrets
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -90,6 +91,7 @@ async def _try_advisory_xact_lock(session: Any, key: str) -> None:
         await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(key))))
     except Exception:
         return
+
 
 _EXTRACTION_INSTRUCTIONS = """从用户单轮消息中抽取长期适用的账号记忆，输出严格 JSON。
 输出格式: {"items":[{"type":"profile|preference|avoid|project","content":"<200字","confidence":0.0-1.0,"source_excerpt":"原文50-120字","intent_kind":"directive|statement"}]}。
@@ -213,7 +215,9 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
 
     for provider in providers:
         try:
-            proxy_url = await resolve_provider_proxy_url(getattr(provider, "proxy", None))
+            proxy_url = await resolve_provider_proxy_url(
+                getattr(provider, "proxy", None)
+            )
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(
                     connect=5.0,
@@ -323,7 +327,7 @@ def _text_from_message(msg: Message | None) -> str:
 
 
 def _topic_key(text: str) -> str:
-    value = canonical_memory_text(text)
+    value = unicodedata.normalize("NFC", canonical_memory_text(text))
     value = re.sub(r"(用户|我|喜欢|偏好|不喜欢|不要|别|不|请|以后|回答)", "", value)
     return value
 
@@ -356,7 +360,9 @@ async def _conversation_disabled_memory_ids(
     if redis is None:
         return set()
     try:
-        raw_values = await redis.smembers(f"memory:conversation:{conversation_id}:disabled")
+        raw_values = await redis.smembers(
+            f"memory:conversation:{conversation_id}:disabled"
+        )
     except Exception:
         return set()
     disabled: set[str] = set()
@@ -405,15 +411,19 @@ async def assemble_user_memory_prompt(
         scope_ids.add(conv.active_scope_id)
         active_scope = await session.get(UserMemoryScope, conv.active_scope_id)
     rows = (
-        await session.execute(
-            select(UserMemory).where(
-                UserMemory.user_id == user_id,
-                UserMemory.disabled.is_(False),
-                UserMemory.superseded_by.is_(None),
-                UserMemory.scope_id.in_(scope_ids),
+        (
+            await session.execute(
+                select(UserMemory).where(
+                    UserMemory.user_id == user_id,
+                    UserMemory.disabled.is_(False),
+                    UserMemory.superseded_by.is_(None),
+                    UserMemory.scope_id.in_(scope_ids),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     disabled_ids = await _conversation_disabled_memory_ids(redis, conversation_id)
     if disabled_ids:
         rows = [memory for memory in rows if memory.id not in disabled_ids]
@@ -422,13 +432,17 @@ async def assemble_user_memory_prompt(
     profiles = [m for m in rows if m.type == "profile"]
     avoids = [m for m in rows if m.type == "avoid"]
     pinned = [m for m in rows if m.pinned]
-    candidates = [m for m in rows if m.type in {"preference", "project"} and not m.pinned]
+    candidates = [
+        m for m in rows if m.type in {"preference", "project"} and not m.pinned
+    ]
 
     ranked: list[tuple[float, UserMemory]] = []
     if len((user_text or "").strip()) >= 5:
         query_vec = await _embedding_vector(None, user_text)
         for memory in candidates:
-            memory_vec = parse_embedding_literal(memory.embedding) or deterministic_embedding(memory.content)
+            memory_vec = parse_embedding_literal(
+                memory.embedding
+            ) or deterministic_embedding(memory.content)
             score = (
                 cosine_similarity(query_vec, memory_vec)
                 * (1 + 0.1 * memory.positive_signal - 0.15 * memory.negative_signal)
@@ -445,8 +459,12 @@ async def assemble_user_memory_prompt(
         seen.add(memory.id)
         context_memories.append(memory)
 
-    profiles = _clip_lines(sorted(profiles, key=lambda m: (not m.pinned, -m.confidence)), max_chars=400)
-    avoids = _clip_lines(sorted(avoids, key=lambda m: (not m.pinned, -m.confidence)), max_chars=400)
+    profiles = _clip_lines(
+        sorted(profiles, key=lambda m: (not m.pinned, -m.confidence)), max_chars=400
+    )
+    avoids = _clip_lines(
+        sorted(avoids, key=lambda m: (not m.pinned, -m.confidence)), max_chars=400
+    )
     context_memories = _clip_lines(context_memories, max_chars=600)
 
     used = [*profiles, *avoids, *context_memories]
@@ -504,7 +522,9 @@ async def assemble_user_memory_prompt(
             if active_scope is not None and not active_scope.is_default
             else None
         ),
-        confirmation_candidate_id=confirmation_candidate.id if confirmation_candidate else None,
+        confirmation_candidate_id=confirmation_candidate.id
+        if confirmation_candidate
+        else None,
         confirmation_instruction=confirmation_instruction,
     )
 
@@ -522,7 +542,9 @@ async def _pick_confirmation_candidate(
 ) -> UserMemory | None:
     if not user.confirmation_enabled:
         return None
-    if re.search(r"(记住|remember|以后|不要|never|always)", user_text or "", re.IGNORECASE):
+    if re.search(
+        r"(记住|remember|以后|不要|never|always)", user_text or "", re.IGNORECASE
+    ):
         return None
     if parent_user_message_id:
         # advisory lock: 在 (user, conversation, day) 维度串行化 select-then-insert,
@@ -585,7 +607,8 @@ async def _pick_confirmation_candidate(
                 continue
         score = cosine_similarity(
             query_vec or deterministic_embedding(user_text),
-            parse_embedding_literal(memory.embedding) or deterministic_embedding(memory.content),
+            parse_embedding_literal(memory.embedding)
+            or deterministic_embedding(memory.content),
         )
         if score >= 0.92:
             if parent_user_message_id:
@@ -666,7 +689,9 @@ async def _publish_memory_writes(
     )
 
 
-async def _append_writes_to_message(session: Any, assistant_msg: Message, writes: list[dict[str, Any]]) -> None:
+async def _append_writes_to_message(
+    session: Any, assistant_msg: Message, writes: list[dict[str, Any]]
+) -> None:
     if not writes:
         return
     content = dict(assistant_msg.content or {})
@@ -693,7 +718,12 @@ async def memory_extract(
         if conv is None or user_msg is None or assistant_msg is None:
             return
         user = await session.get(User, conv.user_id)
-        if user is None or user.memory_disabled or user.memory_paused or conv.memory_disabled:
+        if (
+            user is None
+            or user.memory_disabled
+            or user.memory_paused
+            or conv.memory_disabled
+        ):
             return
         text = _text_from_message(user_msg)
         writes: list[dict[str, Any]] = []
@@ -713,7 +743,9 @@ async def memory_extract(
         default_scope = await _default_scope(session, user.id)
         scope_id = conv.active_scope_id or default_scope.id
         active_scope = await session.get(UserMemoryScope, scope_id)
-        scope_hint = active_scope.name if active_scope and not active_scope.is_default else None
+        scope_hint = (
+            active_scope.name if active_scope and not active_scope.is_default else None
+        )
         if candidates and not rejected_pii:
             llm_candidates = await _try_llm_extract(
                 text,
@@ -726,14 +758,18 @@ async def memory_extract(
         threshold = max(0.6, min(0.95, float(user.extraction_threshold or 0.80)))
         for candidate in candidates:
             existing = (
-                await session.execute(
-                    select(UserMemory).where(
-                        UserMemory.user_id == user.id,
-                        UserMemory.disabled.is_(False),
-                        UserMemory.superseded_by.is_(None),
+                (
+                    await session.execute(
+                        select(UserMemory).where(
+                            UserMemory.user_id == user.id,
+                            UserMemory.disabled.is_(False),
+                            UserMemory.superseded_by.is_(None),
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             duplicate = next(
                 (
                     m
@@ -759,23 +795,27 @@ async def memory_extract(
                 )
                 # 把 candidate 元数据塞进 token, undo "merged" 时按设计 §5.4
                 # 必须拆出独立条, 没这些字段就无法重建.
-                token = await _undo_token(
-                    redis,
-                    {
-                        "user_id": user.id,
-                        "action": "merged",
-                        "memory_id": duplicate.id,
-                        "candidate": {
-                            "type": candidate.type,
-                            "content": candidate.content,
-                            "source_excerpt": candidate.source_excerpt,
-                            "source_message_id": user_msg.id,
-                            "scope_id": scope_id,
-                            "source": "auto",
-                            "confidence": candidate.confidence,
+                token = (
+                    await _undo_token(
+                        redis,
+                        {
+                            "user_id": user.id,
+                            "action": "merged",
+                            "memory_id": duplicate.id,
+                            "candidate": {
+                                "type": candidate.type,
+                                "content": candidate.content,
+                                "source_excerpt": candidate.source_excerpt,
+                                "source_message_id": user_msg.id,
+                                "scope_id": scope_id,
+                                "source": "auto",
+                                "confidence": candidate.confidence,
+                            },
                         },
-                    },
-                ) if redis is not None else None
+                    )
+                    if redis is not None
+                    else None
+                )
                 writes.append(
                     _write_payload(
                         id=duplicate.id,
@@ -799,7 +839,10 @@ async def memory_extract(
                 ),
                 None,
             )
-            if candidate.confidence < threshold and candidate.intent_kind != "directive":
+            if (
+                candidate.confidence < threshold
+                and candidate.intent_kind != "directive"
+            ):
                 staging = UserMemoryStaging(
                     user_id=user.id,
                     type=candidate.type,
@@ -812,14 +855,23 @@ async def memory_extract(
                     scope_id=scope_id,
                     recommended_scope_id=scope_id,
                     decision="pending",
-                    expires_at=datetime.now(timezone.utc) + timedelta(days=_STAGING_TTL_DAYS),
+                    expires_at=datetime.now(timezone.utc)
+                    + timedelta(days=_STAGING_TTL_DAYS),
                 )
                 session.add(staging)
                 await session.flush()
-                token = await _undo_token(
-                    redis,
-                    {"user_id": user.id, "action": "staged", "staging_id": staging.id},
-                ) if redis is not None else None
+                token = (
+                    await _undo_token(
+                        redis,
+                        {
+                            "user_id": user.id,
+                            "action": "staged",
+                            "staging_id": staging.id,
+                        },
+                    )
+                    if redis is not None
+                    else None
+                )
                 writes.append(
                     _write_payload(
                         id=staging.id,
@@ -864,15 +916,19 @@ async def memory_extract(
                     details=details,
                 )
             )
-            token = await _undo_token(
-                redis,
-                {
-                    "user_id": user.id,
-                    "action": kind,
-                    "memory_id": memory.id,
-                    "old_memory_id": conflict.id if conflict is not None else None,
-                },
-            ) if redis is not None else None
+            token = (
+                await _undo_token(
+                    redis,
+                    {
+                        "user_id": user.id,
+                        "action": kind,
+                        "memory_id": memory.id,
+                        "old_memory_id": conflict.id if conflict is not None else None,
+                    },
+                )
+                if redis is not None
+                else None
+            )
             writes.append(
                 _write_payload(
                     id=memory.id,
@@ -903,25 +959,33 @@ async def cleanup_memory(ctx: dict[str, Any]) -> None:
     cutoff = now - timedelta(days=30)
     async with SessionLocal() as session:
         pending = (
-            await session.execute(
-                select(UserMemoryStaging).where(
-                    UserMemoryStaging.decision == "pending",
-                    UserMemoryStaging.expires_at < now,
+            (
+                await session.execute(
+                    select(UserMemoryStaging).where(
+                        UserMemoryStaging.decision == "pending",
+                        UserMemoryStaging.expires_at < now,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for row in pending:
             row.decision = "rejected"
             row.decided_at = now
         old_deleted = (
-            await session.execute(
-                select(UserMemory).where(
-                    UserMemory.disabled.is_(True),
-                    UserMemory.deleted_at.is_not(None),
-                    UserMemory.deleted_at < cutoff,
+            (
+                await session.execute(
+                    select(UserMemory).where(
+                        UserMemory.disabled.is_(True),
+                        UserMemory.deleted_at.is_not(None),
+                        UserMemory.deleted_at < cutoff,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for memory in old_deleted:
             await session.delete(memory)
         await session.commit()

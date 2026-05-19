@@ -17,6 +17,9 @@ from PIL.PngImagePlugin import PngInfo
 
 LUMEN_MODEL_METADATA_KEY = "lumen.model_library"
 LUMEN_MODEL_METADATA_SCHEMA = "model_library.v1"
+JPEG_METADATA_PREFIX = f"{LUMEN_MODEL_METADATA_KEY}:"
+EXIF_IMAGE_DESCRIPTION = 0x010E
+EXIF_USER_COMMENT = 0x9286
 MODEL_FILENAME_PREFIX = "lumen-model"
 MODEL_FILENAME_MAX_CHARS = 96
 
@@ -43,9 +46,7 @@ APPEARANCE_SLUG_BY_VALUE: dict[str, str] = {
     "mixed": "mixed",
     "other": "other",
 }
-APPEARANCE_BY_SLUG = {
-    value: key for key, value in APPEARANCE_SLUG_BY_VALUE.items()
-}
+APPEARANCE_BY_SLUG = {value: key for key, value in APPEARANCE_SLUG_BY_VALUE.items()}
 
 TAG_SLUG_BY_LABEL: dict[str, str] = {
     "温柔亲和": "gentle-friendly",
@@ -154,7 +155,10 @@ def parse_model_image_metadata(value: Any) -> ModelImageMetadata | None:
 
 def read_model_image_metadata(image: PILImage.Image) -> ModelImageMetadata | None:
     value = image.info.get(LUMEN_MODEL_METADATA_KEY)
-    return parse_model_image_metadata(value)
+    parsed = parse_model_image_metadata(value)
+    if parsed is not None:
+        return parsed
+    return _read_model_image_metadata_from_jpeg_fields(image)
 
 
 def pnginfo_for_model_metadata(payload: dict[str, Any]) -> PngInfo:
@@ -166,6 +170,75 @@ def pnginfo_for_model_metadata(payload: dict[str, Any]) -> PngInfo:
     return info
 
 
+def _metadata_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _decode_metadata_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        raw = value
+        if raw.startswith(b"ASCII\x00\x00\x00"):
+            raw = raw[8:]
+        for encoding in ("utf-8", "latin-1"):
+            try:
+                return raw.decode(encoding).strip("\x00").strip()
+            except UnicodeDecodeError:
+                continue
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_metadata_text(value: Any) -> ModelImageMetadata | None:
+    text = _decode_metadata_text(value)
+    if not text:
+        return None
+    if text.startswith(JPEG_METADATA_PREFIX):
+        return parse_model_image_metadata(text[len(JPEG_METADATA_PREFIX) :])
+    parsed = parse_model_image_metadata(text)
+    if parsed is not None:
+        return parsed
+    if LUMEN_MODEL_METADATA_KEY not in text:
+        return None
+    match = re.search(r"\{[\s\S]*\}", text)
+    return parse_model_image_metadata(match.group(0)) if match else None
+
+
+def _read_model_image_metadata_from_jpeg_fields(
+    image: PILImage.Image,
+) -> ModelImageMetadata | None:
+    try:
+        exif = image.getexif()
+    except Exception:
+        exif = None
+    if exif:
+        for tag in (EXIF_USER_COMMENT, EXIF_IMAGE_DESCRIPTION):
+            parsed = _parse_metadata_text(exif.get(tag))
+            if parsed is not None:
+                return parsed
+    for key in ("XML:com.adobe.xmp", "xmp"):
+        parsed = _parse_metadata_text(image.info.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _jpeg_exif_for_model_metadata(
+    image: PILImage.Image,
+    payload: dict[str, Any],
+) -> bytes:
+    try:
+        exif = image.getexif()
+    except Exception:
+        exif = PILImage.Exif()
+    text = f"{JPEG_METADATA_PREFIX}{_metadata_json(payload)}"
+    exif[EXIF_IMAGE_DESCRIPTION] = text
+    exif[EXIF_USER_COMMENT] = b"ASCII\x00\x00\x00" + text.encode("utf-8")
+    return exif.tobytes()
+
+
 def save_image_with_model_metadata(
     image: PILImage.Image,
     fp: Any,
@@ -174,8 +247,16 @@ def save_image_with_model_metadata(
     metadata: dict[str, Any],
     **save_kwargs: Any,
 ) -> None:
-    if fmt.upper() == "PNG" and metadata:
-        image.save(fp, format=fmt, pnginfo=pnginfo_for_model_metadata(metadata), **save_kwargs)
+    fmt_upper = fmt.upper()
+    if fmt_upper == "PNG" and metadata:
+        image.save(
+            fp, format=fmt, pnginfo=pnginfo_for_model_metadata(metadata), **save_kwargs
+        )
+        return
+    if fmt_upper in {"JPEG", "JPG"} and metadata:
+        save_kwargs = dict(save_kwargs)
+        save_kwargs["exif"] = _jpeg_exif_for_model_metadata(image, metadata)
+        image.save(fp, format=fmt, **save_kwargs)
         return
     image.save(fp, format=fmt, **save_kwargs)
 
@@ -204,7 +285,9 @@ def model_image_filename(
     parts.extend(tag_slug(tag) for tag in clean_style_tags(style_tags)[:2])
     parts.append(short_id)
     suffix = f".{ext.lstrip('.').lower() or 'png'}"
-    while len("-".join(parts)) + len(suffix) > MODEL_FILENAME_MAX_CHARS and len(parts) > 5:
+    while (
+        len("-".join(parts)) + len(suffix) > MODEL_FILENAME_MAX_CHARS and len(parts) > 5
+    ):
         parts.pop(-2)
     return f"{'-'.join(parts)}{suffix}"
 
@@ -217,7 +300,11 @@ def parse_model_image_filename(filename: str) -> ModelImageMetadata | None:
     parts = tail.split("-")
     joined = "-".join(parts)
     age_segment = next(
-        (segment for slug, segment in AGE_SEGMENT_BY_SLUG.items() if joined.startswith(slug)),
+        (
+            segment
+            for slug, segment in AGE_SEGMENT_BY_SLUG.items()
+            if joined.startswith(slug)
+        ),
         None,
     )
     tokens = parts
@@ -228,7 +315,9 @@ def parse_model_image_filename(filename: str) -> ModelImageMetadata | None:
     if gender:
         tokens = tokens[1:]
     appearance_direction = None
-    for slug, value in sorted(APPEARANCE_BY_SLUG.items(), key=lambda item: -len(item[0])):
+    for slug, value in sorted(
+        APPEARANCE_BY_SLUG.items(), key=lambda item: -len(item[0])
+    ):
         slug_parts = slug.split("-")
         if tokens[: len(slug_parts)] == slug_parts:
             appearance_direction = value

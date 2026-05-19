@@ -4,10 +4,16 @@
 
 services:
   api-green:
+    init: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: ${LUMEN_ULIMIT_NOFILE_SOFT:-65536}
+        hard: ${LUMEN_ULIMIT_NOFILE_HARD:-65536}
+      nproc: ${LUMEN_ULIMIT_NPROC:-4096}
     logging:
       driver: "json-file"
       options:

@@ -25,7 +25,7 @@ from ..audit import request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, ensure_utc, verify_csrf_session
 from ..public_urls import resolve_public_base_url
-from ..ratelimit import PUBLIC_PREVIEW_LIMITER, require_client_ip
+from ..ratelimit import PUBLIC_PREVIEW_LIMITER, RateLimiter, require_client_ip
 from ..redis_client import get_redis
 
 
@@ -33,6 +33,11 @@ router_authed = APIRouter(prefix="/admin/invite_links", tags=["invites-admin"])
 router_public = APIRouter(tags=["invites-public"])
 
 logger = logging.getLogger(__name__)
+ADMIN_INVITE_CREATE_LIMITER = RateLimiter(
+    capacity=10,
+    refill_per_sec=10 / 60,
+    always_on=True,
+)
 
 
 def _email_hash(value: str | None) -> str | None:
@@ -76,6 +81,7 @@ def _to_out(
 
 # ---------- Admin: create ----------
 
+
 class _CreateInviteIn(BaseModel):
     email: EmailStr | None = None
     expires_in_days: int = Field(default=7, ge=1, le=365)
@@ -94,6 +100,10 @@ async def create_invite_link(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InviteLinkOut:
+    await ADMIN_INVITE_CREATE_LIMITER.check(
+        get_redis(),
+        f"rl:admin:invite_links:create:{admin.id}",
+    )
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=body.expires_in_days)
     email_norm = str(body.email).lower().strip() if body.email else None
@@ -137,6 +147,7 @@ async def create_invite_link(
 
 # ---------- Admin: list ----------
 
+
 @router_authed.get("")
 async def list_invite_links(
     admin: AdminUser,
@@ -166,6 +177,7 @@ async def list_invite_links(
 
 # ---------- Admin: revoke ----------
 
+
 @router_authed.delete(
     "/{invite_id}", status_code=204, dependencies=[Depends(verify_csrf_session)]
 )
@@ -177,9 +189,7 @@ async def revoke_invite_link(
 ) -> None:
     inv = (
         await db.execute(
-            select(InviteLink)
-            .where(InviteLink.id == invite_id)
-            .with_for_update()
+            select(InviteLink).where(InviteLink.id == invite_id).with_for_update()
         )
     ).scalar_one_or_none()
     if not inv:
@@ -203,6 +213,7 @@ async def revoke_invite_link(
 
 
 # ---------- Public: preview ----------
+
 
 def _validity(inv: InviteLink, now: datetime) -> tuple[bool, str | None]:
     if inv.revoked_at is not None:

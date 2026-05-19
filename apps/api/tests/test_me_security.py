@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 
 from app.config import settings
@@ -13,9 +14,10 @@ def test_export_storage_path_stays_under_storage_root(tmp_path: Path) -> None:
     old_root = settings.storage_root
     settings.storage_root = str(root)
     try:
-        assert me._fs_path_safe("u/user_1/image.png") == (
-            root / "u/user_1/image.png"
-        ).resolve()
+        assert (
+            me._fs_path_safe("u/user_1/image.png")
+            == (root / "u/user_1/image.png").resolve()
+        )
         assert me._fs_path_safe("") is None
         assert me._fs_path_safe("   ") is None
         assert me._fs_path_safe("bad\x00name.png") is None
@@ -36,6 +38,19 @@ def test_export_storage_path_rejects_symlink_escape(tmp_path: Path) -> None:
     settings.storage_root = str(root)
     try:
         assert me._fs_path_safe("link/image.png") is None
+    finally:
+        settings.storage_root = old_root
+
+
+def test_open_storage_file_safe_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    root = tmp_path / "storage"
+    root.mkdir()
+    fifo = root / "pipe"
+    os.mkfifo(fifo)
+    old_root = settings.storage_root
+    settings.storage_root = str(root)
+    try:
+        assert me._open_storage_file_safe("pipe") is None
     finally:
         settings.storage_root = old_root
 

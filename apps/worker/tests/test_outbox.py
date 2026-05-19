@@ -93,7 +93,9 @@ class FakeSession:
 
     async def execute(self, statement):
         if statement.is_select:
-            return FakeScalarResult([ev for ev in self.events if ev.published_at is None])
+            return FakeScalarResult(
+                [ev for ev in self.events if ev.published_at is None]
+            )
         rowcount = 0
         for ev in self.events:
             if ev.published_at is None:
@@ -144,7 +146,9 @@ class FakeReconSession:
         return None
 
 
-def _patch_session_local(monkeypatch: pytest.MonkeyPatch, events: list[OutboxEvent]) -> None:
+def _patch_session_local(
+    monkeypatch: pytest.MonkeyPatch, events: list[OutboxEvent]
+) -> None:
     @asynccontextmanager
     async def session_local():
         yield FakeSession(events)
@@ -240,22 +244,42 @@ async def test_publish_outbox_keeps_event_retryable_when_enqueue_fails(monkeypat
     assert redis.enqueued == []
     assert events[0].published_at is None
     assert not any(
-        key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX)
-        for key in redis.keys
+        key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX) for key in redis.keys
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_outbox_writes_dedupe_only_after_commit(monkeypatch):
+    class _CommitFailSession(FakeSession):
+        async def __aexit__(self, *exc_info):
+            if exc_info[0] is None:
+                raise RuntimeError("commit failed")
+            return None
+
+    events = [_event(task_id="gen-1")]
+
+    @asynccontextmanager
+    async def session_local():
+        yield _CommitFailSession(events)
+
+    monkeypatch.setattr(outbox, "SessionLocal", session_local)
+    redis = FakeRedis()
+
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    assert processed == 0
+    assert redis.enqueued == [("run_generation", "gen-1")]
+    assert not any(
+        key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX) for key in redis.keys
     )
 
 
 @pytest.mark.asyncio
 async def test_publish_outbox_marks_deduped_event_without_second_enqueue(monkeypatch):
-    class _DedupeRedis(FakeRedis):
-        async def set(self, key: str, value: str, **kwargs):
-            if key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX):
-                return False
-            return await super().set(key, value, **kwargs)
-
     events = [_event(task_id="gen-1")]
     _patch_session_local(monkeypatch, events)
-    redis = _DedupeRedis()
+    redis = FakeRedis()
+    redis.keys[f"{outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX}{events[0].id}"] = "gen-1"
 
     processed = await outbox.publish_outbox({"redis": redis})
 
@@ -342,7 +366,9 @@ async def test_reconcile_skips_task_with_active_lease(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reconcile_marks_max_attempt_completion_failed_with_string_status(monkeypatch):
+async def test_reconcile_marks_max_attempt_completion_failed_with_string_status(
+    monkeypatch,
+):
     message = Message(
         id="msg-1",
         conversation_id="conv-1",
@@ -390,7 +416,9 @@ async def test_reconcile_marks_max_attempt_completion_failed_with_string_status(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_marks_max_attempt_generation_failed_and_message_failed(monkeypatch):
+async def test_reconcile_marks_max_attempt_generation_failed_and_message_failed(
+    monkeypatch,
+):
     message = Message(
         id="msg-1",
         conversation_id="conv-1",

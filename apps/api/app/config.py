@@ -33,6 +33,7 @@ _DEFAULT_REDIS_URL = (
 )
 _DEFAULT_PUBLIC_BASE_URL = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
 _DEFAULT_CORS_ALLOW_ORIGINS = f"http://{_LOCAL_HOST}:{_DEFAULT_WEB_PORT}"
+_DEFAULT_IMAGE_JOB_BASE_URL = "https://image-job.example.com"
 BYOK_DEV_MASTER_SECRET = "lumen-dev-byok-secret-DO-NOT-USE-IN-PROD-aabbccdd"
 
 
@@ -83,7 +84,7 @@ class Settings(BaseSettings):
     image_primary_route: str = "responses"
     image_channel: str = Field(default="auto", alias="IMAGE_CHANNEL")
     image_engine: str = Field(default="responses", alias="IMAGE_ENGINE")
-    image_job_base_url: str = "https://image-job.example.com"
+    image_job_base_url: str = _DEFAULT_IMAGE_JOB_BASE_URL
     # 与 worker 同名；默认前端/API 只消费脱敏后的 generation diagnostics。
     expose_provider_diagnostics: bool = False
 
@@ -225,21 +226,30 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "IMAGE_PROXY_SECRET must be at least 32 characters outside development"
                 )
+            image_job_url = self.image_job_base_url.strip().rstrip("/")
+            image_job_host = urlsplit(image_job_url).hostname or ""
+            if (
+                not image_job_url
+                or image_job_url == _DEFAULT_IMAGE_JOB_BASE_URL
+                or image_job_host == "image-job.example.com"
+            ):
+                raise ValueError(
+                    "IMAGE_JOB_BASE_URL must be configured outside development"
+                )
             tg_secret = self.telegram_bot_shared_secret.strip()
             if tg_secret and len(tg_secret) < 32:
                 raise ValueError(
                     "TELEGRAM_BOT_SHARED_SECRET must be at least 32 characters outside development"
                 )
             db_url = urlsplit(self.database_url)
-            db_user = unquote(db_url.username or "")
             db_password = unquote(db_url.password or "")
-            if db_user == _DEFAULT_DB_USER and db_password == _DEFAULT_DB_PASSWORD:
+            if not db_password or db_password == _DEFAULT_DB_PASSWORD:
                 raise ValueError(
-                    "DATABASE_URL must not use default Postgres credentials outside development"
+                    "DATABASE_URL must not use the default Postgres password outside development"
                 )
             redis_url = urlsplit(self.redis_url)
             redis_password = unquote(redis_url.password or "")
-            if redis_password == _DEFAULT_REDIS_PASSWORD:
+            if not redis_password or redis_password == _DEFAULT_REDIS_PASSWORD:
                 raise ValueError(
                     "REDIS_URL must not use the default Redis password outside development"
                 )

@@ -11,12 +11,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 import uuid
 from typing import Any
-import asyncio
 
 from lumen_core.constants import EVENTS_STREAM_MAXLEN, EVENTS_STREAM_PREFIX
 from lumen_core.models import OutboxDeadLetter
@@ -54,18 +54,13 @@ return stream_id
 # 进程间不可比较；前端需要用 Redis stream id 做 replay cursor / 严格排序，
 # ts_ms 只作为显示/粗略时间提示。
 _LAST_TS_MS = 0
-# P2-3: 多 publish_event 并发时 _LAST_TS_MS 的读改写非原子，可能被覆盖导致
-# 两条事件拿到同一 ts_ms。改用 asyncio.Lock：worker 单 loop 下没有跨 loop 风险，
-# 而 threading.Lock 在 DLQ 抖动 + 大量并发 publish 时短暂阻塞 event loop。
-# 懒构造避免 import 时无 running loop——所有调用点都在 coroutine 内，进入
-# `_monotonic_ts_ms` 时 loop 一定存在。
-_TS_LOCK: asyncio.Lock | None = None
+# P2-3/P3-6: 多 publish_event 并发时 _LAST_TS_MS 的读改写非原子，可能被覆盖导致
+# 两条事件拿到同一 ts_ms。模块级初始化避免 check-then-set 懒构造竞态。
+_TS_LOCK = asyncio.Lock()
 
 
 async def _monotonic_ts_ms() -> int:
-    global _LAST_TS_MS, _TS_LOCK
-    if _TS_LOCK is None:
-        _TS_LOCK = asyncio.Lock()
+    global _LAST_TS_MS
     async with _TS_LOCK:
         now = int(time.time() * 1000)
         if now <= _LAST_TS_MS:

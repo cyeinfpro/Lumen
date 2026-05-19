@@ -187,7 +187,7 @@ mount_smb() {
   source="$(build_smb_source "$SMB_HOST" "$SMB_SHARE" "$SMB_SUBPATH")"
   cred="$(mktemp /run/lumen-smb-cred.XXXXXX)"
   # shellcheck disable=SC2064
-  trap "rm -f '$cred'" RETURN
+  trap "rm -f '$cred'" RETURN EXIT
   write_smb_credentials "$SMB_USERNAME" "$SMB_PASSWORD" "$cred"
   opts="credentials=${cred},uid=${LUMEN_UID},gid=${LUMEN_GID},forceuid,forcegid,file_mode=0664,dir_mode=0775,${CIFS_OPTS_BASE}"
   if [[ -n "$SMB_PORT" ]]; then
@@ -198,7 +198,18 @@ mount_smb() {
     log "target $TARGET already mounted; unmounting first"
     umount_target_force
   fi
-  mount -t cifs "$source" "$TARGET" -o "$opts"
+  if mount -t cifs "$source" "$TARGET" -o "$opts"; then
+    :
+  else
+    local rc=$?
+    rm -f "$cred"
+    trap - RETURN
+    trap - EXIT
+    return "$rc"
+  fi
+  rm -f "$cred"
+  trap - RETURN
+  trap - EXIT
   log "cifs $source -> $TARGET OK"
 }
 
@@ -300,7 +311,7 @@ cmd_test() {
   source="$(build_smb_source "$SMB_HOST" "$SMB_SHARE" "${SMB_SUBPATH:-/}")"
   cred="$(mktemp /run/lumen-smb-test-cred.XXXXXX)"
   # shellcheck disable=SC2064
-  trap "rm -f '$cred'" RETURN
+  trap "rm -f '$cred'" RETURN EXIT
   write_smb_credentials "$SMB_USERNAME" "$SMB_PASSWORD" "$cred"
   opts="credentials=${cred},uid=${LUMEN_UID},gid=${LUMEN_GID},forceuid,forcegid,file_mode=0664,dir_mode=0775,${CIFS_OPTS_BASE}"
   if [[ -n "${SMB_PORT:-}" ]]; then
@@ -314,15 +325,24 @@ cmd_test() {
       rm -f "$probe"
       umount -l "$TEST_TARGET" 2>/dev/null || true
       write_test_result "$call_id" "ok" "connected to $source, write OK"
+      rm -f "$cred"
+      trap - RETURN
+      trap - EXIT
       rm -f "$TEST_CONF_FILE"
       return 0
     fi
     umount -l "$TEST_TARGET" 2>/dev/null || true
     write_test_result "$call_id" "fail" "mounted but write probe failed at $TEST_TARGET"
+    rm -f "$cred"
+    trap - RETURN
+    trap - EXIT
     rm -f "$TEST_CONF_FILE"
     return 1
   fi
   write_test_result "$call_id" "fail" "mount failed: ${msg}"
+  rm -f "$cred"
+  trap - RETURN
+  trap - EXIT
   rm -f "$TEST_CONF_FILE"
   return 1
 }

@@ -8,6 +8,11 @@ x-service-hardening: &service-hardening
     - ALL
   security_opt:
     - no-new-privileges:true
+  ulimits:
+    nofile:
+      soft: ${LUMEN_ULIMIT_NOFILE_SOFT:-65536}
+      hard: ${LUMEN_ULIMIT_NOFILE_HARD:-65536}
+    nproc: ${LUMEN_ULIMIT_NPROC:-4096}
   logging:
     driver: "json-file"
     options:
@@ -169,18 +174,36 @@ services:
     container_name: lumen-worker
     build: *app-build
     working_dir: /app/apps/worker
-    command: ["python", "-m", "arq", "app.main.WorkerSettings"]
+    command:
+      - "python"
+      - "-c"
+      - |
+        import logging.config
+        import os
+
+        from arq.logs import default_log_config
+        from arq.worker import run_worker
+        from app.main import WorkerSettings
+
+        logging.config.dictConfig(default_log_config(False))
+        run_worker(
+            WorkerSettings,
+            health_check_interval=int(os.getenv("LUMEN_WORKER_HEALTH_INTERVAL", "30")),
+            health_check_key=os.getenv("LUMEN_WORKER_HEALTH_KEY", "arq:queue:health-check"),
+        )
     user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
     group_add:
       - "${LUMEN_APP_STORAGE_GID:-10001}"
     env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     environment:
       <<: *app-runtime-env
-    # Why: docker 内置 DNS 走 8.8.8.8 跨境 → image-job.baishanweb.online 冷查曾达 4.3s。
-    # 直接固定到 1.1.1.1 + 8.8.8.8，缩短跨境 DNS 链路。
+      LUMEN_WORKER_HEALTH_INTERVAL: "${LUMEN_WORKER_HEALTH_INTERVAL:-30}"
+      LUMEN_WORKER_HEALTH_KEY: "${LUMEN_WORKER_HEALTH_KEY:-arq:queue:health-check}"
+    # Why: docker 内置 DNS 在部分跨境链路冷查较慢；默认给公共解析器，
+    # 但允许企业/国内网络按主机情况覆盖。
     dns:
-      - 1.1.1.1
-      - 8.8.8.8
+      - "${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"
+      - "${LUMEN_WORKER_DNS_SECONDARY:-8.8.8.8}"
     restart: unless-stopped
     stop_signal: SIGTERM
     # 4K long task envelope: arq 1800s task timeout + 30s buffer; do not shorten (see §8.5).
@@ -205,11 +228,20 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "python -c 'import os,redis; redis.from_url(os.environ[\"REDIS_URL\"]).ping()' || exit 1"
+        - |
+          python - <<'PY'
+          import os
+          import sys
+          import redis
+
+          redis_client = redis.from_url(os.environ["REDIS_URL"])
+          key = os.getenv("LUMEN_WORKER_HEALTH_KEY", "arq:queue:health-check")
+          sys.exit(0 if redis_client.get(key) else 1)
+          PY
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 60s
 
   web:
     <<: *service-hardening
@@ -240,7 +272,7 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "node -e \"require('http').get('http://127.0.0.1:3000/api/healthz', (r) => { process.exit(r.statusCode >= 200 && r.statusCode < 400 ? 0 : 1); }).on('error', () => process.exit(1)).setTimeout(5000, function () { this.destroy(); process.exit(1); })\""
+        - "node -e \"const req = require('http').request({ host: '127.0.0.1', port: 3000, path: '/healthz', method: 'HEAD' }, (r) => { process.exit(r.statusCode >= 200 && r.statusCode < 400 ? 0 : 1); }); req.on('error', () => process.exit(1)); req.setTimeout(5000, function () { this.destroy(); process.exit(1); }); req.end();\""
       interval: 10s
       timeout: 5s
       retries: 6
@@ -286,6 +318,33 @@ services:
         condition: service_healthy
     networks:
       - lumen_backend
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - |
+          python - <<'PY'
+          import os
+          import sys
+          import redis
+
+          redis.from_url(os.environ["REDIS_URL"]).ping()
+          needle = b"\x00-m\x00app.main\x00"
+          self_pid = str(os.getpid())
+          for pid in os.listdir("/proc"):
+              if not pid.isdigit() or pid == self_pid:
+                  continue
+              try:
+                  with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                      if needle in fh.read():
+                          sys.exit(0)
+              except OSError:
+                  pass
+          sys.exit(1)
+          PY
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   migrate:
     <<: *service-hardening

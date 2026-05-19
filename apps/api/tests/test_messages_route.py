@@ -223,6 +223,39 @@ def test_image_upstream_request_records_billing_tier_from_quality() -> None:
     assert req["billing_tier_source"] == "request_quality"
 
 
+@pytest.mark.asyncio
+async def test_chat_wallet_preflight_locks_wallet_and_uses_task_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, user_id: str, *, lock: bool) -> SimpleNamespace:
+        calls["wallet"] = {"user_id": user_id, "lock": lock}
+        return SimpleNamespace(balance_micro=10_000)
+
+    async def estimate(*_args: Any, **kwargs: Any) -> int:
+        calls["estimate"] = kwargs
+        return 1
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+
+    await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        account_mode="wallet",
+        model="gpt-task",
+    )
+
+    assert calls["wallet"] == {"user_id": "user-1", "lock": True}
+    assert calls["estimate"]["model"] == "gpt-task"
+
+
 def test_silent_generation_prompt_limit_uses_shared_constant() -> None:
     messages.SilentGenerationIn(
         idempotency_key="idem-silent",
@@ -288,7 +321,9 @@ async def test_post_message_publishes_appended_events_after_commit(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: redis)
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     out = await messages.post_message(
@@ -327,7 +362,9 @@ async def test_post_message_returns_when_post_commit_publish_times_out(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", slow_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
     monkeypatch.setattr(messages, "_POST_COMMIT_PUBLISH_TIMEOUT_S", 0.001)
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
@@ -358,7 +395,9 @@ async def test_post_message_persists_web_search_chat_param(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     await messages.post_message(
@@ -396,7 +435,9 @@ async def test_post_message_persists_chat_tool_params(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     await messages.post_message(
@@ -461,7 +502,9 @@ async def test_post_message_pins_chat_task_to_active_user_api_credential(
     monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
     monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
     monkeypatch.setattr(
         messages,
         "_apply_pending_confirmation_reply",
@@ -469,12 +512,14 @@ async def test_post_message_pins_chat_task_to_active_user_api_credential(
     )
     monkeypatch.setattr(messages, "_apply_explicit_memory_write", noop_explicit_memory)
 
-    db = _Db([
-        _Result(_conv()),
-        _Result(None),
-        _Result(None),
-        _Result((_credential(), _supplier(purposes=["chat"]))),
-    ])
+    db = _Db(
+        [
+            _Result(_conv()),
+            _Result(None),
+            _Result(None),
+            _Result((_credential(), _supplier(purposes=["chat"]))),
+        ]
+    )
     await messages.post_message(
         "conv-1",
         PostMessageIn(
@@ -518,14 +563,18 @@ async def test_post_message_pins_image_task_to_active_user_api_credential(
     monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
     monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
-    db = _Db([
-        _Result(_conv()),
-        _Result(None),
-        _Result(None),
-        _Result((_credential(), _supplier(purposes=["image"]))),
-    ])
+    db = _Db(
+        [
+            _Result(_conv()),
+            _Result(None),
+            _Result(None),
+            _Result((_credential(), _supplier(purposes=["image"]))),
+        ]
+    )
     await messages.post_message(
         "conv-1",
         PostMessageIn(
@@ -584,7 +633,9 @@ async def test_post_message_image_task_uses_supplier_default_image_model(
     monkeypatch.setattr(messages, "read_byok_settings", fake_read_byok_settings)
     monkeypatch.setattr(messages, "read_byok_settings_cached", fake_read_byok_settings)
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
     monkeypatch.setattr(
         messages,
         "_apply_pending_confirmation_reply",
@@ -596,12 +647,14 @@ async def test_post_message_image_task_uses_supplier_default_image_model(
         purposes=["image"],
         default_image_model="gpt-image-1",
     )
-    image_db = _Db([
-        _Result(_conv()),
-        _Result(None),
-        _Result(None),
-        _Result((_credential(), image_supplier)),
-    ])
+    image_db = _Db(
+        [
+            _Result(_conv()),
+            _Result(None),
+            _Result(None),
+            _Result((_credential(), image_supplier)),
+        ]
+    )
     await messages.post_message(
         "conv-1",
         PostMessageIn(
@@ -628,12 +681,14 @@ async def test_post_message_image_task_uses_supplier_default_image_model(
         fast_chat_model=None,
         default_image_model="gpt-image-1",  # should be ignored for chat
     )
-    chat_db = _Db([
-        _Result(_conv()),
-        _Result(None),
-        _Result(None),
-        _Result((_credential(), chat_supplier)),
-    ])
+    chat_db = _Db(
+        [
+            _Result(_conv()),
+            _Result(None),
+            _Result(None),
+            _Result((_credential(), chat_supplier)),
+        ]
+    )
     await messages.post_message(
         "conv-1",
         PostMessageIn(
@@ -803,7 +858,9 @@ async def test_post_message_persists_image_render_options(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     await messages.post_message(
@@ -863,7 +920,9 @@ async def test_image_output_format_system_setting_is_default(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
     monkeypatch.setattr(messages, "get_setting", fake_get_setting)
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
@@ -911,7 +970,9 @@ async def test_fast_default_applies_when_client_omits_fast(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
     monkeypatch.setattr(messages, "get_setting", fake_get_setting)
 
     chat_db = _Db([_Result(_conv()), _Result(None), _Result(None)])
@@ -942,7 +1003,9 @@ async def test_fast_default_applies_when_client_omits_fast(
         _wallet_user(),  # type: ignore[arg-type]
         image_db,  # type: ignore[arg-type]
     )
-    gen = next(item for item in image_db.added if item.__class__.__name__ == "Generation")
+    gen = next(
+        item for item in image_db.added if item.__class__.__name__ == "Generation"
+    )
     assert gen.upstream_request["fast"] is True
     assert gen.upstream_request["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL_FAST
 
@@ -968,7 +1031,9 @@ async def test_explicit_fast_false_overrides_system_default(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
     monkeypatch.setattr(messages, "get_setting", fake_get_setting)
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
@@ -1010,7 +1075,9 @@ async def test_image_prompt_transparent_background_forces_png(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     await messages.post_message(
@@ -1057,15 +1124,17 @@ async def test_post_message_persists_mask_image_id_for_image_to_image(
     monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(messages, "get_redis", lambda: object())
     monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
     db = _Db(
         [
-            _Result(_conv()),       # conversation lookup
-            _Result(None),          # idempotency completion lookup
-            _Result(None),          # idempotency generation lookup
+            _Result(_conv()),  # conversation lookup
+            _Result(None),  # idempotency completion lookup
+            _Result(None),  # idempotency generation lookup
             _Result(all_values=["img-att"]),  # attachment_image_ids validation
-            _Result("img-mask"),    # mask image ownership lookup
+            _Result("img-mask"),  # mask image ownership lookup
         ]
     )
     await messages.post_message(
@@ -1112,8 +1181,8 @@ async def test_post_message_rejects_mask_without_reference_image(
     db = _Db(
         [
             _Result(_conv()),  # conversation lookup
-            _Result(None),     # idempotency completion lookup
-            _Result(None),     # idempotency generation lookup
+            _Result(None),  # idempotency completion lookup
+            _Result(None),  # idempotency generation lookup
         ]
     )
 
@@ -1157,8 +1226,8 @@ async def test_post_message_rejects_mask_with_chat_intent(
     db = _Db(
         [
             _Result(_conv()),  # conversation lookup
-            _Result(None),     # idempotency completion lookup
-            _Result(None),     # idempotency generation lookup
+            _Result(None),  # idempotency completion lookup
+            _Result(None),  # idempotency generation lookup
         ]
     )
 
@@ -1201,10 +1270,10 @@ async def test_post_message_rejects_mask_with_multiple_references(
 
     db = _Db(
         [
-            _Result(_conv()),                                # conversation lookup
-            _Result(None),                                   # idempotency completion
-            _Result(None),                                   # idempotency generation
-            _Result(all_values=["img-a", "img-b"]),          # attachment validation
+            _Result(_conv()),  # conversation lookup
+            _Result(None),  # idempotency completion
+            _Result(None),  # idempotency generation
+            _Result(all_values=["img-a", "img-b"]),  # attachment validation
         ]
     )
 
@@ -1223,7 +1292,9 @@ async def test_post_message_rejects_mask_with_multiple_references(
         )
 
     assert getattr(excinfo.value, "status_code", None) == 422
-    assert excinfo.value.detail["error"]["code"] == "mask_requires_single_reference_image"
+    assert (
+        excinfo.value.detail["error"]["code"] == "mask_requires_single_reference_image"
+    )
     assert db.committed is False
     assert not any(item.__class__.__name__ == "Generation" for item in db.added)
 
@@ -1242,11 +1313,11 @@ async def test_post_message_rejects_mask_not_owned_by_user(
 
     db = _Db(
         [
-            _Result(_conv()),                  # conversation lookup
-            _Result(None),                     # idempotency completion lookup
-            _Result(None),                     # idempotency generation lookup
-            _Result(all_values=["img-att"]),   # attachment validation passes
-            _Result(None),                     # mask lookup → not owned / missing
+            _Result(_conv()),  # conversation lookup
+            _Result(None),  # idempotency completion lookup
+            _Result(None),  # idempotency generation lookup
+            _Result(all_values=["img-att"]),  # attachment validation passes
+            _Result(None),  # mask lookup → not owned / missing
         ]
     )
 
@@ -1271,7 +1342,9 @@ async def test_post_message_rejects_mask_not_owned_by_user(
 
 
 @pytest.mark.asyncio
-async def test_publish_message_appended_payload_contains_conversation_and_message_ids() -> None:
+async def test_publish_message_appended_payload_contains_conversation_and_message_ids() -> (
+    None
+):
     redis = _Redis()
 
     await messages._publish_message_appended(
@@ -1318,9 +1391,7 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
         def pipeline(self, *, transaction: bool = False) -> Pipe:
             assert transaction is False
             pipe = Pipe(
-                ["1710000000000-0", "1710000000000-1"]
-                if not self.pipes
-                else []
+                ["1710000000000-0", "1710000000000-1"] if not self.pipes else []
             )
             self.pipes.append(pipe)
             return pipe
@@ -1343,9 +1414,7 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
     assert len(redis.pipes) == 2
     assert [call[0] for call in redis.pipes[0].calls] == ["eval", "eval"]
     assert [call[0] for call in redis.pipes[1].calls] == ["publish", "publish"]
-    publish_payloads = [
-        json.loads(call[1][1]) for call in redis.pipes[1].calls
-    ]
+    publish_payloads = [json.loads(call[1][1]) for call in redis.pipes[1].calls]
     assert [payload["sse_id"] for payload in publish_payloads] == [
         "1710000000000-0",
         "1710000000000-1",
@@ -1657,9 +1726,9 @@ async def test_signup_byok_email_taken_returns_invalid_token(
         )
 
     assert getattr(excinfo.value, "status_code", None) == 400
-    assert (
-        excinfo.value.detail["error"]["code"] == "invalid_verification_token"
-    ), "must NOT leak email_taken — privacy regression"
+    assert excinfo.value.detail["error"]["code"] == "invalid_verification_token", (
+        "must NOT leak email_taken — privacy regression"
+    )
     assert (
         excinfo.value.detail["error"]["message"]
         == auth_routes._BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE
@@ -1735,9 +1804,7 @@ async def test_signup_byok_bypass_allowlist_inserts_allowed_email(
     async def fake_user_out(user: Any, _db: Any) -> Any:
         return SimpleNamespace(id=user.id, email=user.email, role=user.role)
 
-    monkeypatch.setattr(
-        auth_routes, "_user_out_with_runtime_defaults", fake_user_out
-    )
+    monkeypatch.setattr(auth_routes, "_user_out_with_runtime_defaults", fake_user_out)
 
     valid_pending = SimpleNamespace(
         consumed_at=None,
@@ -1778,7 +1845,9 @@ async def test_signup_byok_bypass_allowlist_inserts_allowed_email(
     assert valid_pending.consumed_at is not None
     assert user_added is not None
     assert cred_added is not None
-    assert allowed_added is not None, "AllowedEmail must be inserted on bypass path (review #35)"
+    assert allowed_added is not None, (
+        "AllowedEmail must be inserted on bypass path (review #35)"
+    )
     assert allowed_added.email == "bypass-user@example.com"
     assert allowed_added.invited_by is None
     assert result.email == "bypass-user@example.com"

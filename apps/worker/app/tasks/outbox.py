@@ -13,8 +13,8 @@ publisher 只是"补漏"。对每条按 kind 调 `arq_redis.enqueue_job` 送进 
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -32,7 +32,13 @@ from lumen_core.constants import (
     MessageStatus,
     user_channel,
 )
-from lumen_core.models import Completion, Generation, Message, OutboxDeadLetter, OutboxEvent
+from lumen_core.models import (
+    Completion,
+    Generation,
+    Message,
+    OutboxDeadLetter,
+    OutboxEvent,
+)
 
 from .. import billing as worker_billing
 from ..db import SessionLocal
@@ -54,11 +60,6 @@ _OUTBOX_FAIL_COUNT_HASH = "outbox:fail_count"
 _OUTBOX_FAIL_COUNT_TTL_S = 24 * 3600
 _OUTBOX_ENQUEUE_DEDUPE_PREFIX = "outbox:enqueued:"
 _OUTBOX_ENQUEUE_DEDUPE_TTL_S = 24 * 3600
-# P1-9: enqueue 与 PG commit 不在一个事务里。若 dedupe key 用 24h TTL 一次性写入，
-# 而 commit 之后 rollback（PG 抖动 / 约束冲突），key 仍占 24h 导致下轮 publisher
-# 跳过这条事件 → 事件永久丢失。改成"短 TTL 占位 + commit 成功后续期"：
-# 短 TTL 期间内已防住批内重复 enqueue；commit 失败时 key 自然过期，下轮可重试。
-_OUTBOX_ENQUEUE_DEDUPE_PLACEHOLDER_TTL_S = 60
 
 _RECON_LOCK_KEY = "lock:outbox:reconciler"
 _RECON_LOCK_TTL_S = 50
@@ -110,13 +111,13 @@ async def publish_outbox(ctx: dict[str, Any]) -> int:
 async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int:
     """GEN-P0-5: 批事务内 "claim → enqueue → commit published_at"。
 
-    P1-9: dedupe key 先用短 TTL 占位（_OUTBOX_ENQUEUE_DEDUPE_PLACEHOLDER_TTL_S），
-    commit 成功后再 EXPIRE 续期到完整 _OUTBOX_ENQUEUE_DEDUPE_TTL_S；commit 失败
-    （比如 PG 约束冲突 / 连接抖动）时占位 key 在 60s 内过期，下轮 publisher 可重试。
+    P2-16: Redis 去重 key 只在 PG 事务成功提交后写入。事务内只读取已有
+    去重记录；如果本轮 enqueue 成功但 PG rollback，后续重试仍由稳定 arq
+    job_id / task 幂等吸收，而不会把一个短 TTL 占位误当成已发布事实。
     """
     processed = 0
-    # 收集本批内 commit 成功的 dedupe key，commit 完成后统一续期。
-    dedupe_keys_to_extend: list[str] = []
+    # 收集本批内 enqueue 成功的事件，commit 完成后统一写入去重 key。
+    dedupe_keys_to_set: list[tuple[str, str]] = []
     async with SessionLocal() as session:
         try:
             async with session.begin():
@@ -168,24 +169,27 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     if not task_id or ev_kind not in {"generation", "completion"}:
                         logger.warning(
                             "outbox event invalid id=%s kind=%s payload=%s",
-                            ev_id, ev_kind, payload,
+                            ev_id,
+                            ev_kind,
+                            payload,
                         )
                         await _write_outbox_dlq(
-                            redis, ev_id, ev_kind, payload,
+                            redis,
+                            ev_id,
+                            ev_kind,
+                            payload,
                             reason="invalid_payload",
                         )
                         row.published_at = datetime.now(timezone.utc)
                         continue
 
                     job_name = (
-                        "run_generation" if ev_kind == "generation" else "run_completion"
+                        "run_generation"
+                        if ev_kind == "generation"
+                        else "run_completion"
                     )
                     dedupe_key = f"{_OUTBOX_ENQUEUE_DEDUPE_PREFIX}{ev_id}"
 
-                    # Guard the non-transactional Redis enqueue with a per-event
-                    # dedupe key. If enqueue succeeds but the PG transaction rolls
-                    # back, the next publisher pass marks the row published without
-                    # enqueueing a duplicate job.
                     # 多图 stagger：messages.py 给 i>=1 的 generation row 在 payload 里加 defer_s，
                     # 让 arq 延迟 N 秒后才让 worker 拉起来跑。避免同 prompt 同账号同时撞 ChatGPT codex
                     # 引发 OpenAI 内部 race condition（一败一成稳定模式）。
@@ -200,38 +204,36 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     )
 
                     try:
-                        # P1-9: 先用短 TTL 占位；commit 成功后批末统一续期到 24h。
-                        first_enqueue = await redis.set(
-                            dedupe_key,
-                            task_id,
-                            nx=True,
-                            ex=_OUTBOX_ENQUEUE_DEDUPE_PLACEHOLDER_TTL_S,
-                        )
-                        if first_enqueue:
-                            await redis.enqueue_job(job_name, task_id, **enqueue_kwargs)
-                            dedupe_keys_to_extend.append(dedupe_key)
-                        else:
+                        existing_enqueue = await redis.get(dedupe_key)
+                        if existing_enqueue:
                             logger.info(
                                 "outbox enqueue deduped event=%s task=%s kind=%s",
                                 ev_id,
                                 task_id,
                                 ev_kind,
                             )
+                        else:
+                            await redis.enqueue_job(job_name, task_id, **enqueue_kwargs)
+                            dedupe_keys_to_set.append((dedupe_key, str(task_id)))
                     except Exception as exc:
-                        try:
-                            await redis.delete(dedupe_key)
-                        except Exception:  # noqa: BLE001
-                            pass
                         fail_count = await _increment_outbox_fail_count(redis, ev_id)
                         logger.warning(
                             "outbox enqueue failed; leaving unpublished for retry "
                             "event=%s task=%s kind=%s fail_count=%d err=%s",
-                            ev_id, task_id, ev_kind, fail_count, exc,
+                            ev_id,
+                            task_id,
+                            ev_kind,
+                            fail_count,
+                            exc,
                         )
                         if fail_count >= _OUTBOX_MAX_FAIL_COUNT:
                             await _write_outbox_dlq(
-                                redis, ev_id, ev_kind, payload,
-                                reason="max_fail_count", fail_count=fail_count,
+                                redis,
+                                ev_id,
+                                ev_kind,
+                                payload,
+                                reason="max_fail_count",
+                                fail_count=fail_count,
                             )
                             row.published_at = datetime.now(timezone.utc)
                             try:
@@ -246,20 +248,20 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
         except Exception:  # noqa: BLE001
             # 非毒化的 transient 错误：rollback 已发生，published_at 仍是 NULL，
             # 下轮会再被候选选中；这里只记日志。
-            # P1-9: dedupe key 用短 TTL 占位，commit 失败这些 key 60s 内自动过期，
-            # 下轮 publisher 可正常重试 enqueue，事件不会永久丢失。
             logger.warning("outbox event tx rolled back", exc_info=True)
             return 0
 
-    # P1-9: commit 已成功（async with session.begin() 退出无异常）→ 把本批写入的
-    # dedupe key 续期到完整 24h；commit 失败路径走 except 分支不会到这里。
-    for dedupe_key in dedupe_keys_to_extend:
+    # P2-16: commit 已成功（async with session.begin() 退出无异常）→ 现在才写入
+    # Redis 去重 key。commit 失败路径走 except 分支不会到这里。
+    for dedupe_key, task_id in dedupe_keys_to_set:
         try:
-            await redis.expire(dedupe_key, _OUTBOX_ENQUEUE_DEDUPE_TTL_S)
-        except Exception:  # noqa: BLE001
-            # 续期失败不致命：占位 TTL 60s 内仍能防住批内重复，过期后最坏导致
-            # 一次重复 enqueue（task 那侧用 task_id 幂等吸收）。
-            pass
+            await redis.set(dedupe_key, task_id, ex=_OUTBOX_ENQUEUE_DEDUPE_TTL_S)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "outbox post-commit dedupe write failed key=%s err=%s",
+                dedupe_key,
+                exc,
+            )
     return processed
 
 
@@ -373,9 +375,7 @@ async def _cleanup_terminal_sentinels(redis: Any) -> None:
     for raw in raw_names or []:
         name = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
         if name.startswith(_DUAL_RACE_SENTINEL_PREFIX):
-            sentinel_task_ids.append(
-                (name, name[len(_DUAL_RACE_SENTINEL_PREFIX):])
-            )
+            sentinel_task_ids.append((name, name[len(_DUAL_RACE_SENTINEL_PREFIX) :]))
     if not sentinel_task_ids:
         return
     terminal = {
@@ -445,13 +445,17 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
 
         async with SessionLocal() as session:
             # --- generations ---
-            gen_q = select(Generation).where(
-                or_(
-                    Generation.status == GenerationStatus.QUEUED.value,
-                    Generation.status == GenerationStatus.RUNNING.value,
-                ),
-                Generation.updated_at < cutoff,
-            ).with_for_update(skip_locked=True)
+            gen_q = (
+                select(Generation)
+                .where(
+                    or_(
+                        Generation.status == GenerationStatus.QUEUED.value,
+                        Generation.status == GenerationStatus.RUNNING.value,
+                    ),
+                    Generation.updated_at < cutoff,
+                )
+                .with_for_update(skip_locked=True)
+            )
             gen_rows = list((await session.execute(gen_q)).scalars())
 
             for g in gen_rows:
@@ -521,13 +525,17 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                 touched += 1
 
             # --- completions ---
-            comp_q = select(Completion).where(
-                or_(
-                    Completion.status == CompletionStatus.QUEUED.value,
-                    Completion.status == CompletionStatus.STREAMING.value,
-                ),
-                Completion.updated_at < cutoff,
-            ).with_for_update(skip_locked=True)
+            comp_q = (
+                select(Completion)
+                .where(
+                    or_(
+                        Completion.status == CompletionStatus.QUEUED.value,
+                        Completion.status == CompletionStatus.STREAMING.value,
+                    ),
+                    Completion.updated_at < cutoff,
+                )
+                .with_for_update(skip_locked=True)
+            )
             comp_rows = list((await session.execute(comp_q)).scalars())
 
             for c in comp_rows:

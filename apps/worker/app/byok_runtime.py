@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -35,6 +36,7 @@ _BYOK_PROVIDER_PREFIX = "user:"
 _DEV_ENVS = {"dev", "development", "local", "test"}
 _BASE_URL_VALIDATION_TTL_SECONDS = 10 * 60.0
 _BASE_URL_VALIDATION_CACHE: dict[tuple[str, bool], tuple[float, str]] = {}
+_BASE_URL_VALIDATION_CACHE_LOCK = threading.Lock()
 
 
 def is_byok_provider(provider: Any) -> bool:
@@ -57,14 +59,16 @@ def _is_dev_env() -> bool:
 
 
 def clear_base_url_validation_cache() -> None:
-    _BASE_URL_VALIDATION_CACHE.clear()
+    with _BASE_URL_VALIDATION_CACHE_LOCK:
+        _BASE_URL_VALIDATION_CACHE.clear()
 
 
 async def _validate_supplier_base_url(raw_base_url: str) -> str:
     dev_env = _is_dev_env()
     cache_key = (raw_base_url.strip(), dev_env)
     now = time.monotonic()
-    cached = _BASE_URL_VALIDATION_CACHE.get(cache_key)
+    with _BASE_URL_VALIDATION_CACHE_LOCK:
+        cached = _BASE_URL_VALIDATION_CACHE.get(cache_key)
     if cached is not None and cached[0] > now:
         return cached[1]
 
@@ -74,10 +78,11 @@ async def _validate_supplier_base_url(raw_base_url: str) -> str:
         allow_private=dev_env,
         allow_unresolved=dev_env,
     )
-    _BASE_URL_VALIDATION_CACHE[cache_key] = (
-        now + _BASE_URL_VALIDATION_TTL_SECONDS,
-        safe_base_url,
-    )
+    with _BASE_URL_VALIDATION_CACHE_LOCK:
+        _BASE_URL_VALIDATION_CACHE[cache_key] = (
+            now + _BASE_URL_VALIDATION_TTL_SECONDS,
+            safe_base_url,
+        )
     return safe_base_url
 
 
@@ -88,7 +93,9 @@ async def resolve_user_credential_runtime(
     now = datetime.now(timezone.utc)
     stmt = (
         select(UserApiCredential, ApiSupplierTemplate)
-        .join(ApiSupplierTemplate, ApiSupplierTemplate.id == UserApiCredential.supplier_id)
+        .join(
+            ApiSupplierTemplate, ApiSupplierTemplate.id == UserApiCredential.supplier_id
+        )
         .where(
             UserApiCredential.id == credential_id,
             UserApiCredential.deleted_at.is_(None),
@@ -181,7 +188,9 @@ async def resolve_user_credential_runtime(
     )
 
 
-async def _resolve_supplier_proxy(db: AsyncSession, proxy_name: str | None) -> Any | None:
+async def _resolve_supplier_proxy(
+    db: AsyncSession, proxy_name: str | None
+) -> Any | None:
     if not proxy_name:
         return None
     raw = (

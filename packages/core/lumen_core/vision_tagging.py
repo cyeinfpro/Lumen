@@ -317,13 +317,16 @@ def _clean_optional_text(value: Any, *, max_len: int) -> str | None:
 
 def _strip_markdown_fences(text: str) -> str:
     stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        stripped = "\n".join(lines)
+    fence_matches = re.findall(
+        r"(?m)^[ \t]*```[ \t]*(?:[A-Za-z0-9_-]+)?[ \t]*\n([\s\S]*?)\n^[ \t]*```[ \t]*(?=\n|$)",
+        stripped,
+    )
+    if fence_matches:
+        for candidate in fence_matches:
+            body = candidate.strip()
+            if re.search(r"\{[\s\S]*\}", body):
+                return body
+        stripped = fence_matches[0]
     return stripped.strip()
 
 

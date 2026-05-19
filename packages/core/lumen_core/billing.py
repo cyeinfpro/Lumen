@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
@@ -31,6 +32,7 @@ DEFAULT_IMAGE_SIZE_THRESHOLDS: dict[str, int] = {
     "4k": 8_294_400,
 }
 CROCKFORD_REDEMPTION_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
+logger = logging.getLogger(__name__)
 
 
 class BillingError(RuntimeError):
@@ -79,7 +81,12 @@ def rmb_to_micro(value: str | int | float | Decimal) -> int:
 def parse_bool_setting(raw: str | None, default: bool = False) -> bool:
     if raw is None:
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    value = raw.strip()
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    return default
 
 
 def parse_thresholds(raw: str | None) -> dict[str, int]:
@@ -87,7 +94,11 @@ def parse_thresholds(raw: str | None) -> dict[str, int]:
         return dict(DEFAULT_IMAGE_SIZE_THRESHOLDS)
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Invalid billing image size thresholds JSON; using defaults",
+            exc_info=exc,
+        )
         return dict(DEFAULT_IMAGE_SIZE_THRESHOLDS)
     if not isinstance(parsed, dict):
         return dict(DEFAULT_IMAGE_SIZE_THRESHOLDS)
@@ -144,10 +155,14 @@ def code_prefix(code: str) -> str:
 
 
 async def _ensure_wallet(db: AsyncSession, user_id: str) -> None:
-    connection = getattr(db, "connection", None)
-    if connection is not None:
-        bind = await connection()
-        if bind.dialect.name == "postgresql":
+    get_bind = getattr(db, "get_bind", None)
+    if callable(get_bind):
+        try:
+            bind = get_bind()
+        except Exception:
+            bind = None
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+        if dialect_name == "postgresql":
             await db.execute(
                 pg_insert(UserWallet)
                 .values(user_id=user_id)
@@ -350,12 +365,12 @@ async def hold(
     allow_negative: bool = False,
     meta: dict[str, Any] | None = None,
 ) -> WalletTransaction | None:
-    amount = int(amount_micro)
-    if amount <= 0:
-        return None
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
+    amount = int(amount_micro)
+    if amount <= 0:
+        raise BillingError("INVALID_AMOUNT", "hold amount must be positive", 422)
     wallet = await get_wallet(db, user_id, lock=True)
     assert wallet is not None
     existing = await _existing_tx(db, user_id, idempotency_key)
@@ -421,6 +436,27 @@ async def _held_amount_for_ref(
     return max(0, -int(tx.amount_micro)) if tx is not None else 0
 
 
+async def _existing_ref_consumption_tx(
+    db: AsyncSession,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+) -> WalletTransaction | None:
+    return (
+        await db.execute(
+            select(WalletTransaction)
+            .where(
+                WalletTransaction.user_id == user_id,
+                WalletTransaction.ref_type == ref_type,
+                WalletTransaction.ref_id == ref_id,
+                WalletTransaction.kind.in_(("settle", "release")),
+            )
+            .order_by(WalletTransaction.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def settle(
     db: AsyncSession,
     user_id: str,
@@ -441,6 +477,10 @@ async def settle(
     if existing is not None:
         return existing
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
+    if held <= 0:
+        consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
+        if consumed is not None:
+            return consumed
     if held <= 0 and actual_micro <= 0:
         return None
     before_balance = wallet.balance_micro
@@ -453,7 +493,7 @@ async def settle(
         next_balance = 0
     wallet.balance_micro = next_balance
     wallet.hold_micro = max(0, wallet.hold_micro - held)
-    wallet.lifetime_spend_micro += actual
+    wallet.lifetime_spend_micro += max(0, actual - overdraw_micro)
     wallet.version += 1
     return await _insert_tx(
         db,
@@ -493,6 +533,9 @@ async def release(
         return existing
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
     if held <= 0:
+        consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
+        if consumed is not None:
+            return consumed
         return None
     wallet.balance_micro += held
     wallet.hold_micro = max(0, wallet.hold_micro - held)
@@ -526,7 +569,7 @@ async def charge(
 ) -> WalletTransaction | None:
     amount = int(amount_micro)
     if amount < 0:
-        amount = 0
+        raise BillingError("NEGATIVE_AMOUNT", "charge amount must not be negative", 422)
     if amount == 0 and not record_zero:
         return None
     existing = await _existing_tx(db, user_id, idempotency_key)
@@ -541,12 +584,12 @@ async def charge(
     if wallet.balance_micro < amount and not allow_negative and not cap_overdraw:
         raise BillingError("INSUFFICIENT_BALANCE", "insufficient wallet balance", 402)
     overdraw_micro = 0
-    if wallet.balance_micro < amount and not allow_negative:
+    if wallet.balance_micro < amount and cap_overdraw:
         overdraw_micro = amount - wallet.balance_micro
         wallet.balance_micro = 0
     else:
         wallet.balance_micro -= amount
-    wallet.lifetime_spend_micro += amount
+    wallet.lifetime_spend_micro += max(0, amount - overdraw_micro)
     wallet.version += 1
     return await _insert_tx(
         db,

@@ -1047,8 +1047,11 @@ async def _store_and_publish_completion_tool_image(
 async def _is_cancelled(redis: Any, task_id: str) -> bool:
     try:
         v = await redis.get(f"task:{task_id}:cancel")
-    except Exception:  # noqa: BLE001
-        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "completion cancel check failed closed task=%s err=%s", task_id, exc
+        )
+        return True
     return bool(v)
 
 
@@ -3336,7 +3339,9 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await renewer
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
-        release_future = asyncio.ensure_future(_release_lease(redis, task_id, worker_id))
+        release_future = asyncio.ensure_future(
+            _release_lease(redis, task_id, worker_id)
+        )
         try:
             await asyncio.shield(release_future)
         except asyncio.CancelledError:

@@ -206,7 +206,9 @@ async def test_prompt_enhance_falls_back_to_gpt54_low(
             _StubStreamResponse(
                 200,
                 [
-                    _sse({"type": "response.output_text.delta", "delta": "better prompt"}),
+                    _sse(
+                        {"type": "response.output_text.delta", "delta": "better prompt"}
+                    ),
                     _sse({"type": "response.completed"}),
                 ],
             ),
@@ -362,7 +364,9 @@ async def test_prompt_enhance_charges_completed_usage(
             ),
         ]
     )
-    charged: list[tuple[prompts._EnhanceBillingContext, prompts._EnhanceUsageCapture]] = []
+    charged: list[
+        tuple[prompts._EnhanceBillingContext, prompts._EnhanceUsageCapture]
+    ] = []
 
     async def fake_charge(
         billing: prompts._EnhanceBillingContext,
@@ -483,3 +487,138 @@ async def test_prompt_enhance_charge_uses_completion_wallet_kind(
     assert calls["committed"] is True
     assert audits[-1]["event_type"] == "wallet.charge.completion"
     assert audits[-1]["details"]["route"] == "prompts.enhance"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_billing_preauthorizes_before_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.routes import prompts
+
+    calls: dict[str, Any] = {}
+
+    class Db:
+        committed = False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    async def true_setting(_db: Any) -> bool:
+        return True
+
+    async def false_setting(_db: Any) -> bool:
+        return False
+
+    async def estimate(*_args: Any, **kwargs: Any) -> int:
+        calls["estimate"] = kwargs
+        return 123
+
+    async def hold(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        calls["hold"] = kwargs
+        return SimpleNamespace(id="tx-hold")
+
+    monkeypatch.setattr(prompts, "_billing_enabled", true_setting)
+    monkeypatch.setattr(prompts, "_billing_cache_aware", true_setting)
+    monkeypatch.setattr(prompts, "_billing_allow_negative", false_setting)
+    monkeypatch.setattr(prompts.billing_core, "estimate_completion_cost", estimate)
+    monkeypatch.setattr(prompts.billing_core, "hold", hold)
+
+    db = Db()
+    out = await prompts._prepare_prompt_enhance_billing(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        SimpleNamespace(
+            id="user-1",
+            email="u@example.com",
+            account_mode="wallet",
+            billing_rate_multiplier=1,
+        ),
+    )
+
+    assert out is not None
+    assert db.committed is True
+    assert out.hold_amount_micro == 10_000
+    assert calls["estimate"]["rate_multiplier_x10000"] == 10_000
+    assert calls["hold"]["ref_type"] == "prompt_enhance"
+    assert calls["hold"]["ref_id"] == out.request_id
+    assert calls["hold"]["idempotency_key"] == f"prompt_enhance:hold:{out.request_id}"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_charge_settles_existing_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.routes import prompts
+    from lumen_core.pricing import CostBreakdown
+
+    calls: dict[str, Any] = {}
+
+    class Db:
+        committed = False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    async def estimate_breakdown(*_args: Any, **kwargs: Any) -> CostBreakdown:
+        return CostBreakdown(
+            input_cost_micro=12,
+            output_cost_micro=10,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=kwargs["rate_multiplier_x10000"],
+            total_cost_micro=22,
+            actual_cost_micro=22,
+            pricing_source="db",
+        )
+
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        calls["settle"] = kwargs
+        return SimpleNamespace(amount_micro=-22, balance_after=978)
+
+    async def charge(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("preauthorized enhance must settle, not charge")
+
+    async def write_audit(_db: object, **kwargs: Any) -> bool:
+        calls["audit"] = kwargs
+        return True
+
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    monkeypatch.setattr(prompts.billing_core, "settle", settle)
+    monkeypatch.setattr(prompts.billing_core, "charge", charge)
+    monkeypatch.setattr(prompts, "write_audit", write_audit)
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    capture = prompts._EnhanceUsageCapture(
+        provider_name="primary",
+        model="gpt-5.5",
+        response_id="resp-1",
+        usage={"input_tokens": 12, "output_tokens": 5},
+    )
+
+    await prompts._charge_prompt_enhance(billing, capture)  # noqa: SLF001
+
+    assert calls["settle"]["ref_type"] == "prompt_enhance"
+    assert calls["settle"]["ref_id"] == "enhance-1"
+    assert calls["settle"]["actual_micro"] == 22
+    assert calls["settle"]["idempotency_key"] == "prompt_enhance:settle:enhance-1"
+    assert calls["audit"]["details"]["response_id"] == "resp-1"

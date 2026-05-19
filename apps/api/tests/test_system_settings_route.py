@@ -41,6 +41,18 @@ async def test_put_settings_rejects_empty_string_for_typed_setting() -> None:
 
 
 @pytest.mark.asyncio
+async def test_threshold_pricing_alignment_rejects_invalid_json() -> None:
+    with pytest.raises(Exception) as excinfo:
+        await system_settings._validate_threshold_pricing_alignment(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            "{not-json",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "INVALID_THRESHOLDS_JSON"
+
+
+@pytest.mark.asyncio
 async def test_put_settings_secret_rotation_keeps_previous_secret_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

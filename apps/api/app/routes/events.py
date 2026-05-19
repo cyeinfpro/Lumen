@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import Annotated, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -20,7 +21,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from lumen_core.constants import EVENTS_REPLAY_MAX_SCAN, EVENTS_STREAM_PREFIX
+from lumen_core.constants import (
+    EVENTS_REPLAY_MAX_SCAN,
+    EVENTS_STREAM_MAXLEN,
+    EVENTS_STREAM_PREFIX,
+)
 from lumen_core.models import Completion, Conversation, Generation
 
 from ..db import get_db
@@ -198,6 +203,53 @@ def _compaction_conv_id(channel: object) -> str | None:
     return channel_text.removeprefix(_COMPACTION_CHANNEL_PREFIX)
 
 
+async def _stream_id_for_pubsub_event(
+    redis: object,
+    *,
+    stream_key: str,
+    event_name: str,
+    envelope_event_id: str | None,
+    payload: object,
+) -> str | None:
+    """Persist legacy PubSub-only events so live SSE always advances `id`.
+
+    New publishers include ``sse_id`` after writing the Redis stream. This
+    fallback is for older or external publishers that only PUBLISH; without an
+    SSE id, browser reconnects keep an old Last-Event-ID and replay duplicates.
+    """
+
+    event_id = envelope_event_id or str(uuid.uuid4())
+    payload_for_stream = payload if isinstance(payload, dict) else {"data": payload}
+    envelope = {
+        "event": event_name,
+        "event_id": event_id,
+        "ts_ms": int(time.time() * 1000),
+        "data": payload_for_stream,
+    }
+    try:
+        raw = await redis.xadd(  # type: ignore[attr-defined]
+            stream_key,
+            {
+                "event": event_name,
+                "data": json.dumps(envelope, separators=(",", ":")),
+                "event_id": event_id,
+            },
+            maxlen=EVENTS_STREAM_MAXLEN,
+            approximate=True,
+        )
+    except Exception:
+        logger.warning(
+            "sse pubsub event missing sse_id and xadd fallback failed stream=%s event=%s",
+            stream_key,
+            event_name,
+            exc_info=True,
+        )
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("ascii", errors="replace")
+    return str(raw)
+
+
 def _task_ids_from_payload(payload: dict) -> set[str]:
     ids: set[str] = set()
     for key in ("task_id", "generation_id", "completion_id"):
@@ -212,9 +264,7 @@ def _event_channels_from_payload(payload: dict) -> set[str]:
     conv_id = payload.get("conversation_id")
     if isinstance(conv_id, str) and conv_id:
         channels.add(f"conv:{conv_id}")
-    channels.update(
-        f"task:{task_id}" for task_id in _task_ids_from_payload(payload)
-    )
+    channels.update(f"task:{task_id}" for task_id in _task_ids_from_payload(payload))
     return channels
 
 
@@ -535,6 +585,18 @@ async def events(
                         envelope_event_id = (
                             parsed.get("event_id") if isinstance(parsed, dict) else None
                         )
+                        if not isinstance(event_id, str) or not event_id:
+                            event_id = await _stream_id_for_pubsub_event(
+                                redis,
+                                stream_key=stream_key,
+                                event_name=ev_name,
+                                envelope_event_id=(
+                                    envelope_event_id
+                                    if isinstance(envelope_event_id, str)
+                                    else None
+                                ),
+                                payload=payload,
+                            )
                         # 同时把 msg_id 放进 payload 方便前端 JSON 级去重
                         if isinstance(event_id, str) and event_id:
                             if isinstance(payload, dict):

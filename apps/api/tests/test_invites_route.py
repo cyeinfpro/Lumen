@@ -43,6 +43,34 @@ def _request() -> Request:
 
 
 @pytest.mark.asyncio
+async def test_create_invite_link_checks_per_admin_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Limiter:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        async def check(self, _redis: Any, key: str) -> None:
+            self.keys.append(key)
+            raise invites._http("rate_limited", "too many invites", 429)  # noqa: SLF001
+
+    limiter = Limiter()
+    monkeypatch.setattr(invites, "ADMIN_INVITE_CREATE_LIMITER", limiter)
+    monkeypatch.setattr(invites, "get_redis", lambda: object())
+
+    with pytest.raises(Exception) as excinfo:
+        await invites.create_invite_link(
+            invites._CreateInviteIn(),  # noqa: SLF001
+            _request(),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            object(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 429
+    assert limiter.keys == ["rl:admin:invite_links:create:admin-1"]
+
+
+@pytest.mark.asyncio
 async def test_revoke_invite_is_scoped_to_creator() -> None:
     db = _Db(None)
 

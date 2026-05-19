@@ -159,6 +159,11 @@ class _FailingSecondSetRedis(_MemoryRedis):
         await super().set(key, value, *_args, **_kwargs)
 
 
+class _FailingDeleteRedis(_MemoryRedis):
+    async def delete(self, key: str) -> int:
+        raise RuntimeError(f"delete failed: {key}")
+
+
 class _ScalarResult:
     def __init__(self, values: list[Any]) -> None:
         self._values = values
@@ -333,6 +338,43 @@ async def test_create_redemption_codes_returns_plaintext_and_no_store(
     assert response.headers["Cache-Control"] == "no-store"
     assert any(key.startswith(billing._DOWNLOAD_TOKEN_PREFIX) for key in redis.values)  # noqa: SLF001
     assert any(key.startswith(billing._PLAINTEXT_BATCH_PREFIX) for key in redis.values)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_create_redemption_codes_logs_cache_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fake_secret(_db: Any) -> str:
+        return "test-redemption-secret"
+
+    async def fake_bootstrap(_db: Any) -> None:
+        return None
+
+    async def fake_write_audit(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    class CommitFailDb(_Db):
+        async def commit(self) -> None:
+            raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(billing, "_redemption_secret", fake_secret)
+    monkeypatch.setattr(billing, "_require_bootstrap_completed", fake_bootstrap)
+    monkeypatch.setattr(billing, "write_audit", fake_write_audit)
+    monkeypatch.setattr(billing, "request_ip_hash", lambda _request: "ip-hash")
+    monkeypatch.setattr(billing, "get_redis", lambda: _FailingDeleteRedis())
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await billing.admin_create_redemption_codes(
+                AdminRedemptionCodeCreateIn(amount_rmb="10", count=1),
+                None,  # type: ignore[arg-type]
+                Response(),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                CommitFailDb(),  # type: ignore[arg-type]
+            )
+
+    assert "redemption plaintext cache cleanup failed" in caplog.text
 
 
 @pytest.mark.asyncio

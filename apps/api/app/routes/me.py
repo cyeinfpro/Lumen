@@ -98,23 +98,24 @@ def _open_storage_file_safe(storage_key: str | None) -> BinaryIO | None:
     path = _fs_path_safe(storage_key)
     if path is None:
         return None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # Why: O_NONBLOCK prevents a swapped-in FIFO from blocking a worker thread
+    # before fstat can reject it. It is harmless for regular files.
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    fd = -1
     try:
-        before = path.stat()
-        src = path.open("rb")
-    except OSError:
-        return None
-    try:
-        after = os.fstat(src.fileno())
-        if not (
-            stat.S_ISREG(after.st_mode)
-            and before.st_dev == after.st_dev
-            and before.st_ino == after.st_ino
-        ):
-            src.close()
+        fd = os.open(path, flags)
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode):
+            os.close(fd)
             return None
-        return src
+        return os.fdopen(fd, "rb")
     except OSError:
-        src.close()
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         return None
 
 
@@ -282,6 +283,7 @@ async def get_my_usage(
 # Data export — POST /me/export
 # ---------------------------------------------------------------------------
 
+
 @router.post("/export", dependencies=[Depends(verify_csrf_session)])
 async def export_my_data(
     request: Request,
@@ -296,8 +298,7 @@ async def export_my_data(
     """
     active_user_id = (
         await db.execute(
-            select(User.id)
-            .where(User.id == user.id, User.deleted_at.is_(None))
+            select(User.id).where(User.id == user.id, User.deleted_at.is_(None))
         )
     ).scalar_one_or_none()
     if active_user_id is None:
@@ -310,9 +311,7 @@ async def export_my_data(
     images_skipped = 0
 
     try:
-        with zipfile.ZipFile(
-            tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True
-        ) as zf:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
             with zf.open("messages.ndjson", "w") as messages_file:
                 last_created_at: datetime | None = None
                 last_id: str | None = None
@@ -461,6 +460,7 @@ async def export_my_data(
 # Account deletion — DELETE /me  (soft)
 # ---------------------------------------------------------------------------
 
+
 @router.delete("", status_code=204, dependencies=[Depends(verify_csrf_session)])
 async def delete_my_account(
     request: Request,
@@ -521,25 +521,36 @@ async def delete_my_account(
     # rather than serialize via FOR UPDATE / advisory lock here. The flag's
     # 1-hour TTL also self-cleans the redundant key.
     active_generation_ids = (
-        await db.execute(
-            select(Generation.id).where(
-                Generation.user_id == user.id,
-                Generation.status.in_(
-                    [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
-                ),
+        (
+            await db.execute(
+                select(Generation.id).where(
+                    Generation.user_id == user.id,
+                    Generation.status.in_(
+                        [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
+                    ),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     active_completion_ids = (
-        await db.execute(
-            select(Completion.id).where(
-                Completion.user_id == user.id,
-                Completion.status.in_(
-                    [CompletionStatus.QUEUED.value, CompletionStatus.STREAMING.value]
-                ),
+        (
+            await db.execute(
+                select(Completion.id).where(
+                    Completion.user_id == user.id,
+                    Completion.status.in_(
+                        [
+                            CompletionStatus.QUEUED.value,
+                            CompletionStatus.STREAMING.value,
+                        ]
+                    ),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     generations_canceled = await db.execute(
         update(Generation)
         .where(
@@ -582,18 +593,19 @@ async def delete_my_account(
             "completions_canceled": completions_canceled.rowcount,
         },
     )
-    # Why: cancel keys MUST be written BEFORE db.commit. If the process
-    # crashes between commit and the redis SET, the worker may finish the
-    # task and overwrite the CANCELED rows with succeeded/failed. Setting
-    # the flag first means the worker's _is_cancelled() short-circuits
-    # before any terminal write.
+    await db.commit()
+
+    # DB state is now durable. Redis cancel keys are intentionally written only
+    # after commit so a failed account deletion cannot leave stale cancel flags
+    # that kill future tasks for an account that still exists.
     try:
         redis = get_redis()
         for task_id in [*active_generation_ids, *active_completion_ids]:
             await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("account deletion cancel signal write failed user=%s err=%s", user.id, exc)
-    await db.commit()
+        logger.warning(
+            "account deletion cancel signal write failed user=%s err=%s", user.id, exc
+        )
 
     # Best-effort: clear cookies
     response.delete_cookie("session", path="/")
@@ -606,6 +618,7 @@ async def delete_my_account(
 # Sessions — list & revoke
 # ---------------------------------------------------------------------------
 
+
 @router.get("/sessions", response_model=SessionsOut)
 async def list_my_sessions(
     request: Request,
@@ -614,16 +627,20 @@ async def list_my_sessions(
 ) -> SessionsOut:
     now = datetime.now(timezone.utc)
     rows = (
-        await db.execute(
-            select(AuthSession)
-            .where(
-                AuthSession.user_id == user.id,
-                AuthSession.revoked_at.is_(None),
-                AuthSession.expires_at > now,
+        (
+            await db.execute(
+                select(AuthSession)
+                .where(
+                    AuthSession.user_id == user.id,
+                    AuthSession.revoked_at.is_(None),
+                    AuthSession.expires_at > now,
+                )
+                .order_by(AuthSession.created_at.desc())
             )
-            .order_by(AuthSession.created_at.desc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     current_sid = getattr(request.state, "session_id", None)
     items = [
         SessionOut(

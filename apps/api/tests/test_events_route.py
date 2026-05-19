@@ -59,6 +59,41 @@ def test_replay_payload_filter_matches_requested_channels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pubsub_event_without_sse_id_is_persisted_for_live_id() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def xadd(
+            self,
+            stream_key: str,
+            fields: dict[str, str],
+            **kwargs: Any,
+        ) -> str:
+            self.calls.append(
+                {"stream_key": stream_key, "fields": fields, "kwargs": kwargs}
+            )
+            return "1710000000001-0"
+
+    redis = Redis()
+
+    stream_id = await events._stream_id_for_pubsub_event(  # noqa: SLF001
+        redis,
+        stream_key="events:user:user-1",
+        event_name="generation.completed",
+        envelope_event_id="event-1",
+        payload={"generation_id": "gen-1"},
+    )
+
+    assert stream_id == "1710000000001-0"
+    assert redis.calls[0]["stream_key"] == "events:user:user-1"
+    assert redis.calls[0]["fields"]["event"] == "generation.completed"
+    payload = json.loads(redis.calls[0]["fields"]["data"])
+    assert payload["event_id"] == "event-1"
+    assert payload["data"]["generation_id"] == "gen-1"
+
+
+@pytest.mark.asyncio
 async def test_events_rejects_too_many_channels_before_subscribing() -> None:
     channels = ",".join(f"task:{i}" for i in range(events.MAX_SSE_CHANNELS + 1))
 
@@ -73,8 +108,12 @@ async def test_events_rejects_too_many_channels_before_subscribing() -> None:
     assert getattr(excinfo.value, "status_code", None) == 400
     assert excinfo.value.detail["error"]["code"] == "too_many_channels"
     assert excinfo.value.detail["error"]["max_channels"] == events.MAX_SSE_CHANNELS
-    assert excinfo.value.detail["error"]["requested_count"] == events.MAX_SSE_CHANNELS + 1
-    assert excinfo.value.detail["error"]["effective_count"] == events.MAX_SSE_CHANNELS + 2
+    assert (
+        excinfo.value.detail["error"]["requested_count"] == events.MAX_SSE_CHANNELS + 1
+    )
+    assert (
+        excinfo.value.detail["error"]["effective_count"] == events.MAX_SSE_CHANNELS + 2
+    )
 
 
 @pytest.mark.asyncio
