@@ -180,6 +180,7 @@ local_keep_keys = {
     "REDIS_BIND_HOST",
     "API_BIND_HOST",
     "WEB_BIND_HOST",
+    "WORKER_METRICS_BIND",
     "LUMEN_UPDATE_PROXY_URL",
     "LUMEN_HTTP_PROXY",
     "HTTP_PROXY",
