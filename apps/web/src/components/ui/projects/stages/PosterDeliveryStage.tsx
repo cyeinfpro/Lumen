@@ -1,16 +1,21 @@
 "use client";
 
-// 海报交付阶段：下载 + 入图库 + 复制信息。
-// 此阶段没有专门的"完成"接口（与 apparel showcase 用 completeWorkflowDelivery 不同），
-// 后端在 multi_size_generation 完成后自动推进；前端这里只做信息汇总。
+// 海报交付阶段：下载 + 写入项目资产 + 复制信息。
 
-import { Check, Copy, Download } from "lucide-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Check, Copy, Download, FolderPlus } from "lucide-react";
 import Image from "next/image";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
-import type { BackendImageMeta, PosterRender, WorkflowRun } from "@/lib/apiClient";
+import {
+  apiFetch,
+  type BackendImageMeta,
+  type PosterRender,
+  type WorkflowRun,
+} from "@/lib/apiClient";
+import { qk } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { StageFrame } from "../components/StageFrame";
@@ -41,8 +46,37 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
   const renders = (workflow.poster_renders ?? []).filter(
     (render) => render.image_id,
   );
+  const renderImageIds = renders
+    .map((render) => render.image_id)
+    .filter((imageId): imageId is string => Boolean(imageId));
+  const savedAssetIds = workflowAssetImageIds(workflow, "poster_delivery");
+  const allSaved =
+    renderImageIds.length > 0 && renderImageIds.every((imageId) => savedAssetIds.has(imageId));
   const [previewList, setPreviewList] = useState<BackendImageMeta[]>([]);
   const [previewIndex, setPreviewIndex] = useState(-1);
+  const queryClient = useQueryClient();
+  const saveAssets = useMutation<WorkflowRun, Error, string[]>({
+    mutationFn: (image_ids) =>
+      apiFetch<WorkflowRun>(`/workflows/${workflow.id}/assets`, {
+        method: "POST",
+        body: JSON.stringify({
+          image_ids,
+          asset_type: "poster_delivery",
+          source_step_key: "delivery",
+          label: "海报交付",
+        }),
+      }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(qk.workflow(workflow.id), data);
+      queryClient.invalidateQueries({ queryKey: ["workflows"] });
+      toast.success("海报成品已加入项目资产");
+    },
+    onError: (error) => {
+      toast.error("加入项目资产失败", {
+        description: error.message || "请稍后重试",
+      });
+    },
+  });
 
   const downloadAll = () => {
     let count = 0;
@@ -86,7 +120,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
     <StageFrame
       eyebrow="N°07 — 交付"
       title="交付"
-      subtitle="批量下载所有尺寸，或单张右键另存。"
+      subtitle="批量下载所有尺寸，把成品加入项目资产，后续可从项目中心继续查找。"
       actions={
         <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:flex sm:flex-wrap">
           <Button
@@ -98,6 +132,17 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
             className="w-full sm:w-auto"
           >
             全部下载
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => saveAssets.mutate(renderImageIds)}
+            leftIcon={<FolderPlus className="h-3.5 w-3.5" />}
+            disabled={!renderImageIds.length || allSaved}
+            loading={saveAssets.isPending}
+            className="w-full sm:w-auto"
+          >
+            {allSaved ? "已加入项目资产" : "加入项目资产"}
           </Button>
           <Button
             variant="outline"
@@ -139,7 +184,9 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
           交付就绪
         </p>
         <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
-          也可在「图库」中找到这些成品，做后续二次编辑或分享。
+          {allSaved
+            ? "这些成品已保存为项目资产，可从项目中心继续追踪与复用。"
+            : "下载前建议先加入项目资产，便于后续查找、复用和交付复盘。"}
         </p>
       </div>
 
@@ -150,6 +197,21 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
       />
     </StageFrame>
   );
+}
+
+function workflowAssetImageIds(workflow: WorkflowRun, assetType: string): Set<string> {
+  const rawAssets = workflow.metadata_jsonb?.assets;
+  const ids = new Set<string>();
+  if (!Array.isArray(rawAssets)) return ids;
+  for (const asset of rawAssets) {
+    if (!asset || typeof asset !== "object") continue;
+    const record = asset as Record<string, unknown>;
+    if (record.asset_type !== assetType) continue;
+    if (typeof record.image_id === "string" && record.image_id) {
+      ids.add(record.image_id);
+    }
+  }
+  return ids;
 }
 
 function DeliveryCard({
@@ -172,7 +234,7 @@ function DeliveryCard({
         type="button"
         onClick={() => onPreview(image)}
         className={cn(
-          "relative block w-full overflow-hidden rounded-lg bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
           aspectCls,
         )}
       >

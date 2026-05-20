@@ -1,7 +1,7 @@
 "use client";
 
 // Sidebar 搜索框：客户端 filter 已加载会话的 title，
-// debounce 350ms；Esc 清空；⌘/Ctrl+K 聚焦（全局，侧栏可见时才启用；input 不可见时忽略）。
+// debounce 350ms；Esc 清空。搜索入口保持显式输入框，不抢占全局命令面板快捷键。
 
 import { useEffect, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
@@ -37,24 +37,6 @@ export function SearchBox({
     }, 350);
     return () => window.clearTimeout(t);
   }, [local, onChange, value]);
-
-  // ⌘/Ctrl+K 聚焦搜索框（仅在 input 可见时响应，避免移动端抽屉收起时抢焦点）
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const isK = e.key === "k" || e.key === "K";
-      if (!isK) return;
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const el = inputRef.current;
-      if (!el) return;
-      // offsetParent 为 null 代表元素不可见（display:none 或祖先隐藏）
-      if (!el.offsetParent) return;
-      e.preventDefault();
-      el.focus();
-      el.select();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
 
   return (
     <div
@@ -97,15 +79,6 @@ export function SearchBox({
           <X className="w-4 h-4" />
         </button>
       )}
-      <kbd
-        aria-hidden
-        className={cn(
-          "absolute right-2 px-1.5 py-0.5 rounded text-[10px] font-mono text-[var(--fg-2)] bg-white/5 border border-[var(--border)] pointer-events-none transition-opacity",
-          local ? "opacity-0" : "opacity-100",
-        )}
-      >
-        ⌘K
-      </kbd>
     </div>
   );
 }

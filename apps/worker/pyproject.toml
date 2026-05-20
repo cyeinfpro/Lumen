@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-worker"
-version = "1.1.44"
+version = "1.1.45"
 description = "Lumen arq Worker — DESIGN.md §6 + §7 上游集成"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
     "asyncpg>=0.29,<1.0",
     "redis>=5.0,<7.0",
     "pillow>=10.3,<13.0",
+    "pyvips>=2.2,<3.0",
     "blurhash-python>=1.2,<2.0",
     "lumen-core",
     # 观测层（V1.0 收尾）

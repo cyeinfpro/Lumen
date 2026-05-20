@@ -8,7 +8,15 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Brush, Download, Maximize2, Pencil, RefreshCw, Loader2 } from "lucide-react";
+import {
+  ArrowUpRight,
+  Brush,
+  Download,
+  Maximize2,
+  Pencil,
+  RefreshCw,
+  Loader2,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { copy } from "@/lib/copy";
 import { useUiStore } from "@/store/useUiStore";
@@ -17,12 +25,16 @@ import { useInpaintStore } from "@/store/useInpaintStore";
 import { Button, toast } from "./primitives";
 import { ViewportImage } from "./ViewportImage";
 import { extensionFromSrc, triggerImageDownload } from "./lightbox/utils";
+import type { LightboxItem } from "./lightbox/types";
 
 interface PremiumImageCardProps {
   id: string;
   src: string;
   previewSrc?: string;
   lightboxPreviewSrc?: string;
+  lightboxItem?: LightboxItem;
+  versionLabel?: string | null;
+  versionTitle?: string | null;
   alt: string;
   isStreaming?: boolean;
   compact?: boolean;
@@ -39,6 +51,9 @@ export function PremiumImageCard({
   src,
   previewSrc,
   lightboxPreviewSrc,
+  lightboxItem,
+  versionLabel,
+  versionTitle,
   alt,
   isStreaming = false,
   compact = false,
@@ -58,6 +73,7 @@ export function PremiumImageCard({
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const openLightbox = useUiStore((s) => s.openLightbox);
+  const openLightboxFromItems = useUiStore((s) => s.openLightboxFromItems);
 
   // React 19 推荐：prop 变化时在 render 阶段用 prev-check 同步 state，
   // 避免 useEffect+setState 触发的级联渲染。refs 清理放到下方 effect 的 cleanup 里处理。
@@ -163,6 +179,20 @@ export function PremiumImageCard({
 
   const handleOpenLightbox = () => {
     if (isStreaming) return;
+    if (lightboxItem) {
+      openLightboxFromItems(
+        [
+          {
+            ...lightboxItem,
+            url: lightboxItem.url || src,
+            previewUrl:
+              lightboxItem.previewUrl ?? lightboxPreviewSrc ?? previewSrc,
+          },
+        ],
+        lightboxItem.id,
+      );
+      return;
+    }
     openLightbox(id, src, alt, lightboxPreviewSrc ?? previewSrc);
   };
 
@@ -183,6 +213,7 @@ export function PremiumImageCard({
     isTouchDevice && !isStreaming && !controlsOpen && !touchHintSeen && loaded;
 
   return (
+    <>
     <motion.div
       style={style}
       role="group"
@@ -316,6 +347,27 @@ export function PremiumImageCard({
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {versionLabel && !isStreaming && loaded && !controlsOpen && (
+          <motion.div
+            key="version-source"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 6 }}
+            transition={{ duration: 0.18 }}
+            title={versionTitle ?? versionLabel}
+            className={cn(
+              "pointer-events-none absolute bottom-2 left-2 max-w-[calc(100%-1rem)] truncate",
+              "rounded-full border border-white/15 bg-black/48 px-2 py-1",
+              "font-mono text-[10px] leading-none text-white/82 backdrop-blur-md",
+            )}
+            aria-hidden
+          >
+            {versionLabel}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* hover 操作层：底部渐变 + IconButton 行（窄卡片自动换行 + compact 紧凑间距） */}
       <motion.div
         className={cn(
@@ -357,7 +409,7 @@ export function PremiumImageCard({
               <HoverIconButton
                 key="upscale"
                 label="放大到中等质量"
-                delay={0.03}
+                delay={0.06}
                 compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -374,7 +426,7 @@ export function PremiumImageCard({
               <HoverIconButton
                 key="reroll"
                 label="重新生成"
-                delay={0.06}
+                delay={0.075}
                 compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -408,7 +460,7 @@ export function PremiumImageCard({
               <HoverIconButton
                 key="lightbox"
                 label="查看大图"
-                delay={0.12}
+                delay={0.105}
                 compact={compact}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -420,7 +472,8 @@ export function PremiumImageCard({
             ]}
         </AnimatePresence>
       </motion.div>
-    </motion.div>
+      </motion.div>
+    </>
   );
 }
 

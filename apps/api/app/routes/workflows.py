@@ -33,6 +33,7 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,6 +181,16 @@ SHOT_POOL_BY_BAND: dict[str, ShotPool] = {
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 logger = logging.getLogger(__name__)
+
+
+class WorkflowAssetsAddIn(BaseModel):
+    image_ids: list[str] = Field(min_length=1, max_length=64)
+    asset_type: str = Field(default="project_asset", min_length=1, max_length=64)
+    source_step_key: str | None = Field(default=None, max_length=64)
+    label: str | None = Field(default=None, max_length=120)
+
+
+_WORKFLOW_ASSET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_:-]{0,63}$")
 
 _SHOWCASE_GPT55_REFERENCE_MAX_BYTES = 900_000
 _SHOWCASE_PREFLIGHT_TIMEOUT_ENV = "LUMEN_SHOWCASE_PREFLIGHT_TIMEOUT_SEC"
@@ -4335,6 +4346,7 @@ async def _prepare_showcase_preflight_impl(
         "gpt55_reference_image_skips": list(reference_image_skips or []),
     }
 
+
 async def _prepare_showcase_preflight(**kwargs: Any) -> dict[str, Any]:
     scene_planner = str(kwargs.get("scene_planner") or "")
     shot_count = len(kwargs.get("shot_picks") or []) or 1
@@ -5517,6 +5529,14 @@ async def _ensure_legacy_quality_reports(
 def _next_action_for(run: WorkflowRun) -> str:
     if run.status == "completed":
         return "查看交付"
+    if run.type == POSTER_WORKFLOW_TYPE:
+        return {
+            "copy_analysis": "确认海报文案",
+            "master_generation": "生成母版方案",
+            "master_approval": "选定母版",
+            "multi_size_generation": "生成/确认多尺寸",
+            "delivery": "下载海报成品",
+        }.get(run.current_step, "继续海报项目")
     return {
         "product_analysis": "确认商品约束",
         "model_settings": "生成模特候选",
@@ -5526,6 +5546,170 @@ def _next_action_for(run: WorkflowRun) -> str:
         "quality_review": "查看质检",
         "delivery": "下载最终图",
     }.get(run.current_step, "继续项目")
+
+
+def _workflow_asset_key(record: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(record.get("workflow_run_id") or ""),
+        str(record.get("image_id") or ""),
+        str(record.get("asset_type") or ""),
+        str(record.get("source_step_key") or ""),
+    )
+
+
+def _workflow_asset_records(
+    *,
+    run: WorkflowRun,
+    image_ids: list[str],
+    asset_type: str,
+    source_step_key: str,
+    label: str | None,
+    added_at: datetime,
+) -> list[dict[str, Any]]:
+    clean_label = (label or "").strip() or None
+    records: list[dict[str, Any]] = []
+    for image_id in image_ids:
+        record: dict[str, Any] = {
+            "workflow_run_id": run.id,
+            "workflow_type": run.type,
+            "project_title": run.title,
+            "image_id": image_id,
+            "asset_type": asset_type,
+            "source_step_key": source_step_key,
+            "added_at": added_at.isoformat(),
+        }
+        if clean_label:
+            record["label"] = clean_label
+        records.append(record)
+    return records
+
+
+def _merge_workflow_asset_metadata(
+    metadata: dict[str, Any] | None,
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = dict(metadata or {})
+    existing_raw = payload.get("assets")
+    existing = (
+        [
+            dict(record)
+            for record in existing_raw
+            if isinstance(record, dict) and isinstance(record.get("image_id"), str)
+        ]
+        if isinstance(existing_raw, list)
+        else []
+    )
+    replace_keys = {_workflow_asset_key(record) for record in records}
+    merged = [
+        record for record in existing if _workflow_asset_key(record) not in replace_keys
+    ]
+    merged.extend(records)
+    payload["assets"] = merged[-200:]
+    payload["asset_image_ids"] = _dedupe_nonempty(
+        str(record.get("image_id") or "") for record in payload["assets"]
+    )
+    payload["asset_count"] = len(payload["asset_image_ids"])
+    return payload
+
+
+def _merge_image_workflow_asset_metadata(
+    metadata: dict[str, Any] | None,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    payload = dict(metadata or {})
+    existing_raw = payload.get("workflow_assets")
+    existing = (
+        [
+            dict(item)
+            for item in existing_raw
+            if isinstance(item, dict) and isinstance(item.get("workflow_run_id"), str)
+        ]
+        if isinstance(existing_raw, list)
+        else []
+    )
+    key = _workflow_asset_key(record)
+    merged = [item for item in existing if _workflow_asset_key(item) != key]
+    merged.append(record)
+    payload["workflow_assets"] = merged[-50:]
+    payload["latest_workflow_asset"] = record
+    return payload
+
+
+async def _attach_workflow_assets(
+    db: AsyncSession,
+    *,
+    run: WorkflowRun,
+    user_id: str,
+    image_ids: list[str],
+    asset_type: str,
+    source_step_key: str,
+    label: str | None = None,
+    added_at: datetime | None = None,
+) -> list[dict[str, Any]]:
+    clean_asset_type = (asset_type or "").strip()
+    if not _WORKFLOW_ASSET_TYPE_RE.fullmatch(clean_asset_type):
+        raise _http("invalid_asset_type", "asset_type is invalid", 422)
+    clean_step_key = (source_step_key or "").strip()
+    if not clean_step_key:
+        raise _http("missing_source_step", "source_step_key is required", 422)
+    deduped_image_ids = _dedupe_nonempty(image_ids)
+    if not deduped_image_ids:
+        raise _http("missing_images", "image_ids cannot be empty", 422)
+
+    images = list(
+        (
+            await db.execute(
+                select(Image).where(
+                    Image.user_id == user_id,
+                    Image.id.in_(deduped_image_ids),
+                    Image.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    image_by_id = {image.id: image for image in images}
+    missing = [
+        image_id for image_id in deduped_image_ids if image_id not in image_by_id
+    ]
+    if missing:
+        raise _http(
+            "image_not_found",
+            "one or more images are not available for this workflow",
+            404,
+            image_ids=missing,
+        )
+
+    step = await _step(db, run.id, clean_step_key)
+    now = added_at or _now()
+    records = _workflow_asset_records(
+        run=run,
+        image_ids=deduped_image_ids,
+        asset_type=clean_asset_type,
+        source_step_key=clean_step_key,
+        label=label,
+        added_at=now,
+    )
+    run.metadata_jsonb = _merge_workflow_asset_metadata(run.metadata_jsonb, records)
+    step.image_ids = _dedupe_nonempty([*(step.image_ids or []), *deduped_image_ids])
+    existing_step_asset_ids = (step.output_json or {}).get("asset_image_ids")
+    if not isinstance(existing_step_asset_ids, list):
+        existing_step_asset_ids = []
+    step_asset_ids = _dedupe_nonempty([*existing_step_asset_ids, *deduped_image_ids])
+    step.output_json = {
+        **(step.output_json or {}),
+        "asset_image_ids": step_asset_ids,
+        "asset_count": len(step_asset_ids),
+        "asset_updated_at": now.isoformat(),
+    }
+    for record in records:
+        image = image_by_id[record["image_id"]]
+        image.metadata_jsonb = _merge_image_workflow_asset_metadata(
+            image.metadata_jsonb,
+            record,
+        )
+    return records
 
 
 async def _image_out_map(db: AsyncSession, images: list[Image]) -> dict[str, ImageOut]:
@@ -6227,6 +6411,37 @@ async def delete_workflow(
             conv.deleted_at = deleted_at
     await db.commit()
     return {"ok": True}
+
+
+@router.post(
+    "/{workflow_run_id}/assets",
+    response_model=WorkflowRunOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def add_workflow_assets(
+    workflow_run_id: str,
+    body: WorkflowAssetsAddIn,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> WorkflowRunOut:
+    run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
+    if run.type == POSTER_WORKFLOW_TYPE:
+        await _sync_poster_workflow_outputs(db, run)
+    else:
+        await _sync_workflow_outputs(db, run)
+    source_step_key = (body.source_step_key or run.current_step or "").strip()
+    await _attach_workflow_assets(
+        db,
+        run=run,
+        user_id=user.id,
+        image_ids=body.image_ids,
+        asset_type=body.asset_type,
+        source_step_key=source_step_key,
+        label=body.label,
+    )
+    out = await _build_run_out(db, run)
+    await db.commit()
+    return out
 
 
 @router.post(
@@ -7625,6 +7840,45 @@ async def complete_delivery(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WorkflowRunOut:
     run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
+    if run.type == POSTER_WORKFLOW_TYPE:
+        await _sync_poster_workflow_outputs(db, run)
+        multi_step = await _step(db, run.id, "multi_size_generation")
+        image_ids = _dedupe_nonempty(multi_step.image_ids or [])
+        if not image_ids:
+            raise _http("no_outputs", "generate poster renders before delivery", 409)
+        delivery = await _step(db, run.id, "delivery")
+        now = _now()
+        multi_step.status = "completed"
+        multi_step.approved_at = now
+        multi_step.approved_by = user.id
+        delivery.status = "completed"
+        delivery.approved_at = now
+        delivery.approved_by = user.id
+        delivery.input_json = {
+            **(delivery.input_json or {}),
+            "final_image_ids": image_ids,
+        }
+        delivery.output_json = {
+            **(delivery.output_json or {}),
+            "download_image_ids": image_ids,
+            "completed_at": now.isoformat(),
+        }
+        await _attach_workflow_assets(
+            db,
+            run=run,
+            user_id=user.id,
+            image_ids=image_ids,
+            asset_type="poster_delivery",
+            source_step_key="delivery",
+            label="海报交付",
+            added_at=now,
+        )
+        run.status = "completed"
+        run.current_step = "delivery"
+        out = await _build_run_out(db, run)
+        await db.commit()
+        return out
+
     await _sync_workflow_outputs(db, run)
     showcase = await _step(db, run.id, "showcase_generation")
     if not showcase.image_ids:

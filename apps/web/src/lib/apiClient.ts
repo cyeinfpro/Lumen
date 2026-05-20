@@ -10,6 +10,7 @@ import type { NoContent } from "./api/http";
 import type {
   Intent,
   ImageParams,
+  StructuredAttachment,
   AllowedEmailOut,
   AdminRequestEventsOut,
   AdminContextHealthOut,
@@ -36,6 +37,7 @@ import type {
   ApiKeyVerifyOut,
   ByokSettingsOut,
   ByokSettingsPatchIn,
+  TelegramLinkCodeOut,
   UserApiCredentialListOut,
   UserApiCredentialOut,
   AdminBillingAuditEventOut,
@@ -59,12 +61,27 @@ import type {
   WalletOut,
   WalletTransactionListOut,
   WalletTransactionOut,
+  RecommendedErrorAction,
 } from "./types";
 import { uuid } from "./utils";
 export { API_BASE, ApiError, apiFetch, apiFetchNoContent } from "./api/http";
 export type { NoContent } from "./api/http";
 
 // —————————————————— 领域接口 ——————————————————
+
+function createIdempotencyKey(): string {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      /* fall back to RFC 4122 v4 helper */
+    }
+  }
+  return uuid();
+}
 
 export interface AuthUser {
   id: string;
@@ -282,6 +299,8 @@ export type TaskStatus = GenerationTaskStatus | CompletionTaskStatus;
 export interface BackendGeneration {
   id: string;
   message_id: string;
+  conversation_id?: string | null;
+  project_id?: string | null;
   user_api_credential_id?: string | null;
   upstream_supplier_id?: string | null;
   parent_generation_id?: string | null;
@@ -293,6 +312,16 @@ export interface BackendGeneration {
   primary_input_image_id: string | null;
   status: GenerationTaskStatus;
   progress_stage: string;
+  stage?: string | null;
+  substage?: string | null;
+  queue_position?: number | null;
+  retrying?: boolean;
+  waiting_provider?: boolean;
+  cancelled?: boolean;
+  retryable?: boolean;
+  recommended_actions?: RecommendedErrorAction[];
+  thumb_url?: string | null;
+  created_at?: string | null;
   attempt: number;
   error_code: string | null;
   error_message: string | null;
@@ -307,11 +336,26 @@ export interface BackendGeneration {
   requested_params?: Record<string, unknown> | null;
   effective_params?: Record<string, unknown> | null;
   provider_attempts?: Array<Record<string, unknown>>;
+  source?: string | null;
+  action_source?: string | null;
+  trace_id?: string | null;
+  attachment_roles?: StructuredAttachment[];
+  source_image_id?: string | null;
+  queue_lane?: string | null;
+  workflow_type?: string | null;
+  workflow_step_key?: string | null;
+  pixel_count?: number | null;
+  size_bucket?: string | null;
+  cost_class?: string | null;
+  queue_wait_ms?: number | null;
 }
 
 export interface BackendCompletion {
   id: string;
   message_id: string;
+  conversation_id?: string | null;
+  project_id?: string | null;
+  source?: string | null;
   user_api_credential_id?: string | null;
   upstream_supplier_id?: string | null;
   model: string;
@@ -321,11 +365,26 @@ export interface BackendCompletion {
   tokens_out: number;
   status: CompletionTaskStatus;
   progress_stage: string;
+  stage?: string | null;
+  substage?: string | null;
+  retrying?: boolean;
+  waiting_provider?: boolean;
+  cancelled?: boolean;
+  retryable?: boolean;
+  recommended_actions?: RecommendedErrorAction[];
+  created_at?: string | null;
   attempt: number;
   error_code: string | null;
   error_message: string | null;
   started_at: string | null;
   finished_at: string | null;
+  queue_lane?: string | null;
+  workflow_type?: string | null;
+  workflow_step_key?: string | null;
+  pixel_count?: number | null;
+  size_bucket?: string | null;
+  cost_class?: string | null;
+  queue_wait_ms?: number | null;
 }
 
 export interface BackendImageMeta {
@@ -1286,6 +1345,11 @@ export interface PostMessageIn {
   idempotency_key: string;
   text: string;
   attachment_image_ids?: string[];
+  attachments?: StructuredAttachment[];
+  input_images?: string[];
+  source?: string;
+  action_source?: string;
+  trace_id?: string;
   // 局部修改 (inpaint) mask 的 image_id（已通过 /images/upload 上传，
   // RGBA PNG，alpha=0 处为要重画区域）。仅 image_to_image 时有意义。
   mask_image_id?: string;
@@ -1459,7 +1523,42 @@ export interface TaskItemResponse {
   message_id: string;
   status: TaskStatus;
   progress_stage: string;
+  stage?: string | null;
   started_at: string | null;
+  date?: string | null;
+  cursor?: string | null;
+  created_at?: string | null;
+  finished_at?: string | null;
+  source?: string | null;
+  action_source?: string | null;
+  trace_id?: string | null;
+  conversation_id?: string | null;
+  project_id?: string | null;
+  workflow_type?: string | null;
+  workflow_step_key?: string | null;
+  queue_lane?: string | null;
+  pixel_count?: number | null;
+  size_bucket?: string | null;
+  cost_class?: string | null;
+  queue_wait_ms?: number | null;
+  queue_position?: number | null;
+  substage?: string | null;
+  retrying?: boolean;
+  waiting_provider?: boolean;
+  cancelled?: boolean;
+  title?: string | null;
+  prompt?: string | null;
+  source_image_id?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  retryable?: boolean;
+  recommended_actions?: RecommendedErrorAction[];
+  thumb_url?: string | null;
+}
+
+export interface TaskListResponse {
+  items: TaskItemResponse[];
+  next_cursor?: string | null;
 }
 
 export function getTask(kind: "generations", id: string): Promise<BackendGeneration>;
@@ -1489,14 +1588,32 @@ export function retryTask(
 export interface TaskListOpts {
   status?: string;
   mine?: boolean;
+  kind?: "all" | "generation" | "completion";
+  source?: string;
+  conversation_id?: string;
+  project_id?: string;
+  date?: string;
+  cursor?: string;
+  error_code?: string;
+  retryable?: boolean;
+  limit?: number;
 }
 
-export function listTasks(opts: TaskListOpts = {}): Promise<TaskItemResponse[]> {
+export function listTasks(opts: TaskListOpts = {}): Promise<TaskListResponse> {
   const q = new URLSearchParams();
   if (opts.status) q.set("status", opts.status);
   if (opts.mine) q.set("mine", "1");
+  if (opts.kind && opts.kind !== "all") q.set("kind", opts.kind);
+  if (opts.source) q.set("source", opts.source);
+  if (opts.conversation_id) q.set("conversation_id", opts.conversation_id);
+  if (opts.project_id) q.set("project_id", opts.project_id);
+  if (opts.date) q.set("date", opts.date);
+  if (opts.cursor) q.set("cursor", opts.cursor);
+  if (opts.error_code) q.set("error_code", opts.error_code);
+  if (opts.retryable != null) q.set("retryable", opts.retryable ? "1" : "0");
+  if (opts.limit != null) q.set("limit", String(opts.limit));
   const suffix = q.toString() ? `?${q.toString()}` : "";
-  return apiFetch<TaskItemResponse[]>(`/tasks${suffix}`);
+  return apiFetch<TaskListResponse>(`/tasks${suffix}`);
 }
 
 // 用户级中心任务列表：返回当前登录用户**所有**会话的进行中任务完整字段，
@@ -2264,9 +2381,22 @@ export function putMyApiCredential(
   });
 }
 
+export function probeMyApiCredential(credential_id: string): Promise<UserApiCredentialOut> {
+  return apiFetch<UserApiCredentialOut>(
+    `/me/api-credentials/${credential_id}/probe`,
+    { method: "POST" },
+  );
+}
+
 export function revokeMyApiCredential(credential_id: string): Promise<{ ok: boolean }> {
   return apiFetch<{ ok: boolean }>(`/me/api-credentials/${credential_id}`, {
     method: "DELETE",
+  });
+}
+
+export function createTelegramLinkCode(): Promise<TelegramLinkCodeOut> {
+  return apiFetch<TelegramLinkCodeOut>("/me/telegram/link-code", {
+    method: "POST",
   });
 }
 
@@ -2294,7 +2424,7 @@ export function listMyWalletTransactions(
 export function redeemCode(code: string): Promise<RedemptionOut> {
   return apiFetch<RedemptionOut>("/me/redemptions", {
     method: "POST",
-    headers: { "Idempotency-Key": uuid() },
+    headers: { "Idempotency-Key": createIdempotencyKey() },
     body: JSON.stringify({ code }),
   });
 }

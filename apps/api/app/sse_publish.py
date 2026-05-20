@@ -23,8 +23,16 @@ _XADD_RETRY_DELAYS_SECONDS = (0.05, 0.2)
 _EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
 _XADD_IDEMPOTENT_LUA = """
 local existing = redis.call('GET', KEYS[2])
-if existing then
+if existing and existing ~= '' then
   return existing
+end
+local reserved = redis.call('SET', KEYS[2], '', 'NX', 'EX', tonumber(ARGV[5]))
+if not reserved then
+  existing = redis.call('GET', KEYS[2])
+  if existing and existing ~= '' then
+    return existing
+  end
+  return redis.error_reply('sse dedupe reservation has no stream id')
 end
 local stream_id = redis.call(
   'XADD',
@@ -40,7 +48,7 @@ local stream_id = redis.call(
   'event_id',
   ARGV[1]
 )
-redis.call('SET', KEYS[2], stream_id, 'EX', tonumber(ARGV[5]))
+redis.call('SET', KEYS[2], stream_id, 'XX', 'EX', tonumber(ARGV[5]))
 return stream_id
 """
 
@@ -48,7 +56,7 @@ return stream_id
 # non-comparable values, so clients must use Redis stream ids for replay
 # ordering and treat ts_ms as a display hint.
 _LAST_TS_MS = 0
-_TS_LOCK: asyncio.Lock | None = None
+_TS_LOCK = asyncio.Lock()
 
 
 class SSEPublishEvent(TypedDict):
@@ -59,9 +67,7 @@ class SSEPublishEvent(TypedDict):
 
 
 async def _monotonic_ts_ms() -> int:
-    global _LAST_TS_MS, _TS_LOCK
-    if _TS_LOCK is None:
-        _TS_LOCK = asyncio.Lock()
+    global _LAST_TS_MS
     async with _TS_LOCK:
         now = int(time.time() * 1000)
         if now <= _LAST_TS_MS:
@@ -172,6 +178,7 @@ async def publish_sse_events(
         payload["event_id"] = event_id
         envelope: dict[str, Any] = {
             "event": event["event_name"],
+            "channel": event["channel"],
             "event_id": event_id,
             "ts_ms": await _monotonic_ts_ms(),
             "data": payload,
@@ -260,6 +267,7 @@ async def _publish_sse_event_single(
     payload["event_id"] = event_id
     envelope: dict[str, Any] = {
         "event": event_name,
+        "channel": channel,
         "event_id": event_id,
         "ts_ms": await _monotonic_ts_ms(),
         "data": payload,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,15 @@ def test_backup_paths_resolve_from_settings_at_call_time(
     assert admin_backups._backup_root() == backup_root
     assert admin_backups._backup_script() == scripts_dir / "backup.sh"
     assert admin_backups._restore_script() == scripts_dir / "restore.sh"
+
+
+def test_backup_trigger_mode_accepts_only_numeric_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUMEN_BACKUP_VIA_TRIGGER", "true")
+    assert admin_backups._backup_trigger_only_mode() is False
+    monkeypatch.setenv("LUMEN_BACKUP_VIA_TRIGGER", "1")
+    assert admin_backups._backup_trigger_only_mode() is True
 
 
 def test_chmod_tolerate_eperm_swallows_only_eperm(
@@ -160,8 +170,171 @@ async def test_backup_now_unlinks_marker_before_releasing_lock(
     with pytest.raises(Exception) as exc_info:
         await admin_backups.backup_now(
             SimpleNamespace(),  # type: ignore[arg-type]
-            SimpleNamespace(id="admin-1"),  # type: ignore[arg-type]
+            SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
         )
 
     assert getattr(exc_info.value, "status_code", None) == 504
     assert release_marker_states == [False]
+
+
+def test_timestamp_from_backup_stdout_accepts_json_and_legacy_lines() -> None:
+    started_at = datetime(2026, 5, 19, tzinfo=timezone.utc)
+
+    assert (
+        admin_backups._timestamp_from_backup_stdout(
+            '[backup 2026-05-19T00:00:00Z] done\n'
+            '{"timestamp":"20260519-010203","pg_size":1,"redis_size":2}\n',
+            started_at,
+        )
+        == "20260519-010203"
+    )
+    assert (
+        admin_backups._timestamp_from_backup_stdout(
+            "[backup 2026-05-19T00:00:00Z] backup 20260519-020304 complete\n",
+            started_at,
+        )
+        == "20260519-020304"
+    )
+    assert (
+        admin_backups._timestamp_from_backup_stdout(
+            "backup complete: timestamp=20260519-030405\n",
+            started_at,
+        )
+        == "20260519-030405"
+    )
+
+
+def test_backup_script_was_skipped_detects_maintenance_skip() -> None:
+    assert admin_backups._backup_script_was_skipped(
+        "[backup now] skipped: maintenance lock held; next timer cycle will retry\n"
+    )
+    assert not admin_backups._backup_script_was_skipped(
+        "[backup now] backup 20260519-010203 complete\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_latest_paired_backup_after_uses_filesystem_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    pg_dir = backup_root / "pg"
+    redis_dir = backup_root / "redis"
+    pg_dir.mkdir(parents=True)
+    redis_dir.mkdir()
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+
+    started_at = datetime.now(timezone.utc)
+    ts = "20260519-010203"
+    (pg_dir / f"{ts}.pg.dump.gz").write_bytes(b"pg")
+    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+
+    assert await admin_backups._find_latest_paired_backup_after(started_at) == ts
+
+
+@pytest.mark.asyncio
+async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "backup.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (scripts_dir / "restore.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
+    monkeypatch.setattr(admin_backups, "_backup_trigger_only_mode", lambda: True)
+
+    release_calls: list[dict[str, object]] = []
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **kwargs) -> None:
+            release_calls.append(kwargs)
+
+    async def fake_wait_for_log_append(*_args, **_kwargs) -> bool:
+        return True
+
+    async def fake_wait_for_latest(*_args, **_kwargs) -> str:
+        return "20260519-010203"
+
+    async def fake_audit(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+    monkeypatch.setattr(admin_backups, "_wait_for_log_append", fake_wait_for_log_append)
+    monkeypatch.setattr(
+        admin_backups,
+        "_wait_for_latest_paired_backup_after",
+        fake_wait_for_latest,
+    )
+    monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
+
+    out = await admin_backups.backup_now(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+    )
+
+    assert out.ok is True
+    assert out.timestamp == "20260519-010203"
+    assert (backup_root / ".backup.trigger").is_file()
+    assert not (backup_root / ".backup.running").exists()
+    assert release_calls[-1] == {"succeeded": True, "reason": "backup_complete"}
+
+
+@pytest.mark.asyncio
+async def test_backup_now_reports_skipped_script_as_busy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "backup.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (scripts_dir / "restore.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
+    monkeypatch.setattr(admin_backups, "_backup_trigger_only_mode", lambda: False)
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **_kwargs) -> None:
+            return None
+
+    async def fake_run_script(*_args, **_kwargs):
+        return admin_backups._ScriptResult(
+            0,
+            "[backup now] skipped: maintenance lock held; next timer cycle will retry\n",
+            "",
+        )
+
+    audit_events: list[str] = []
+
+    async def fake_audit(*_args, event_type: str, **_kwargs) -> None:
+        audit_events.append(event_type)
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+    monkeypatch.setattr(admin_backups, "_run_script", fake_run_script)
+    monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
+
+    with pytest.raises(Exception) as exc_info:
+        await admin_backups.backup_now(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert audit_events == ["admin.backup.create.skipped"]
+    assert not (backup_root / ".backup.trigger").exists()

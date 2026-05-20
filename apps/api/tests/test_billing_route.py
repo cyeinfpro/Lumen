@@ -620,6 +620,53 @@ async def test_topup_redeem_locks_wallet_before_balance_mutation(
     assert tx.idempotency_key == "redeem:usage-1"
 
 
+@pytest.mark.asyncio
+async def test_topup_redeem_replay_preserves_existing_tx_meta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_meta = {
+        "code_id": "code-original",
+        "redemption_request_hash": "hash-original",
+    }
+    existing_tx = SimpleNamespace(
+        id="wallet-tx-existing",
+        idempotency_key="redeem:usage-1",
+        meta=original_meta,
+    )
+
+    async def fake_existing_tx(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return existing_tx
+
+    async def fail_get_wallet(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("topup replay must not lock wallet or mutate balance")
+
+    async def fail_insert_tx(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("topup replay must not insert a replacement tx")
+
+    monkeypatch.setattr(billing_core, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing_core, "get_wallet", fail_get_wallet)
+    monkeypatch.setattr(billing_core, "_insert_tx", fail_insert_tx)
+
+    tx = await billing_core.topup_redeem(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        25_000_000,
+        usage_id="usage-1",
+        code_id="code-new",
+        meta={
+            "code_id": "code-new",
+            "redemption_request_hash": "hash-new",
+        },
+    )
+
+    assert tx is existing_tx
+    assert existing_tx.meta is original_meta
+    assert existing_tx.meta == {
+        "code_id": "code-original",
+        "redemption_request_hash": "hash-original",
+    }
+
+
 def test_redemption_idempotency_key_derives_for_legacy_clients() -> None:
     request = _request(method="POST")
 

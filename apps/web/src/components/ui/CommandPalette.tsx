@@ -5,8 +5,10 @@ import {
   BarChart3,
   Brain,
   FileText,
+  FolderKanban,
   Home,
-  Image as ImageIcon,
+  Images,
+  PanelLeft,
   Search,
   Shield,
   User,
@@ -29,16 +31,25 @@ import {
 
 import { IconButton, Kbd } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
+import {
+  APP_NAV_ITEMS,
+  getActiveNavKey,
+  isSameRoute,
+  type AppNavKey,
+} from "@/components/ui/shell/navigation";
 import { cn } from "@/lib/utils";
 
 type CommandIcon = ComponentType<SVGProps<SVGSVGElement>>;
+type CommandAction = "toggle-sidebar";
 
 interface Command {
   id: string;
   label: string;
   detail: string;
-  href: string;
-  group: "导航" | "设置" | "管理";
+  href?: string;
+  action?: CommandAction;
+  navKey?: AppNavKey;
+  group: "导航" | "操作" | "设置" | "管理";
   keywords: string[];
   icon: CommandIcon;
   searchText: string;
@@ -63,7 +74,8 @@ function command(definition: Omit<Command, "searchText">): Command {
       [
         definition.label,
         definition.detail,
-        definition.href,
+        definition.href ?? "",
+        definition.action ?? "",
         definition.group,
         ...definition.keywords,
       ].join(" "),
@@ -71,33 +83,36 @@ function command(definition: Omit<Command, "searchText">): Command {
   };
 }
 
+const NAV_ICONS: Record<AppNavKey, CommandIcon> = {
+  studio: Home,
+  projects: FolderKanban,
+  assets: Images,
+  me: User,
+};
+
+const NAV_COMMANDS: Command[] = APP_NAV_ITEMS.map((item) =>
+  command({
+    id: `nav-${item.key}`,
+    label: item.label,
+    detail: item.detail,
+    href: item.route,
+    navKey: item.key,
+    group: "导航",
+    keywords: item.keywords,
+    icon: NAV_ICONS[item.key],
+  }),
+);
+
 const COMMANDS: Command[] = [
+  ...NAV_COMMANDS,
   command({
-    id: "studio",
-    label: "新建 / Studio",
-    detail: "打开创作工作台",
-    href: "/",
-    group: "导航",
-    keywords: ["new", "studio", "home", "创作", "首页", "工作台"],
-    icon: Home,
-  }),
-  command({
-    id: "stream",
-    label: "图库",
-    detail: "浏览已生成的图片",
-    href: "/stream",
-    group: "导航",
-    keywords: ["stream", "feed", "图库", "图片", "作品"],
-    icon: ImageIcon,
-  }),
-  command({
-    id: "me",
-    label: "个人中心",
-    detail: "查看账号与历史",
-    href: "/me",
-    group: "导航",
-    keywords: ["me", "profile", "account", "我的", "账号"],
-    icon: User,
+    id: "toggle-sidebar",
+    label: "切换会话侧栏",
+    detail: "打开或关闭创作页左侧会话列表",
+    action: "toggle-sidebar",
+    group: "操作",
+    keywords: ["sidebar", "conversation", "侧栏", "会话", "列表", "快捷键", "cmd b", "ctrl b"],
+    icon: PanelLeft,
   }),
   command({
     id: "settings-usage",
@@ -180,6 +195,7 @@ export function CommandPalette() {
       ? 0
       : Math.min(selectedIndex, filteredCommands.length - 1);
   const selectedCommand = filteredCommands[effectiveSelectedIndex];
+  const activeNavKey = getActiveNavKey(pathname);
   const optionId = useCallback(
     (id: string) => `${listboxId}-${id}`,
     [listboxId],
@@ -214,7 +230,13 @@ export function CommandPalette() {
   const runCommand = useCallback(
     (item: Command) => {
       closePalette(false);
-      router.push(item.href);
+      if (item.action === "toggle-sidebar") {
+        window.dispatchEvent(new CustomEvent("lumen:sidebar-toggle"));
+        return;
+      }
+      if (item.href) {
+        router.push(item.href);
+      }
     },
     [closePalette, router],
   );
@@ -225,6 +247,7 @@ export function CommandPalette() {
         event.key.toLocaleLowerCase() === "k" && (event.metaKey || event.ctrlKey);
 
       if (!isCommandK) return;
+      if (event.defaultPrevented) return;
       event.preventDefault();
       if (open) {
         closePalette();
@@ -233,8 +256,8 @@ export function CommandPalette() {
       }
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, [closePalette, open, openPalette]);
 
   useEffect(() => {
@@ -321,10 +344,12 @@ export function CommandPalette() {
           "placeholder:text-[var(--fg-2)] focus:outline-none",
         )}
       />
-      <div className="hidden items-center gap-1 sm:flex" aria-hidden>
-        <Kbd>{modifierLabel}</Kbd>
-        <Kbd>K</Kbd>
-      </div>
+      {isDesktop && (
+        <div className="hidden items-center gap-1 sm:flex" aria-hidden>
+          <Kbd>{modifierLabel}</Kbd>
+          <Kbd>K</Kbd>
+        </div>
+      )}
       <IconButton
         variant="ghost"
         size="lg"
@@ -351,14 +376,15 @@ export function CommandPalette() {
         filteredCommands.map((item, index) => {
           const Icon = item.icon;
           const selected = index === effectiveSelectedIndex;
-          const current =
-            item.href === "/"
-              ? pathname === "/"
-              : pathname === item.href || pathname.startsWith(`${item.href}/`);
+          const current = item.navKey
+            ? activeNavKey === item.navKey
+            : item.href
+              ? isSameRoute(pathname, item.href)
+              : false;
 
           return (
             /* @list-item-ok: combobox option, role + aria-selected + 多列布局 */
-<button
+            <button
               key={item.id}
               id={optionId(item.id)}
               type="button"
@@ -436,6 +462,12 @@ export function CommandPalette() {
       <span className="inline-flex items-center gap-1.5">
         <Kbd>{modifierLabel}</Kbd>
         <Kbd>K</Kbd>
+        命令
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <Kbd>{modifierLabel}</Kbd>
+        <Kbd>B</Kbd>
+        侧栏
       </span>
       <span className="inline-flex items-center gap-1.5">
         <Kbd>↑</Kbd>
@@ -468,7 +500,6 @@ export function CommandPalette() {
         >
           {searchRow}
           {list}
-          {shortcutHelp}
         </div>
       </BottomSheet>
     );
@@ -477,7 +508,7 @@ export function CommandPalette() {
   return (
     <div className="fixed inset-0 z-[95] flex items-start justify-center px-3 pt-[12vh] sm:pt-[16vh]">
       {/* @backdrop-button: dialog backdrop button，需要 click 但不能用 Button primitive 样式 */}
-<button
+      <button
         type="button"
         aria-label="关闭命令面板"
         className="absolute inset-0 cursor-default bg-black/45 backdrop-blur-sm"

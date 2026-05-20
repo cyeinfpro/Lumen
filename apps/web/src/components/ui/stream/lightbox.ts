@@ -37,6 +37,18 @@ export function generationToLightboxItem(
     type: item.output_format ? `requested/${item.output_format}` : undefined,
     fast: item.fast,
     created_at: item.created_at,
+    revised_prompt: item.revised_prompt ?? null,
+    requested_params: item.requested_params ?? null,
+    effective_params: item.effective_params ?? null,
+    diagnostics: item.diagnostics ?? null,
+    provider_attempts: item.provider_attempts,
+    parent_image_id: item.image.parent_image_id ?? null,
+    parent_generation_id: item.parent_generation_id ?? null,
+    generation_id: item.id,
+    message_id: item.message_id,
+    conversation_id: item.conversation_id,
+    action_source: item.action_source ?? null,
+    metadata: item.image.metadata_jsonb ?? undefined,
   };
 }
 

@@ -80,6 +80,42 @@ class FakeRedis:
         return 1
 
 
+def test_metrics_server_closes_bound_socket_when_thread_start_fails(monkeypatch):
+    class FakeHttpd:
+        closed = False
+
+        def serve_forever(self) -> None:
+            raise AssertionError("thread should not run target")
+
+        def server_close(self) -> None:
+            self.closed = True
+
+    class BrokenThread:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("thread failed")
+
+    httpd = FakeHttpd()
+    monkeypatch.setattr(observability, "_metrics_server_started", False)
+    monkeypatch.setattr(observability, "_metrics_httpd", None)
+    monkeypatch.setattr(observability, "_metrics_thread", None)
+    monkeypatch.setattr(
+        observability,
+        "make_server",
+        lambda *_args, **_kwargs: httpd,
+    )
+    monkeypatch.setattr(observability.threading, "Thread", BrokenThread)
+
+    with pytest.raises(RuntimeError, match="metrics server failed"):
+        observability.start_metrics_server(9101)
+
+    assert httpd.closed is True
+    assert observability._metrics_httpd is None
+    assert observability._metrics_server_started is False
+
+
 @pytest.mark.asyncio
 async def test_publish_event_xadd_retries_use_seconds_not_milliseconds(monkeypatch):
     sleeps: list[float] = []
@@ -114,6 +150,24 @@ async def test_publish_event_xadd_retries_use_seconds_not_milliseconds(monkeypat
     assert payload["event"] == "generation.requeued"
     assert payload["sse_id"] == "1710000000000-0"
     assert isinstance(payload["event_id"], str)
+
+
+@pytest.mark.asyncio
+async def test_publish_event_preserves_falsy_payload_event_id() -> None:
+    redis = FakeRedis()
+
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "user:user-1",
+        "generation.started",
+        {"generation_id": "gen-1", "event_id": 0},
+    )
+
+    assert redis.stream_entries[0][1]["event_id"] == "0"
+    payload = json.loads(redis.published[0][1])
+    assert payload["event_id"] == "0"
+    assert payload["data"]["event_id"] == 0
 
 
 class AcceptedThenRaisedRedis(FakeRedis):

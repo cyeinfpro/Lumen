@@ -35,3 +35,22 @@ def test_completion_tool_image_skips_blurhash_for_tiny_images(
     assert orig_mime == "image/png"
     assert (width, height) == (2, 2)
     assert blurhash_str is None
+
+
+def test_tool_image_dedupe_key_uses_b64_sha1_without_item_id() -> None:
+    b64_one = " data:image/png;base64,\nQUJDRA== "
+    b64_two = "QUJDRA=="
+
+    assert completion._tool_image_dedupe_key({}, b64_one).startswith("b64sha1:")
+    assert completion._tool_image_dedupe_key({}, b64_one) == (
+        completion._tool_image_dedupe_key({}, b64_two)
+    )
+
+
+def test_tool_image_dedupe_key_prefers_item_id() -> None:
+    key = completion._tool_image_dedupe_key(
+        {"item": {"id": "img-call-1"}},
+        "different-image",
+    )
+
+    assert key == "id:img-call-1"

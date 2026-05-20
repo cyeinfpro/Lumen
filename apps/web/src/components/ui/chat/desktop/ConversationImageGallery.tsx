@@ -35,6 +35,7 @@ import {
   getLightboxDownloadFilename,
   triggerImageDownload,
 } from "@/components/ui/lightbox/utils";
+import { imageResultToLightboxItem } from "@/lib/imageResultLightbox";
 import { shareOrCopyLink } from "@/lib/shareLink";
 import { cn } from "@/lib/utils";
 import type { Generation, Message } from "@/lib/types";
@@ -178,6 +179,15 @@ function collectConversationImages(
         image.preview_url ??
         imageVariantUrl(image.id, "thumb256");
       const label = image.size_actual || sizeLabel(image.width, image.height);
+      const createdAt = gen.finished_at ?? gen.started_at ?? msg.created_at;
+      const item = imageResultToLightboxItem(gen, image, {
+        previewUrl: display,
+        thumbUrl: thumb,
+        type: "generated-image",
+        source: "generated",
+        sourceId: msg.id,
+        createdAt,
+      });
       images.push({
         id: image.id,
         shareImageId: image.id,
@@ -188,30 +198,10 @@ function collectConversationImages(
         alt: gen.prompt,
         width: image.width,
         height: image.height,
-        createdAt: gen.finished_at ?? gen.started_at ?? msg.created_at,
+        createdAt,
         sourceLabel: "生成",
         sizeLabel: label,
-        item: {
-          id: image.id,
-          url: original,
-          previewUrl: display,
-          thumbUrl: thumb,
-          prompt: gen.prompt,
-          width: image.width,
-          height: image.height,
-          aspect_ratio: gen.aspect_ratio,
-          size_actual: label ?? undefined,
-          mime: image.mime,
-          filename: image.filename,
-          type: "generated-image",
-          created_at: isoFromMs(gen.finished_at ?? gen.started_at ?? msg.created_at),
-          metadata: {
-            source: "generated",
-            message_id: msg.id,
-            generation_id: gen.id,
-            ...(image.metadata_jsonb ?? {}),
-          },
-        },
+        item,
       });
     }
   }

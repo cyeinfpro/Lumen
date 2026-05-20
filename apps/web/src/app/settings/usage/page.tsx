@@ -11,16 +11,25 @@ import {
   AlertCircle,
   ArrowLeft,
   CalendarDays,
+  CreditCard,
   Database,
   Image as ImageIcon,
+  Info,
+  KeyRound,
   MessageSquare,
+  ReceiptText,
   RefreshCw,
   Sparkles,
   Zap,
 } from "lucide-react";
 
-import { apiFetch } from "@/lib/apiClient";
-import type { UsageOut } from "@/lib/types";
+import {
+  apiFetch,
+  getMe,
+  getMyBillingSnapshot,
+  listMyWalletTransactions,
+} from "@/lib/apiClient";
+import type { BillingSnapshotOut, UsageOut, WalletTransactionOut } from "@/lib/types";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
@@ -41,10 +50,29 @@ const USAGE_PERIODS = [
 
 export default function UsagePage() {
   const [days, setDays] = useState(30);
+  const meQ = useQuery({
+    queryKey: ["me"],
+    queryFn: getMe,
+    retry: false,
+    staleTime: 60_000,
+  });
   const q = useQuery<UsageOut>({
     queryKey: ["me", "usage", { days }],
     queryFn: () => getUsage(days),
     placeholderData: (previous) => previous,
+    staleTime: 30_000,
+  });
+  const billingQ = useQuery<BillingSnapshotOut>({
+    queryKey: ["me", "billing", "snapshot"],
+    queryFn: getMyBillingSnapshot,
+    retry: false,
+    staleTime: 30_000,
+  });
+  const txQ = useQuery({
+    queryKey: ["me", "wallet", "transactions", "charge", "usage-page"],
+    queryFn: () => listMyWalletTransactions({ limit: 3, kind: "charge" }),
+    enabled: meQ.data?.account_mode === "wallet",
+    retry: false,
     staleTime: 30_000,
   });
   const selectedPeriod =
@@ -92,7 +120,15 @@ export default function UsagePage() {
             onRetry={() => void q.refetch()}
           />
         ) : q.data ? (
-          <UsageView data={q.data} />
+          <div className="space-y-6">
+            <UsageView data={q.data} />
+            <BillingTransparency
+              accountMode={meQ.data?.account_mode ?? "wallet"}
+              snapshot={billingQ.data ?? null}
+              recentTransactions={txQ.data?.items ?? []}
+              loading={billingQ.isLoading || txQ.isLoading}
+            />
+          </div>
         ) : null}
       </motion.div>
     </SettingsShell>
@@ -241,6 +277,160 @@ function UsageView({ data }: { data: UsageOut }) {
           </div>
         </SecondaryCard>
       </div>
+    </div>
+  );
+}
+
+function BillingTransparency({
+  accountMode,
+  snapshot,
+  recentTransactions,
+  loading,
+}: {
+  accountMode: "wallet" | "byok";
+  snapshot: BillingSnapshotOut | null;
+  recentTransactions: WalletTransactionOut[];
+  loading: boolean;
+}) {
+  const imageCost = snapshot ? microToRmbText(snapshot.by_kind_30d.image) : "—";
+  const outputCost = snapshot ? microToRmbText(snapshot.by_kind_30d.output) : "—";
+  return (
+    <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 type-overline text-[var(--fg-1)]">
+            <Info className="w-3.5 h-3.5" />
+            计费口径
+          </div>
+          <p className="type-body-sm mt-2 text-[var(--fg-2)]">
+            提交前展示的是按当前模型、尺寸、数量和价格表计算的预估；任务完成后以实际
+            token、实际图片档位和可计费成功结果结算。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {accountMode === "wallet" ? (
+            <LinkButton href="/me/wallet" icon={<CreditCard className="w-3.5 h-3.5" />}>
+              查看钱包流水
+            </LinkButton>
+          ) : (
+            <LinkButton href="/settings/api-key" icon={<KeyRound className="w-3.5 h-3.5" />}>
+              查看 Key 健康
+            </LinkButton>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <BillingStep
+          label="预计费用"
+          value="发送前"
+          description="用于确认预算，价格表或参数变化会让下一次预估变化。"
+        />
+        <BillingStep
+          label="实际扣费"
+          value={accountMode === "wallet" ? "完成后结算" : "由上游 Key 结算"}
+          description="失败、取消、未产生结果的部分会释放预扣或不计入平台扣费。"
+        />
+        <BillingStep
+          label="结果详情"
+          value="看流水 ref_id"
+          description="钱包流水里的 ref_type/ref_id 可定位到 generation 或 completion。"
+        />
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
+          <div className="flex items-center gap-2 text-[var(--fg-2)]">
+            <ReceiptText className="w-4 h-4" />
+            <span className="type-caption">近 30 天费用构成</span>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <MiniMoney label="图片实际" value={imageCost} />
+            <MiniMoney label="对话输出" value={outputCost} />
+          </div>
+        </div>
+        <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-[var(--fg-2)]">
+              <CreditCard className="w-4 h-4" />
+              <span className="type-caption">最近实际结算</span>
+            </div>
+            {loading && <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--fg-2)]" />}
+          </div>
+          {accountMode === "byok" ? (
+            <p className="mt-3 type-body-sm text-[var(--fg-2)]">
+              BYOK 账号不走平台钱包扣费；实际费用以你的上游供应商账单为准。
+            </p>
+          ) : recentTransactions.length > 0 ? (
+            <div className="mt-3 divide-y divide-[var(--border-subtle)]">
+              {recentTransactions.map((tx) => (
+                <div key={tx.id} className="py-2 first:pt-0 last:pb-0">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="truncate text-[var(--fg-0)]">{txLabel(tx)}</span>
+                    <span className="shrink-0 font-mono tabular-nums text-[var(--fg-0)]">
+                      {txAmount(tx)}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
+                    {tx.ref_type ?? "tx"}:{tx.ref_id ?? tx.id}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 type-body-sm text-[var(--fg-2)]">
+              暂无近期扣费流水。
+            </p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function LinkButton({
+  href,
+  icon,
+  children,
+}: {
+  href: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex h-8 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-caption text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
+    >
+      {icon}
+      {children}
+    </Link>
+  );
+}
+
+function BillingStep({
+  label,
+  value,
+  description,
+}: {
+  label: string;
+  value: string;
+  description: string;
+}) {
+  return (
+    <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
+      <p className="type-caption text-[var(--fg-2)]">{label}</p>
+      <p className="mt-1 type-body-sm text-[var(--fg-0)]">{value}</p>
+      <p className="mt-1 text-[11px] leading-relaxed text-[var(--fg-2)]">{description}</p>
+    </div>
+  );
+}
+
+function MiniMoney({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="type-caption text-[var(--fg-2)]">{label}</p>
+      <p className="mt-1 font-mono text-base tabular-nums text-[var(--fg-0)]">{value}</p>
     </div>
   );
 }
@@ -395,7 +585,9 @@ function formatDay(iso: string): string {
 }
 
 function formatThousands(n: number): string {
-  return n.toLocaleString("en-US");
+  const [intPart, fractionPart] = String(n).split(".");
+  const formattedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return fractionPart ? `${formattedInt}.${fractionPart}` : formattedInt;
 }
 
 function formatBytes(bytes: number): string {
@@ -406,4 +598,24 @@ function formatBytes(bytes: number): string {
   if (mb < 1024) return `${mb.toFixed(1)} MB`;
   const gb = mb / 1024;
   return `${gb.toFixed(2)} GB`;
+}
+
+function microToRmbText(micro: number): string {
+  return `¥${(micro / 1_000_000).toFixed(2)}`;
+}
+
+function txAmount(tx: WalletTransactionOut): string {
+  return microToRmbText(Math.abs(tx.amount.micro));
+}
+
+function txLabel(tx: WalletTransactionOut): string {
+  const meta = tx.meta ?? {};
+  const actual = typeof meta.actual_micro === "number" ? meta.actual_micro : null;
+  const preauth = typeof meta.preauth_micro === "number" ? meta.preauth_micro : null;
+  if (actual != null && preauth != null) {
+    return `实际 ${microToRmbText(actual)} / 预估 ${microToRmbText(preauth)}`;
+  }
+  if (tx.kind === "settle") return "图片生成实际扣费";
+  if (tx.kind === "charge_completion") return "对话任务实际扣费";
+  return "实际扣费";
 }

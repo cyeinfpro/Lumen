@@ -11,6 +11,16 @@ export type LightboxMetadataSection = {
   rows: LightboxMetadataRow[];
 };
 
+type NormalizedProviderAttempt = {
+  provider: string | null;
+  status: string | null;
+  route: string | null;
+  endpoint: string | null;
+  proxy: string | null;
+  durationMs: number | null;
+  error: string | null;
+};
+
 const FALLBACK_URL_BASE = "https://lumen.local";
 
 function hasText(value: unknown): value is string {
@@ -47,6 +57,8 @@ const NESTED_METADATA_KEYS = [
 ] as const;
 
 const REQUEST_PARAM_RECORD_KEYS = [
+  "params",
+  "image_params",
   "requested_params",
   "request_params",
   "requested_image_params",
@@ -56,6 +68,8 @@ const REQUEST_PARAM_RECORD_KEYS = [
 ] as const;
 
 const EFFECTIVE_PARAM_RECORD_KEYS = [
+  "params",
+  "image_params",
   "effective_params",
   "actual_params",
   "effective_image_params",
@@ -233,9 +247,22 @@ function formatDurationMs(ms: number): string | null {
 function formatProviderAttempt(value: unknown): {
   provider: string | null;
   status: string | null;
+  route: string | null;
+  endpoint: string | null;
+  proxy: string | null;
+  durationMs: number | null;
+  error: string | null;
 } | null {
   if (typeof value === "string" && value.trim()) {
-    return { provider: value.trim(), status: null };
+    return {
+      provider: value.trim(),
+      status: null,
+      route: null,
+      endpoint: null,
+      proxy: null,
+      durationMs: null,
+      error: null,
+    };
   }
   const record = asRecord(value);
   if (!record) return null;
@@ -247,14 +274,31 @@ function formatProviderAttempt(value: unknown): {
     "actual_provider",
   ]);
   const status = firstTextFromSources([record], ["status", "outcome", "state"]);
-  if (!provider && !status) return null;
-  return { provider, status };
+  const route = firstTextFromSources([record], ["route", "actual_route", "upstream_route"]);
+  const endpoint = firstTextFromSources([record], ["endpoint", "actual_endpoint", "upstream_endpoint"]);
+  const proxy = firstTextFromSources([record], ["proxy", "proxy_name", "egress_proxy"]);
+  const durationMs =
+    firstNumberFromSources([record], ["duration_ms", "elapsed_ms", "upstream_duration_ms"]) ??
+    (() => {
+      const seconds = firstNumberFromSources([record], [
+        "duration_seconds",
+        "upstream_duration_seconds",
+      ]);
+      return seconds !== null ? seconds * 1000 : null;
+    })();
+  const error = firstTextFromSources([record], [
+    "error_summary",
+    "safe_error_summary",
+    "upstream_error_summary",
+    "error",
+  ]);
+  if (!provider && !status && !route && !endpoint && !proxy && !error) {
+    return null;
+  }
+  return { provider, status, route, endpoint, proxy, durationMs, error };
 }
 
-function providerAttempts(item: LightboxItem): Array<{
-  provider: string | null;
-  status: string | null;
-}> {
+function providerAttempts(item: LightboxItem): NormalizedProviderAttempt[] {
   const raw = firstArrayFromSources(collectRecordSources(item), [
     "provider_attempts",
     "attempts",
@@ -263,9 +307,7 @@ function providerAttempts(item: LightboxItem): Array<{
   if (!raw) return [];
   return raw
     .map(formatProviderAttempt)
-    .filter((attempt): attempt is { provider: string | null; status: string | null } =>
-      Boolean(attempt),
-    );
+    .filter((attempt): attempt is NormalizedProviderAttempt => Boolean(attempt));
 }
 
 function lastSuccessfulProvider(
@@ -424,6 +466,7 @@ export function buildLightboxMetadataSections(
     readField(effectiveParams, ["moderation"]).value,
   );
   const rows = {
+    source: buildSourceRows(item),
     generation: [
       dimensions ? { label: "尺寸", value: dimensions } : null,
       item.aspect_ratio ? { label: "比例", value: item.aspect_ratio } : null,
@@ -444,6 +487,7 @@ export function buildLightboxMetadataSections(
     ],
     diff: buildParamDiffRows(item),
     runtime: buildRuntimeRows(item),
+    diagnostics: buildDiagnosticsRows(item),
     file: [
       mime ? { label: "MIME", value: mime } : null,
       type ? { label: "类型", value: type } : null,
@@ -456,12 +500,91 @@ export function buildLightboxMetadataSections(
   };
 
   return [
+    { title: "版本来源", rows: rows.source },
     { title: "生成参数", rows: compactRows(rows.generation) },
     { title: "参数差异", rows: rows.diff },
     { title: "运行信息", rows: rows.runtime },
+    { title: "诊断", rows: rows.diagnostics },
     { title: "文件信息", rows: compactRows(rows.file) },
     { title: "记录", rows: compactRows(rows.record) },
   ].filter((section) => section.rows.length > 0);
+}
+
+function sourceLabel(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  if (normalized === "chat" || normalized === "generated") return "聊天生成";
+  if (normalized === "project" || normalized === "workflow") return "项目";
+  if (normalized === "upload" || normalized === "user_upload") return "上传";
+  if (normalized === "telegram") return "Telegram";
+  if (normalized === "library" || normalized === "model_library") return "素材库";
+  return value;
+}
+
+function actionLabel(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  if (normalized === "generate" || normalized === "create") return "生成";
+  if (normalized === "edit" || normalized === "revise") return "编辑";
+  if (normalized === "inpaint") return "局部修图";
+  if (normalized === "reroll" || normalized === "retry") return "重生成";
+  if (normalized === "upscale") return "放大";
+  if (normalized === "variation") return "变体";
+  return value;
+}
+
+function compactId(value: string | null): string | null {
+  if (!value) return null;
+  return value.length > 18 ? `${value.slice(0, 12)}...${value.slice(-4)}` : value;
+}
+
+function buildSourceRows(item: LightboxItem): LightboxMetadataRow[] {
+  const sources = collectRecordSources(item);
+  const source =
+    item.source_type ??
+    item.source ??
+    firstTextFromSources(sources, ["source_type", "source", "origin"]);
+  const action =
+    item.action_source ??
+    item.generation_action ??
+    firstTextFromSources(sources, ["action_source", "generation_action", "action"]);
+  const parentImage =
+    item.parent_image_id ??
+    firstTextFromSources(sources, ["parent_image_id", "source_image_id"]);
+  const parentGeneration =
+    item.parent_generation_id ??
+    firstTextFromSources(sources, ["parent_generation_id", "parent_task_id"]);
+  const generation =
+    item.generation_id ??
+    item.from_generation_id ??
+    firstTextFromSources(sources, [
+      "generation_id",
+      "from_generation_id",
+      "owner_generation_id",
+    ]);
+  const message =
+    item.message_id ?? firstTextFromSources(sources, ["message_id"]);
+  const sourceId =
+    item.source_id ??
+    item.conversation_id ??
+    firstTextFromSources(sources, [
+      "source_id",
+      "conversation_id",
+      "workflow_run_id",
+      "project_id",
+    ]);
+
+  return compactRows([
+    sourceLabel(source) ? { label: "来源", value: sourceLabel(source) as string } : null,
+    actionLabel(action) ? { label: "动作", value: actionLabel(action) as string } : null,
+    parentImage ? { label: "父图", value: compactId(parentImage) as string } : null,
+    parentGeneration
+      ? { label: "父任务", value: compactId(parentGeneration) as string }
+      : null,
+    generation ? { label: "任务", value: compactId(generation) as string } : null,
+    message ? { label: "消息", value: compactId(message) as string } : null,
+    sourceId ? { label: "来源 ID", value: compactId(sourceId) as string } : null,
+  ]);
 }
 
 function buildParamDiffRows(item: LightboxItem): LightboxMetadataRow[] {
@@ -650,6 +773,61 @@ function buildRuntimeRows(item: LightboxItem): LightboxMetadataRow[] {
     debugId ? { label: "Debug ID", value: debugId } : null,
     safeError ? { label: "错误摘要", value: safeError } : null,
   ]);
+}
+
+function buildDiagnosticsRows(item: LightboxItem): LightboxMetadataRow[] {
+  const sources = collectRecordSources(item);
+  const attempts = providerAttempts(item);
+  const safeError = firstTextFromSources(sources, [
+    "safe_error_summary",
+    "upstream_error_summary",
+    "error_summary",
+    "failure_summary",
+  ]);
+  const queueMs = firstNumberFromSources(sources, [
+    "queue_wait_ms",
+    "provider_wait_ms",
+    "dispatch_wait_ms",
+  ]);
+  const processingMs = firstNumberFromSources(sources, [
+    "processing_ms",
+    "variant_ms",
+    "storage_ms",
+    "decode_ms",
+  ]);
+  const rows: Array<LightboxMetadataRow | null> = [
+    safeError ? { label: "摘要", value: safeError } : null,
+    attempts.length > 0
+      ? { label: "尝试次数", value: `${attempts.length}` }
+      : null,
+    queueMs !== null && formatDurationMs(queueMs)
+      ? { label: "等待", value: formatDurationMs(queueMs) as string }
+      : null,
+    processingMs !== null && formatDurationMs(processingMs)
+      ? { label: "处理", value: formatDurationMs(processingMs) as string }
+      : null,
+  ];
+
+  attempts.slice(0, 4).forEach((attempt, index) => {
+    const parts = [
+      attempt.provider,
+      attempt.status,
+      attempt.durationMs !== null ? formatDurationMs(attempt.durationMs) : null,
+      attempt.route,
+      attempt.proxy ? `proxy ${attempt.proxy}` : null,
+      attempt.error,
+    ].filter((value): value is string => Boolean(value));
+    if (parts.length > 0) {
+      rows.push({
+        label: `尝试 ${index + 1}`,
+        value: parts.join(" · "),
+      });
+    }
+  });
+  if (attempts.length > 4) {
+    rows.push({ label: "更多", value: `另有 ${attempts.length - 4} 次尝试` });
+  }
+  return compactRows(rows);
 }
 
 function compactRows(

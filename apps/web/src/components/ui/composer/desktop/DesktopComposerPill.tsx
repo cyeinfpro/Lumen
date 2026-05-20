@@ -3,7 +3,7 @@
 // Darkroom 桌面端 Composer Pill（≥768px）：
 // - fixed bottom-6 中间居中，max-w 920，折叠 60 / 展开 ≤320
 // - 宽高比 & 推理强度用 Popover（不是 BottomSheet）
-// - 键盘快捷键：⌘↵ 发送、/ 展开、⌘K 切换 Sidebar
+// - 键盘快捷键：⌘↵ 发送、/ 展开
 // - 蓝本：../mobile/MobileComposerPill.tsx
 
 import { AnimatePresence, motion } from "framer-motion";
@@ -57,6 +57,11 @@ import {
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
 import { useMaskInpaint } from "../shared/useMaskInpaint";
+import { AttachmentRoleBadge } from "../shared/AttachmentRoleBadge";
+import { ExecutionSummaryBar } from "../shared/ExecutionSummaryBar";
+import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
+import { buildComposerExecutionSummary } from "../shared/executionSummary";
+import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { MaskCanvas } from "../MaskCanvas";
 
 interface DesktopComposerPillProps {
@@ -267,18 +272,11 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
     }
   }, [text, setForceIntent]);
 
-  // ———— 全局键盘快捷键：⌘K 切换 Sidebar、/ 展开 Composer ————
+  // ———— 全局键盘快捷键：/ 展开 Composer ————
   useEffect(() => {
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
       // 跳过 IME 组合中
       if (e.isComposing) return;
-
-      // ⌘K / Ctrl+K → 派发 sidebar-toggle
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent("lumen:sidebar-toggle"));
-        return;
-      }
 
       // "/" 展开 composer（不能在已聚焦输入控件内触发）
       if (e.key === "/") {
@@ -327,6 +325,37 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
   });
 
   const inpaint = useMaskInpaint();
+  const attachmentRoles = useComposerAttachmentRoles({
+    attachments,
+    mode,
+    maskTargetAttachmentId: inpaint.maskActive
+      ? attachments[0]?.id ?? null
+      : null,
+  });
+  const costEstimate = useComposerCostEstimate({
+    mode,
+    quality,
+    aspect,
+    count,
+  });
+  const executionSummary = buildComposerExecutionSummary({
+    mode,
+    attachmentCount: attachments.length,
+    attachmentRoles: attachmentRoles.entries.map((entry) => entry.role),
+    outputCount: count,
+    aspect,
+    quality,
+    renderQuality,
+    fast,
+    maskActive: inpaint.maskActive,
+    costLabel: costEstimate.label,
+    costWarning: costEstimate.warning,
+    reasoningEffort,
+    webSearch,
+    fileSearch,
+    codeInterpreter,
+    imageGeneration,
+  });
 
   const handleSubmit = useCallback(async () => {
     if (submittingRef.current) return;
@@ -632,6 +661,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               {attachments.map((att, idx) => {
                 const isFirst = idx === 0;
                 const showMaskBadge = isFirst && inpaint.maskActive;
+                const role = attachmentRoles.getRole(att.id);
                 return (
                   <div
                     key={att.id}
@@ -676,22 +706,11 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                     >
                       @图{idx + 1}
                     </button>
-                    {showMaskBadge && (
-                      <button
-                        type="button"
-                        onClick={() => inpaint.openInpaint()}
-                        aria-label="重新涂抹 mask"
-                        title="点击重新涂抹"
-                        className={cn(
-                          "absolute inset-x-0 bottom-0 px-1 py-0.5",
-                          "bg-[var(--amber-400)]/85 text-[10px] font-semibold text-[var(--bg-0)]",
-                          "text-center leading-tight tracking-wide",
-                          "hover:bg-[var(--amber-400)] transition-colors",
-                        )}
-                      >
-                        Mask
-                      </button>
-                    )}
+                    <AttachmentRoleBadge
+                      role={role}
+                      imageNumber={idx + 1}
+                      onClick={() => attachmentRoles.cycleRole(att.id)}
+                    />
                     <button
                       type="button"
                       onClick={() => removeAttachment(att.id)}
@@ -737,6 +756,11 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               )}
             </div>
           )}
+          {attachmentRoles.hint && (
+            <div className="px-3 pt-1 text-[11px] leading-4 text-[var(--fg-2)]">
+              {attachmentRoles.hint}
+            </div>
+          )}
 
           {/* 错误条 */}
           <AnimatePresence>
@@ -760,7 +784,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                     type="button"
                     aria-label="关闭错误提示"
                     onClick={() => setComposerError(null)}
-                    className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md hover:bg-black/30"
+                    className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md hover:bg-[var(--bg-2)]"
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -829,6 +853,8 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               )}
             />
           </div>
+
+          <ExecutionSummaryBar summary={executionSummary} />
 
           {/* 工具条 */}
           <div

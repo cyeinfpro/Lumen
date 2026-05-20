@@ -35,6 +35,7 @@ import { BackupsPanel } from "./_panels/BackupsPanel";
 import { InvitesPanel } from "./_panels/InvitesPanel";
 import { ByokPanel } from "./_panels/ByokPanel";
 import { BillingPanel } from "./_panels/BillingPanel";
+import { HealthPanel } from "./_panels/HealthPanel";
 import { ProvidersPanel } from "./_panels/ProvidersPanel";
 import { ProxiesPanel } from "./_panels/ProxiesPanel";
 import { RequestEventsPanel } from "./_panels/RequestEventsPanel";
@@ -45,6 +46,7 @@ import { TelegramPanel } from "./_panels/TelegramPanel";
 type MaybeAdminUser = AuthUser & { role?: "admin" | "member" };
 
 type Tab =
+  | "health"
   | "emails"
   | "users"
   | "events"
@@ -59,6 +61,7 @@ type Tab =
   | "backups";
 
 const TABS: { key: Tab; label: string }[] = [
+  { key: "health", label: "健康" },
   { key: "emails", label: "白名单" },
   { key: "users", label: "用户" },
   { key: "events", label: "请求事件" },
@@ -170,7 +173,7 @@ export default function AdminPage() {
 }
 
 function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
-  const [tab, setTab] = useState<Tab>("emails");
+  const [tab, setTab] = useState<Tab>("health");
 
   return (
     <motion.div
@@ -222,7 +225,9 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.18, ease: "easeOut" }}
             >
-              {tab === "emails" ? (
+              {tab === "health" ? (
+                <HealthPanel onOpenTab={setTab} />
+              ) : tab === "emails" ? (
                 <AllowedEmailsPanel />
               ) : tab === "users" ? (
                 <UsersPanel />

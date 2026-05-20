@@ -241,11 +241,12 @@ deploy_systemd_units() {
     backup_root="${LUMEN_BACKUP_ROOT:-${data_root}/backup}"
     backup_root="${backup_root%/}"
     tmp_dir="$(mktemp -d)"
+    lumen_ensure_backup_service_user "${backup_root}"
     local f src dst
     for f in lumen-api.service lumen-web.service lumen-worker.service \
              lumen-tgbot.service lumen-update-runner.service \
              lumen-update.path lumen-update-warm.service lumen-update-warm.path \
-             lumen-backup.service lumen-backup.timer \
+             lumen-backup.service lumen-backup.timer lumen-backup.path \
              lumen-health-watchdog.service lumen-health-watchdog.timer \
              lumen-storage-mount.service \
              lumen-storage-apply.service lumen-storage-apply.path \
@@ -254,7 +255,7 @@ deploy_systemd_units() {
             src="${src_dir}/${f}"
             dst="${tmp_dir}/${f}"
             case "${f}" in
-                lumen-update.path|lumen-update-runner.service|lumen-update-warm.path|lumen-update-warm.service)
+                lumen-update.path|lumen-update-runner.service|lumen-update-warm.path|lumen-update-warm.service|lumen-backup.service|lumen-backup.timer|lumen-backup.path)
                     render_update_runner_unit "${src}" "${dst}" "${data_root}" "${backup_root}" "${ROOT%/}"
                     ;;
                 *)
@@ -286,6 +287,10 @@ deploy_systemd_units() {
         || log_warn "启用 lumen-update.path 失败（继续；面板一键更新可能不可用）"
     systemctl enable --now lumen-update-warm.path 2>/dev/null \
         || log_warn "启用 lumen-update-warm.path 失败（继续；镜像预热不可用）"
+    systemctl enable --now lumen-backup.timer 2>/dev/null \
+        || log_warn "启用 lumen-backup.timer 失败（继续；自动备份可能不可用）"
+    systemctl enable --now lumen-backup.path 2>/dev/null \
+        || log_warn "启用 lumen-backup.path 失败（继续；管理后台立即备份可能不可用）"
 }
 
 # 修正 ownership：所有迁移产物归 lumen:lumen（如该用户存在）。

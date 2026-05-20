@@ -3,12 +3,15 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { format } from "date-fns";
 import {
   AlertCircle,
   ArrowLeft,
   Check,
+  Clock3,
   KeyRound,
   RefreshCw,
+  ShieldCheck,
   Trash2,
 } from "lucide-react";
 
@@ -20,9 +23,11 @@ import {
   getMe,
   listBindableApiSuppliers,
   listMyApiCredentials,
+  probeMyApiCredential,
   putMyApiCredential,
   revokeMyApiCredential,
 } from "@/lib/apiClient";
+import type { UserApiCredentialOut } from "@/lib/types";
 
 // review §9: 与 /signup 保持一致的错误码 → 文案映射（业务专用，不归入 copy.ts）
 const BYOK_ERROR_TEXT: Record<string, string> = {
@@ -63,6 +68,7 @@ export default function ApiKeySettingsPage() {
   const [supplierId, setSupplierId] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [probeMessage, setProbeMessage] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
 
@@ -77,6 +83,7 @@ export default function ApiKeySettingsPage() {
     onSuccess: async () => {
       setApiKey("");
       setSaved(true);
+      setProbeMessage(null);
       setError(null);
       await qc.invalidateQueries({ queryKey: ["me", "api-credentials"] });
     },
@@ -92,6 +99,21 @@ export default function ApiKeySettingsPage() {
       await qc.invalidateQueries({ queryKey: ["me", "api-credentials"] });
     },
     onError: (err) => setError(apiKeyErrorText(err)),
+  });
+
+  const probeMut = useMutation({
+    mutationFn: (credentialId: string) => probeMyApiCredential(credentialId),
+    onSuccess: async (credential) => {
+      setSaved(false);
+      setError(null);
+      setProbeMessage(credentialHealthText(credential));
+      await qc.invalidateQueries({ queryKey: ["me", "api-credentials"] });
+    },
+    onError: (err) => {
+      setSaved(false);
+      setProbeMessage(null);
+      setError(apiKeyErrorText(err));
+    },
   });
 
   const onSave = (e: React.FormEvent) => {
@@ -160,11 +182,11 @@ export default function ApiKeySettingsPage() {
         <Card variant="subtle" padding="lg" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-[var(--radius-control)] bg-white/5 border border-[var(--border)] flex items-center justify-center">
+              <div className="w-9 h-9 rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
                 <KeyRound className="w-4 h-4" />
               </div>
               <div>
-                <p className="type-body-sm text-[var(--fg-0)]">当前 Key</p>
+                <p className="type-body-sm text-[var(--fg-0)]">当前 Key 健康</p>
                 <p className="type-caption text-[var(--fg-2)]">
                   {credentialsQ.isLoading
                     ? copy.state.loading
@@ -180,23 +202,59 @@ export default function ApiKeySettingsPage() {
               </span>
             )}
           </div>
+          {active && (
+            <div className="grid gap-2 sm:grid-cols-3">
+              <HealthMeta
+                icon={<ShieldCheck className="w-3.5 h-3.5" />}
+                label="最近通过"
+                value={formatDateTime(active.last_verified_at)}
+              />
+              <HealthMeta
+                icon={<AlertCircle className="w-3.5 h-3.5" />}
+                label="最近失败"
+                value={formatDateTime(active.last_failed_at)}
+              />
+              <HealthMeta
+                icon={<Clock3 className="w-3.5 h-3.5" />}
+                label="限流恢复"
+                value={formatDateTime(active.rate_limited_until)}
+              />
+            </div>
+          )}
           {active?.last_error_code && (
             <div className="rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-3 py-2 type-body-sm text-[var(--danger-fg)]">
               {BYOK_ERROR_TEXT[active.last_error_code] ?? active.last_error_code}
             </div>
           )}
+          {probeMessage && (
+            <div className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 type-body-sm text-[var(--fg-1)]">
+              {probeMessage}
+            </div>
+          )}
           {active && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleRevoke}
-              disabled={revokeMut.isPending}
-              loading={revokeMut.isPending}
-              leftIcon={!revokeMut.isPending ? <Trash2 className="w-4 h-4" /> : undefined}
-              className="border-danger-border text-danger hover:bg-danger-soft"
-            >
-              {copy.action.delete}
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => probeMut.mutate(active.id)}
+                disabled={probeMut.isPending || active.status !== "active"}
+                loading={probeMut.isPending}
+                leftIcon={!probeMut.isPending ? <RefreshCw className="w-4 h-4" /> : undefined}
+              >
+                重新检测
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRevoke}
+                disabled={revokeMut.isPending}
+                loading={revokeMut.isPending}
+                leftIcon={!revokeMut.isPending ? <Trash2 className="w-4 h-4" /> : undefined}
+                className="border-danger-border text-danger hover:bg-danger-soft"
+              >
+                {copy.action.delete}
+              </Button>
+            </div>
           )}
         </Card>
 
@@ -298,4 +356,41 @@ function apiKeyErrorText(err: unknown): string {
     return err.message || `请求失败 · HTTP ${err.status}`;
   }
   return err instanceof Error ? err.message : "请求失败";
+}
+
+function credentialHealthText(credential: UserApiCredentialOut): string {
+  if (credential.last_error_code) {
+    const label = BYOK_ERROR_TEXT[credential.last_error_code] ?? credential.last_error_code;
+    return `检测完成：${label}。后续生成会继续提示这个 Key 的状态。`;
+  }
+  return "检测完成：供应商已接受当前 Key。";
+}
+
+function formatDateTime(value: string | null): string {
+  if (!value) return "无记录";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return format(date, "yyyy-MM-dd HH:mm:ss");
+}
+
+function HealthMeta({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 px-3 py-2">
+      <div className="flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-1 truncate type-body-sm text-[var(--fg-0)]" title={value}>
+        {value}
+      </div>
+    </div>
+  );
 }

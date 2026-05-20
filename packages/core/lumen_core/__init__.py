@@ -9,11 +9,13 @@
 - providers: Provider Pool 解析与旧 env 兼容 fallback
 - pricing: cache-aware token usage and cost breakdown helpers
 - runtime_settings: 可调系统设置元数据与校验
+- chat_tools: chat tool status normalization
 """
 
-__version__ = "1.1.44"
+__version__ = "1.1.45"
 
 from . import (  # noqa: F401
+    chat_tools,
     constants,
     context_window,
     image_signing,

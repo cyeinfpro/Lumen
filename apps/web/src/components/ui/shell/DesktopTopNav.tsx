@@ -2,8 +2,7 @@
 
 // 桌面端顶部主导航：复用在 DesktopStudio / DesktopStream / DesktopMe。
 // 四 Tab 横向导航 + 左侧 Logo + 可配置右侧 slot。
-// 与 MobileTabBar 的路由契约保持一致：/ → 创作；/projects → 项目；/stream → 图库；/me、/settings → 我的。
-// 模特库 /library 不再是顶级入口，由项目页内入口跳入；停留在 /library 时高亮「项目」。
+// 路由契约集中在 navigation.ts，桌面顶部与移动底栏共用同一套 IA。
 
 import { motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
@@ -16,21 +15,15 @@ import { IconButton } from "@/components/ui/primitives";
 import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
 import { formatRmb, formatRmbCompact } from "@/lib/money";
 import { SPRING } from "@/lib/motion";
+import {
+  APP_NAV_ITEMS,
+  getActiveNavKey,
+  isSameRoute,
+  type AppNavItem,
+  type AppNavKey,
+} from "./navigation";
 
-export type DesktopNavTab = "studio" | "projects" | "stream" | "me";
-
-interface TabDef {
-  key: DesktopNavTab;
-  label: string;
-  route: string;
-}
-
-const TABS: TabDef[] = [
-  { key: "studio", label: "创作", route: "/" },
-  { key: "projects", label: "项目", route: "/projects" },
-  { key: "stream", label: "图库", route: "/stream" },
-  { key: "me", label: "我的", route: "/me" },
-];
+export type DesktopNavTab = AppNavKey;
 
 export interface DesktopTopNavProps {
   active: DesktopNavTab;
@@ -43,19 +36,12 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
   const router = useRouter();
 
   const currentActive: DesktopNavTab = useMemo(() => {
-    if (pathname === "/" || pathname === "") return "studio";
-    if (pathname.startsWith("/library")) return "projects";
-    if (pathname.startsWith("/projects")) return "projects";
-    if (pathname.startsWith("/stream")) return "stream";
-    if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return "me";
-    return active;
+    return getActiveNavKey(pathname) ?? active;
   }, [pathname, active]);
 
   const onTap = useCallback(
-    (tab: TabDef) => {
-      const onExactRoute =
-        tab.route === "/" ? pathname === "/" : pathname === tab.route || pathname.startsWith(tab.route + "/");
-      if (onExactRoute) return;
+    (tab: AppNavItem) => {
+      if (isSameRoute(pathname, tab.route)) return;
       router.push(tab.route);
     },
     [pathname, router],
@@ -94,8 +80,8 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
           <IconButton
             size="sm"
             aria-label="切换侧栏"
-            title="切换侧栏 (⌘K)"
-            tooltip="切换侧栏 (⌘K)"
+            title="切换侧栏 (⌘/Ctrl+B)"
+            tooltip="切换侧栏 (⌘/Ctrl+B)"
             onClick={onToggleSidebar}
             className="rounded-full"
           >
@@ -113,7 +99,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
       {/* Middle: Tabs — 占据中间 1fr，居中显示，可挤压 */}
       <nav aria-label="主导航" className="flex min-w-0 flex-1 justify-center overflow-hidden">
         <ul ref={tabsRef} onKeyDown={onTabsKeyDown} className="flex items-center gap-1">
-          {TABS.map((tab) => {
+          {APP_NAV_ITEMS.map((tab) => {
             const isActive = tab.key === currentActive;
             return (
               <li key={tab.key} className="relative">

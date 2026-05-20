@@ -71,7 +71,7 @@ async def test_create_invite_link_checks_per_admin_rate_limit(
 
 
 @pytest.mark.asyncio
-async def test_revoke_invite_is_scoped_to_creator() -> None:
+async def test_revoke_invite_uses_admin_scope_not_creator_scope() -> None:
     db = _Db(None)
 
     with pytest.raises(Exception) as excinfo:
@@ -85,11 +85,12 @@ async def test_revoke_invite_is_scoped_to_creator() -> None:
     assert getattr(excinfo.value, "status_code", None) == 404
     rendered = str(db.statements[0])
     assert "invite_links.id" in rendered
-    assert "invite_links.created_by" in rendered
+    assert "WHERE invite_links.id = :id_1" in rendered
+    assert "invite_links.created_by = " not in rendered
 
 
 @pytest.mark.asyncio
-async def test_list_invites_only_returns_current_admin_invites(
+async def test_list_invites_uses_admin_scope_not_creator_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_base_url(_request: Request, _db: Any) -> str:
@@ -106,4 +107,4 @@ async def test_list_invites_only_returns_current_admin_invites(
 
     assert out == {"items": []}
     rendered = str(db.statements[0])
-    assert "invite_links.created_by" in rendered
+    assert "WHERE invite_links.created_by" not in rendered

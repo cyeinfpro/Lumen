@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Camera, Compass, FolderKanban, User } from "lucide-react";
+import { Camera, FolderKanban, Images, User, type LucideIcon } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo } from "react";
 import { useHaptic } from "@/hooks/useHaptic";
@@ -9,22 +9,27 @@ import { useUiStore } from "@/store/useUiStore";
 import { SPRING, DURATION, EASE } from "@/lib/motion";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
+import {
+  APP_NAV_ITEMS,
+  getActiveNavKey,
+  isSameRoute,
+  type AppNavItem,
+  type AppNavKey,
+} from "./navigation";
 
-type TabKey = "studio" | "projects" | "stream" | "me";
+type TabDef = AppNavItem & { Icon: LucideIcon };
 
-interface TabDef {
-  key: TabKey;
-  label: string;
-  route: string;
-  Icon: typeof Camera;
-}
+const TAB_ICONS: Record<AppNavKey, LucideIcon> = {
+  studio: Camera,
+  projects: FolderKanban,
+  assets: Images,
+  me: User,
+};
 
-const TABS: TabDef[] = [
-  { key: "studio", label: "创作", route: "/", Icon: Camera },
-  { key: "projects", label: "项目", route: "/projects", Icon: FolderKanban },
-  { key: "stream", label: "图库", route: "/stream", Icon: Compass },
-  { key: "me", label: "我的", route: "/me", Icon: User },
-];
+const TABS: readonly TabDef[] = APP_NAV_ITEMS.map((item) => ({
+  ...item,
+  Icon: TAB_ICONS[item.key],
+}));
 
 export function MobileTabBar() {
   const pathname = usePathname();
@@ -35,21 +40,15 @@ export function MobileTabBar() {
   const { isKeyboardOpen } = useKeyboardInset();
 
   const activeIndex = useMemo(() => {
-    if (pathname === "/" || pathname.startsWith("/?")) return 0;
-    // 模特库不再是顶级 tab，停留在 /library 时高亮「项目」（新数组里 index 1）
-    if (pathname.startsWith("/library")) return 1;
-    if (pathname.startsWith("/projects")) return 1;
-    if (pathname.startsWith("/stream")) return 2;
-    if (pathname.startsWith("/me") || pathname.startsWith("/settings")) return 3;
-    return 0;
+    const activeKey = getActiveNavKey(pathname) ?? "studio";
+    const index = TABS.findIndex((tab) => tab.key === activeKey);
+    return index >= 0 ? index : 0;
   }, [pathname]);
 
   const onTap = useCallback(
     (tab: TabDef) => {
       haptic("light");
-      const onExactRoute =
-        tab.route === "/" ? pathname === "/" || pathname.startsWith("/?") : pathname === tab.route || pathname.startsWith(tab.route + "/");
-      if (onExactRoute) {
+      if (isSameRoute(pathname, tab.route)) {
         window.scrollTo({ top: 0, behavior: "smooth" });
         if (typeof window !== "undefined" && window.location.search) {
           router.replace(tab.route);

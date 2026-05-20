@@ -6,6 +6,7 @@
 import { memo } from "react";
 import { Check, Loader2, RotateCw, X } from "lucide-react";
 import type { Generation, GenerationStage } from "@/lib/types";
+import { recommendedActionsForError } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 
 const STAGE_LABEL: Record<GenerationStage, string> = {
@@ -21,6 +22,25 @@ const STAGE_RATIO: Record<GenerationStage, number> = {
   understanding: 0.35,
   rendering: 0.7,
   finalizing: 0.92,
+};
+
+const SUBSTAGE_LABEL: Record<string, string> = {
+  waiting_queue: "排队中",
+  waiting_provider: "等待可用通道",
+  preparing_refs: "准备参考图",
+  upstream_started: "模型生成中",
+  upstream_retrying: "上游重试中",
+  postprocessing: "图片后处理中",
+  processing: "图片后处理中",
+  storing: "保存图片中",
+  display_ready: "图片已完成",
+  retryable: "失败，可重试",
+  terminal: "失败",
+  cancelled: "已取消",
+  provider_selected: "通道已就绪",
+  stream_started: "模型生成中",
+  partial_received: "生成预览中",
+  final_received: "生成完成，处理中",
 };
 
 function truncate(s: string, n: number) {
@@ -63,23 +83,45 @@ export const TaskItem = memo(function TaskItem({
   } else if (succeeded) {
     statusText = "已完成";
   } else if (queued) {
-    statusText = "排队中";
+    statusText =
+      gen.substage && SUBSTAGE_LABEL[gen.substage]
+        ? SUBSTAGE_LABEL[gen.substage]
+        : "排队中";
+    if (gen.queue_position != null && gen.queue_position > 0) {
+      statusText += ` · 第 ${gen.queue_position} 位`;
+    }
   } else if (gen.attempt > 1 && running) {
-    statusText = `${STAGE_LABEL[gen.stage]} (第${gen.attempt}次)`;
+    statusText = `${
+      gen.substage && SUBSTAGE_LABEL[gen.substage]
+        ? SUBSTAGE_LABEL[gen.substage]
+        : STAGE_LABEL[gen.stage]
+    } (第${gen.attempt}次)`;
   } else {
-    statusText = STAGE_LABEL[gen.stage];
+    statusText =
+      gen.substage && SUBSTAGE_LABEL[gen.substage]
+        ? SUBSTAGE_LABEL[gen.substage]
+        : STAGE_LABEL[gen.stage];
   }
+  const actions =
+    gen.recommended_actions?.length
+      ? gen.recommended_actions
+      : recommendedActionsForError(gen.error_code, {
+          retryable: gen.retryable,
+          status: gen.status,
+        });
+  const showRecoveryActions = (failed || canceled) && actions.length > 0;
 
   return (
     <div
       role="status"
       aria-live="polite"
       className={cn(
-        "flex gap-2.5 sm:gap-3 items-center p-2 rounded-xl border transition-all",
+        "relative flex gap-2.5 sm:gap-3 items-center rounded-[var(--radius-card)] border p-2 transition-all",
         "active:scale-[0.98] active:bg-white/5",
         failed
-          ? "bg-danger-soft border-danger-border"
+          ? "bg-danger-soft border-danger-border pb-8"
           : "bg-white/[0.03] border-[var(--border)]",
+        showRecoveryActions && !failed && "pb-8",
       )}
     >
       {/* 缩略图 / 骨架：窄屏缩小到 40，桌面保持 44 */}
@@ -89,7 +131,7 @@ export const TaskItem = memo(function TaskItem({
         disabled={!onView || !succeeded}
         aria-label={succeeded ? "查看结果" : "缩略图"}
         className={cn(
-          "relative w-10 h-10 sm:w-11 sm:h-11 shrink-0 rounded-lg overflow-hidden bg-[var(--bg-2)] border border-[var(--border-subtle)]",
+          "relative h-10 w-10 shrink-0 overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] sm:h-11 sm:w-11",
           "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
           succeeded && onView
             ? "cursor-pointer hover:opacity-90 active:scale-[0.92]"
@@ -146,7 +188,7 @@ export const TaskItem = memo(function TaskItem({
               <Loader2 className="w-2.5 h-2.5 animate-spin" />
               <span>{statusText}</span>
               {!queued && (
-                <span className="tabular-nums text-neutral-600">
+                <span className="tabular-nums text-[var(--fg-3)]">
                   {Math.round(ratio * 100)}%
                 </span>
               )}
@@ -167,7 +209,7 @@ export const TaskItem = memo(function TaskItem({
             <X className="w-3.5 h-3.5" />
           </IconBtn>
         )}
-        {failed && onRetry && (
+        {(failed || canceled) && onRetry && !showRecoveryActions && (
           <IconBtn
             onClick={() => onRetry(gen)}
             aria-label="重试任务"
@@ -178,6 +220,43 @@ export const TaskItem = memo(function TaskItem({
           </IconBtn>
         )}
       </div>
+      {showRecoveryActions && (
+        <div className="absolute bottom-1.5 left-[3.75rem] right-2 flex flex-wrap gap-1">
+          {actions.slice(0, 2).map((action) => {
+            if (action.kind === "retry" && onRetry) {
+              return (
+                <button
+                  key={action.id}
+                  type="button"
+                  onClick={() => onRetry(gen)}
+                  className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+                >
+                  {action.label}
+                </button>
+              );
+            }
+            if (action.kind === "link" && action.href) {
+              return (
+                <a
+                  key={action.id}
+                  href={action.href}
+                  className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+                >
+                  {action.label}
+                </a>
+              );
+            }
+            return (
+              <span
+                key={action.id}
+                className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-2)]"
+              >
+                {action.label}
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 });
@@ -193,7 +272,7 @@ function IconBtn({
       {...rest}
       className={cn(
         // 移动端 44px 命中区；桌面端保持紧凑 28px
-        "w-11 h-11 sm:w-7 sm:h-7 inline-flex items-center justify-center rounded-md text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 active:scale-[0.95] transition-all",
+        "inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-all hover:bg-white/10 hover:text-[var(--fg-0)] active:scale-[0.95] sm:h-7 sm:w-7",
         "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
         className,
       )}

@@ -83,7 +83,10 @@ async def assert_public_http_target(
             loop.getaddrinfo(host, port, type=socket.SOCK_STREAM),
             timeout=dns_timeout_s,
         )
-    except (socket.gaierror, TimeoutError) as exc:
+    except socket.gaierror:
+        # DNS blips should fail at the outbound HTTP call, not at config validation.
+        return value
+    except TimeoutError as exc:
         if allow_unresolved:
             return value
         raise ValueError("base_url host cannot be resolved") from exc

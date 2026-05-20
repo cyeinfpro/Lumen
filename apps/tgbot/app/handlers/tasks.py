@@ -21,6 +21,7 @@ from aiogram.types import (
 )
 
 from ..api_client import ApiError, LumenApi
+from ..keyboards import post_success_keyboard
 from ._helpers import mime_extension, require_message, truncate_text
 
 logger = logging.getLogger(__name__)
@@ -123,11 +124,17 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
         caption = f"📂 来自任务 #{gen_id[:8]}\n\n📝 {prompt}"
         # 一律 sendDocument：sendPhoto 会强制 1280px + JPEG 重编码。
         sent_first = False
+        actions = post_success_keyboard(
+            gen_id,
+            web_url=str(gen.get("edit_url") or ""),
+            project_url=str(gen.get("project_url") or ""),
+        )
         for idx, (path, _mime, _size, filename) in enumerate(downloads):
             try:
                 await msg.answer_document(
                     document=FSInputFile(str(path), filename=filename),
                     caption=caption if idx == 0 else None,
+                    reply_markup=actions if idx == 0 else None,
                 )
                 sent_first = True
             except Exception as exc:  # noqa: BLE001

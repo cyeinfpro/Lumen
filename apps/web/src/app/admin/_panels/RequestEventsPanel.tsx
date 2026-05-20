@@ -163,6 +163,13 @@ function formatDuration(ms: number | null): string {
   return `${minutes}m ${rest}s`;
 }
 
+function formatPixels(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return "—";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)} MP`;
+  if (value >= 1000) return `${Math.round(value / 1000)} Kpx`;
+  return `${value} px`;
+}
+
 function formatPercent(share: number): string {
   if (!Number.isFinite(share) || share <= 0) return "0%";
   const percent = share * 100;
@@ -275,6 +282,11 @@ function matchesSearch(event: AdminRequestEventOut, query: string): boolean {
     event.upstream_provider,
     event.upstream_route,
     event.upstream_endpoint,
+    event.queue_lane,
+    event.workflow_type,
+    event.workflow_step_key,
+    event.size_bucket,
+    event.cost_class,
     event.conversation_title,
     event.prompt,
     event.error_code,
@@ -1109,6 +1121,24 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
         <Detail label="创建时间" value={formatDateTime(event.created_at)} mono />
         <Detail label="开始时间" value={formatDateTime(event.started_at)} mono />
         <Detail label="结束时间" value={formatDateTime(event.finished_at)} mono />
+        <Detail
+          label="队列泳道"
+          value={displayValue(event.queue_lane, "未记录")}
+        />
+        <Detail
+          label="排队耗时"
+          value={formatDuration(event.queue_wait_ms ?? null)}
+          mono
+        />
+        <Detail label="尺寸桶" value={displayValue(event.size_bucket, "—")} />
+        <Detail label="像素量" value={formatPixels(event.pixel_count)} mono />
+        <Detail label="成本类型" value={displayValue(event.cost_class, "—")} />
+        {event.workflow_type && (
+          <Detail label="工作流" value={event.workflow_type} />
+        )}
+        {event.workflow_step_key && (
+          <Detail label="工作流步骤" value={event.workflow_step_key} />
+        )}
         <Detail
           label="上游端点"
           value={displayValue(event.upstream_endpoint)}

@@ -18,7 +18,7 @@ import signal
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple, TextIO
+from typing import Mapping, NamedTuple, TextIO
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -37,7 +37,10 @@ _TIMESTAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{6}$")
 # 备份点配对一致性窗口：PG 和 Redis 文件 mtime 偏差应 ≤ 该秒数。
 _PAIR_MTIME_WINDOW_SEC = 600
 _BACKUP_TIMEOUT_SECONDS = 180
+_BACKUP_TRIGGER_START_TIMEOUT_SECONDS = 15
 _MAINTENANCE_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
+_BACKUP_TRIGGER_NAME = ".backup.trigger"
+_BACKUP_LOG_NAME = ".backup.log"
 _BACKUP_RUNNING_MARKER = ".backup.running"
 _RESTORE_RUNNING_MARKER = ".restore.running"
 _UPDATE_RUNNING_MARKER = ".update.running"
@@ -90,6 +93,18 @@ def _backup_root() -> Path:
 
 def _maintenance_marker_path(name: str) -> Path:
     return _backup_root() / name
+
+
+def _backup_trigger_path() -> Path:
+    return _backup_root() / _BACKUP_TRIGGER_NAME
+
+
+def _backup_log_path() -> Path:
+    return _backup_root() / _BACKUP_LOG_NAME
+
+
+def _backup_trigger_only_mode() -> bool:
+    return os.environ.get("LUMEN_BACKUP_VIA_TRIGGER", "").strip() == "1"
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -195,7 +210,15 @@ def _restore_script() -> Path:
     return _discover_scripts_dir() / "restore.sh"
 
 
-async def _run_script(script: Path, *args: str, timeout: int) -> _ScriptResult:
+async def _run_script(
+    script: Path,
+    *args: str,
+    timeout: int,
+    env: Mapping[str, str] | None = None,
+) -> _ScriptResult:
+    proc_env = os.environ.copy()
+    if env:
+        proc_env.update(env)
     proc = await asyncio.create_subprocess_exec(
         "/usr/bin/env",
         "bash",
@@ -203,6 +226,7 @@ async def _run_script(script: Path, *args: str, timeout: int) -> _ScriptResult:
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=proc_env,
         start_new_session=True,
     )
     try:
@@ -357,6 +381,39 @@ async def _find_latest_paired_backup_after(started_at: datetime) -> str | None:
     return candidates[0][1]
 
 
+async def _wait_for_log_append(
+    path: Path,
+    *,
+    initial_size: int,
+    timeout_sec: float,
+) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while loop.time() < deadline:
+        try:
+            if path.stat().st_size > initial_size:
+                return True
+        except OSError:
+            pass
+        await asyncio.sleep(0.25)
+    return False
+
+
+async def _wait_for_latest_paired_backup_after(
+    started_at: datetime,
+    *,
+    timeout_sec: float,
+) -> str | None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while loop.time() < deadline:
+        ts = await _find_latest_paired_backup_after(started_at)
+        if ts is not None:
+            return ts
+        await asyncio.sleep(0.5)
+    return await _find_latest_paired_backup_after(started_at)
+
+
 def _timestamp_from_backup_stdout(stdout: str, started_at: datetime) -> str | None:
     for line in reversed((stdout or "").splitlines()):
         stripped = line.strip()
@@ -377,7 +434,26 @@ def _timestamp_from_backup_stdout(stdout: str, started_at: datetime) -> str | No
                     ts = parts[i + 1].rstrip(":")
                     if _TIMESTAMP_RE.fullmatch(ts):
                         return ts
+        if "complete" in line.lower():
+            match = re.search(r"\b([0-9]{8}-[0-9]{6})\b", line)
+            if match:
+                return match.group(1)
     return None
+
+
+def _backup_script_was_skipped(output: str) -> bool:
+    lowered = (output or "").lower()
+    return "skipped:" in lowered and (
+        "maintenance lock" in lowered or "already running" in lowered
+    )
+
+
+def _write_backup_trigger(path: Path, started_at: datetime) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_text(started_at.isoformat() + "\n", encoding="utf-8")
+    _chmod_tolerate_eperm(tmp, 0o600)
+    tmp.replace(path)
 
 
 @router.post("/now", response_model=BackupNowOut, dependencies=[Depends(verify_csrf)])
@@ -403,11 +479,61 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
     succeeded = False
     release_reason = "backup_failed"
     started_at = datetime.now(timezone.utc)
+    proc: _ScriptResult | None = None
+    ts: str | None = None
     try:
-        proc = await _run_script(
-            backup_script,
-            timeout=_BACKUP_TIMEOUT_SECONDS,
-        )
+        if _backup_trigger_only_mode():
+            backup_root = _backup_root()
+            backup_root.mkdir(parents=True, exist_ok=True)
+            log_path = _backup_log_path()
+            try:
+                initial_log_size = log_path.stat().st_size
+            except OSError:
+                initial_log_size = 0
+            trigger_path = _backup_trigger_path()
+            _write_backup_trigger(trigger_path, started_at)
+            if not await _wait_for_log_append(
+                log_path,
+                initial_size=initial_log_size,
+                timeout_sec=_BACKUP_TRIGGER_START_TIMEOUT_SECONDS,
+            ):
+                release_reason = "backup_trigger_not_started"
+                _unlink_marker(trigger_path)
+                raise _http(
+                    "backup_trigger_not_started",
+                    "backup trigger was written, but host backup service did not start",
+                    504,
+                )
+            ts = await _wait_for_latest_paired_backup_after(
+                started_at,
+                timeout_sec=max(
+                    1,
+                    _BACKUP_TIMEOUT_SECONDS - _BACKUP_TRIGGER_START_TIMEOUT_SECONDS,
+                ),
+            )
+            if ts is None:
+                release_reason = "backup_timeout"
+                raise _http(
+                    "backup_timeout",
+                    f"backup exceeded {_BACKUP_TIMEOUT_SECONDS}s",
+                    504,
+                )
+        else:
+            backup_root = _backup_root()
+            proc = await _run_script(
+                backup_script,
+                timeout=_BACKUP_TIMEOUT_SECONDS,
+                env={
+                    "BACKUP_ROOT": str(backup_root),
+                    "LUMEN_BACKUP_ROOT": str(backup_root),
+                    # Manual backups are already guarded by the API operation
+                    # lock and marker files. In the containerized API path
+                    # /opt/lumen is mounted read-only, so backup.sh cannot take
+                    # the host maintenance lock and would otherwise exit 0 as
+                    # "skipped".
+                    "LUMEN_BACKUP_FORCE": "1",
+                },
+            )
     except TimeoutError:
         release_reason = "backup_timeout"
         _unlink_marker(marker)
@@ -418,13 +544,12 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
             504,
         )
     except Exception:
-        release_reason = "backup_failed"
         _unlink_marker(marker)
         await lock_service.release(lock, succeeded=False, reason=release_reason)
         raise
     _unlink_marker(marker)
 
-    if proc.returncode != 0:
+    if proc is not None and proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "")[-1000:]
         await write_admin_audit_isolated(
             request,
@@ -435,7 +560,25 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
         await lock_service.release(lock, succeeded=False, reason=release_reason)
         return BackupNowOut(ok=False, stderr_tail=tail)
 
-    ts = _timestamp_from_backup_stdout(proc.stdout, started_at)
+    if proc is not None and ts is None:
+        output = f"{proc.stdout}\n{proc.stderr}"
+        if _backup_script_was_skipped(output):
+            _unlink_marker(marker)
+            await write_admin_audit_isolated(
+                request,
+                admin,
+                event_type="admin.backup.create.skipped",
+                details={"reason": "backup_skipped"},
+            )
+            await lock_service.release(
+                lock, succeeded=False, reason="backup_skipped"
+            )
+            raise _http(
+                "backup_skipped",
+                "backup was skipped because another maintenance operation is running",
+                409,
+            )
+        ts = _timestamp_from_backup_stdout(output, started_at)
     if ts is None:
         ts = await _find_latest_paired_backup_after(started_at)
     if ts is None:

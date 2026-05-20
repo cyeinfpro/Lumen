@@ -176,6 +176,10 @@ class Settings(BaseSettings):
         smtp_from = self.smtp_from_email.strip()
         smtp_username = self.smtp_username.strip()
         smtp_password = self.smtp_password.strip()
+        self.smtp_host = smtp_host
+        self.smtp_from_email = smtp_from
+        self.smtp_username = smtp_username
+        self.smtp_password = smtp_password
         if self.smtp_use_tls and self.smtp_starttls:
             raise ValueError("SMTP_USE_TLS and SMTP_STARTTLS cannot both be enabled")
         if smtp_from and "@" not in smtp_from:

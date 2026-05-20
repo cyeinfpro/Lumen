@@ -68,6 +68,29 @@ async def _account_mode(session: AsyncSession, user_id: str) -> str:
     ).scalar_one_or_none() or "wallet"
 
 
+async def billing_enabled() -> bool:
+    return await _billing_enabled()
+
+
+async def allow_negative_balance() -> bool:
+    return await _allow_negative_balance()
+
+
+async def account_mode(session: AsyncSession, user_id: str) -> str:
+    return await _account_mode(session, user_id)
+
+
+async def held_amount_for_ref(
+    session: AsyncSession,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+) -> int:
+    return await billing_core._held_amount_for_ref(  # noqa: SLF001
+        session, user_id, ref_type, ref_id
+    )
+
+
 async def _rate_multiplier_x10000(session: AsyncSession, user_id: str) -> int:
     if not isinstance(session, AsyncSession):
         return 10_000
@@ -487,16 +510,14 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
             )
             return
     try:
-        tx = await billing_core.charge(
+        tx = await billing_core.settle(
             session,
             completion.user_id,
-            cost,
             ref_type="completion",
             ref_id=completion.id,
+            actual_micro=cost,
             idempotency_key=idempotency_key,
             allow_negative=await _allow_negative_balance(),
-            record_zero=True,
-            kind="charge_completion",
             meta={
                 "model": completion.model,
                 "tokens_in": usage.input_tokens,
@@ -561,7 +582,7 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
                 )
             )
         if int((tx.meta or {}).get("overdraw_micro") or 0) > 0:
-            wallet_overdrawn_total.labels(kind="charge").inc()
+            wallet_overdrawn_total.labels(kind="settle").inc()
             session.add(
                 _audit(
                     event_type="wallet.overdrawn",
@@ -573,3 +594,47 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
                     },
                 )
             )
+
+
+async def release_completion(
+    session: AsyncSession,
+    completion: Completion,
+    *,
+    reason: str,
+) -> None:
+    if await _account_mode(session, completion.user_id) != "wallet":
+        return
+    if not await _billing_enabled():
+        return
+    idempotency_key = f"release:{completion.id}"
+    existing = await _existing_wallet_tx(session, completion.user_id, idempotency_key)
+    if existing is not None:
+        _add_replay_audit(
+            session,
+            user_id=completion.user_id,
+            tx=existing,
+            replay_source="precheck",
+        )
+        return
+    tx = await billing_core.release(
+        session,
+        completion.user_id,
+        ref_type="completion",
+        ref_id=completion.id,
+        idempotency_key=idempotency_key,
+        meta={"reason": reason},
+    )
+    if tx is not None:
+        session.add(
+            _audit(
+                event_type="wallet.release.completion",
+                user_id=completion.user_id,
+                details={
+                    "completion_id": completion.id,
+                    "amount_micro": tx.amount_micro,
+                    "balance_after": tx.balance_after,
+                    "hold_after": tx.hold_after,
+                    "reason": reason,
+                },
+            )
+        )

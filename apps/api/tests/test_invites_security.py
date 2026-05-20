@@ -33,13 +33,14 @@ class _Db:
 
 
 class _RevokeDb:
-    def __init__(self):
+    def __init__(self, row):
+        self.row = row
         self.statement = None
         self.committed = False
 
     async def execute(self, stmt):
         self.statement = stmt
-        return _Rows(None)
+        return _Rows(self.row)
 
     async def commit(self) -> None:
         self.committed = True
@@ -82,7 +83,7 @@ async def test_invite_preview_rejects_deleted_creator(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_revoke_invite_rejects_invites_owned_by_another_admin(
+async def test_revoke_invite_allows_any_admin_to_manage_invite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_write_audit(*_args, **_kwargs) -> bool:
@@ -91,17 +92,18 @@ async def test_revoke_invite_rejects_invites_owned_by_another_admin(
     monkeypatch.setattr(invites, "write_audit", fake_write_audit)
     monkeypatch.setattr(invites, "request_ip_hash", lambda _request: "ip-hash")
 
-    db = _RevokeDb()
+    inv = SimpleNamespace(id="invite-1", revoked_at=None)
+    db = _RevokeDb(inv)
     admin = SimpleNamespace(id="admin-other", email="other@example.com")
 
-    with pytest.raises(Exception) as excinfo:
-        await invites.revoke_invite_link(
-            "invite-1",
-            _request(),
-            admin,  # type: ignore[arg-type]
-            db,  # type: ignore[arg-type]
-        )
+    await invites.revoke_invite_link(
+        "invite-1",
+        _request(),
+        admin,  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
 
-    assert getattr(excinfo.value, "status_code", None) == 404
-    assert "created_by" in str(db.statement)
-    assert db.committed is False
+    assert "WHERE invite_links.id = :id_1" in str(db.statement)
+    assert "invite_links.created_by = " not in str(db.statement)
+    assert inv.revoked_at is not None
+    assert db.committed is True

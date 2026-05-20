@@ -25,6 +25,91 @@ def test_completion_charge_uses_same_session_before_success_commit() -> None:
     assert "async with" not in between
 
 
+def test_completion_rechecks_cancel_after_billing_charge_before_commit() -> None:
+    source = inspect.getsource(completion.run_completion)
+    charge_idx = source.index(
+        "await worker_billing.charge_completion(session, comp_for_billing)"
+    )
+    cancel_idx = source.index(
+        'await _raise_if_completion_cancelled(\n                    redis,\n                    task_id,\n                    "cancelled before success commit"',
+        charge_idx,
+    )
+    commit_idx = source.index("await session.commit()", charge_idx)
+
+    assert charge_idx < cancel_idx < commit_idx
+
+
+def test_completion_tool_limit_continues_with_tool_choice_none() -> None:
+    body = {
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [{"type": "web_search_preview"}],
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+    }
+
+    fallback = completion._tool_limited_completion_body(body)  # noqa: SLF001
+
+    assert fallback is not body
+    assert fallback["tool_choice"] == "none"
+    assert fallback["parallel_tool_calls"] is False
+    assert fallback["tools"] == body["tools"]
+    assert fallback["input"][:-1] == body["input"]
+    assert fallback["input"][-1]["content"][0]["text"] == (
+        completion._TOOL_LIMIT_FALLBACK_TEXT  # noqa: SLF001
+    )
+
+
+def test_completion_cancelled_response_uses_cancel_branch() -> None:
+    with pytest.raises(completion._TaskCancelled, match="upstream response cancelled"):  # noqa: SLF001
+        completion._raise_for_terminal_response_event(  # noqa: SLF001
+            "response.cancelled",
+            {"id": "resp-1"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_completion_checks_cancel_before_billing_commit() -> None:
+    class CancelledRedis:
+        async def get(self, _key: str) -> str:
+            return "1"
+
+    with pytest.raises(completion._TaskCancelled, match="before billing settle"):  # noqa: SLF001
+        await completion._raise_if_completion_cancelled(  # noqa: SLF001
+            CancelledRedis(),
+            "comp-1",
+            "cancelled before billing settle",
+        )
+
+
+@pytest.mark.asyncio
+async def test_completion_abort_iterator_closes_inner_stream() -> None:
+    class HangingStream:
+        closed = False
+
+        def __aiter__(self) -> "HangingStream":
+            return self
+
+        async def __anext__(self) -> dict[str, Any]:
+            await asyncio.sleep(60)
+            return {"type": "response.output_text.delta", "delta": "late"}
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = HangingStream()
+    cancel_requested = asyncio.Event()
+    lease_lost = asyncio.Event()
+    cancel_requested.set()
+
+    with pytest.raises(completion._TaskCancelled, match="cancelled during stream"):  # noqa: SLF001
+        await completion._next_completion_stream_event(  # noqa: SLF001
+            stream,
+            cancel_requested=cancel_requested,
+            lease_lost=lease_lost,
+        )
+    assert stream.closed is True
+
+
 def test_generation_retry_delay_is_jittered() -> None:
     helper_source = inspect.getsource(generation._retry_delay_seconds)  # noqa: SLF001
     runner_source = inspect.getsource(generation.run_generation)
@@ -60,34 +145,83 @@ def test_provider_pool_weighted_round_robin_honors_weights() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_checks_fail_closed_when_redis_errors() -> None:
+async def test_cancel_checks_fail_closed_for_completion_when_redis_errors() -> None:
     class BrokenRedis:
+        calls = 0
+
         async def get(self, _key: str) -> str:
+            self.calls += 1
             raise RuntimeError("redis unavailable")
 
     redis = BrokenRedis()
 
+    # Redis is the authoritative cancellation channel for both task types. If the
+    # read path is unavailable, fail closed so a cancellation cannot be missed.
     assert await generation._is_cancelled(redis, "gen-1") is True
     assert await completion._is_cancelled(redis, "comp-1") is True
+    assert redis.calls >= 4
+
+
+@pytest.mark.asyncio
+async def test_completion_cancel_check_honors_redis_cancel_key() -> None:
+    class Redis:
+        async def get(self, _key: str) -> str:
+            return "1"
+
+    assert await completion._is_cancelled(Redis(), "comp-1") is True
+
+
+def test_tool_limit_fallback_completed_finalizes_active_tools() -> None:
+    source = inspect.getsource(completion.run_completion)
+    fallback_idx = source.index("if tool_loop_truncated:")
+    completed_idx = source.index('elif ev_type == "response.completed":', fallback_idx)
+    failed_idx = source.index("elif ev_type in {", completed_idx)
+    completed_block = source[completed_idx:failed_idx]
+
+    assert "finalize_active(" in completed_block
+    assert "ToolStatus.SUCCEEDED.value" in completed_block
 
 
 @pytest.mark.asyncio
 async def test_generation_lease_acquire_uses_nx() -> None:
     class Redis:
         def __init__(self) -> None:
+            self.args: tuple[Any, ...] | None = None
             self.kwargs: dict[str, Any] | None = None
 
         async def set(self, *_args: Any, **kwargs: Any) -> bool:
+            self.args = _args
             self.kwargs = kwargs
             return False
 
     redis = Redis()
 
-    with pytest.raises(generation._LeaseLost):
-        await generation._acquire_lease(redis, "gen-1", "worker-1")
+    with pytest.raises(generation._LeaseLost):  # noqa: SLF001
+        await generation._acquire_lease(redis, "gen-1", "worker-1:token-1")  # noqa: SLF001
 
+    assert redis.args == ("task:gen-1:lease", "worker-1:token-1")
     assert redis.kwargs is not None
     assert redis.kwargs["nx"] is True
+
+
+@pytest.mark.asyncio
+async def test_generation_release_lease_uses_worker_token_cas() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.eval_args: tuple[Any, ...] | None = None
+
+        async def eval(self, *args: Any) -> int:
+            self.eval_args = args
+            return 1
+
+    redis = Redis()
+
+    await generation._release_lease(redis, "gen-1", "worker-1:token-1")  # noqa: SLF001
+
+    assert redis.eval_args is not None
+    assert redis.eval_args[1] == 1
+    assert redis.eval_args[2] == "task:gen-1:lease"
+    assert redis.eval_args[3] == "worker-1:token-1"
 
 
 @pytest.mark.asyncio
@@ -110,9 +244,41 @@ async def test_generation_release_lease_requires_atomic_cas() -> None:
     assert redis.deleted == []
 
 
+def test_run_generation_uses_unique_lease_token_for_owner_cas() -> None:
+    source = inspect.getsource(generation.run_generation)
+
+    assert 'lease_token = f"{worker_id}:' in source
+    assert "_acquire_lease(redis, task_id, lease_token)" in source
+    assert "_release_lease(redis, task_id, lease_token)" in source
+
+
+def test_generation_lease_lost_max_attempts_fails_without_requeue() -> None:
+    source = inspect.getsource(generation.run_generation)
+    start = source.rindex("except _LeaseLost as exc:")
+    end = source.index("except _StaleGenerationAttempt", start)
+    lease_branch = source[start:end]
+
+    max_idx = lease_branch.index("if attempt >= _MAX_ATTEMPTS:")
+    fail_idx = lease_branch.index("_mark_generation_attempt_failed")
+    retry_idx = lease_branch.index("_mark_generation_attempt_retrying")
+
+    assert max_idx < fail_idx < retry_idx
+    assert "retriable=False" in lease_branch[fail_idx:retry_idx]
+    assert "redis.enqueue_job" not in lease_branch[fail_idx:retry_idx]
+
+
 def test_sse_timestamp_lock_is_eagerly_initialized() -> None:
     assert sse_publish._TS_LOCK is not None
     assert hasattr(sse_publish._TS_LOCK, "acquire")
+
+
+def test_sse_xadd_dedupe_uses_per_event_set_nx_ex() -> None:
+    lua = " ".join(sse_publish._XADD_IDEMPOTENT_LUA.split())
+
+    assert "HSET" not in sse_publish._XADD_IDEMPOTENT_LUA
+    assert "HGET" not in sse_publish._XADD_IDEMPOTENT_LUA
+    assert "redis.call('SET', KEYS[2], '', 'NX', 'EX', tonumber(ARGV[5]))" in lua
+    assert "return existing" in lua
 
 
 def test_memory_topic_key_normalizes_unicode() -> None:
@@ -177,6 +343,30 @@ async def test_proxied_client_cache_is_lru_bounded(
         assert any(client.closed for client in built[:5])
     finally:
         await upstream.close_client()
+
+
+@pytest.mark.asyncio
+async def test_delayed_client_close_waits_until_idle() -> None:
+    class BusyClient:
+        def __init__(self) -> None:
+            self.closed = False
+            self.idle = asyncio.Event()
+
+        async def _wait_until_idle(self, _timeout: float) -> None:
+            await self.idle.wait()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    client = BusyClient()
+    close_task = asyncio.create_task(upstream._delayed_aclose(client, delay=0))  # noqa: SLF001
+    await asyncio.sleep(0.01)
+
+    assert client.closed is False
+
+    client.idle.set()
+    await asyncio.wait_for(close_task, timeout=1.0)
+    assert client.closed is True
 
 
 @pytest.mark.asyncio

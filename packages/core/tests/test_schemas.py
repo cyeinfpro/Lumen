@@ -75,6 +75,64 @@ def test_post_message_prompt_limit_uses_shared_constant():
         raise AssertionError("expected attachment count validation error")
 
 
+def test_post_message_structured_attachment_contract():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import PostMessageIn
+
+    body = PostMessageIn(
+        idempotency_key="idem",
+        text="ok",
+        attachments=[
+            {
+                "image_id": "img-product",
+                "role": "product",
+                "label": "商品图",
+                "weight": 0.7,
+            }
+        ],
+        source="chat",
+        action_source="revise",
+        trace_id="trace-ui-1",
+    )
+
+    assert body.attachment_image_ids == ["img-product"]
+    assert body.input_images == ["img-product"]
+    assert body.attachments[0].role == "product"
+    assert body.attachments[0].label == "商品图"
+    assert body.attachments[0].weight == 0.7
+    assert body.source == "chat"
+    assert body.action_source == "revise"
+    assert body.trace_id == "trace-ui-1"
+
+    try:
+        PostMessageIn(
+            idempotency_key="idem",
+            text="ok",
+            attachment_image_ids=["img-a"],
+            attachments=[{"image_id": "img-b", "role": "style"}],
+        )
+    except ValidationError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected attachment contract validation error")
+
+    try:
+        PostMessageIn(
+            idempotency_key="idem",
+            text="ok",
+            attachment_image_ids=["img-a", "img-b"],
+            attachments=[
+                {"image_id": "img-b", "role": "style"},
+                {"image_id": "img-a", "role": "product"},
+            ],
+        )
+    except ValidationError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected order-sensitive attachment validation error")
+
+
 def test_model_library_generate_accepts_multiple_genders():
     from lumen_core.schemas import ApparelModelLibraryGenerateIn
 

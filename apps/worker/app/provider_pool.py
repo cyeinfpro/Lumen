@@ -36,6 +36,13 @@ from .validation import validate_provider_base_url
 
 logger = logging.getLogger(__name__)
 
+
+def _ewma(previous: float | None, sample: float, alpha: float) -> float:
+    if previous is None:
+        return float(sample)
+    return (alpha * float(sample)) + ((1.0 - alpha) * previous)
+
+
 # ---------------------------------------------------------------------------
 # 断路器常量
 # ---------------------------------------------------------------------------
@@ -51,6 +58,11 @@ _IMAGE_CB_FAILURE_THRESHOLD = 3
 _IMAGE_CB_COOLDOWN_S = 10.0
 # 上游显式 429 / quota 没给 retry-after 时的兜底冷却时长
 _IMAGE_RATE_LIMITED_DEFAULT_S = 60.0
+_ENDPOINT_EWMA_ALPHA = 0.25
+_ENDPOINT_FAILURE_ALPHA = 0.35
+_ENDPOINT_RECENT_FAILURE_WINDOW_S = 60.0
+_IMAGE_ROUTING_FAILURE_PENALTY_MS = 5000.0
+_IMAGE_ROUTING_CONSECUTIVE_FAILURE_PENALTY_MS = 1000.0
 
 # image probe：发一张 1024x1024 低质量图，真返回 base64 才算 healthy。
 # **默认 0 = 关闭**（生产先关，确认账号配额能扛住后再调高，建议 ≥ 1800s/30min）。
@@ -126,6 +138,11 @@ class EndpointStat:
     # to outliers compared to a moving window.
     success_count: int = 0
     success_mean_ms: float = 0.0
+    # EWMA keeps recent endpoint behavior visible without a bounded sample list.
+    # latency_ewma_ms is updated by successful calls; failure_ewma moves toward
+    # 1 on failure and toward 0 on success, so route selection can recover.
+    latency_ewma_ms: float | None = None
+    failure_ewma: float = 0.0
 
 
 @dataclass
@@ -222,6 +239,9 @@ class ProviderPool:
 
     # ---- 配置加载 --------------------------------------------------------
 
+    async def _validate_provider_base_url(self, raw_base: str) -> str:
+        return await _validate_provider_base_url(raw_base)
+
     async def _load_provider_config(
         self,
     ) -> tuple[list[ProviderConfig], dict[str, ProviderProxyDefinition]]:
@@ -282,7 +302,7 @@ class ProviderPool:
             validated: list[ProviderConfig] = []
             for p in new_providers:
                 try:
-                    url = await _validate_provider_base_url(p.base_url)
+                    url = await self._validate_provider_base_url(p.base_url)
                     validated.append(
                         ProviderConfig(
                             name=p.name,
@@ -529,6 +549,9 @@ class ProviderPool:
         acquire_inflight: bool = True,
         requires_mask: bool = False,
         mask_transport_required: bool = True,
+        queue_lane: str | None = None,
+        size_bucket: str | None = None,
+        cost_class: str | None = None,
     ) -> list[ResolvedProvider]:
         """Select 候选 provider。
 
@@ -556,6 +579,9 @@ class ProviderPool:
                 acquire_inflight=acquire_inflight,
                 requires_mask=requires_mask,
                 mask_transport_required=mask_transport_required,
+                queue_lane=queue_lane,
+                size_bucket=size_bucket,
+                cost_class=cost_class,
             )
         if route == "image_jobs":
             return await self._select_for_image(
@@ -566,6 +592,9 @@ class ProviderPool:
                 acquire_inflight=acquire_inflight,
                 requires_mask=requires_mask,
                 mask_transport_required=mask_transport_required,
+                queue_lane=queue_lane,
+                size_bucket=size_bucket,
+                cost_class=cost_class,
             )
         if route == "text":
             endpoint_kind = endpoint_kind or "responses"
@@ -606,9 +635,12 @@ class ProviderPool:
         acquire_inflight: bool = True,
         requires_mask: bool = False,
         mask_transport_required: bool = True,
+        queue_lane: str | None = None,
+        size_bucket: str | None = None,
+        cost_class: str | None = None,
     ) -> list[ResolvedProvider]:
         """按账号视角选号：跳过熔断 / image cooldown / 配额耗尽的账号，
-        剩余候选按 `(inflight[ek], image_last_used_at[ek], -priority)` 升序排序。
+        剩余候选按 inflight/last-used 基线 + EWMA 健康分升序排序。
 
         ignore_cooldown=True 时，单任务遍历场景下跳过 image_cooldown / image_rate_limited
         过滤——上次失败不代表下次失败，让任务把所有 enabled 账号都试一遍。
@@ -665,9 +697,9 @@ class ProviderPool:
             except Exception:  # noqa: BLE001
                 avoided = set()
 
-        candidates: list[tuple[ProviderConfig, float]] = []
-        mask_file_candidates: list[tuple[ProviderConfig, float]] = []
-        mask_url_candidates: list[tuple[ProviderConfig, float]] = []
+        candidates: list[tuple[ProviderConfig, tuple[int, float, float]]] = []
+        mask_file_candidates: list[tuple[ProviderConfig, tuple[int, float, float]]] = []
+        mask_url_candidates: list[tuple[ProviderConfig, tuple[int, float, float]]] = []
         skipped: list[tuple[str, str]] = []
 
         for p in enabled:
@@ -748,7 +780,13 @@ class ProviderPool:
                     target_bucket = mask_file_candidates
                 else:
                     target_bucket = mask_url_candidates
-            target_bucket.append((p, (inflight, last_used_key)))
+            adaptive_score = self._image_candidate_adaptive_score(
+                health=h,
+                endpoint_kind=endpoint_kind,
+                size_bucket=size_bucket,
+                cost_class=cost_class or queue_lane,
+            )
+            target_bucket.append((p, (inflight, last_used_key, adaptive_score)))
 
         if requires_mask and mask_transport_required:
             if mask_file_candidates:
@@ -783,6 +821,9 @@ class ProviderPool:
                     acquire_inflight=acquire_inflight,
                     requires_mask=requires_mask,
                     mask_transport_required=mask_transport_required,
+                    queue_lane=queue_lane,
+                    size_bucket=size_bucket,
+                    cost_class=cost_class,
                 )
             detail = (
                 ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
@@ -794,13 +835,14 @@ class ProviderPool:
                 payload={"skipped": skipped},
             )
 
-        # 排序键 = (inflight[ek], last_used[ek], -priority)。inflight 排在最前
-        # 让并发请求自然分散；last_used 让"最久未用"优先；priority 在前两者并列
-        # 时维持配置层的优先级。
+        # 排序键保留 inflight 作为第一约束，确保并发请求自然分散；随后让
+        # EWMA 健康分优先于 last_used/priority，避免"从未成功过但刚失败"的
+        # provider 因 last_used=-inf 被反复选中。无历史数据时 adaptive_score=0，
+        # 排序会退回到旧的 last_used/priority 行为。
         # 注：endpoint_kind lock 过滤已在 candidate gather 阶段（上方循环里
         # endpoint_kind_allowed）完成，到这里 candidates 必然只剩可用号；不再做
         # 二次过滤，避免维护双份失败信息。
-        candidates.sort(key=lambda x: (x[1][0], x[1][1], -x[0].priority))
+        candidates.sort(key=lambda x: (x[1][0], x[1][2], x[1][1], -x[0].priority))
         result = [
             ResolvedProvider(
                 name=p.name,
@@ -827,6 +869,71 @@ class ProviderPool:
         if acquire_inflight and result:
             self.acquire_image_inflight(result[0].name, endpoint_kind)
         return result
+
+    def _image_candidate_adaptive_score(
+        self,
+        *,
+        health: ProviderHealth,
+        endpoint_kind: str | None,
+        size_bucket: str | None = None,
+        cost_class: str | None = None,
+    ) -> float:
+        if endpoint_kind:
+            stat = health.endpoint_stats.get(endpoint_kind)
+            return self._endpoint_adaptive_score(
+                stat,
+                size_bucket=size_bucket,
+                cost_class=cost_class,
+            )
+        stats = [
+            health.endpoint_stats.get(endpoint)
+            for endpoint in ("generations", "responses", "")
+            if health.endpoint_stats.get(endpoint) is not None
+        ]
+        if not stats:
+            return 0.0
+        return min(
+            self._endpoint_adaptive_score(
+                stat,
+                size_bucket=size_bucket,
+                cost_class=cost_class,
+            )
+            for stat in stats
+        )
+
+    def _endpoint_adaptive_score(
+        self,
+        stat: EndpointStat | None,
+        *,
+        size_bucket: str | None = None,
+        cost_class: str | None = None,
+    ) -> float:
+        latency = (
+            stat.latency_ewma_ms
+            if stat is not None and stat.latency_ewma_ms is not None
+            else stat.success_mean_ms
+            if stat is not None and stat.success_count > 0
+            else 0.0
+        )
+        failure_ewma = stat.failure_ewma if stat is not None else 0.0
+        consecutive_failures = stat.consecutive_failures if stat is not None else 0
+        score = (
+            latency
+            + failure_ewma * _IMAGE_ROUTING_FAILURE_PENALTY_MS
+            + consecutive_failures * _IMAGE_ROUTING_CONSECUTIVE_FAILURE_PENALTY_MS
+        )
+        if (
+            stat is not None
+            and stat.last_failure_at is not None
+            and time.monotonic() - stat.last_failure_at
+            < _ENDPOINT_RECENT_FAILURE_WINDOW_S
+        ):
+            score += _IMAGE_ROUTING_CONSECUTIVE_FAILURE_PENALTY_MS
+        # Large/dual-race work occupies expensive slots longer, so amplify the
+        # health signal when all hard routing keys tie.
+        if size_bucket == "large" or cost_class in {"large", "dual_race"}:
+            score *= 1.25
+        return score
 
     def report_success(self, provider_name: str, *, is_probe: bool = False) -> None:
         h = self._health.get(provider_name)
@@ -900,7 +1007,11 @@ class ProviderPool:
                 h.image_inflight[k] = cur - 1
 
     def report_image_success(
-        self, provider_name: str, *, endpoint_kind: str | None = None
+        self,
+        provider_name: str,
+        *,
+        endpoint_kind: str | None = None,
+        record_endpoint: bool = True,
     ) -> None:
         """成功一次 image_generation：清空 image 失败计数 + 记 last_used_at。
 
@@ -920,6 +1031,8 @@ class ProviderPool:
         if endpoint_kind:
             h.image_last_used_at_per_ek[endpoint_kind] = now
         h.last_success_at = now  # 同时更新全局 last_success_at（探活逻辑会用）
+        if endpoint_kind and record_endpoint:
+            self.record_endpoint_success(provider_name, endpoint_kind)
         self._record_request_stats(h, total=1, success=1)
         try:
             from .observability import account_image_calls_total
@@ -932,7 +1045,9 @@ class ProviderPool:
         if was_image_open:
             logger.info("image_circuit_closed: provider=%s recovered", provider_name)
 
-    def report_image_failure(self, provider_name: str) -> None:
+    def report_image_failure(
+        self, provider_name: str, *, endpoint_kind: str | None = None
+    ) -> None:
         """失败一次 image_generation（普通 retriable，比如 SSE response.failed / 5xx）。
 
         累计 _IMAGE_CB_FAILURE_THRESHOLD 次 → image cooldown _IMAGE_CB_COOLDOWN_S。
@@ -942,6 +1057,8 @@ class ProviderPool:
         now = time.monotonic()
         h.image_consecutive_failures += 1
         h.last_failure_at = now
+        if endpoint_kind:
+            self.record_endpoint_failure(provider_name, endpoint_kind)
         self._record_request_stats(h, total=1, fail=1)
         try:
             from .observability import account_image_calls_total
@@ -977,18 +1094,33 @@ class ProviderPool:
         stat.last_success_at = time.monotonic()
         stat.consecutive_failures = 0
         stat.successes += 1
+        stat.failure_ewma = _ewma(
+            stat.failure_ewma,
+            0.0,
+            _ENDPOINT_FAILURE_ALPHA,
+        )
         if latency_ms is not None and latency_ms > 0:
             stat.success_count += 1
             # Welford running mean — O(1), no list of samples to bound.
             stat.success_mean_ms += (
                 latency_ms - stat.success_mean_ms
             ) / stat.success_count
+            stat.latency_ewma_ms = _ewma(
+                stat.latency_ewma_ms,
+                latency_ms,
+                _ENDPOINT_EWMA_ALPHA,
+            )
 
     def record_endpoint_failure(self, provider_name: str, endpoint: str) -> None:
         stat = self._endpoint_stat(provider_name, endpoint)
         stat.last_failure_at = time.monotonic()
         stat.consecutive_failures += 1
         stat.failures += 1
+        stat.failure_ewma = _ewma(
+            stat.failure_ewma,
+            1.0,
+            _ENDPOINT_FAILURE_ALPHA,
+        )
 
     def endpoint_chain(
         self,
@@ -1016,25 +1148,39 @@ class ProviderPool:
         h = self._health.get(provider_name)
         now = time.monotonic()
 
-        def _score(endpoint: str) -> tuple[int, float, float]:
-            # Lower is better. Tuple ordering: (consecutive_failure_penalty,
-            # mean_latency_ms_with_default, recency_penalty).
+        def _score(endpoint: str) -> tuple[float, float, float, int]:
+            # Lower is better. Tuple ordering: EWMA failure/recent-failure
+            # penalty, EWMA latency, recency, configured default order.
             if h is None:
                 stat = EndpointStat()
             else:
                 stat = h.endpoint_stats.get(endpoint, EndpointStat())
-            penalty = stat.consecutive_failures
+            penalty = (
+                stat.failure_ewma * _IMAGE_ROUTING_FAILURE_PENALTY_MS
+                + stat.consecutive_failures
+                * _IMAGE_ROUTING_CONSECUTIVE_FAILURE_PENALTY_MS
+            )
             # If this endpoint failed in the last 60s prefer the alternative
             # even if its mean latency is higher.
-            if stat.last_failure_at is not None and now - stat.last_failure_at < 60:
-                penalty += 5
-            latency = stat.success_mean_ms if stat.success_count > 0 else float("inf")
+            if (
+                stat.last_failure_at is not None
+                and now - stat.last_failure_at < _ENDPOINT_RECENT_FAILURE_WINDOW_S
+            ):
+                penalty += _IMAGE_ROUTING_FAILURE_PENALTY_MS
+            latency = (
+                stat.latency_ewma_ms
+                if stat.latency_ewma_ms is not None
+                else stat.success_mean_ms
+                if stat.success_count > 0
+                else float("inf")
+            )
             # Default tie-break: generations historically faster than responses,
             # so when no data exists prefer generations for generate, edits-style
             # for edit. Action-specific bias is folded in by the caller via
             # the action parameter.
             recency = -(stat.last_success_at or 0.0)
-            return (penalty, latency, recency)
+            default_order = 0 if endpoint == "generations" else 1
+            return (penalty, latency, recency, default_order)
 
         ranked = sorted(candidates, key=_score)
         # Action-aware default tweak: edit jobs tend to be more reliable on

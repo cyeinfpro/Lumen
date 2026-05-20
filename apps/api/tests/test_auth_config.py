@@ -76,6 +76,16 @@ def test_dev_allows_missing_password_reset_smtp() -> None:
     assert settings.smtp_host == ""
 
 
+def test_smtp_password_is_stripped_before_runtime_use() -> None:
+    kwargs = _prod_kwargs()
+    kwargs["smtp_username"] = "smtp-user"
+    kwargs["smtp_password"] = "  smtp-secret  "
+
+    settings = Settings(**kwargs)
+
+    assert settings.smtp_password == "smtp-secret"
+
+
 def test_non_dev_requires_byok_master_secret() -> None:
     kwargs = _prod_kwargs()
     kwargs["byok_api_key_master_secret"] = ""

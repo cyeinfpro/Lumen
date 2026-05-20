@@ -585,16 +585,23 @@ def _safe_upstream_details(upstream_request: dict[str, Any] | None) -> dict[str,
         "moderation",
         "output_compression",
         "output_format",
+        "pixel_count",
+        "queue_lane",
+        "queue_wait_ms",
         "render_quality",
         "request_event_provider",
         "responses_model",
         "revised_prompt",
         "route",
         "size_actual",
+        "size_bucket",
+        "cost_class",
         "transparent_alpha_recovered",
         "transparent_pipeline_provider",
         "upstream_route",
         "web_search",
+        "workflow_step_key",
+        "workflow_type",
     }
     details: dict[str, Any] = {}
     for key in sorted(allowed):
@@ -671,6 +678,13 @@ class _RequestEventOut(BaseModel):
     upstream_provider: str | None = None
     upstream_route: str | None = None
     upstream_endpoint: str | None = None
+    queue_lane: str | None = None
+    workflow_type: str | None = None
+    workflow_step_key: str | None = None
+    pixel_count: int | None = None
+    size_bucket: str | None = None
+    cost_class: str | None = None
+    queue_wait_ms: int | None = None
     tokens_in: int | None = None
     tokens_out: int | None = None
     error_code: str | None = None
@@ -1408,6 +1422,13 @@ async def list_request_events(
                 upstream_provider=_request_provider(req),
                 upstream_route=_request_route(req),
                 upstream_endpoint=upstream_endpoint,
+                queue_lane=getattr(task, "queue_lane", None),
+                workflow_type=getattr(task, "workflow_type", None),
+                workflow_step_key=getattr(task, "workflow_step_key", None),
+                pixel_count=getattr(task, "pixel_count", None),
+                size_bucket=getattr(task, "size_bucket", None),
+                cost_class=getattr(task, "cost_class", None),
+                queue_wait_ms=getattr(task, "queue_wait_ms", None),
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 error_code=task.error_code,

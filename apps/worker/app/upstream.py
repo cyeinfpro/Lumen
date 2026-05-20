@@ -132,9 +132,28 @@ def _resolve_lumen_version() -> str:
 _LUMEN_ORIGINATOR = f"lumen-prod-{_resolve_lumen_version()}"
 
 
+_image_trace_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "lumen_image_trace_id",
+    default=None,
+)
+
+
+def push_image_trace_id(trace_id: str | None) -> contextvars.Token[str | None] | None:
+    """Bind a generation-level trace id to downstream image HTTP calls."""
+    if not isinstance(trace_id, str) or not trace_id:
+        return None
+    return _image_trace_id_ctx.set(trace_id)
+
+
+def pop_image_trace_id(token: contextvars.Token[str | None] | None) -> None:
+    if token is None:
+        return
+    _image_trace_id_ctx.reset(token)
+
+
 def _generate_trace_id() -> str:
     """每次上游 HTTP 调用生成一个 x-trace-id，方便和上游下发的 x-request-id 对账。"""
-    return uuid.uuid4().hex
+    return _image_trace_id_ctx.get() or uuid.uuid4().hex
 
 
 # ---- 已知 SSE output[].type 白名单 ----
@@ -260,6 +279,7 @@ _client: httpx.AsyncClient | None = None
 _client_timeout_config: "_TimeoutConfig | None" = None
 _PROXIED_CLIENT_CACHE_MAX = 32
 _PROXIED_CLIENT_CLOSE_DELAY_SECONDS = 30.0
+_PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS = 30 * 60.0
 _proxied_clients: OrderedDict[tuple["_TimeoutConfig", str], httpx.AsyncClient] = (
     OrderedDict()
 )
@@ -531,6 +551,65 @@ class _TimeoutConfig:
         )
 
 
+class _TrackedStreamContext:
+    def __init__(self, client: "_TrackedAsyncClient", inner: Any) -> None:
+        self._client = client
+        self._inner = inner
+        self._entered = False
+
+    async def __aenter__(self) -> httpx.Response:
+        self._client._acquire_request()
+        try:
+            response = await self._inner.__aenter__()
+        except BaseException:
+            self._client._release_request()
+            raise
+        self._entered = True
+        return response
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        try:
+            return await self._inner.__aexit__(exc_type, exc, tb)
+        finally:
+            if self._entered:
+                self._entered = False
+                self._client._release_request()
+
+
+class _TrackedAsyncClient(httpx.AsyncClient):
+    """httpx client that can defer retirement until active calls drain."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._active_requests = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    def _acquire_request(self) -> None:
+        self._active_requests += 1
+        self._idle.clear()
+
+    def _release_request(self) -> None:
+        self._active_requests = max(0, self._active_requests - 1)
+        if self._active_requests == 0:
+            self._idle.set()
+
+    async def _wait_until_idle(self, timeout: float) -> None:
+        if self._active_requests == 0:
+            return
+        await asyncio.wait_for(self._idle.wait(), timeout=timeout)
+
+    async def request(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        self._acquire_request()
+        try:
+            return await super().request(*args, **kwargs)
+        finally:
+            self._release_request()
+
+    def stream(self, *args: Any, **kwargs: Any) -> _TrackedStreamContext:
+        return _TrackedStreamContext(self, super().stream(*args, **kwargs))
+
+
 async def _resolve_timeout_config() -> _TimeoutConfig:
     async def _resolve_float(spec_key: str, fallback: float) -> float:
         try:
@@ -580,7 +659,7 @@ def _build_client(
         read=settings.upstream_read_timeout_s,
         write=settings.upstream_write_timeout_s,
     )
-    return httpx.AsyncClient(
+    return _TrackedAsyncClient(
         timeout=timeout_config.to_httpx(),
         headers={"content-type": "application/json"},
         proxy=proxy_url,
@@ -598,7 +677,7 @@ def _build_images_client(
         read=settings.upstream_read_timeout_s,
         write=settings.upstream_write_timeout_s,
     )
-    return httpx.AsyncClient(timeout=timeout_config.to_httpx(), proxy=proxy_url)
+    return _TrackedAsyncClient(timeout=timeout_config.to_httpx(), proxy=proxy_url)
 
 
 def _cache_proxied_client(
@@ -622,6 +701,12 @@ async def _delayed_aclose(
         await asyncio.sleep(
             _PROXIED_CLIENT_CLOSE_DELAY_SECONDS if delay is None else delay
         )
+        wait_until_idle = getattr(client, "_wait_until_idle", None)
+        if callable(wait_until_idle):
+            try:
+                await wait_until_idle(_PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning("timed out waiting for retired upstream client to idle")
         await client.aclose()
     except Exception:  # noqa: BLE001
         logger.warning("delayed proxied client close failed", exc_info=True)
@@ -650,7 +735,7 @@ async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
                 _client = _build_client(timeout_config)
                 _client_timeout_config = timeout_config
                 if old_client is not None:
-                    await old_client.aclose()
+                    asyncio.create_task(_delayed_aclose(old_client))
     return _client
 
 
@@ -680,7 +765,7 @@ async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
                 _images_client = _build_images_client(timeout_config)
                 _images_client_timeout_config = timeout_config
                 if old_client is not None:
-                    await old_client.aclose()
+                    asyncio.create_task(_delayed_aclose(old_client))
     return _images_client
 
 
@@ -4186,8 +4271,43 @@ def _is_byok_provider(provider: Any) -> bool:
     return isinstance(name, str) and name.startswith("user:")
 
 
+def _provider_attempt_context(
+    provider: Any,
+    *,
+    attempt: int | None = None,
+    duration_ms: int | None = None,
+    status: str | None = None,
+    reason: str | None = None,
+    exc: BaseException | None = None,
+    endpoint_attempt: int | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {"byok": _is_byok_provider(provider)}
+    if attempt is not None:
+        out["attempt"] = attempt
+    if endpoint_attempt is not None:
+        out["endpoint_attempt"] = endpoint_attempt
+    if duration_ms is not None:
+        out["duration_ms"] = max(0, int(duration_ms))
+    if status:
+        out["status"] = status
+    if reason:
+        out["attempt_reason"] = reason
+    if isinstance(exc, UpstreamError):
+        if exc.error_code:
+            out["error_code"] = exc.error_code
+        if exc.status_code is not None:
+            out["status_code"] = exc.status_code
+    elif exc is not None:
+        out["error_code"] = type(exc).__name__
+    return out
+
+
 def _pool_report_image_success(
-    pool: Any, name: str, *, endpoint_kind: str | None = None
+    pool: Any,
+    name: str,
+    *,
+    endpoint_kind: str | None = None,
+    record_endpoint: bool = True,
 ) -> None:
     """兼容老 mock pool（不接 endpoint_kind kwarg）的 report_image_success 包装。
 
@@ -4199,6 +4319,35 @@ def _pool_report_image_success(
     image health/quota 维度。
     """
     fn = getattr(pool, "report_image_success", None)
+    if not callable(fn):
+        return
+    try:
+        fn(
+            name,
+            endpoint_kind=endpoint_kind,
+            record_endpoint=record_endpoint,
+        )
+    except TypeError as exc:
+        msg = str(exc)
+        if "record_endpoint" in msg:
+            try:
+                fn(name, endpoint_kind=endpoint_kind)
+            except TypeError as inner_exc:
+                if "endpoint_kind" not in str(inner_exc):
+                    raise
+                fn(name)
+            return
+        if "endpoint_kind" not in msg:
+            raise
+        fn(name)
+
+
+def _pool_report_image_failure(
+    pool: Any, name: str, *, endpoint_kind: str | None = None
+) -> None:
+    """Compatibility wrapper for endpoint-aware image failure reporting."""
+
+    fn = getattr(pool, "report_image_failure", None)
     if not callable(fn):
         return
     try:
@@ -4588,6 +4737,7 @@ async def _direct_generate_image_with_failover(
     for i, provider in enumerate(providers):
         if lane_owns_inflight and i > 0:
             _pool_acquire_inflight(pool, provider.name, "generations")
+        started = time.monotonic()
         try:
             unavailable_error = _provider_endpoint_unavailable_error(
                 provider, "generations"
@@ -4627,6 +4777,12 @@ async def _direct_generate_image_with_failover(
                     route="image2",
                     source="image2_direct",
                     endpoint="images/generations",
+                    **_provider_attempt_context(
+                        provider,
+                        attempt=i + 1,
+                        duration_ms=(time.monotonic() - started) * 1000,
+                        status="succeeded",
+                    ),
                 )
                 await _emit_image_progress(
                     progress_callback,
@@ -4666,7 +4822,11 @@ async def _direct_generate_image_with_failover(
                             provider.name, retry_after_s=retry_after
                         )
                     else:
-                        pool.report_image_failure(provider.name)
+                        _pool_report_image_failure(
+                            pool,
+                            provider.name,
+                            endpoint_kind="generations",
+                        )
                 remaining = len(providers) - i - 1
                 if remaining > 0:
                     logger.warning(
@@ -4685,6 +4845,14 @@ async def _direct_generate_image_with_failover(
                         remaining=remaining,
                         reason=decision.reason,
                         route="image2_direct",
+                        **_provider_attempt_context(
+                            provider,
+                            attempt=i + 1,
+                            duration_ms=(time.monotonic() - started) * 1000,
+                            status="failed",
+                            reason=decision.reason,
+                            exc=exc,
+                        ),
                     )
         finally:
             if lane_owns_inflight:
@@ -5034,6 +5202,15 @@ async def _image_job_with_failover(
                             remaining=ep_remaining,
                             reason=error_class or decision.reason,
                             route="image_jobs",
+                            **_provider_attempt_context(
+                                provider,
+                                attempt=i + 1,
+                                endpoint_attempt=ep_idx + 1,
+                                duration_ms=(time.monotonic() - started) * 1000,
+                                status="failed",
+                                reason=error_class or decision.reason,
+                                exc=exc,
+                            ),
                         )
                         continue
                     should_continue = _should_continue_image_job_failover(
@@ -5056,7 +5233,10 @@ async def _image_job_with_failover(
                             provider.name, endpoint, latency_ms=latency_ms
                         )
                         _pool_report_image_success(
-                            pool, provider.name, endpoint_kind=inflight_ek
+                            pool,
+                            provider.name,
+                            endpoint_kind=inflight_ek,
+                            record_endpoint=False,
                         )
                         await _record_admin_image_call_or_raise(pool, provider.name)
                     await _emit_image_progress(
@@ -5066,6 +5246,13 @@ async def _image_job_with_failover(
                         route="image_jobs",
                         source=source_label,
                         endpoint=f"image-jobs:{endpoint}",
+                        **_provider_attempt_context(
+                            provider,
+                            attempt=i + 1,
+                            endpoint_attempt=ep_idx + 1,
+                            duration_ms=latency_ms,
+                            status="succeeded",
+                        ),
                     )
                     await _emit_image_progress(
                         progress_callback,
@@ -5096,7 +5283,7 @@ async def _image_job_with_failover(
                         provider.name, retry_after_s=retry_after
                     )
                 else:
-                    pool.report_image_failure(provider.name)
+                    _pool_report_image_failure(pool, provider.name)
             remaining = len(providers) - i - 1
             if remaining > 0:
                 logger.warning(
@@ -5112,6 +5299,14 @@ async def _image_job_with_failover(
                     remaining=remaining,
                     reason="image_job_failed",
                     route="image_jobs",
+                    **_provider_attempt_context(
+                        provider,
+                        attempt=i + 1,
+                        duration_ms=None,
+                        status="failed",
+                        reason="image_job_failed",
+                        exc=last_exc,
+                    ),
                 )
         finally:
             if lane_owns_inflight:
@@ -5257,6 +5452,7 @@ async def _direct_edit_image_with_failover(
     for i, provider in enumerate(providers):
         if lane_owns_inflight and i > 0:
             _pool_acquire_inflight(pool, provider.name, "generations")
+        started = time.monotonic()
         try:
             unavailable_error = _provider_endpoint_unavailable_error(
                 provider, "generations"
@@ -5297,6 +5493,12 @@ async def _direct_edit_image_with_failover(
                     route="image2",
                     source="image2_edit_direct",
                     endpoint="images/edits",
+                    **_provider_attempt_context(
+                        provider,
+                        attempt=i + 1,
+                        duration_ms=(time.monotonic() - started) * 1000,
+                        status="succeeded",
+                    ),
                 )
                 await _emit_image_progress(
                     progress_callback,
@@ -5336,7 +5538,11 @@ async def _direct_edit_image_with_failover(
                             provider.name, retry_after_s=retry_after
                         )
                     else:
-                        pool.report_image_failure(provider.name)
+                        _pool_report_image_failure(
+                            pool,
+                            provider.name,
+                            endpoint_kind="generations",
+                        )
                 remaining = len(providers) - i - 1
                 if remaining > 0:
                     logger.warning(
@@ -5352,6 +5558,14 @@ async def _direct_edit_image_with_failover(
                         remaining=remaining,
                         reason=decision.reason,
                         route="image2_edit_direct",
+                        **_provider_attempt_context(
+                            provider,
+                            attempt=i + 1,
+                            duration_ms=(time.monotonic() - started) * 1000,
+                            status="failed",
+                            reason=decision.reason,
+                            exc=exc,
+                        ),
                     )
         finally:
             if lane_owns_inflight:
@@ -5413,6 +5627,7 @@ async def _responses_image_stream_with_failover(
     for i, provider in enumerate(providers):
         if lane_owns_inflight and i > 0:
             _pool_acquire_inflight(pool, provider.name, "responses")
+        started = time.monotonic()
         try:
             unavailable_error = _provider_endpoint_unavailable_error(
                 provider, "responses"
@@ -5462,6 +5677,12 @@ async def _responses_image_stream_with_failover(
                     route="responses",
                     source="responses",
                     endpoint="responses:image_generation",
+                    **_provider_attempt_context(
+                        provider,
+                        attempt=i + 1,
+                        duration_ms=(time.monotonic() - started) * 1000,
+                        status="succeeded",
+                    ),
                 )
                 return result
             except (asyncio.CancelledError, UpstreamCancelled):
@@ -5494,7 +5715,11 @@ async def _responses_image_stream_with_failover(
                             provider.name, retry_after_s=retry_after
                         )
                     else:
-                        pool.report_image_failure(provider.name)
+                        _pool_report_image_failure(
+                            pool,
+                            provider.name,
+                            endpoint_kind="responses",
+                        )
                 remaining = len(providers) - i - 1
                 if remaining > 0:
                     logger.warning(
@@ -5511,6 +5736,14 @@ async def _responses_image_stream_with_failover(
                         remaining=remaining,
                         reason=decision.reason,
                         route="responses",
+                        **_provider_attempt_context(
+                            provider,
+                            attempt=i + 1,
+                            duration_ms=(time.monotonic() - started) * 1000,
+                            status="failed",
+                            reason=decision.reason,
+                            exc=exc,
+                        ),
                     )
         finally:
             if lane_owns_inflight:
@@ -5614,6 +5847,20 @@ async def _race_responses_image(
     async def _metadata_only_progress(event: dict[str, Any]) -> None:
         if event.get("type") != "provider_used":
             return
+        extra = {
+            key: event.get(key)
+            for key in (
+                "attempt",
+                "endpoint_attempt",
+                "duration_ms",
+                "status",
+                "reason",
+                "error_code",
+                "status_code",
+                "byok",
+            )
+            if event.get(key) is not None
+        }
         await _emit_image_progress(
             progress_callback,
             "provider_used",
@@ -5621,6 +5868,7 @@ async def _race_responses_image(
             route=event.get("route"),
             source=event.get("source"),
             endpoint=event.get("endpoint"),
+            **extra,
         )
 
     async def _run_lane(idx: int) -> tuple[str, str | None]:
@@ -5793,6 +6041,20 @@ async def _dual_race_image_action(
     async def _metadata_only_progress(event: dict[str, Any]) -> None:
         if event.get("type") != "provider_used":
             return
+        extra = {
+            key: event.get(key)
+            for key in (
+                "attempt",
+                "endpoint_attempt",
+                "duration_ms",
+                "status",
+                "reason",
+                "error_code",
+                "status_code",
+                "byok",
+            )
+            if event.get(key) is not None
+        }
         await _emit_image_progress(
             progress_callback,
             "provider_used",
@@ -5800,6 +6062,7 @@ async def _dual_race_image_action(
             route=event.get("route"),
             source=event.get("source"),
             endpoint=event.get("endpoint"),
+            **extra,
         )
 
     async def _lane_image2() -> tuple[str, str | None]:
@@ -6048,6 +6311,20 @@ async def _dual_race_image_jobs_action(
     async def _metadata_only_progress(event: dict[str, Any]) -> None:
         if event.get("type") != "provider_used":
             return
+        extra = {
+            key: event.get(key)
+            for key in (
+                "attempt",
+                "endpoint_attempt",
+                "duration_ms",
+                "status",
+                "reason",
+                "error_code",
+                "status_code",
+                "byok",
+            )
+            if event.get(key) is not None
+        }
         await _emit_image_progress(
             progress_callback,
             "provider_used",
@@ -6055,6 +6332,7 @@ async def _dual_race_image_jobs_action(
             route=event.get("route"),
             source=event.get("source"),
             endpoint=event.get("endpoint"),
+            **extra,
         )
 
     async def _lane(
@@ -6297,6 +6575,19 @@ async def _run_image_once_for_provider(
         mask is not None,
     )
 
+    if engine == _IMAGE_ROUTE_DUAL_RACE and _is_byok_provider(provider):
+        await _emit_image_progress(
+            progress_callback,
+            "route_diagnostic",
+            provider=provider_name,
+            route=f"{channel}:{engine}",
+            reason="byok_disables_dual_race",
+            fallback_route=f"{channel}:{_IMAGE_ROUTE_RESPONSES}",
+            byok=True,
+            status="routed",
+        )
+        engine = _IMAGE_ROUTE_RESPONSES
+
     # ---- 局部 inpaint mask 强制走 generations endpoint ----
     # responses lane / image_generation tool 不支持 mask 字段（OpenAI 协议只在
     # /v1/images/edits 上接 mask）。如果让 mask 任务走 dual_race 或 responses fallback，
@@ -6316,6 +6607,19 @@ async def _run_image_once_for_provider(
                 "mask requires at least one reference image",
                 error_code=EC.MISSING_INPUT_IMAGES.value,
                 status_code=400,
+            )
+        if engine != _IMAGE_ROUTE_IMAGE2 or use_jobs:
+            await _emit_image_progress(
+                progress_callback,
+                "route_diagnostic",
+                provider=provider_name,
+                route=f"{channel}:{engine}",
+                reason="mask_requires_generations_endpoint",
+                fallback_route=(
+                    "image_jobs:generations" if use_jobs else "image2_edit_direct"
+                ),
+                byok=_is_byok_provider(provider),
+                status="routed",
             )
         if use_jobs:
             yield await _image_job_with_failover(
@@ -6715,6 +7019,13 @@ async def _dispatch_image(
                     remaining=remaining,
                     reason=decision.reason,
                     route=f"{channel}:{engine}",
+                    **_provider_attempt_context(
+                        provider,
+                        attempt=idx + 1,
+                        status="failed",
+                        reason=decision.reason,
+                        exc=exc,
+                    ),
                 )
         finally:
             if dispatch_owns_inflight and pool is not None:
@@ -6845,9 +7156,8 @@ async def _iter_sse_with_runtime(
 
     取消安全：httpx `client.stream(...)` 的 async context 在 CancelledError 沿
     yield 出去时也会执行 __aexit__ → response.aclose()，连接和 stream 都会被释放。
-    本函数额外捕获 CancelledError 并 reraise（不 swallow），以及在主路径里使用
-    try/finally 把 `resp.aclose()` 显式调用一次（context manager 已经做了，但显式
-    写出更便于排查）。
+    本函数额外捕获 CancelledError 并 reraise（不 swallow）；response 关闭由 async
+    context manager 统一负责。
 
     allow_non_sse_payload=True 时，2xx 响应若 Content-Type 不是 text/event-stream，
     读取完整 body 并 yield 一个 sentinel event ``_lumen.image.json_payload``，
@@ -7003,16 +7313,10 @@ async def _iter_sse_with_runtime(
                             _maybe_record_usage_from_event(data)
                             yield data
             except UpstreamError:
-                with suppress(Exception):
-                    await resp.aclose()
                 raise
             except asyncio.CancelledError:
-                # cancellation safe: 显式 aclose() 释放底层连接；async with 的 __aexit__
-                # 也会做同样的事，这里写出便于排查。reraise 不 swallow CancelledError。
-                try:
-                    await resp.aclose()
-                except Exception:  # noqa: BLE001
-                    pass
+                # async with __aexit__ closes the response; reraise so caller
+                # cancellation remains visible.
                 raise
             except httpx.HTTPError as exc:
                 raise UpstreamError(
@@ -7027,7 +7331,7 @@ async def _iter_sse_with_runtime(
                     },
                 ) from exc
     except asyncio.CancelledError:
-        # 上一层 try/except 已经显式 aclose；这里仅 reraise，让取消信号穿透到调用方。
+        # response cleanup is owned by the async context manager above.
         raise
     finally:
         # 元信息埋点：endpoint=responses（httpx 路径）。final_status/headers 在请求
@@ -7084,8 +7388,8 @@ async def stream_completion(
     """流式 completion：消费者关注 `response.output_text.delta` 的 `delta` 字段，
     收到 `response.completed` 后结束。
 
-    取消安全：内部 `_iter_sse_with_runtime` 的 try/except/finally 已经显式 aclose
-    httpx response 并 reraise CancelledError，不 swallow。
+    取消安全：内部 `_iter_sse_with_runtime` 依赖 httpx async context manager 关闭
+    response，并 reraise CancelledError，不 swallow。
     """
     async for ev in _iter_sse(body, runtime_override=runtime_override):
         yield ev
@@ -7138,8 +7442,8 @@ async def responses_call(
             上游 timeout（携带 status_code & error_code 便于 caller 走 retry classifier）。
         asyncio.CancelledError: 直接透传不吞，上层取消信号必须能穿透。
 
-    取消安全：使用 `client.stream()` async context manager + 显式 aclose 双保险，
-    即使 caller 在 await 期间被 cancel，连接和底层 socket 都会被释放。
+    取消安全：使用 `client.stream()` async context manager；即使 caller 在 await
+    期间被 cancel，连接和底层 socket 也由 __aexit__ 释放。
     """
     # 1) body 前置处理——和 stream 路径完全一致，保证 prompt cache 前缀稳定
     _validate_responses_body(body)
@@ -7302,14 +7606,8 @@ async def responses_call(
                                     if isinstance(err, dict):
                                         error_terminal = err
                     except UpstreamError:
-                        with suppress(Exception):
-                            await resp.aclose()
                         raise
                     except asyncio.CancelledError:
-                        try:
-                            await resp.aclose()
-                        except Exception:  # noqa: BLE001
-                            pass
                         raise
                     except httpx.HTTPError as exc:
                         raise UpstreamError(

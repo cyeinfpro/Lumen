@@ -2,7 +2,7 @@
 
 // Lumen V1 侧栏：品牌栏 + 搜索 + 分组列表 + 归档 tab。
 // 关键交互：
-//  - ⌘/Ctrl+K 聚焦搜索；Esc 清空搜索（SearchBox 内部处理）
+//  - 顶部按钮或 ⌘/Ctrl+B 切换侧栏；Esc 清空搜索（SearchBox 内部处理）
 //  - ↑/↓ 在列表里走焦点；Enter 打开；Delete 触发删除 popover
 //  - 重命名 / 归档 / 删除 全部走内嵌 popover，不弹 window.confirm
 //  - InfiniteQuery 语义不变；搜索只 client-filter 已加载页

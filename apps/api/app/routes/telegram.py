@@ -25,6 +25,7 @@ import secrets
 import uuid
 from datetime import datetime
 from typing import Annotated, Literal
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -44,12 +45,14 @@ from lumen_core.models import (
     Conversation,
     Generation,
     Image,
+    Message,
     TelegramBinding,
 )
 from lumen_core.schemas import ImageParamsIn, PostMessageIn
 
 from ..db import get_db
 from ..deps import BotUser, CurrentUser, require_bot_token, verify_csrf
+from ..public_urls import resolve_public_base_url
 from ..redis_client import get_redis
 from .messages import submit_user_message
 from .prompts import _resolve_provider_order, _stream_enhance
@@ -309,6 +312,7 @@ class EnhancePromptOut(BaseModel):
 
 class GenerationStatusOut(BaseModel):
     id: str
+    conversation_id: str
     status: str
     progress_stage: str
     error_code: str | None = None
@@ -323,6 +327,9 @@ class GenerationStatusOut(BaseModel):
     render_quality: str = "medium"
     output_format: str = "jpeg"
     fast: bool = False
+    web_url: str | None = None
+    edit_url: str | None = None
+    project_url: str | None = None
 
 
 class TaskListItem(BaseModel):
@@ -749,19 +756,23 @@ async def create_generation(
 @router_bot.get("/telegram/generations/{gen_id}", response_model=GenerationStatusOut)
 async def get_generation(
     gen_id: str,
+    request: Request,
     user: BotUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> GenerationStatusOut:
-    gen = (
+    row = (
         await db.execute(
-            select(Generation).where(
+            select(Generation, Message.conversation_id)
+            .join(Message, Message.id == Generation.message_id)
+            .where(
                 Generation.id == gen_id,
                 Generation.user_id == user.id,
             )
         )
-    ).scalar_one_or_none()
-    if gen is None:
+    ).one_or_none()
+    if row is None:
         raise _http("not_found", "generation not found", 404)
+    gen, conversation_id = row
     image_ids = (
         (
             await db.execute(
@@ -777,8 +788,20 @@ async def get_generation(
         .all()
     )
     upstream = gen.upstream_request if isinstance(gen.upstream_request, dict) else {}
+    web_url: str | None = None
+    edit_url: str | None = None
+    project_url: str | None = None
+    try:
+        public_base = (await resolve_public_base_url(request, db)).rstrip("/")
+        web_url = f"{public_base}/?{urlencode({'conversationId': conversation_id})}"
+        edit_url = f"{public_base}/?{urlencode({'conversationId': conversation_id, 'generationId': gen.id, 'source': 'telegram'})}"
+        if image_ids:
+            project_url = f"{public_base}/projects?{urlencode({'source': 'telegram', 'imageId': str(image_ids[0]), 'generationId': gen.id})}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram web link resolve failed gen=%s err=%s", gen.id, exc)
     return GenerationStatusOut(
         id=gen.id,
+        conversation_id=conversation_id,
         status=gen.status,
         progress_stage=gen.progress_stage,
         error_code=gen.error_code,
@@ -792,6 +815,9 @@ async def get_generation(
         render_quality=str(upstream.get("render_quality") or "medium"),
         output_format=str(upstream.get("output_format") or "jpeg"),
         fast=bool(upstream.get("fast", False)),
+        web_url=web_url,
+        edit_url=edit_url,
+        project_url=project_url,
     )
 
 

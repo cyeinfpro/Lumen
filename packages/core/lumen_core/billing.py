@@ -476,11 +476,10 @@ async def settle(
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
+    consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
+    if consumed is not None:
+        return consumed
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
-    if held <= 0:
-        consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
-        if consumed is not None:
-            return consumed
     if held <= 0 and actual_micro <= 0:
         return None
     before_balance = wallet.balance_micro

@@ -55,6 +55,7 @@ import type {
 import { imageBinaryUrl, imageVariantUrl } from "@/lib/apiClient";
 import { prewarmImage } from "@/lib/imagePreload";
 import { aspectRatioToCss } from "@/lib/sizing";
+import { imageResultToLightboxItem } from "@/lib/imageResultLightbox";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
 import { triggerImageDownload } from "@/components/ui/lightbox/utils";
 import { DevelopingCard } from "@/components/ui/chat/mobile";
@@ -848,20 +849,11 @@ const FinalImage = memo(function FinalImage({
   };
 
   const handleClick = () => {
-    const item: LightboxItem = {
-      id: image.id,
-      url: imageBinaryUrl(image.id),
+    const item = imageResultToLightboxItem(gen, image, {
       previewUrl: lightboxPreview,
       thumbUrl: lightboxThumbUrl(image),
-      prompt: gen.prompt,
-      width: image.width,
-      height: image.height,
-      aspect_ratio: gen.aspect_ratio,
-      size_actual: image.size_actual || `${image.width}x${image.height}`,
-      mime: image.mime,
-      filename: image.filename,
-      metadata: image.metadata_jsonb ?? undefined,
-    };
+      createdAt: gen.finished_at ?? gen.started_at,
+    });
     openLightbox([item], image.id);
   };
 

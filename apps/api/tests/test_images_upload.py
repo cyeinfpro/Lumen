@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import io
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +53,16 @@ def _request(method: str = "DELETE") -> Request:
             "client": ("127.0.0.1", 12345),
         }
     )
+
+
+def _png_bytes(
+    mode: str,
+    size: tuple[int, int],
+    color,
+) -> bytes:
+    buf = io.BytesIO()
+    PILImage.new(mode, size, color=color).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def test_storage_path_rejects_traversal(tmp_path: Path) -> None:
@@ -133,6 +144,59 @@ def test_upload_limits_are_bounded() -> None:
     assert images.MAX_BYTES == 50 * 1024 * 1024
     assert images.MAX_LONG_SIDE == 4096
     assert images.PILImage.MAX_IMAGE_PIXELS == images.MAX_IMAGE_PIXELS
+
+
+def test_prepare_upload_image_preserves_original_and_builds_normalized_ref() -> None:
+    original = _png_bytes("RGB", (3000, 1500), (30, 60, 90))
+
+    data, mime, width, height, metadata, normalized_ref, normalized_meta = (
+        images._prepare_upload_image(original, "reference.png")
+    )
+
+    assert data == original
+    assert mime == "image/png"
+    assert (width, height) == (3000, 1500)
+    assert metadata["mask_preflight"]["has_alpha"] is False
+    assert normalized_meta["mime"] == "image/webp"
+    assert normalized_meta["width"] == 2048
+    assert normalized_meta["height"] == 1024
+    assert normalized_meta["bytes"] == len(normalized_ref)
+    assert len(normalized_meta["sha256"]) == 64
+
+
+def test_prepare_upload_image_rejects_no_alpha_mask() -> None:
+    mask = _png_bytes("RGB", (32, 32), (0, 0, 0))
+
+    with pytest.raises(Exception) as excinfo:
+        images._prepare_upload_image(mask, "mask.png", mask_requested=True)
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "invalid_mask_alpha"
+    assert "no alpha channel" in excinfo.value.detail["error"]["message"]
+
+
+def test_prepare_upload_image_rejects_mask_size_mismatch() -> None:
+    mask = _png_bytes("RGBA", (32, 32), (255, 255, 255, 0))
+
+    with pytest.raises(Exception) as excinfo:
+        images._prepare_upload_image(
+            mask,
+            "mask.png",
+            mask_requested=True,
+            reference_size=(64, 64),
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    assert excinfo.value.detail["error"]["code"] == "mask_size_mismatch"
+    assert "32x32" in excinfo.value.detail["error"]["message"]
+    assert "64x64" in excinfo.value.detail["error"]["message"]
+
+
+def test_mask_filename_requests_strict_preflight() -> None:
+    assert images._upload_requests_mask_preflight(None, "mask.png")
+    assert images._upload_requests_mask_preflight(None, "mask_123.png")
+    assert images._upload_requests_mask_preflight("inpaint_mask", "photo.png")
+    assert not images._upload_requests_mask_preflight(None, "reference.png")
 
 
 def test_decompression_bomb_error_maps_to_413(

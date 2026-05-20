@@ -26,6 +26,13 @@ export interface GenerationSummary {
   quality?: string | null;
   output_format?: string | null;
   size_actual: string;
+  parent_generation_id?: string | null;
+  action_source?: string | null;
+  revised_prompt?: string | null;
+  requested_params?: Record<string, unknown> | null;
+  effective_params?: Record<string, unknown> | null;
+  diagnostics?: Record<string, unknown> | null;
+  provider_attempts?: Array<Record<string, unknown>>;
   image: {
     id: string;
     url: string;
@@ -34,6 +41,8 @@ export interface GenerationSummary {
     thumb_url: string;
     width: number;
     height: number;
+    parent_image_id?: string | null;
+    metadata_jsonb?: Record<string, unknown> | null;
   };
   message_id: string;
   conversation_id: string;

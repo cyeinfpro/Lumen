@@ -9,7 +9,7 @@ const source = readFileSync(
 
 test("idless SSE events are not rebroadcast across tabs", () => {
   const untrackedGuard = source.indexOf(
-    'if (seenResult === "untracked") return;',
+    "if (seenResult === null) return;",
   );
   const broadcastPost = source.indexOf("postMessage({");
 
@@ -24,11 +24,22 @@ test("idless SSE events are not rebroadcast across tabs", () => {
 test("idless BroadcastChannel messages are dropped before store delivery", () => {
   match(
     source,
-    /seenResult === "untracked" && opts\?\.source === "broadcast"[\s\S]*?return;/,
+    /seenResult === null && opts\?\.source === "broadcast"[\s\S]*?return;/,
   );
 });
 
-test("SSE event identity accepts payload ids and EventSource ids", () => {
-  match(source, /event_id\?: unknown; msg_id\?: unknown/);
+test("SSE event identity accepts payload ids, sse ids, and EventSource ids", () => {
+  match(source, /event_id\?: unknown;[\s\S]*?sse_id\?: unknown;[\s\S]*?msg_id\?: unknown/);
   match(source, /return eventId \|\| null;/);
+});
+
+test("BroadcastChannel cleanup only clears its own channel instance", () => {
+  match(source, /const channel = new BroadcastChannel\(SSE_BROADCAST_CHANNEL\)/);
+  match(source, /if \(broadcastRef\.current === channel\) \{[\s\S]*?broadcastRef\.current = null;/);
+});
+
+test("chat store reset clears the local seen event id cache", () => {
+  match(source, /lumen:chat-store-reset/);
+  match(source, /seenEventIdsRef\.current\.clear\(\)/);
+  match(source, /seenEventIdQueueRef\.current = \[\]/);
 });

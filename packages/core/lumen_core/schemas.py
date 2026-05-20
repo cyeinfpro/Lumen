@@ -184,6 +184,28 @@ class AdvancedIn(BaseModel):
     stream_partial_image: bool = False
 
 
+AttachmentRole = Literal[
+    "reference",
+    "subject",
+    "product",
+    "style",
+    "edit_target",
+    "ask_target",
+    "background",
+    "mask",
+    "other",
+]
+
+
+class MessageAttachmentIn(BaseModel):
+    """Structured image attachment metadata for composer/workflow routing."""
+
+    image_id: str = Field(min_length=1, max_length=64)
+    role: AttachmentRole = "reference"
+    label: str | None = Field(default=None, max_length=40)
+    weight: float | None = Field(default=None, ge=0, le=1)
+
+
 class PostMessageIn(BaseModel):
     """DESIGN §5.4 核心写入接口。"""
 
@@ -194,6 +216,17 @@ class PostMessageIn(BaseModel):
         default_factory=list,
         max_length=MAX_MESSAGE_ATTACHMENTS,
     )
+    attachments: list[MessageAttachmentIn] = Field(
+        default_factory=list,
+        max_length=MAX_MESSAGE_ATTACHMENTS,
+    )
+    # Future-facing metadata used by UI actions, projects, Telegram deep links,
+    # and worker diagnostics. All fields are optional so legacy clients keep
+    # working with only text + attachment_image_ids.
+    input_images: list[str] = Field(default_factory=list, max_length=MAX_MESSAGE_ATTACHMENTS)
+    source: str | None = Field(default=None, max_length=48)
+    action_source: str | None = Field(default=None, max_length=80)
+    trace_id: str | None = Field(default=None, max_length=96)
     # 局部 inpaint 用 mask（attachment 级别，不进 image_params）。
     # RGBA PNG，alpha=0 处即要重画区域。复用 POST /images/upload 上传后把返回
     # 的 image_id 填到这里；worker 侧用 PIL 自适应 resize 到第一张参考图尺寸。
@@ -206,6 +239,29 @@ class PostMessageIn(BaseModel):
     image_params: ImageParamsIn = Field(default_factory=ImageParamsIn)
     chat_params: ChatParamsIn = Field(default_factory=ChatParamsIn)
     advanced: AdvancedIn = Field(default_factory=AdvancedIn)
+
+    @model_validator(mode="after")
+    def normalize_attachment_contract(self) -> "PostMessageIn":
+        structured_ids = [att.image_id for att in self.attachments]
+        input_ids = [value for value in self.input_images if value]
+        legacy_ids = list(self.attachment_image_ids or [])
+
+        def same_ids(left: list[str], right: list[str]) -> bool:
+            return left == right
+
+        if structured_ids and legacy_ids and not same_ids(structured_ids, legacy_ids):
+            raise ValueError("attachments image_id values must match attachment_image_ids")
+        if input_ids and legacy_ids and not same_ids(input_ids, legacy_ids):
+            raise ValueError("input_images must match attachment_image_ids")
+        if input_ids and structured_ids and not same_ids(input_ids, structured_ids):
+            raise ValueError("input_images must match attachments image_id values")
+
+        canonical_ids = structured_ids or legacy_ids or input_ids
+        if canonical_ids:
+            self.attachment_image_ids = list(canonical_ids)
+            if not self.input_images or not same_ids(input_ids, canonical_ids):
+                self.input_images = list(canonical_ids)
+        return self
 
 
 class MessageOut(BaseOut):
@@ -258,6 +314,18 @@ class GenerationOut(BaseOut):
     requested_params: dict[str, Any] | None = None
     effective_params: dict[str, Any] | None = None
     provider_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    source: str | None = None
+    action_source: str | None = None
+    trace_id: str | None = None
+    attachment_roles: list[dict[str, Any]] = Field(default_factory=list)
+    source_image_id: str | None = None
+    queue_lane: str | None = None
+    workflow_type: str | None = None
+    workflow_step_key: str | None = None
+    pixel_count: int | None = None
+    size_bucket: str | None = None
+    cost_class: str | None = None
+    queue_wait_ms: int | None = None
 
 
 class CompletionOut(BaseOut):
@@ -277,6 +345,23 @@ class CompletionOut(BaseOut):
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    source: str | None = None
+    action_source: str | None = None
+    trace_id: str | None = None
+    queue_lane: str | None = None
+    workflow_type: str | None = None
+    workflow_step_key: str | None = None
+    pixel_count: int | None = None
+    size_bucket: str | None = None
+    cost_class: str | None = None
+    queue_wait_ms: int | None = None
+
+
+class TaskRecommendedActionOut(BaseModel):
+    id: str
+    label: str
+    kind: Literal["retry", "link", "adjust", "wait", "details"] = "details"
+    href: str | None = None
 
 
 class TaskItemOut(BaseModel):
@@ -287,7 +372,42 @@ class TaskItemOut(BaseModel):
     message_id: str
     status: str
     progress_stage: str
+    stage: str | None = None
     started_at: datetime | None
+    date: datetime | None = None
+    cursor: str | None = None
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
+    source: str | None = None
+    action_source: str | None = None
+    trace_id: str | None = None
+    conversation_id: str | None = None
+    project_id: str | None = None
+    workflow_type: str | None = None
+    workflow_step_key: str | None = None
+    queue_lane: str | None = None
+    pixel_count: int | None = None
+    size_bucket: str | None = None
+    cost_class: str | None = None
+    queue_wait_ms: int | None = None
+    queue_position: int | None = None
+    substage: str | None = None
+    retrying: bool | None = None
+    waiting_provider: bool | None = None
+    cancelled: bool | None = None
+    title: str | None = None
+    prompt: str | None = None
+    source_image_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    retryable: bool | None = None
+    recommended_actions: list[TaskRecommendedActionOut] = Field(default_factory=list)
+    thumb_url: str | None = None
+
+
+class TaskListOut(BaseModel):
+    items: list[TaskItemOut]
+    next_cursor: str | None = None
 
 
 class ActiveTasksOut(BaseModel):
@@ -1905,6 +2025,8 @@ __all__ = [
     "SystemPromptListOut",
     "ConversationOut",
     "ConversationPatchIn",
+    "AttachmentRole",
+    "MessageAttachmentIn",
     "PostMessageIn",
     "PostMessageOut",
     "MessageOut",
@@ -1914,6 +2036,7 @@ __all__ = [
     "GenerationOut",
     "CompletionOut",
     "TaskItemOut",
+    "ActiveTasksOut",
     "ImageOut",
     "TaskQueueItem",
     "SSEEvent",

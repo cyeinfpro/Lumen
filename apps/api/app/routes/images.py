@@ -19,7 +19,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Iterator
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage, UnidentifiedImageError
 from sqlalchemy import or_, select
@@ -31,13 +40,20 @@ from lumen_core.image_signing import (
     ALLOWED_VARIANTS as SIGNED_ALLOWED_VARIANTS,
     verify_image_sig,
 )
+from lumen_core.image_reference import (
+    DEFAULT_REFERENCE_MAX_SIDE,
+    ImageReferenceError,
+    MaskPreflightError,
+    analyze_mask_image,
+    make_reference_variant,
+    validate_mask_preflight,
+)
 from lumen_core.models import Image, ImageVariant, Share
 from lumen_core.model_image_metadata import (
     build_model_image_metadata,
     model_image_filename,
     parse_model_image_filename,
     read_model_image_metadata,
-    save_image_with_model_metadata,
 )
 from lumen_core.schemas import ImageOut
 
@@ -119,7 +135,18 @@ def _open_image_bytes(data: bytes, *, verify: bool = False) -> PILImage.Image:
 def _prepare_upload_image(
     data: bytes,
     filename: str | None,
-) -> tuple[bytes, str, int, int, dict[str, Any]]:
+    *,
+    mask_requested: bool = False,
+    reference_size: tuple[int, int] | None = None,
+) -> tuple[
+    bytes,
+    str,
+    int,
+    int,
+    dict[str, Any],
+    bytes,
+    dict[str, Any],
+]:
     _open_image_bytes(data, verify=True)
 
     with _open_image_bytes(data) as im:
@@ -130,46 +157,40 @@ def _prepare_upload_image(
         uploaded_model_metadata = _model_metadata_json_from_upload(im, filename)
         width, height = im.size
         _enforce_pixel_limit((width, height))
-        output = data
-        if max(width, height) > MAX_LONG_SIDE:
-            ratio = MAX_LONG_SIDE / max(width, height)
-            new_w, new_h = int(width * ratio), int(height * ratio)
-            resized = im.resize((new_w, new_h), PILImage.LANCZOS)
-            try:
-                width, height = new_w, new_h
-                out = io.BytesIO()
-                fmt = (
-                    "WEBP"
-                    if mime == "image/webp"
-                    else ("PNG" if mime == "image/png" else "JPEG")
-                )
-                save_kw: dict[str, Any] = {}
-                if fmt == "JPEG":
-                    save_kw["quality"] = 92
-                elif fmt == "WEBP":
-                    save_kw["quality"] = 90
-                payload = uploaded_model_metadata.get("model_library")
-                if fmt == "PNG" and isinstance(payload, dict):
-                    save_image_with_model_metadata(
-                        resized,
-                        out,
-                        fmt=fmt,
-                        metadata=payload,
-                        **save_kw,
-                    )
-                else:
-                    if isinstance(payload, dict):
-                        logger.warning(
-                            "model metadata cannot be embedded after %s resize; "
-                            "preserving metadata_jsonb only filename=%s",
-                            fmt,
-                            filename,
-                        )
-                    resized.save(out, format=fmt, **save_kw)
-                output = out.getvalue()
-            finally:
-                resized.close()
-        return output, mime, width, height, uploaded_model_metadata
+    try:
+        normalized_ref = make_reference_variant(
+            data,
+            max_side=DEFAULT_REFERENCE_MAX_SIDE,
+        )
+        mask_preflight = analyze_mask_image(data, reference_size=reference_size)
+        if mask_requested:
+            validate_mask_preflight(mask_preflight)
+    except MaskPreflightError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+    except ImageReferenceError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+
+    metadata = {
+        **uploaded_model_metadata,
+        "mask_preflight": mask_preflight.to_metadata(),
+    }
+    normalized_ref_meta = {
+        "mime": normalized_ref.mime,
+        "width": normalized_ref.width,
+        "height": normalized_ref.height,
+        "sha256": normalized_ref.sha256,
+        "bytes": normalized_ref.bytes,
+        "max_side": normalized_ref.max_side,
+    }
+    return (
+        data,
+        mime,
+        width,
+        height,
+        metadata,
+        normalized_ref.data,
+        normalized_ref_meta,
+    )
 
 
 def _model_metadata_json_from_upload(
@@ -199,8 +220,21 @@ def _model_metadata_json_from_upload(
     }
 
 
+def _upload_requests_mask_preflight(purpose: str | None, filename: str | None) -> bool:
+    purpose_norm = (purpose or "").strip().lower()
+    if purpose_norm in {"mask", "inpaint_mask", "inpaint-mask"}:
+        return True
+    name = Path(filename or "").name.lower()
+    stem = Path(name).stem
+    return stem == "mask" or stem.startswith("mask_")
+
+
 def _key_for_upload(user_id: str, image_id: str, ext: str) -> str:
     return f"u/{user_id}/uploads/{image_id}.{ext}"
+
+
+def _key_for_normalized_ref(user_id: str, image_id: str) -> str:
+    return f"u/{user_id}/uploads/{image_id}.ref.webp"
 
 
 def _fs_path(storage_key: str) -> Path:
@@ -445,6 +479,14 @@ def _write_new_file_exclusive(path: Path, data: bytes) -> None:
         raise
 
 
+def _unlink_file_if_exists(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+        _fsync_directory(path.parent)
+    except OSError:
+        logger.warning("failed to remove orphan upload file path=%s", path, exc_info=True)
+
+
 def _open_regular_file_no_symlink(path: Path) -> tuple[BinaryIO, int]:
     flags = os.O_RDONLY
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -583,6 +625,9 @@ async def upload_image(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     file: UploadFile = File(...),
+    purpose: str | None = Form(default=None),
+    reference_width: int | None = Form(default=None),
+    reference_height: int | None = Form(default=None),
 ) -> ImageOut:
     await _check_upload_rate_limit(user.id)
 
@@ -600,10 +645,19 @@ async def upload_image(
         raise _http("empty_file", "empty file", 400)
 
     data = bytes(buf)
-    data, mime, width, height, uploaded_model_metadata = await asyncio.to_thread(
-        _prepare_upload_image,
-        data,
-        file.filename,
+    reference_size = (
+        (reference_width, reference_height)
+        if reference_width is not None and reference_height is not None
+        else None
+    )
+    data, mime, width, height, upload_metadata, normalized_ref, normalized_ref_meta = (
+        await asyncio.to_thread(
+            _prepare_upload_image,
+            data,
+            file.filename,
+            mask_requested=_upload_requests_mask_preflight(purpose, file.filename),
+            reference_size=reference_size,
+        )
     )
     buf = bytearray(data)
 
@@ -630,9 +684,9 @@ async def upload_image(
     await db.flush()
 
     ext = EXT_BY_MIME[mime]
-    model_payload = uploaded_model_metadata.get("model_library")
+    model_payload = upload_metadata.get("model_library")
     if isinstance(model_payload, dict):
-        uploaded_model_metadata["suggested_filename"] = model_image_filename(
+        upload_metadata["suggested_filename"] = model_image_filename(
             image_id=img.id,
             ext=ext,
             age_segment=model_payload.get("age_segment"),
@@ -640,18 +694,35 @@ async def upload_image(
             appearance_direction=model_payload.get("appearance_direction"),
             style_tags=model_payload.get("style_tags") or [],
         )
-        img.metadata_jsonb = uploaded_model_metadata
     key = _key_for_upload(user.id, img.id, ext)
+    normalized_key = _key_for_normalized_ref(user.id, img.id)
+    upload_metadata["normalized_ref"] = {
+        **normalized_ref_meta,
+        "storage_key": normalized_key,
+    }
+    img.metadata_jsonb = upload_metadata
     img.storage_key = key
 
     # Write to disk.
     path = _fs_path(key)
+    normalized_path = _fs_path(normalized_key)
+    written_paths: list[Path] = []
     try:
         await asyncio.to_thread(_write_new_file_atomic, path, bytes(buf))
+        written_paths.append(path)
+        await asyncio.to_thread(_write_new_file_atomic, normalized_path, normalized_ref)
+        written_paths.append(normalized_path)
+        await db.commit()
     except FileExistsError as exc:
+        await db.rollback()
+        for written_path in reversed(written_paths):
+            await asyncio.to_thread(_unlink_file_if_exists, written_path)
         raise _http("storage_conflict", "image storage key already exists", 409) from exc
-
-    await db.commit()
+    except Exception:
+        await db.rollback()
+        for written_path in reversed(written_paths):
+            await asyncio.to_thread(_unlink_file_if_exists, written_path)
+        raise
     await db.refresh(img)
 
     return await _image_out(db, img)

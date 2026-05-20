@@ -54,10 +54,25 @@ export interface LightboxItem {
   /** 上游返回的改写提示词；兼容未来后端直接透传。 */
   revised_prompt?: string | null;
   /** 用户请求参数与实际生效参数；也可能藏在 metadata/upstream_request 里。 */
+  params?: LightboxParamBag | null;
+  image_params?: LightboxParamBag | null;
   requested_params?: LightboxParamBag | null;
   request_params?: LightboxParamBag | null;
   effective_params?: LightboxParamBag | null;
   actual_params?: LightboxParamBag | null;
+  diagnostics?: LightboxParamBag | null;
+  /** 基础版本 / 来源链路字段；旧数据缺失时静默隐藏。 */
+  source?: string | null;
+  source_type?: string | null;
+  source_id?: string | null;
+  parent_image_id?: string | null;
+  parent_generation_id?: string | null;
+  from_generation_id?: string | null;
+  generation_id?: string | null;
+  message_id?: string | null;
+  conversation_id?: string | null;
+  action_source?: string | null;
+  generation_action?: string | null;
   /** 上游运行痕迹；字段都是可选的，旧数据不返回时静默隐藏。 */
   provider?: string | null;
   upstream_provider?: string | null;

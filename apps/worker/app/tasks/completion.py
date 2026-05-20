@@ -17,8 +17,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import io
+import json
 import logging
+import time
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -28,6 +32,7 @@ from PIL import Image as PILImage
 from sqlalchemy import and_, desc, or_, select, text as sa_text, update
 
 from .. import billing as worker_billing
+from lumen_core import billing as billing_core
 from lumen_core.constants import (
     DEFAULT_CHAT_INSTRUCTIONS,
     DEFAULT_CHAT_MODEL,
@@ -62,6 +67,14 @@ from lumen_core.context_window import (
     get_input_budget,
     is_summary_usable,
 )
+from lumen_core.chat_tools import (
+    TOOL_TERMINAL_STATUSES,
+    ToolStatus,
+    normalize_tool_idle_timeout_seconds,
+    normalize_tool_status as normalize_upstream_tool_status,
+    tool_status_idle_timed_out,
+    tool_status_idle_timeout_remaining_seconds,
+)
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -71,6 +84,7 @@ from lumen_core.models import (
     new_uuid7,
 )
 from lumen_core.pricing import parse_usage
+from lumen_core.queue_metadata import completion_queue_metadata, merge_queue_metadata
 
 from .. import runtime_settings
 from ..config import settings
@@ -83,6 +97,7 @@ from ..byok_runtime import (
     resolve_user_credential_runtime,
 )
 from ..observability import (
+    completion_cancel_check_errors_total,
     get_tracer,
     safe_outcome,
     task_duration_seconds,
@@ -140,12 +155,17 @@ _CODE_INTERPRETER_TOOL_TYPE = "code_interpreter"
 _IMAGE_GENERATION_TOOL_TYPE = "image_generation"
 _CHAT_TOOL_VECTOR_STORE_SETTING = "chat.file_search_vector_store_ids"
 _CHAT_IMAGE_TOOL_SIZE = "1024x1024"
-_TOOL_RUNNING_STATUSES = frozenset({"queued", "running", "in_progress", "searching"})
-_TOOL_SUCCEEDED_STATUSES = frozenset({"completed", "complete", "succeeded", "done"})
-_TOOL_FAILED_STATUSES = frozenset({"failed", "incomplete", "error", "errored"})
 # GEN-P1-4: 用户点取消后 API 在 Redis 设 task:{id}:cancel=1。worker 在 SSE 循环
 # 里每隔若干次 delta 检查一次（控制 Redis 调用频率），命中后立即终止流并标 cancelled。
-_CANCEL_CHECK_EVERY_DELTAS = 16
+_CANCEL_CHECK_EVERY_DELTAS = 4
+_CANCEL_POLL_INTERVAL_S = 0.1
+_MAX_TOOL_INVOCATIONS_DEFAULT = 8
+_TOOL_IDLE_TIMEOUT_S_DEFAULT = 30.0
+_CHAT_TOOL_IMAGE_BUDGET_SETTING = "chat.tool_image_generation_micro"
+_TOOL_LIMIT_FALLBACK_TEXT = (
+    "Tool invocation limit reached. Continue with the information already "
+    "available and do not call any tools."
+)
 
 
 @dataclass(frozen=True)
@@ -186,6 +206,14 @@ class PackedContext:
 
 class _TaskCancelled(RuntimeError):
     """GEN-P1-4: 用户取消信号——上层捕获走终态分支，不当作错误重试。"""
+
+
+class _ToolIdleTimeout(RuntimeError):
+    """No upstream events arrived while a tool call was active."""
+
+
+class _CompletionToolInsufficientBalance(UpstreamError):
+    """Wallet balance fell below the image tool budget before publishing output."""
 
 
 class _LeaseLost(UpstreamCancelled):
@@ -231,6 +259,22 @@ class _CompletionToolTracker:
     def __init__(self) -> None:
         self._calls: dict[str, _ToolCallState] = {}
         self._last_published: dict[str, tuple[Any, ...]] = {}
+        self.last_update_ts: float | None = None
+
+    def _publish_if_changed(self, state: _ToolCallState) -> dict[str, Any] | None:
+        signature = (
+            state.type,
+            state.status,
+            state.name,
+            state.label,
+            state.title,
+            state.error,
+        )
+        if self._last_published.get(state.id) == signature:
+            return None
+        self._last_published[state.id] = signature
+        self.last_update_ts = time.monotonic()
+        return state.payload()
 
     def update(self, event: dict[str, Any]) -> dict[str, Any] | None:
         update = _extract_tool_call_update(event)
@@ -240,18 +284,7 @@ class _CompletionToolTracker:
         previous = self._calls.get(call_id)
         next_state = _merge_tool_call_state(previous, update)
         self._calls[call_id] = next_state
-        signature = (
-            next_state.type,
-            next_state.status,
-            next_state.name,
-            next_state.label,
-            next_state.title,
-            next_state.error,
-        )
-        if self._last_published.get(call_id) == signature:
-            return None
-        self._last_published[call_id] = signature
-        return next_state.payload()
+        return self._publish_if_changed(next_state)
 
     def update_from_response(
         self, response: dict[str, Any] | None
@@ -270,6 +303,55 @@ class _CompletionToolTracker:
             if payload is not None:
                 published.append(payload)
         return published
+
+    def finalize_active(
+        self,
+        status: str,
+        *,
+        error: str | None = None,
+    ) -> list[dict[str, Any]]:
+        published: list[dict[str, Any]] = []
+        for call_id, state in list(self._calls.items()):
+            if state.status in TOOL_TERMINAL_STATUSES:
+                continue
+            next_state = replace(
+                state,
+                status=status,
+                error=error or state.error,
+            )
+            self._calls[call_id] = next_state
+            payload = self._publish_if_changed(next_state)
+            if payload is not None:
+                published.append(payload)
+        return published
+
+    @property
+    def invocation_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def has_active(self) -> bool:
+        return any(
+            state.status not in TOOL_TERMINAL_STATUSES
+            for state in self._calls.values()
+        )
+
+    def idle_timeout_remaining(self, timeout_s: float) -> float | None:
+        if not self.has_active:
+            return None
+        now = time.monotonic()
+        if tool_status_idle_timed_out(
+            self.last_update_ts,
+            now=now,
+            timeout_s=timeout_s,
+        ):
+            return 0.0
+        remaining = tool_status_idle_timeout_remaining_seconds(
+            self.last_update_ts,
+            now=now,
+            timeout_s=timeout_s,
+        )
+        return None if remaining is None else max(0.001, remaining)
 
     def content(self) -> list[dict[str, Any]]:
         return [state.payload() for state in self._calls.values()]
@@ -344,8 +426,10 @@ async def _chat_tools_from_content(
                 }
             )
         else:
-            logger.warning(
-                "file_search requested without vector_store_ids; skipping tool"
+            raise UpstreamError(
+                "file_search requested but no vector_store_ids are configured",
+                error_code="FILE_SEARCH_NOT_CONFIGURED",
+                status_code=400,
             )
 
     if content.get("code_interpreter") is True:
@@ -385,6 +469,45 @@ def _decode_upstream_image_b64(value: str) -> bytes:
         raw = raw.split(",", 1)[1]
     raw = "".join(raw.split())
     return base64.b64decode(raw, validate=True)
+
+
+def _tool_image_dedupe_key(event: dict[str, Any], b64_image: str) -> str:
+    item = event.get("item")
+    if isinstance(item, dict):
+        raw_id = item.get("id")
+        if isinstance(raw_id, str) and raw_id:
+            return f"id:{raw_id}"
+    raw = b64_image.strip()
+    if raw[:5].lower() == "data:" and "," in raw:
+        raw = raw.split(",", 1)[1]
+    if len(raw) <= 8192:
+        normalized_b64 = "".join(raw.split())
+        digest = hashlib.sha1(
+            normalized_b64.encode("ascii", errors="ignore")
+        ).hexdigest()
+        return f"b64sha1:{digest}"
+    sample = f"{len(raw)}:{raw[:512]}:{raw[-512:]}"
+    digest = hashlib.sha1(sample.encode("ascii", errors="ignore")).hexdigest()
+    return f"b64sig:{len(raw)}:{digest}"
+
+
+def _fallback_completion_usage_tokens(
+    input_list: list[dict[str, Any]],
+    output_text: str,
+    *,
+    tokens_in: int,
+    tokens_out: int,
+) -> tuple[int, int]:
+    next_in = tokens_in
+    next_out = tokens_out
+    if next_out <= 0 and output_text:
+        next_out = max(1, count_tokens(output_text))
+    if next_in <= 0 and input_list:
+        try:
+            next_in = max(1, count_tokens(json.dumps(input_list, ensure_ascii=False)))
+        except Exception:  # noqa: BLE001
+            next_in = 1
+    return next_in, next_out
 
 
 def _tool_display_label(tool_type: str, name: str | None = None) -> str:
@@ -428,43 +551,26 @@ def _normalize_tool_type(raw: Any, *, event_type: str = "") -> str | None:
 
 
 def _normalize_tool_status(raw: Any, *, event_type: str = "") -> str | None:
-    value = str(raw).strip().lower() if raw is not None else ""
-    if value in _TOOL_FAILED_STATUSES:
-        return "failed"
-    if value in _TOOL_SUCCEEDED_STATUSES:
-        return "succeeded"
-    if value == "queued":
-        return "queued"
-    if value in _TOOL_RUNNING_STATUSES:
-        return "running"
-    if event_type == "response.output_item.added":
-        return "running"
-    if event_type == "response.output_item.done":
-        return "succeeded"
-    if event_type.endswith((".failed", ".incomplete", ".error")):
-        return "failed"
-    if event_type.endswith((".completed", ".complete", ".done")):
-        return "succeeded"
-    if event_type.endswith(
-        (
-            ".created",
-            ".queued",
-            ".in_progress",
-            ".running",
-            ".searching",
-            ".interpreting",
-        )
-    ):
-        return "running"
-    return None
+    normalized = normalize_upstream_tool_status(raw, event_type=event_type)
+    if normalized is ToolStatus.UNKNOWN:
+        if raw is not None and str(raw).strip():
+            logger.warning(
+                "unknown upstream tool status raw=%r event_type=%s", raw, event_type
+            )
+        else:
+            normalized = ToolStatus.RUNNING
+    return normalized.value
 
 
 def _tool_status_rank(status: str | None) -> int:
     return {
+        "unknown": 0,
         "queued": 0,
         "running": 1,
         "succeeded": 2,
         "failed": 3,
+        "cancelled": 3,
+        "timed_out": 3,
     }.get(status or "", -1)
 
 
@@ -536,9 +642,9 @@ def _extract_tool_call_update(event: dict[str, Any]) -> dict[str, Any] | None:
         or event.get("error")
         or event.get("incomplete_details")
     )
-    if error and status is None:
-        status = "failed"
-    status = status or "running"
+    if error and status in (None, ToolStatus.UNKNOWN.value):
+        status = ToolStatus.FAILED.value
+    status = status or ToolStatus.RUNNING.value
 
     return {
         "id": call_id,
@@ -556,10 +662,12 @@ def _merge_tool_call_state(
     update: dict[str, Any],
 ) -> _ToolCallState:
     next_status = update["status"]
-    if previous is not None and _tool_status_rank(previous.status) > _tool_status_rank(
-        next_status
-    ):
-        next_status = previous.status
+    if previous is not None:
+        if (
+            previous.status in TOOL_TERMINAL_STATUSES
+            and next_status in TOOL_TERMINAL_STATUSES
+        ) or _tool_status_rank(previous.status) > _tool_status_rank(next_status):
+            next_status = previous.status
     next_type = update["type"] or (previous.type if previous is not None else "tool")
     next_name = update.get("name") or (previous.name if previous is not None else None)
     next_label = update.get("label") or (
@@ -605,6 +713,66 @@ async def _publish_completion_tool_progress(
             "tool_calls": tool_calls,
         },
     )
+
+
+async def _publish_completion_tool_updates(
+    *,
+    redis: Any,
+    user_id: str,
+    channel: str,
+    task_id: str,
+    message_id: str,
+    attempt: int,
+    attempt_epoch: int,
+    tool_tracker: _CompletionToolTracker,
+    updates: list[dict[str, Any]],
+) -> None:
+    tool_calls = tool_tracker.content()
+    if len(updates) > 1:
+        await publish_event(
+            redis,
+            user_id,
+            channel,
+            EV_COMP_PROGRESS,
+            {
+                "completion_id": task_id,
+                "message_id": message_id,
+                "attempt": attempt,
+                "attempt_epoch": attempt_epoch,
+                "stage": "tool_call",
+                "tool_call": updates[-1],
+                "tool_call_updates": updates,
+                "tool_calls": tool_calls,
+            },
+        )
+        return
+    for tool_call in updates:
+        await _publish_completion_tool_progress(
+            redis=redis,
+            user_id=user_id,
+            channel=channel,
+            task_id=task_id,
+            message_id=message_id,
+            attempt=attempt,
+            attempt_epoch=attempt_epoch,
+            tool_call=tool_call,
+            tool_calls=tool_calls,
+        )
+
+
+def _tool_limited_completion_body(body: dict[str, Any]) -> dict[str, Any]:
+    fallback = dict(body)
+    fallback["tool_choice"] = "none"
+    fallback["parallel_tool_calls"] = False
+    input_items = list(body.get("input") or [])
+    input_items.append(
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": _TOOL_LIMIT_FALLBACK_TEXT}],
+        }
+    )
+    fallback["input"] = input_items
+    return fallback
 
 
 def _markdown_link(label: str, url: str) -> str:
@@ -997,6 +1165,49 @@ async def _store_completion_tool_image(
         }
 
 
+async def _ensure_completion_tool_image_wallet_budget(
+    *,
+    user_id: str,
+    task_id: str,
+) -> None:
+    budget_micro = await runtime_settings.resolve_int(
+        _CHAT_TOOL_IMAGE_BUDGET_SETTING,
+        0,
+    )
+    if budget_micro <= 0:
+        return
+    async with SessionLocal() as session:
+        if await worker_billing.account_mode(session, user_id) != "wallet":
+            return
+        if not await worker_billing.billing_enabled():
+            return
+        wallet = await billing_core.get_wallet(session, user_id, lock=False, create=False)
+        balance_micro = int(getattr(wallet, "balance_micro", 0) or 0) if wallet else 0
+        held_micro = await worker_billing.held_amount_for_ref(
+            session,
+            user_id,
+            "completion",
+            task_id,
+        )
+        available_micro = balance_micro + int(held_micro or 0)
+        if (
+            available_micro >= budget_micro
+            or await worker_billing.allow_negative_balance()
+        ):
+            return
+        raise _CompletionToolInsufficientBalance(
+            "insufficient wallet balance for image_generation tool",
+            error_code="INSUFFICIENT_BALANCE",
+            status_code=402,
+            payload={
+                "required_micro": int(budget_micro),
+                "balance_micro": balance_micro,
+                "held_micro": int(held_micro or 0),
+                "completion_id": task_id,
+            },
+        )
+
+
 async def _store_and_publish_completion_tool_image(
     *,
     redis: Any,
@@ -1009,6 +1220,10 @@ async def _store_and_publish_completion_tool_image(
     b64_image: str,
     revised_prompt: str | None,
 ) -> dict[str, Any] | None:
+    await _ensure_completion_tool_image_wallet_budget(
+        user_id=user_id,
+        task_id=task_id,
+    )
     try:
         raw_image = _decode_upstream_image_b64(b64_image)
     except binascii.Error as exc:
@@ -1045,14 +1260,153 @@ async def _store_and_publish_completion_tool_image(
 
 
 async def _is_cancelled(redis: Any, task_id: str) -> bool:
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            v = await redis.get(f"task:{task_id}:cancel")
+            return bool(v)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(0.05 * (attempt + 1))
+    completion_cancel_check_errors_total.inc()
+    logger.warning(
+        "completion cancel check failed closed task=%s err=%s", task_id, last_exc
+    )
+    return True
+
+
+async def _raise_if_completion_cancelled(
+    redis: Any,
+    task_id: str,
+    reason: str,
+) -> None:
+    if await _is_cancelled(redis, task_id):
+        raise _TaskCancelled(reason)
+
+
+def _raise_for_terminal_response_event(
+    ev_type: str,
+    resp: dict[str, Any],
+    event_error: Any = None,
+) -> None:
+    _ = event_error
+    terminal_status = (
+        ToolStatus.CANCELLED.value
+        if ev_type in {"response.cancelled", "response.canceled"}
+        else ToolStatus.FAILED.value
+    )
+    error_code = (
+        EC.CANCELLED.value
+        if terminal_status == ToolStatus.CANCELLED.value
+        else EC.BAD_RESPONSE.value
+    )
+    if terminal_status == ToolStatus.CANCELLED.value:
+        raise _TaskCancelled("upstream response cancelled")
+    raise UpstreamError(
+        f"upstream {ev_type}",
+        error_code=error_code,
+        status_code=200,
+        payload=resp or None,
+    )
+
+
+async def _watch_completion_cancel(
+    redis: Any,
+    task_id: str,
+    *,
+    cancel_requested: asyncio.Event,
+    stop_requested: asyncio.Event,
+    poll_interval_s: float = _CANCEL_POLL_INTERVAL_S,
+) -> None:
+    while not stop_requested.is_set() and not cancel_requested.is_set():
+        if await _is_cancelled(redis, task_id):
+            cancel_requested.set()
+            return
+        try:
+            await asyncio.wait_for(
+                stop_requested.wait(), timeout=poll_interval_s
+            )
+        except TimeoutError:
+            continue
+
+
+async def _next_completion_stream_event(
+    stream: Any,
+    *,
+    cancel_requested: asyncio.Event,
+    lease_lost: asyncio.Event,
+    idle_timeout_s: float | None = None,
+) -> dict[str, Any]:
+    next_task = asyncio.create_task(anext(stream))
+    cancel_task = asyncio.create_task(cancel_requested.wait())
+    lease_task = asyncio.create_task(lease_lost.wait())
+    timeout_task = (
+        asyncio.create_task(asyncio.sleep(idle_timeout_s))
+        if idle_timeout_s is not None and idle_timeout_s > 0
+        else None
+    )
+    wait_for_tasks = {next_task, cancel_task, lease_task}
+    if timeout_task is not None:
+        wait_for_tasks.add(timeout_task)
     try:
-        v = await redis.get(f"task:{task_id}:cancel")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "completion cancel check failed closed task=%s err=%s", task_id, exc
+        done, _pending = await asyncio.wait(
+            wait_for_tasks, return_when=asyncio.FIRST_COMPLETED
         )
-        return True
-    return bool(v)
+        if next_task in done:
+            return await next_task
+
+        next_task.cancel()
+        with suppress(BaseException):
+            await next_task
+        with suppress(Exception):
+            await stream.aclose()
+
+        if cancel_requested.is_set():
+            raise _TaskCancelled("cancelled during stream")
+        if lease_lost.is_set():
+            raise _LeaseLost("lease lost during stream")
+        if timeout_task is not None and timeout_task in done:
+            raise _ToolIdleTimeout("tool call idle timeout")
+        raise UpstreamError(
+            "completion stream aborted",
+            error_code=EC.TEXT_STREAM_INTERRUPTED.value,
+            status_code=None,
+        )
+    finally:
+        for task in (cancel_task, lease_task, timeout_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(BaseException):
+                    await task
+
+
+async def _iter_completion_stream_with_abort(
+    stream: Any,
+    *,
+    cancel_requested: asyncio.Event,
+    lease_lost: asyncio.Event,
+    tool_tracker: _CompletionToolTracker,
+    tool_idle_timeout_s: float,
+) -> Any:
+    try:
+        while True:
+            try:
+                yield await _next_completion_stream_event(
+                    stream,
+                    cancel_requested=cancel_requested,
+                    lease_lost=lease_lost,
+                    idle_timeout_s=tool_tracker.idle_timeout_remaining(
+                        tool_idle_timeout_s
+                    ),
+                )
+            except StopAsyncIteration:
+                break
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            with suppress(Exception):
+                await close()
 
 
 class _CompletionEpochSuperseded(RuntimeError):
@@ -2520,6 +2874,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     attempt_epoch = 0
     user_api_credential_id: str | None = None
     runtime_override: Any | None = None
+    queue_metadata_payload: dict[str, Any] = {}
 
     # --- 1. 读 completion 行 ---
     async with SessionLocal() as session:
@@ -2594,8 +2949,21 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
         comp.status = CompletionStatus.STREAMING.value
         comp.progress_stage = CompletionStage.STREAMING
-        comp.started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(timezone.utc)
+        comp.started_at = started_at
         comp.attempt = attempt
+        upstream_request = dict(comp.upstream_request or {})
+        queue_metadata_payload = completion_queue_metadata(
+            upstream_request=upstream_request,
+            created_at=comp.created_at,
+            started_at=started_at,
+            finished_at=comp.finished_at,
+            now=started_at,
+        )
+        comp.upstream_request = merge_queue_metadata(
+            upstream_request,
+            queue_metadata_payload,
+        )
         # 流中断恢复：清空已写 text（§6.9 策略 1）
         if was_restarted:
             comp.text = ""
@@ -2624,6 +2992,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 "message_id": message_id,
                 "attempt": attempt,
                 "attempt_epoch": attempt_epoch,
+                **queue_metadata_payload,
             },
         )
     else:
@@ -2637,6 +3006,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 "message_id": message_id,
                 "attempt": attempt,
                 "attempt_epoch": attempt_epoch,
+                **queue_metadata_payload,
             },
         )
 
@@ -2664,6 +3034,9 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         _stream_span.set_attribute("lumen.task_id", task_id)
     except Exception:  # noqa: BLE001
         _stream_span_cm = None
+
+    cancel_stop_requested: asyncio.Event | None = None
+    cancel_watcher: asyncio.Task[None] | None = None
 
     try:
         if user_api_credential_id:
@@ -2786,6 +3159,29 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             # Fast 模式 = OpenAI Priority 处理通道（Codex fast 语义同源）。
             # 上游若不支持会原样忽略；若账号/项目未开 Priority，服务端会降级到 default 但仍处理。
             body["service_tier"] = "priority"
+        max_tool_invocations = max(
+            1,
+            await runtime_settings.resolve_int(
+                "chat.max_tool_invocations", _MAX_TOOL_INVOCATIONS_DEFAULT
+            ),
+        )
+        cancel_poll_interval_s = max(
+            0.05,
+            (
+                await runtime_settings.resolve_int(
+                    "chat.cancel_poll_interval_ms",
+                    int(_CANCEL_POLL_INTERVAL_S * 1000),
+                )
+            )
+            / 1000,
+        )
+        tool_idle_timeout_s = normalize_tool_idle_timeout_seconds(
+            await runtime_settings.resolve_int(
+                "chat.tool_status_idle_timeout_s",
+                int(_TOOL_IDLE_TIMEOUT_S_DEFAULT),
+            ),
+            default=_TOOL_IDLE_TIMEOUT_S_DEFAULT,
+        )
 
         # --- 5. 消费 SSE ---
         delta_counter = 0
@@ -2795,7 +3191,25 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         if lease_lost.is_set():
             raise _LeaseLost("lease lost before stream start")
         completed_response: dict[str, Any] | None = None
-        async for ev in stream_completion(body, runtime_override=runtime_override):
+        cancel_requested = asyncio.Event()
+        cancel_stop_requested = asyncio.Event()
+        cancel_watcher = asyncio.create_task(
+            _watch_completion_cancel(
+                redis,
+                task_id,
+                cancel_requested=cancel_requested,
+                stop_requested=cancel_stop_requested,
+                poll_interval_s=cancel_poll_interval_s,
+            )
+        )
+        tool_loop_truncated = False
+        async for ev in _iter_completion_stream_with_abort(
+            stream_completion(body, runtime_override=runtime_override),
+            cancel_requested=cancel_requested,
+            lease_lost=lease_lost,
+            tool_tracker=tool_tracker,
+            tool_idle_timeout_s=tool_idle_timeout_s,
+        ):
             if lease_lost.is_set():
                 raise _LeaseLost("lease lost during stream")
             ev_type = ev.get("type", "")
@@ -2812,6 +3226,37 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     tool_call=tool_call,
                     tool_calls=tool_tracker.content(),
                 )
+                if tool_tracker.invocation_count > max_tool_invocations:
+                    await _publish_completion_tool_updates(
+                        redis=redis,
+                        user_id=user_id,
+                        channel=channel,
+                        task_id=task_id,
+                        message_id=message_id,
+                        attempt=attempt,
+                        attempt_epoch=attempt_epoch,
+                        tool_tracker=tool_tracker,
+                        updates=tool_tracker.finalize_active(
+                            ToolStatus.FAILED.value,
+                            error="tool invocation limit exceeded",
+                        ),
+                    )
+                    await publish_event(
+                        redis,
+                        user_id,
+                        channel,
+                        EV_COMP_PROGRESS,
+                        {
+                            "completion_id": task_id,
+                            "message_id": message_id,
+                            "attempt": attempt,
+                            "attempt_epoch": attempt_epoch,
+                            "stage": "tool_loop_truncated",
+                            "max_tool_invocations": max_tool_invocations,
+                        },
+                    )
+                    tool_loop_truncated = True
+                    break
             thinking_delta = _extract_reasoning_delta(ev)
             if thinking_delta:
                 if not accumulated_thinking.endswith(thinking_delta):
@@ -2833,12 +3278,8 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
             image_b64 = _extract_response_image_b64(ev)
             if image_b64:
-                image_id = None
-                item = ev.get("item")
-                if isinstance(item, dict):
-                    raw_id = item.get("id")
-                    image_id = raw_id if isinstance(raw_id, str) else None
-                if image_id is None or image_id not in stored_image_call_ids:
+                image_dedupe_key = _tool_image_dedupe_key(ev, image_b64)
+                if image_dedupe_key not in stored_image_call_ids:
                     # 图片存储是 base64 解码 + PIL 处理 + 多 storage 写 + DB
                     # insert，最长可达数秒；进入前再卡一道 lease，避免 lease 已
                     # 被接管 worker 抢走时这边继续写图。
@@ -2857,8 +3298,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                     if image_payload is not None:
                         tool_images.append(image_payload)
-                        if image_id is not None:
-                            stored_image_call_ids.add(image_id)
+                        stored_image_call_ids.add(image_dedupe_key)
 
             if ev_type == "response.output_text.delta":
                 delta = ev.get("delta") or ""
@@ -2936,12 +3376,8 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     image_b64 = _extract_response_image_b64(image_event)
                     if not image_b64:
                         continue
-                    image_id = None
-                    item = image_event.get("item")
-                    if isinstance(item, dict):
-                        raw_id = item.get("id")
-                        image_id = raw_id if isinstance(raw_id, str) else None
-                    if image_id is not None and image_id in stored_image_call_ids:
+                    image_dedupe_key = _tool_image_dedupe_key(image_event, image_b64)
+                    if image_dedupe_key in stored_image_call_ids:
                         continue
                     image_payload = await _store_and_publish_completion_tool_image(
                         redis=redis,
@@ -2956,10 +3392,214 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     )
                     if image_payload is not None:
                         tool_images.append(image_payload)
-                        if image_id is not None:
-                            stored_image_call_ids.add(image_id)
-                for tool_call in tool_tracker.update_from_response(resp):
-                    await _publish_completion_tool_progress(
+                        stored_image_call_ids.add(image_dedupe_key)
+                await _publish_completion_tool_updates(
+                    redis=redis,
+                    user_id=user_id,
+                    channel=channel,
+                    task_id=task_id,
+                    message_id=message_id,
+                    attempt=attempt,
+                    attempt_epoch=attempt_epoch,
+                    tool_tracker=tool_tracker,
+                    updates=tool_tracker.update_from_response(resp),
+                )
+            elif ev_type in {
+                "response.failed",
+                "response.incomplete",
+                "response.cancelled",
+                "response.canceled",
+            }:
+                raw_resp = ev.get("response")
+                resp = raw_resp if isinstance(raw_resp, dict) else {}
+                await _publish_completion_tool_updates(
+                    redis=redis,
+                    user_id=user_id,
+                    channel=channel,
+                    task_id=task_id,
+                    message_id=message_id,
+                    attempt=attempt,
+                    attempt_epoch=attempt_epoch,
+                    tool_tracker=tool_tracker,
+                    updates=tool_tracker.update_from_response(resp),
+                )
+                terminal_status = (
+                    ToolStatus.CANCELLED.value
+                    if ev_type in {"response.cancelled", "response.canceled"}
+                    else ToolStatus.FAILED.value
+                )
+                await _publish_completion_tool_updates(
+                    redis=redis,
+                    user_id=user_id,
+                    channel=channel,
+                    task_id=task_id,
+                    message_id=message_id,
+                    attempt=attempt,
+                    attempt_epoch=attempt_epoch,
+                    tool_tracker=tool_tracker,
+                    updates=tool_tracker.finalize_active(
+                        terminal_status,
+                        error=_summarize_tool_error(
+                            resp.get("error")
+                            or resp.get("incomplete_details")
+                            or ev.get("error")
+                        ),
+                    ),
+                )
+                _raise_for_terminal_response_event(ev_type, resp, ev.get("error"))
+            # 其他事件（content_part.added 等）忽略
+
+        if tool_loop_truncated:
+            fallback_body = _tool_limited_completion_body(body)
+            async for ev in _iter_completion_stream_with_abort(
+                stream_completion(fallback_body, runtime_override=runtime_override),
+                cancel_requested=cancel_requested,
+                lease_lost=lease_lost,
+                tool_tracker=tool_tracker,
+                tool_idle_timeout_s=tool_idle_timeout_s,
+            ):
+                if lease_lost.is_set():
+                    raise _LeaseLost("lease lost during tool-limit fallback")
+                ev_type = ev.get("type", "")
+                thinking_delta = _extract_reasoning_delta(ev)
+                if thinking_delta:
+                    if not accumulated_thinking.endswith(thinking_delta):
+                        accumulated_thinking += thinking_delta
+                    await publish_event(
+                        redis,
+                        user_id,
+                        channel,
+                        EV_COMP_THINKING_DELTA,
+                        {
+                            "completion_id": task_id,
+                            "message_id": message_id,
+                            "attempt": attempt,
+                            "attempt_epoch": attempt_epoch,
+                            "thinking_delta": thinking_delta,
+                        },
+                    )
+
+                image_b64 = _extract_response_image_b64(ev)
+                if image_b64:
+                    image_dedupe_key = _tool_image_dedupe_key(ev, image_b64)
+                    if image_dedupe_key not in stored_image_call_ids:
+                        if lease_lost.is_set():
+                            raise _LeaseLost("lease lost before tool image store")
+                        image_payload = await _store_and_publish_completion_tool_image(
+                            redis=redis,
+                            user_id=user_id,
+                            channel=channel,
+                            task_id=task_id,
+                            message_id=message_id,
+                            attempt=attempt,
+                            attempt_epoch=attempt_epoch,
+                            b64_image=image_b64,
+                            revised_prompt=_extract_response_revised_prompt(ev),
+                        )
+                        if image_payload is not None:
+                            tool_images.append(image_payload)
+                            stored_image_call_ids.add(image_dedupe_key)
+
+                if ev_type == "response.output_text.delta":
+                    delta = ev.get("delta") or ""
+                    if not delta:
+                        continue
+                    has_partial = True
+                    accumulated_text += delta
+                    delta_counter += 1
+                    if delta_counter % _CANCEL_CHECK_EVERY_DELTAS == 0:
+                        if lease_lost.is_set():
+                            raise _LeaseLost("lease lost during fallback stream")
+                        if await _is_cancelled(redis, task_id):
+                            raise _TaskCancelled("cancelled during fallback stream")
+                    total_len = len(accumulated_text)
+                    if total_len - flushed_len >= _PG_FLUSH_EVERY_CHARS:
+                        flushed_len = total_len
+                        await _flush_completion_text(
+                            task_id,
+                            accumulated_text,
+                            attempt_epoch=attempt_epoch,
+                        )
+                    await publish_event(
+                        redis,
+                        user_id,
+                        channel,
+                        EV_COMP_DELTA,
+                        {
+                            "completion_id": task_id,
+                            "message_id": message_id,
+                            "attempt": attempt,
+                            "attempt_epoch": attempt_epoch,
+                            "text_delta": delta,
+                        },
+                    )
+                elif ev_type == "response.completed":
+                    raw_resp = ev.get("response")
+                    resp = raw_resp if isinstance(raw_resp, dict) else {}
+                    completed_response = resp
+                    usage = resp.get("usage") or {}
+                    parsed_usage = parse_usage(chat_model, usage)
+                    tokens_in = parsed_usage.input_tokens
+                    tokens_out = parsed_usage.output_tokens
+                    cache_read_tokens = parsed_usage.cache_read_tokens
+                    cache_creation_tokens = parsed_usage.cache_creation_tokens
+                    cache_creation_5m_tokens = parsed_usage.cache_creation_5m_tokens
+                    cache_creation_1h_tokens = parsed_usage.cache_creation_1h_tokens
+                    reasoning_tokens = parsed_usage.reasoning_tokens
+                    image_output_tokens = parsed_usage.image_output_tokens
+                    completed_text = _extract_completed_output_text(resp)
+                    if completed_text and not accumulated_text.endswith(
+                        completed_text
+                    ):
+                        accumulated_text = (
+                            f"{accumulated_text}\n\n{completed_text}"
+                            if accumulated_text
+                            else completed_text
+                        )
+                    if not accumulated_thinking:
+                        reasoning_text = _extract_reasoning_text_from_response(resp)
+                        if reasoning_text:
+                            accumulated_thinking = reasoning_text
+                            await publish_event(
+                                redis,
+                                user_id,
+                                channel,
+                                EV_COMP_THINKING_DELTA,
+                                {
+                                    "completion_id": task_id,
+                                    "message_id": message_id,
+                                    "attempt": attempt,
+                                    "attempt_epoch": attempt_epoch,
+                                    "thinking_delta": reasoning_text,
+                                },
+                            )
+                    for image_event in _extract_image_events_from_response(resp):
+                        image_b64 = _extract_response_image_b64(image_event)
+                        if not image_b64:
+                            continue
+                        image_dedupe_key = _tool_image_dedupe_key(
+                            image_event,
+                            image_b64,
+                        )
+                        if image_dedupe_key in stored_image_call_ids:
+                            continue
+                        image_payload = await _store_and_publish_completion_tool_image(
+                            redis=redis,
+                            user_id=user_id,
+                            channel=channel,
+                            task_id=task_id,
+                            message_id=message_id,
+                            attempt=attempt,
+                            attempt_epoch=attempt_epoch,
+                            b64_image=image_b64,
+                            revised_prompt=_extract_response_revised_prompt(
+                                image_event
+                            ),
+                        )
+                        if image_payload is not None:
+                            tool_images.append(image_payload)
+                            stored_image_call_ids.add(image_dedupe_key)
+                    await _publish_completion_tool_updates(
                         redis=redis,
                         user_id=user_id,
                         channel=channel,
@@ -2967,12 +3607,73 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         message_id=message_id,
                         attempt=attempt,
                         attempt_epoch=attempt_epoch,
-                        tool_call=tool_call,
-                        tool_calls=tool_tracker.content(),
+                        tool_tracker=tool_tracker,
+                        updates=tool_tracker.update_from_response(resp),
                     )
-            # 其他事件（content_part.added 等）忽略
+                    await _publish_completion_tool_updates(
+                        redis=redis,
+                        user_id=user_id,
+                        channel=channel,
+                        task_id=task_id,
+                        message_id=message_id,
+                        attempt=attempt,
+                        attempt_epoch=attempt_epoch,
+                        tool_tracker=tool_tracker,
+                        updates=tool_tracker.finalize_active(
+                            ToolStatus.SUCCEEDED.value
+                        ),
+                    )
+                elif ev_type in {
+                    "response.failed",
+                    "response.incomplete",
+                    "response.cancelled",
+                    "response.canceled",
+                }:
+                    raw_resp = ev.get("response")
+                    resp = raw_resp if isinstance(raw_resp, dict) else {}
+                    await _publish_completion_tool_updates(
+                        redis=redis,
+                        user_id=user_id,
+                        channel=channel,
+                        task_id=task_id,
+                        message_id=message_id,
+                        attempt=attempt,
+                        attempt_epoch=attempt_epoch,
+                        tool_tracker=tool_tracker,
+                        updates=tool_tracker.update_from_response(resp),
+                    )
+                    terminal_status = (
+                        ToolStatus.CANCELLED.value
+                        if ev_type in {"response.cancelled", "response.canceled"}
+                        else ToolStatus.FAILED.value
+                    )
+                    await _publish_completion_tool_updates(
+                        redis=redis,
+                        user_id=user_id,
+                        channel=channel,
+                        task_id=task_id,
+                        message_id=message_id,
+                        attempt=attempt,
+                        attempt_epoch=attempt_epoch,
+                        tool_tracker=tool_tracker,
+                        updates=tool_tracker.finalize_active(
+                            terminal_status,
+                            error=_summarize_tool_error(
+                                resp.get("error")
+                                or resp.get("incomplete_details")
+                                or ev.get("error")
+                            ),
+                        ),
+                    )
+                    _raise_for_terminal_response_event(ev_type, resp, ev.get("error"))
 
-        final_text = _finalize_completion_text(accumulated_text, completed_response)
+        if tool_loop_truncated and accumulated_text:
+            final_text = _apply_url_citations(
+                accumulated_text,
+                _extract_url_citations(completed_response or {}),
+            )
+        else:
+            final_text = _finalize_completion_text(accumulated_text, completed_response)
         if not final_text and tool_images:
             final_text = "已生成图片。"
         if not final_text:
@@ -2981,6 +3682,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 error_code=EC.NO_TEXT_RETURNED.value,
                 status_code=200,
             )
+        tokens_in, tokens_out = _fallback_completion_usage_tokens(
+            input_list,
+            final_text,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+        )
 
         # --- 6. 成功态 ---
         # 写终态 db 前最后一道 lease 检查：如果 stream 期间 lease 丢失但事件循环
@@ -2989,8 +3696,22 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         # 我又写了 SUCCEEDED"的双写。
         if lease_lost.is_set():
             raise _LeaseLost("lease lost before success commit")
-        if await _is_cancelled(redis, task_id):
-            raise _TaskCancelled("cancelled before success commit")
+        await _raise_if_completion_cancelled(
+            redis,
+            task_id,
+            "cancelled before success commit",
+        )
+        await _publish_completion_tool_updates(
+            redis=redis,
+            user_id=user_id,
+            channel=channel,
+            task_id=task_id,
+            message_id=message_id,
+            attempt=attempt,
+            attempt_epoch=attempt_epoch,
+            tool_tracker=tool_tracker,
+            updates=tool_tracker.finalize_active(ToolStatus.SUCCEEDED.value),
+        )
         async with SessionLocal() as session:
             res = await session.execute(
                 update(Completion)
@@ -3059,7 +3780,17 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 comp_for_billing.cache_creation_1h_tokens = cache_creation_1h_tokens
                 comp_for_billing.reasoning_tokens = reasoning_tokens
                 comp_for_billing.image_output_tokens = image_output_tokens
+                await _raise_if_completion_cancelled(
+                    redis,
+                    task_id,
+                    "cancelled before billing settle",
+                )
                 await worker_billing.charge_completion(session, comp_for_billing)
+                await _raise_if_completion_cancelled(
+                    redis,
+                    task_id,
+                    "cancelled before success commit",
+                )
             await session.commit()
 
         # publish_event 是 SSE 推送+回放写入；万一 lease 已丢，就别再以"我"的身份
@@ -3080,6 +3811,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
                 "tool_calls": tool_tracker.content(),
+                "tool_loop_truncated": tool_loop_truncated,
                 "used_memory_ids": memory_meta_for_event.get("used_memory_ids", []),
                 "used_memory_summary": memory_meta_for_event.get(
                     "used_memory_summary", []
@@ -3135,6 +3867,17 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     except _TaskCancelled as exc:
         # GEN-P1-4: 用户主动取消——标 cancelled 并 publish failed(retriable=false)。
         logger.info("completion cancelled by user task=%s reason=%s", task_id, exc)
+        await _publish_completion_tool_updates(
+            redis=redis,
+            user_id=user_id,
+            channel=channel,
+            task_id=task_id,
+            message_id=message_id,
+            attempt=attempt,
+            attempt_epoch=attempt_epoch,
+            tool_tracker=tool_tracker,
+            updates=tool_tracker.finalize_active(ToolStatus.CANCELLED.value),
+        )
         try:
             async with SessionLocal() as session:
                 await session.execute(
@@ -3163,6 +3906,13 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         content["tool_calls"] = tool_calls
                         msg_c.content = content
                     msg_c.status = MessageStatus.FAILED
+                comp_cancel = await session.get(Completion, task_id)
+                if comp_cancel is not None:
+                    await worker_billing.release_completion(
+                        session,
+                        comp_cancel,
+                        reason=EC.CANCELLED.value,
+                    )
                 await session.commit()
         except Exception as db_exc:  # noqa: BLE001
             logger.warning(
@@ -3189,6 +3939,26 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         return
 
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, _ToolIdleTimeout):
+            await _publish_completion_tool_updates(
+                redis=redis,
+                user_id=user_id,
+                channel=channel,
+                task_id=task_id,
+                message_id=message_id,
+                attempt=attempt,
+                attempt_epoch=attempt_epoch,
+                tool_tracker=tool_tracker,
+                updates=tool_tracker.finalize_active(
+                    ToolStatus.TIMED_OUT.value,
+                    error="tool call idle timeout",
+                ),
+            )
+            exc = UpstreamError(
+                "tool call idle timeout",
+                error_code=EC.TIMEOUT.value,
+                status_code=200,
+            )
         upstream_calls_total.labels(kind="completion", outcome="error").inc()
         decision = _classify_exception(exc, has_partial)
         _byok_terminal, byok_error = classify_user_credential_error(exc)
@@ -3265,6 +4035,20 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             return
 
         # terminal
+        await _publish_completion_tool_updates(
+            redis=redis,
+            user_id=user_id,
+            channel=channel,
+            task_id=task_id,
+            message_id=message_id,
+            attempt=attempt,
+            attempt_epoch=attempt_epoch,
+            tool_tracker=tool_tracker,
+            updates=tool_tracker.finalize_active(
+                ToolStatus.FAILED.value,
+                error=err_msg,
+            ),
+        )
         async with SessionLocal() as session:
             res = await session.execute(
                 update(Completion)
@@ -3304,6 +4088,16 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             # don't get a free response on intermittent network errors.
             # tokens_in/out default to 0 and stay 0 if no usage frame ever
             # arrived — `charge` short-circuits on amount<=0.
+            if has_partial and tokens_out <= 0 and accumulated_text:
+                if "input_list" in locals():
+                    tokens_in, tokens_out = _fallback_completion_usage_tokens(
+                        input_list,
+                        accumulated_text,
+                        tokens_in=tokens_in,
+                        tokens_out=tokens_out,
+                    )
+                else:
+                    tokens_out = max(1, count_tokens(accumulated_text))
             if has_partial and (tokens_in > 0 or tokens_out > 0):
                 comp_partial = await session.get(Completion, task_id)
                 if comp_partial is not None:
@@ -3315,6 +4109,14 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         logger.exception(
                             "partial-stream charge failed comp=%s", task_id
                         )
+            else:
+                comp_failed = await session.get(Completion, task_id)
+                if comp_failed is not None:
+                    await worker_billing.release_completion(
+                        session,
+                        comp_failed,
+                        reason=str(err_code),
+                    )
             await session.commit()
 
         await publish_event(
@@ -3334,6 +4136,12 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         )
 
     finally:
+        if cancel_stop_requested is not None:
+            cancel_stop_requested.set()
+        if cancel_watcher is not None:
+            cancel_watcher.cancel()
+            with suppress(BaseException):
+                await cancel_watcher
         renewer.cancel()
         try:
             await renewer
