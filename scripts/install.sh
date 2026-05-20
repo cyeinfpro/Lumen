@@ -27,6 +27,11 @@ set -euo pipefail
 
 # `curl | bash` 远程模式下 BASH_SOURCE 是空数组，set -u 会让访问 [0] 报
 # unbound variable 噪音；用 :- 兜底，dirname "" 返回 "." 落到 cwd。
+RAW_INSTALL_FROM_STDIN=0
+if [ -z "${BASH_SOURCE[0]:-}" ]; then
+    RAW_INSTALL_FROM_STDIN=1
+fi
+
 if SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"; then
     :
 else
@@ -99,6 +104,15 @@ raw_install_git() {
             return 1
             ;;
     esac
+}
+
+raw_drain_bootstrap_stdin() {
+    # In `curl .../install.sh | bash`, bootstrap execs into the freshly cloned
+    # local script before curl has always finished writing the rest of this
+    # file. Drain the script pipe first so curl does not report rc=23.
+    if [ "${RAW_INSTALL_FROM_STDIN:-0}" = "1" ] && [ ! -t 0 ]; then
+        cat >/dev/null 2>/dev/null || true
+    fi
 }
 
 # 检测 install_dir 当前状态，返回字符串：
@@ -294,6 +308,7 @@ bootstrap_from_raw_script() {
 
     # 优先用 /dev/tty 接管 stdin（让交互菜单能读键），没 tty 就直接 exec。
     # --auto / --update 都是非交互的，没 tty 也能跑通。
+    raw_drain_bootstrap_stdin
     if [ -r /dev/tty ]; then
         exec bash "${script_path}" "${args[@]}" </dev/tty
     fi
