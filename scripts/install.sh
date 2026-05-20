@@ -1649,13 +1649,45 @@ pull_or_build_images() {
 
 start_infrastructure() {
     emit_step_start containers "启动 PostgreSQL / Redis 并等待健康"
+    INSTALL_POSTGRES_DATA_PREEXISTING=0
+    if postgres_data_initialized; then
+        INSTALL_POSTGRES_DATA_PREEXISTING=1
+    fi
     if ! _install_compose up --pull missing -d --wait postgres redis; then
         log_error "postgres / redis 启动或健康检查失败。"
         exit 1
     fi
     INSTALL_STARTED_SERVICES+=("postgres" "redis")
     log_info "PG / Redis 已健康。"
+    sync_existing_postgres_password
     emit_step_done
+}
+
+sync_existing_postgres_password() {
+    if [ "${INSTALL_POSTGRES_DATA_PREEXISTING:-0}" != "1" ]; then
+        return 0
+    fi
+
+    log_info "检测到已有 Postgres 数据目录，尝试同步数据库角色密码到当前 shared/.env。"
+    if _install_compose exec -T postgres sh -eu <<'SH'
+psql -X -v ON_ERROR_STOP=1 \
+    -v lumen_role="${POSTGRES_USER:?POSTGRES_USER missing}" \
+    -v lumen_password="${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing}" \
+    -U "${POSTGRES_USER:?POSTGRES_USER missing}" \
+    -d postgres <<'SQL'
+ALTER ROLE :"lumen_role" WITH PASSWORD :'lumen_password';
+SQL
+SH
+    then
+        log_info "Postgres 角色密码已与 shared/.env 对齐。"
+        return 0
+    fi
+
+    log_error "无法同步 Postgres 角色密码。"
+    log_error "  这通常表示拷贝来的 PGDATA 使用了不同 DB_USER，或本地 socket 也要求旧密码。"
+    log_error "  请确认 /opt/lumen/shared/.env 与该 /opt/lumendata 备份来自同一套部署，"
+    log_error "  或手动在 postgres 容器内 ALTER ROLE 后重跑安装。"
+    exit 1
 }
 
 run_migration() {
