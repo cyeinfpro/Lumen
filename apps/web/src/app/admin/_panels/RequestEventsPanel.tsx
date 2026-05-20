@@ -306,6 +306,9 @@ function matchesSearch(event: AdminRequestEventOut, query: string): boolean {
     event.workflow_step_key,
     event.size_bucket,
     event.cost_class,
+    upstreamText(event, "source"),
+    upstreamText(event, "action_source"),
+    upstreamText(event, "actual_source"),
     event.conversation_title,
     event.prompt,
     event.error_code,
@@ -325,6 +328,17 @@ function displayValue(value: string | null | undefined, fallback = "—"): strin
   return text || fallback;
 }
 
+function upstreamText(event: AdminRequestEventOut, key: string): string | null {
+  const value = event.upstream?.[key];
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text || null;
+}
+
+function upstreamSource(event: AdminRequestEventOut): string | null {
+  return upstreamText(event, "source") ?? upstreamText(event, "actual_source");
+}
+
 function isActiveStatus(status: string): boolean {
   return status === "queued" || status === "running" || status === "streaming";
 }
@@ -338,6 +352,9 @@ function providerDisplayValue(event: AdminRequestEventOut): string {
   }
   const provider = displayValue(event.upstream_provider, "");
   if (provider) return provider;
+  if (event.kind === "completion") {
+    return isActiveStatus(event.status) ? "等待上游结果" : "历史未记录";
+  }
   if (event.upstream_route === "dual_race") {
     return isActiveStatus(event.status) ? "等待上游结果" : "历史未记录";
   }
@@ -1122,6 +1139,8 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
     ? `${event.conversation_title} (${truncateMiddle(event.conversation_id ?? "")})`
     : displayValue(event.conversation_id);
   const outputCount = outputImageCount(event);
+  const source = upstreamSource(event);
+  const actionSource = upstreamText(event, "action_source");
 
   return (
     <div className="space-y-4 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60 p-4">
@@ -1168,6 +1187,8 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
         <Detail label="尺寸桶" value={displayValue(event.size_bucket, "—")} />
         <Detail label="像素量" value={formatPixels(event.pixel_count)} mono />
         <Detail label="成本类型" value={displayValue(event.cost_class, "—")} />
+        {source && <Detail label="来源" value={source} />}
+        {actionSource && <Detail label="动作来源" value={actionSource} />}
         {event.workflow_type && (
           <Detail label="工作流" value={event.workflow_type} />
         )}

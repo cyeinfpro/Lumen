@@ -296,6 +296,7 @@ def _request_route(upstream_request: dict[str, Any] | None) -> str | None:
     route = _json_str(
         upstream_request,
         "upstream_route",
+        "actual_route",
         "image_route",
         "route",
         "primary_route",
@@ -569,6 +570,7 @@ def _safe_upstream_details(upstream_request: dict[str, Any] | None) -> dict[str,
     if not isinstance(upstream_request, dict):
         return {}
     allowed = {
+        "action_source",
         "actual_endpoint",
         "actual_provider",
         "actual_route",
@@ -596,6 +598,7 @@ def _safe_upstream_details(upstream_request: dict[str, Any] | None) -> dict[str,
         "size_actual",
         "size_bucket",
         "cost_class",
+        "source",
         "transparent_alpha_recovered",
         "transparent_pipeline_provider",
         "upstream_route",
@@ -1450,7 +1453,9 @@ async def list_request_events(
             tokens_out = None
         else:
             model_label = task.model
-            upstream_endpoint = "responses"
+            upstream_endpoint = (
+                _json_str(req, "actual_endpoint", "endpoint") or "responses"
+            )
             prompt = row.get("prompt")
             action = None
             tokens_in = task.tokens_in

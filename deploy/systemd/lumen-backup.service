@@ -13,12 +13,13 @@ Type=oneshot
 User=lumen-backup
 Group=lumen-backup
 SupplementaryGroups=docker
-EnvironmentFile=-/opt/lumen/.env
+EnvironmentFile=-/opt/lumen/shared/.env
 Environment=BACKUP_ROOT=/opt/lumendata/backup
 Environment=LUMEN_BACKUP_ROOT=/opt/lumendata/backup
+Environment=LUMEN_BACKUP_RESTORE_LOCKFILE=/opt/lumendata/backup/.backup-restore.lock
 Environment=LUMEN_BACKUP_SERVICE_MODE=1
 WorkingDirectory=/opt/lumen/current
-ExecStartPre=+/bin/sh -c 'mkdir -p /opt/lumendata/backup; chgrp lumen-backup /opt/lumendata/backup 2>/dev/null || true; chmod g+rwx /opt/lumendata/backup 2>/dev/null || true; log=/opt/lumendata/backup/.backup.log; max=$${LUMEN_BACKUP_LOG_MAX_BYTES:-10485760}; if [ -f "$log" ] && [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$max" ]; then rm -f "$log.1"; mv -f "$log" "$log.1"; fi'
+ExecStartPre=+/bin/sh -c 'mkdir -p /opt/lumendata/backup; chgrp lumen-backup /opt/lumendata/backup 2>/dev/null || true; chmod g+rwx /opt/lumendata/backup 2>/dev/null || true; touch /opt/lumen/.lumen-maintenance.lock 2>/dev/null || true; chgrp lumen-backup /opt/lumen/.lumen-maintenance.lock 2>/dev/null || true; chmod g+rw /opt/lumen/.lumen-maintenance.lock 2>/dev/null || true; log=/opt/lumendata/backup/.backup.log; max=$${LUMEN_BACKUP_LOG_MAX_BYTES:-10485760}; if [ -f "$log" ] && [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$max" ]; then rm -f "$log.1"; mv -f "$log" "$log.1"; fi'
 ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/backup.sh
 StandardOutput=append:/opt/lumendata/backup/.backup.log
 StandardError=append:/opt/lumendata/backup/.backup.log
@@ -37,5 +38,5 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 LockPersonality=true
 RestrictSUIDSGID=true
-ReadWritePaths=/opt/lumendata/backup /run/lock /var/lock -/run/docker.sock -/var/run/docker.sock
+ReadWritePaths=/opt/lumendata/backup /opt/lumen/.lumen-maintenance.lock /run/lock /var/lock -/run/docker.sock -/var/run/docker.sock
 ReadOnlyPaths=/opt/lumen

@@ -209,11 +209,18 @@ def test_backup_units_use_release_layout_and_path_trigger() -> None:
         encoding="utf-8"
     )
 
+    assert "EnvironmentFile=-/opt/lumen/shared/.env" in service
     assert "ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/backup.sh" in service
     assert "Environment=BACKUP_ROOT=/opt/lumendata/backup" in service
+    assert (
+        "Environment=LUMEN_BACKUP_RESTORE_LOCKFILE=/opt/lumendata/backup/.backup-restore.lock"
+        in service
+    )
     assert "Environment=LUMEN_BACKUP_SERVICE_MODE=1" in service
     assert "ExecStartPre=+/bin/sh -c" in service
     assert "LUMEN_BACKUP_LOG_MAX_BYTES" in service
+    assert "chgrp lumen-backup /opt/lumen/.lumen-maintenance.lock" in service
+    assert "chmod g+rw /opt/lumen/.lumen-maintenance.lock" in service
     assert "StandardOutput=append:/opt/lumendata/backup/.backup.log" in service
     assert ".backup.pending" in service
     assert ".backup.running" in service
@@ -222,6 +229,7 @@ def test_backup_units_use_release_layout_and_path_trigger() -> None:
     assert "PrivateTmp=true" in service
     assert "ProtectSystem=strict" in service
     assert "ReadWritePaths=/opt/lumendata/backup" in service
+    assert "/opt/lumen/.lumen-maintenance.lock" in service
     assert "-/run/docker.sock" in service
     assert "-/var/run/docker.sock" in service
     assert "PathChanged=/opt/lumendata/backup/.backup.trigger" in path_unit
@@ -243,6 +251,13 @@ def test_backup_script_records_service_marker_and_queues_retrigger() -> None:
     assert '"pg_size":%s' in text
     assert '"${PG_SIZE:-0}"' in text
     assert '"${REDIS_SIZE:-0}"' in text
+    assert 'exec 7>"$LOCKFILE"' in text
+    assert "redis_bgsave_start()" in text
+    assert "wait_for_redis_bgsave()" in text
+    assert "rdb_bgsave_in_progress" in text
+    assert "Background save already in progress" in text
+    assert 'docker_cp_redis "/data/dump.rdb"' in text
+    assert "ERROR: redis $label missing" in text
 
 
 def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots() -> None:
@@ -761,7 +776,8 @@ def test_update_script_defaults_to_fast_update_path() -> None:
     assert 'LUMEN_UPDATE_FAST_EXPLICIT_PULL:-0' in code
     assert '! lumen_image_tag_is_rolling "${TARGET_TAG}"' in code
     assert 'skipped_by_fast_mode' in text
-    assert 'reuse_healthy_infra' in code
+    assert 'reuse_healthy' in code
+    assert 'recreated_for_release_bind_mount' in code
     assert '--no-deps' in code
     assert 'image_prune "skipped_by_fast_mode"' in code
 

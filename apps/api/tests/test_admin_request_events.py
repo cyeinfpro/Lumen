@@ -330,6 +330,16 @@ def test_request_provider_can_fallback_to_provider_attempts() -> None:
     )
 
 
+def test_request_route_accepts_actual_route_fallback() -> None:
+    assert admin._request_route({"actual_route": "responses"}) == "responses"
+    assert (
+        admin._request_route(
+            {"upstream_route": "dual_race", "actual_route": "responses"}
+        )
+        == "dual_race"
+    )
+
+
 def test_build_live_lanes_single_provider_snapshot() -> None:
     summary, lanes = admin._build_live_lanes_from_snapshot(
         {
@@ -471,6 +481,8 @@ def test_generation_model_label_uses_fast_responses_model() -> None:
 
 def test_completion_upstream_request_exposes_provider_and_responses_route() -> None:
     upstream_request = {
+        "source": "composer",
+        "action_source": "composer.vision_qa",
         "request_event_provider": "pool-a",
         "upstream_route": "responses",
         "actual_endpoint": "responses",
@@ -480,8 +492,10 @@ def test_completion_upstream_request_exposes_provider_and_responses_route() -> N
     assert admin._request_provider(upstream_request) == "pool-a"
     assert admin._request_route(upstream_request) == "responses"
     assert admin._safe_upstream_details(upstream_request) == {
+        "action_source": "composer.vision_qa",
         "actual_endpoint": "responses",
         "actual_source": "text",
         "request_event_provider": "pool-a",
+        "source": "composer",
         "upstream_route": "responses",
     }
