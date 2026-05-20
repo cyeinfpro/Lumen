@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Admin request event thumbnails use authenticated API URLs. */
+
 import { Fragment, useDeferredValue, useMemo, useState } from "react";
 import { format } from "date-fns";
 import {
@@ -194,6 +196,23 @@ function imageRoleLabel(image: AdminRequestEventImageOut): string {
   }
   if (image.roles.includes("output")) return "输出";
   return "参考";
+}
+
+function imagePreviewSrc(image: AdminRequestEventImageOut): string {
+  return image.thumb_url || image.preview_url || image.display_url || image.url;
+}
+
+function previewImagesForEvent(
+  event: AdminRequestEventOut,
+  max = 3,
+): AdminRequestEventImageOut[] {
+  return [...event.images]
+    .sort((a, b) => {
+      const aOutput = a.roles.includes("output") ? 0 : 1;
+      const bOutput = b.roles.includes("output") ? 0 : 1;
+      return aOutput - bOutput;
+    })
+    .slice(0, max);
 }
 
 function toLightboxItem(
@@ -1056,6 +1075,7 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
   }
   const outputCount = outputImageCount(event);
   const canOpen = lightboxItemsForEvent(event).length > 0;
+  const previews = previewImagesForEvent(event);
   return (
     <button
       type="button"
@@ -1067,8 +1087,23 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
       className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-xs text-neutral-200 transition-colors hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
       aria-label={`查看 ${event.images.length} 张事件图片`}
     >
+      <span className="flex shrink-0 -space-x-1">
+        {previews.map((image) => (
+          <span
+            key={image.id}
+            className="h-7 w-7 overflow-hidden rounded-md border border-black/40 bg-white/[0.06] shadow-sm"
+          >
+            <img
+              src={imagePreviewSrc(image)}
+              alt=""
+              loading="lazy"
+              className="h-full w-full object-cover"
+            />
+          </span>
+        ))}
+      </span>
       <Eye className="w-3.5 h-3.5" />
-      查看图片
+      查看
       <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-neutral-300">
         {event.images.length}
       </span>
@@ -1205,7 +1240,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
             <ImageIcon className="w-3.5 h-3.5" />
             图片文件
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
             {event.images.map((image, index) => (
               <button
                 key={`${image.id}:${index}`}
@@ -1215,14 +1250,21 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
                   openEventImages(event, image.id);
                 }}
                 disabled={!image.url}
-                className="inline-flex min-h-[36px] max-w-full items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-2 text-xs text-neutral-200 transition-colors hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                className="group relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-white/[0.04] text-left transition-colors hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
               >
-                <ImageIcon className="w-3.5 h-3.5 text-neutral-400" />
-                <span className="shrink-0">{imageRoleLabel(image)}</span>
-                <span className="truncate font-mono text-neutral-500">
-                  {image.width > 0 && image.height > 0
-                    ? `${image.width}x${image.height}`
-                    : "尺寸未知"}
+                <img
+                  src={imagePreviewSrc(image)}
+                  alt={imageRoleLabel(image)}
+                  loading="lazy"
+                  className="absolute inset-0 h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
+                />
+                <span className="absolute inset-x-0 bottom-0 flex min-w-0 items-center justify-between gap-2 bg-black/65 px-2 py-1.5 text-xs text-white backdrop-blur-sm">
+                  <span className="shrink-0">{imageRoleLabel(image)}</span>
+                  <span className="truncate font-mono text-white/75">
+                    {image.width > 0 && image.height > 0
+                      ? `${image.width}x${image.height}`
+                      : "尺寸未知"}
+                  </span>
                 </span>
               </button>
             ))}
