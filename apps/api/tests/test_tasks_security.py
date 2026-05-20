@@ -216,9 +216,10 @@ async def test_list_tasks_scopes_generation_and_completion_queries_to_user() -> 
     await tasks.list_tasks(user=user, db=db, limit=10)
 
     rendered = [str(statement) for statement in db.statements]
-    assert len(rendered) == 2
+    assert len(rendered) == 3
     assert "generations.user_id" in rendered[0]
     assert "completions.user_id" in rendered[1]
+    assert "generations.user_id" in rendered[2]
 
 
 @pytest.mark.asyncio

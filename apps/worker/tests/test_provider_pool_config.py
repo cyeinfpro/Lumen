@@ -317,8 +317,6 @@ async def test_provider_pool_uses_legacy_env_only_when_providers_absent(
 async def test_provider_pool_reload_cleans_orphan_health_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool
-
     pool = ProviderPool()
     pool._health = {
         "old": ProviderHealth(),
