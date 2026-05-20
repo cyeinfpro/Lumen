@@ -1668,16 +1668,42 @@ sync_existing_postgres_password() {
         return 0
     fi
 
+    local shared_env="${SHARED_DIR}/.env"
+    local db_user db_name db_password
+    db_user="$(env_file_get DB_USER "${shared_env}")"
+    db_name="$(env_file_get DB_NAME "${shared_env}")"
+    db_password="$(env_file_get DB_PASSWORD "${shared_env}")"
+    if [ -z "${db_user}" ] || [ -z "${db_name}" ] || [ -z "${db_password}" ]; then
+        log_error "shared/.env 缺少 DB_USER/DB_NAME/DB_PASSWORD，无法同步已有 Postgres 数据。"
+        exit 1
+    fi
+
     log_info "检测到已有 Postgres 数据目录，尝试同步数据库角色密码到当前 shared/.env。"
-    if _install_compose exec -T postgres sh -eu <<'SH'
-psql -X -v ON_ERROR_STOP=1 \
-    -v lumen_role="${POSTGRES_USER:?POSTGRES_USER missing}" \
-    -v lumen_password="${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing}" \
-    -U "${POSTGRES_USER:?POSTGRES_USER missing}" \
-    -d postgres <<'SQL'
-ALTER ROLE :"lumen_role" WITH PASSWORD :'lumen_password';
-SQL
-SH
+    if ! postgres_role_can_connect "${db_user}"; then
+        if [ "${db_user}" = "lumen_app" ] && [ "${db_name}" = "lumen_app" ] \
+                && postgres_role_can_connect "lumen" \
+                && postgres_database_exists_for_role "lumen" "lumen"; then
+            log_warn "PGDATA 使用旧默认 DB_USER=lumen / DB_NAME=lumen；已对齐 shared/.env。"
+            db_user="lumen"
+            db_name="lumen"
+            env_file_set "${shared_env}" DB_USER "${db_user}" || exit 1
+            env_file_set "${shared_env}" DB_NAME "${db_name}" || exit 1
+            env_file_set "${shared_env}" DATABASE_URL \
+                "postgresql+asyncpg://${db_user}:${db_password}@postgres:5432/${db_name}" || exit 1
+        else
+            log_error "无法用 shared/.env 中的 DB_USER=${db_user} 连接已有 PGDATA。"
+            log_error "  该数据目录可能来自不同 DB_USER；请把 shared/.env 的 DB_USER/DB_NAME 改成原部署值后重跑。"
+            exit 1
+        fi
+    fi
+
+    if ! postgres_database_exists_for_role "${db_user}" "${db_name}"; then
+        log_error "已有 PGDATA 中找不到数据库 DB_NAME=${db_name}。"
+        log_error "  请把 shared/.env 的 DB_NAME 改成原部署值后重跑。"
+        exit 1
+    fi
+
+    if postgres_set_role_password "${db_user}" "${db_password}"
     then
         log_info "Postgres 角色密码已与 shared/.env 对齐。"
         return 0
@@ -1688,6 +1714,37 @@ SH
     log_error "  请确认 /opt/lumen/shared/.env 与该 /opt/lumendata 备份来自同一套部署，"
     log_error "  或手动在 postgres 容器内 ALTER ROLE 后重跑安装。"
     exit 1
+}
+
+postgres_role_can_connect() {
+    local db_user="$1"
+    _install_compose exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 \
+        -U "${db_user}" -d postgres -c 'SELECT 1' >/dev/null 2>&1
+}
+
+postgres_database_exists_for_role() {
+    local db_user="$1"
+    local db_name="$2"
+    local found
+    found="$(
+        _install_compose exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 \
+            -v lumen_db="${db_name}" \
+            -U "${db_user}" -d postgres <<'SQL' 2>/dev/null || true
+SELECT 1 FROM pg_database WHERE datname = :'lumen_db';
+SQL
+    )"
+    [ "${found}" = "1" ]
+}
+
+postgres_set_role_password() {
+    local db_user="$1"
+    local db_password="$2"
+    _install_compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
+        -v lumen_role="${db_user}" \
+        -v lumen_password="${db_password}" \
+        -U "${db_user}" -d postgres <<'SQL'
+ALTER ROLE :"lumen_role" WITH PASSWORD :'lumen_password';
+SQL
 }
 
 run_migration() {
