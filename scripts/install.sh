@@ -634,6 +634,22 @@ generate_hex_secret() {
     openssl rand -hex "${bytes}"
 }
 
+postgres_data_initialized() {
+    local db_root="${LUMEN_DB_ROOT:-/opt/lumendata}"
+    local postgres_dir="${db_root}/postgres"
+
+    if [ -f "${postgres_dir}/PG_VERSION" ] || [ -f "${postgres_dir}/global/pg_control" ]; then
+        return 0
+    fi
+    if command -v lumen_run_as_root >/dev/null 2>&1; then
+        if lumen_run_as_root test -f "${postgres_dir}/PG_VERSION" 2>/dev/null \
+                || lumen_run_as_root test -f "${postgres_dir}/global/pg_control" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 ensure_env_secret() {
     local file="$1"
     local key="$2"
@@ -644,10 +660,13 @@ ensure_env_secret() {
         return 0
     fi
     if [ "${key}" = "BYOK_API_KEY_MASTER_SECRET" ] && [ "${LUMEN_ALLOW_BYOK_KEY_GEN:-0}" != "1" ]; then
-        log_error "BYOK_API_KEY_MASTER_SECRET 缺失，且数据库可能已有 BYOK 密文。"
-        log_error "  - 新部署：export LUMEN_ALLOW_BYOK_KEY_GEN=1 再重跑安装。"
-        log_error "  - 升级：从备份恢复原始 BYOK_API_KEY_MASTER_SECRET，不要让脚本随机生成。"
-        return 1
+        if postgres_data_initialized; then
+            log_error "BYOK_API_KEY_MASTER_SECRET 缺失，且数据库可能已有 BYOK 密文。"
+            log_error "  - 新部署：export LUMEN_ALLOW_BYOK_KEY_GEN=1 再重跑安装。"
+            log_error "  - 升级：从备份恢复原始 BYOK_API_KEY_MASTER_SECRET，不要让脚本随机生成。"
+            return 1
+        fi
+        log_warn "BYOK_API_KEY_MASTER_SECRET 缺失，但 Postgres 尚未初始化；按新部署/失败重跑自动生成。"
     fi
     value="$(generate_hex_secret "${bytes}")"
     if [ "${key}" = "REDIS_PASSWORD" ]; then
