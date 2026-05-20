@@ -1501,10 +1501,15 @@ prepare_env_file() {
     env_file_set "${shared_env}" LUMEN_APP_UID        "${LUMEN_APP_UID}"
     env_file_set "${shared_env}" LUMEN_APP_GID        "${LUMEN_APP_GID}"
     env_file_set "${shared_env}" LUMEN_APP_STORAGE_GID "${LUMEN_APP_STORAGE_GID}"
+    local current_web_bind_host
+    current_web_bind_host="$(env_file_get WEB_BIND_HOST "${shared_env}")"
     if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
         env_file_set "${shared_env}" WEB_BIND_HOST "${LUMEN_WEB_BIND_HOST}"
-    elif [ -z "$(env_file_get WEB_BIND_HOST "${shared_env}")" ]; then
-        env_file_set "${shared_env}" WEB_BIND_HOST "127.0.0.1"
+    elif [ -z "${current_web_bind_host}" ] || [ "${current_web_bind_host}" = "127.0.0.1" ]; then
+        if [ "${current_web_bind_host}" = "127.0.0.1" ]; then
+            log_warn "WEB_BIND_HOST 是旧默认 127.0.0.1，改为 0.0.0.0；如需反代-only，请设置 LUMEN_WEB_BIND_HOST=127.0.0.1。"
+        fi
+        env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"
     fi
 
     # 创建 release/.env -> ../../shared/.env 的相对 symlink
@@ -2046,14 +2051,16 @@ warn_about_legacy_systemd() {
 print_summary() {
     emit_step_start cleanup "安装完成汇总"
     local shared_env="${SHARED_DIR}/.env"
-    local image_tag
+    local image_tag web_bind_host
     image_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
+    web_bind_host="$(env_file_get WEB_BIND_HOST "${shared_env}")"
+    web_bind_host="${web_bind_host:-0.0.0.0}"
     cat <<EOF
 
   ${LUMEN_C_BOLD}Lumen 安装完成（Docker Compose 全栈）${LUMEN_C_RESET}
 
-  Web 地址 ......... http://127.0.0.1:3000/
-                     （默认仅本机监听；生产请通过 nginx/Caddy/Traefik 反代 HTTPS）
+  Web 监听 ......... ${web_bind_host}:3000
+  浏览器访问 ....... http://<服务器IP>:3000/（云安全组需放行 TCP 3000）
   API 健康检查 ..... http://127.0.0.1:8000/healthz
   管理员邮箱 ....... ${INSTALL_ADMIN_EMAIL:-（已存在或非交互模式未设置）}
   Provider 配置 .... 登录后 → 右上角「管理 → 上游 Provider」
