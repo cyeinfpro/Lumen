@@ -129,6 +129,33 @@ def test_request_event_response_defaults_are_isolated() -> None:
     assert second.upstream == {}
 
 
+def test_message_output_image_refs_extracts_deduped_generation_links() -> None:
+    refs = admin._message_output_image_refs(
+        {
+            "images": [
+                {"image_id": "img-1", "from_generation_id": "gen-1"},
+                {"id": "img-2", "generation_id": "gen-2"},
+                {"image_id": "img-1", "from_generation_id": "gen-1"},
+                "img-3",
+                {"image_id": ""},
+                {"not_image": "ignored"},
+            ]
+        }
+    )
+
+    assert refs == [
+        ("img-1", "gen-1"),
+        ("img-2", "gen-2"),
+        ("img-3", None),
+    ]
+
+
+def test_message_output_image_refs_ignores_non_image_content() -> None:
+    assert admin._message_output_image_refs(None) == []
+    assert admin._message_output_image_refs({"images": "img-1"}) == []
+    assert admin._message_output_image_refs({"text": "hello"}) == []
+
+
 def test_request_event_exposes_queue_observability_fields() -> None:
     created_at = admin.datetime(
         2026,

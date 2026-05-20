@@ -1056,6 +1056,40 @@ def _event_image_out(
     )
 
 
+def _message_output_image_refs(content: Any) -> list[tuple[str, str | None]]:
+    if not isinstance(content, dict):
+        return []
+    images = content.get("images")
+    if not isinstance(images, list):
+        return []
+    refs: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+    for item in images:
+        image_id: Any = None
+        from_generation_id: Any = None
+        if isinstance(item, dict):
+            image_id = item.get("image_id") or item.get("id")
+            from_generation_id = (
+                item.get("from_generation_id")
+                or item.get("generation_id")
+                or item.get("owner_generation_id")
+            )
+        elif isinstance(item, str):
+            image_id = item
+        if not isinstance(image_id, str) or not image_id:
+            continue
+        if image_id in seen:
+            continue
+        seen.add(image_id)
+        refs.append(
+            (
+                image_id,
+                from_generation_id if isinstance(from_generation_id, str) else None,
+            )
+        )
+    return refs
+
+
 def _request_event_model_stats(
     items: list[_RequestEventOut],
 ) -> list[_RequestEventModelStatOut]:
@@ -1267,12 +1301,46 @@ async def list_request_events(
     ]
     image_roles_by_event: dict[str, dict[str, set[Literal["input", "output"]]]] = {}
     image_ids: set[str] = set()
+    generation_ids_by_message: dict[str, list[str]] = {}
+
+    for row in event_rows:
+        task = row["task"]
+        if row["kind"] == "generation":
+            generation_ids_by_message.setdefault(task.message_id, []).append(task.id)
+        roles = image_roles_by_event.setdefault(task.id, {})
+        for image_id in list(getattr(task, "input_image_ids", None) or []):
+            roles.setdefault(image_id, set()).add("input")
+            image_ids.add(image_id)
+
+    message_output_refs: dict[str, list[tuple[str, str | None]]] = {}
+    message_ids = {
+        row["task"].message_id
+        for row in event_rows
+        if isinstance(getattr(row["task"], "message_id", None), str)
+    }
+    if message_ids:
+        message_rows = (
+            await db.execute(
+                select(Message.id, Message.content).where(Message.id.in_(message_ids))
+            )
+        ).all()
+        message_output_refs = {
+            message_id: _message_output_image_refs(content)
+            for message_id, content in message_rows
+        }
 
     for row in event_rows:
         task = row["task"]
         roles = image_roles_by_event.setdefault(task.id, {})
-        for image_id in list(getattr(task, "input_image_ids", None) or []):
-            roles.setdefault(image_id, set()).add("input")
+        refs = message_output_refs.get(task.message_id, [])
+        for image_id, from_generation_id in refs:
+            if row["kind"] == "generation":
+                if from_generation_id:
+                    if from_generation_id != task.id:
+                        continue
+                elif len(generation_ids_by_message.get(task.message_id, [])) > 1:
+                    continue
+            roles.setdefault(image_id, set()).add("output")
             image_ids.add(image_id)
 
     output_image_rows: list[Image] = []
