@@ -333,6 +333,7 @@ class CompletionOut(BaseOut):
     message_id: str
     user_api_credential_id: str | None = None
     upstream_supplier_id: str | None = None
+    upstream_request: dict[str, Any] | None = None
     model: str
     input_image_ids: list[str]
     text: str
