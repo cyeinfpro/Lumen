@@ -530,6 +530,7 @@ def test_container_url_migration_dry_run_and_apply_are_allowlisted(
                 "PUBLIC_BASE_URL=http://localhost:8000",
                 "CORS_ALLOW_ORIGINS=http://localhost:3000",
                 "NEXT_PUBLIC_API_BASE=/api",
+                "WORKER_METRICS_BIND=127.0.0.1",
             ]
         )
         + "\n",
@@ -562,6 +563,7 @@ def test_container_url_migration_dry_run_and_apply_are_allowlisted(
     # Browser/CORS fields are intentionally not touched by the migration helper.
     assert "PUBLIC_BASE_URL=http://localhost:8000" in after
     assert "CORS_ALLOW_ORIGINS=http://localhost:3000" in after
+    assert "WORKER_METRICS_BIND=127.0.0.1" in after
     assert list(tmp_path.glob(".env.bak.*"))
 
 
