@@ -104,6 +104,41 @@ def test_reasoning_effort_normalizes_minimal_to_none_for_upstream() -> None:
     )
 
 
+def test_completion_upstream_metadata_records_provider_for_request_events() -> None:
+    upstream_request = {"web_search": True, "service_tier": "priority"}
+    merged = completion._merge_completion_upstream_metadata(
+        upstream_request,
+        provider_event={
+            "provider": "pool-a",
+            "route": "responses",
+            "endpoint": "responses",
+            "source": "text",
+        },
+        fast_mode=False,
+    )
+
+    assert merged["provider"] == "pool-a"
+    assert merged["actual_provider"] == "pool-a"
+    assert merged["request_event_provider"] == "pool-a"
+    assert merged["upstream_route"] == "responses"
+    assert merged["actual_route"] == "responses"
+    assert merged["actual_endpoint"] == "responses"
+    assert merged["actual_source"] == "text"
+    assert "service_tier" not in merged
+
+
+def test_completion_upstream_metadata_preserves_priority_when_fast() -> None:
+    merged = completion._merge_completion_upstream_metadata(
+        {},
+        provider_event=None,
+        fast_mode=True,
+    )
+
+    assert merged["upstream_route"] == "responses"
+    assert merged["actual_endpoint"] == "responses"
+    assert merged["service_tier"] == "priority"
+
+
 def test_finalize_completion_text_turns_url_annotations_into_markdown_links() -> None:
     response = {
         "output": [

@@ -398,6 +398,83 @@ def _normalize_reasoning_effort_for_upstream(
     return effort
 
 
+def _completion_upstream_provider_event(event: dict[str, Any]) -> dict[str, str]:
+    if event.get("type") != "provider_used":
+        return {}
+    provider = event.get("provider")
+    route = event.get("route")
+    endpoint = event.get("endpoint")
+    source = event.get("source")
+    out: dict[str, str] = {}
+    if isinstance(provider, str) and provider.strip():
+        out["provider"] = provider.strip()
+    if isinstance(route, str) and route.strip():
+        out["route"] = route.strip()
+    if isinstance(endpoint, str) and endpoint.strip():
+        out["endpoint"] = endpoint.strip()
+    if isinstance(source, str) and source.strip():
+        out["source"] = source.strip()
+    return out
+
+
+def _merge_completion_upstream_metadata(
+    upstream_request: dict[str, Any],
+    *,
+    provider_event: dict[str, str] | None,
+    fast_mode: bool,
+) -> dict[str, Any]:
+    out = dict(upstream_request)
+    provider = (provider_event or {}).get("provider")
+    route = (provider_event or {}).get("route") or "responses"
+    endpoint = (provider_event or {}).get("endpoint") or "responses"
+    source = (provider_event or {}).get("source") or "text"
+
+    out["upstream_route"] = route
+    out["actual_route"] = route
+    out["actual_endpoint"] = endpoint
+    out["actual_source"] = source
+    if provider:
+        out["provider"] = provider
+        out["actual_provider"] = provider
+        out["request_event_provider"] = provider
+    if fast_mode:
+        out["service_tier"] = "priority"
+    else:
+        out.pop("service_tier", None)
+    return out
+
+
+async def _record_completion_upstream_metadata(
+    *,
+    task_id: str,
+    attempt_epoch: int,
+    provider_event: dict[str, str],
+    fast_mode: bool,
+) -> None:
+    if not provider_event:
+        return
+    try:
+        async with SessionLocal() as session:
+            comp = await session.get(Completion, task_id)
+            if comp is None or comp.attempt != attempt_epoch:
+                return
+            if comp.status not in _RUNNING_COMPLETION_STATUSES:
+                return
+            comp.upstream_request = _merge_completion_upstream_metadata(
+                dict(comp.upstream_request or {}),
+                provider_event=provider_event,
+                fast_mode=fast_mode,
+            )
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "completion upstream metadata write failed task=%s attempt=%s",
+            task_id,
+            attempt_epoch,
+            exc_info=True,
+        )
+
+
 async def _chat_tools_from_content(
     content: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -3025,6 +3102,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     cache_creation_1h_tokens = 0
     reasoning_tokens = 0
     image_output_tokens = 0
+    upstream_provider_event: dict[str, str] | None = None
 
     # 观测：整个 upstream 流式阶段一层 span；手动 enter/exit 以免嵌套大块改缩进
     _stream_span_cm = None
@@ -3213,6 +3291,17 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             if lease_lost.is_set():
                 raise _LeaseLost("lease lost during stream")
             ev_type = ev.get("type", "")
+            if ev_type == "provider_used":
+                provider_event = _completion_upstream_provider_event(ev)
+                if provider_event:
+                    upstream_provider_event = provider_event
+                    await _record_completion_upstream_metadata(
+                        task_id=task_id,
+                        attempt_epoch=attempt_epoch,
+                        provider_event=provider_event,
+                        fast_mode=fast_mode,
+                    )
+                continue
             tool_call = tool_tracker.update(ev)
             if tool_call is not None:
                 await _publish_completion_tool_progress(
@@ -3461,6 +3550,17 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 if lease_lost.is_set():
                     raise _LeaseLost("lease lost during tool-limit fallback")
                 ev_type = ev.get("type", "")
+                if ev_type == "provider_used":
+                    provider_event = _completion_upstream_provider_event(ev)
+                    if provider_event:
+                        upstream_provider_event = provider_event
+                        await _record_completion_upstream_metadata(
+                            task_id=task_id,
+                            attempt_epoch=attempt_epoch,
+                            provider_event=provider_event,
+                            fast_mode=fast_mode,
+                        )
+                    continue
                 thinking_delta = _extract_reasoning_delta(ev)
                 if thinking_delta:
                     if not accumulated_thinking.endswith(thinking_delta):
@@ -3767,10 +3867,11 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             comp_for_billing = await session.get(Completion, task_id)
             if comp_for_billing is not None:
                 upstream_request = dict(comp_for_billing.upstream_request or {})
-                if fast_mode:
-                    upstream_request["service_tier"] = "priority"
-                else:
-                    upstream_request.pop("service_tier", None)
+                upstream_request = _merge_completion_upstream_metadata(
+                    upstream_request,
+                    provider_event=upstream_provider_event,
+                    fast_mode=fast_mode,
+                )
                 comp_for_billing.upstream_request = upstream_request or None
                 comp_for_billing.tokens_in = tokens_in
                 comp_for_billing.tokens_out = tokens_out

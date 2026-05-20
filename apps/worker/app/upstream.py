@@ -802,6 +802,7 @@ async def close_client() -> None:
 
 @dataclass(frozen=True)
 class _ResolvedRuntime:
+    name: str | None
     base_url: str
     api_key: str
     proxy: ProviderProxyDefinition | None = None
@@ -815,7 +816,7 @@ async def _resolve_runtime() -> _ResolvedRuntime:
     """读 provider pool 返回最优 provider 的 (base_url, api_key)。"""
     pool = await provider_pool.get_pool()
     p = await pool.select_one()
-    return _ResolvedRuntime(p.base_url, p.api_key, p.proxy)
+    return _ResolvedRuntime(p.name, p.base_url, p.api_key, p.proxy)
 
 
 def _provider_proxy(provider: Any) -> ProviderProxyDefinition | None:
@@ -826,13 +827,21 @@ def _provider_proxy(provider: Any) -> ProviderProxyDefinition | None:
 def _runtime_parts(
     runtime: Any,
 ) -> tuple[str, str, ProviderProxyDefinition | None]:
-    base_url, api_key = runtime
+    base_url = getattr(runtime, "base_url", None)
+    api_key = getattr(runtime, "api_key", None)
+    if base_url is None or api_key is None:
+        base_url, api_key = runtime
     proxy = getattr(runtime, "proxy", None)
     return (
         str(base_url),
         str(api_key),
         proxy if isinstance(proxy, ProviderProxyDefinition) else None,
     )
+
+
+def _runtime_provider_name(runtime: Any) -> str | None:
+    name = getattr(runtime, "name", None)
+    return name.strip() if isinstance(name, str) and name.strip() else None
 
 
 def _legacy_route_to_channel_engine(route: str | None) -> tuple[str, str]:
@@ -7369,6 +7378,15 @@ async def _iter_sse(
     assert body.get("model"), "model must be set"
     runtime = runtime_override or await _resolve_runtime()
     base, api_key, proxy = _runtime_parts(runtime)
+    provider_name = _runtime_provider_name(runtime)
+    if provider_name:
+        yield {
+            "type": "provider_used",
+            "provider": provider_name,
+            "route": "responses",
+            "endpoint": "responses",
+            "source": "text",
+        }
     proxy_url = await resolve_provider_proxy_url(proxy)
     async for event in _iter_sse_with_runtime(
         base=base,

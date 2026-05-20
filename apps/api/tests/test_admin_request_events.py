@@ -467,3 +467,21 @@ def test_generation_model_label_uses_fast_responses_model() -> None:
 
     assert admin._generation_model_label(fast_responses) == "5.4 mini"
     assert admin._generation_model_label(queued_fast_race) == "竞速中: 5.4 mini / image2"
+
+
+def test_completion_upstream_request_exposes_provider_and_responses_route() -> None:
+    upstream_request = {
+        "request_event_provider": "pool-a",
+        "upstream_route": "responses",
+        "actual_endpoint": "responses",
+        "actual_source": "text",
+    }
+
+    assert admin._request_provider(upstream_request) == "pool-a"
+    assert admin._request_route(upstream_request) == "responses"
+    assert admin._safe_upstream_details(upstream_request) == {
+        "actual_endpoint": "responses",
+        "actual_source": "text",
+        "request_event_provider": "pool-a",
+        "upstream_route": "responses",
+    }

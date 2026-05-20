@@ -358,6 +358,7 @@ export interface BackendCompletion {
   source?: string | null;
   user_api_credential_id?: string | null;
   upstream_supplier_id?: string | null;
+  upstream_request?: Record<string, unknown> | null;
   model: string;
   input_image_ids: string[];
   text: string;
