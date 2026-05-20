@@ -779,10 +779,14 @@ if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
         CURRENT_WEB_BIND_HOST="${LUMEN_WEB_BIND_HOST}"
         CONFIG_CHANGED=1
     fi
-elif [ -z "${CURRENT_WEB_BIND_HOST}" ]; then
-    log_info "[check] WEB_BIND_HOST 未设置，使用安全默认 127.0.0.1。若需直暴 3000，请在 .env 明确设为 0.0.0.0。"
-    lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "127.0.0.1"
-    CURRENT_WEB_BIND_HOST="127.0.0.1"
+elif [ -z "${CURRENT_WEB_BIND_HOST}" ] || [ "${CURRENT_WEB_BIND_HOST}" = "127.0.0.1" ]; then
+    if [ "${CURRENT_WEB_BIND_HOST}" = "127.0.0.1" ]; then
+        log_warn "[check] WEB_BIND_HOST 是旧默认 127.0.0.1，改为 0.0.0.0；如需反代-only，请设置 LUMEN_WEB_BIND_HOST=127.0.0.1。"
+    else
+        log_info "[check] WEB_BIND_HOST 未设置，使用默认 0.0.0.0，Web 将监听所有网卡 3000。"
+    fi
+    lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"
+    CURRENT_WEB_BIND_HOST="0.0.0.0"
     CONFIG_CHANGED=1
 fi
 

@@ -134,16 +134,17 @@ def test_update_preflight_matches_byok_dev_fallback_policy() -> None:
     assert "dev|development|local|test)" in text
 
 
-def test_web_port_defaults_to_loopback_bind_and_install_preserves_explicit_override() -> (
+def test_web_port_defaults_to_public_bind_and_install_preserves_explicit_override() -> (
     None
 ):
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
-    assert '"${WEB_BIND_HOST:-127.0.0.1}:3000:3000"' in compose
-    assert "WEB_BIND_HOST=127.0.0.1" in env_example
+    assert '"${WEB_BIND_HOST:-0.0.0.0}:3000:3000"' in compose
+    assert "WEB_BIND_HOST=0.0.0.0" in env_example
     assert "LUMEN_WEB_BIND_HOST" in install
-    assert 'env_file_set "${shared_env}" WEB_BIND_HOST "127.0.0.1"' in install
+    assert 'env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"' in install
+    assert "WEB_BIND_HOST 是旧默认 127.0.0.1" in install
 
 
 def test_workflow_actions_are_sha_pinned() -> None:
@@ -407,10 +408,11 @@ def test_update_preserves_web_bind_and_proxy_env() -> None:
     assert 'emit_info check reason "missing_shared_env"' in update
     assert 'emit_info check reason "target_tag_empty"' in update
     assert (
-        'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "127.0.0.1"'
+        'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"'
         in update
     )
-    assert "若需直暴 3000，请在 .env 明确设为 0.0.0.0" in update
+    assert "Web 将监听所有网卡 3000" in update
+    assert "WEB_BIND_HOST 是旧默认 127.0.0.1" in update
     assert (
         'emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"' in update
     )
