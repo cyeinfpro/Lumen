@@ -78,6 +78,7 @@ RUN apt-get update \
         ca-certificates \
         openssh-client \
         sshpass \
+        libvips42 \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -92,6 +93,15 @@ RUN groupadd -g "${LUMEN_APP_GID}" lumen \
 WORKDIR /app
 
 COPY --from=builder --chown=lumen:lumen /app /app
+
+RUN python - <<'PY'
+import pyvips
+
+version = (int(pyvips.major), int(pyvips.minor))
+if version < (8, 14):
+    raise SystemExit(f"libvips >= 8.14 is required, got {pyvips.major}.{pyvips.minor}")
+print(f"libvips runtime OK: {pyvips.major}.{pyvips.minor}.{pyvips.micro}")
+PY
 
 USER lumen
 

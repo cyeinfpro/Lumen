@@ -20,7 +20,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.drop_constraint("users_email_key", "users", type_="unique")
     kwargs = {
         "unique": True,
         "postgresql_where": sa.text("deleted_at IS NULL"),
@@ -35,7 +34,9 @@ def upgrade() -> None:
                 postgresql_concurrently=True,
                 **kwargs,
             )
+        op.drop_constraint("users_email_key", "users", type_="unique")
     else:
+        op.drop_constraint("users_email_key", "users", type_="unique")
         op.create_index("uq_users_email_active", "users", ["email"], **kwargs)
 
 
@@ -54,6 +55,7 @@ def downgrade() -> None:
             "cannot downgrade users email uniqueness while duplicate emails exist"
         )
     if op.get_bind().dialect.name == "postgresql":
+        op.create_unique_constraint("users_email_key", "users", ["email"])
         with op.get_context().autocommit_block():
             op.drop_index(
                 "uq_users_email_active",
@@ -61,5 +63,5 @@ def downgrade() -> None:
                 postgresql_concurrently=True,
             )
     else:
+        op.create_unique_constraint("users_email_key", "users", ["email"])
         op.drop_index("uq_users_email_active", table_name="users")
-    op.create_unique_constraint("users_email_key", "users", ["email"])

@@ -142,6 +142,9 @@ services:
       # 触发文件由 lumen-api 写到挂载的 backup 目录，宿主机 PID 1 监听并启动
       # lumen-update-runner.service 真正执行 update.sh。
       LUMEN_UPDATE_VIA_TRIGGER: "1"
+      # Manual backup follows the same host-side trigger model: the container
+      # writes .backup.trigger, PID 1 runs lumen-backup.service with Docker CLI.
+      LUMEN_BACKUP_VIA_TRIGGER: "1"
     volumes:
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
       - ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup

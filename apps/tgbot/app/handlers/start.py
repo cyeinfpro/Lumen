@@ -64,7 +64,7 @@ async def cmd_start(message: Message, command: CommandObject, api: LumenApi) -> 
         await message.answer(
             "👋 你好！这里是 Lumen AI 绘图。\n\n"
             "首次使用需要先绑定账号：\n"
-            "1. 登录 Lumen 网站，打开「设置 → Telegram」生成绑定码\n"
+            "1. 登录 Lumen 网站，打开 /settings/telegram 生成绑定码\n"
             "2. 在这里发送 /start <code> 完成绑定"
         )
 

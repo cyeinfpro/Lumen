@@ -1,7 +1,7 @@
 "use client";
 
 // DESIGN 附录 B：前端 SSE hook
-// - 一个组件实例一个 EventSource；channels 变化时 close+open
+// - 同一 channels key 复用一个模块级 EventSource；订阅者 ref-count 归零后关闭
 // - 带 withCredentials（browser 自动带 cookie；服务端 CORS 需 Access-Control-Allow-Credentials: true）
 // - 断线自动重连（指数退避 1s→2s→4s，上限 30s）。浏览器原生 EventSource 会在重连时带 Last-Event-ID
 // - 页面 visibilitychange：hidden 延迟 close，visible → open（节流）
@@ -39,16 +39,23 @@ export function registerSSEHandler(type: string, handler: SSEHandler): () => voi
     globalSSEHandlers.set(type, set);
   }
   set.add(handler);
+  for (const connection of sharedSSEConnections.values()) {
+    connection.ensureNamedListener(type);
+  }
   return () => {
     const cur = globalSSEHandlers.get(type);
     if (!cur) return;
     cur.delete(handler);
     if (cur.size === 0) globalSSEHandlers.delete(type);
+    for (const connection of sharedSSEConnections.values()) {
+      connection.syncNamedListeners();
+    }
   };
 }
 
 // 未知事件类型 console.warn 去重缓存：每种 type 只警告一次，避免日志风暴。
 const warnedUnknownTypes: Set<string> = new Set();
+const sharedSSEConnections: Map<string, SharedSSEConnection> = new Map();
 
 export type SSEStatus = "connecting" | "open" | "closed" | "error";
 
@@ -80,6 +87,350 @@ function initialStatus(): SSEStatus {
   if (typeof document === "undefined") return "closed";
   if (document.visibilityState === "hidden") return "closed";
   return "connecting";
+}
+
+interface SSESubscriber {
+  handlersRef: { current: SSEHandlers };
+  onOpenRef: { current: ((ev: Event) => void) | undefined };
+  onErrorRef: { current: ((ev: Event) => void) | undefined };
+  hiddenCloseDelayRef: { current: number };
+  maxRetryCountRef: { current: number };
+  eventNames: Set<string>;
+  setStatus: (status: SSEStatus) => void;
+}
+
+function computeJitteredDelay(baseDelay: number): number {
+  let ratio: number;
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const arr = new Uint8Array(1);
+    crypto.getRandomValues(arr);
+    ratio = ((arr[0] % 40) + 80) / 100; // 0.80-1.19
+  } else {
+    ratio = 0.8 + Math.random() * 0.4;
+  }
+  return Math.round(baseDelay * ratio);
+}
+
+class SharedSSEConnection {
+  private es: EventSource | null = null;
+  private retryAttempt = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private hiddenCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  private hiddenAt: number | null = null;
+  private namedListeners = new Map<string, (ev: MessageEvent) => void>();
+  private subscribers = new Set<SSESubscriber>();
+  private disposed = false;
+  private connectionSeq = 0;
+  private status: SSEStatus = "connecting";
+  private readonly channelList: string[];
+  private readonly onVisibility = () => {
+    if (document.visibilityState === "hidden") {
+      this.hiddenAt = Date.now();
+      this.clearHiddenCloseTimer();
+      this.hiddenCloseTimer = setTimeout(() => {
+        if (this.disposed || document.visibilityState !== "hidden") return;
+        this.closeEventSource();
+        this.notifyStatus("closed");
+      }, this.hiddenCloseDelayMs());
+      return;
+    }
+
+    const wasHiddenForMs =
+      this.hiddenAt == null ? 0 : Date.now() - this.hiddenAt;
+    this.hiddenAt = null;
+    this.clearHiddenCloseTimer();
+    if (
+      wasHiddenForMs >= this.hiddenCloseDelayMs() ||
+      this.retryAttempt >= this.maxRetryCount()
+    ) {
+      this.retryAttempt = 0;
+      this.open();
+    } else if (!this.es || this.es.readyState === EventSource.CLOSED) {
+      this.retryAttempt = 0;
+      this.open();
+    } else if (this.es.readyState === EventSource.OPEN) {
+      this.notifyStatus("open");
+    } else {
+      this.notifyStatus("connecting");
+    }
+  };
+
+  constructor(private readonly channelKey: string) {
+    this.channelList = channelKey.split(",").filter(Boolean);
+  }
+
+  subscribe(subscriber: SSESubscriber): () => void {
+    this.subscribers.add(subscriber);
+    subscriber.setStatus(this.status);
+    this.syncNamedListeners();
+
+    if (this.subscribers.size === 1) {
+      this.disposed = false;
+      document.addEventListener("visibilitychange", this.onVisibility);
+      if (document.visibilityState === "visible") {
+        this.open();
+      } else {
+        setTimeout(() => {
+          if (!this.disposed) this.notifyStatus("closed");
+        }, 0);
+      }
+    } else if (this.es) {
+      this.syncNamedListeners();
+    }
+
+    return () => {
+      this.subscribers.delete(subscriber);
+      if (this.subscribers.size > 0) {
+        this.syncNamedListeners();
+        return;
+      }
+      this.dispose();
+      sharedSSEConnections.delete(this.channelKey);
+    };
+  }
+
+  ensureNamedListener(name: string): void {
+    if (!this.es || this.namedListeners.has(name)) return;
+    if (name === "message" || name === "open" || name === "error") return;
+    const listener = (ev: MessageEvent) => {
+      const seq = this.connectionSeq;
+      if (this.disposed || seq !== this.connectionSeq) return;
+      this.dispatchNamed(ev);
+    };
+    this.namedListeners.set(name, listener);
+    this.es.addEventListener(name, listener);
+  }
+
+  syncNamedListeners(): void {
+    const eventNames = new Set<string>();
+    for (const subscriber of this.subscribers) {
+      for (const name of subscriber.eventNames) eventNames.add(name);
+    }
+    for (const name of globalSSEHandlers.keys()) eventNames.add(name);
+    for (const [name, listener] of Array.from(this.namedListeners)) {
+      if (eventNames.has(name)) continue;
+      if (this.es) {
+        try {
+          this.es.removeEventListener(name, listener);
+        } catch {
+          /* ignore */
+        }
+      }
+      this.namedListeners.delete(name);
+    }
+    for (const name of eventNames) this.ensureNamedListener(name);
+  }
+
+  private notifyStatus(status: SSEStatus): void {
+    this.status = status;
+    for (const subscriber of Array.from(this.subscribers)) {
+      subscriber.setStatus(status);
+    }
+  }
+
+  private clearRetryTimer(): void {
+    if (!this.retryTimer) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+
+  private clearHiddenCloseTimer(): void {
+    if (!this.hiddenCloseTimer) return;
+    clearTimeout(this.hiddenCloseTimer);
+    this.hiddenCloseTimer = null;
+  }
+
+  private hiddenCloseDelayMs(): number {
+    let delay = DEFAULT_HIDDEN_CLOSE_DELAY_MS;
+    for (const subscriber of this.subscribers) {
+      delay = Math.min(delay, subscriber.hiddenCloseDelayRef.current);
+    }
+    return delay;
+  }
+
+  private maxRetryCount(): number {
+    let count = 0;
+    for (const subscriber of this.subscribers) {
+      count = Math.max(count, subscriber.maxRetryCountRef.current);
+    }
+    return count || defaultMaxRetryCount();
+  }
+
+  private closeEventSource(): void {
+    this.connectionSeq += 1;
+    this.clearRetryTimer();
+    this.clearHiddenCloseTimer();
+    if (this.es) {
+      for (const [name, listener] of this.namedListeners) {
+        try {
+          this.es.removeEventListener(name, listener);
+        } catch {
+          /* ignore */
+        }
+      }
+      this.es.onopen = null;
+      this.es.onmessage = null;
+      this.es.onerror = null;
+      try {
+        if (this.es.readyState !== EventSource.CLOSED) {
+          this.es.close();
+        }
+      } catch {
+        /* ignore */
+      }
+      this.es = null;
+    }
+    this.namedListeners.clear();
+  }
+
+  private open(): void {
+    if (this.disposed || this.subscribers.size === 0) return;
+    this.closeEventSource();
+    const seq = this.connectionSeq;
+    this.notifyStatus("connecting");
+    try {
+      this.es = new EventSource(sseUrl(this.channelList), {
+        withCredentials: true,
+      });
+    } catch (err) {
+      logError(err, { scope: "useSSE", extra: { phase: "open" } });
+      this.notifyStatus("error");
+      this.scheduleRetry();
+      return;
+    }
+
+    this.es.onopen = (ev) => {
+      if (this.disposed || seq !== this.connectionSeq) return;
+      this.retryAttempt = 0;
+      this.notifyStatus("open");
+      for (const subscriber of Array.from(this.subscribers)) {
+        try {
+          subscriber.onOpenRef.current?.(ev);
+        } catch (cbErr) {
+          logError(cbErr, {
+            scope: "useSSE",
+            extra: { phase: "onOpen-callback" },
+          });
+        }
+      }
+    };
+
+    this.es.onmessage = (ev: MessageEvent) => {
+      if (this.disposed || seq !== this.connectionSeq) return;
+      this.dispatchNamed(ev);
+    };
+
+    this.es.onerror = (ev) => {
+      if (this.disposed || seq !== this.connectionSeq) return;
+      this.notifyStatus("error");
+      for (const subscriber of Array.from(this.subscribers)) {
+        try {
+          subscriber.onErrorRef.current?.(ev);
+        } catch (cbErr) {
+          logError(cbErr, {
+            scope: "useSSE",
+            extra: { phase: "onError-callback" },
+          });
+        }
+      }
+      this.closeEventSource();
+      this.scheduleRetry();
+    };
+
+    this.syncNamedListeners();
+  }
+
+  private scheduleRetry(): void {
+    if (this.disposed || this.subscribers.size === 0) return;
+    this.clearRetryTimer();
+    if (this.retryAttempt >= this.maxRetryCount()) {
+      this.notifyStatus("error");
+      return;
+    }
+    const baseDelay = Math.min(30_000, 1000 * 2 ** this.retryAttempt);
+    const delay = Math.min(30_000, computeJitteredDelay(baseDelay));
+    this.retryAttempt += 1;
+    this.retryTimer = setTimeout(() => {
+      if (document.visibilityState === "visible") {
+        this.open();
+      }
+    }, delay);
+  }
+
+  private dispatchNamed(ev: MessageEvent): void {
+    const name = ev.type;
+    const globalSet = globalSSEHandlers.get(name);
+    let delivered = false;
+
+    let parsed: unknown = ev.data;
+    if (typeof ev.data === "string") {
+      try {
+        parsed = JSON.parse(ev.data);
+      } catch {
+        parsed = ev.data;
+      }
+    }
+
+    for (const subscriber of Array.from(this.subscribers)) {
+      if (!subscriber.eventNames.has(name)) continue;
+      const localFn = subscriber.handlersRef.current[name];
+      if (typeof localFn !== "function") continue;
+      delivered = true;
+      try {
+        localFn(parsed, ev.lastEventId);
+      } catch (err) {
+        logError(err, { scope: "useSSE", extra: { event: name } });
+      }
+    }
+
+    if (globalSet && globalSet.size > 0) {
+      delivered = true;
+      for (const fn of Array.from(globalSet)) {
+        try {
+          fn(parsed, ev.lastEventId);
+        } catch (err) {
+          logError(err, {
+            scope: "useSSE",
+            extra: { event: name, source: "global" },
+          });
+        }
+      }
+    }
+
+    if (delivered) return;
+    if (
+      name &&
+      name !== "message" &&
+      name !== "open" &&
+      name !== "error" &&
+      !warnedUnknownTypes.has(name)
+    ) {
+      warnedUnknownTypes.add(name);
+      try {
+        console.warn(
+          `[useSSE] unknown event type '${name}' (no handler). Future events of this type will be silently ignored.`,
+        );
+      } catch {
+        /* console 不可用时忽略 */
+      }
+    }
+  }
+
+  private dispose(): void {
+    this.disposed = true;
+    document.removeEventListener("visibilitychange", this.onVisibility);
+    this.closeEventSource();
+    this.notifyStatus("closed");
+  }
+}
+
+function acquireSharedSSEConnection(channelKey: string): SharedSSEConnection {
+  let connection = sharedSSEConnections.get(channelKey);
+  if (!connection) {
+    connection = new SharedSSEConnection(channelKey);
+    sharedSSEConnections.set(channelKey, connection);
+  }
+  return connection;
 }
 
 export function useSSE(
@@ -125,256 +476,16 @@ export function useSSE(
       return () => clearTimeout(t);
     }
 
-    let es: EventSource | null = null;
-    let retryAttempt = 0;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let hiddenCloseTimer: ReturnType<typeof setTimeout> | null = null;
-    let hiddenAt: number | null = null;
-    const namedListeners = new Map<string, (ev: MessageEvent) => void>();
-    let disposed = false;
-
-    const clearRetryTimer = () => {
-      if (retryTimer) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
-      }
+    const subscriber: SSESubscriber = {
+      handlersRef,
+      onOpenRef,
+      onErrorRef,
+      hiddenCloseDelayRef,
+      maxRetryCountRef,
+      eventNames: new Set(handlerEventKey.split(",").filter(Boolean)),
+      setStatus,
     };
-
-    const clearHiddenCloseTimer = () => {
-      if (hiddenCloseTimer) {
-        clearTimeout(hiddenCloseTimer);
-        hiddenCloseTimer = null;
-      }
-    };
-
-    const close = () => {
-      clearRetryTimer();
-      clearHiddenCloseTimer();
-      if (es) {
-        namedListeners.forEach((listener, name) => {
-          try {
-            es?.removeEventListener(name, listener);
-          } catch {
-            /* ignore */
-          }
-        });
-        es.onopen = null;
-        es.onmessage = null;
-        es.onerror = null;
-        try {
-          if (es.readyState !== EventSource.CLOSED) {
-            es.close();
-          }
-        } catch {
-          /* ignore */
-        }
-        es = null;
-      }
-      // 无条件清空：即便 es 为 null 也要清，防止 open() 重复 addEventListener。
-      namedListeners.clear();
-    };
-
-    const dispatchNamed = (ev: MessageEvent) => {
-      const name = ev.type;
-      const localFn = handlersRef.current[name];
-      const globalSet = globalSSEHandlers.get(name);
-      const hasLocal = typeof localFn === "function";
-      const hasGlobal = !!globalSet && globalSet.size > 0;
-
-      // 未知事件类型：上游可能下发 useSSE 调用方未注册的事件
-      // （例如未来的 compaction_summary / reasoning_summary）。
-      // 决策：每种 type 只 console.warn 一次，去重；不抛错、不断连，保证连接活着。
-      if (!hasLocal && !hasGlobal) {
-        if (
-          name &&
-          name !== "message" &&
-          name !== "open" &&
-          name !== "error" &&
-          !warnedUnknownTypes.has(name)
-        ) {
-          warnedUnknownTypes.add(name);
-          try {
-            console.warn(
-              `[useSSE] unknown event type '${name}' (no handler). Future events of this type will be silently ignored.`,
-            );
-          } catch {
-            /* console 不可用时忽略 */
-          }
-        }
-        return;
-      }
-
-      let parsed: unknown = ev.data;
-      if (typeof ev.data === "string") {
-        try {
-          parsed = JSON.parse(ev.data);
-        } catch {
-          parsed = ev.data;
-        }
-      }
-      if (hasLocal) {
-        try {
-          localFn(parsed, ev.lastEventId);
-        } catch (err) {
-          // handler 内部抛异常不应影响 SSE 连接
-          logError(err, { scope: "useSSE", extra: { event: name } });
-        }
-      }
-      if (hasGlobal) {
-        // 单个全局 handler 抛错不影响其他 handler，也不断连。
-        for (const fn of Array.from(globalSet!)) {
-          try {
-            fn(parsed, ev.lastEventId);
-          } catch (err) {
-            logError(err, {
-              scope: "useSSE",
-              extra: { event: name, source: "global" },
-            });
-          }
-        }
-      }
-    };
-
-    const open = () => {
-      if (disposed) return;
-      close();
-      setStatus("connecting");
-      try {
-        const channelList = channelKey.split(",").filter(Boolean);
-        es = new EventSource(sseUrl(channelList), { withCredentials: true });
-      } catch (err) {
-        logError(err, { scope: "useSSE", extra: { phase: "open" } });
-        setStatus("error");
-        scheduleRetry();
-        return;
-      }
-
-      es.onopen = (ev) => {
-        retryAttempt = 0;
-        setStatus("open");
-        try {
-          onOpenRef.current?.(ev);
-        } catch (cbErr) {
-          logError(cbErr, { scope: "useSSE", extra: { phase: "onOpen-callback" } });
-        }
-      };
-
-      // 通配：未命名的 message 事件（name === "message"）也尝试 dispatch（如果 handlers 里有 "message"）。
-      es.onmessage = (ev: MessageEvent) => {
-        dispatchNamed(ev);
-      };
-
-      es.onerror = (ev) => {
-        setStatus("error");
-        try {
-          onErrorRef.current?.(ev);
-        } catch (cbErr) {
-          logError(cbErr, { scope: "useSSE", extra: { phase: "onError-callback" } });
-        }
-        // 浏览器内置重连在某些情况下会自动恢复；但为确保指数退避受控，这里主动 close + schedule。
-        close();
-        scheduleRetry();
-      };
-
-      // 注册命名事件（对齐 DESIGN §5.7）
-      const eventNames = new Set(handlerEventKey.split(",").filter(Boolean));
-      // 把全局注册表里的 type 也一并 addEventListener，这样未来上游下发新事件时
-      // 调用方只要 registerSSEHandler 就能接收，不需要修改 useSSE 调用点。
-      for (const t of globalSSEHandlers.keys()) {
-        eventNames.add(t);
-      }
-      for (const name of eventNames) {
-        if (name === "message" || name === "open" || name === "error") continue;
-        const listener = (ev: MessageEvent) => dispatchNamed(ev);
-        namedListeners.set(name, listener);
-        es.addEventListener(name, listener);
-      }
-    };
-
-    // 优先使用 crypto.getRandomValues 生成 0.8-1.2 的 jitter ratio，
-      // 避免 Math.random() 在同步控制流中造成弱随机或被误用于渲染路径。
-    const computeJitteredDelay = (baseDelay: number): number => {
-      let ratio: number;
-      if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
-        const arr = new Uint8Array(1);
-        crypto.getRandomValues(arr);
-        ratio = ((arr[0] % 40) + 80) / 100; // 0.80-1.19
-      } else {
-        ratio = 0.8 + Math.random() * 0.4;
-      }
-      return Math.round(baseDelay * ratio);
-    };
-
-    const scheduleRetry = () => {
-      if (disposed) return;
-      clearRetryTimer();
-      // 超过最大重试次数后停止，避免离线时无限重试耗尽电池。
-      // 默认桌面 20 次、移动/触屏 5 次；调用方可通过 maxRetryCount 覆盖。
-      if (retryAttempt >= maxRetryCountRef.current) {
-        setStatus("error");
-        return;
-      }
-      // 1s → 2s → 4s → 8s → 16s → 30s 封顶
-      const baseDelay = Math.min(30_000, 1000 * 2 ** retryAttempt);
-      const delay = Math.min(30_000, computeJitteredDelay(baseDelay));
-      retryAttempt += 1;
-      retryTimer = setTimeout(() => {
-        if (document.visibilityState === "visible") {
-          open();
-        }
-        // 若仍 hidden，visibilitychange 会再次触发 open
-      }, delay);
-    };
-
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        hiddenAt = Date.now();
-        clearHiddenCloseTimer();
-        hiddenCloseTimer = setTimeout(() => {
-          if (disposed || document.visibilityState !== "hidden") return;
-          close();
-          setStatus("closed");
-        }, hiddenCloseDelayRef.current);
-      } else {
-        const wasHiddenForMs = hiddenAt == null ? 0 : Date.now() - hiddenAt;
-        hiddenAt = null;
-        clearHiddenCloseTimer();
-        // BUG-009: 页面恢复可见时重置重试计数，重新连接。
-        // 即使之前因超过 maxRetryCount 停止了，visibilitychange 也可恢复。
-        if (
-          wasHiddenForMs >= hiddenCloseDelayRef.current ||
-          retryAttempt >= maxRetryCountRef.current
-        ) {
-          retryAttempt = 0;
-          open();
-        } else if (!es || es.readyState === EventSource.CLOSED) {
-          retryAttempt = 0;
-          open();
-        } else if (es.readyState === EventSource.OPEN) {
-          setStatus("open");
-        } else {
-          setStatus("connecting");
-        }
-      }
-    };
-
-    document.addEventListener("visibilitychange", onVisibility);
-
-    if (document.visibilityState === "visible") {
-      open();
-    } else {
-      // 异步置 closed，避免在 effect 同步阶段 setState 触发级联。
-      setTimeout(() => {
-        if (!disposed) setStatus("closed");
-      }, 0);
-    }
-
-    return () => {
-      disposed = true;
-      document.removeEventListener("visibilitychange", onVisibility);
-      clearHiddenCloseTimer();
-      close();
-    };
+    return acquireSharedSSEConnection(channelKey).subscribe(subscriber);
   }, [channelKey, handlerEventKey]);
 
   return { status };

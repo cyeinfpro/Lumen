@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from errno import EADDRINUSE
+from socketserver import ThreadingMixIn
 from typing import Any
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
-from prometheus_client import REGISTRY, Counter, Gauge, Histogram, start_http_server
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, make_wsgi_app
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +218,12 @@ billing_idempotency_replay_total = _metric(
     "Billing ledger idempotency replays.",
 )
 
+completion_cancel_check_errors_total = _metric(
+    Counter,
+    "lumen_completion_cancel_check_errors_total",
+    "Redis errors while checking chat completion cancellation.",
+)
+
 # ---- 账号级 image 调度指标（多 provider = 多 OAuth 账号 → 每号一组时序） ----
 # 当前 image 路由的状态——每个号每个 state 一个时序；同一时刻一个号只有一个
 # state 是 1，其他 state 是 0。state 取自 ProviderHealth：closed / cooldown /
@@ -384,13 +393,39 @@ _metrics_httpd: Any | None = None
 _metrics_thread: Any | None = None
 
 
+class _ThreadingMetricsWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+
+class _SilentMetricsHandler(WSGIRequestHandler):
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
+
+
+def _start_metrics_wsgi_server(port: int) -> tuple[Any, threading.Thread]:
+    httpd = make_server(
+        "0.0.0.0",
+        port,
+        make_wsgi_app(REGISTRY),
+        _ThreadingMetricsWSGIServer,
+        handler_class=_SilentMetricsHandler,
+    )
+    try:
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+    except Exception:
+        httpd.server_close()
+        raise
+    return httpd, thread
+
+
 def start_metrics_server(port: int) -> None:
     """在指定端口起一个独立的 prometheus_client HTTP server。幂等。"""
     global _metrics_httpd, _metrics_server_started, _metrics_thread
     if _metrics_server_started:
         return
     try:
-        _metrics_httpd, _metrics_thread = start_http_server(port)
+        _metrics_httpd, _metrics_thread = _start_metrics_wsgi_server(port)
         _metrics_server_started = True
         logger.info("worker metrics server started on :%d", port)
     except OSError as exc:
@@ -460,6 +495,7 @@ __all__ = [
     "billing_pricing_source_total",
     "billing_rate_limit_block_total",
     "billing_idempotency_replay_total",
+    "completion_cancel_check_errors_total",
     "safe_outcome",
     "account_image_state",
     "account_image_calls_total",

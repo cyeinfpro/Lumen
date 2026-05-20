@@ -315,7 +315,7 @@ export function DesktopStream() {
   return (
     <div className="relative flex h-[100dvh] min-h-0 w-full flex-col bg-[var(--bg-0)]">
       <DesktopTopNav
-        active="stream"
+        active="assets"
         right={
           <StreamToolbar
             total={total}

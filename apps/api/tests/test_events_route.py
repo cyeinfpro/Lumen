@@ -56,6 +56,13 @@ def test_replay_payload_filter_matches_requested_channels() -> None:
         include_user_channel=True,
         user_channel=user_channel,
     )
+    assert not events._replay_payload_matches_channels(
+        {"conversation_id": "conv-1"},
+        requested_channels={"conv:conv-1"},
+        include_user_channel=False,
+        user_channel=user_channel,
+        envelope_channel="conv:conv-2",
+    )
 
 
 @pytest.mark.asyncio
@@ -94,6 +101,37 @@ async def test_pubsub_event_without_sse_id_is_persisted_for_live_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pubsub_event_envelope_id_does_not_overwrite_payload_event_id() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.fields: dict[str, str] | None = None
+
+        async def xadd(
+            self,
+            _stream_key: str,
+            fields: dict[str, str],
+            **_kwargs: Any,
+        ) -> str:
+            self.fields = fields
+            return "1710000000001-0"
+
+    redis = Redis()
+
+    await events._stream_id_for_pubsub_event(  # noqa: SLF001
+        redis,
+        stream_key="events:user:user-1",
+        event_name="generation.completed",
+        envelope_event_id="envelope-event",
+        payload={"event_id": "payload-event", "generation_id": "gen-1"},
+    )
+
+    assert redis.fields is not None
+    envelope = json.loads(redis.fields["data"])
+    assert envelope["event_id"] == "envelope-event"
+    assert envelope["data"]["event_id"] == "payload-event"
+
+
+@pytest.mark.asyncio
 async def test_events_rejects_too_many_channels_before_subscribing() -> None:
     channels = ",".join(f"task:{i}" for i in range(events.MAX_SSE_CHANNELS + 1))
 
@@ -112,7 +150,7 @@ async def test_events_rejects_too_many_channels_before_subscribing() -> None:
         excinfo.value.detail["error"]["requested_count"] == events.MAX_SSE_CHANNELS + 1
     )
     assert (
-        excinfo.value.detail["error"]["effective_count"] == events.MAX_SSE_CHANNELS + 2
+        excinfo.value.detail["error"]["effective_count"] == events.MAX_SSE_CHANNELS + 1
     )
 
 
@@ -274,6 +312,11 @@ async def test_sse_replay_pages_until_stream_is_empty(
     ]
 
     assert [item["id"] for item in events_seen] == ["1-0", "2-0", "3-0"]
+    assert [json.loads(item["data"])["sse_id"] for item in events_seen] == [
+        "1-0",
+        "2-0",
+        "3-0",
+    ]
     assert redis.calls == 2
 
 
@@ -329,7 +372,7 @@ async def test_sse_replay_truncated_advances_cursor(
 
 
 @pytest.mark.asyncio
-async def test_events_replay_includes_auto_user_channel(
+async def test_events_replay_uses_effective_subscription_channels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -382,5 +425,74 @@ async def test_events_replay_includes_auto_user_channel(
     async for _chunk in response.body_iterator:
         pass
 
-    assert captured["requested_channels"] == {"conv:conv-1", "user:user-1"}
-    assert captured["include_user_channel"] is True
+    assert captured["requested_channels"] == {"conv:conv-1"}
+    assert captured["include_user_channel"] is False
+
+
+@pytest.mark.asyncio
+async def test_sse_replay_includes_user_events_without_leaking_other_channels() -> None:
+    class Redis:
+        async def xread(self, cursor: dict[str, str], **_kwargs: Any) -> list[Any]:
+            stream_key, last_id = next(iter(cursor.items()))
+            if last_id != "0-0":
+                return []
+            return [
+                (
+                    stream_key,
+                    [
+                        (
+                            "1-0",
+                            {
+                                "event": "wallet.low_balance",
+                                "data": (
+                                    '{"event":"wallet.low_balance",'
+                                    '"channel":"user:user-1",'
+                                    '"data":{"notice":"low"}}'
+                                ),
+                            },
+                        ),
+                        (
+                            "2-0",
+                            {
+                                "event": "completion.delta",
+                                "data": (
+                                    '{"event":"completion.delta",'
+                                    '"channel":"conv:conv-2",'
+                                    '"data":{"conversation_id":"conv-2",'
+                                    '"completion_id":"c2"}}'
+                                ),
+                            },
+                        ),
+                        (
+                            "3-0",
+                            {
+                                "event": "conv.message.appended",
+                                "data": (
+                                    '{"event":"conv.message.appended",'
+                                    '"channel":"conv:conv-1",'
+                                    '"data":{"conversation_id":"conv-1",'
+                                    '"message_id":"m1"}}'
+                                ),
+                            },
+                        ),
+                    ],
+                )
+            ]
+
+    events_seen = [
+        item
+        async for item in events._iter_replay_events(
+            Redis(),
+            stream_key="events:user:user-1",
+            last_event_id="0-0",
+            requested_channels={"conv:conv-1", "user:user-1"},
+            include_user_channel=True,
+            user_channel="user:user-1",
+        )
+    ]
+
+    assert [item["id"] for item in events_seen] == ["1-0", "3-0"]
+    assert [item["event"] for item in events_seen] == [
+        "wallet.low_balance",
+        "conv.message.appended",
+    ]

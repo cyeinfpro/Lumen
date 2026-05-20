@@ -3,7 +3,7 @@
 `run_generation(ctx, task_id)` 是 arq 任务入口。流程：
 
 1. 幂等读 Generation 行；若终态直接 return
-2. 进入统一图片 FIFO 队列；只有全局并发槽内的任务会被标记 running
+2. 进入加权公平图片队列；只有全局并发槽内的任务会被标记 running
 3. 起 lease（5min TTL）+ 30s 续租协程
 4. publish generation.started
 5. 解析 size（resolve_size）
@@ -28,10 +28,14 @@ import hashlib
 import io
 import logging
 import math
+import os
 import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -75,6 +79,7 @@ from lumen_core.constants import (
     Role,
     task_channel,
 )
+from lumen_core.image_reference import normalized_ref_from_metadata
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -95,6 +100,7 @@ from lumen_core.model_image_metadata import (
     model_image_filename,
     save_image_with_model_metadata,
 )
+from lumen_core.queue_metadata import generation_queue_metadata, merge_queue_metadata
 from lumen_core.sizing import resolve_size, validate_explicit_size
 
 from ..config import settings
@@ -122,7 +128,9 @@ from ..upstream import (
     _resolve_image_primary_route,
     edit_image,
     generate_image,
+    pop_image_trace_id,
     pop_image_retry_attempt,
+    push_image_trace_id,
     push_image_retry_attempt,
 )
 from .state import is_generation_terminal
@@ -150,6 +158,7 @@ _IMAGE_QUEUE_TASK_PROVIDER_PREFIX = "generation:image_queue:task_provider:"
 _IMAGE_QUEUE_ENQUEUE_DEDUPE_PREFIX = "generation:image_queue:enqueue:"
 _IMAGE_QUEUE_NOT_BEFORE_PREFIX = "generation:image_queue:not_before:"
 _IMAGE_QUEUE_AVOID_PREFIX = "generation:image_queue:avoid:"
+_IMAGE_QUEUE_LANE_CURSOR_KEY = "generation:image_queue:lane_cursor"
 # 正在调用上游的实时 provider 快照（admin 请求事件面板的 in-flight 列读这里）。
 # 单 provider 模式：mode=single + provider 字段；
 # dual_race 模式：mode=dual_race + lane_a_provider / lane_b_provider 两路最新 provider；
@@ -158,6 +167,7 @@ _IMAGE_INFLIGHT_PREFIX = "generation:image_inflight:"
 _IMAGE_QUEUE_LOCK_TTL_S = 10
 _IMAGE_QUEUE_LOCK_WAIT_S = 5.0
 _IMAGE_QUEUE_SCAN_LIMIT = 100
+_IMAGE_QUEUE_FAIR_SCAN_LIMIT = 1000
 _IMAGE_QUEUE_ENQUEUE_DEDUPE_TTL_S = 30
 _IMAGE_QUEUE_NOT_BEFORE_GRACE_S = 600
 _IMAGE_PROVIDER_UNAVAILABLE_RETRY_S = 30
@@ -171,6 +181,25 @@ _PROVIDER_COOLDOWN_LOCAL: dict[str, float] = {}
 # 跳过它一次，避免 retry 反复打到同一个有问题的 provider（如 model_not_found / 401）。
 # 全部 enabled provider 都被 avoid 时退化为不过滤（防止永远 reserve 失败）。
 _IMAGE_QUEUE_AVOID_TTL_S = 120
+_IMAGE_QUEUE_DEFAULT_LANE = "image:interactive:unknown"
+_IMAGE_QUEUE_LANE_WEIGHTS: dict[str, int] = {
+    "image:interactive:small": 8,
+    "image:interactive:medium": 5,
+    "image:interactive:large": 3,
+    "image:interactive:edit": 4,
+    "image:interactive:mask_edit": 5,
+    "image:interactive:unknown": 3,
+    "image:workflow:small": 3,
+    "image:workflow:medium": 2,
+    "image:workflow:large": 1,
+    "image:workflow:edit": 1,
+    "image:workflow:mask_edit": 1,
+    "image:workflow:unknown": 1,
+}
+_IMAGE_QUEUE_LANE_ORDER: tuple[str, ...] = tuple(_IMAGE_QUEUE_LANE_WEIGHTS)
+_IMAGE_QUEUE_LANE_RANK: dict[str, int] = {
+    lane: idx for idx, lane in enumerate(_IMAGE_QUEUE_LANE_ORDER)
+}
 # moderation_blocked / safety_violation 单次 task 跨 attempt 的换号上限。
 # retry.py 仍把 moderation 视为 terminal——单 provider 时直接 fail，避免烧配额；
 # 多 provider 时 task 层升级为 retriable，配 avoid set 把请求路由到下一个未试 provider。
@@ -198,6 +227,15 @@ class _StaleGenerationAttempt(Exception):
     """This worker's attempt epoch no longer owns the generation row."""
 
 
+@dataclass(frozen=True)
+class _QueuedGenerationCandidate:
+    id: str
+    queue_lane: str = _IMAGE_QUEUE_DEFAULT_LANE
+    size_bucket: str | None = None
+    cost_class: str | None = None
+    created_at: datetime | None = None
+
+
 async def _is_cancelled(redis: Any, task_id: str) -> bool:
     try:
         v = await redis.get(f"task:{task_id}:cancel")
@@ -214,8 +252,10 @@ async def _is_cancelled(redis: Any, task_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def _acquire_lease(redis: Any, task_id: str, worker_id: str) -> None:
-    ok = await redis.set(f"task:{task_id}:lease", worker_id, ex=_LEASE_TTL_S, nx=True)
+async def _acquire_lease(redis: Any, task_id: str, worker_token: str) -> None:
+    ok = await redis.set(
+        f"task:{task_id}:lease", worker_token, ex=_LEASE_TTL_S, nx=True
+    )
     if not ok:
         raise _LeaseLost(f"lease already held task={task_id}")
 
@@ -268,11 +308,13 @@ return 1
 """
 
 
-async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
+async def _release_lease(redis: Any, task_id: str, worker_token: str) -> None:
     try:
         eval_fn = getattr(redis, "eval", None)
         if callable(eval_fn):
-            await eval_fn(_RELEASE_LEASE_LUA, 1, f"task:{task_id}:lease", worker_id)
+            await eval_fn(
+                _RELEASE_LEASE_LUA, 1, f"task:{task_id}:lease", worker_token
+            )
             return
         logger.warning(
             "generation lease release skipped without atomic CAS task=%s", task_id
@@ -284,7 +326,7 @@ async def _release_lease(redis: Any, task_id: str, worker_id: str) -> None:
 async def _lease_renewer(
     redis: Any,
     task_id: str,
-    worker_id: str,
+    worker_token: str,
     lease_lost: asyncio.Event | None = None,
     *,
     extra_lease_keys: list[str] | None = None,
@@ -307,7 +349,7 @@ async def _lease_renewer(
                     _RENEW_LEASE_LUA,
                     1,
                     f"task:{task_id}:lease",
-                    worker_id,
+                    worker_token,
                     _LEASE_TTL_S,
                 )
                 if int(renewed or 0) == 0:
@@ -316,7 +358,7 @@ async def _lease_renewer(
                     logger.warning(
                         "generation lease ownership lost task=%s worker=%s",
                         task_id,
-                        worker_id,
+                        worker_token,
                     )
                     return
                 for key in extra_lease_keys or []:
@@ -710,14 +752,178 @@ async def _queued_generation_ids(limit: int) -> list[str]:
     return [str(row) for row in rows]
 
 
-async def _ready_queued_generation_ids(redis: Any, limit: int) -> list[str]:
-    ids = await _queued_generation_ids(max(limit, _IMAGE_QUEUE_SCAN_LIMIT))
+def _queue_lane_weight(lane: str | None) -> int:
+    if not lane:
+        return 1
+    return max(1, int(_IMAGE_QUEUE_LANE_WEIGHTS.get(lane, 1)))
+
+
+def _queue_lane_sort_key(lane: str) -> tuple[int, int, str]:
+    return (
+        _IMAGE_QUEUE_LANE_RANK.get(lane, len(_IMAGE_QUEUE_LANE_RANK)),
+        -_queue_lane_weight(lane),
+        lane,
+    )
+
+
+def _weighted_queue_lane_slots(lanes: list[str]) -> list[str]:
+    ordered = sorted(lanes, key=_queue_lane_sort_key)
+    if not ordered:
+        return []
+    max_weight = max(_queue_lane_weight(lane) for lane in ordered)
+    slots: list[str] = []
+    for level in range(max_weight):
+        for lane in ordered:
+            if _queue_lane_weight(lane) > level:
+                slots.append(lane)
+    return slots
+
+
+def _queued_candidate_from_mapping(
+    row: Any,
+    *,
+    default_id: str | None = None,
+) -> _QueuedGenerationCandidate:
+    mapping = getattr(row, "_mapping", None)
+
+    def _value(name: str, default: Any = None) -> Any:
+        if mapping is not None and name in mapping:
+            return mapping[name]
+        return getattr(row, name, default)
+
+    generation_id = str(_value("id", default_id or ""))
+    metadata = generation_queue_metadata(
+        upstream_request=_value("upstream_request", None),
+        action=_value("action", None),
+        size_requested=_value("size_requested", None),
+        mask_image_id=_value("mask_image_id", None),
+        created_at=_value("created_at", None),
+        upstream_pixels=_value("upstream_pixels", None),
+    )
+    lane = str(metadata.get("queue_lane") or _IMAGE_QUEUE_DEFAULT_LANE)
+    return _QueuedGenerationCandidate(
+        id=generation_id,
+        queue_lane=lane,
+        size_bucket=metadata.get("size_bucket"),
+        cost_class=metadata.get("cost_class"),
+        created_at=_value("created_at", None),
+    )
+
+
+def _fallback_queued_candidate(generation_id: str) -> _QueuedGenerationCandidate:
+    return _QueuedGenerationCandidate(id=str(generation_id))
+
+
+async def _queued_generation_candidates(limit: int) -> list[_QueuedGenerationCandidate]:
+    """Return queued candidates in canonical FIFO order with lane metadata.
+
+    `_queued_generation_ids` remains the compatibility seam used by older unit
+    tests; this helper enriches those ids when database rows are available.
+    """
+
+    ids = await _queued_generation_ids(limit)
     if not ids:
         return []
-    ready: list[str] = []
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        Generation.id,
+                        Generation.upstream_request,
+                        Generation.action,
+                        Generation.size_requested,
+                        Generation.mask_image_id,
+                        Generation.created_at,
+                        Generation.upstream_pixels,
+                    ).where(Generation.id.in_(ids))
+                )
+            ).all()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("image queue candidate enrichment failed: %s", exc)
+        return [_fallback_queued_candidate(generation_id) for generation_id in ids]
+
+    by_id: dict[str, _QueuedGenerationCandidate] = {}
+    for row in rows:
+        candidate = _queued_candidate_from_mapping(row)
+        if candidate.id:
+            by_id[candidate.id] = candidate
+    return [
+        by_id.get(str(generation_id), _fallback_queued_candidate(str(generation_id)))
+        for generation_id in ids
+    ]
+
+
+async def _select_ready_generation_ids_by_lane(
+    redis: Any,
+    ready_by_lane: dict[str, list[_QueuedGenerationCandidate]],
+    limit: int,
+    *,
+    advance_cursor: bool = False,
+) -> list[str]:
+    slots = _weighted_queue_lane_slots(list(ready_by_lane))
+    if not slots:
+        return []
+    raw_cursor: str | None = None
+    with suppress(Exception):
+        raw_cursor = _redis_text(await redis.get(_IMAGE_QUEUE_LANE_CURSOR_KEY))
+    try:
+        cursor = int(raw_cursor) if raw_cursor else 0
+    except ValueError:
+        cursor = 0
+
+    selected: list[str] = []
+    remaining = sum(len(candidates) for candidates in ready_by_lane.values())
+    while remaining > 0 and len(selected) < limit:
+        lane = slots[cursor % len(slots)]
+        cursor += 1
+        lane_candidates = ready_by_lane.get(lane)
+        if not lane_candidates:
+            continue
+        selected.append(lane_candidates.pop(0).id)
+        remaining -= 1
+
+    if advance_cursor:
+        with suppress(Exception):
+            await redis.set(_IMAGE_QUEUE_LANE_CURSOR_KEY, str(cursor), ex=3600)
+    return selected
+
+
+async def _advance_image_queue_lane_cursor(redis: Any, steps: int = 1) -> None:
+    if steps <= 0:
+        return
+    with suppress(Exception):
+        await redis.incrby(_IMAGE_QUEUE_LANE_CURSOR_KEY, int(steps))
+        await redis.expire(_IMAGE_QUEUE_LANE_CURSOR_KEY, 3600)
+
+
+async def _ready_queued_generation_ids(
+    redis: Any,
+    limit: int,
+    *,
+    advance_cursor: bool = False,
+) -> list[str]:
+    candidates = await _queued_generation_candidates(
+        max(limit, _IMAGE_QUEUE_FAIR_SCAN_LIMIT)
+    )
+    if not candidates:
+        return []
+    ready_fifo: list[str] = []
+    ready_by_lane: dict[str, list[_QueuedGenerationCandidate]] = {}
     now = time.time()
     now_mono = time.monotonic()
-    for queued_id in ids:
+    active_members: set[str] = set()
+    with suppress(UpstreamError):
+        await _cleanup_image_queue_active(redis)
+    with suppress(UpstreamError):
+        active_members = await _active_image_provider_names(redis)
+    for candidate in candidates:
+        queued_id = candidate.id
+        if (
+            queued_id in active_members
+            or _dual_race_sentinel_name(queued_id) in active_members
+        ):
+            continue
         # 本地兜底 cooldown：redis 写失败时唯一防 hot-loop 的栅栏
         local_until = _PROVIDER_COOLDOWN_LOCAL.get(queued_id)
         if local_until is not None:
@@ -734,10 +940,27 @@ async def _ready_queued_generation_ids(redis: Any, limit: int) -> list[str]:
             except ValueError:
                 with suppress(Exception):
                     await redis.delete(not_before_key)
-        ready.append(queued_id)
-        if len(ready) >= limit:
-            break
-    return ready
+        ready_fifo.append(queued_id)
+        ready_by_lane.setdefault(
+            candidate.queue_lane or _IMAGE_QUEUE_DEFAULT_LANE,
+            [],
+        ).append(candidate)
+    if not ready_by_lane:
+        return []
+    if len(ready_by_lane) == 1:
+        return ready_fifo[:limit]
+    try:
+        selected = await _select_ready_generation_ids_by_lane(
+            redis,
+            {lane: list(values) for lane, values in ready_by_lane.items()},
+            limit,
+            advance_cursor=advance_cursor,
+        )
+        if selected:
+            return selected
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("image queue weighted lane selection failed err=%s", exc)
+    return ready_fifo[:limit]
 
 
 async def _enqueue_generation_once(
@@ -808,11 +1031,15 @@ async def _reserve_image_queue_slot(
     endpoint_kind: str | None = None,
     requires_mask: bool = False,
     provider_override: Any | None = None,
+    queue_lane: str | None = None,
+    size_bucket: str | None = None,
+    cost_class: str | None = None,
 ) -> Any | None:
-    """Reserve one global image slot for the oldest queued task.
+    """Reserve one global image slot for a task admitted by fair scheduling.
 
     Policy:
-    - all image sizes share the same FIFO queue;
+    - queued image work is grouped into stable lanes (interactive/workflow +
+      size/edit/mask class) and admitted with weighted fair scheduling;
     - global concurrency cap = ``image.generation_concurrency`` / env
       ``IMAGE_GENERATION_CONCURRENCY`` (active task count);
     - **per-provider concurrency** is configurable via the provider field
@@ -824,7 +1051,8 @@ async def _reserve_image_queue_slot(
     - dual_race mode: occupies one capacity slot via a sentinel name (no provider
       lock), so both image2 and responses lanes can failover across all enabled
       accounts independently. The sentinel is ``__dr:<task_id>``.
-    - tasks that are not the oldest queued task return immediately and stay queued.
+    - tasks outside the current fair scheduling window return immediately and
+      stay queued.
 
     Concurrency model:
     Two ZSETs back the bookkeeping. The global ``_IMAGE_QUEUE_ACTIVE_KEY`` ZSET
@@ -886,9 +1114,11 @@ async def _reserve_image_queue_slot(
         if len(active_members) >= capacity:
             return None
 
-        queued_ids = await _ready_queued_generation_ids(redis, 1)
-        if not queued_ids or queued_ids[0] != task_id:
+        fair_window = max(1, capacity - len(active_members))
+        queued_ids = await _ready_queued_generation_ids(redis, fair_window)
+        if task_id not in queued_ids:
             return None
+        fair_rank = queued_ids.index(task_id)
 
         now = time.time()
         expiry = now + _LEASE_TTL_S
@@ -905,6 +1135,7 @@ async def _reserve_image_queue_slot(
                 {sentinel: expiry},
             )
             await redis.delete(_image_queue_not_before_key(task_id))
+            await _advance_image_queue_lane_cursor(redis, fair_rank + 1)
             logger.info(
                 "image queue admitted task=%s mode=dual_race active=%d/%d",
                 task_id,
@@ -931,24 +1162,47 @@ async def _reserve_image_queue_slot(
                     endpoint_kind=endpoint_kind,
                     acquire_inflight=False,
                     requires_mask=requires_mask,
+                    queue_lane=queue_lane,
+                    size_bucket=size_bucket,
+                    cost_class=cost_class,
                 )
             except TypeError as exc:
                 msg = str(exc)
-                # 兼容老 mock：依次去掉新增 kwargs（requires_mask、acquire_inflight）。
+                # 兼容老 mock：依次去掉新增 kwargs（metadata、requires_mask、
+                # acquire_inflight）。
                 # requires_mask=True 但 mock 不识别时，select 出来的候选可能含 url 模式
                 # provider；真实 ProviderPool 会优先 file-mode，file-mode 耗尽时允许
                 # url-mode 兜底，避免 inpaint 因单一 transport 池耗尽直接失败。
-                if "requires_mask" not in msg and "acquire_inflight" not in msg:
+                if (
+                    "size_bucket" not in msg
+                    and "cost_class" not in msg
+                    and "queue_lane" not in msg
+                    and "requires_mask" not in msg
+                    and "acquire_inflight" not in msg
+                    and "endpoint_kind" not in msg
+                    and "task_id" not in msg
+                ):
                     raise
-                kwargs = {
-                    "route": "image",
-                    "task_id": task_id,
-                    "endpoint_kind": endpoint_kind,
-                }
                 try:
-                    providers = await pool.select(**kwargs, acquire_inflight=False)
+                    providers = await pool.select(
+                        route="image",
+                        task_id=task_id,
+                        endpoint_kind=endpoint_kind,
+                    )
                 except TypeError:
-                    providers = await pool.select(**kwargs)
+                    try:
+                        providers = await pool.select(
+                            route="image",
+                            task_id=task_id,
+                        )
+                    except TypeError:
+                        try:
+                            providers = await pool.select(
+                                route="image",
+                                endpoint_kind=endpoint_kind,
+                            )
+                        except TypeError:
+                            providers = await pool.select(route="image")
         if not providers:
             return None
 
@@ -1047,6 +1301,7 @@ async def _reserve_image_queue_slot(
                 len(active_members) + 1,
                 capacity,
             )
+            await _advance_image_queue_lane_cursor(redis, fair_rank + 1)
             return provider
         if active_count_failed:
             cooldown = _IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S
@@ -1121,6 +1376,54 @@ async def _release_image_queue_slot(
 # Image processing
 # ---------------------------------------------------------------------------
 
+_ALLOWED_UPSTREAM_IMAGE_FORMATS = {"PNG", "WEBP", "JPEG"}
+_MAX_UPSTREAM_IMAGE_SIDE = 10000
+_IMAGE_POSTPROCESS_MODES = {"inline", "thread", "process_pool"}
+_IMAGE_POSTPROCESS_EXECUTOR: ProcessPoolExecutor | None = None
+
+
+@dataclass(frozen=True)
+class _VariantPayload:
+    bytes: bytes
+    size: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _GeneratedImageInspection:
+    orig_format: str
+    width: int
+    height: int
+    has_transparency: bool
+
+
+@dataclass(frozen=True)
+class _ImageVariantBundle:
+    orig_format: str
+    width: int
+    height: int
+    display: _VariantPayload
+    preview: _VariantPayload
+    thumb: _VariantPayload
+    engine: str
+
+
+@dataclass(frozen=True)
+class _PostprocessedGeneratedImage:
+    raw_image: bytes
+    sha256: str
+    orig_format: str
+    width: int
+    height: int
+    blurhash: str | None
+    display: _VariantPayload
+    preview: _VariantPayload
+    thumb: _VariantPayload
+    transparent_alpha_recovered: bool = False
+    transparent_qc_payload: dict[str, Any] | None = None
+    transparent_provider: str | None = None
+    engine: str = "pil"
+    executor_mode: str = "inline"
+
 
 def _sha256(data: bytes) -> str:
     h = hashlib.sha256()
@@ -1134,6 +1437,39 @@ def _decode_upstream_image_b64(value: str) -> bytes:
         raw = raw.split(",", 1)[1]
     raw = "".join(raw.split())
     return base64.b64decode(raw, validate=True)
+
+
+def _validate_generated_image_metadata(
+    orig_format: str | None,
+    width: int,
+    height: int,
+) -> str:
+    if orig_format not in _ALLOWED_UPSTREAM_IMAGE_FORMATS:
+        raise ValueError(f"upstream returned unexpected image format: {orig_format}")
+    if (
+        width < 1
+        or height < 1
+        or width > _MAX_UPSTREAM_IMAGE_SIDE
+        or height > _MAX_UPSTREAM_IMAGE_SIDE
+    ):
+        raise ValueError(f"upstream image dimensions out of range: {width}x{height}")
+    return orig_format
+
+
+def _inspect_generated_image_sync(raw_image: bytes) -> _GeneratedImageInspection:
+    with PILImage.open(io.BytesIO(raw_image)) as pil:
+        pil.load()
+        orig_format = _validate_generated_image_metadata(
+            pil.format,
+            pil.size[0],
+            pil.size[1],
+        )
+        return _GeneratedImageInspection(
+            orig_format=orig_format,
+            width=pil.size[0],
+            height=pil.size[1],
+            has_transparency=_image_has_transparency(pil),
+        )
 
 
 def _compute_blurhash(img: PILImage.Image) -> str | None:
@@ -1213,6 +1549,274 @@ def _make_thumb(
         with _rgb_image_for_flat_variant(im) as rgb:
             rgb.save(buf, format="JPEG", quality=78, optimize=True)
         return buf.getvalue(), im.size
+
+
+def _resize_vips_image(image: Any, max_side: int) -> Any:
+    longest = max(int(getattr(image, "width", 0)), int(getattr(image, "height", 0)))
+    if longest <= 0:
+        raise ValueError("libvips image has invalid dimensions")
+    scale = min(1.0, max_side / longest)
+    if scale >= 1.0:
+        return image.copy()
+    return image.resize(scale)
+
+
+def _make_variants_with_vips_sync(
+    raw_image: bytes,
+    inspection: _GeneratedImageInspection,
+) -> _ImageVariantBundle:
+    import pyvips  # type: ignore[import-not-found]
+
+    image = pyvips.Image.new_from_buffer(raw_image, "", access="sequential")
+    display = _resize_vips_image(image, 2048)
+    preview = _resize_vips_image(image, 1024)
+    thumb = _resize_vips_image(image, 256)
+    try:
+        if bool(thumb.hasalpha()):
+            thumb = thumb.flatten(background=[255, 255, 255])
+    except Exception:
+        # Some libvips builds expose alpha metadata differently. If this path
+        # cannot prove flattening, let the caller fall back to PIL.
+        raise
+    return _ImageVariantBundle(
+        orig_format=inspection.orig_format,
+        width=inspection.width,
+        height=inspection.height,
+        display=_VariantPayload(
+            bytes=display.write_to_buffer(".webp[Q=86]"),
+            size=(int(display.width), int(display.height)),
+        ),
+        preview=_VariantPayload(
+            bytes=preview.write_to_buffer(".webp[Q=82]"),
+            size=(int(preview.width), int(preview.height)),
+        ),
+        thumb=_VariantPayload(
+            bytes=thumb.write_to_buffer(".jpg[Q=78]"),
+            size=(int(thumb.width), int(thumb.height)),
+        ),
+        engine="libvips",
+    )
+
+
+def _make_variants_with_pil_sync(
+    raw_image: bytes,
+    inspection: _GeneratedImageInspection | None = None,
+) -> _ImageVariantBundle:
+    with PILImage.open(io.BytesIO(raw_image)) as pil:
+        pil.load()
+        if inspection is None:
+            inspection = _GeneratedImageInspection(
+                orig_format=_validate_generated_image_metadata(
+                    pil.format,
+                    pil.size[0],
+                    pil.size[1],
+                ),
+                width=pil.size[0],
+                height=pil.size[1],
+                has_transparency=_image_has_transparency(pil),
+            )
+        display_bytes, display_size = _make_display(pil)
+        preview_bytes, preview_size = _make_preview(pil)
+        thumb_bytes, thumb_size = _make_thumb(pil)
+    return _ImageVariantBundle(
+        orig_format=inspection.orig_format,
+        width=inspection.width,
+        height=inspection.height,
+        display=_VariantPayload(display_bytes, display_size),
+        preview=_VariantPayload(preview_bytes, preview_size),
+        thumb=_VariantPayload(thumb_bytes, thumb_size),
+        engine="pil",
+    )
+
+
+def _make_image_variants_sync(raw_image: bytes) -> _ImageVariantBundle:
+    inspection = _inspect_generated_image_sync(raw_image)
+    try:
+        return _make_variants_with_vips_sync(raw_image, inspection)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("libvips image postprocess unavailable, falling back: %s", exc)
+    return _make_variants_with_pil_sync(raw_image, inspection)
+
+
+def _make_image_variants_pil_only_sync(raw_image: bytes) -> _ImageVariantBundle:
+    return _make_variants_with_pil_sync(raw_image)
+
+
+def _resolve_image_postprocess_mode(mode: str | None = None) -> str:
+    raw_mode = (mode or os.environ.get("IMAGE_POSTPROCESS_MODE") or "process_pool")
+    normalized = raw_mode.strip().lower().replace("-", "_")
+    if normalized not in _IMAGE_POSTPROCESS_MODES:
+        logger.warning(
+            "invalid IMAGE_POSTPROCESS_MODE=%s; using process_pool", raw_mode
+        )
+        return "process_pool"
+    return normalized
+
+
+def _resolve_image_postprocess_workers() -> int:
+    raw_workers = os.environ.get("IMAGE_POSTPROCESS_WORKERS")
+    if raw_workers:
+        try:
+            workers = int(raw_workers)
+        except ValueError:
+            workers = 0
+        if workers > 0:
+            return min(workers, 8)
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(4, cpu_count // 2 or 1))
+
+
+def _get_image_postprocess_executor() -> ProcessPoolExecutor:
+    global _IMAGE_POSTPROCESS_EXECUTOR
+    if _IMAGE_POSTPROCESS_EXECUTOR is None:
+        _IMAGE_POSTPROCESS_EXECUTOR = ProcessPoolExecutor(
+            max_workers=_resolve_image_postprocess_workers(),
+        )
+    return _IMAGE_POSTPROCESS_EXECUTOR
+
+
+def _reset_image_postprocess_executor() -> None:
+    global _IMAGE_POSTPROCESS_EXECUTOR
+    executor = _IMAGE_POSTPROCESS_EXECUTOR
+    _IMAGE_POSTPROCESS_EXECUTOR = None
+    if executor is not None:
+        with suppress(Exception):
+            executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def _postprocess_image_variants(
+    raw_image: bytes,
+    *,
+    mode: str | None = None,
+) -> tuple[_ImageVariantBundle, str]:
+    executor_mode = _resolve_image_postprocess_mode(mode)
+    if executor_mode == "inline":
+        return _make_image_variants_sync(raw_image), "inline"
+    if executor_mode == "thread":
+        return await asyncio.to_thread(_make_image_variants_sync, raw_image), "thread"
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            _get_image_postprocess_executor(),
+            _make_image_variants_sync,
+            raw_image,
+        )
+        return result, "process_pool"
+    except BrokenProcessPool as exc:
+        _reset_image_postprocess_executor()
+        logger.warning(
+            "image postprocess process_pool broke; reset executor and falling back "
+            "to PIL thread err=%s",
+            exc,
+        )
+        return (
+            await asyncio.to_thread(_make_image_variants_pil_only_sync, raw_image),
+            "thread",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "image postprocess process_pool failed; falling back to PIL thread err=%s",
+            exc,
+        )
+        return (
+            await asyncio.to_thread(_make_image_variants_pil_only_sync, raw_image),
+            "thread",
+        )
+
+
+def _image_decode_upstream_error(exc: Exception) -> UpstreamError:
+    message = str(exc)
+    if not (
+        message.startswith("upstream returned unexpected image format")
+        or message.startswith("upstream image dimensions out of range")
+    ):
+        message = f"pillow could not decode image: {exc}"
+    return UpstreamError(
+        message,
+        error_code=EC.BAD_RESPONSE.value,
+        status_code=200,
+    )
+
+
+async def _postprocess_raw_generated_image(
+    raw_image: bytes,
+    *,
+    prompt: str,
+    transparent_requested: bool,
+    mode: str | None = None,
+) -> _PostprocessedGeneratedImage:
+    try:
+        inspection = await asyncio.to_thread(_inspect_generated_image_sync, raw_image)
+    except Exception as exc:  # noqa: BLE001
+        raise _image_decode_upstream_error(exc) from exc
+
+    sha = _sha256(raw_image)
+    transparent_alpha_recovered = False
+    transparent_qc_payload: dict[str, Any] | None = None
+    transparent_provider: str | None = None
+
+    if transparent_requested and not inspection.has_transparency:
+        try:
+            with PILImage.open(io.BytesIO(raw_image)) as pil:
+                pil.load()
+                pipeline_out = await process_transparent_request(pil, prompt=prompt)
+        except TransparentPipelineFailure as exc:
+            qc_dict = exc.qc.to_dict() if exc.qc is not None else None
+            raise UpstreamError(
+                f"transparent material pipeline failed: {exc}",
+                error_code=EC.BAD_RESPONSE.value,
+                status_code=200,
+                payload={
+                    "transparent_qc": qc_dict,
+                    "transparent_provider": exc.provider,
+                },
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _image_decode_upstream_error(exc) from exc
+        raw_image = pipeline_out.rgba_png
+        sha = _sha256(raw_image)
+        inspection = _GeneratedImageInspection(
+            orig_format="PNG",
+            width=pipeline_out.width,
+            height=pipeline_out.height,
+            has_transparency=True,
+        )
+        transparent_alpha_recovered = True
+        transparent_qc_payload = pipeline_out.qc.to_dict()
+        transparent_provider = pipeline_out.provider
+
+    try:
+        variants, executor_mode = await _postprocess_image_variants(
+            raw_image,
+            mode=mode,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _image_decode_upstream_error(exc) from exc
+
+    try:
+        with PILImage.open(io.BytesIO(raw_image)) as pil:
+            pil.load()
+            blurhash_str = _compute_blurhash(pil)
+    except Exception as exc:  # noqa: BLE001
+        raise _image_decode_upstream_error(exc) from exc
+
+    return _PostprocessedGeneratedImage(
+        raw_image=raw_image,
+        sha256=sha,
+        orig_format=variants.orig_format,
+        width=variants.width,
+        height=variants.height,
+        blurhash=blurhash_str,
+        display=variants.display,
+        preview=variants.preview,
+        thumb=variants.thumb,
+        transparent_alpha_recovered=transparent_alpha_recovered,
+        transparent_qc_payload=transparent_qc_payload,
+        transparent_provider=transparent_provider,
+        engine=variants.engine,
+        executor_mode=executor_mode,
+    )
 
 
 def _clean_model_style_tags(value: Any) -> list[str]:
@@ -1314,13 +1918,18 @@ async def _load_reference_images(
         return []
     rows = (
         await session.execute(
-            select(Image.id, Image.storage_key, Image.sha256).where(
+            select(
+                Image.id,
+                Image.storage_key,
+                Image.sha256,
+                Image.metadata_jsonb,
+            ).where(
                 Image.id.in_(image_ids),
                 Image.deleted_at.is_(None),
             )
         )
     ).all()
-    by_id = {r.id: (r.storage_key, r.sha256) for r in rows}
+    by_id = {r.id: r for r in rows}
     out: list[tuple[str, bytes]] = []
     for iid in image_ids:
         if iid not in by_id:
@@ -1329,23 +1938,58 @@ async def _load_reference_images(
                 error_code=EC.REFERENCE_MISSING.value,
                 status_code=404,
             )
-        storage_key, sha = by_id[iid]
+        row = by_id[iid]
+        storage_key = row.storage_key
+        sha = row.sha256
+        normalized = normalized_ref_from_metadata(row.metadata_jsonb)
+        read_key = storage_key
+        read_sha = sha
+        if normalized is not None:
+            read_key = normalized["storage_key"]
+            maybe_sha = normalized.get("sha256")
+            if isinstance(maybe_sha, str) and maybe_sha:
+                read_sha = maybe_sha
         try:
             async with asyncio.timeout(_REFERENCE_LOAD_TIMEOUT_S):
-                raw = await storage.aget_bytes(storage_key)
+                raw = await storage.aget_bytes(read_key)
         except TimeoutError as exc:
             raise UpstreamError(
-                f"reference image bytes read timed out key={storage_key}",
+                f"reference image bytes read timed out key={read_key}",
                 error_code=EC.REFERENCE_TIMEOUT.value,
                 status_code=None,
             ) from exc
         except FileNotFoundError as exc:
+            if read_key != storage_key:
+                logger.warning(
+                    "normalized reference missing; falling back to original "
+                    "image_id=%s normalized_key=%s original_key=%s",
+                    iid,
+                    read_key,
+                    storage_key,
+                )
+                try:
+                    async with asyncio.timeout(_REFERENCE_LOAD_TIMEOUT_S):
+                        raw = await storage.aget_bytes(storage_key)
+                except TimeoutError as fallback_exc:
+                    raise UpstreamError(
+                        f"reference image bytes read timed out key={storage_key}",
+                        error_code=EC.REFERENCE_TIMEOUT.value,
+                        status_code=None,
+                    ) from fallback_exc
+                except FileNotFoundError as fallback_exc:
+                    raise UpstreamError(
+                        f"reference image bytes missing key={storage_key}",
+                        error_code=EC.REFERENCE_MISSING.value,
+                        status_code=404,
+                    ) from fallback_exc
+                out.append((sha, raw))
+                continue
             raise UpstreamError(
-                f"reference image bytes missing key={storage_key}",
+                f"reference image bytes missing key={read_key}",
                 error_code=EC.REFERENCE_MISSING.value,
                 status_code=404,
             ) from exc
-        out.append((sha, raw))
+        out.append((read_sha, raw))
     return out
 
 
@@ -2401,6 +3045,87 @@ _PRIVATE_PROVIDER_PROGRESS_KEYS = _PRIVATE_PROVIDER_ATTEMPT_KEYS | {
 }
 
 
+class _StageTimer:
+    def __init__(self) -> None:
+        self.timings_ms: dict[str, int] = {}
+
+    def set_ms(self, name: str, value_ms: int | float | None) -> None:
+        if value_ms is None:
+            return
+        self.timings_ms[name] = max(0, int(value_ms))
+
+    def add_elapsed(self, name: str, started: float) -> None:
+        elapsed_ms = int(max(0.0, time.monotonic() - started) * 1000)
+        self.timings_ms[name] = self.timings_ms.get(name, 0) + elapsed_ms
+
+    def snapshot(self) -> dict[str, int]:
+        return dict(self.timings_ms)
+
+
+def _generation_trace_id(
+    task_id: str,
+    upstream_request: dict[str, Any] | None,
+) -> str:
+    raw = upstream_request.get("trace_id") if isinstance(upstream_request, dict) else None
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return f"gen_{task_id}"
+
+
+def _queue_wait_ms(created_at: datetime | None, *, now: datetime | None = None) -> int | None:
+    if not isinstance(created_at, datetime):
+        return None
+    current = now or datetime.now(timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return int(max(0.0, (current - created_at.astimezone(timezone.utc)).total_seconds()) * 1000)
+
+
+def _is_byok_provider_name(name: Any) -> bool:
+    return isinstance(name, str) and name.startswith("user:")
+
+
+_PROVIDER_ATTEMPT_PROGRESS_KEYS = (
+    "attempt",
+    "endpoint_attempt",
+    "duration_ms",
+    "reason",
+    "error_code",
+    "status_code",
+    "byok",
+    "source",
+    "endpoint",
+    "from_endpoint",
+)
+
+
+def _provider_attempt_from_progress(
+    event: dict[str, Any],
+    *,
+    status: str,
+    attempt_epoch: int,
+    provider_key: str = "provider",
+    route_default: str | None = None,
+) -> dict[str, Any]:
+    provider = _redis_text(event.get(provider_key))
+    attempt: dict[str, Any] = {
+        "provider": provider,
+        "route": event.get("route") or route_default,
+        "status": status,
+        "attempt": event.get("attempt") or attempt_epoch,
+        "byok": bool(event.get("byok")) or _is_byok_provider_name(provider),
+    }
+    reason = _redis_text(event.get("reason"))
+    if reason:
+        attempt["reason"] = reason
+        attempt["error_summary"] = reason
+    for key in _PROVIDER_ATTEMPT_PROGRESS_KEYS:
+        value = event.get(key)
+        if value is not None and key not in attempt:
+            attempt[key] = value
+    return {k: v for k, v in attempt.items() if v is not None}
+
+
 def _compact_diag_value(value: Any) -> Any:
     if isinstance(value, str):
         return value[:_DIAG_STRING_LIMIT]
@@ -2626,6 +3351,7 @@ def _safe_generation_error_summary(
 
 def _build_generation_diagnostics(
     *,
+    trace_id: str | None = None,
     requested_params: dict[str, Any],
     effective_params: dict[str, Any] | None = None,
     revised_prompt: str | None = None,
@@ -2635,6 +3361,8 @@ def _build_generation_diagnostics(
     actual_source: str | None = None,
     actual_endpoint: str | None = None,
     provider_attempts: list[dict[str, Any]] | None = None,
+    stage_timings_ms: dict[str, int] | None = None,
+    route_diagnostics: list[dict[str, Any]] | None = None,
     upstream_duration_ms: int | None = None,
     duration_ms: int | None = None,
     debug_id: str | None = None,
@@ -2651,6 +3379,8 @@ def _build_generation_diagnostics(
         "requested_params": requested_params,
         "debug_id": debug_id,
     }
+    if trace_id:
+        out["trace_id"] = trace_id
     if effective_params:
         out["effective_params"] = effective_params
     if revised_prompt:
@@ -2668,6 +3398,10 @@ def _build_generation_diagnostics(
         out["actual_endpoint"] = actual_endpoint
     if attempts:
         out["provider_attempts"] = attempts[:12]
+    if stage_timings_ms:
+        out["stage_timings_ms"] = stage_timings_ms
+    if route_diagnostics:
+        out["route_diagnostics"] = route_diagnostics[:12]
     if failover_count:
         out["failover"] = True
         out["failover_count"] = failover_count
@@ -3217,59 +3951,13 @@ async def _handle_dual_race_bonus_image(
             return
 
     transparent_requested = image_request_options.get("background") == "transparent"
-    transparent_alpha_recovered = False
-    transparent_qc_payload: dict[str, Any] | None = None
-    transparent_provider: str | None = None
 
     try:
-        with PILImage.open(io.BytesIO(raw_image)) as pil:
-            pil.load()
-            if pil.format not in ("PNG", "WEBP", "JPEG"):
-                logger.warning(
-                    "dual_race bonus unexpected format=%s parent=%s",
-                    pil.format,
-                    parent_task_id,
-                )
-                return
-            orig_format = pil.format
-            width, height = pil.size
-            if width < 1 or height < 1 or width > 10000 or height > 10000:
-                logger.warning(
-                    "dual_race bonus dims out of range %dx%d parent=%s",
-                    width,
-                    height,
-                    parent_task_id,
-                )
-                return
-            processed: PILImage.Image | None = None
-            if transparent_requested and not _image_has_transparency(pil):
-                try:
-                    pipeline_out = await process_transparent_request(pil, prompt=prompt)
-                except TransparentPipelineFailure as exc:
-                    logger.info(
-                        "dual_race bonus transparent pipeline failed parent=%s err=%r",
-                        parent_task_id,
-                        exc,
-                    )
-                    return
-                raw_image = pipeline_out.rgba_png
-                sha = _sha256(raw_image)
-                orig_format = "PNG"
-                width, height = pipeline_out.width, pipeline_out.height
-                transparent_alpha_recovered = True
-                transparent_qc_payload = pipeline_out.qc.to_dict()
-                transparent_provider = pipeline_out.provider
-                processed = PILImage.open(io.BytesIO(raw_image))
-                processed.load()
-            try:
-                output_pil = processed or pil
-                blurhash_str = _compute_blurhash(output_pil)
-                display_bytes, display_size = _make_display(output_pil)
-                preview_bytes, preview_size = _make_preview(output_pil)
-                thumb_bytes, thumb_size = _make_thumb(output_pil)
-            finally:
-                if processed is not None:
-                    processed.close()
+        processed_image = await _postprocess_raw_generated_image(
+            raw_image,
+            prompt=prompt,
+            transparent_requested=transparent_requested,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "dual_race bonus pillow decode failed parent=%s err=%r",
@@ -3277,6 +3965,21 @@ async def _handle_dual_race_bonus_image(
             exc,
         )
         return
+    raw_image = processed_image.raw_image
+    sha = processed_image.sha256
+    orig_format = processed_image.orig_format
+    width = processed_image.width
+    height = processed_image.height
+    blurhash_str = processed_image.blurhash
+    display_bytes = processed_image.display.bytes
+    display_size = processed_image.display.size
+    preview_bytes = processed_image.preview.bytes
+    preview_size = processed_image.preview.size
+    thumb_bytes = processed_image.thumb.bytes
+    thumb_size = processed_image.thumb.size
+    transparent_alpha_recovered = processed_image.transparent_alpha_recovered
+    transparent_qc_payload = processed_image.transparent_qc_payload
+    transparent_provider = processed_image.transparent_provider
 
     # --- 2. 写盘 ---
     bonus_gen_id = new_uuid7()
@@ -3576,6 +4279,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     """arq entry for generation task."""
     redis = ctx["redis"]
     worker_id = str(ctx.get("worker_id") or ctx.get("job_id") or "worker")
+    lease_token = f"{worker_id}:{new_uuid7()}"
     _task_start = asyncio.get_event_loop().time()
     _task_deadline = _task_start + _RUN_GENERATION_TIMEOUT_S
     _task_outcome = "unknown"
@@ -3588,6 +4292,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
     user_runtime_provider: Any | None = None
     loaded_attempt = 0
     channel = task_channel(task_id)
+    queue_metadata_payload: dict[str, Any] = {}
+    trace_id = f"gen_{task_id}"
+    stage_timer = _StageTimer()
+    route_diagnostics: list[dict[str, Any]] = []
+    gen_created_at: datetime | None = None
 
     # 让 ProviderPool 能用 redis 做账号级 quota 检查 / 入账（image route）。
     # 单例 pool 内部缓存最后一次注入的 redis；arq ctx['redis'] 在 worker 生命周期内
@@ -3626,6 +4335,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             return
 
         loaded_attempt = gen.attempt
+        gen_created_at = getattr(gen, "created_at", None)
         user_id = gen.user_id
         message_id = gen.message_id
         action = gen.action
@@ -3647,6 +4357,8 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             if isinstance(gen.upstream_request, dict)
             else None
         )
+        trace_id = _generation_trace_id(task_id, gen_upstream_request_snapshot)
+        stage_timer.set_ms("queue_wait", _queue_wait_ms(gen_created_at))
         image_request_options = _image_request_options(
             gen.upstream_request,
             size=size_requested,
@@ -3853,9 +4565,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
     provider_queue_delay = 0
     try:
-        image_route = await _resolve_image_primary_route()
+        raw_image_route = await _resolve_image_primary_route()
     except Exception:  # noqa: BLE001
-        image_route = "responses"
+        raw_image_route = "responses"
+    image_route = raw_image_route
     if user_api_credential_id:
         try:
             async with SessionLocal() as session:
@@ -3920,17 +4633,47 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             )
             _task_outcome = "failed"
             return
-        if image_route == "dual_race":
+        if raw_image_route == "dual_race":
+            route_diagnostics.append(
+                {
+                    "route": raw_image_route,
+                    "fallback_route": "responses",
+                    "reason": "byok_disables_dual_race",
+                    "byok": True,
+                }
+            )
             image_route = "responses"
-    is_dual_race = image_route == "dual_race"
+    requires_mask_provider = bool(mask_image_id) and action == GenerationAction.EDIT
+    if requires_mask_provider and raw_image_route in {"dual_race", "responses"}:
+        route_diagnostics.append(
+            {
+                "route": raw_image_route,
+                "fallback_route": "generations",
+                "reason": "mask_requires_generations_endpoint",
+                "has_mask": True,
+            }
+        )
+        image_route = "image2"
+    is_dual_race = raw_image_route == "dual_race" and image_route == "dual_race"
     endpoint_kind = (
-        None if is_dual_race else _image_endpoint_kind_for_engine(image_route)
+        "generations"
+        if requires_mask_provider
+        else None
+        if is_dual_race
+        else _image_endpoint_kind_for_engine(image_route)
+    )
+    reserve_queue_metadata = generation_queue_metadata(
+        upstream_request=gen_upstream_request_snapshot,
+        action=action,
+        size_requested=size_requested,
+        mask_image_id=mask_image_id,
+        created_at=gen_created_at,
     )
     # mask 不为空 → reserve 阶段把任务标记给 ProviderPool：sidecar 路径优先
     # file-mode provider，file-mode 候选耗尽时允许 url-mode 兜底；direct 路径本身
     # 是 multipart，不依赖 provider 的 image_edit_input_transport 配置。
-    requires_mask_provider = bool(mask_image_id) and action == GenerationAction.EDIT
     try:
+        provider_wait_started = time.monotonic()
         reserved_provider = await _reserve_image_queue_slot(
             redis,
             task_id,
@@ -3938,7 +4681,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             endpoint_kind=endpoint_kind,
             requires_mask=requires_mask_provider,
             provider_override=user_runtime_provider,
+            queue_lane=reserve_queue_metadata.get("queue_lane"),
+            size_bucket=reserve_queue_metadata.get("size_bucket"),
+            cost_class=reserve_queue_metadata.get("cost_class"),
         )
+        stage_timer.add_elapsed("provider_wait", provider_wait_started)
     except UpstreamError as exc:
         # 兼容旧代码路径：如果仍有老 guard 抛 NO_MASK_CAPABLE_PROVIDER，按 terminal 处理。
         if getattr(exc, "error_code", None) == EC.NO_MASK_CAPABLE_PROVIDER.value:
@@ -3966,7 +4713,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             {
                 "generation_id": task_id,
                 "message_id": message_id,
+                "trace_id": trace_id,
                 "stage": GenerationStage.QUEUED.value,
+                "substage": (
+                    "waiting_provider"
+                    if provider_queue_delay
+                    else "waiting_queue"
+                ),
                 "reason": (
                     "image_provider_unavailable"
                     if provider_queue_delay
@@ -3986,7 +4739,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
     # --- 3. lease + 续租协程 ---
     try:
-        await _acquire_lease(redis, task_id, worker_id)
+        await _acquire_lease(redis, task_id, lease_token)
     except _LeaseLost as exc:
         logger.info("generation lease already held task=%s err=%s", task_id, exc)
         _task_outcome = "lease_held"
@@ -4009,7 +4762,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await _release_image_queue_slot(
                 redis, task_id=task_id, provider_name=reserved_provider_name
             )
-            await _release_lease(redis, task_id, worker_id)
+            await _release_lease(redis, task_id, lease_token)
             return
         attempt, attempt_may_run = _bounded_next_attempt(current.attempt)
         if not attempt_may_run:
@@ -4017,7 +4770,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await _release_image_queue_slot(
                 redis, task_id=task_id, provider_name=reserved_provider_name
             )
-            await _release_lease(redis, task_id, worker_id)
+            await _release_lease(redis, task_id, lease_token)
             return
         running_upstream_request: dict[str, Any] = (
             dict(current.upstream_request)
@@ -4025,12 +4778,32 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             else {}
         )
         lease_reacquired = current.error_code == "lease_lost"
+        running_upstream_request["trace_id"] = trace_id
         running_upstream_request["upstream_route"] = image_route
+        if route_diagnostics:
+            running_upstream_request["route_diagnostics"] = route_diagnostics[:12]
         if is_dual_race:
             running_upstream_request.pop("provider", None)
             running_upstream_request.pop("actual_provider", None)
         elif upstream_provider_label:
             running_upstream_request["provider"] = upstream_provider_label
+        started_at = datetime.now(timezone.utc)
+        queue_metadata_payload = generation_queue_metadata(
+            upstream_request=running_upstream_request,
+            action=current.action,
+            size_requested=current.size_requested,
+            mask_image_id=current.mask_image_id,
+            created_at=current.created_at,
+            started_at=started_at,
+            finished_at=current.finished_at,
+            upstream_pixels=current.upstream_pixels,
+            now=started_at,
+        )
+        running_upstream_request = merge_queue_metadata(
+            running_upstream_request,
+            queue_metadata_payload,
+        )
+        gen_upstream_request_snapshot = dict(running_upstream_request)
         result = await session.execute(
             update(Generation)
             .where(
@@ -4041,7 +4814,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             .values(
                 status=GenerationStatus.RUNNING.value,
                 progress_stage=GenerationStage.RENDERING,
-                started_at=datetime.now(timezone.utc),
+                started_at=started_at,
                 attempt=attempt,
                 upstream_request=running_upstream_request,
                 error_code=None,
@@ -4054,7 +4827,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             await _release_image_queue_slot(
                 redis, task_id=task_id, provider_name=reserved_provider_name
             )
-            await _release_lease(redis, task_id, worker_id)
+            await _release_lease(redis, task_id, lease_token)
             raise
         await session.commit()
 
@@ -4062,7 +4835,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         _lease_renewer(
             redis,
             task_id,
-            worker_id,
+            lease_token,
             lease_lost,
             # task_provider 反向索引仍是 SET key，需要 EXPIRE 续命；ZSET 槽位
             # 续命交给 lease_renewer 内部按 image_provider_name 分支处理。
@@ -4080,10 +4853,12 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         {
             "generation_id": task_id,
             "message_id": message_id,
+            "trace_id": trace_id,
             "attempt": attempt,
             "provider": None if is_dual_race else upstream_provider_label,
             "route": image_route,
             "lease_reacquired": bool(lease_reacquired),
+            **queue_metadata_payload,
         },
     )
     if lease_reacquired:
@@ -4095,6 +4870,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             {
                 "generation_id": task_id,
                 "message_id": message_id,
+                "trace_id": trace_id,
                 "stage": GenerationStage.QUEUED.value,
                 "substage": _LEASE_REACQUIRED_SUBSTAGE,
             },
@@ -4130,6 +4906,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
     try:
         # 新 API 不支持 size="auto"，强制走 fixed 模式（让 resolve_size 走预设/比例回退）
+        normalize_started = time.monotonic()
         size_mode = "fixed"
         fixed_size = (
             size_requested if (size_requested and "x" in size_requested) else None
@@ -4184,6 +4961,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             ref_size = _reference_pixel_size(ref_for_body[0][1])
             if ref_size is not None:
                 inpaint_size_override = _inpaint_size_from_reference(*ref_size)
+        stage_timer.add_elapsed("normalize", normalize_started)
 
         # 即将调用上游（同步 HTTP，20-60s），先推一条 rendering progress 让前端切指示。
         # substage=stream_started 让 DevelopingCard 显影扫光从"占位"切到"真在工作"。
@@ -4195,6 +4973,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             {
                 "generation_id": task_id,
                 "message_id": message_id,
+                "trace_id": trace_id,
                 "stage": GenerationStage.RENDERING.value,
                 "substage": GenerationStage.STREAM_STARTED.value,
             },
@@ -4237,14 +5016,50 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             else key
                         ] = value
                 return
+            if event_type == "route_diagnostic":
+                diag = {
+                    "route": event.get("route"),
+                    "fallback_route": event.get("fallback_route"),
+                    "reason": event.get("reason"),
+                    "byok": event.get("byok"),
+                    "status": event.get("status") or "routed",
+                }
+                route_diagnostics.append(
+                    {k: v for k, v in diag.items() if v is not None}
+                )
+                await publish_event(
+                    redis,
+                    user_id,
+                    channel,
+                    EV_GEN_PROGRESS,
+                    _sanitize_provider_progress_payload(
+                        {
+                            "generation_id": task_id,
+                            "message_id": message_id,
+                            "trace_id": trace_id,
+                            "stage": GenerationStage.RENDERING.value,
+                            "substage": GenerationStage.PROVIDER_SELECTED.value,
+                            "route_diagnostic": True,
+                            "provider": event.get("provider"),
+                            "route": event.get("route"),
+                            "fallback_route": event.get("fallback_route"),
+                            "reason": event.get("reason"),
+                            "byok": event.get("byok"),
+                        },
+                        expose_provider_diagnostics=(
+                            settings.expose_provider_diagnostics
+                        ),
+                    ),
+                )
+                return
             if event_type == "endpoint_failover":
                 provider_attempt_log.append(
-                    {
-                        "provider": _redis_text(event.get("provider")),
-                        "route": event.get("route") or "image_jobs",
-                        "status": "failover",
-                        "error_summary": _redis_text(event.get("reason")),
-                    }
+                    _provider_attempt_from_progress(
+                        event,
+                        status="failover",
+                        attempt_epoch=attempt,
+                        route_default="image_jobs",
+                    )
                 )
                 # Inner-loop endpoint switch (generations ↔ responses) on the
                 # same provider — keep semantics close to provider_failover so
@@ -4258,6 +5073,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         {
                             "generation_id": task_id,
                             "message_id": message_id,
+                            "trace_id": trace_id,
                             "stage": GenerationStage.RENDERING.value,
                             "substage": GenerationStage.PROVIDER_SELECTED.value,
                             "endpoint_failover": True,
@@ -4288,7 +5104,16 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         if value:
                             metadata[target_key] = value
                     provider_used_events.append(metadata)
-                    provider_attempt_log.append({**metadata, "status": "used"})
+                    provider_attempt_log.append(
+                        {
+                            **_provider_attempt_from_progress(
+                                event,
+                                status="used",
+                                attempt_epoch=attempt,
+                            ),
+                            **metadata,
+                        }
+                    )
                     # 同步把当前 lane 的 provider 落到 in-flight 快照里。
                     inflight_update: dict[str, str] = {}
                     route_text = metadata.get("route") or ""
@@ -4318,6 +5143,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     {
                         "generation_id": task_id,
                         "message_id": message_id,
+                        "trace_id": trace_id,
                         "stage": GenerationStage.RENDERING.value,
                         "substage": GenerationStage.PARTIAL_RECEIVED.value,
                         "index": event.get("index"),
@@ -4344,6 +5170,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     {
                         "generation_id": task_id,
                         "message_id": message_id,
+                        "trace_id": trace_id,
                         "stage": stage,
                         "substage": substage,
                         "source": event.get("source") or "responses_fallback",
@@ -4360,12 +5187,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 from_provider = _redis_text(event.get("from_provider"))
                 route_text = _redis_text(event.get("route")) or ""
                 provider_attempt_log.append(
-                    {
-                        "provider": from_provider,
-                        "route": route_text or None,
-                        "status": "failover",
-                        "error_summary": _redis_text(event.get("reason")),
-                    }
+                    _provider_attempt_from_progress(
+                        event,
+                        status="failover",
+                        attempt_epoch=attempt,
+                        provider_key="from_provider",
+                        route_default=route_text or None,
+                    )
                 )
                 inflight_update: dict[str, str] = {}
                 if is_dual_race:
@@ -4387,6 +5215,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         {
                             "generation_id": task_id,
                             "message_id": message_id,
+                            "trace_id": trace_id,
                             "stage": GenerationStage.RENDERING.value,
                             "substage": GenerationStage.PROVIDER_SELECTED.value,
                             "provider_failover": True,
@@ -4433,6 +5262,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     # attempt == 1 首次（不打散）；>= 2 每次都用不同 prompt_cache_key /
                     # reasoning.effort，绕开 ChatGPT codex 端的"故障 cache"和 sub2api sticky session。
                     retry_attempt_token = push_image_retry_attempt(attempt)
+                    trace_token = push_image_trace_id(trace_id)
                     upstream_started = time.monotonic()
                     try:
                         if action == GenerationAction.EDIT:
@@ -4492,6 +5322,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                             task_id=task_id,
                         )
                     finally:
+                        pop_image_trace_id(trace_token)
                         pop_image_retry_attempt(retry_attempt_token)
                     if first_pair is None:
                         raise UpstreamError(
@@ -4503,6 +5334,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     upstream_duration_ms = int(
                         max(0.0, time.monotonic() - upstream_started) * 1000
                     )
+                    stage_timer.set_ms("render", upstream_duration_ms)
                     winner_provider_event = pop_provider_used_event()
                     actual_upstream_provider = winner_provider_event.get("provider")
                     actual_upstream_route = winner_provider_event.get("route")
@@ -4532,6 +5364,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             {
                 "generation_id": task_id,
                 "message_id": message_id,
+                "trace_id": trace_id,
                 "stage": GenerationStage.FINALIZING.value,
                 "substage": GenerationStage.FINAL_RECEIVED.value,
             },
@@ -4548,12 +5381,14 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             {
                 "generation_id": task_id,
                 "message_id": message_id,
+                "trace_id": trace_id,
                 "stage": GenerationStage.FINALIZING.value,
                 "substage": GenerationStage.PROCESSING.value,
             },
         )
 
         # --- 解码 + 校验 ---
+        postprocess_started = time.monotonic()
         try:
             raw_image = _decode_upstream_image_b64(b64_result)
         except binascii.Error as exc:
@@ -4575,71 +5410,27 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 )
 
         transparent_requested = image_request_options.get("background") == "transparent"
-        transparent_alpha_recovered = False
-        transparent_qc_payload: dict[str, Any] | None = None
-        transparent_provider: str | None = None
-
-        try:
-            orig_format = "PNG"
-            with PILImage.open(io.BytesIO(raw_image)) as pil:
-                pil.load()
-                if pil.format not in ("PNG", "WEBP", "JPEG"):
-                    raise UpstreamError(
-                        f"upstream returned unexpected image format: {pil.format}",
-                        error_code=EC.BAD_RESPONSE.value,
-                        status_code=200,
-                    )
-                orig_format = pil.format
-                width, height = pil.size
-                if width < 1 or height < 1 or width > 10000 or height > 10000:
-                    raise UpstreamError(
-                        f"upstream image dimensions out of range: {width}x{height}",
-                        error_code=EC.BAD_RESPONSE.value,
-                        status_code=200,
-                    )
-                processed: PILImage.Image | None = None
-                if transparent_requested and not _image_has_transparency(pil):
-                    try:
-                        pipeline_out = await process_transparent_request(
-                            pil, prompt=prompt
-                        )
-                    except TransparentPipelineFailure as exc:
-                        qc_dict = exc.qc.to_dict() if exc.qc is not None else None
-                        raise UpstreamError(
-                            f"transparent material pipeline failed: {exc}",
-                            error_code=EC.BAD_RESPONSE.value,
-                            status_code=200,
-                            payload={
-                                "transparent_qc": qc_dict,
-                                "transparent_provider": exc.provider,
-                            },
-                        ) from exc
-                    raw_image = pipeline_out.rgba_png
-                    sha = _sha256(raw_image)
-                    orig_format = "PNG"
-                    width, height = pipeline_out.width, pipeline_out.height
-                    transparent_alpha_recovered = True
-                    transparent_qc_payload = pipeline_out.qc.to_dict()
-                    transparent_provider = pipeline_out.provider
-                    processed = PILImage.open(io.BytesIO(raw_image))
-                    processed.load()
-                try:
-                    output_pil = processed or pil
-                    blurhash_str = _compute_blurhash(output_pil)
-                    display_bytes, display_size = _make_display(output_pil)
-                    preview_bytes, preview_size = _make_preview(output_pil)
-                    thumb_bytes, thumb_size = _make_thumb(output_pil)
-                finally:
-                    if processed is not None:
-                        processed.close()
-        except UpstreamError:
-            raise
-        except Exception as exc:
-            raise UpstreamError(
-                f"pillow could not decode image: {exc}",
-                error_code=EC.BAD_RESPONSE.value,
-                status_code=200,
-            ) from exc
+        processed_image = await _postprocess_raw_generated_image(
+            raw_image,
+            prompt=prompt,
+            transparent_requested=transparent_requested,
+        )
+        raw_image = processed_image.raw_image
+        sha = processed_image.sha256
+        orig_format = processed_image.orig_format
+        width = processed_image.width
+        height = processed_image.height
+        blurhash_str = processed_image.blurhash
+        display_bytes = processed_image.display.bytes
+        display_size = processed_image.display.size
+        preview_bytes = processed_image.preview.bytes
+        preview_size = processed_image.preview.size
+        thumb_bytes = processed_image.thumb.bytes
+        thumb_size = processed_image.thumb.size
+        transparent_alpha_recovered = processed_image.transparent_alpha_recovered
+        transparent_qc_payload = processed_image.transparent_qc_payload
+        transparent_provider = processed_image.transparent_provider
+        stage_timer.add_elapsed("normalize", postprocess_started)
 
         # --- 写存储 ---
         image_id = new_uuid7()
@@ -4664,22 +5455,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             height=height,
             mime=orig_mime,
         )
-        generation_diagnostics = _build_generation_diagnostics(
-            requested_params=requested_params_for_diag,
-            effective_params=effective_params_for_diag,
-            revised_prompt=revised_prompt,
-            provider=actual_upstream_provider
-            or (upstream_provider_label if not is_dual_race else None),
-            upstream_route=image_route,
-            actual_route=actual_upstream_route,
-            actual_source=actual_upstream_source,
-            actual_endpoint=actual_upstream_endpoint,
-            provider_attempts=provider_attempt_log,
-            upstream_duration_ms=upstream_duration_ms,
-            duration_ms=int(max(0.0, time.monotonic() - _task_start) * 1000),
-            debug_id=task_id,
-            expose_provider_diagnostics=settings.expose_provider_diagnostics,
-        )
         image_metadata = dict(model_metadata)
         if model_metadata:
             try:
@@ -4698,9 +5473,6 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     task_id,
                     exc,
                 )
-        image_metadata["generation_diagnostics"] = generation_diagnostics
-        if revised_prompt:
-            image_metadata["revised_prompt"] = revised_prompt
         key_orig = f"u/{user_id}/g/{task_id}/orig.{orig_ext}"
         key_display = f"u/{user_id}/g/{task_id}/display2048.webp"
         key_preview = f"u/{user_id}/g/{task_id}/preview1024.webp"
@@ -4715,11 +5487,13 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             {
                 "generation_id": task_id,
                 "message_id": message_id,
+                "trace_id": trace_id,
                 "stage": GenerationStage.FINALIZING.value,
                 "substage": GenerationStage.STORING.value,
             },
         )
 
+        upload_started = time.monotonic()
         created_storage_keys = await _write_generation_files(
             [
                 (key_orig, raw_image),
@@ -4728,6 +5502,30 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 (key_thumb, thumb_bytes),
             ]
         )
+        stage_timer.add_elapsed("upload", upload_started)
+
+        generation_diagnostics = _build_generation_diagnostics(
+            trace_id=trace_id,
+            requested_params=requested_params_for_diag,
+            effective_params=effective_params_for_diag,
+            revised_prompt=revised_prompt,
+            provider=actual_upstream_provider
+            or (upstream_provider_label if not is_dual_race else None),
+            upstream_route=image_route,
+            actual_route=actual_upstream_route,
+            actual_source=actual_upstream_source,
+            actual_endpoint=actual_upstream_endpoint,
+            provider_attempts=provider_attempt_log,
+            stage_timings_ms=stage_timer.snapshot(),
+            route_diagnostics=route_diagnostics,
+            upstream_duration_ms=upstream_duration_ms,
+            duration_ms=int(max(0.0, time.monotonic() - _task_start) * 1000),
+            debug_id=task_id,
+            expose_provider_diagnostics=settings.expose_provider_diagnostics,
+        )
+        image_metadata["generation_diagnostics"] = generation_diagnostics
+        if revised_prompt:
+            image_metadata["revised_prompt"] = revised_prompt
 
         # --- 写 DB ---
         conversation_id_for_title: str | None = None
@@ -4792,17 +5590,22 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
                 # UPDATE generation 成功态
                 upstream_req: dict[str, Any] = (
-                    dict(gen.upstream_request)
+                    dict(gen_upstream_request_snapshot)
+                    if isinstance(gen_upstream_request_snapshot, dict)
+                    else dict(gen.upstream_request)
                     if isinstance(gen.upstream_request, dict)
                     else {}
                 )
                 upstream_req.update(image_request_options)
+                upstream_req["trace_id"] = trace_id
                 upstream_req["size_actual"] = f"{width}x{height}"
                 upstream_req["mime"] = orig_mime
                 upstream_req["upstream_route"] = image_route
                 upstream_req["requested_params"] = requested_params_for_diag
                 upstream_req["effective_params"] = effective_params_for_diag
                 upstream_req["generation_diagnostics"] = generation_diagnostics
+                if route_diagnostics:
+                    upstream_req["route_diagnostics"] = route_diagnostics[:12]
                 upstream_req["debug_id"] = task_id
                 if upstream_duration_ms is not None:
                     upstream_req["upstream_duration_ms"] = upstream_duration_ms
@@ -5324,7 +6127,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
 
             await _cancel_renewer_task(renewer)
             renewer = None
-            await _release_lease(redis, task_id, worker_id)
+            await _release_lease(redis, task_id, lease_token)
 
             # 用 arq redis 延迟入队（_defer_by 秒）
             try:
@@ -5495,7 +6298,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         exc_info=True,
                     )
             try:
-                await _release_lease(redis, task_id, worker_id)
+                await _release_lease(redis, task_id, lease_token)
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "generation lease release failed task=%s",

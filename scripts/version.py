@@ -163,7 +163,12 @@ def check() -> int:
                 mismatches.append(f"{current_release_json.relative_to(ROOT)}: JSON root is not object")
             else:
                 image_tag = release.get("image_tag")
-                if image_tag not in allowed_runtime_image_tags(version):
+                if image_tag == "main" and not rolling_tag_allowed():
+                    mismatches.append(
+                        f"{current_release_json.relative_to(ROOT)} image_tag: "
+                        "'main' requires LUMEN_ALLOW_ROLLING_TAG=1"
+                    )
+                elif image_tag not in allowed_runtime_image_tags(version):
                     mismatches.append(
                         f"{current_release_json.relative_to(ROOT)} image_tag: "
                         f"{image_tag!r} != 'v{version}'"

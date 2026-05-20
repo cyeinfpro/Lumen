@@ -26,7 +26,6 @@ _KEY_TS = "lumen:acct:{name}:image:ts"
 _KEY_DAILY = "lumen:acct:{name}:image:daily:{day}"
 _TS_TTL_S = 86400 * 2
 REDIS_ERROR_RETRY_AFTER_S = 5.0
-_REDIS_ERROR_RETRY_AFTER_S = REDIS_ERROR_RETRY_AFTER_S
 
 _CHECK_WINDOW_LUA = """
 local key = KEYS[1]
@@ -145,7 +144,7 @@ async def _check_window_fallback(
     try:
         head = await redis.zrange(ts_key, 0, 0, withscores=True)
     except Exception:  # noqa: BLE001
-        head = []
+        return count_limit, _make_redis_blip_retry_after(cur_now, window_s)
     if not head:
         return used, None
     _member, oldest = head[0]
@@ -159,11 +158,11 @@ def _make_redis_blip_retry_after(cur_now: float, window_s: float) -> float:
     """Redis 抖动时的 fail-closed 短冷却，"oldest" 占位让上层算出 5s 级 retry。
 
     上层公式：``retry_after = max(1.0, (oldest + window_s) - cur_now)``。
-    所以这里用 ``cur_now - window_s + _REDIS_ERROR_RETRY_AFTER_S`` 作为伪
-    oldest，正好让 retry_after = _REDIS_ERROR_RETRY_AFTER_S（5s）。语义：
+    所以这里用 ``cur_now - window_s + REDIS_ERROR_RETRY_AFTER_S`` 作为伪
+    oldest，正好让 retry_after = REDIS_ERROR_RETRY_AFTER_S（5s）。语义：
     "Redis 抖了，5 秒后再让选号器试一次"，不依赖 cutoff 数学耦合。
     """
-    return cur_now - float(window_s) + _REDIS_ERROR_RETRY_AFTER_S
+    return cur_now - float(window_s) + REDIS_ERROR_RETRY_AFTER_S
 
 
 async def _check_window(
@@ -283,7 +282,7 @@ async def check_quota(
         try:
             raw = await redis.get(day_key)
         except Exception:  # noqa: BLE001
-            raw = None
+            return False, REDIS_ERROR_RETRY_AFTER_S
         used = 0
         if raw is not None:
             try:

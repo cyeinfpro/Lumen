@@ -12,6 +12,7 @@
 8. _do_poster_inpaint mask_image_id 必填校验（通过 schema 触发）
 9. create_poster_design_workflow + masters + render 主流程 monkeypatch 串通
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -167,7 +168,10 @@ def test_poster_seed_steps_initial_status() -> None:
     run = SimpleNamespace(
         id="run-1",
         user_prompt="限时五折，全场夏季新品，立即抢购",
-        metadata_jsonb={"style_id": "style_promo_01", "target_aspects": ["1:1", "9:16"]},
+        metadata_jsonb={
+            "style_id": "style_promo_01",
+            "target_aspects": ["1:1", "9:16"],
+        },
     )
     seeded = workflows._poster_seed_steps(run)  # noqa: SLF001
     by_key = {s.step_key: s for s in seeded}
@@ -318,7 +322,9 @@ def test_poster_revision_prompt_inpaint_unused() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_promotes_copy_analysis_to_needs_review(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sync_promotes_copy_analysis_to_needs_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """文案分析 completion 完成 → step.status=needs_review, run.current_step=copy_analysis。"""
     run = SimpleNamespace(
         id="run-1",
@@ -341,6 +347,7 @@ async def test_sync_promotes_copy_analysis_to_needs_review(monkeypatch: pytest.M
         error_code=None,
         error_message=None,
     )
+
     # 模拟 _load_steps 返回我们的 steps
     async def fake_load_steps(db: Any, run_id: str) -> list[Any]:
         return [copy_step]
@@ -374,7 +381,11 @@ async def test_sync_marks_master_step_needs_review_when_all_masters_ready(
         image_ids=[],
     )
     approval_step = SimpleNamespace(
-        step_key="master_approval", status="waiting_input", task_ids=[], input_json={}, output_json={}
+        step_key="master_approval",
+        status="waiting_input",
+        task_ids=[],
+        input_json={},
+        output_json={},
     )
     masters = [
         SimpleNamespace(
@@ -622,13 +633,146 @@ async def test_list_workflows_counts_poster_multi_size_outputs() -> None:
     assert out.items[0].output_count == 2
 
 
+def test_next_action_for_poster_project_steps() -> None:
+    run = SimpleNamespace(
+        type="poster_design",
+        status="needs_review",
+        current_step="multi_size_generation",
+    )
+
+    assert workflows._next_action_for(run) == "生成/确认多尺寸"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_attach_workflow_assets_updates_run_step_and_image_metadata() -> None:
+    now = datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc)
+    run = SimpleNamespace(
+        id="run-poster",
+        type="poster_design",
+        title="春季海报",
+        metadata_jsonb={},
+    )
+    step = SimpleNamespace(
+        image_ids=["img-old"],
+        output_json={"asset_image_ids": ["img-old"]},
+    )
+    image = SimpleNamespace(id="img-1", metadata_jsonb={})
+    db = _Db(responses=[[image], [step]])
+
+    records = await workflows._attach_workflow_assets(  # noqa: SLF001
+        db,
+        run=run,  # type: ignore[arg-type]
+        user_id="user-1",
+        image_ids=["img-1", "img-1"],
+        asset_type="poster_delivery",
+        source_step_key="delivery",
+        label="海报交付",
+        added_at=now,
+    )
+
+    assert len(records) == 1
+    assert run.metadata_jsonb["asset_image_ids"] == ["img-1"]
+    assert step.image_ids == ["img-old", "img-1"]
+    assert step.output_json["asset_image_ids"] == ["img-old", "img-1"]
+    assert (
+        image.metadata_jsonb["latest_workflow_asset"]["workflow_run_id"] == "run-poster"
+    )
+    assert (
+        image.metadata_jsonb["latest_workflow_asset"]["asset_type"] == "poster_delivery"
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_delivery_supports_poster_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-poster",
+        user_id="user-1",
+        type="poster_design",
+        status="needs_review",
+        current_step="multi_size_generation",
+        metadata_jsonb={},
+    )
+    multi_step = SimpleNamespace(
+        status="needs_review",
+        image_ids=["img-1", "img-2"],
+        input_json={},
+        output_json={},
+        approved_at=None,
+        approved_by=None,
+    )
+    delivery_step = SimpleNamespace(
+        status="waiting_input",
+        image_ids=[],
+        input_json={},
+        output_json={},
+        approved_at=None,
+        approved_by=None,
+    )
+    attached: dict[str, Any] = {}
+
+    async def fake_get_run(
+        db: Any,
+        *,
+        user_id: str,
+        run_id: str,
+        lock: bool = False,
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-poster"
+        assert lock is True
+        return run
+
+    async def fake_sync_poster(db: Any, run_arg: Any) -> None:
+        assert run_arg is run
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        return {
+            "multi_size_generation": multi_step,
+            "delivery": delivery_step,
+        }[step_key]
+
+    async def fake_attach_assets(db_arg: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        assert db_arg is not None
+        attached.update(kwargs)
+        delivery_step.image_ids = kwargs["image_ids"]
+        return []
+
+    async def fake_build_run_out(db: Any, run_arg: Any) -> Any:
+        return SimpleNamespace(status=run_arg.status, current_step=run_arg.current_step)
+
+    monkeypatch.setattr(workflows, "_get_run", fake_get_run)
+    monkeypatch.setattr(workflows, "_sync_poster_workflow_outputs", fake_sync_poster)
+    monkeypatch.setattr(workflows, "_step", fake_step)
+    monkeypatch.setattr(workflows, "_attach_workflow_assets", fake_attach_assets)
+    monkeypatch.setattr(workflows, "_build_run_out", fake_build_run_out)
+
+    db = _Db()
+    user = SimpleNamespace(id="user-1")
+    out = await workflows.complete_delivery("run-poster", user, db)  # type: ignore[arg-type]
+
+    assert out.status == "completed"
+    assert out.current_step == "delivery"
+    assert run.status == "completed"
+    assert multi_step.status == "completed"
+    assert delivery_step.status == "completed"
+    assert delivery_step.output_json["download_image_ids"] == ["img-1", "img-2"]
+    assert attached["asset_type"] == "poster_delivery"
+    assert attached["source_step_key"] == "delivery"
+    assert attached["image_ids"] == ["img-1", "img-2"]
+    assert db.committed is True
+
+
 @pytest.mark.asyncio
 async def test_poster_load_style_reads_json_preset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Preset styles live in the JSON index, not poster_style_items DB rows."""
 
-    async def fake_find_preset(db: Any, *, user_id: str, style_id: str) -> dict[str, Any] | None:
+    async def fake_find_preset(
+        db: Any, *, user_id: str, style_id: str
+    ) -> dict[str, Any] | None:
         assert user_id == "user-1"
         assert style_id == "preset:flat_illustration:v1"
         return {
@@ -713,11 +857,17 @@ async def test_create_poster_design_workflow_smoke(
         db: Any, *, user: Any, conversation_id: Any, title: str, workflow_type: str
     ) -> Any:
         return SimpleNamespace(
-            id="conv-1", user_id=user.id, archived=False, title="", last_activity_at=None
+            id="conv-1",
+            user_id=user.id,
+            archived=False,
+            title="",
+            last_activity_at=None,
         )
 
     async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
-        return SimpleNamespace(step_key=step_key, task_ids=[], input_json={}, output_json={})
+        return SimpleNamespace(
+            step_key=step_key, task_ids=[], input_json={}, output_json={}
+        )
 
     async def fake_create_workflow_task(**kwargs: Any) -> Any:
         bundle = SimpleNamespace(
@@ -728,7 +878,9 @@ async def test_create_poster_design_workflow_smoke(
         )
         return bundle, "comp-1", []
 
-    async def fake_publish_bundles(db: Any, *, user_id: str, conv_id: str, bundles: list[Any]) -> None:
+    async def fake_publish_bundles(
+        db: Any, *, user_id: str, conv_id: str, bundles: list[Any]
+    ) -> None:
         return None
 
     monkeypatch.setattr(workflows, "_poster_load_style", fake_load_style)
@@ -737,7 +889,9 @@ async def test_create_poster_design_workflow_smoke(
         workflows, "_get_or_create_workflow_conversation", fake_get_or_create_conv
     )
     monkeypatch.setattr(workflows, "_step", fake_step)
-    monkeypatch.setattr(workflows, "_create_poster_workflow_task", fake_create_workflow_task)
+    monkeypatch.setattr(
+        workflows, "_create_poster_workflow_task", fake_create_workflow_task
+    )
     monkeypatch.setattr(workflows, "_publish_bundles", fake_publish_bundles)
 
     body = PosterDesignWorkflowCreateIn(
@@ -770,9 +924,7 @@ async def test_create_poster_design_workflow_rejects_unknown_style(
 
     monkeypatch.setattr(workflows, "_poster_load_style", fake_load_style)
 
-    body = PosterDesignWorkflowCreateIn(
-        copy_text="测试文案", style_id="missing"
-    )
+    body = PosterDesignWorkflowCreateIn(copy_text="测试文案", style_id="missing")
     db = _Db()
     user = SimpleNamespace(id="user-1")
     with pytest.raises(HTTPException) as exc:

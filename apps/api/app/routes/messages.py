@@ -4,7 +4,7 @@ POST /conversations/{conv_id}/messages
 1. 鉴权 + rate limit
 2. 意图路由（auto → chat / vision_qa / text_to_image / image_to_image）
 3. 出图参数校验 + 尺寸解析（lumen_core.sizing.resolve_size）
-4. 幂等：(user, idempotency_key) 命中 → 直接返回既有三件套
+4. 幂等：(user, conversation, idempotency_key) 命中 → 直接返回既有三件套
 5. 单事务：INSERT messages(user) + messages(assistant, pending) + 子任务 + outbox_events
 6. 事务提交后尽力 XADD queue + PUBLISH task.queued + XADD events:user:{uid}
 7. 返回 PostMessageOut
@@ -13,8 +13,10 @@ POST /conversations/{conv_id}/messages
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 import secrets
 import unicodedata
@@ -63,16 +65,20 @@ from lumen_core.models import (
     MemoryAudit,
     Message,
     OutboxEvent,
+    SystemSetting,
     SystemPrompt,
     User,
     UserApiCredential,
     UserMemory,
     UserMemoryScope,
+    new_uuid7,
 )
+from lumen_core.queue_metadata import generation_queue_metadata
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     ChatParamsIn,
     ImageParamsIn,
+    MessageAttachmentIn,
     MessageOut,
     PostMessageIn,
     PostMessageOut,
@@ -104,23 +110,40 @@ logger = logging.getLogger(__name__)
 async def _lock_idempotency_key(
     db: AsyncSession,
     user_id: str,
+    conv_id: str,
     idempotency_key: str,
-) -> None:
+) -> bool:
     connection = getattr(db, "connection", None)
     if connection is None:
-        return
+        return False
     bind = await connection()
     if bind.dialect.name != "postgresql":
-        return
-    lock_key = f"{user_id}:{idempotency_key}"
+        return False
+    lock_key = _idempotency_lock_key(user_id, conv_id, idempotency_key)
     # Why hashtext is OK here: pg_advisory_xact_lock takes a 64-bit signed int
     # and hashtext returns a 32-bit signed int — i.e. there is collision risk
-    # across distinct (user_id, idempotency_key) pairs. Collisions only cost
+    # across distinct (user_id, conv_id, idempotency_key) triples. Collisions only cost
     # serialization (one extra waiter blocks until the txn commits) and never
     # corrupt; the race we actually guard against is duplicate inserts of the
     # same key, which still hash identically. So 32-bit hash collisions only
     # slow, never corrupt.
     await db.execute(select(func.pg_advisory_xact_lock(func.hashtext(lock_key))))
+    return True
+
+
+def _idempotency_lock_key(user_id: str, conv_id: str, idempotency_key: str) -> str:
+    return f"{user_id}:{conv_id}:{idempotency_key}"
+
+
+def _stored_idempotency_key(conv_id: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(
+        f"{conv_id}:{idempotency_key}".encode("utf-8", errors="replace")
+    ).hexdigest()
+    return f"cv:{digest[:61]}"
+
+
+def _idempotency_lookup_keys(conv_id: str, idempotency_key: str) -> tuple[str, str]:
+    return (idempotency_key, _stored_idempotency_key(conv_id, idempotency_key))
 
 
 # Why: align with the global ``MAX_PROMPT_CHARS`` so server-side truncation
@@ -164,6 +187,27 @@ _TRANSPARENT_BACKGROUND_NEGATIVE_RE = re.compile(
 # 终端转义、\x00 空字节注入，而不是把用户合法的换行也搞丢。
 _SYSTEM_PROMPT_CONTROL_TRANSLATION = {i: " " for i in range(32) if i not in (9, 10, 13)}
 _SYSTEM_PROMPT_CONTROL_TRANSLATION[127] = " "
+_CHAT_TOOL_BUDGET_SETTINGS: dict[str, tuple[str, str]] = {
+    "web_search": ("chat.tool_web_search_micro", "CHAT_TOOL_WEB_SEARCH_MICRO"),
+    "file_search": ("chat.tool_file_search_micro", "CHAT_TOOL_FILE_SEARCH_MICRO"),
+    "code_interpreter": (
+        "chat.tool_code_interpreter_micro",
+        "CHAT_TOOL_CODE_INTERPRETER_MICRO",
+    ),
+    "image_generation": (
+        "chat.tool_image_generation_micro",
+        "CHAT_TOOL_IMAGE_GENERATION_MICRO",
+    ),
+}
+_MAX_TOOL_INVOCATIONS_DEFAULT = 8
+
+
+@dataclass(frozen=True)
+class _ChatWalletPreflight:
+    estimated_model_micro: int
+    tool_budget_micro: int
+    preauth_micro: int
+    tool_budget_by_tool: dict[str, int]
 
 
 def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
@@ -216,6 +260,87 @@ async def _billing_allow_negative(db: AsyncSession) -> bool:
     )
 
 
+def _parse_nonnegative_micro(value: object) -> int:
+    if value in (None, ""):
+        return 0
+    try:
+        return max(0, int(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _enabled_chat_tools(chat_params: ChatParamsIn | None) -> list[str]:
+    if chat_params is None:
+        return []
+    tools: list[str] = []
+    if chat_params.web_search:
+        tools.append("web_search")
+    if chat_params.file_search:
+        tools.append("file_search")
+    if chat_params.code_interpreter:
+        tools.append("code_interpreter")
+    if chat_params.image_generation:
+        tools.append("image_generation")
+    return tools
+
+
+async def _chat_tool_budget_setting_micro(
+    db: AsyncSession,
+    tool_name: str,
+) -> int:
+    setting = _CHAT_TOOL_BUDGET_SETTINGS.get(tool_name)
+    if setting is None:
+        return 0
+    setting_key, env_key = setting
+    raw: object | None = None
+    try:
+        raw = (
+            await db.execute(
+                select(SystemSetting.value).where(SystemSetting.key == setting_key)
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        logger.warning(
+            "chat tool budget setting lookup failed key=%s", setting_key, exc_info=True
+        )
+    if raw in (None, ""):
+        raw = os.environ.get(env_key)
+    return _parse_nonnegative_micro(raw)
+
+
+async def _chat_max_tool_invocations(db: AsyncSession) -> int:
+    raw: object | None = None
+    try:
+        raw = (
+            await db.execute(
+                select(SystemSetting.value).where(
+                    SystemSetting.key == "chat.max_tool_invocations"
+                )
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        logger.warning("chat max_tool_invocations lookup failed", exc_info=True)
+    if raw in (None, ""):
+        raw = os.environ.get("CHAT_MAX_TOOL_INVOCATIONS")
+    try:
+        return min(64, max(1, int(raw or _MAX_TOOL_INVOCATIONS_DEFAULT)))
+    except (TypeError, ValueError):
+        return _MAX_TOOL_INVOCATIONS_DEFAULT
+
+
+async def _estimate_chat_tool_budget_micro(
+    db: AsyncSession,
+    chat_params: ChatParamsIn | None,
+) -> tuple[int, dict[str, int]]:
+    budget_by_tool: dict[str, int] = {}
+    max_tool_invocations = await _chat_max_tool_invocations(db)
+    for tool_name in _enabled_chat_tools(chat_params):
+        amount = await _chat_tool_budget_setting_micro(db, tool_name)
+        if amount > 0:
+            budget_by_tool[tool_name] = amount * max_tool_invocations
+    return sum(budget_by_tool.values()), budget_by_tool
+
+
 async def _billing_image_thresholds(db: AsyncSession) -> dict[str, int]:
     return billing_core.parse_thresholds(
         await _billing_setting_raw(db, "billing.image_size_thresholds")
@@ -233,21 +358,27 @@ async def _ensure_chat_wallet_preflight(
     user_email: str | None,
     account_mode: str,
     model: str,
-) -> None:
+    chat_params: ChatParamsIn | None = None,
+) -> _ChatWalletPreflight | None:
     if account_mode != "wallet" or not await _billing_enabled(db):
-        return
+        return None
     wallet = await billing_core.get_wallet(db, user_id, lock=True)
     if wallet.balance_micro < 10_000:
         raise _http(
             "INSUFFICIENT_BALANCE",
             "insufficient wallet balance",
             402,
+            required_micro=10_000,
+            balance_micro=int(wallet.balance_micro),
         )
     cost_preview = await billing_core.estimate_completion_cost(
         db,
         model=model,
         tokens_in=1,
         tokens_out=1,
+    )
+    tool_budget_micro, budget_by_tool = await _estimate_chat_tool_budget_micro(
+        db, chat_params
     )
     if cost_preview <= 0:
         await write_audit(
@@ -262,6 +393,23 @@ async def _ensure_chat_wallet_preflight(
             },
             autocommit=False,
         )
+    preauth_micro = max(10_000, int(cost_preview or 0) + tool_budget_micro)
+    if wallet.balance_micro < preauth_micro and not await _billing_allow_negative(db):
+        raise _http(
+            "INSUFFICIENT_BALANCE",
+            "insufficient wallet balance",
+            402,
+            required_micro=preauth_micro,
+            balance_micro=int(wallet.balance_micro),
+            estimated_model_micro=int(cost_preview or 0),
+            tool_budget_micro=tool_budget_micro,
+        )
+    return _ChatWalletPreflight(
+        estimated_model_micro=int(cost_preview or 0),
+        tool_budget_micro=tool_budget_micro,
+        preauth_micro=preauth_micro,
+        tool_budget_by_tool=budget_by_tool,
+    )
 
 
 def _requested_image_billing_tier(image_params: ImageParamsIn) -> str | None:
@@ -406,21 +554,7 @@ def _chat_upstream_request(chat_params: ChatParamsIn) -> dict[str, Any] | None:
     if chat_params.web_search:
         req["web_search"] = True
     if chat_params.file_search:
-        vector_store_ids: list[str] = []
-        seen: set[str] = set()
-        for raw in chat_params.vector_store_ids:
-            value = raw.strip()
-            if not value:
-                continue
-            if not _VECTOR_STORE_ID_RE.fullmatch(value):
-                raise _http(
-                    "invalid_vector_store_id",
-                    "invalid vector_store_ids entry",
-                    422,
-                )
-            if value not in seen:
-                seen.add(value)
-                vector_store_ids.append(value)
+        vector_store_ids = _chat_param_vector_store_ids(chat_params)
         req["file_search"] = True
         if vector_store_ids:
             req["vector_store_ids"] = vector_store_ids
@@ -429,6 +563,168 @@ def _chat_upstream_request(chat_params: ChatParamsIn) -> dict[str, Any] | None:
     if chat_params.image_generation:
         req["image_generation"] = True
     return req or None
+
+
+def _clean_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _default_attachment_role(intent: Intent) -> str:
+    return "ask_target" if intent == Intent.VISION_QA else "reference"
+
+
+def _message_attachment_roles(
+    body: PostMessageIn,
+    *,
+    attachment_ids: list[str],
+    intent: Intent,
+) -> list[dict[str, Any]]:
+    roles: list[dict[str, Any]] = []
+    if body.attachments:
+        items: list[MessageAttachmentIn | str] = list(body.attachments)
+    else:
+        items = list(attachment_ids)
+    default_role = _default_attachment_role(intent)
+    for item in items:
+        if isinstance(item, str):
+            roles.append({"image_id": item, "role": default_role})
+            continue
+        role = {
+            "image_id": item.image_id,
+            "role": item.role,
+        }
+        if item.label:
+            role["label"] = item.label
+        if item.weight is not None:
+            role["weight"] = item.weight
+        roles.append(role)
+    return roles
+
+
+def _message_request_metadata(
+    body: PostMessageIn,
+    *,
+    attachment_ids: list[str],
+    mask_image_id: str | None,
+    intent: Intent,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    source = _clean_optional_text(body.source)
+    action_source = _clean_optional_text(body.action_source)
+    trace_id = _clean_optional_text(body.trace_id)
+    attachment_roles = _message_attachment_roles(
+        body,
+        attachment_ids=attachment_ids,
+        intent=intent,
+    )
+
+    if source:
+        metadata["source"] = source
+    if action_source:
+        metadata["action_source"] = action_source
+    if trace_id:
+        metadata["trace_id"] = trace_id
+    if attachment_roles:
+        metadata["attachment_roles"] = attachment_roles
+    if attachment_ids:
+        metadata["input_images"] = [dict(item) for item in attachment_roles]
+        metadata["primary_input_image_id"] = attachment_ids[0]
+        metadata["source_image_id"] = attachment_ids[0]
+    if mask_image_id:
+        metadata["mask_image_id"] = mask_image_id
+        input_images = list(metadata.get("input_images") or [])
+        input_images.append({"image_id": mask_image_id, "role": "mask"})
+        metadata["input_images"] = input_images
+    return metadata
+
+
+def _merge_request_metadata(
+    upstream_request: dict[str, Any] | None,
+    request_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    out = dict(upstream_request or {})
+    for key, value in (request_metadata or {}).items():
+        out.setdefault(key, value)
+    return out
+
+
+def _task_payload_context(upstream_request: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(upstream_request, dict):
+        return {}
+    context: dict[str, Any] = {}
+    for key in ("trace_id", "source", "action_source"):
+        value = upstream_request.get(key)
+        if isinstance(value, str) and value:
+            context[key] = value
+    input_images = upstream_request.get("input_images")
+    if isinstance(input_images, list):
+        context["input_images"] = input_images
+    return context
+
+
+def _image_queue_metadata(
+    image_params: ImageParamsIn,
+    resolved_size: ResolvedSize,
+    *,
+    action: str | None,
+    mask_image_id: str | None,
+    size_px: int,
+    billing_tier: str | None,
+) -> dict[str, Any]:
+    _ = image_params, billing_tier
+    safe_action = action or (
+        GenerationAction.EDIT.value
+        if mask_image_id
+        else GenerationAction.GENERATE.value
+    )
+    return generation_queue_metadata(
+        upstream_request=None,
+        action=safe_action,
+        size_requested=resolved_size.size,
+        mask_image_id=mask_image_id,
+        upstream_pixels=size_px,
+    )
+
+
+def _chat_param_vector_store_ids(chat_params: ChatParamsIn) -> list[str]:
+    vector_store_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in chat_params.vector_store_ids:
+        value = raw.strip()
+        if not value:
+            continue
+        if not _VECTOR_STORE_ID_RE.fullmatch(value):
+            raise _http(
+                "invalid_vector_store_id",
+                "invalid vector_store_ids entry",
+                422,
+            )
+        if value not in seen:
+            seen.add(value)
+            vector_store_ids.append(value)
+    return vector_store_ids
+
+
+async def _ensure_file_search_configured(
+    db: AsyncSession,
+    chat_params: ChatParamsIn,
+) -> None:
+    if not chat_params.file_search:
+        return
+    if _chat_param_vector_store_ids(chat_params):
+        return
+    spec = get_spec("chat.file_search_vector_store_ids")
+    raw = await get_setting(db, spec) if spec is not None else None
+    if raw and any(part.strip() for part in raw.split(",")):
+        return
+    raise _http(
+        "FILE_SEARCH_NOT_CONFIGURED",
+        "file_search requires vector_store_ids or a configured default vector store",
+        400,
+    )
 
 
 def _non_blank(text: str | None) -> str | None:
@@ -958,6 +1254,19 @@ async def _resolve_task_credential_pin(
     )
 
 
+def _select_chat_task_model(
+    credential_pin: _TaskCredentialPin | None,
+    chat_params: ChatParamsIn,
+) -> str:
+    return (
+        credential_pin.fast_chat_model
+        if credential_pin and chat_params.fast and credential_pin.fast_chat_model
+        else credential_pin.default_chat_model
+        if credential_pin
+        else DEFAULT_CHAT_MODEL
+    )
+
+
 async def _create_assistant_task(
     *,
     db: AsyncSession,
@@ -975,6 +1284,11 @@ async def _create_assistant_task(
     user_email: str | None = None,
     default_image_output_format: str = _DEFAULT_IMAGE_OUTPUT_FORMAT,
     mask_image_id: str | None = None,
+    credential_pin: _TaskCredentialPin | None = None,
+    credential_pin_resolved: bool = False,
+    chat_wallet_preflight_done: bool = False,
+    chat_wallet_preflight: _ChatWalletPreflight | None = None,
+    request_metadata: dict[str, Any] | None = None,
 ) -> AssistantTaskResult:
     """Build assistant message + sub-task(s) + outbox in the open transaction.
 
@@ -1005,29 +1319,18 @@ async def _create_assistant_task(
     completion_id: str | None = None
     generation_ids: list[str] = []
     outbox_payloads: list[dict[str, Any]] = []
-    credential_pin = await _resolve_task_credential_pin(
-        db,
-        user_id,
-        "image" if produces_image else "chat",
-        account_mode,
-    )
+    if not credential_pin_resolved:
+        credential_pin = await _resolve_task_credential_pin(
+            db,
+            user_id,
+            "image" if produces_image else "chat",
+            account_mode,
+        )
 
     if intent in (Intent.CHAT, Intent.VISION_QA):
-        task_chat_model = (
-            credential_pin.fast_chat_model
-            if credential_pin and chat_params.fast and credential_pin.fast_chat_model
-            else credential_pin.default_chat_model
-            if credential_pin
-            else DEFAULT_CHAT_MODEL
-        )
-        await _ensure_chat_wallet_preflight(
-            db,
-            user_id=user_id,
-            user_email=user_email,
-            account_mode=account_mode,
-            model=task_chat_model,
-        )
+        task_chat_model = _select_chat_task_model(credential_pin, chat_params)
 
+    stored_idempotency_key = _stored_idempotency_key(conv.id, idempotency_key)
     assistant_msg = Message(
         conversation_id=conv.id,
         role=Role.ASSISTANT.value,
@@ -1040,6 +1343,10 @@ async def _create_assistant_task(
     await db.flush()
 
     if intent in (Intent.CHAT, Intent.VISION_QA):
+        comp_upstream_request = _merge_request_metadata(
+            _chat_upstream_request(chat_params),
+            request_metadata,
+        )
         comp = Completion(
             message_id=assistant_msg.id,
             user_id=user_id,
@@ -1050,8 +1357,8 @@ async def _create_assistant_task(
             status=CompletionStatus.QUEUED.value,
             progress_stage=CompletionStage.QUEUED.value,
             attempt=0,
-            idempotency_key=idempotency_key,
-            upstream_request=_chat_upstream_request(chat_params),
+            idempotency_key=stored_idempotency_key,
+            upstream_request=comp_upstream_request or None,
             user_api_credential_id=(
                 credential_pin.credential_id if credential_pin else None
             ),
@@ -1060,13 +1367,64 @@ async def _create_assistant_task(
         db.add(comp)
         await db.flush()
         completion_id = comp.id
-        outbox_payloads.append(
-            {
-                "task_id": comp.id,
-                "user_id": user_id,
-                "kind": "completion",
-            }
-        )
+        if not chat_wallet_preflight_done:
+            chat_wallet_preflight = await _ensure_chat_wallet_preflight(
+                db,
+                user_id=user_id,
+                user_email=user_email,
+                account_mode=account_mode,
+                model=task_chat_model,
+                chat_params=chat_params,
+            )
+        if (
+            chat_wallet_preflight is not None
+            and chat_wallet_preflight.preauth_micro > 0
+        ):
+            try:
+                tx = await billing_core.hold(
+                    db,
+                    user_id,
+                    chat_wallet_preflight.preauth_micro,
+                    ref_type="completion",
+                    ref_id=comp.id,
+                    idempotency_key=f"hold:{comp.id}",
+                    allow_negative=await _billing_allow_negative(db),
+                    meta={
+                        "estimated_model_micro": (
+                            chat_wallet_preflight.estimated_model_micro
+                        ),
+                        "tool_budget_micro": chat_wallet_preflight.tool_budget_micro,
+                        "tool_budget_by_tool": (
+                            chat_wallet_preflight.tool_budget_by_tool
+                        ),
+                    },
+                )
+            except billing_core.BillingError as exc:
+                raise _billing_http_error(exc)
+            if tx is not None:
+                await write_audit(
+                    db,
+                    event_type="wallet.hold.chat",
+                    user_id=user_id,
+                    details={
+                        "completion_id": comp.id,
+                        "amount_micro": chat_wallet_preflight.preauth_micro,
+                        "estimated_model_micro": (
+                            chat_wallet_preflight.estimated_model_micro
+                        ),
+                        "tool_budget_micro": chat_wallet_preflight.tool_budget_micro,
+                        "balance_after": tx.balance_after,
+                        "hold_after": tx.hold_after,
+                    },
+                    autocommit=False,
+                )
+        payload = {
+            "task_id": comp.id,
+            "user_id": user_id,
+            "kind": "completion",
+        }
+        payload.update(_task_payload_context(comp_upstream_request))
+        outbox_payloads.append(payload)
     else:
         # text_to_image / image_to_image
         count = max(1, min(16, image_params.count))
@@ -1094,6 +1452,17 @@ async def _create_assistant_task(
             else billing_core.DEFAULT_IMAGE_SIZE_THRESHOLDS["1k"]
         )
         billing_tier = _requested_image_billing_tier(image_params)
+        upstream_request = _merge_request_metadata(upstream_request, request_metadata)
+        upstream_request.update(
+            _image_queue_metadata(
+                image_params,
+                resolved_size,
+                action=action,
+                mask_image_id=mask_image_id,
+                size_px=size_px,
+                billing_tier=billing_tier,
+            )
+        )
         if not billing_enabled:
             estimated_micro, estimated_tier = (0, "free")
         elif billing_tier is not None:
@@ -1124,7 +1493,13 @@ async def _create_assistant_task(
             prompt_full += _transparent_background_prompt_suffix()
 
         for i in range(count):
-            idem = idempotency_key if i == 0 else f"{idempotency_key}:{i}"
+            idem = (
+                stored_idempotency_key
+                if i == 0
+                else _stored_idempotency_key(conv.id, f"{idempotency_key}:{i}")
+            )
+            gen_upstream_request = dict(upstream_request)
+            gen_upstream_request.setdefault("trace_id", f"gen_{new_uuid7()}")
             gen = Generation(
                 message_id=assistant_msg.id,
                 user_id=user_id,
@@ -1143,7 +1518,7 @@ async def _create_assistant_task(
                 progress_stage=GenerationStage.QUEUED.value,
                 attempt=0,
                 idempotency_key=idem,
-                upstream_request=dict(upstream_request),
+                upstream_request=gen_upstream_request,
                 user_api_credential_id=(
                     credential_pin.credential_id if credential_pin else None
                 ),
@@ -1199,6 +1574,7 @@ async def _create_assistant_task(
                 "user_id": user_id,
                 "kind": "generation",
             }
+            payload.update(_task_payload_context(gen_upstream_request))
             if defer_s > 0:
                 payload["defer_s"] = defer_s
             outbox_payloads.append(payload)
@@ -1309,17 +1685,25 @@ async def _publish_assistant_task(
 
             ev_name = EV_COMP_QUEUED if p["kind"] == "completion" else EV_GEN_QUEUED
             id_field = "completion_id" if p["kind"] == "completion" else "generation_id"
+            event_data: dict[str, Any] = {
+                id_field: p["task_id"],
+                "message_id": assistant_msg_id,
+                "conversation_id": conv_id,
+                "kind": p["kind"],
+            }
+            for key in ("trace_id", "source", "action_source"):
+                value = p.get(key)
+                if isinstance(value, str) and value:
+                    event_data[key] = value
+            input_images = p.get("input_images")
+            if isinstance(input_images, list):
+                event_data["input_images"] = input_images
             await publish_sse_event(
                 redis,
                 user_id=user_id,
                 channel=task_channel(p["task_id"]),
                 event_name=ev_name,
-                data={
-                    id_field: p["task_id"],
-                    "message_id": assistant_msg_id,
-                    "conversation_id": conv_id,
-                    "kind": p["kind"],
-                },
+                data=event_data,
             )
     except Exception:
         # Why: Outbox publisher will catch up later; surface in logs so silent
@@ -1400,12 +1784,13 @@ async def _lookup_idempotent_post(
     conv_id: str,
     idempotency_key: str,
 ) -> PostMessageOut | None:
-    """Return prior PostMessageOut if (user, idempotency_key) already exists.
+    """Return prior PostMessageOut if (user, conversation, idempotency_key) exists.
 
     Used for both the pre-check fast path and the IntegrityError fallback so the
     response shape stays bit-identical between concurrent and sequential cases.
     """
     alive_filters = _message_alive_filters()
+    lookup_keys = _idempotency_lookup_keys(conv_id, idempotency_key)
     comp_hit = (
         await db.execute(
             select(Completion)
@@ -1413,7 +1798,7 @@ async def _lookup_idempotent_post(
             .join(Conversation, Conversation.id == Message.conversation_id)
             .where(
                 Completion.user_id == user_id,
-                Completion.idempotency_key == idempotency_key,
+                Completion.idempotency_key.in_(lookup_keys),
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
@@ -1428,7 +1813,7 @@ async def _lookup_idempotent_post(
             .join(Conversation, Conversation.id == Message.conversation_id)
             .where(
                 Generation.user_id == user_id,
-                Generation.idempotency_key == idempotency_key,
+                Generation.idempotency_key.in_(lookup_keys),
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
@@ -1552,7 +1937,15 @@ async def submit_user_message(
     # first concurrent INSERT for an idempotency key. PostgreSQL advisory locks
     # give the intended per-user/per-key critical section; other dialects keep
     # relying on the unique constraint + IntegrityError fallback below.
-    await _lock_idempotency_key(db, user.id, body.idempotency_key)
+    if await _lock_idempotency_key(db, user.id, conv_id, body.idempotency_key):
+        prior = await _lookup_idempotent_post(
+            db,
+            user.id,
+            conv_id,
+            body.idempotency_key,
+        )
+        if prior is not None:
+            return prior
 
     # ---- validate attachments belong to user (and are alive) ----
     attachment_ids = list(body.attachment_image_ids or [])
@@ -1627,14 +2020,34 @@ async def submit_user_message(
 
     # ---- single transaction ----
     now = datetime.now(timezone.utc)
+    request_metadata = _message_request_metadata(
+        body,
+        attachment_ids=attachment_ids,
+        mask_image_id=mask_image_id,
+        intent=intent,
+    )
+    content_attachments = (
+        request_metadata.get("attachment_roles")
+        if isinstance(request_metadata.get("attachment_roles"), list)
+        else [{"image_id": i} for i in attachment_ids]
+    )
 
     user_content: dict[str, Any] = {
         "text": body.text or "",
-        "attachments": [{"image_id": i} for i in attachment_ids],
+        "attachments": content_attachments,
     }
+    if request_metadata.get("source"):
+        user_content["source"] = request_metadata["source"]
+    if request_metadata.get("action_source"):
+        user_content["action_source"] = request_metadata["action_source"]
+    for metadata_key in ("trace_id", "input_images", "mask_image_id"):
+        if request_metadata.get(metadata_key):
+            user_content[metadata_key] = request_metadata[metadata_key]
     fast_default = await _resolve_fast_default(db)
     image_params = _image_params_with_fast_default(body.image_params, fast_default)
     chat_params = _chat_params_with_fast_default(body.chat_params, fast_default)
+    if intent in (Intent.CHAT, Intent.VISION_QA):
+        await _ensure_file_search_configured(db, chat_params)
 
     # 推理强度仅对文本/视觉问答有意义；非空才写入，保持 content 干净。
     if intent in (Intent.CHAT, Intent.VISION_QA) and chat_params.reasoning_effort:
@@ -1677,57 +2090,72 @@ async def submit_user_message(
             if raw_default_format in _IMAGE_OUTPUT_FORMAT_VALUES:
                 default_image_output_format = raw_default_format
 
-    user_msg = Message(
-        conversation_id=conv_id,
-        role=Role.USER.value,
-        content=user_content,
-        intent=None,
-        status=None,
-    )
-    db.add(user_msg)
-    await db.flush()  # need user_msg.id for parent_message_id
+    account_mode = getattr(user, "account_mode", "wallet")
+    credential_pin: _TaskCredentialPin | None = None
+    credential_pin_resolved = False
     if intent in (Intent.CHAT, Intent.VISION_QA):
-        await _apply_pending_confirmation_reply(
-            db=db,
-            user=user,
-            conv=conv,
-            user_msg=user_msg,
-            text=body.text or "",
+        credential_pin = await _resolve_task_credential_pin(
+            db,
+            user.id,
+            "chat",
+            account_mode,
         )
-
-    result = await _create_assistant_task(
-        db=db,
-        user_id=user.id,
-        user_email=user.email,
-        account_mode=getattr(user, "account_mode", "wallet"),
-        conv=conv,
-        user_msg=user_msg,
-        intent=intent,
-        idempotency_key=body.idempotency_key,
-        image_params=image_params,
-        chat_params=chat_params,
-        system_prompt=system_prompt,
-        attachment_ids=attachment_ids,
-        text=body.text or "",
-        default_image_output_format=default_image_output_format,
-        mask_image_id=mask_image_id,
-    )
-    explicit_reembed_ids: list[str] = []
-    if intent in (Intent.CHAT, Intent.VISION_QA):
-        await _apply_explicit_memory_write(
-            db=db,
-            user=user,
-            conv=conv,
-            user_msg=user_msg,
-            assistant_msg=result.assistant_msg,
-            text=body.text or "",
-            reembed_ids=explicit_reembed_ids,
-        )
-
-    # bump conversation last_activity_at
-    conv.last_activity_at = now
+        credential_pin_resolved = True
 
     try:
+        user_msg = Message(
+            conversation_id=conv_id,
+            role=Role.USER.value,
+            content=user_content,
+            intent=None,
+            status=None,
+        )
+        db.add(user_msg)
+        await db.flush()  # need user_msg.id for parent_message_id
+        if intent in (Intent.CHAT, Intent.VISION_QA):
+            await _apply_pending_confirmation_reply(
+                db=db,
+                user=user,
+                conv=conv,
+                user_msg=user_msg,
+                text=body.text or "",
+            )
+
+        result = await _create_assistant_task(
+            db=db,
+            user_id=user.id,
+            user_email=user.email,
+            account_mode=account_mode,
+            conv=conv,
+            user_msg=user_msg,
+            intent=intent,
+            idempotency_key=body.idempotency_key,
+            image_params=image_params,
+            chat_params=chat_params,
+            system_prompt=system_prompt,
+            attachment_ids=attachment_ids,
+            text=body.text or "",
+            default_image_output_format=default_image_output_format,
+            mask_image_id=mask_image_id,
+            credential_pin=credential_pin,
+            credential_pin_resolved=credential_pin_resolved,
+            request_metadata=request_metadata,
+        )
+        explicit_reembed_ids: list[str] = []
+        if intent in (Intent.CHAT, Intent.VISION_QA):
+            await _apply_explicit_memory_write(
+                db=db,
+                user=user,
+                conv=conv,
+                user_msg=user_msg,
+                assistant_msg=result.assistant_msg,
+                text=body.text or "",
+                reembed_ids=explicit_reembed_ids,
+            )
+
+        # bump conversation last_activity_at
+        conv.last_activity_at = now
+
         await db.commit()
     except IntegrityError:
         # Why: concurrent request with the same idempotency_key won the race;
@@ -1744,6 +2172,9 @@ async def submit_user_message(
             "idempotency_key conflict",
             409,
         )
+    except Exception:
+        await db.rollback()
+        raise
     await db.refresh(user_msg)
     await db.refresh(result.assistant_msg)
     for memory_id in explicit_reembed_ids:

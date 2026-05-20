@@ -17,6 +17,10 @@ import { copy } from "@/lib/copy";
 import { IntentBadge } from "./IntentBadge";
 import { StageTicker } from "./StageTicker";
 import type { Generation, Intent } from "@/lib/types";
+import {
+  imageResultToLightboxItem,
+  imageVersionLabel,
+} from "@/lib/imageResultLightbox";
 
 // 1x1 透明 PNG 占位符（DESIGN §14.2）
 const PLACEHOLDER_PIXEL =
@@ -160,6 +164,8 @@ export function GenerationView({
 
   if (gen.status === "succeeded" && gen.image) {
     const img = gen.image;
+    const lightboxItem = imageResultToLightboxItem(gen, img);
+    const versionLabel = imageVersionLabel(lightboxItem);
     const free = isFreeGeneration(gen);
     const elapsed =
       gen.finished_at && gen.started_at
@@ -177,6 +183,9 @@ export function GenerationView({
           src={img.data_url}
           previewSrc={img.preview_url ?? img.thumb_url}
           lightboxPreviewSrc={img.display_url ?? img.preview_url ?? img.thumb_url}
+          lightboxItem={lightboxItem}
+          versionLabel={versionLabel}
+          versionTitle={versionLabel ?? undefined}
           alt={gen.prompt}
           compact={compact}
           className={cn(

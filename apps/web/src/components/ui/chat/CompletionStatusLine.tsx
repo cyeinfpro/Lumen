@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
-import type { AssistantMessage } from "@/lib/types";
+import type { AssistantMessage, CompletionToolCall } from "@/lib/types";
 
 type StatusTone = "active" | "muted" | "warn" | "danger";
 
@@ -46,31 +46,38 @@ function timestampOrNow(now: number, then: number | undefined): number {
 
 function activeToolLabel(msg: AssistantMessage): CompletionStatus | null {
   const calls = msg.tool_calls ?? [];
-  const failed = calls.find((call) => call.status === "failed");
-  if (failed) {
-    return {
-      label: `${failed.label}失败`,
-      tone: "warn",
-      active: false,
-    };
-  }
-  const running = calls.find(
-    (call) => call.status === "running" || call.status === "queued",
-  );
-  if (running) {
-    return {
-      label: `${running.label}中`,
-      tone: "active",
-      active: true,
-    };
-  }
-  const latest = calls[calls.length - 1];
-  if (latest?.status === "succeeded") {
-    return {
-      label: `${latest.label}完成`,
-      tone: "muted",
-      active: false,
-    };
+  const priority = [
+    "failed",
+    "timed_out",
+    "cancelled",
+    "unknown",
+    "running",
+    "queued",
+    "succeeded",
+  ] satisfies CompletionToolCall["status"][];
+
+  for (const status of priority) {
+    const call = calls.find((item) => item.status === status);
+    if (!call) continue;
+    switch (status) {
+      case "failed":
+        return { label: `${call.label}失败`, tone: "warn", active: false };
+      case "timed_out":
+        return { label: `${call.label}超时`, tone: "warn", active: false };
+      case "cancelled":
+        return { label: `${call.label}已取消`, tone: "muted", active: false };
+      case "unknown":
+        return { label: `${call.label}状态未知`, tone: "warn", active: false };
+      case "running":
+      case "queued":
+        return { label: `${call.label}中`, tone: "active", active: true };
+      case "succeeded":
+        return { label: `${call.label}完成`, tone: "muted", active: false };
+      default: {
+        const _exhaustive: never = status;
+        return _exhaustive;
+      }
+    }
   }
   return null;
 }

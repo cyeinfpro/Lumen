@@ -5,7 +5,37 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
+# This service needs Docker socket access to run pg_dump/redis backup inside
+# the compose containers. Run it as a non-root account that is only granted the
+# docker group; installer/update scripts create lumen-backup and make the backup
+# directory group-writable. Docker socket access is still privileged, but no
+# longer runs the whole unit as host root.
+User=lumen-backup
+Group=lumen-backup
+SupplementaryGroups=docker
 EnvironmentFile=-/opt/lumen/.env
-ExecStart=/opt/lumen/scripts/backup.sh
-StandardOutput=journal
-StandardError=journal
+Environment=BACKUP_ROOT=/opt/lumendata/backup
+Environment=LUMEN_BACKUP_ROOT=/opt/lumendata/backup
+Environment=LUMEN_BACKUP_SERVICE_MODE=1
+WorkingDirectory=/opt/lumen/current
+ExecStartPre=+/bin/sh -c 'mkdir -p /opt/lumendata/backup; chgrp lumen-backup /opt/lumendata/backup 2>/dev/null || true; chmod g+rwx /opt/lumendata/backup 2>/dev/null || true; log=/opt/lumendata/backup/.backup.log; max=$${LUMEN_BACKUP_LOG_MAX_BYTES:-10485760}; if [ -f "$log" ] && [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$max" ]; then rm -f "$log.1"; mv -f "$log" "$log.1"; fi'
+ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/backup.sh
+StandardOutput=append:/opt/lumendata/backup/.backup.log
+StandardError=append:/opt/lumendata/backup/.backup.log
+ExecStopPost=/bin/sh -c 'if [ -f /opt/lumendata/backup/.backup.pending ]; then rm -f /opt/lumendata/backup/.backup.pending /opt/lumendata/backup/.backup.running; touch /opt/lumendata/backup/.backup.trigger; else rm -f /opt/lumendata/backup/.backup.running; fi'
+TimeoutStartSec=900
+TimeoutStopSec=120
+KillSignal=SIGTERM
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+LockPersonality=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/lumendata/backup /run/lock /var/lock -/run/docker.sock -/var/run/docker.sock
+ReadOnlyPaths=/opt/lumen

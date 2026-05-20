@@ -1367,6 +1367,53 @@ lumen_systemctl() {
     fi
 }
 
+lumen_install_optional_systemd_unit() {
+    local tmp_dir="$1"
+    local unit="$2"
+    local warn_msg="$3"
+    [ -f "${tmp_dir}/${unit}" ] || return 0
+    lumen_run_as_root install -m 0644 "${tmp_dir}/${unit}" "/etc/systemd/system/${unit}" \
+        || log_warn "${warn_msg}"
+}
+
+lumen_ensure_backup_service_user() {
+    local backup_root="${1:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
+    local user="${LUMEN_BACKUP_SERVICE_USER:-lumen-backup}"
+    local group="${LUMEN_BACKUP_SERVICE_GROUP:-lumen-backup}"
+    local shell_path="/usr/sbin/nologin"
+    [ -x "${shell_path}" ] || shell_path="/sbin/nologin"
+    [ -x "${shell_path}" ] || shell_path="/bin/false"
+
+    if command -v getent >/dev/null 2>&1; then
+        if ! getent group "${group}" >/dev/null 2>&1; then
+            lumen_run_as_root groupadd --system "${group}" 2>/dev/null \
+                || log_warn "创建 ${group} 组失败；lumen-backup.service 可能无法启动。"
+        fi
+    fi
+    if ! id "${user}" >/dev/null 2>&1; then
+        lumen_run_as_root useradd --system --home-dir "${backup_root}" \
+            --shell "${shell_path}" --gid "${group}" "${user}" 2>/dev/null \
+            || log_warn "创建 ${user} 用户失败；lumen-backup.service 可能无法启动。"
+    fi
+    if command -v getent >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; then
+        lumen_run_as_root usermod -aG docker "${user}" 2>/dev/null \
+            || log_warn "把 ${user} 加入 docker 组失败；备份服务可能无法访问 docker socket。"
+    else
+        log_warn "未找到 docker 组；请确保 ${user} 可访问 /var/run/docker.sock。"
+    fi
+    lumen_run_as_root mkdir -p "${backup_root}" 2>/dev/null || true
+    lumen_run_as_root chgrp -R "${group}" "${backup_root}" 2>/dev/null || true
+    lumen_run_as_root chmod -R g+rwX "${backup_root}" 2>/dev/null || true
+}
+
+lumen_enable_optional_systemd_unit() {
+    local tmp_dir="$1"
+    local unit="$2"
+    local warn_msg="$3"
+    [ -f "${tmp_dir}/${unit}" ] || return 0
+    lumen_run_as_root systemctl enable --now "${unit}" || log_warn "${warn_msg}"
+}
+
 lumen_restart_systemd_units() {
     local units=()
     local unit

@@ -137,6 +137,72 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         env_fallback="CHAT_FILE_SEARCH_VECTOR_STORE_IDS",
     ),
     SettingSpec(
+        key="chat.max_tool_invocations",
+        description="单轮对话最多允许的 Responses 内建工具调用次数，超过后终止本轮。",
+        sensitive=False,
+        parser=int,
+        env_fallback="CHAT_MAX_TOOL_INVOCATIONS",
+        min_value=1,
+        max_value=64,
+    ),
+    SettingSpec(
+        key="chat.tool_status_idle_timeout_s",
+        description="工具状态无更新后判定为 timed_out 的秒数。",
+        sensitive=False,
+        parser=int,
+        env_fallback="CHAT_TOOL_STATUS_IDLE_TIMEOUT_S",
+        min_value=5,
+        max_value=600,
+    ),
+    SettingSpec(
+        key="chat.cancel_poll_interval_ms",
+        description="对话 completion 主动取消轮询间隔，单位毫秒。",
+        sensitive=False,
+        parser=int,
+        env_fallback="CHAT_CANCEL_POLL_INTERVAL_MS",
+        min_value=50,
+        max_value=5000,
+    ),
+    SettingSpec(
+        key="chat.tool_web_search_micro",
+        description="对话 web_search 工具预授权预算，单位微人民币。",
+        sensitive=False,
+        parser=int,
+        env_fallback="CHAT_TOOL_WEB_SEARCH_MICRO",
+        min_value=0,
+        max_value=10_000_000,
+    ),
+    SettingSpec(
+        key="chat.tool_file_search_micro",
+        description="对话 file_search 工具预授权预算，单位微人民币。",
+        sensitive=False,
+        parser=int,
+        env_fallback="CHAT_TOOL_FILE_SEARCH_MICRO",
+        min_value=0,
+        max_value=10_000_000,
+    ),
+    SettingSpec(
+        key="chat.tool_code_interpreter_micro",
+        description="对话 code_interpreter 工具预授权预算，单位微人民币。",
+        sensitive=False,
+        parser=int,
+        env_fallback="CHAT_TOOL_CODE_INTERPRETER_MICRO",
+        min_value=0,
+        max_value=100_000_000,
+    ),
+    SettingSpec(
+        key="chat.tool_image_generation_micro",
+        description=(
+            "对话 image_generation 工具预授权预算，单位微人民币。上限高于"
+            " web/file_search，因为一次图片工具调用可接近独立图片生成任务成本。"
+        ),
+        sensitive=False,
+        parser=int,
+        env_fallback="CHAT_TOOL_IMAGE_GENERATION_MICRO",
+        min_value=0,
+        max_value=100_000_000,
+    ),
+    SettingSpec(
         key="providers",
         description=(
             "上游 provider pool（JSON array）；唯一上游配置来源。旧 "

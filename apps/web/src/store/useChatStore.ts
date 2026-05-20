@@ -8,6 +8,7 @@
 // 本文件不直接调用上游网关；所有网络交互走 apiClient。
 
 import { create } from "zustand";
+import { z } from "zod";
 import { uuid } from "@/lib/utils";
 import { logWarn } from "@/lib/logger";
 import { MAX_COMPOSER_ATTACHMENTS } from "@/lib/attachmentLimits";
@@ -45,8 +46,10 @@ import type {
   Quality,
   RenderQualityChoice,
   SizeMode,
+  StructuredAttachment,
   UserMessage,
   UsedMemorySummary,
+  RecommendedErrorAction,
 } from "@/lib/types";
 import {
   PRESET,
@@ -74,7 +77,7 @@ import {
   type MessageListResponse,
   type PostMessageIn,
 } from "@/lib/apiClient";
-import { errorCodeToFullText } from "@/lib/errors";
+import { errorCodeToFullText, recommendedActionsForError } from "@/lib/errors";
 
 type ComposerMode = "image" | "chat";
 
@@ -225,8 +228,11 @@ const MESSAGE_PAGE_LIMIT = 50;
 const BASE64_EVICTION_DELAY_MS = 60_000;
 const BASE64_EVICTION_MIN_CHARS = 1024;
 const COMPLETION_STREAM_FLUSH_MS = 64;
+const COMPLETION_PENDING_DELTA_TTL_MS = 10_000;
+const COMPLETION_PENDING_DELTA_MAX_ENTRIES = 1_000;
 const CONVERSATION_INDEX_LIMIT = 5_000;
 const OPTIMISTIC_ALIAS_TTL_MS = 120_000;
+const COMPLETION_MESSAGE_ID_TTL_MS = 60 * 60 * 1000;
 
 function clampImageCount(count: number | undefined): number {
   if (typeof count !== "number" || !Number.isFinite(count))
@@ -347,17 +353,38 @@ function createInitialComposer(): ComposerState {
   };
 }
 
+function clonePlainValue<T>(value: T): T {
+  if (typeof structuredClone === "function") {
+    try {
+      return structuredClone(value);
+    } catch {
+      // Fall through to the manual plain-object clone below.
+    }
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => clonePlainValue(item)) as T;
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      out[key] = clonePlainValue(nested);
+    }
+    return out as T;
+  }
+  return value;
+}
+
 function cloneComposerState(composer: ComposerState): ComposerState {
-  const attachments = composer.attachments.map((attachment) => ({ ...attachment }));
+  const attachments = clonePlainValue(composer.attachments);
   const mask =
     composer.mask &&
     attachments.some((attachment) => attachment.id === composer.mask?.target_attachment_id)
-      ? { ...composer.mask }
+      ? clonePlainValue(composer.mask)
       : null;
   return {
     ...composer,
     attachments,
-    params: { ...composer.params },
+    params: clonePlainValue(composer.params),
     mask,
   };
 }
@@ -510,6 +537,33 @@ function coerceGenerationStage(
     : fallback;
 }
 
+const GENERATION_SUBSTAGES = new Set<NonNullable<Generation["substage"]>>([
+  "waiting_queue",
+  "waiting_provider",
+  "preparing_refs",
+  "upstream_started",
+  "upstream_retrying",
+  "postprocessing",
+  "display_ready",
+  "retryable",
+  "terminal",
+  "cancelled",
+  "completed",
+  "provider_selected",
+  "stream_started",
+  "partial_received",
+  "final_received",
+  "processing",
+  "storing",
+]);
+
+function coerceGenerationSubstage(value: unknown): Generation["substage"] | undefined {
+  return typeof value === "string" &&
+    GENERATION_SUBSTAGES.has(value as NonNullable<Generation["substage"]>)
+    ? (value as Generation["substage"])
+    : undefined;
+}
+
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string");
@@ -536,6 +590,25 @@ function optionalRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+const SsePayloadSchema = z.object({}).catchall(z.unknown());
+
+function ssePayloadRecord(
+  eventName: string,
+  data: unknown,
+): Record<string, unknown> | null {
+  const parsed = SsePayloadSchema.safeParse(data);
+  if (parsed.success) return parsed.data;
+  logWarn("dropped SSE event with invalid payload", {
+    scope: "chat-sse",
+    extra: {
+      event: eventName,
+      payloadType: Array.isArray(data) ? "array" : typeof data,
+      validation: "zod",
+    },
+  });
+  return null;
+}
+
 function optionalRecordArray(value: unknown): Array<Record<string, unknown>> | undefined {
   if (!Array.isArray(value)) return undefined;
   const records = value.filter(
@@ -543,6 +616,140 @@ function optionalRecordArray(value: unknown): Array<Record<string, unknown>> | u
       Boolean(item) && typeof item === "object" && !Array.isArray(item),
   );
   return records.length > 0 ? records : undefined;
+}
+
+function recordString(
+  record: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function recordBoolean(
+  record: Record<string, unknown>,
+  key: string,
+): boolean | undefined {
+  const value = record[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function recordNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function recommendedActionsFromUnknown(
+  value: unknown,
+): RecommendedErrorAction[] | undefined {
+  const items = optionalRecordArray(value);
+  if (!items) return undefined;
+  const actions: RecommendedErrorAction[] = [];
+  for (const item of items) {
+    const id = recordString(item, "id");
+    const label = recordString(item, "label");
+    if (!id || !label) continue;
+    const action: RecommendedErrorAction = {
+      id,
+      label,
+    };
+    const kind = recordString(item, "kind");
+    if (kind) action.kind = kind;
+    const href = recordNullableString(item, "href");
+    if (href) action.href = href;
+    actions.push(action);
+  }
+  return actions.length > 0 ? actions : undefined;
+}
+
+function recordNullableString(
+  record: Record<string, unknown>,
+  key: string,
+): string | null | undefined {
+  const value = record[key];
+  if (value === null) return null;
+  return typeof value === "string" ? value : undefined;
+}
+
+const ATTACHMENT_ROLES = new Set<StructuredAttachment["role"]>([
+  "reference",
+  "subject",
+  "product",
+  "style",
+  "edit_target",
+  "ask_target",
+  "background",
+  "mask",
+  "other",
+]);
+
+function defaultAttachmentRole(
+  intent: Intent,
+  index: number,
+  hasMask: boolean,
+): StructuredAttachment["role"] {
+  if (intent === "vision_qa") return "ask_target";
+  if (hasMask && index === 0) return "edit_target";
+  return "reference";
+}
+
+function attachmentRole(value: unknown): StructuredAttachment["role"] | undefined {
+  return typeof value === "string" &&
+    ATTACHMENT_ROLES.has(value as StructuredAttachment["role"])
+    ? (value as StructuredAttachment["role"])
+    : undefined;
+}
+
+function structuredAttachmentsFromComposer(
+  attachments: AttachmentImage[],
+  intent: Intent,
+  hasMask: boolean,
+): StructuredAttachment[] {
+  return attachments.map((attachment, index) => {
+    const role =
+      attachmentRole(attachment.role) ??
+      defaultAttachmentRole(intent, index, hasMask);
+    return {
+      image_id: attachment.source_image_id ?? attachment.id,
+      role,
+      ...(attachment.label ? { label: attachment.label } : {}),
+      ...(typeof attachment.weight === "number"
+        ? { weight: attachment.weight }
+        : {}),
+    };
+  });
+}
+
+function structuredAttachmentsFromUnknown(
+  value: unknown,
+): StructuredAttachment[] | undefined {
+  const records = optionalRecordArray(value);
+  if (!records) return undefined;
+  const attachments = records
+    .map((record) => {
+      const imageId = recordString(record, "image_id");
+      if (!imageId) return null;
+      return {
+        image_id: imageId,
+        role: attachmentRole(record.role) ?? "reference",
+        ...(recordString(record, "label")
+          ? { label: recordString(record, "label") }
+          : {}),
+        ...(typeof record.weight === "number" ? { weight: record.weight } : {}),
+      } satisfies StructuredAttachment;
+    })
+    .filter((item): item is StructuredAttachment => item !== null);
+  return attachments.length > 0 ? attachments : undefined;
+}
+
+function parseSizeString(value: unknown): { width: number; height: number } {
+  if (typeof value !== "string") return { width: 0, height: 0 };
+  const match = value.match(/^(\d+)x(\d+)$/);
+  if (!match) return { width: 0, height: 0 };
+  return { width: Number(match[1]), height: Number(match[2]) };
 }
 
 function billingMetaFromPayload(
@@ -585,6 +792,17 @@ type GenerationExplainabilityMeta = Pick<
   | "requested_params"
   | "effective_params"
   | "provider_attempts"
+  | "source"
+  | "action_source"
+  | "trace_id"
+  | "attachment_roles"
+  | "queue_lane"
+  | "workflow_type"
+  | "workflow_step_key"
+  | "pixel_count"
+  | "size_bucket"
+  | "cost_class"
+  | "queue_wait_ms"
 >;
 
 function generationExplainabilityFromBackend(
@@ -609,6 +827,63 @@ function generationExplainabilityFromBackend(
       optionalRecord(diagnostics?.effective_params) ??
       undefined,
     provider_attempts: providerAttempts as ImageProviderAttempt[] | undefined,
+    source: generation.source ?? undefined,
+    action_source: generation.action_source ?? undefined,
+    trace_id: generation.trace_id ?? optionalString(diagnostics?.trace_id),
+    attachment_roles:
+      structuredAttachmentsFromUnknown(generation.attachment_roles) ?? undefined,
+    queue_lane: generation.queue_lane ?? undefined,
+    workflow_type: generation.workflow_type ?? undefined,
+    workflow_step_key: generation.workflow_step_key ?? undefined,
+    pixel_count:
+      typeof generation.pixel_count === "number" ? generation.pixel_count : undefined,
+    size_bucket: generation.size_bucket ?? undefined,
+    cost_class: generation.cost_class ?? undefined,
+    queue_wait_ms:
+      typeof generation.queue_wait_ms === "number"
+        ? generation.queue_wait_ms
+        : undefined,
+  };
+}
+
+function generationTaskMetaFromBackend(
+  generation: BackendGeneration,
+): Pick<
+  Generation,
+  | "substage"
+  | "queue_position"
+  | "retrying"
+  | "waiting_provider"
+  | "cancelled"
+  | "retryable"
+  | "recommended_actions"
+  | "source"
+  | "conversation_id"
+  | "project_id"
+  | "thumb_url"
+> {
+  return {
+    substage: coerceGenerationSubstage(generation.substage),
+    queue_position:
+      typeof generation.queue_position === "number" &&
+      Number.isFinite(generation.queue_position)
+        ? generation.queue_position
+        : null,
+    retrying: generation.retrying === true || undefined,
+    waiting_provider: generation.waiting_provider === true || undefined,
+    cancelled:
+      generation.cancelled === true || generation.status === "canceled" || undefined,
+    retryable: generation.retryable === true || undefined,
+    recommended_actions:
+      recommendedActionsFromUnknown(generation.recommended_actions) ??
+      recommendedActionsForError(generation.error_code, {
+        retryable: generation.retryable === true,
+        status: generation.status,
+      }),
+    source: generation.source ?? undefined,
+    conversation_id: generation.conversation_id ?? null,
+    project_id: generation.project_id ?? null,
+    thumb_url: generation.thumb_url ?? null,
   };
 }
 
@@ -633,6 +908,19 @@ function generationExplainabilityFromPayload(
       optionalRecord(diagnostics?.effective_params) ??
       undefined,
     provider_attempts: providerAttempts as ImageProviderAttempt[] | undefined,
+    source: optionalString(payload.source),
+    action_source: optionalString(payload.action_source),
+    trace_id: optionalString(payload.trace_id) ?? optionalString(diagnostics?.trace_id),
+    attachment_roles: structuredAttachmentsFromUnknown(payload.attachment_roles),
+    queue_lane: optionalString(payload.queue_lane),
+    workflow_type: optionalString(payload.workflow_type),
+    workflow_step_key: optionalString(payload.workflow_step_key),
+    pixel_count:
+      typeof payload.pixel_count === "number" ? payload.pixel_count : undefined,
+    size_bucket: optionalString(payload.size_bucket),
+    cost_class: optionalString(payload.cost_class),
+    queue_wait_ms:
+      typeof payload.queue_wait_ms === "number" ? payload.queue_wait_ms : undefined,
   };
 }
 
@@ -646,7 +934,10 @@ function mergeExplainabilityIntoImage(
     meta.revised_prompt ||
     meta.requested_params ||
     meta.effective_params ||
-    meta.provider_attempts;
+    meta.provider_attempts ||
+    meta.trace_id ||
+    meta.action_source ||
+    meta.attachment_roles;
   if (!hasMeta) return image;
   const metadata = { ...(image.metadata_jsonb ?? {}) };
   if (meta.diagnostics && metadata.generation_diagnostics == null) {
@@ -663,6 +954,15 @@ function mergeExplainabilityIntoImage(
   }
   if (meta.provider_attempts && metadata.provider_attempts == null) {
     metadata.provider_attempts = meta.provider_attempts;
+  }
+  if (meta.trace_id && metadata.trace_id == null) {
+    metadata.trace_id = meta.trace_id;
+  }
+  if (meta.action_source && metadata.action_source == null) {
+    metadata.action_source = meta.action_source;
+  }
+  if (meta.attachment_roles && metadata.attachment_roles == null) {
+    metadata.attachment_roles = meta.attachment_roles;
   }
   return {
     ...image,
@@ -744,12 +1044,34 @@ function coerceAssistantStatus(v: unknown): AssistantMessage["status"] {
   return "pending";
 }
 
-const TOOL_STATUSES = new Set<CompletionToolCall["status"]>([
-  "queued",
-  "running",
-  "succeeded",
-  "failed",
-]);
+type NormalizedToolStatus = CompletionToolCall["status"];
+
+const TOOL_STATUS_MAP: Record<string, NormalizedToolStatus> = {
+  queued: "queued",
+  pending: "queued",
+  created: "queued",
+  running: "running",
+  in_progress: "running",
+  searching: "running",
+  interpreting: "running",
+  generating: "running",
+  completed: "succeeded",
+  complete: "succeeded",
+  succeeded: "succeeded",
+  success: "succeeded",
+  failed: "failed",
+  error: "failed",
+  incomplete: "failed",
+  cancelled: "cancelled",
+  canceled: "cancelled",
+  timed_out: "timed_out",
+  timeout: "timed_out",
+};
+
+function normalizeCompletionToolStatus(value: unknown): NormalizedToolStatus {
+  if (typeof value !== "string") return "unknown";
+  return TOOL_STATUS_MAP[value.trim().toLowerCase()] ?? "unknown";
+}
 
 function coerceCompletionToolCalls(value: unknown): CompletionToolCall[] {
   if (!Array.isArray(value)) return [];
@@ -758,11 +1080,7 @@ function coerceCompletionToolCalls(value: unknown): CompletionToolCall[] {
     const raw = item as Record<string, unknown>;
     const id = typeof raw.id === "string" && raw.id ? raw.id : "";
     if (!id) return [];
-    const status =
-      typeof raw.status === "string" &&
-      TOOL_STATUSES.has(raw.status as CompletionToolCall["status"])
-        ? (raw.status as CompletionToolCall["status"])
-        : "running";
+    const status = normalizeCompletionToolStatus(raw.status);
     const type =
       typeof raw.type === "string" && raw.type ? raw.type : "tool";
     const label =
@@ -1216,6 +1534,10 @@ let _completionStreamTimer: ReturnType<typeof setTimeout> | null = null;
 const _messageConvIds = new Map<string, string>();
 const _generationConvIds = new Map<string, string>();
 const _imageConvIds = new Map<string, string>();
+const _completionMessageIds = new Map<
+  string,
+  { messageId: string; expiresAt: number }
+>();
 const _generationIdAliases = new Map<
   string,
   { optimisticId: string; expiresAt: number }
@@ -1230,9 +1552,15 @@ interface PendingCompletionStreamPatch {
   compId?: string;
   text: string;
   thinking: string;
+  firstQueuedAt: number;
+  updatedAt: number;
 }
 
 const _completionStreamPatches = new Map<
+  string,
+  PendingCompletionStreamPatch
+>();
+const _pendingDeltasByCompletionId = new Map<
   string,
   PendingCompletionStreamPatch
 >();
@@ -1295,8 +1623,12 @@ function pruneAliases(now?: number): void {
   for (const [id, alias] of _completionMessageAliases) {
     if (alias.expiresAt <= effectiveNow) _completionMessageAliases.delete(id);
   }
+  for (const [id, item] of _completionMessageIds) {
+    if (item.expiresAt <= effectiveNow) _completionMessageIds.delete(id);
+  }
   pruneMapToLimit(_generationIdAliases);
   pruneMapToLimit(_completionMessageAliases);
+  pruneMapToLimit(_completionMessageIds);
 }
 
 function rememberGenerationAlias(
@@ -1323,6 +1655,22 @@ function rememberCompletionAlias(
   });
 }
 
+function rememberCompletionMessage(
+  completionId: string | undefined | null,
+  messageId: string | undefined | null,
+  now?: number,
+): void {
+  if (!completionId || !messageId) return;
+  const effectiveNow = now ?? Date.now();
+  setBounded(_completionMessageIds, completionId, {
+    messageId,
+    expiresAt: effectiveNow + COMPLETION_MESSAGE_ID_TTL_MS,
+  });
+  if (_pendingDeltasByCompletionId.has(completionId)) {
+    setTimeout(flushCompletionStreamPatches, 0);
+  }
+}
+
 function generationLookupId(id: string, now?: number): string {
   pruneAliases(now);
   return _generationIdAliases.get(id)?.optimisticId ?? id;
@@ -1334,14 +1682,56 @@ function completionMessageLookupId(
 ): string | undefined {
   if (!id) return undefined;
   pruneAliases(now);
-  return _completionMessageAliases.get(id)?.optimisticMessageId;
+  return (
+    _completionMessageAliases.get(id)?.optimisticMessageId ??
+    _completionMessageIds.get(id)?.messageId
+  );
 }
 
 function completionStreamPatchKey(
   msgId: string | undefined,
   compId: string | undefined,
 ): string | null {
-  return compId ?? msgId ?? null;
+  if (compId) return `comp:${compId}`;
+  if (msgId) return `msg:${msgId}`;
+  return null;
+}
+
+function createCompletionStreamPatch(
+  msgId: string | undefined,
+  compId: string | undefined,
+  now: number,
+): PendingCompletionStreamPatch {
+  return {
+    msgId,
+    compId,
+    text: "",
+    thinking: "",
+    firstQueuedAt: now,
+    updatedAt: now,
+  };
+}
+
+function mergeCompletionStreamPatch(
+  target: PendingCompletionStreamPatch,
+  source: PendingCompletionStreamPatch,
+): void {
+  target.msgId = target.msgId ?? source.msgId;
+  target.compId = target.compId ?? source.compId;
+  target.text += source.text;
+  target.thinking += source.thinking;
+  target.updatedAt = Math.max(target.updatedAt, source.updatedAt);
+}
+
+function pruneExpiredPendingCompletionDeltas(now = Date.now()): void {
+  for (const [completionId, patch] of _pendingDeltasByCompletionId) {
+    if (now - patch.firstQueuedAt <= COMPLETION_PENDING_DELTA_TTL_MS) continue;
+    _pendingDeltasByCompletionId.delete(completionId);
+    logWarn("dropped stale completion delta without assistant message", {
+      scope: "chat-sse",
+      extra: { completionId },
+    });
+  }
 }
 
 function flushCompletionStreamPatches(): void {
@@ -1349,23 +1739,45 @@ function flushCompletionStreamPatches(): void {
     clearTimeout(_completionStreamTimer);
     _completionStreamTimer = null;
   }
-  if (_completionStreamPatches.size === 0) return;
+  if (
+    _completionStreamPatches.size === 0 &&
+    _pendingDeltasByCompletionId.size === 0
+  ) {
+    return;
+  }
 
-  const patches = Array.from(_completionStreamPatches.values());
+  const patchEntries = Array.from(_completionStreamPatches.entries());
   _completionStreamPatches.clear();
   const now = Date.now();
+  pruneExpiredPendingCompletionDeltas(now);
+  const appliedPatchKeys = new Set<string>();
+  const appliedPendingCompletionIds = new Set<string>();
 
   useChatStore.setState((s) => {
     let changed = false;
     const messages = s.messages.map((m) => {
       if (m.role !== "assistant") return m;
       let next: AssistantMessage | null = null;
+      const patches: PendingCompletionStreamPatch[] = [];
 
-      for (const patch of patches) {
+      for (const [key, patch] of patchEntries) {
         const matches =
           (patch.msgId != null && m.id === patch.msgId) ||
           (patch.compId != null && m.completion_id === patch.compId);
         if (!matches) continue;
+        appliedPatchKeys.add(key);
+        patches.push(patch);
+      }
+
+      if (m.completion_id) {
+        const pending = _pendingDeltasByCompletionId.get(m.completion_id);
+        if (pending) {
+          appliedPendingCompletionIds.add(m.completion_id);
+          patches.push(pending);
+        }
+      }
+
+      for (const patch of patches) {
         next ??= { ...m };
         const isTerminal =
           next.status === "succeeded" ||
@@ -1401,6 +1813,25 @@ function flushCompletionStreamPatches(): void {
 
     return changed ? { messages } : s;
   });
+
+  for (const completionId of appliedPendingCompletionIds) {
+    _pendingDeltasByCompletionId.delete(completionId);
+  }
+
+  for (const [key, patch] of patchEntries) {
+    if (appliedPatchKeys.has(key) || !patch.compId) continue;
+    const existing = _pendingDeltasByCompletionId.get(patch.compId);
+    if (existing) {
+      mergeCompletionStreamPatch(existing, patch);
+      continue;
+    }
+    setBounded(
+      _pendingDeltasByCompletionId,
+      patch.compId,
+      { ...patch },
+      COMPLETION_PENDING_DELTA_MAX_ENTRIES,
+    );
+  }
 }
 
 function queueCompletionStreamPatch(
@@ -1412,14 +1843,13 @@ function queueCompletionStreamPatch(
   if (!value) return;
   const key = completionStreamPatchKey(msgId, compId);
   if (!key) return;
-  const current = _completionStreamPatches.get(key) ?? {
-    msgId,
-    compId,
-    text: "",
-    thinking: "",
-  };
+  const now = Date.now();
+  const current =
+    _completionStreamPatches.get(key) ??
+    createCompletionStreamPatch(msgId, compId, now);
   current.msgId = current.msgId ?? msgId;
   current.compId = current.compId ?? compId;
+  current.updatedAt = now;
   if (kind === "text") current.text += value;
   else current.thinking += value;
   _completionStreamPatches.set(key, current);
@@ -1437,12 +1867,14 @@ function clearCompletionStreamBuffer(): void {
     _completionStreamTimer = null;
   }
   _completionStreamPatches.clear();
+  _pendingDeltasByCompletionId.clear();
 }
 
 function clearConversationIndexes(): void {
   _messageConvIds.clear();
   _generationConvIds.clear();
   _imageConvIds.clear();
+  _completionMessageIds.clear();
   _generationIdAliases.clear();
   _completionMessageAliases.clear();
 }
@@ -1641,6 +2073,8 @@ function buildMessageListState(
       const merged: Generation = {
         id: g.id,
         message_id: g.message_id,
+        parent_generation_id:
+          g.parent_generation_id ?? existing?.parent_generation_id ?? null,
         action: g.action === "edit" ? "edit" : "generate",
         prompt:
           typeof g.prompt === "string" ? g.prompt : (existing?.prompt ?? ""),
@@ -1694,6 +2128,7 @@ function buildMessageListState(
   if (resp.completions) {
     for (const c of resp.completions) {
       compIdByMsgId[c.message_id] = c.id;
+      rememberCompletionMessage(c.id, c.message_id);
     }
   }
 
@@ -2306,6 +2741,31 @@ function createChatStore() {
         opts?.intentOverride ??
         resolveIntent(mode, attachments.length > 0, forceIntent);
       const isImage = intent === "text_to_image" || intent === "image_to_image";
+      // 局部修改 mask：只有 image_to_image + 单张参考图 + mask.target 仍指向第一张时才发。
+      // 任意一条不满足都视为脏状态，直接吞掉避免发出无效字段。
+      const maskImageId =
+        intent === "image_to_image" &&
+        attachments.length === 1 &&
+        mask &&
+        mask.target_attachment_id === attachments[0]?.id
+          ? mask.image_id
+          : undefined;
+      const structuredAttachments = structuredAttachmentsFromComposer(
+        attachments,
+        intent,
+        Boolean(maskImageId),
+      );
+      const attachmentImageIds = structuredAttachments.map((a) => a.image_id);
+      const actionSource = isImage
+        ? maskImageId
+          ? "composer.inpaint"
+          : intent === "image_to_image"
+            ? "composer.image_to_image"
+            : "composer.text_to_image"
+        : intent === "vision_qa"
+          ? "composer.vision_qa"
+          : "composer.chat";
+      const traceId = uuid();
 
       // 1) 乐观插入 user msg + pending assistant msg
       const optimisticUserId = `opt-user-${uuid()}`;
@@ -2366,10 +2826,14 @@ function createChatStore() {
               prompt: requestText,
               size_requested: sizeRequested,
               aspect_ratio: params.aspect_ratio,
-              input_image_ids: attachments.map((a) => a.id),
-              primary_input_image_id: attachments[0]?.id ?? null,
+              input_image_ids: attachmentImageIds,
+              primary_input_image_id: attachmentImageIds[0] ?? null,
               status: "queued" as const,
               stage: "queued" as const,
+              source: "composer",
+              action_source: actionSource,
+              trace_id: traceId,
+              attachment_roles: structuredAttachments,
               attempt: 0,
               started_at: 0,
             } satisfies Generation,
@@ -2409,22 +2873,17 @@ function createChatStore() {
         return Object.keys(cp).length > 0 ? cp : undefined;
       })();
 
-      // 局部修改 mask：只有 image_to_image + 单张参考图 + mask.target 仍指向第一张时才发。
-      // 任意一条不满足都视为脏状态，直接吞掉避免发出无效字段。
-      const maskImageId =
-        intent === "image_to_image" &&
-        attachments.length === 1 &&
-        mask &&
-        mask.target_attachment_id === attachments[0]?.id
-          ? mask.image_id
-          : undefined;
-
       const body: PostMessageIn = {
         idempotency_key: uuid(),
         text: requestText,
         // generated 参考图的 a.id 是本地 uuid（用于 composer 增删管理），真实后端
         // image_id 在 source_image_id；upload 路径下两者相同（id = 后端 image_id）。
-        attachment_image_ids: attachments.map((a) => a.source_image_id ?? a.id),
+        attachment_image_ids: attachmentImageIds,
+        attachments: structuredAttachments,
+        input_images: attachmentImageIds,
+        source: "composer",
+        action_source: actionSource,
+        trace_id: traceId,
         ...(maskImageId ? { mask_image_id: maskImageId } : {}),
         intent,
         image_params: isImage
@@ -2543,6 +3002,7 @@ function createChatStore() {
           isImage ? genIds : undefined,
           completionId,
         );
+        rememberCompletionMessage(completionId, realAssistant.id);
         _messageConvIds.delete(optimisticUserId);
         _messageConvIds.delete(optimisticAssistantId);
         setBounded(_messageConvIds, realUser.id, convId);
@@ -2813,6 +3273,7 @@ function createChatStore() {
           created_at: now,
         };
         setBounded(_messageConvIds, out.assistant_message_id, convId);
+        rememberCompletionMessage(completionId, out.assistant_message_id);
 
         // 同时为 image intent 占位一个 queued generation，让 GenerationView 立刻显示骨架
         let pendingGen: Generation | undefined;
@@ -3212,6 +3673,7 @@ function createChatStore() {
     appendAssistantMessage: (msg) => {
       const convId = get().currentConvId;
       if (convId) setBounded(_messageConvIds, msg.id, convId);
+      rememberCompletionMessage(msg.completion_id, msg.id);
       set((s) => ({ messages: [...s.messages, msg] }));
     },
     upsertGeneration: (gen) => {
@@ -3246,13 +3708,15 @@ function createChatStore() {
     // 对齐 DESIGN §5.7 事件名。未识别事件静默忽略，避免污染日志。
     applySSEEvent: (eventName, data) => {
       const eventNow = Date.now();
-      const payload = (data ?? {}) as Record<string, unknown>;
+      const payload = ssePayloadRecord(eventName, data);
+      if (!payload) return;
       const get_id = (key: string): string | undefined => {
         const v = payload[key];
         return typeof v === "string" ? v : undefined;
       };
 
-      switch (eventName) {
+      try {
+        switch (eventName) {
         case "generation.queued":
         case "generation.started":
         case "generation.progress":
@@ -3268,27 +3732,9 @@ function createChatStore() {
           let pendingImage: GeneratedImage | undefined;
           if (eventName === "generation.succeeded") {
             // DESIGN §5.7: payload = { images: [{image_id, url, actual_size, from_generation_id, parent_image_id?}, ...], final_size }
-            const images = payload.images as
-              | Array<{
-                  image_id?: string;
-                  url?: string;
-                  data_url?: string;
-                  actual_size?: string;
-                  display_url?: string;
-                  preview_url?: string;
-                  thumb_url?: string;
-                  mime?: string;
-                  parent_image_id?: string | null;
-                  filename?: string;
-                  metadata_jsonb?: Record<string, unknown> | null;
-                  is_dual_race_bonus?: boolean;
-                  billing_free?: boolean;
-                  billing_label?: string;
-                  billing_exempt_reason?: string;
-                }>
-              | undefined;
-            const first = Array.isArray(images) ? images[0] : undefined;
-            if (!first?.image_id) {
+            const first = optionalRecordArray(payload.images)?.[0];
+            const imageId = first ? recordString(first, "image_id") : undefined;
+            if (!first || !imageId) {
               logWarn("missing image_id in succeeded payload", {
                 scope: "chat-sse",
                 extra: { generation_id: id },
@@ -3296,9 +3742,12 @@ function createChatStore() {
               return;
             }
             const src =
-              first.data_url ?? first.url ?? imageBinaryUrl(first.image_id);
+              recordString(first, "data_url") ??
+              recordString(first, "url") ??
+              imageBinaryUrl(imageId);
             const generationExplainability = generationExplainabilityFromPayload(payload);
-            const imageMetadata = { ...(first.metadata_jsonb ?? {}) };
+            const firstMetadata = optionalRecord(first.metadata_jsonb);
+            const imageMetadata = { ...(firstMetadata ?? {}) };
             if (
               generationExplainability.diagnostics &&
               imageMetadata.generation_diagnostics == null
@@ -3312,38 +3761,40 @@ function createChatStore() {
             ) {
               imageMetadata.revised_prompt = generationExplainability.revised_prompt;
             }
-            let w = 0;
-            let h = 0;
-            if (typeof first.actual_size === "string") {
-              const m = first.actual_size.match(/^(\d+)x(\d+)$/);
-              if (m) {
-                w = Number(m[1]);
-                h = Number(m[2]);
-              }
-            }
+            const actualSize = recordString(first, "actual_size");
+            const { width: w, height: h } = parseSizeString(actualSize);
             pendingImage = {
-              id: first.image_id,
+              id: imageId,
               data_url: src,
-              mime: first.mime,
+              mime: recordString(first, "mime"),
               display_url:
-                first.display_url ??
-                imageVariantUrl(first.image_id, "display2048"),
+                recordString(first, "display_url") ??
+                imageVariantUrl(imageId, "display2048"),
               preview_url:
-                first.preview_url ??
-                imageVariantUrl(first.image_id, "preview1024"),
+                recordString(first, "preview_url") ??
+                imageVariantUrl(imageId, "preview1024"),
               thumb_url:
-                first.thumb_url ?? imageVariantUrl(first.image_id, "thumb256"),
+                recordString(first, "thumb_url") ??
+                imageVariantUrl(imageId, "thumb256"),
               width: w,
               height: h,
-              parent_image_id: first.parent_image_id ?? null,
+              parent_image_id: recordNullableString(first, "parent_image_id") ?? null,
               from_generation_id: id,
               size_requested: "auto",
-              size_actual: first.actual_size ?? "unknown",
-              filename: first.filename,
+              size_actual: actualSize ?? "unknown",
+              filename: recordString(first, "filename"),
               metadata_jsonb:
                 Object.keys(imageMetadata).length > 0 ? imageMetadata : null,
               ...generationExplainability,
-              ...billingMetaFromPayload(first, first.metadata_jsonb),
+              ...billingMetaFromPayload(
+                {
+                  is_dual_race_bonus: recordBoolean(first, "is_dual_race_bonus"),
+                  billing_free: recordBoolean(first, "billing_free"),
+                  billing_label: recordString(first, "billing_label"),
+                  billing_exempt_reason: recordString(first, "billing_exempt_reason"),
+                },
+                firstMetadata,
+              ),
             };
           }
           set((s) => {
@@ -3380,15 +3831,33 @@ function createChatStore() {
             if (eventName === "generation.queued") {
               patch.status = "queued";
               patch.stage = "queued";
+              patch.substage =
+                coerceGenerationSubstage(payload.substage) ??
+                (payload.reason === "image_provider_unavailable"
+                  ? "waiting_provider"
+                  : "waiting_queue");
+              patch.queue_position =
+                recordNumber(payload, "queue_position") ?? gen.queue_position ?? null;
+              patch.retrying = payload.retrying === true || false;
+              patch.waiting_provider =
+                payload.waiting_provider === true ||
+                payload.reason === "image_provider_unavailable" ||
+                patch.substage === "waiting_provider";
+              patch.cancelled = false;
               patch.started_at = 0;
             } else if (eventName === "generation.started") {
               patch.status = "running";
               patch.stage = "understanding";
+              patch.substage =
+                coerceGenerationSubstage(payload.substage) ?? "upstream_started";
               patch.started_at = gen.started_at > 0 ? gen.started_at : eventNow;
               const att = payload.attempt;
               if (typeof att === "number") patch.attempt = att;
               patch.retry_eta = undefined;
               patch.retry_error = undefined;
+              patch.retrying = false;
+              patch.waiting_provider = false;
+              patch.cancelled = false;
             } else if (eventName === "generation.progress") {
               const stage = payload.stage;
               if (
@@ -3402,17 +3871,13 @@ function createChatStore() {
               // P1 细颗粒子阶段：worker 在 RENDERING/FINALIZING 内打了多个里程碑，
               // 让 DevelopingCard 等组件可读取 substage 切换更精细的视觉。
               // 旧消息（不含 substage）保持 undefined，行为同当前。
-              const substage = payload.substage;
-              if (
-                substage === "provider_selected" ||
-                substage === "stream_started" ||
-                substage === "partial_received" ||
-                substage === "final_received" ||
-                substage === "processing" ||
-                substage === "storing"
-              ) {
-                patch.substage = substage;
-              }
+              const substage = coerceGenerationSubstage(payload.substage);
+              if (substage) patch.substage = substage;
+              patch.queue_position =
+                recordNumber(payload, "queue_position") ?? gen.queue_position ?? null;
+              if (payload.retrying === true) patch.retrying = true;
+              if (payload.waiting_provider === true) patch.waiting_provider = true;
+              if (payload.cancelled === true) patch.cancelled = true;
               // P2 worker 内 failover：上游切到下一个 provider 时携带 provider_failover=true。
               // 累加计数到 Generation 上，DevelopingCard 可显示"换号重试 N 次"。
               if (payload.provider_failover === true) {
@@ -3424,6 +3889,8 @@ function createChatStore() {
               patch.status = "running";
               patch.stage = "rendering";
               patch.substage = "partial_received";
+              patch.retrying = false;
+              patch.waiting_provider = false;
               if (!(gen.started_at > 0)) patch.started_at = eventNow;
             } else if (eventName === "generation.succeeded" && pendingImage) {
               const generationExplainability =
@@ -3440,24 +3907,45 @@ function createChatStore() {
               patch.image = finalImg;
               patch.status = "succeeded";
               patch.stage = "finalizing";
+              patch.substage = "display_ready";
+              patch.retrying = false;
+              patch.waiting_provider = false;
+              patch.cancelled = false;
               patch.finished_at = eventNow;
               Object.assign(patch, generationExplainability);
             } else if (eventName === "generation.failed") {
               const generationExplainability =
                 generationExplainabilityFromPayload(payload);
+              const code = get_id("code") ?? "generation_failed";
+              const retryable = payload.retriable === true;
               patch.status = "failed";
               patch.stage = "finalizing";
-              patch.error_code = get_id("code") ?? "generation_failed";
+              patch.substage = retryable ? "retryable" : "terminal";
+              patch.error_code = code;
               patch.error_message =
                 optionalString(generationExplainability.diagnostics?.safe_error_summary) ??
                 get_id("safe_error_summary") ??
                 get_id("message") ??
                 "生成失败";
+              patch.retryable = retryable;
+              patch.recommended_actions =
+                recommendedActionsFromUnknown(payload.recommended_actions) ??
+                recommendedActionsForError(code, {
+                  retryable,
+                  status: "failed",
+                });
+              patch.retrying = false;
+              patch.waiting_provider = false;
+              patch.cancelled = false;
               patch.finished_at = eventNow;
               Object.assign(patch, generationExplainability);
             } else if (eventName === "generation.retrying") {
               patch.status = "queued";
               patch.stage = "queued";
+              patch.substage = "upstream_retrying";
+              patch.retrying = true;
+              patch.waiting_provider = payload.reason === "image_provider_unavailable";
+              patch.cancelled = false;
               patch.started_at = 0;
               const att = payload.attempt;
               if (typeof att === "number") patch.attempt = att;
@@ -3469,6 +3957,8 @@ function createChatStore() {
               }
               patch.retry_error =
                 get_id("error_message") ?? get_id("message") ?? undefined;
+              patch.error_code = get_id("error_code") ?? patch.error_code;
+              patch.error_message = patch.retry_error;
             }
             const nextGen = { ...gen, ...patch };
             const nextGenerations = { ...s.generations, [id]: nextGen };
@@ -3511,6 +4001,19 @@ function createChatStore() {
               ...gen,
               status: "canceled",
               stage: "finalizing",
+              substage: "cancelled",
+              cancelled: true,
+              retrying: false,
+              waiting_provider: false,
+              retryable: true,
+              error_code: get_id("code") ?? "cancelled",
+              error_message: get_id("message") ?? "已取消",
+              recommended_actions:
+                recommendedActionsFromUnknown(payload.recommended_actions) ??
+                recommendedActionsForError("cancelled", {
+                  retryable: true,
+                  status: "canceled",
+                }),
               finished_at: eventNow,
             };
             const nextMessages = s.messages.map((m) => {
@@ -3616,6 +4119,7 @@ function createChatStore() {
             get_id("completion_id") ?? get_id("task_id") ?? get_id("id");
           const msgId = rawMsgId ?? completionMessageLookupId(compId, eventNow);
           if (!msgId && !compId) return;
+          rememberCompletionMessage(compId, msgId);
           if (eventName === "completion.thinking_delta") {
             const td =
               typeof payload.thinking_delta === "string"
@@ -3637,54 +4141,37 @@ function createChatStore() {
             break;
           }
           if (eventName === "completion.image") {
-            const images = payload.images as
-              | Array<{
-                  image_id?: string;
-                  url?: string;
-                  data_url?: string;
-                  actual_size?: string;
-                  display_url?: string;
-                  preview_url?: string;
-                  thumb_url?: string;
-                  mime?: string;
-                  filename?: string;
-                  metadata_jsonb?: Record<string, unknown> | null;
-                }>
-              | undefined;
-            const first = Array.isArray(images) ? images[0] : undefined;
-            if (!first?.image_id || !msgId || !compId) return;
+            const first = optionalRecordArray(payload.images)?.[0];
+            const imageId = first ? recordString(first, "image_id") : undefined;
+            if (!first || !imageId || !msgId || !compId) return;
             const src =
-              first.data_url ?? first.url ?? imageBinaryUrl(first.image_id);
-            let w = 0;
-            let h = 0;
-            if (typeof first.actual_size === "string") {
-              const m = first.actual_size.match(/^(\d+)x(\d+)$/);
-              if (m) {
-                w = Number(m[1]);
-                h = Number(m[2]);
-              }
-            }
+              recordString(first, "data_url") ??
+              recordString(first, "url") ??
+              imageBinaryUrl(imageId);
+            const actualSize = recordString(first, "actual_size");
+            const { width: w, height: h } = parseSizeString(actualSize);
             const genId = completionToolGenerationId(compId);
             const img: GeneratedImage = {
-              id: first.image_id,
+              id: imageId,
               data_url: src,
-              mime: first.mime,
+              mime: recordString(first, "mime"),
               display_url:
-                first.display_url ??
-                imageVariantUrl(first.image_id, "display2048"),
+                recordString(first, "display_url") ??
+                imageVariantUrl(imageId, "display2048"),
               preview_url:
-                first.preview_url ??
-                imageVariantUrl(first.image_id, "preview1024"),
+                recordString(first, "preview_url") ??
+                imageVariantUrl(imageId, "preview1024"),
               thumb_url:
-                first.thumb_url ?? imageVariantUrl(first.image_id, "thumb256"),
+                recordString(first, "thumb_url") ??
+                imageVariantUrl(imageId, "thumb256"),
               width: w,
               height: h,
               parent_image_id: null,
               from_generation_id: genId,
-              size_requested: first.actual_size ?? "auto",
-              size_actual: first.actual_size ?? "unknown",
-              filename: first.filename,
-              metadata_jsonb: first.metadata_jsonb ?? null,
+              size_requested: actualSize ?? "auto",
+              size_actual: actualSize ?? "unknown",
+              filename: recordString(first, "filename"),
+              metadata_jsonb: optionalRecord(first.metadata_jsonb) ?? null,
             };
             set((s) => {
               const existingGen = s.generations[genId];
@@ -3955,6 +4442,12 @@ function createChatStore() {
         default:
           // 未识别事件：忽略
           break;
+        }
+      } catch (err) {
+        logWarn("dropped SSE event after store handler error", {
+          scope: "chat-sse",
+          extra: { event: eventName, err: errorToMessage(err) },
+        });
       }
     },
 
@@ -4020,6 +4513,7 @@ function createChatStore() {
                 gid,
               )) as BackendGeneration;
               const freshExplainability = generationExplainabilityFromBackend(fresh);
+              const freshTaskMeta = generationTaskMetaFromBackend(fresh);
               const local = get().generations[gid];
               if (!local) return;
               const isTerminal =
@@ -4062,6 +4556,7 @@ function createChatStore() {
                         error_code: fresh.error_code ?? undefined,
                         error_message: fresh.error_message ?? undefined,
                         ...freshExplainability,
+                        ...freshTaskMeta,
                         finished_at: finishedAt,
                       },
                     },
@@ -4096,6 +4591,7 @@ function createChatStore() {
                         error_code: fresh.error_code ?? undefined,
                         error_message: fresh.error_message ?? undefined,
                         ...freshExplainability,
+                        ...freshTaskMeta,
                       },
                     },
                   }));
@@ -4194,6 +4690,7 @@ function createChatStore() {
         for (const g of incoming) {
           const prev = existing[g.id];
           const generationExplainability = generationExplainabilityFromBackend(g);
+          const generationTaskMeta = generationTaskMetaFromBackend(g);
           // 已知 task 且仍 inflight：本地权威，避免 hydrate 覆盖刚收到的 SSE 增量
           if (
             prev &&
@@ -4204,6 +4701,7 @@ function createChatStore() {
           const built: Generation = {
             id: g.id,
             message_id: g.message_id,
+            parent_generation_id: g.parent_generation_id ?? prev?.parent_generation_id ?? null,
             action: g.action === "edit" ? "edit" : "generate",
             prompt: typeof g.prompt === "string" ? g.prompt : "",
             size_requested:
@@ -4223,6 +4721,7 @@ function createChatStore() {
             error_code: g.error_code ?? undefined,
             error_message: g.error_message ?? undefined,
             ...generationExplainability,
+            ...generationTaskMeta,
             attempt:
               typeof g.attempt === "number" && Number.isFinite(g.attempt)
                 ? g.attempt
@@ -4257,36 +4756,42 @@ function createChatStore() {
 }
 
 type ChatStoreHook = ReturnType<typeof createChatStore>;
-type ChatSelector<T> = (state: ChatState) => T;
-const identityChatSelector: ChatSelector<ChatState> = (state) => state;
 
-let _chatStore: ChatStoreHook | null = null;
+let browserChatStore: ChatStoreHook | null = null;
 
-// SSR access gets a fresh store; client reuses singleton.
-// 避免 Node 渲染期模块级单例在多用户请求间泄漏可变 chat 状态。
 function getChatStore(): ChatStoreHook {
-  if (typeof window === "undefined") return createChatStore();
-  _chatStore ??= createChatStore();
-  return _chatStore;
+  if (typeof window === "undefined") {
+    clearCompletionStreamBuffer();
+    clearConversationIndexes();
+    return createChatStore();
+  }
+  if (!browserChatStore) {
+    browserChatStore = createChatStore();
+  }
+  return browserChatStore;
 }
 
-function useChatStoreBound(): ChatState;
-function useChatStoreBound<T>(selector: ChatSelector<T>): T;
-function useChatStoreBound<T>(selector?: ChatSelector<T>): ChatState | T {
-  const store = getChatStore();
-  return store((selector ?? identityChatSelector) as ChatSelector<T>);
-}
-
-// Browser runtime keeps one interactive store. SSR access gets a fresh store so
-// module evaluation cannot share mutable chat state across requests.
-export const useChatStore = useChatStoreBound as ChatStoreHook;
-
-Object.defineProperties(useChatStore, {
-  getState: { get: () => getChatStore().getState },
-  setState: { get: () => getChatStore().setState },
-  subscribe: { get: () => getChatStore().subscribe },
-  getInitialState: { get: () => getChatStore().getInitialState },
-});
+export const useChatStore: ChatStoreHook = new Proxy(
+  ((...args: Parameters<ChatStoreHook>) =>
+    getChatStore()(...args)) as ChatStoreHook,
+  {
+    get(_target, prop, receiver) {
+      return Reflect.get(getChatStore(), prop, receiver);
+    },
+    set(_target, prop, value, receiver) {
+      return Reflect.set(getChatStore(), prop, value, receiver);
+    },
+    has(_target, prop) {
+      return prop in getChatStore();
+    },
+    ownKeys() {
+      return Reflect.ownKeys(getChatStore());
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      return Reflect.getOwnPropertyDescriptor(getChatStore(), prop);
+    },
+  },
+) as ChatStoreHook;
 
 export function disposeChatStoreRuntime(): void {
   clearCompletionStreamBuffer();

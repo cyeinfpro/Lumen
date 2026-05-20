@@ -55,6 +55,11 @@ import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
 import { useMaskInpaint } from "../shared/useMaskInpaint";
+import { AttachmentRoleBadge } from "../shared/AttachmentRoleBadge";
+import { ExecutionSummaryBar } from "../shared/ExecutionSummaryBar";
+import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
+import { buildComposerExecutionSummary } from "../shared/executionSummary";
+import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
 import { MaskCanvas } from "../MaskCanvas";
 
 interface MobileComposerPillProps {
@@ -369,6 +374,37 @@ export function MobileComposerPill({
   });
 
   const inpaint = useMaskInpaint();
+  const attachmentRoles = useComposerAttachmentRoles({
+    attachments,
+    mode,
+    maskTargetAttachmentId: inpaint.maskActive
+      ? attachments[0]?.id ?? null
+      : null,
+  });
+  const costEstimate = useComposerCostEstimate({
+    mode,
+    quality,
+    aspect,
+    count,
+  });
+  const executionSummary = buildComposerExecutionSummary({
+    mode,
+    attachmentCount: attachments.length,
+    attachmentRoles: attachmentRoles.entries.map((entry) => entry.role),
+    outputCount: count,
+    aspect,
+    quality,
+    renderQuality,
+    fast,
+    maskActive: inpaint.maskActive,
+    costLabel: costEstimate.label,
+    costWarning: costEstimate.warning,
+    reasoningEffort,
+    webSearch,
+    fileSearch,
+    codeInterpreter,
+    imageGeneration,
+  });
 
   const handleSubmit = useCallback(async () => {
     if (submittingRef.current) return;
@@ -831,6 +867,7 @@ export function MobileComposerPill({
                 {attachments.map((att, idx) => {
                   const isFirst = idx === 0;
                   const showMaskBadge = isFirst && inpaint.maskActive;
+                  const role = attachmentRoles.getRole(att.id);
                   return (
                     <div
                       key={att.id}
@@ -877,21 +914,12 @@ export function MobileComposerPill({
                       >
                         @图{idx + 1}
                       </button>
-                      {showMaskBadge && (
-                        <button
-                          type="button"
-                          data-composer-attachment-action="true"
-                          onClick={() => inpaint.openInpaint()}
-                          aria-label="重新涂抹 mask"
-                          className={cn(
-                            "absolute inset-x-0 bottom-0 px-0.5 py-0.5",
-                            "bg-[var(--amber-400)]/85 text-[9px] font-semibold text-[var(--bg-0)]",
-                            "text-center leading-tight tracking-wide",
-                          )}
-                        >
-                          Mask
-                        </button>
-                      )}
+                      <AttachmentRoleBadge
+                        role={role}
+                        imageNumber={idx + 1}
+                        compact
+                        onClick={() => attachmentRoles.cycleRole(att.id)}
+                      />
                       <button
                         type="button"
                         data-composer-attachment-action="true"
@@ -936,6 +964,11 @@ export function MobileComposerPill({
                 )}
               </div>
             )}
+            {attachmentRoles.compactHint && (
+              <div className="px-3 pt-1 text-[10.5px] leading-4 text-[var(--fg-2)] line-clamp-1">
+                {attachmentRoles.compactHint}
+              </div>
+            )}
 
             {/* 错误条 */}
             <AnimatePresence>
@@ -959,7 +992,7 @@ export function MobileComposerPill({
                       type="button"
                       aria-label="关闭错误提示"
                       onClick={() => setComposerError(null)}
-                      className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md hover:bg-black/30"
+                      className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md active:bg-[var(--bg-2)]"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -1059,6 +1092,8 @@ export function MobileComposerPill({
                 )}
               />
             </div>
+
+            <ExecutionSummaryBar summary={executionSummary} compact />
 
             {/* 分隔线 */}
             <div className="mx-3 h-px bg-[var(--border-subtle)]" />

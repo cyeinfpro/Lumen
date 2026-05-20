@@ -63,6 +63,27 @@ export interface AttachmentImage {
   height?: number;
   // 版本树父图：若该 attachment 由 generated 图派生，保留源 image_id
   source_image_id?: string;
+  role?: AttachmentRole;
+  label?: string;
+  weight?: number;
+}
+
+export type AttachmentRole =
+  | "reference"
+  | "subject"
+  | "product"
+  | "style"
+  | "edit_target"
+  | "ask_target"
+  | "background"
+  | "mask"
+  | "other";
+
+export interface StructuredAttachment {
+  image_id: string;
+  role: AttachmentRole;
+  label?: string;
+  weight?: number;
 }
 
 // 局部修改 (inpaint) mask：与第一张参考图绑定。
@@ -83,6 +104,8 @@ export interface ImageProviderAttempt {
   status?: string | null;
   duration_ms?: number | null;
   error_summary?: string | null;
+  byok?: boolean | null;
+  reason?: string | null;
 }
 
 export interface ImageGenerationDiagnostics {
@@ -135,6 +158,7 @@ export interface GeneratedImage {
   billing_free?: boolean;
   billing_label?: string;
   billing_exempt_reason?: string;
+  source_image_id?: string | null;
   diagnostics?: ImageGenerationDiagnostics | null;
   revised_prompt?: string | null;
   requested_params?: Record<string, unknown> | null;
@@ -142,6 +166,17 @@ export interface GeneratedImage {
   effective_params?: Record<string, unknown> | null;
   actual_params?: Record<string, unknown> | null;
   provider_attempts?: ImageProviderAttempt[];
+  source?: string | null;
+  action_source?: string | null;
+  trace_id?: string | null;
+  attachment_roles?: StructuredAttachment[];
+  queue_lane?: string | null;
+  workflow_type?: string | null;
+  workflow_step_key?: string | null;
+  pixel_count?: number | null;
+  size_bucket?: string | null;
+  cost_class?: string | null;
+  queue_wait_ms?: number | null;
 }
 
 export type GenerationStatus =
@@ -161,6 +196,17 @@ export type GenerationStage =
 // substage 仅在实时 SSE 中出现，不识别时降级到粗 stage 行为。
 // 与后端 lumen_core.constants.GenerationStage 的细子值保持一致。
 export type GenerationSubstage =
+  | "waiting_queue"
+  | "waiting_provider"
+  | "preparing_refs"
+  | "upstream_started"
+  | "upstream_retrying"
+  | "postprocessing"
+  | "display_ready"
+  | "retryable"
+  | "terminal"
+  | "cancelled"
+  | "completed"
   | "provider_selected"
   | "stream_started"
   | "partial_received"
@@ -171,6 +217,7 @@ export type GenerationSubstage =
 export interface Generation {
   id: string;
   message_id: string;
+  parent_generation_id?: string | null;
   action: "generate" | "edit";
   prompt: string;
   size_requested: string;
@@ -179,16 +226,26 @@ export interface Generation {
   primary_input_image_id: string | null;
   status: GenerationStatus;
   stage: GenerationStage;
-  // 仅 SSE 实时事件填入；用户断线重连时拉历史只读 stage，substage 留空。
+  // SSE 与任务快照均可填入；不识别时降级到粗 stage。
   substage?: GenerationSubstage;
   // P2: worker 内跨 provider failover 时由 generation.progress 携带 provider_failover=true。
   // 前端可据此在 DevelopingCard 上展示"换号重试中…"。一次任务可能多次 failover，
   // 用计数表达；首次为 0 / undefined。
   failover_count?: number;
+  queue_position?: number | null;
+  retrying?: boolean;
+  waiting_provider?: boolean;
+  cancelled?: boolean;
   // 成功后填入
   image?: GeneratedImage;
   error_code?: string;
   error_message?: string;
+  retryable?: boolean;
+  recommended_actions?: RecommendedErrorAction[];
+  source?: string | null;
+  conversation_id?: string | null;
+  project_id?: string | null;
+  thumb_url?: string | null;
   diagnostics?: ImageGenerationDiagnostics | null;
   revised_prompt?: string | null;
   requested_params?: Record<string, unknown> | null;
@@ -196,6 +253,16 @@ export interface Generation {
   effective_params?: Record<string, unknown> | null;
   actual_params?: Record<string, unknown> | null;
   provider_attempts?: ImageProviderAttempt[];
+  action_source?: string | null;
+  trace_id?: string | null;
+  attachment_roles?: StructuredAttachment[];
+  queue_lane?: string | null;
+  workflow_type?: string | null;
+  workflow_step_key?: string | null;
+  pixel_count?: number | null;
+  size_bucket?: string | null;
+  cost_class?: string | null;
+  queue_wait_ms?: number | null;
   attempt: number;
   max_attempts?: number;
   retry_eta?: number;
@@ -208,6 +275,13 @@ export interface Generation {
   billing_free?: boolean;
   billing_label?: string;
   billing_exempt_reason?: string;
+}
+
+export interface RecommendedErrorAction {
+  id: string;
+  label: string;
+  kind?: "retry" | "link" | "adjust" | "wait" | "details" | string;
+  href?: string | null;
 }
 
 export interface UserMessage {
@@ -251,7 +325,10 @@ export type CompletionToolCallStatus =
   | "queued"
   | "running"
   | "succeeded"
-  | "failed";
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "unknown";
 
 export interface CompletionToolCall {
   id: string;
@@ -355,6 +432,13 @@ export interface AdminRequestEventOut {
   upstream_provider: string | null;
   upstream_route: string | null;
   upstream_endpoint: string | null;
+  queue_lane?: string | null;
+  workflow_type?: string | null;
+  workflow_step_key?: string | null;
+  pixel_count?: number | null;
+  size_bucket?: string | null;
+  cost_class?: string | null;
+  queue_wait_ms?: number | null;
   tokens_in: number | null;
   tokens_out: number | null;
   error_code: string | null;
@@ -787,6 +871,12 @@ export interface UserApiCredentialOut {
 
 export interface UserApiCredentialListOut {
   items: UserApiCredentialOut[];
+}
+
+export interface TelegramLinkCodeOut {
+  code: string;
+  expires_in: number;
+  deep_link: string | null;
 }
 
 export interface SessionOut {

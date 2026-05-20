@@ -36,9 +36,10 @@ import type {
   Message,
   UserMessage,
 } from "@/lib/types";
-import { cancelTask, imageBinaryUrl, imageVariantUrl } from "@/lib/apiClient";
+import { cancelTask, imageVariantUrl } from "@/lib/apiClient";
 import { prewarmImage } from "@/lib/imagePreload";
 import { aspectRatioToCss } from "@/lib/sizing";
+import { imageResultToLightboxItem } from "@/lib/imageResultLightbox";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
 import { DevelopingCard } from "./DevelopingCard";
 import { SceneDivider } from "./SceneDivider";
@@ -662,22 +663,13 @@ const FinalImage = memo(function FinalImage({
   const handleClick = () => {
     // 点击图：打开 Lightbox（Phase 6 监听该事件）
     const rect = imgRef.current?.getBoundingClientRect() ?? null;
-    const item: LightboxItem = {
-      id: image.id,
+    const item = imageResultToLightboxItem(gen, image, {
       // url 用 binary 保留下载 / 新标签页打开原图能力；
       // previewUrl 用 display2048 避免手机 decode 4K 原图卡死。
-      url: imageBinaryUrl(image.id),
       previewUrl: lightboxPreview,
       thumbUrl: lightboxThumbUrl(image),
-      prompt: gen.prompt,
-      width: image.width,
-      height: image.height,
-      aspect_ratio: gen.aspect_ratio,
-      size_actual: image.size_actual || `${image.width}x${image.height}`,
-      mime: image.mime,
-      filename: image.filename,
-      metadata: image.metadata_jsonb ?? undefined,
-    };
+      createdAt: gen.finished_at ?? gen.started_at,
+    });
     openLightbox([item], image.id, rect);
   };
 

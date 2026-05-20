@@ -51,7 +51,7 @@ class _FakeStreamResponse:
         return self
 
     async def __aexit__(self, *_args: Any) -> None:
-        return None
+        await self.aclose()
 
     async def aiter_lines(self):
         if self._raise_in_lines is not None:
@@ -144,6 +144,7 @@ async def test_get_client_rebuilds_when_runtime_timeout_changes(
     monkeypatch.setattr(upstream, "_build_client", fake_build_client)
     monkeypatch.setattr(upstream, "_client", None)
     monkeypatch.setattr(upstream, "_client_timeout_config", None)
+    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01)
 
     first = await upstream._get_client()
     values["upstream.read_timeout_s"] = "45"
@@ -151,6 +152,8 @@ async def test_get_client_rebuilds_when_runtime_timeout_changes(
 
     assert first is clients[0]
     assert second is clients[1]
+    assert clients[0].closed is False
+    await asyncio.sleep(0.05)
     assert clients[0].closed is True
     assert [cfg.read for cfg in built] == [30.0, 45.0]
 
@@ -330,6 +333,32 @@ async def test_iter_sse_with_runtime_counts_utf8_bytes_for_line_limit(
 
 
 @pytest.mark.asyncio
+async def test_iter_sse_with_runtime_closes_response_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_response = _FakeStreamResponse(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        raise_in_lines=httpx.ReadError("socket closed"),
+    )
+    client = _FakeClient(fake_response)
+    _patch_client(monkeypatch, client)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        _ = [
+            event
+            async for event in upstream._iter_sse_with_runtime(
+                base="https://upstream.example/v1",
+                api_key="test-key",
+                body=_valid_body(),
+            )
+        ]
+
+    assert exc_info.value.error_code == "stream_interrupted"
+    assert fake_response.aclose_called is True
+
+
+@pytest.mark.asyncio
 async def test_responses_call_counts_utf8_bytes_for_line_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -346,6 +375,25 @@ async def test_responses_call_counts_utf8_bytes_for_line_limit(
         await upstream.responses_call(_valid_body())
 
     assert exc_info.value.error_code == "stream_too_large"
+    assert fake_response.aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_responses_call_closes_response_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_response = _FakeStreamResponse(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        raise_in_lines=httpx.ReadError("socket closed"),
+    )
+    client = _FakeClient(fake_response)
+    _patch_client(monkeypatch, client)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await upstream.responses_call(_valid_body())
+
+    assert exc_info.value.error_code == "text_stream_interrupted"
     assert fake_response.aclose_called is True
 
 
@@ -433,7 +481,7 @@ async def test_responses_call_cancelled_propagates(
     with pytest.raises(asyncio.CancelledError):
         await upstream.responses_call(_valid_body())
 
-    # 取消时显式 aclose，让 httpx 释放底层连接
+    # 取消时 async context manager 仍会退出，让 httpx 释放底层连接。
     assert fake_response.aclose_called is True
 
 

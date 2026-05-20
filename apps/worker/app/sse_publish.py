@@ -29,8 +29,16 @@ _EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
 _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
 _XADD_IDEMPOTENT_LUA = """
 local existing = redis.call('GET', KEYS[2])
-if existing then
+if existing and existing ~= '' then
   return existing
+end
+local reserved = redis.call('SET', KEYS[2], '', 'NX', 'EX', tonumber(ARGV[5]))
+if not reserved then
+  existing = redis.call('GET', KEYS[2])
+  if existing and existing ~= '' then
+    return existing
+  end
+  return redis.error_reply('sse dedupe reservation has no stream id')
 end
 local stream_id = redis.call(
   'XADD',
@@ -46,7 +54,7 @@ local stream_id = redis.call(
   'event_id',
   ARGV[1]
 )
-redis.call('SET', KEYS[2], stream_id, 'EX', tonumber(ARGV[5]))
+redis.call('SET', KEYS[2], stream_id, 'XX', 'EX', tonumber(ARGV[5]))
 return stream_id
 """
 
@@ -69,11 +77,16 @@ async def _monotonic_ts_ms() -> int:
         return now
 
 
-async def _envelope(event_name: str, data: dict[str, Any]) -> dict[str, Any]:
+async def _envelope(
+    event_name: str,
+    channel: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
     raw_event_id = data.get("event_id")
     event_id = raw_event_id if raw_event_id not in (None, "") else uuid.uuid4()
     return {
         "event": event_name,
+        "channel": channel,
         "data": data,
         "event_id": str(event_id),
         "ts_ms": await _monotonic_ts_ms(),
@@ -135,7 +148,7 @@ async def publish_event(
         data: 事件 payload（一定是 dict，不塞 None / bytes）
     """
     stream_key = f"{EVENTS_STREAM_PREFIX}{user_id}"
-    envelope = await _envelope(event_name, data)
+    envelope = await _envelope(event_name, channel, data)
     stream_id: str | None = None
 
     for attempt in range(3):

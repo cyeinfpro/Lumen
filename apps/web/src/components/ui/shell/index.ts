@@ -14,3 +14,10 @@ export { DesktopMe } from "./DesktopMe";
 export { LandscapeBanner } from "./LandscapeBanner";
 export { DesktopTopNav } from "./DesktopTopNav";
 export type { DesktopTopNavProps, DesktopNavTab } from "./DesktopTopNav";
+export {
+  APP_NAV_ITEMS,
+  getActiveNavKey,
+  isSameRoute,
+  matchesPathPrefix,
+} from "./navigation";
+export type { AppNavItem, AppNavKey } from "./navigation";

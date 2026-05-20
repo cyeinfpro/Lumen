@@ -242,6 +242,36 @@ async def test_admin_login_uses_dedicated_limiter(
 
 
 @pytest.mark.asyncio
+async def test_login_checks_admin_limiter_before_db_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_keys: list[str] = []
+
+    class Db:
+        async def execute(self, _stmt):
+            raise AssertionError("admin login limiter must run before user lookup")
+
+    async def fake_check(_redis, key: str, cost: int = 1) -> None:
+        seen_keys.append(key)
+        raise auth._bad("rate_limited", "too many login attempts", 429)
+
+    monkeypatch.setattr(auth, "get_redis", lambda: object())
+    monkeypatch.setattr(auth.AUTH_ADMIN_LOGIN_LIMITER, "check", fake_check)
+
+    with pytest.raises(Exception) as excinfo:
+        await auth.login(
+            LoginIn(email="member@example.com", password="bad-password"),
+            _request(method="POST"),
+            Response(),
+            Db(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 429
+    assert len(seen_keys) == 1
+    assert seen_keys[0].startswith("rl:auth:admin_login:127.0.0.1:")
+
+
+@pytest.mark.asyncio
 async def test_signup_integrity_error_returns_email_taken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -322,6 +322,9 @@ refresh_update_runner_units() {
     local src_runner="${src_dir}/lumen-update-runner.service"
     local src_warm_path="${src_dir}/lumen-update-warm.path"
     local src_warm_service="${src_dir}/lumen-update-warm.service"
+    local src_backup_service="${src_dir}/lumen-backup.service"
+    local src_backup_timer="${src_dir}/lumen-backup.timer"
+    local src_backup_path="${src_dir}/lumen-backup.path"
     if [ ! -f "${src_path}" ] || [ ! -f "${src_runner}" ]; then
         log_warn "[refresh_update_runner] 找不到 update runner unit 模板（${src_dir}），跳过。"
         emit_warn refresh_update_runner "unit_templates_missing"
@@ -341,6 +344,17 @@ refresh_update_runner_units() {
         render_update_runner_unit "${src_warm_path}" "${tmp_dir}/lumen-update-warm.path" "${data_root}" "${backup_root}" "${deploy_root}"
         render_update_runner_unit "${src_warm_service}" "${tmp_dir}/lumen-update-warm.service" "${data_root}" "${backup_root}" "${deploy_root}"
     fi
+    if [ -f "${src_backup_service}" ]; then
+        render_update_runner_unit "${src_backup_service}" "${tmp_dir}/lumen-backup.service" "${data_root}" "${backup_root}" "${deploy_root}"
+    fi
+    if [ -f "${src_backup_timer}" ]; then
+        render_update_runner_unit "${src_backup_timer}" "${tmp_dir}/lumen-backup.timer" "${data_root}" "${backup_root}" "${deploy_root}"
+    fi
+    if [ -f "${src_backup_path}" ]; then
+        render_update_runner_unit "${src_backup_path}" "${tmp_dir}/lumen-backup.path" "${data_root}" "${backup_root}" "${deploy_root}"
+    fi
+
+    lumen_ensure_backup_service_user "${backup_root}"
 
     if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" /etc/systemd/system/lumen-update.path; then
         log_warn "[refresh_update_runner] 安装 lumen-update.path 失败，面板一键更新可能不可用。"
@@ -359,6 +373,9 @@ refresh_update_runner_units() {
             log_warn "[refresh_update_runner] 安装 lumen-update-warm.service 失败，镜像预热将不可用。"
         fi
     fi
+    lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.service "[refresh_update_runner] 安装 lumen-backup.service 失败，自动/手动触发备份将不可用。"
+    lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.timer "[refresh_update_runner] 安装 lumen-backup.timer 失败，自动备份将不可用。"
+    lumen_install_optional_systemd_unit "${tmp_dir}" lumen-backup.path "[refresh_update_runner] 安装 lumen-backup.path 失败，管理后台立即备份将不可用。"
     if ! lumen_run_as_root systemctl daemon-reload; then
         log_warn "[refresh_update_runner] systemctl daemon-reload 失败，面板一键更新可能不可用。"
         rm -rf "${tmp_dir}"
@@ -374,11 +391,14 @@ refresh_update_runner_units() {
             log_warn "[refresh_update_runner] 启用 lumen-update-warm.path 失败，镜像预热将不可用；可稍后手动执行 systemctl enable --now lumen-update-warm.path。"
         fi
     fi
+    lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-backup.timer "[refresh_update_runner] 启用 lumen-backup.timer 失败，自动备份将不可用；可稍后手动执行 systemctl enable --now lumen-backup.timer。"
+    lumen_enable_optional_systemd_unit "${tmp_dir}" lumen-backup.path "[refresh_update_runner] 启用 lumen-backup.path 失败，管理后台立即备份将不可用；可稍后手动执行 systemctl enable --now lumen-backup.path。"
     rm -rf "${tmp_dir}"
 
     log_info "一键更新 runner 已刷新：监听 ${backup_root}/.update.trigger"
     emit_info refresh_update_runner update_trigger "${backup_root}/.update.trigger"
     emit_info refresh_update_runner warm_trigger "${backup_root}/.warm.trigger"
+    emit_info refresh_update_runner backup_trigger "${backup_root}/.backup.trigger"
     return 0
 }
 

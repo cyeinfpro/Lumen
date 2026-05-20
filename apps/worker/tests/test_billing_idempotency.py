@@ -196,7 +196,7 @@ async def test_charge_completion_integrity_error_bubbles_after_billing_attempt(
     async def no_existing_then_found(*_args: Any) -> SimpleNamespace | None:
         return None
 
-    async def fail_charge(*_args: Any, **_kwargs: Any) -> None:
+    async def fail_settle(*_args: Any, **_kwargs: Any) -> None:
         raise IntegrityError("insert", {}, Exception("duplicate"))
 
     monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
@@ -204,7 +204,7 @@ async def test_charge_completion_integrity_error_bubbles_after_billing_attempt(
     monkeypatch.setattr(worker_billing, "_allow_negative_balance", allow_negative_balance)
     monkeypatch.setattr(worker_billing.billing_core, "estimate_completion_cost", estimate_cost)
     monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing_then_found)
-    monkeypatch.setattr(worker_billing.billing_core, "charge", fail_charge)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", fail_settle)
 
     with pytest.raises(IntegrityError):
         await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
@@ -243,7 +243,7 @@ async def test_charge_completion_passes_priority_service_tier_to_pricing(
     async def no_existing(*_args: Any) -> None:
         return None
 
-    async def charge(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
         captured["meta"] = kwargs.get("meta")
         return SimpleNamespace(
             id="tx-1",
@@ -258,7 +258,7 @@ async def test_charge_completion_passes_priority_service_tier_to_pricing(
     monkeypatch.setattr(worker_billing.billing_core, "estimate_completion_cost", estimate_cost)
     monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
     monkeypatch.setattr(worker_billing, "_existing_fingerprint_tx", no_existing)
-    monkeypatch.setattr(worker_billing.billing_core, "charge", charge)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
 
     await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
 
@@ -320,7 +320,7 @@ async def test_charge_completion_legacy_mode_folds_cache_tokens_into_input(
     async def no_existing(*_args: Any) -> None:
         return None
 
-    async def charge(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
         captured["meta"] = kwargs.get("meta")
         return SimpleNamespace(
             id="tx-1",
@@ -342,7 +342,7 @@ async def test_charge_completion_legacy_mode_folds_cache_tokens_into_input(
     )
     monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
     monkeypatch.setattr(worker_billing, "_existing_fingerprint_tx", no_existing)
-    monkeypatch.setattr(worker_billing.billing_core, "charge", charge)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
 
     await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
 

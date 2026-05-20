@@ -970,7 +970,7 @@ wheels = [
 
 [[package]]
 name = "lumen"
-version = "1.1.42"
+version = "1.1.44"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -993,7 +993,7 @@ dev = [
 
 [[package]]
 name = "lumen-api"
-version = "1.1.42"
+version = "1.1.44"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "alembic" },
@@ -1056,7 +1056,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-core"
-version = "1.1.42"
+version = "1.1.44"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "cryptography" },
@@ -1077,7 +1077,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-tgbot"
-version = "1.1.42"
+version = "1.1.44"
 source = { editable = "apps/tgbot" }
 dependencies = [
     { name = "aiogram" },
@@ -1100,7 +1100,7 @@ requires-dist = [
 
 [[package]]
 name = "lumen-worker"
-version = "1.1.42"
+version = "1.1.44"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "arq" },
@@ -1118,6 +1118,7 @@ dependencies = [
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pyvips" },
     { name = "redis" },
     { name = "sentry-sdk" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -1140,6 +1141,7 @@ requires-dist = [
     { name = "prometheus-client", specifier = ">=0.20,<1.0" },
     { name = "pydantic", specifier = ">=2.7,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.3,<3.0" },
+    { name = "pyvips", specifier = ">=2.2,<3.0" },
     { name = "redis", specifier = ">=5.0,<7.0" },
     { name = "sentry-sdk", specifier = ">=2.0,<3.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30,<3.0" },
@@ -1976,6 +1978,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/36/0b/cd77011c1bc01b764
 wheels = [
     { url = "https://files.pythonhosted.org/packages/15/fe/9a58cb6eec633ff6afae150ca53c16f8cc8b65862ccb3d088051efdfceb7/python_socks-2.8.1-py3-none-any.whl", hash = "sha256:28232739c4988064e725cdbcd15be194743dd23f1c910f784163365b9d7be035", size = 55087, upload-time = "2026-02-16T05:23:59.147Z" },
 ]
+
+[[package]]
+name = "pyvips"
+version = "2.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7b/88/f73dae807ec68b228fba72507105e3ba80a561dc0bade0004ce24fd118fc/pyvips-2.2.3.tar.gz", hash = "sha256:43bceced0db492654c93008246a58a508e0373ae1621116b87b322f2ac72212f", size = 56626, upload-time = "2024-04-28T11:19:58.158Z" }
 
 [[package]]
 name = "pyyaml"

@@ -112,7 +112,7 @@ async def test_normalize_base_url_blocks_dns_resolution_to_private_ip(
 
 
 @pytest.mark.asyncio
-async def test_normalize_base_url_rejects_dns_blips_in_production(
+async def test_normalize_base_url_allows_dns_gaierror_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(byok_service.settings, "app_env", "production")
@@ -122,8 +122,9 @@ async def test_normalize_base_url_rejects_dns_blips_in_production(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    with pytest.raises(ValueError, match="cannot be resolved"):
-        await byok_service.normalize_base_url("https://upstream.example/v1")
+    assert await byok_service.normalize_base_url("https://upstream.example/v1") == (
+        "https://upstream.example/v1"
+    )
 
 
 @pytest.mark.asyncio

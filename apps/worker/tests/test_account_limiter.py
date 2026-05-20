@@ -223,7 +223,7 @@ async def test_check_quota_lua_failure_uses_short_fail_closed_retry() -> None:
     )
 
     assert allowed is False
-    assert 1.0 <= retry_after <= account_limiter._REDIS_ERROR_RETRY_AFTER_S + 0.5
+    assert 1.0 <= retry_after <= account_limiter.REDIS_ERROR_RETRY_AFTER_S + 0.5
 
 
 @pytest.mark.asyncio
@@ -240,7 +240,45 @@ async def test_check_quota_fallback_failure_uses_short_fail_closed_retry() -> No
     )
 
     assert allowed is False
-    assert 1.0 <= retry_after <= account_limiter._REDIS_ERROR_RETRY_AFTER_S + 0.5
+    assert 1.0 <= retry_after <= account_limiter.REDIS_ERROR_RETRY_AFTER_S + 0.5
+
+
+@pytest.mark.asyncio
+async def test_check_quota_daily_redis_error_fails_closed_short_retry() -> None:
+    class DailyGetBrokenRedis(FakeRedis):
+        async def get(self, _key: str) -> str | None:
+            raise RuntimeError("redis down")
+
+    now = 1_700_000_000.0
+    allowed, retry_after = await account_limiter.check_quota(
+        DailyGetBrokenRedis(), "acc1", rate_limit=None, daily_quota=80, now=now
+    )
+
+    assert allowed is False
+    assert retry_after == account_limiter.REDIS_ERROR_RETRY_AFTER_S
+
+
+@pytest.mark.asyncio
+async def test_check_quota_fallback_zrange_error_returns_count_limit_retry() -> None:
+    class NoEvalZRangeBrokenRedis(FakeRedis):
+        eval = None
+
+        async def zrange(
+            self, key: str, start: int, stop: int, withscores: bool = False
+        ) -> list[Any]:
+            raise RuntimeError("redis down")
+
+    now = 1_700_000_000.0
+    redis = NoEvalZRangeBrokenRedis()
+    for i in range(5):
+        await redis.zadd("lumen:acct:acc1:image:ts", {f"t{i}": now - 10 + i})
+
+    allowed, retry_after = await account_limiter.check_quota(
+        redis, "acc1", rate_limit="5/min", daily_quota=None, now=now
+    )
+
+    assert allowed is False
+    assert 1.0 <= retry_after <= account_limiter.REDIS_ERROR_RETRY_AFTER_S + 0.5
 
 
 # --- record_image_call ------------------------------------------------------

@@ -48,6 +48,11 @@ if [ ! -d "$LOCK_BASE" ] || [ ! -w "$LOCK_BASE" ]; then
 fi
 LOCKFILE="${LUMEN_BACKUP_RESTORE_LOCKFILE:-${LOCK_BASE}/lumen-backup-restore.lock}"
 LOCKDIR="$LOCKFILE.d"
+BACKUP_TRIGGER_FILE="${LUMEN_BACKUP_TRIGGER_FILE:-${BACKUP_ROOT}/.backup.trigger}"
+BACKUP_RUNNING_FILE="${LUMEN_BACKUP_RUNNING_FILE:-${BACKUP_ROOT}/.backup.running}"
+BACKUP_PENDING_FILE="${LUMEN_BACKUP_PENDING_FILE:-${BACKUP_ROOT}/.backup.pending}"
+BACKUP_TRIGGER_FINGERPRINT=""
+BACKUP_SERVICE_MARKER_ACTIVE=0
 LOCK_KIND=""
 TMP_DIR=""
 PG_OUT=""
@@ -56,6 +61,44 @@ PG_TMP=""
 REDIS_TMP=""
 
 log() { printf '[backup %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
+
+trigger_fingerprint() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    {
+        stat -c '%y:%s:%i' "$file" 2>/dev/null \
+            || stat -f '%Sm:%z:%i' "$file" 2>/dev/null \
+            || ls -l "$file" 2>/dev/null
+        cksum "$file" 2>/dev/null || true
+    } | tr '\n' '|'
+}
+
+mark_backup_running() {
+    [ "${LUMEN_BACKUP_SERVICE_MODE:-0}" = "1" ] || return 0
+    mkdir -p "$BACKUP_ROOT"
+    local tmp="${BACKUP_RUNNING_FILE}.$$"
+    {
+        printf 'pid=%s\n' "$$"
+        printf 'started_at=%s\n' "$(date -u +%FT%TZ)"
+    } > "$tmp"
+    mv -f "$tmp" "$BACKUP_RUNNING_FILE"
+    BACKUP_TRIGGER_FINGERPRINT="$(trigger_fingerprint "$BACKUP_TRIGGER_FILE")"
+    BACKUP_SERVICE_MARKER_ACTIVE=1
+}
+
+mark_backup_pending_if_retriggered() {
+    [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ] || return 0
+    [ -f "$BACKUP_TRIGGER_FILE" ] || return 0
+    local current
+    current="$(trigger_fingerprint "$BACKUP_TRIGGER_FILE")"
+    if [ -n "$current" ] && [ "$current" != "$BACKUP_TRIGGER_FINGERPRINT" ]; then
+        {
+            printf 'pid=%s\n' "$$"
+            printf 'queued_at=%s\n' "$(date -u +%FT%TZ)"
+        } > "$BACKUP_PENDING_FILE"
+        log "detected another backup trigger while running; queued one follow-up run"
+    fi
+}
 
 release_lock() {
     if [ "$LOCK_KIND" = "flock" ]; then
@@ -67,6 +110,10 @@ release_lock() {
 
 cleanup() {
     local rc=$?
+    mark_backup_pending_if_retriggered
+    if [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ]; then
+        rm -f "$BACKUP_RUNNING_FILE" 2>/dev/null || true
+    fi
     if [ "$rc" -ne 0 ]; then
         [ -n "${PG_TMP:-}" ] && rm -f "$PG_TMP" 2>/dev/null || true
         [ -n "${REDIS_TMP:-}" ] && rm -f "$REDIS_TMP" 2>/dev/null || true
@@ -218,6 +265,8 @@ docker_cp_redis() {
 trap cleanup EXIT
 trap 'on_signal INT' INT
 trap 'on_signal TERM' TERM
+
+mark_backup_running
 
 # 维护锁：与 install/update/uninstall 互斥；被占用时跳过本次 backup（exit 0，不让 systemd timer 报警）。
 # 受 LUMEN_BACKUP_FORCE=1 控制：强制运行（用于 update.sh 的 backup_preflight）；
@@ -399,3 +448,4 @@ prune_paired() {
 prune_paired "$PG_DIR" "$REDIS_DIR" "$MAX_KEEP"
 
 log "backup $TS complete"
+printf '{"timestamp":"%s","pg_size":%s,"redis_size":%s}\n' "$TS" "${PG_SIZE:-0}" "${REDIS_SIZE:-0}"

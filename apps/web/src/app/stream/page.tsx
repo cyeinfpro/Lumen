@@ -1,8 +1,8 @@
 "use client";
 
 // /stream 路由分流：
-// - < 768px → MobileStream（图库瀑布流）
-// - ≥ 768px → DesktopStream（桌面图库外壳）
+// - < 768px → MobileStream（资产瀑布流）
+// - ≥ 768px → DesktopStream（桌面资产外壳）
 
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { ShellSkeleton } from "@/components/ui/shell/ShellSkeleton";

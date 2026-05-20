@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,6 +12,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.byok import ByokCryptoError, decrypt_api_key
 from lumen_core.models import (
     ApiSupplierTemplate,
     PendingApiKeyVerification,
@@ -37,6 +38,7 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit, write_audit_isolated
 from ..byok_service import (
     api_key_rate_limit_hash,
+    byok_master_secret,
     create_verification_token_hash,
     encrypt_pending_key,
     hash_text_for_audit,
@@ -69,6 +71,15 @@ _VERIFY_SUPPLIER_LIMITER = RateLimiter(
     capacity=60, refill_per_sec=60 / 60, always_on=True
 )
 _VERIFY_KEY_LIMITER = RateLimiter(capacity=10, refill_per_sec=10 / 900, always_on=True)
+_PROBE_IP_LIMITER = RateLimiter(capacity=10, refill_per_sec=10 / 60, always_on=True)
+_PROBE_USER_LIMITER = RateLimiter(capacity=12, refill_per_sec=12 / 300, always_on=True)
+_PROBE_CREDENTIAL_LIMITER = RateLimiter(
+    capacity=3, refill_per_sec=3 / 300, always_on=True
+)
+_PROBE_SUPPLIER_LIMITER = RateLimiter(
+    capacity=30, refill_per_sec=30 / 60, always_on=True
+)
+_PROBE_KEY_LIMITER = RateLimiter(capacity=6, refill_per_sec=6 / 900, always_on=True)
 _MIN_VALIDATION_SECONDS = 0.25
 
 
@@ -535,6 +546,153 @@ async def list_bindable_api_suppliers(
     return ApiSupplierTemplatePublicListOut(
         items=[supplier_to_public_out(supplier) for supplier in suppliers]
     )
+
+
+@router_me.post(
+    "/{credential_id}/probe",
+    response_model=UserApiCredentialOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def probe_my_api_credential(
+    credential_id: str,
+    request: Request,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserApiCredentialOut:
+    redis = get_redis()
+    ip = require_client_ip(request)
+    await _PROBE_IP_LIMITER.check(redis, f"rl:byok:probe:ip:{ip}")
+    await _PROBE_USER_LIMITER.check(redis, f"rl:byok:probe:user:{user.id}")
+    await _PROBE_CREDENTIAL_LIMITER.check(
+        redis, f"rl:byok:probe:credential:{credential_id}"
+    )
+
+    row = (
+        await db.execute(
+            select(UserApiCredential, ApiSupplierTemplate)
+            .join(
+                ApiSupplierTemplate,
+                ApiSupplierTemplate.id == UserApiCredential.supplier_id,
+            )
+            .where(
+                UserApiCredential.id == credential_id,
+                UserApiCredential.user_id == user.id,
+                UserApiCredential.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).one_or_none()
+    if row is None:
+        raise _http("not_found", "credential not found", 404)
+    credential, supplier = row
+    if credential.status != "active":
+        raise _http(
+            "credential_not_active",
+            "only the active credential can be re-probed",
+            409,
+        )
+    if supplier.deleted_at is not None or not supplier.enabled:
+        raise _http("supplier_not_available", "supplier is not available", 404)
+    key_ciphertext = credential.key_ciphertext
+    supplier_id = supplier.id
+    await _PROBE_SUPPLIER_LIMITER.check(
+        redis, f"rl:byok:probe:supplier:{supplier_id}"
+    )
+    await db.commit()
+
+    try:
+        api_key = decrypt_api_key(key_ciphertext, byok_master_secret())
+    except ByokCryptoError as exc:
+        await write_audit_isolated(
+            event_type="me.api_credential.probe.decrypt_failed",
+            user_id=user.id,
+            actor_email=user.email,
+            actor_ip_hash=request_ip_hash(request),
+            details={"credential_id": credential_id, "supplier_id": supplier_id},
+        )
+        raise _http(
+            "byok_master_secret_mismatch",
+            "credential cannot be decrypted; check BYOK master secret",
+            500,
+        ) from exc
+    try:
+        key_hash_for_limit = api_key_rate_limit_hash(api_key)
+    except ValueError as exc:
+        raise _http("invalid_api_key", "API key is invalid", 400) from exc
+    await _PROBE_KEY_LIMITER.check(redis, f"rl:byok:probe:key:{key_hash_for_limit}")
+
+    settings_out = await read_byok_settings(db)
+    outcome = await validate_api_key_with_supplier(
+        db,
+        supplier,
+        api_key,
+        validation_model=settings_out.validation_model,
+        timeout_ms=settings_out.validation_timeout_ms,
+    )
+    row = (
+        await db.execute(
+            select(UserApiCredential, ApiSupplierTemplate)
+            .join(
+                ApiSupplierTemplate,
+                ApiSupplierTemplate.id == UserApiCredential.supplier_id,
+            )
+            .where(
+                UserApiCredential.id == credential_id,
+                UserApiCredential.user_id == user.id,
+                UserApiCredential.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).one_or_none()
+    if row is None:
+        raise _http("not_found", "credential not found", 404)
+    credential, supplier = row
+    if credential.status != "active":
+        raise _http(
+            "credential_not_active",
+            "only the active credential can be re-probed",
+            409,
+        )
+    if supplier.deleted_at is not None or not supplier.enabled:
+        raise _http("supplier_not_available", "supplier is not available", 404)
+    now = datetime.now(timezone.utc)
+    if outcome.ok:
+        credential.last_verified_at = now
+        credential.last_error_code = None
+        credential.rate_limited_until = None
+    else:
+        credential.last_failed_at = now
+        credential.last_error_code = outcome.error_code or "api_key_validation_failed"
+        if credential.last_error_code == "invalid_api_key":
+            credential.status = "invalid"
+        if credential.last_error_code == "key_rate_limited":
+            credential.rate_limited_until = now + timedelta(minutes=5)
+        else:
+            credential.rate_limited_until = None
+
+    await write_audit(
+        db,
+        event_type=(
+            "me.api_credential.probe.success"
+            if outcome.ok
+            else "me.api_credential.probe.fail"
+        ),
+        user_id=user.id,
+        actor_email_hash=hash_email(user.email),
+        actor_ip_hash=request_ip_hash(request),
+        details={
+            "credential_id": credential.id,
+            "supplier_id": supplier.id,
+            "ok": outcome.ok,
+            "error_code": outcome.error_code,
+            "http_status": outcome.http_status,
+            "latency_ms": outcome.latency_ms,
+        },
+        autocommit=False,
+    )
+    await db.commit()
+    await db.refresh(credential, ["updated_at"])
+    return _credential_out(credential, supplier)
 
 
 @router_me.put(

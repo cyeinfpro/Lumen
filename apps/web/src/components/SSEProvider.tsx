@@ -52,12 +52,26 @@ const CONV_EVENTS = [
 ] as const;
 
 const USER_EVENTS = ["user.notice", "account_settings_updated"] as const;
+const TASK_QUERY_EVENTS = new Set<string>([
+  "generation.queued",
+  "generation.started",
+  "generation.succeeded",
+  "generation.failed",
+  "generation.canceled",
+  "generation.retrying",
+  "completion.queued",
+  "completion.started",
+  "completion.succeeded",
+  "completion.failed",
+  "completion.restarted",
+]);
 
 // API accepts 64 effective channels and auto-adds user:{id} when omitted.
 // Keep the client below that ceiling; overflow tasks are still repaired by
 // pollInflightTasks(), just without live progress events until capacity frees.
 const MAX_SSE_CHANNELS_PER_CONNECTION = 62;
 const SSE_RECOVERY_POLL_MS = 10_000;
+const SSE_RECOVERY_COALESCE_MS = 600;
 const SSE_BROADCAST_CHANNEL = "lumen:sse-events:v1";
 const MAX_SEEN_SSE_EVENT_IDS = 2_000;
 
@@ -69,7 +83,25 @@ type SSEBroadcastPayload = {
   sentAt: number;
 };
 
-type SeenEventResult = "accepted" | "duplicate" | "untracked";
+type SeenEventResult = "accepted" | "duplicate" | null;
+type RecoveryRequest = {
+  phase: string;
+  hydrateTasks: boolean;
+  refreshCompletionText: boolean;
+};
+
+function mergeRecoveryRequest(
+  current: RecoveryRequest | null,
+  next: RecoveryRequest,
+): RecoveryRequest {
+  if (!current) return next;
+  return {
+    phase: `${current.phase}+${next.phase}`,
+    hydrateTasks: current.hydrateTasks || next.hydrateTasks,
+    refreshCompletionText:
+      current.refreshCompletionText || next.refreshCompletionText,
+  };
+}
 
 function createBroadcastSourceId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -80,9 +112,16 @@ function createBroadcastSourceId(): string {
 
 function payloadEventId(data: unknown, eventId?: string): string | null {
   if (data && typeof data === "object") {
-    const raw = (data as { event_id?: unknown; msg_id?: unknown }).event_id;
+    const record = data as {
+      event_id?: unknown;
+      sse_id?: unknown;
+      msg_id?: unknown;
+    };
+    const raw = record.event_id;
     if (typeof raw === "string" && raw) return raw;
-    const msgId = (data as { msg_id?: unknown }).msg_id;
+    const sseId = record.sse_id;
+    if (typeof sseId === "string" && sseId) return sseId;
+    const msgId = record.msg_id;
     if (typeof msgId === "string" && msgId) return msgId;
   }
   return eventId || null;
@@ -241,15 +280,26 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const broadcastRef = useRef<BroadcastChannel | null>(null);
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenEventIdQueueRef = useRef<string[]>([]);
+  const taskInvalidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   useEffect(() => {
     qcRef.current = qc;
   }, [qc]);
 
+  const scheduleTaskInvalidation = useCallback(() => {
+    if (taskInvalidationTimerRef.current) return;
+    taskInvalidationTimerRef.current = setTimeout(() => {
+      taskInvalidationTimerRef.current = null;
+      void qcRef.current.invalidateQueries({ queryKey: ["tasks"] });
+    }, 500);
+  }, []);
+
   const markEventSeen = useCallback(
     (data: unknown, eventId?: string): SeenEventResult => {
       const id = payloadEventId(data, eventId);
-      if (!id) return "untracked";
+      if (!id) return null;
 
       const seen = seenEventIdsRef.current;
       if (seen.has(id)) return "duplicate";
@@ -286,6 +336,10 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const applySSEEventWithSideEffects = useCallback((name: string, data: unknown) => {
     useChatStore.getState().applySSEEvent(name, data);
 
+    if (TASK_QUERY_EVENTS.has(name)) {
+      scheduleTaskInvalidation();
+    }
+
     if (name === "conv.renamed") {
       qcRef.current.invalidateQueries({ queryKey: ["conversations"] });
       return;
@@ -314,7 +368,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
         });
       }
     }
-  }, []);
+  }, [scheduleTaskInvalidation]);
 
   const deliverSSEEvent = useCallback(
     (
@@ -325,13 +379,13 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     ) => {
       const seenResult = markEventSeen(data, eventId);
       if (seenResult === "duplicate") return;
-      if (seenResult === "untracked" && opts?.source === "broadcast") {
+      if (seenResult === null && opts?.source === "broadcast") {
         return;
       }
 
       applySSEEventWithSideEffects(name, data);
 
-      if (seenResult === "untracked") return;
+      if (seenResult === null) return;
       if (opts?.broadcast === false) return;
       try {
         broadcastRef.current?.postMessage({
@@ -398,11 +452,64 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   }, [deliverSSEEvent]);
 
   const recoveryInFlightRef = useRef(false);
+  const queuedRecoveryRef = useRef<RecoveryRequest | null>(null);
+  const recoveryCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const recoveryDisposedRef = useRef(false);
+  const recoveryLifecycleRef = useRef(0);
+  const lastRecoveryStartedAtRef = useRef(0);
   const runRecovery = useCallback(
-    (phase: string, hydrateTasks: boolean, refreshCompletionText: boolean) => {
-      if (recoveryInFlightRef.current) return;
-      recoveryInFlightRef.current = true;
+    function runRecoveryImpl(
+      phase: string,
+      hydrateTasks: boolean,
+      refreshCompletionText: boolean,
+    ) {
+      if (recoveryDisposedRef.current) return;
+      const lifecycle = recoveryLifecycleRef.current;
+      const request: RecoveryRequest = {
+        phase,
+        hydrateTasks,
+        refreshCompletionText,
+      };
+      const queueRequest = () => {
+        queuedRecoveryRef.current = mergeRecoveryRequest(
+          queuedRecoveryRef.current,
+          request,
+        );
+      };
 
+      if (recoveryInFlightRef.current || recoveryCooldownTimerRef.current) {
+        queueRequest();
+        return;
+      }
+
+      const elapsed = Date.now() - lastRecoveryStartedAtRef.current;
+      if (elapsed < SSE_RECOVERY_COALESCE_MS) {
+        queueRequest();
+        recoveryCooldownTimerRef.current = setTimeout(() => {
+          recoveryCooldownTimerRef.current = null;
+          if (
+            recoveryDisposedRef.current ||
+            lifecycle !== recoveryLifecycleRef.current
+          ) {
+            return;
+          }
+          const queued = queuedRecoveryRef.current;
+          queuedRecoveryRef.current = null;
+          if (queued) {
+            runRecoveryImpl(
+              queued.phase,
+              queued.hydrateTasks,
+              queued.refreshCompletionText,
+            );
+          }
+        }, SSE_RECOVERY_COALESCE_MS - elapsed);
+        return;
+      }
+
+      recoveryInFlightRef.current = true;
+      lastRecoveryStartedAtRef.current = Date.now();
       const store = useChatStore.getState();
       const jobs: Array<Promise<unknown>> = [];
       if (hydrateTasks) jobs.push(store.hydrateActiveTasks());
@@ -421,7 +528,22 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
           }
         })
         .finally(() => {
+          if (
+            recoveryDisposedRef.current ||
+            lifecycle !== recoveryLifecycleRef.current
+          ) {
+            return;
+          }
           recoveryInFlightRef.current = false;
+          const queued = queuedRecoveryRef.current;
+          queuedRecoveryRef.current = null;
+          if (queued) {
+            runRecoveryImpl(
+              queued.phase,
+              queued.hydrateTasks,
+              queued.refreshCompletionText,
+            );
+          }
         });
     },
     [],
@@ -434,13 +556,27 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   useSSE(channels, handlers, { onOpen: handleSSEOpen });
 
   useEffect(() => {
+    recoveryDisposedRef.current = false;
+    recoveryLifecycleRef.current += 1;
     const unsubscribeOnlineRestore = onOnlineRestore(() => {
       runRecovery("online-restore", true, false);
     });
     const stopConnectivity = startConnectivity();
     return () => {
+      recoveryDisposedRef.current = true;
+      recoveryLifecycleRef.current += 1;
       unsubscribeOnlineRestore();
       stopConnectivity();
+      if (taskInvalidationTimerRef.current) {
+        clearTimeout(taskInvalidationTimerRef.current);
+        taskInvalidationTimerRef.current = null;
+      }
+      if (recoveryCooldownTimerRef.current) {
+        clearTimeout(recoveryCooldownTimerRef.current);
+        recoveryCooldownTimerRef.current = null;
+      }
+      recoveryInFlightRef.current = false;
+      queuedRecoveryRef.current = null;
       disposeChatStoreRuntime();
     };
   }, [runRecovery]);

@@ -10,6 +10,8 @@ callback_data 严格 ≤ 64 字节（TG 限制）。本文件全部 callback_dat
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -148,16 +150,43 @@ def render_params_summary(params: dict[str, object]) -> str:
     )
 
 
-def post_success_keyboard(gen_id: str) -> InlineKeyboardMarkup:
-    """成功生成后的操作面板：重画（同 prompt 重新出）+ 迭代（以图为底改 prompt）。"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔁 重画", callback_data=f"redo:{gen_id}"),
-                InlineKeyboardButton(text="✏️ 迭代", callback_data=f"iter:{gen_id}"),
-            ]
+def post_success_keyboard(
+    gen_id: str,
+    *,
+    web_url: str | None = None,
+    project_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    """成功生成后的操作面板：重画、迭代、回 Web 继续整理。"""
+    rows = [
+        [
+            InlineKeyboardButton(text="🔁 重画", callback_data=f"redo:{gen_id}"),
+            InlineKeyboardButton(text="✏️ 迭代", callback_data=f"iter:{gen_id}"),
         ]
+    ]
+    link_row: list[InlineKeyboardButton] = []
+    safe_web_url = _https_url_or_none(web_url)
+    safe_project_url = _https_url_or_none(project_url)
+    if safe_web_url:
+        link_row.append(InlineKeyboardButton(text="Web 编辑", url=safe_web_url))
+    if safe_project_url:
+        link_row.append(InlineKeyboardButton(text="加入项目", url=safe_project_url))
+    if link_row:
+        rows.append(link_row)
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
     )
+
+
+def _https_url_or_none(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    return value
 
 
 def enhance_choice_keyboard() -> InlineKeyboardMarkup:

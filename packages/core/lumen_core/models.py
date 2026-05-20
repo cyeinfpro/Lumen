@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from functools import cached_property
 from typing import Any
 
 from sqlalchemy import (
@@ -31,6 +32,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .constants import DEFAULT_CHAT_MODEL
+from .queue_metadata import completion_queue_metadata, generation_queue_metadata
 
 
 # review #14：BYOK 凭证状态全局唯一来源；migration / ORM / route / worker 共用。
@@ -737,6 +739,87 @@ class Generation(Base, TimestampMixin):
             return []
         return [item for item in value if isinstance(item, dict)]
 
+    @property
+    def source(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("source")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def action_source(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("action_source")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def trace_id(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("trace_id") or self.diagnostics.get("trace_id")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def attachment_roles(self) -> list[dict[str, Any]]:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("attachment_roles")
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    @property
+    def source_image_id(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("source_image_id") or request.get("primary_input_image_id")
+        return value if isinstance(value, str) and value else self.primary_input_image_id
+
+    @cached_property
+    def queue_metadata(self) -> dict[str, Any]:
+        return generation_queue_metadata(
+            upstream_request=self.upstream_request,
+            action=self.action,
+            size_requested=self.size_requested,
+            mask_image_id=self.mask_image_id,
+            created_at=self.created_at,
+            started_at=self.started_at,
+            finished_at=self.finished_at,
+            upstream_pixels=self.upstream_pixels,
+            now=datetime.now(timezone.utc),
+        )
+
+    @property
+    def queue_lane(self) -> str | None:
+        value = self.queue_metadata.get("queue_lane")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def workflow_type(self) -> str | None:
+        value = self.queue_metadata.get("workflow_type")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def workflow_step_key(self) -> str | None:
+        value = self.queue_metadata.get("workflow_step_key")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def pixel_count(self) -> int | None:
+        value = self.queue_metadata.get("pixel_count")
+        return value if isinstance(value, int) and value >= 0 else None
+
+    @property
+    def size_bucket(self) -> str | None:
+        value = self.queue_metadata.get("size_bucket")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def cost_class(self) -> str | None:
+        value = self.queue_metadata.get("cost_class")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def queue_wait_ms(self) -> int | None:
+        value = self.queue_metadata.get("queue_wait_ms")
+        return value if isinstance(value, int) and value >= 0 else None
+
 
 class Completion(Base, TimestampMixin):
     __tablename__ = "completions"
@@ -817,6 +900,69 @@ class Completion(Base, TimestampMixin):
         foreign_keys="Completion.user_api_credential_id",
         lazy="raise",
     )
+
+    @property
+    def source(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("source")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def action_source(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("action_source")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def trace_id(self) -> str | None:
+        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        value = request.get("trace_id")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def queue_metadata(self) -> dict[str, Any]:
+        return completion_queue_metadata(
+            upstream_request=self.upstream_request,
+            created_at=self.created_at,
+            started_at=self.started_at,
+            finished_at=self.finished_at,
+            now=datetime.now(timezone.utc),
+        )
+
+    @property
+    def queue_lane(self) -> str | None:
+        value = self.queue_metadata.get("queue_lane")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def workflow_type(self) -> str | None:
+        value = self.queue_metadata.get("workflow_type")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def workflow_step_key(self) -> str | None:
+        value = self.queue_metadata.get("workflow_step_key")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def pixel_count(self) -> int | None:
+        value = self.queue_metadata.get("pixel_count")
+        return value if isinstance(value, int) else None
+
+    @property
+    def size_bucket(self) -> str | None:
+        value = self.queue_metadata.get("size_bucket")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def cost_class(self) -> str | None:
+        value = self.queue_metadata.get("cost_class")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def queue_wait_ms(self) -> int | None:
+        value = self.queue_metadata.get("queue_wait_ms")
+        return value if isinstance(value, int) else None
 
 
 # ---------- Images ----------

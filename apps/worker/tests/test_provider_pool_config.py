@@ -346,11 +346,7 @@ async def test_provider_pool_reload_cleans_orphan_health_entries(
         return raw_base
 
     monkeypatch.setattr(pool, "_load_provider_config", fake_load_provider_config)
-    monkeypatch.setattr(
-        provider_pool,
-        "_validate_provider_base_url",
-        fake_validate_provider_base_url,
-    )
+    monkeypatch.setattr(pool, "_validate_provider_base_url", fake_validate_provider_base_url)
 
     await pool._maybe_reload()
 

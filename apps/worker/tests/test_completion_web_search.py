@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 import tempfile
+from typing import Any
 
 os.environ.setdefault(
     "STORAGE_ROOT", f"{tempfile.gettempdir()}/lumen-worker-test-storage"
 )
+
+import pytest
 
 from app.tasks import completion
 
@@ -24,6 +27,21 @@ def test_configure_web_search_tool_adds_responses_tool_fields() -> None:
     assert body["tools"] == [{"type": "web_search"}]
     assert body["tool_choice"] == "auto"
     assert body["parallel_tool_calls"] is False
+
+
+@pytest.mark.asyncio
+async def test_file_search_without_vector_store_raises_config_error(
+    monkeypatch: Any,
+) -> None:
+    async def empty_setting(_key: str) -> str:
+        return ""
+
+    monkeypatch.setattr(completion.runtime_settings, "resolve", empty_setting)
+
+    with pytest.raises(completion.UpstreamError) as exc_info:
+        await completion._chat_tools_from_content({"file_search": True})
+
+    assert exc_info.value.error_code == "FILE_SEARCH_NOT_CONFIGURED"
 
 
 def test_extract_reasoning_delta_accepts_multiple_event_shapes() -> None:
@@ -230,3 +248,50 @@ def test_tool_tracker_keeps_failed_terminal_state() -> None:
     }
     assert later_done is None
     assert tracker.content() == [failed]
+
+
+def test_tool_tracker_finalizes_active_calls_on_cancel() -> None:
+    tracker = completion._CompletionToolTracker()
+    tracker.update(
+        {
+            "type": "response.web_search_call.searching",
+            "id": "ws-1",
+            "query": "latest docs",
+        }
+    )
+
+    published = tracker.finalize_active(completion.ToolStatus.CANCELLED.value)
+
+    assert published == [
+        {
+            "id": "ws-1",
+            "type": "web_search",
+            "status": "cancelled",
+            "label": "联网搜索",
+            "title": "latest docs",
+        }
+    ]
+    assert tracker.content() == published
+    assert tracker.finalize_active(completion.ToolStatus.FAILED.value) == []
+
+
+def test_tool_tracker_unknown_status_is_observable_not_running() -> None:
+    tracker = completion._CompletionToolTracker()
+
+    payload = tracker.update(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "id": "tool-1",
+                "type": "file_search_call",
+                "status": "provider_specific_wait",
+            },
+        }
+    )
+
+    assert payload == {
+        "id": "tool-1",
+        "type": "file_search",
+        "status": "unknown",
+        "label": "检索文件",
+    }

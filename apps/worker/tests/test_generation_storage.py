@@ -346,6 +346,14 @@ def test_validate_resolved_size_rejects_aspect_drift() -> None:
         generation._validate_resolved_size("1024x1024", "16:9")
 
 
+def test_validate_resolved_size_can_skip_aspect_drift_for_fixed_size() -> None:
+    assert generation._validate_resolved_size(
+        "1024x1024",
+        "16:9",
+        validate_aspect_ratio=False,
+    ) == (1024, 1024)
+
+
 def test_retry_delay_adds_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(generation.random, "uniform", lambda low, high: high)
 

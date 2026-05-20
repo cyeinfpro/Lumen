@@ -71,6 +71,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [originalText, setOriginalText] = useState<string | null>(null);
   const enhanceAbortRef = useRef<AbortController | null>(null);
+  const enhanceStreamIdRef = useRef(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -220,12 +221,21 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
     setIsEnhancing(true);
     setText("");
     const ctl = new AbortController();
+    const streamId = enhanceStreamIdRef.current + 1;
+    enhanceStreamIdRef.current = streamId;
     enhanceAbortRef.current = ctl;
     let accumulated = "";
     try {
       await enhancePrompt(
         current,
         (delta) => {
+          if (
+            ctl.signal.aborted ||
+            enhanceStreamIdRef.current !== streamId ||
+            enhanceAbortRef.current !== ctl
+          ) {
+            return;
+          }
           accumulated += delta;
           setText(accumulated);
         },
@@ -233,17 +243,23 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
       );
     } catch (err) {
       if (ctl.signal.aborted) {
-        setText(current);
-        setOriginalText(null);
+        if (enhanceStreamIdRef.current === streamId) {
+          setText(current);
+          setOriginalText(null);
+        }
         return;
       }
       logError(err, { scope: "composer", code: "enhance_failed" });
-      setText(current);
-      setOriginalText(null);
-      setToast("润色失败");
+      if (enhanceStreamIdRef.current === streamId) {
+        setText(current);
+        setOriginalText(null);
+        setToast("润色失败");
+      }
     } finally {
-      setIsEnhancing(false);
-      if (enhanceAbortRef.current === ctl) {
+      if (enhanceStreamIdRef.current === streamId) {
+        setIsEnhancing(false);
+      }
+      if (enhanceAbortRef.current === ctl && enhanceStreamIdRef.current === streamId) {
         enhanceAbortRef.current = null;
       }
     }
@@ -251,6 +267,10 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
 
   const handleUndoEnhance = () => {
     if (originalText !== null) {
+      enhanceStreamIdRef.current += 1;
+      enhanceAbortRef.current?.abort();
+      enhanceAbortRef.current = null;
+      setIsEnhancing(false);
       setText(originalText);
       setOriginalText(null);
     }

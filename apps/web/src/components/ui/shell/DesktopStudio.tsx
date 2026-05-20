@@ -1,8 +1,8 @@
 "use client";
 
 // 桌面端创作外壳（V1.0 重设计版）——对齐移动 Darkroom 逻辑：
-//   · 顶部主导航三 Tab (创作 / 图库 / 我的) 替代原 Header
-//   · Sidebar 从固定侧栏改为按需抽屉，由 ⌘K 或顶部 ≡ 触发
+//   · 顶部主导航四入口 (创作 / 项目 / 资产 / 我的) 替代原 Header
+//   · Sidebar 从固定侧栏改为按需抽屉，由 ⌘B 或顶部 ≡ 触发
 //   · 底部 Composer 改为居中 Pill（max-w 720，由 Agent 1 提供）
 //   · 会话画布改用 Scene 无气泡（由 Agent 2 提供）
 
@@ -139,10 +139,10 @@ export function DesktopStudio() {
     toggleSidebarRef.current = toggleSidebar;
   }, [toggleSidebar]);
 
-  // ⌘K：切换侧栏抽屉；同时监听 Composer 派发的自定义事件。
+  // ⌘/Ctrl+B：切换侧栏抽屉；同时监听 Command Palette 派发的自定义事件。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "b" || e.key === "B")) {
         e.preventDefault();
         toggleSidebarRef.current();
       }

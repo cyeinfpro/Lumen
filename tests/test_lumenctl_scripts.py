@@ -181,6 +181,10 @@ def test_api_service_mounts_release_scripts_for_admin_update() -> None:
         "lumen-api needs LUMEN_UPDATE_VIA_TRIGGER=1 to skip systemctl probes "
         "(systemctl is not present inside the api container)"
     )
+    assert 'LUMEN_BACKUP_VIA_TRIGGER: "1"' in compose, (
+        "lumen-api must trigger host-side backup.service from the container; "
+        "running backup.sh inside api lacks Docker CLI/socket access"
+    )
 
 
 def test_update_runner_docs_match_path_unit_contract() -> None:
@@ -197,6 +201,74 @@ def test_update_runner_docs_match_path_unit_contract() -> None:
     assert ".update-trigger" not in deploy_readme
 
 
+def test_backup_units_use_release_layout_and_path_trigger() -> None:
+    service = (ROOT / "deploy" / "systemd" / "lumen-backup.service").read_text(
+        encoding="utf-8"
+    )
+    path_unit = (ROOT / "deploy" / "systemd" / "lumen-backup.path").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/backup.sh" in service
+    assert "Environment=BACKUP_ROOT=/opt/lumendata/backup" in service
+    assert "Environment=LUMEN_BACKUP_SERVICE_MODE=1" in service
+    assert "ExecStartPre=+/bin/sh -c" in service
+    assert "LUMEN_BACKUP_LOG_MAX_BYTES" in service
+    assert "StandardOutput=append:/opt/lumendata/backup/.backup.log" in service
+    assert ".backup.pending" in service
+    assert ".backup.running" in service
+    assert "touch /opt/lumendata/backup/.backup.trigger" in service
+    assert "NoNewPrivileges=true" in service
+    assert "PrivateTmp=true" in service
+    assert "ProtectSystem=strict" in service
+    assert "ReadWritePaths=/opt/lumendata/backup" in service
+    assert "-/run/docker.sock" in service
+    assert "-/var/run/docker.sock" in service
+    assert "PathChanged=/opt/lumendata/backup/.backup.trigger" in path_unit
+    assert "Unit=lumen-backup.service" in path_unit
+    assert "TriggerLimitIntervalSec=30s" in path_unit
+    assert "TriggerLimitBurst=3" in path_unit
+
+
+def test_backup_script_records_service_marker_and_queues_retrigger() -> None:
+    text = (ROOT / "scripts" / "backup.sh").read_text(encoding="utf-8")
+
+    assert "BACKUP_RUNNING_FILE" in text
+    assert "BACKUP_PENDING_FILE" in text
+    assert "trigger_fingerprint()" in text
+    assert 'LUMEN_BACKUP_SERVICE_MODE:-0}" = "1"' in text
+    assert "mark_backup_running" in text
+    assert "mark_backup_pending_if_retriggered" in text
+    assert "detected another backup trigger while running" in text
+    assert '"pg_size":%s' in text
+    assert '"${PG_SIZE:-0}"' in text
+    assert '"${REDIS_SIZE:-0}"' in text
+
+
+def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots() -> None:
+    install = INSTALL.read_text(encoding="utf-8")
+    update = UPDATE.read_text(encoding="utf-8")
+    migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(
+        encoding="utf-8"
+    )
+
+    for text in (install, update, migrate):
+        assert "s#/opt/lumendata/backup#__LUMEN_BACKUP_ROOT__#g" in text
+        assert "s#/opt/lumendata#__LUMEN_DATA_ROOT__#g" in text
+        assert "s#/opt/lumen#__LUMEN_DEPLOY_ROOT__#g" in text
+        assert "s#__LUMEN_BACKUP_ROOT__#" in text
+        assert "s#__LUMEN_DATA_ROOT__#" in text
+        assert "s#__LUMEN_DEPLOY_ROOT__#" in text
+
+    render_section = install[
+        install.index("_render_update_runner_units()") : install.index(
+            "# ---------------------------------------------------------------------------\n# C."
+        )
+    ]
+    assert "_render_systemd_unit_template" in render_section
+    assert "s#/opt/lumen#" not in render_section
+
+
 def test_install_refreshes_update_runner_units_for_admin_button() -> None:
     """Fresh Docker installs must enable the host watcher used by the panel button."""
     install = INSTALL.read_text(encoding="utf-8")
@@ -205,6 +277,8 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
 
     assert "install_update_runner_units" in install
     assert "systemctl enable --now lumen-update.path" in install
+    assert "systemctl enable --now lumen-backup.timer" in install
+    assert "systemctl enable --now lumen-backup.path" in install
     assert "LUMEN_BACKUP_ROOT" in install
     assert "__LUMEN_BACKUP_ROOT__" in install
     assert "__LUMEN_DEPLOY_ROOT__" in install
@@ -215,10 +289,18 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
 
     assert "refresh_update_runner_units" in update
     assert "systemctl enable --now lumen-update.path" in update
+    assert "systemctl enable --now lumen-backup.timer" in update
+    assert "systemctl enable --now lumen-backup.path" in update
     assert "__LUMEN_BACKUP_ROOT__" in update
     assert "__LUMEN_DEPLOY_ROOT__" in update
+    assert "lumen_install_optional_systemd_unit" in install
+    assert "lumen_enable_optional_systemd_unit" in install
+    assert "lumen_install_optional_systemd_unit" in update
+    assert "lumen_enable_optional_systemd_unit" in update
 
     assert "systemctl enable --now lumen-update.path" in migrate
+    assert "systemctl enable --now lumen-backup.timer" in migrate
+    assert "systemctl enable --now lumen-backup.path" in migrate
     assert "__LUMEN_BACKUP_ROOT__" in migrate
     assert "__LUMEN_DEPLOY_ROOT__" in migrate
 
@@ -1559,6 +1641,11 @@ def test_nginx_example_security_headers_are_not_duplicated() -> None:
         "Cross-Origin-Resource-Policy",
     ):
         assert config.count(f"add_header {header}") == 1
+    assert config.count("add_header Content-Security-Policy") == 1
+    assert (
+        "add_header Content-Security-Policy \"default-src 'self'; frame-ancestors 'none';\" always;"
+        in config
+    )
     assert "Content-Security-Policy \"default-src 'none'" not in config
 
 

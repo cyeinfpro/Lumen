@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.sql import operators, visitors
 
 from app.routes import messages
 from lumen_core.constants import (
@@ -74,6 +75,28 @@ class _Db:
             item.created_at = datetime.now(timezone.utc)
 
 
+def _statement_has_eq_filter(statement: Any, column: Any, expected: Any) -> bool:
+    whereclause = getattr(statement, "whereclause", None)
+    if whereclause is None:
+        return False
+    column_expr = getattr(column, "expression", column)
+
+    def is_same_column(value: Any) -> bool:
+        return (
+            getattr(value, "name", None) == getattr(column_expr, "name", None)
+            and getattr(value, "table", None) is getattr(column_expr, "table", None)
+        )
+
+    for node in visitors.iterate(whereclause):
+        if getattr(node, "operator", None) is not operators.eq:
+            continue
+        left = getattr(node, "left", None)
+        right = getattr(node, "right", None)
+        if is_same_column(left) and getattr(right, "value", None) == expected:
+            return True
+    return False
+
+
 class _Pipe:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
@@ -137,6 +160,26 @@ def _wallet_user() -> SimpleNamespace:
         email="user@example.test",
         account_mode="wallet",
         default_system_prompt_id=None,
+    )
+
+
+def _message(
+    *,
+    id: str,
+    role: str,
+    content: dict[str, Any] | None = None,
+    parent_message_id: str | None = None,
+    status: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=id,
+        conversation_id="conv-1",
+        role=role,
+        content=content or {},
+        intent=None,
+        status=status,
+        parent_message_id=parent_message_id,
+        created_at=datetime.now(timezone.utc),
     )
 
 
@@ -256,6 +299,243 @@ async def test_chat_wallet_preflight_locks_wallet_and_uses_task_model(
     assert calls["estimate"]["model"] == "gpt-task"
 
 
+@pytest.mark.asyncio
+async def test_chat_wallet_preflight_includes_enabled_tool_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> SimpleNamespace:
+        assert lock is True
+        return SimpleNamespace(balance_micro=50_000)
+
+    async def estimate(*_args: Any, **_kwargs: Any) -> int:
+        return 3_000
+
+    async def tool_budget(_db: Any, tool_name: str) -> int:
+        return {"web_search": 7_000, "code_interpreter": 11_000}.get(tool_name, 0)
+
+    async def max_tool_invocations(_db: Any) -> int:
+        return 2
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+    monkeypatch.setattr(messages, "_chat_tool_budget_setting_micro", tool_budget)
+    monkeypatch.setattr(messages, "_chat_max_tool_invocations", max_tool_invocations)
+
+    preflight = await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        account_mode="wallet",
+        model="gpt-task",
+        chat_params=ChatParamsIn(web_search=True, code_interpreter=True),
+    )
+
+    assert preflight is not None
+    assert preflight.estimated_model_micro == 3_000
+    assert preflight.tool_budget_micro == 36_000
+    assert preflight.preauth_micro == 39_000
+    assert preflight.tool_budget_by_tool == {
+        "web_search": 14_000,
+        "code_interpreter": 22_000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_wallet_preflight_keeps_absolute_floor_with_negative_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> SimpleNamespace:
+        assert lock is True
+        return SimpleNamespace(balance_micro=0)
+
+    async def allow_negative(_db: Any) -> bool:
+        return True
+
+    async def estimate(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("absolute wallet floor should fail before pricing")
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+
+    with pytest.raises(Exception) as excinfo:
+        await messages._ensure_chat_wallet_preflight(  # noqa: SLF001
+            object(),  # type: ignore[arg-type]
+            user_id="user-1",
+            user_email="u@example.com",
+            account_mode="wallet",
+            model="gpt-task",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 402
+    assert excinfo.value.detail["error"]["code"] == "INSUFFICIENT_BALANCE"
+    assert excinfo.value.detail["error"]["details"]["required_micro"] == 10_000
+
+
+@pytest.mark.asyncio
+async def test_create_assistant_task_holds_chat_wallet_preauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hold_calls: list[dict[str, Any]] = []
+
+    async def allow_negative(_db: Any) -> bool:
+        return False
+
+    async def hold(_db: Any, user_id: str, amount_micro: int, **kwargs: Any) -> Any:
+        hold_calls.append(
+            {"user_id": user_id, "amount_micro": amount_micro, **kwargs}
+        )
+        return SimpleNamespace(balance_after=80_000, hold_after=20_000)
+
+    monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
+    monkeypatch.setattr(messages.billing_core, "hold", hold)
+
+    db = _Db([])
+    preflight = messages._ChatWalletPreflight(  # noqa: SLF001
+        estimated_model_micro=12_000,
+        tool_budget_micro=8_000,
+        preauth_micro=20_000,
+        tool_budget_by_tool={"web_search": 8_000},
+    )
+
+    result = await messages._create_assistant_task(  # noqa: SLF001
+        db=db,  # type: ignore[arg-type]
+        user_id="user-1",
+        account_mode="wallet",
+        conv=_conv(),  # type: ignore[arg-type]
+        user_msg=SimpleNamespace(id="user-msg"),
+        intent=messages.Intent.CHAT,
+        idempotency_key="idem-chat-hold",
+        image_params=ImageParamsIn(),
+        chat_params=ChatParamsIn(web_search=True),
+        system_prompt=None,
+        attachment_ids=[],
+        text="hello",
+        chat_wallet_preflight_done=True,
+        chat_wallet_preflight=preflight,
+    )
+
+    assert result.completion_id is not None
+    assert hold_calls == [
+        {
+            "user_id": "user-1",
+            "amount_micro": 20_000,
+            "ref_type": "completion",
+            "ref_id": result.completion_id,
+            "idempotency_key": f"hold:{result.completion_id}",
+            "allow_negative": False,
+            "meta": {
+                "estimated_model_micro": 12_000,
+                "tool_budget_micro": 8_000,
+                "tool_budget_by_tool": {"web_search": 8_000},
+            },
+        }
+    ]
+    audit = next(item for item in db.added if item.__class__.__name__ == "AuditLog")
+    assert audit.event_type == "wallet.hold.chat"
+    assert audit.details["completion_id"] == result.completion_id
+
+
+@pytest.mark.asyncio
+async def test_create_assistant_task_chat_caller_without_preflight_still_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> SimpleNamespace:
+        assert lock is True
+        return SimpleNamespace(balance_micro=50_000)
+
+    async def estimate(*_args: Any, **_kwargs: Any) -> int:
+        return 15_000
+
+    async def allow_negative(_db: Any) -> bool:
+        return False
+
+    async def hold(_db: Any, _user_id: str, amount_micro: int, **kwargs: Any) -> Any:
+        calls["hold"] = {"amount_micro": amount_micro, **kwargs}
+        return SimpleNamespace(balance_after=35_000, hold_after=15_000)
+
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+    monkeypatch.setattr(messages.billing_core, "hold", hold)
+
+    result = await messages._create_assistant_task(  # noqa: SLF001
+        db=_Db([]),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        account_mode="wallet",
+        conv=_conv(),  # type: ignore[arg-type]
+        user_msg=SimpleNamespace(id="user-msg"),
+        intent=messages.Intent.CHAT,
+        idempotency_key="idem-chat-helper-hold",
+        image_params=ImageParamsIn(),
+        chat_params=ChatParamsIn(),
+        system_prompt=None,
+        attachment_ids=[],
+        text="hello",
+    )
+
+    assert calls["hold"]["amount_micro"] == 15_000
+    assert calls["hold"]["ref_type"] == "completion"
+    assert calls["hold"]["ref_id"] == result.completion_id
+
+
+@pytest.mark.asyncio
+async def test_post_message_wallet_preflight_failure_rolls_back_flushed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def enabled(_db: Any) -> bool:
+        return True
+
+    async def get_wallet(_db: Any, _user_id: str, *, lock: bool) -> SimpleNamespace:
+        assert lock is True
+        return SimpleNamespace(balance_micro=1)
+
+    async def estimate(*_args: Any, **_kwargs: Any) -> int:
+        return 20_000
+
+    async def allow_negative(_db: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "_billing_enabled", enabled)
+    monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
+    monkeypatch.setattr(messages.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(messages.billing_core, "estimate_completion_cost", estimate)
+
+    db = _Db([_Result(_conv()), _Result(None), _Result(None)])
+    with pytest.raises(Exception) as excinfo:
+        await messages.post_message(
+            "conv-1",
+            PostMessageIn(idempotency_key="idem-low-wallet", text="hello"),
+            _wallet_user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 402
+    assert excinfo.value.detail["error"]["code"] == "INSUFFICIENT_BALANCE"
+    assert db.rolled_back is True
+    assert db.committed is False
+
+
 def test_silent_generation_prompt_limit_uses_shared_constant() -> None:
     messages.SilentGenerationIn(
         idempotency_key="idem-silent",
@@ -269,6 +549,109 @@ def test_silent_generation_prompt_limit_uses_shared_constant() -> None:
             parent_message_id="msg-1",
             prompt="x" * (MAX_PROMPT_CHARS + 1),
         )
+
+
+@pytest.mark.asyncio
+async def test_lookup_idempotent_post_filters_by_conversation_id() -> None:
+    db = _Db([_Result(None), _Result(None)])
+
+    prior = await messages._lookup_idempotent_post(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        "user-1",
+        "conv-1",
+        "same-key",
+    )
+
+    assert prior is None
+    assert _statement_has_eq_filter(
+        db.statements[0],
+        messages.Message.conversation_id,
+        "conv-1",
+    )
+    assert _statement_has_eq_filter(
+        db.statements[1],
+        messages.Message.conversation_id,
+        "conv-1",
+    )
+    assert _statement_has_eq_filter(
+        db.statements[0],
+        messages.Conversation.user_id,
+        "user-1",
+    )
+    assert _statement_has_eq_filter(
+        db.statements[1],
+        messages.Conversation.user_id,
+        "user-1",
+    )
+
+
+def test_idempotency_advisory_lock_key_is_conversation_scoped() -> None:
+    assert (
+        messages._idempotency_lock_key("user-1", "conv-a", "same-key")  # noqa: SLF001
+        != messages._idempotency_lock_key("user-1", "conv-b", "same-key")  # noqa: SLF001
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_message_rechecks_idempotency_after_postgres_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    class _Bind:
+        dialect = SimpleNamespace(name="postgresql")
+
+    class _PgDb(_Db):
+        async def connection(self) -> _Bind:
+            return _Bind()
+
+    user_msg = _message(id="user-msg", role=messages.Role.USER.value)
+    assistant_msg = _message(
+        id="assistant-msg",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id=user_msg.id,
+        status=messages.MessageStatus.PENDING.value,
+    )
+    completion = SimpleNamespace(id="comp-1", message_id=assistant_msg.id)
+    db = _PgDb(
+        [
+            _Result(_conv()),
+            _Result(None),
+            _Result(None),
+            _Result(None),  # advisory lock SELECT
+            _Result(completion),
+            _Result(None),
+            _Result(assistant_msg),
+            _Result(user_msg),
+        ]
+    )
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+
+    out = await messages.post_message(
+        "conv-1",
+        PostMessageIn(idempotency_key="same-key", text="hello"),
+        _wallet_user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out.completion_id == "comp-1"
+    assert db.added == []
+    assert db.committed is False
+
+
+def test_stored_idempotency_key_is_conversation_scoped_and_db_safe() -> None:
+    key_a = messages._stored_idempotency_key("conv-a", "same-key")  # noqa: SLF001
+    key_b = messages._stored_idempotency_key("conv-b", "same-key")  # noqa: SLF001
+
+    assert key_a != key_b
+    assert len(key_a) <= 64
+    assert messages._idempotency_lookup_keys("conv-a", "same-key") == (  # noqa: SLF001
+        "same-key",
+        key_a,
+    )
 
 
 @pytest.mark.asyncio
@@ -886,7 +1269,7 @@ async def test_post_message_persists_image_render_options(
     )
 
     gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
-    assert gen.upstream_request == {
+    expected = {
         "fast": False,
         "responses_model": DEFAULT_IMAGE_RESPONSES_MODEL,
         "render_quality": "medium",
@@ -896,6 +1279,97 @@ async def test_post_message_persists_image_render_options(
         "moderation": "auto",
         "output_compression": 88,
     }
+    for key, value in expected.items():
+        assert gen.upstream_request[key] == value
+    assert gen.upstream_request["trace_id"].startswith("gen_")
+    assert gen.upstream_request["queue_lane"] == "image:interactive:medium"
+
+
+@pytest.mark.asyncio
+async def test_post_message_persists_structured_attachment_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_appended(**_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish_assistant_task(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(messages, "_publish_message_appended", fake_publish_appended)
+    monkeypatch.setattr(
+        messages, "_publish_assistant_task", fake_publish_assistant_task
+    )
+
+    db = _Db(
+        [
+            _Result(_conv()),
+            _Result(None),
+            _Result(None),
+            _Result(all_values=["img-product", "img-style"]),
+        ]
+    )
+    await messages.post_message(
+        "conv-1",
+        PostMessageIn(
+            idempotency_key="idem-structured-attachments",
+            text="用商品图和风格图生成新主图",
+            intent="image_to_image",
+            attachments=[
+                {
+                    "image_id": "img-product",
+                    "role": "product",
+                    "label": "商品图",
+                    "weight": 0.8,
+                },
+                {"image_id": "img-style", "role": "style", "label": "风格参考"},
+            ],
+            trace_id="trace-ui-1",
+            source="chat",
+            action_source="revise",
+            image_params=ImageParamsIn(
+                aspect_ratio="1:1",
+                size_mode="fixed",
+                fixed_size="1024x1024",
+            ),
+        ),
+        _wallet_user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    expected_input_images = [
+        {
+            "image_id": "img-product",
+            "role": "product",
+            "label": "商品图",
+            "weight": 0.8,
+        },
+        {"image_id": "img-style", "role": "style", "label": "风格参考"},
+    ]
+    user_msg = next(item for item in db.added if getattr(item, "role", None) == "user")
+    gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
+    outbox = next(item for item in db.added if item.__class__.__name__ == "OutboxEvent")
+
+    assert user_msg.content["attachments"] == expected_input_images
+    assert user_msg.content["input_images"] == expected_input_images
+    assert user_msg.content["trace_id"] == "trace-ui-1"
+    assert user_msg.content["source"] == "chat"
+    assert user_msg.content["action_source"] == "revise"
+    assert gen.input_image_ids == ["img-product", "img-style"]
+    assert gen.primary_input_image_id == "img-product"
+    assert gen.upstream_request["input_images"] == expected_input_images
+    assert gen.upstream_request["attachment_roles"] == expected_input_images
+    assert gen.upstream_request["trace_id"] == "trace-ui-1"
+    assert gen.upstream_request["source"] == "chat"
+    assert gen.upstream_request["action_source"] == "revise"
+    assert outbox.payload["trace_id"] == "trace-ui-1"
+    assert outbox.payload["source"] == "chat"
+    assert outbox.payload["action_source"] == "revise"
+    assert outbox.payload["input_images"] == expected_input_images
 
 
 @pytest.mark.asyncio
@@ -1156,9 +1630,23 @@ async def test_post_message_persists_mask_image_id_for_image_to_image(
     )
 
     gen = next(item for item in db.added if item.__class__.__name__ == "Generation")
+    user_msg = next(item for item in db.added if getattr(item, "role", None) == "user")
+    expected_input_images = [
+        {"image_id": "img-att", "role": "reference"},
+        {"image_id": "img-mask", "role": "mask"},
+    ]
     assert gen.mask_image_id == "img-mask"
     assert gen.input_image_ids == ["img-att"]
     assert gen.primary_input_image_id == "img-att"
+    assert user_msg.content["attachments"] == [
+        {"image_id": "img-att", "role": "reference"}
+    ]
+    assert user_msg.content["input_images"] == expected_input_images
+    assert gen.upstream_request["input_images"] == expected_input_images
+    assert gen.upstream_request["attachment_roles"] == [
+        {"image_id": "img-att", "role": "reference"}
+    ]
+    assert gen.upstream_request["attachment_roles"] is not gen.upstream_request["input_images"]
 
 
 @pytest.mark.asyncio
@@ -1360,6 +1848,7 @@ async def test_publish_message_appended_payload_contains_conversation_and_messag
     assert publish[1][0] == "conv:conv-1"
     publish_payload = json.loads(publish[1][1])
     assert publish_payload["event"] == "conv.message.appended"
+    assert publish_payload["channel"] == "conv:conv-1"
     assert publish_payload["sse_id"] == "1710000000000-0"
     assert publish_payload["data"]["conversation_id"] == "conv-1"
     assert publish_payload["data"]["message_id"] == "msg-1"
@@ -1418,6 +1907,10 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
     assert [payload["sse_id"] for payload in publish_payloads] == [
         "1710000000000-0",
         "1710000000000-1",
+    ]
+    assert [payload["channel"] for payload in publish_payloads] == [
+        "conv:conv-1",
+        "conv:conv-1",
     ]
     assert [payload["data"]["message_id"] for payload in publish_payloads] == [
         "msg-1",

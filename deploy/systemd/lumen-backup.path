@@ -1,0 +1,14 @@
+[Unit]
+Description=Lumen manual backup trigger watcher
+After=multi-user.target
+
+[Path]
+# Template default; install.sh/update.sh render this to the effective
+# LUMEN_BACKUP_ROOT before installing under /etc/systemd/system.
+PathChanged=/opt/lumendata/backup/.backup.trigger
+Unit=lumen-backup.service
+TriggerLimitIntervalSec=30s
+TriggerLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target

@@ -2,31 +2,25 @@
 
 // Lumen V1 全局任务托盘：
 //  - 无任务：整个 tray 隐藏
-//  - 有任务：顶部任务按钮负责打开；展开态 = 玻璃卡 + TaskItem 列表
+//  - 有任务：任务按钮负责打开；展开态 = 可持久查看最近任务的 TaskCenter
 //  - 移动端改为底部中间 full-width
-//  - 入场/退场用 AnimatePresence，每项 stagger 30ms
-//  - 成功后短暂展示「已完成」，随后在自然状态下由 store 维护（不改 store 逻辑）
+//  - 入场/退场用 AnimatePresence
 //
 // 注意：本组件不维护任务生命周期；取消 / 重试只是发送 API 调用，store 的 SSE handler 会更新状态。
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown, X } from "lucide-react";
+import { ListChecks } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
-import { cancelTask } from "@/lib/apiClient";
+import { cancelTask, listTasks } from "@/lib/apiClient";
 import { logWarn } from "@/lib/logger";
 import type { Generation } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
-import { IconButton } from "@/components/ui/primitives";
 import { SPRING } from "@/lib/motion";
-import { TaskItem } from "./tray/TaskItem";
-
-const MAX_VISIBLE = 5;
-// 成功完成后保留在 tray 的软窗口（ms）；到期后不再纳入 displayList 渲染
-const COMPLETED_LINGER_MS = 4000;
+import { TaskCenter } from "./tray/TaskCenter";
 
 export function GlobalTaskTray() {
   const taskTrayMinimized = useUiStore((s) => s.taskTray.minimized);
@@ -34,65 +28,35 @@ export function GlobalTaskTray() {
   const generations = useChatStore((s) => s.generations);
   const retryGeneration = useChatStore((s) => s.retryGeneration);
   const openLightbox = useUiStore((s) => s.openLightbox);
+  const userId = useChatStore((s) => s.currentUserId);
 
-  const [now, setNow] = useState(() => Date.now());
-
-  const { active, terminal } = useMemo(() => {
+  const active = useMemo(() => {
     const activeItems: Generation[] = [];
-    const terminalItems: Generation[] = [];
     for (const g of Object.values(generations)) {
       if (g.status === "queued" || g.status === "running") {
         activeItems.push(g);
-      } else if (g.status === "succeeded" || g.status === "failed") {
-        terminalItems.push(g);
       }
     }
     activeItems.sort((a, b) => b.started_at - a.started_at);
-    terminalItems.sort((a, b) => b.started_at - a.started_at);
-    return { active: activeItems, terminal: terminalItems };
+    return activeItems;
   }, [generations]);
 
-  const {
-    displayList,
-    activeCount,
-    hasActive,
-    hiddenCount,
-    hasLingeringTerminal,
-  } = useMemo(() => {
-    const nowMs = now;
+  const hasActive = active.length > 0;
+  const activeCount = active.length;
+  const recentTasks = useQuery({
+    queryKey: ["tasks", "recent", "presence"],
+    queryFn: () => listTasks({ limit: 20 }),
+    enabled: Boolean(userId),
+    staleTime: 10_000,
+    refetchInterval: hasActive ? 10_000 : 30_000,
+  });
 
-    const lingering: Generation[] = [];
-    for (const g of terminal) {
-      const t0 = g.finished_at ?? g.started_at ?? nowMs;
-      if (nowMs - t0 <= COMPLETED_LINGER_MS) lingering.push(g);
-    }
-
-    const combined = [...active, ...lingering];
-    const visible = combined.slice(0, MAX_VISIBLE);
-
-    return {
-      displayList: visible,
-      activeCount: active.length,
-      hasActive: active.length > 0,
-      hiddenCount: Math.max(0, combined.length - visible.length),
-      hasLingeringTerminal: lingering.length > 0,
-    };
-  }, [active, now, terminal]);
-
-  // 只有终态任务处于 linger 展示窗口时才需要本地 tick 来让它自然消失。
-  useEffect(() => {
-    if (!hasLingeringTerminal) return;
-    const t = window.setInterval(() => setNow(Date.now()), 500);
-    return () => window.clearInterval(t);
-  }, [hasLingeringTerminal]);
-
-  const hasAnything = displayList.length > 0;
-
-  useEffect(() => {
-    if (!hasAnything && !taskTrayMinimized) {
-      setTaskTrayMinimized(true);
-    }
-  }, [hasAnything, setTaskTrayMinimized, taskTrayMinimized]);
+  const recentCount = recentTasks.data?.items.length ?? 0;
+  const hasAnything = hasActive || recentCount > 0;
+  const badgeCount = hasActive ? activeCount : Math.min(recentCount, 99);
+  const badgeLabel = hasActive
+    ? `进行中的任务：${activeCount}`
+    : `最近任务：${recentCount}`;
 
   // 完全无任务：整个 tray 隐藏（避免占位）
   if (!hasAnything) return null;
@@ -172,92 +136,54 @@ export function GlobalTaskTray() {
               exit={{ opacity: 0, y: 24, scale: 0.98 }}
               transition={SPRING.sheet}
               className={cn(
-                "pointer-events-auto",
-                // 移动端：底部 sheet，宽度铺满，圆角仅顶部，顶部把手
-                "w-full rounded-t-2xl sm:rounded-2xl",
-                "sm:w-80 sm:mb-3",
-                "border border-[var(--border)] bg-[var(--surface)] backdrop-blur-xl shadow-lumen-card",
-                "mobile-dialog-sheet flex min-h-0 flex-col overflow-hidden",
+                "pointer-events-auto mobile-dialog-sheet flex min-h-0 w-full flex-col overflow-hidden rounded-t-[var(--radius-sheet)] border border-[var(--border)] bg-[var(--surface)] shadow-lumen-card backdrop-blur-xl sm:mb-3 sm:w-[23rem] sm:rounded-[var(--radius-sheet)]",
               )}
               role="region"
-              aria-label="任务托盘"
+              aria-label="任务中心"
             >
               {/* 把手（仅移动端） */}
               <div className="sm:hidden flex justify-center pt-2 pb-1" aria-hidden>
                 <span className="block w-10 h-1 rounded-full bg-white/20" />
               </div>
-              <header className="flex shrink-0 items-center gap-2 px-3 py-2.5 border-b border-[var(--border-subtle)]">
+              <TaskCenter
+                activeGenerations={active}
+                localGenerations={generations}
+                onCancelGeneration={handleCancel}
+                onRetryGeneration={handleRetry}
+                onViewGeneration={handleView}
+                onClose={() => setTaskTrayMinimized(true)}
+              />
+            </motion.div>
+          )}
+          {taskTrayMinimized && (
+            <motion.button
+              key="tray-button"
+              type="button"
+              initial={{ opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.96 }}
+              transition={SPRING.soft}
+              onClick={() => setTaskTrayMinimized(false)}
+              aria-label={badgeLabel}
+              className={cn(
+                "pointer-events-auto relative inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--fg-0)] shadow-lumen-card backdrop-blur-xl transition",
+                "hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
+              )}
+            >
+              <ListChecks className="h-5 w-5" />
+              {badgeCount > 0 && (
                 <span
                   className={cn(
-                    "w-2 h-2 rounded-full shrink-0",
+                    "absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-semibold",
                     hasActive
-                      ? "bg-[var(--accent)] animate-pulse"
-                      : "bg-[var(--ok)]",
+                      ? "bg-[var(--accent)] text-[var(--accent-on)]"
+                      : "bg-[var(--fg-2)] text-[var(--bg-0)]",
                   )}
-                />
-                <h4 className="text-xs font-medium text-[var(--fg-0)] flex-1">
-                  {hasActive ? `进行中的任务 (${activeCount})` : "全部完成"}
-                </h4>
-                {/* 移动端关闭按钮 */}
-                <MobileIconButton
-                  icon={<X className="w-4 h-4" />}
-                  label="关闭任务面板"
-                  onPress={() => setTaskTrayMinimized(true)}
-                  className="sm:hidden text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 rounded-md"
-                />
-                {/* 桌面端折叠按钮 */}
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setTaskTrayMinimized(true)}
-                  aria-label="折叠任务面板"
-                  className="hidden sm:inline-flex"
                 >
-                  <ChevronDown className="w-3.5 h-3.5" />
-                </IconButton>
-              </header>
-
-              <ul
-                className="mobile-dialog-scroll min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2 sm:max-h-[50vh]"
-                aria-live="polite"
-              >
-                <AnimatePresence initial={false}>
-                  {displayList.map((gen, i) => (
-                    <motion.li
-                      key={gen.id}
-                      layout
-                      initial={{ opacity: 0, y: 8, scale: 0.98 }}
-                      animate={{
-                        opacity: 1,
-                        y: 0,
-                        scale: 1,
-                        transition: { delay: i * 0.03 },
-                      }}
-                      exit={{
-                        opacity: 0,
-                        y: -4,
-                        scale: 0.98,
-                        transition: { duration: 0.18 },
-                      }}
-                    >
-                      <TaskItem
-                        gen={gen}
-                        onCancel={handleCancel}
-                        onRetry={handleRetry}
-                        onView={handleView}
-                      />
-                    </motion.li>
-                  ))}
-                </AnimatePresence>
-                {hiddenCount > 0 && (
-                  <li className="text-center pt-0.5">
-                    <span className="text-[11px] text-neutral-500">
-                      还有 {hiddenCount} 项未展示
-                    </span>
-                  </li>
-                )}
-              </ul>
-            </motion.div>
+                  {badgeCount}
+                </span>
+              )}
+            </motion.button>
           )}
         </AnimatePresence>
       </motion.div>

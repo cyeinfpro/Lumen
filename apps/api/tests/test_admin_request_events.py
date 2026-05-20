@@ -129,6 +129,74 @@ def test_request_event_response_defaults_are_isolated() -> None:
     assert second.upstream == {}
 
 
+def test_request_event_exposes_queue_observability_fields() -> None:
+    created_at = admin.datetime(
+        2026,
+        5,
+        19,
+        tzinfo=admin.timezone.utc,
+    )
+    event = admin._RequestEventOut(
+        id="gen-queue",
+        kind="generation",
+        created_at=created_at,
+        started_at=created_at + admin.timedelta(seconds=2),
+        finished_at=None,
+        duration_ms=None,
+        status="running",
+        progress_stage="rendering",
+        attempt=1,
+        model="image2",
+        user_id="user-1",
+        user_email="admin@example.com",
+        conversation_id=None,
+        conversation_title=None,
+        message_id="msg-queue",
+        queue_lane="image:workflow:large",
+        workflow_type="apparel_model_showcase",
+        workflow_step_key="showcase_generation",
+        pixel_count=8_294_400,
+        size_bucket="large",
+        cost_class="large",
+        queue_wait_ms=2000,
+    )
+
+    payload = event.model_dump()
+
+    assert payload["queue_lane"] == "image:workflow:large"
+    assert payload["workflow_type"] == "apparel_model_showcase"
+    assert payload["workflow_step_key"] == "showcase_generation"
+    assert payload["pixel_count"] == 8_294_400
+    assert payload["size_bucket"] == "large"
+    assert payload["cost_class"] == "large"
+    assert payload["queue_wait_ms"] == 2000
+
+
+def test_safe_upstream_details_includes_queue_observability_fields() -> None:
+    details = admin._safe_upstream_details(
+        {
+            "queue_lane": "image:interactive:small",
+            "workflow_type": "poster_design",
+            "workflow_step_key": "master_generation",
+            "pixel_count": 1_048_576,
+            "size_bucket": "small",
+            "cost_class": "small",
+            "queue_wait_ms": 123,
+            "prompt": "must not leak",
+        }
+    )
+
+    assert details == {
+        "cost_class": "small",
+        "pixel_count": 1_048_576,
+        "queue_lane": "image:interactive:small",
+        "queue_wait_ms": 123,
+        "size_bucket": "small",
+        "workflow_step_key": "master_generation",
+        "workflow_type": "poster_design",
+    }
+
+
 def test_request_event_model_stats_merge_codex_native_variants() -> None:
     created_at = admin.datetime(
         2026,

@@ -93,6 +93,9 @@ def test_compose_healthchecks_are_local_and_hardened() -> None:
     assert "LUMEN_ULIMIT_NOFILE_SOFT" in compose
     assert "LUMEN_ULIMIT_NPROC" in compose
     assert "http://127.0.0.1:3000/api/healthz" not in compose
+    web = re.search(r"(?ms)^  web:\n(?P<body>.*?)(?=^  \w|\Z)", compose)
+    assert web is not None
+    assert "wget" not in web.group("body")
     assert "path: '/healthz', method: 'HEAD'" in compose
     assert "health_check_interval=int(os.getenv" in compose
     assert (
@@ -108,6 +111,16 @@ def test_compose_healthchecks_are_local_and_hardened() -> None:
     assert "api-green:" in bluegreen
     assert "init: true" in bluegreen
     assert "LUMEN_ULIMIT_NOFILE_SOFT" in bluegreen
+
+
+def test_compose_one_shot_profiles_do_not_auto_restart() -> None:
+    compose = COMPOSE.read_text(encoding="utf-8")
+
+    for service in ("migrate", "bootstrap"):
+        match = re.search(rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  \w|\Z)", compose)
+        assert match is not None, f"{service} service missing"
+        assert 'restart: "no"' in match.group("body")
+        assert "on-failure" not in match.group("body")
 
 
 def test_storage_mount_cleans_smb_credentials_on_hard_failures() -> None:

@@ -589,6 +589,7 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
     )
     try:
         images = data.get("images") or []
+        detail: dict[str, Any] | None = None
         if not isinstance(images, list) or not images:
             # 偶尔事件里没带 images（如 attached 之前的 race），fallback 查 API
             try:
@@ -612,6 +613,11 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
             )
             delivered = True
         else:
+            if detail is None:
+                try:
+                    detail = await api.get_generation(track.chat_id, gen_id)
+                except ApiError as exc:
+                    logger.warning("succeeded link detail get failed gen=%s err=%s", gen_id, exc)
             # batch 模式 placeholder 已经把 prompt 显示过一次；每张图的 caption 不再带原文，
             # 让会话更紧凑。单任务保持完整 caption（用户没有别处能看到 prompt）。
             if track.batch_id:
@@ -650,7 +656,15 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
             else:
                 # 一律 sendDocument：TG 的 sendPhoto 不论大小都强制缩到 ~1280px + JPEG
                 # 重编码（协议设计），4K 图发出去会糊得不能看。Document 通道原样保留。
-                actions_kb = None if track.is_bonus else post_success_keyboard(gen_id)
+                actions_kb = (
+                    None
+                    if track.is_bonus
+                    else post_success_keyboard(
+                        gen_id,
+                        web_url=str((detail or {}).get("edit_url") or ""),
+                        project_url=str((detail or {}).get("project_url") or ""),
+                    )
+                )
                 sent_count = 0
                 for idx, (path, _mime, _size, filename) in enumerate(downloads):
                     kb = actions_kb if idx == 0 else None

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io as _io
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -357,6 +358,87 @@ def test_resize_mask_binarizes_partial_alpha_same_size() -> None:
         assert (lo, hi) == (255, 255), (
             f"alpha must be binarized (128 → 255 since >= threshold), got {(lo, hi)}"
         )
+
+
+# --- normalized_ref loading -----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_reference_images_prefers_normalized_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Rows:
+        def all(self) -> list[Any]:
+            return [
+                SimpleNamespace(
+                    id="img-1",
+                    storage_key="u/user/uploads/img-1.png",
+                    sha256="orig-sha",
+                    metadata_jsonb={
+                        "normalized_ref": {
+                            "storage_key": "u/user/uploads/img-1.ref.webp",
+                            "sha256": "ref-sha",
+                        }
+                    },
+                )
+            ]
+
+    class _Session:
+        async def execute(self, _stmt: Any) -> _Rows:
+            return _Rows()
+
+    calls: list[str] = []
+
+    async def fake_aget_bytes(key: str) -> bytes:
+        calls.append(key)
+        return b"normalized-reference"
+
+    monkeypatch.setattr(generation.storage, "aget_bytes", fake_aget_bytes)
+
+    refs = await generation._load_reference_images(_Session(), ["img-1"])
+
+    assert refs == [("ref-sha", b"normalized-reference")]
+    assert calls == ["u/user/uploads/img-1.ref.webp"]
+
+
+@pytest.mark.asyncio
+async def test_load_reference_images_falls_back_when_normalized_ref_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Rows:
+        def all(self) -> list[Any]:
+            return [
+                SimpleNamespace(
+                    id="img-1",
+                    storage_key="u/user/uploads/img-1.png",
+                    sha256="orig-sha",
+                    metadata_jsonb={
+                        "normalized_ref": {
+                            "storage_key": "u/user/uploads/img-1.ref.webp",
+                            "sha256": "ref-sha",
+                        }
+                    },
+                )
+            ]
+
+    class _Session:
+        async def execute(self, _stmt: Any) -> _Rows:
+            return _Rows()
+
+    calls: list[str] = []
+
+    async def fake_aget_bytes(key: str) -> bytes:
+        calls.append(key)
+        if key.endswith(".ref.webp"):
+            raise FileNotFoundError(key)
+        return b"original-reference"
+
+    monkeypatch.setattr(generation.storage, "aget_bytes", fake_aget_bytes)
+
+    refs = await generation._load_reference_images(_Session(), ["img-1"])
+
+    assert refs == [("orig-sha", b"original-reference")]
+    assert calls == ["u/user/uploads/img-1.ref.webp", "u/user/uploads/img-1.png"]
 
 
 def test_resize_mask_binarizes_partial_alpha_below_threshold() -> None:

@@ -4,12 +4,10 @@ import { motion, useReducedMotion } from "framer-motion";
 import { usePathname } from "next/navigation";
 import { type ReactNode } from "react";
 
-// 底部 Tab 路由仍保留 pathname key，但不做整页退出等待，避免露出黑底。
-const ANIMATED_ROUTES = ["/", "/stream", "/me"];
+import { getActiveNavKey } from "./navigation";
 
 function isAnimatedRoute(pathname: string): boolean {
-  if (pathname === "/") return true;
-  return ANIMATED_ROUTES.some((r) => r !== "/" && pathname.startsWith(r));
+  return getActiveNavKey(pathname) !== null;
 }
 
 export function PageTransitions({ children }: { children: ReactNode }) {

@@ -52,6 +52,7 @@ from .messages import (
     _message_alive_filters,
     _publish_assistant_task,
     _publish_message_appended,
+    _idempotency_lookup_keys,
     resolve_system_prompt_for_message,
 )
 
@@ -92,6 +93,7 @@ async def _lookup_idempotent_regenerate(
     db: AsyncSession, user_id: str, conv_id: str, idempotency_key: str
 ) -> RegenerateOut | None:
     alive_filters = _message_alive_filters()
+    lookup_keys = _idempotency_lookup_keys(conv_id, idempotency_key)
     comp_hit = (
         await db.execute(
             select(Completion)
@@ -99,7 +101,7 @@ async def _lookup_idempotent_regenerate(
             .join(Conversation, Conversation.id == Message.conversation_id)
             .where(
                 Completion.user_id == user_id,
-                Completion.idempotency_key == idempotency_key,
+                Completion.idempotency_key.in_(lookup_keys),
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),
@@ -114,7 +116,7 @@ async def _lookup_idempotent_regenerate(
             .join(Conversation, Conversation.id == Message.conversation_id)
             .where(
                 Generation.user_id == user_id,
-                Generation.idempotency_key == idempotency_key,
+                Generation.idempotency_key.in_(lookup_keys),
                 Message.conversation_id == conv_id,
                 Conversation.user_id == user_id,
                 Conversation.deleted_at.is_(None),

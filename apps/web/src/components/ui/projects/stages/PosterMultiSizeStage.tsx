@@ -4,14 +4,15 @@
 // - 未触发：参数（aspects chip 多选）+ "生成 N 张成品" 按钮
 // - 生成中 / 已就绪：成品网格（PosterRenderCard）
 // - 单张返修：背景重生 / 局部 inpaint（Dialog）/ 自定义指令
-// - 完成时显示"标记完成进入交付"按钮（status==="needs_review"）
+// - 完成时显示"完成交付并保存资产"按钮（status==="needs_review"）
 
-import { Sparkles, Pencil, Plus } from "lucide-react";
+import { Check, Sparkles, Pencil, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
+  useCompleteWorkflowDeliveryMutation,
   useCreatePosterRendersMutation,
   useInpaintPosterRenderMutation,
   useRevisePosterRenderMutation,
@@ -94,11 +95,20 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
   });
 
   const hasRenders = renders.length > 0;
+  const readyRenderCount = renders.filter((render) => render.image_id && render.status === "ready").length;
 
   const existingAspectSet = useMemo(
     () => new Set(renders.map((r) => r.aspect_ratio)),
     [renders],
   );
+
+  const complete = useCompleteWorkflowDeliveryMutation(workflow.id, {
+    onError: (err) =>
+      toast.error("完成交付失败", {
+        description: err instanceof Error ? err.message : "请稍后重试",
+      }),
+    onSuccess: () => toast.success("海报已完成交付，成品已加入项目资产"),
+  });
 
   const onTriggerGenerate = () => {
     if (!aspects.length) {
@@ -267,9 +277,25 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
 
       {step?.status === "needs_review" ? (
         <div className="mt-8 border-t border-[var(--border)] pt-5">
-          <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
-            所有尺寸已就绪。可继续返修或直接进入交付。
-          </p>
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div className="min-w-0">
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+                Delivery Ready
+              </p>
+              <p className="mt-1 text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                {readyRenderCount} 个尺寸已就绪。完成后会进入交付页，并把海报成品写入项目资产。
+              </p>
+            </div>
+            <Button
+              variant="primary"
+              loading={complete.isPending}
+              onClick={() => complete.mutate()}
+              leftIcon={<Check className="h-4 w-4" />}
+              className="w-full sm:w-auto"
+            >
+              完成交付并保存资产
+            </Button>
+          </div>
         </div>
       ) : null}
     </StageFrame>
@@ -308,7 +334,7 @@ function ReviseDialog({
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <div className="mobile-dialog-panel relative flex w-full max-w-md flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:max-h-[var(--mobile-dialog-max-height)] max-md:rounded-t-[var(--radius-sheet)] md:rounded-lg md:border md:border-[var(--border)]">
+      <div className="mobile-dialog-panel relative flex w-full max-w-md flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:max-h-[var(--mobile-dialog-max-height)] max-md:rounded-t-[var(--radius-sheet)] md:rounded-[var(--radius-dialog)] md:border md:border-[var(--border)]">
         <header className="border-b border-[var(--border)] px-5 py-4">
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
             Revise · {render.aspect_ratio}

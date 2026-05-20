@@ -14,3 +14,27 @@ def test_alembic_commits_timeout_setup_before_migration_transaction() -> None:
 
     assert timeout_pos < commit_pos < configure_pos
 
+
+def test_users_active_email_unique_migration_uses_safe_postgres_ordering() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "0025_users_active_email_unique.py"
+    ).read_text(encoding="utf-8")
+
+    upgrade_pos = source.index("def upgrade()")
+    pg_create_pos = source.index("postgresql_concurrently=True", upgrade_pos)
+    drop_constraint_pos = source.index(
+        'op.drop_constraint("users_email_key"', upgrade_pos
+    )
+    downgrade_pos = source.index("def downgrade()")
+    duplicate_guard_pos = source.index("duplicate is not None", downgrade_pos)
+    recreate_constraint_pos = source.index(
+        'op.create_unique_constraint("users_email_key"', downgrade_pos
+    )
+    concurrent_drop_pos = source.index("postgresql_concurrently=True", downgrade_pos)
+
+    assert "autocommit_block()" in source
+    assert pg_create_pos < drop_constraint_pos
+    assert duplicate_guard_pos < recreate_constraint_pos < concurrent_drop_pos

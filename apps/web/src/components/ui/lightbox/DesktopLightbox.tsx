@@ -20,7 +20,6 @@ import {
   ZoomIn,
   ZoomOut,
   ExternalLink,
-  Copy,
   Share2,
   Check,
   Loader2,
@@ -30,11 +29,12 @@ import {
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
 import { useInpaintStore } from "@/store/useInpaintStore";
-import type { Generation } from "@/lib/types";
+import type { GeneratedImage, Generation } from "@/lib/types";
 import {
   CLOSE_EVENT,
   OPEN_EVENT,
   type LightboxItem,
+  type LightboxParamBag,
   type OpenLightboxDetail,
 } from "./types";
 import {
@@ -49,6 +49,7 @@ import { cn } from "@/lib/utils";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { Tooltip } from "@/components/ui/primitives/Tooltip";
 import { useCreateShareMutation } from "@/lib/queries";
+import { LightboxDetailsContent } from "./LightboxDetailsContent";
 
 const RESET_PAN_OFFSET = { x: 0, y: 0 };
 const MIN_ZOOM = 1;
@@ -97,15 +98,32 @@ type DesktopGalleryItem = {
     width?: number;
     height?: number;
     size_actual?: string;
+    size_requested?: string;
     quality?: string;
     fast?: boolean;
     created_at?: string;
     filename?: string;
+    parent_image_id?: string | null;
+    from_generation_id?: string | null;
+    metadata_jsonb?: Record<string, unknown> | null;
+    diagnostics?: GeneratedImage["diagnostics"] | LightboxItem["diagnostics"];
+    revised_prompt?: string | null;
+    requested_params?: Record<string, unknown> | null;
+    request_params?: Record<string, unknown> | null;
+    effective_params?: Record<string, unknown> | null;
+    actual_params?: Record<string, unknown> | null;
+    provider_attempts?: LightboxItem["provider_attempts"];
   };
   prompt: string;
   started_at?: number;
 };
 const EMPTY_DESKTOP_GALLERY: DesktopGalleryItem[] = [];
+
+function asLightboxParamBag(value: unknown): LightboxParamBag | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as LightboxParamBag;
+}
+
 type TouchActions = {
   clampPanForCurrentView: (
     offset: PanOffset,
@@ -142,10 +160,21 @@ function toDesktopGalleryItem(item: LightboxItem): DesktopGalleryItem {
       width: item.width,
       height: item.height,
       size_actual: item.size_actual,
+      size_requested: item.size_requested,
       quality: item.quality,
       fast: item.fast,
       created_at: item.created_at,
       filename: item.filename ?? item.file_name,
+      parent_image_id: item.parent_image_id ?? null,
+      from_generation_id: item.from_generation_id ?? item.generation_id ?? null,
+      metadata_jsonb: item.metadata ?? null,
+      diagnostics: item.diagnostics ?? null,
+      revised_prompt: item.revised_prompt ?? null,
+      requested_params: item.requested_params ?? item.request_params ?? null,
+      request_params: item.request_params ?? item.requested_params ?? null,
+      effective_params: item.effective_params ?? item.actual_params ?? null,
+      actual_params: item.actual_params ?? item.effective_params ?? null,
+      provider_attempts: item.provider_attempts,
     },
     prompt: item.prompt ?? "",
   };
@@ -275,18 +304,6 @@ function labelForViewMode(viewMode: ViewMode): string {
   return "适应";
 }
 
-function formatImageDate(value: string | undefined): string | null {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export function DesktopLightbox() {
   const lightbox = useUiStore((s) => s.lightbox);
   const openLightbox = useUiStore((s) => s.openLightbox);
@@ -301,6 +318,7 @@ export function DesktopLightbox() {
   const [eventGallery, setEventGallery] = useState<DesktopGalleryItem[] | null>(
     null,
   );
+  const [eventItems, setEventItems] = useState<LightboxItem[] | null>(null);
   const imageStateKey = `${lightbox.imageSrc ?? ""}\n${lightbox.imagePreviewSrc ?? ""}`;
   const [imageState, setImageState] = useState(() =>
     createImageState(imageStateKey),
@@ -338,7 +356,6 @@ export function DesktopLightbox() {
   const [edgeHint, setEdgeHint] = useState<null | "first" | "last">(null);
   const [, setSlideDir] = useState<1 | -1>(1);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [promptCopied, setPromptCopied] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState<DownloadStatus>("idle");
   const [shareStatus, setShareStatus] = useState<ShareStatus>("idle");
   const [pendingImageId, setPendingImageId] = useState<string | null>(null);
@@ -411,8 +428,8 @@ export function DesktopLightbox() {
     preloadAbortRef.current = null;
     imagePointerRef.current = null;
     setEventGallery(null);
+    setEventItems(null);
     setDetailsOpen(false);
-    setPromptCopied(false);
     setPendingImageId(null);
     setMousePan(null);
     closeLightbox();
@@ -434,6 +451,7 @@ export function DesktopLightbox() {
       preloadAbortRef.current?.abort();
       preloadAbortRef.current = null;
       setEventGallery(nextGallery);
+      setEventItems(detail.items);
       setSlideDir(1);
       setEdgeHint(null);
       setPendingImageId(null);
@@ -467,6 +485,52 @@ export function DesktopLightbox() {
     }
     return null;
   }, [gallery, lightbox.imageId]);
+
+  const currentLightboxItem = useMemo<LightboxItem | null>(() => {
+    if (!lightbox.imageId || !lightbox.imageSrc) return null;
+    const directItem =
+      storeEventItems?.find((item) => item.id === lightbox.imageId) ??
+      eventItems?.find((item) => item.id === lightbox.imageId);
+    if (directItem) return directItem;
+    return {
+      id: lightbox.imageId,
+      url: lightbox.imageSrc,
+      previewUrl: lightbox.imagePreviewSrc ?? currentImageMeta?.preview_url,
+      thumbUrl: currentImageMeta?.thumb_url ?? currentImageMeta?.preview_url,
+      prompt: lightbox.imageAlt ?? undefined,
+      width: currentImageMeta?.width,
+      height: currentImageMeta?.height,
+      size_actual: currentImageMeta?.size_actual,
+      size_requested: currentImageMeta?.size_requested,
+      quality: currentImageMeta?.quality,
+      fast: currentImageMeta?.fast,
+      mime: currentImageMeta?.mime,
+      filename: currentImageMeta?.filename,
+      created_at: currentImageMeta?.created_at,
+      parent_image_id: currentImageMeta?.parent_image_id ?? null,
+      from_generation_id: currentImageMeta?.from_generation_id ?? null,
+      diagnostics: asLightboxParamBag(currentImageMeta?.diagnostics),
+      revised_prompt: currentImageMeta?.revised_prompt ?? null,
+      requested_params:
+        currentImageMeta?.requested_params ?? currentImageMeta?.request_params ?? null,
+      request_params:
+        currentImageMeta?.request_params ?? currentImageMeta?.requested_params ?? null,
+      effective_params:
+        currentImageMeta?.effective_params ?? currentImageMeta?.actual_params ?? null,
+      actual_params:
+        currentImageMeta?.actual_params ?? currentImageMeta?.effective_params ?? null,
+      provider_attempts: currentImageMeta?.provider_attempts,
+      metadata: currentImageMeta?.metadata_jsonb ?? undefined,
+    };
+  }, [
+    currentImageMeta,
+    eventItems,
+    lightbox.imageAlt,
+    lightbox.imageId,
+    lightbox.imagePreviewSrc,
+    lightbox.imageSrc,
+    storeEventItems,
+  ]);
 
   const currentIdx = useMemo(() => {
     if (!lightbox.imageId) return -1;
@@ -659,17 +723,6 @@ export function DesktopLightbox() {
     window.open(lightbox.imageSrc, "_blank", "noopener,noreferrer");
   }, [lightbox.imageSrc]);
 
-  const handleCopyPrompt = useCallback(() => {
-    const prompt = lightbox.imageAlt?.trim();
-    if (!prompt || typeof navigator === "undefined") return;
-    const write = navigator.clipboard?.writeText(prompt);
-    if (!write) return;
-    void write.then(() => {
-      setPromptCopied(true);
-      window.setTimeout(() => setPromptCopied(false), 1400);
-    });
-  }, [lightbox.imageAlt]);
-
   const resetShareStatusSoon = useCallback(() => {
     window.setTimeout(() => setShareStatus("idle"), 1600);
   }, []);
@@ -765,8 +818,9 @@ export function DesktopLightbox() {
         }
         setSlideDir(direction);
         setPendingImageId(null);
-        if (storeEventItems && lightbox.action) {
-          openLightboxFromItems(storeEventItems, target.image.id, lightbox.action);
+        const items = storeEventItems ?? eventItems;
+        if (items) {
+          openLightboxFromItems(items, target.image.id, lightbox.action);
         } else {
           openLightbox(
             target.image.id,
@@ -777,7 +831,13 @@ export function DesktopLightbox() {
         }
       })();
     },
-    [lightbox.action, openLightbox, openLightboxFromItems, storeEventItems],
+    [
+      eventItems,
+      lightbox.action,
+      openLightbox,
+      openLightboxFromItems,
+      storeEventItems,
+    ],
   );
 
   const gotoDelta = useCallback(
@@ -1042,7 +1102,6 @@ export function DesktopLightbox() {
     queueMicrotask(() => {
       if (canceled) return;
       setDetailsOpen(false);
-      setPromptCopied(false);
       setMousePan(null);
       imagePointerRef.current = null;
     });
@@ -1055,7 +1114,6 @@ export function DesktopLightbox() {
     let canceled = false;
     queueMicrotask(() => {
       if (canceled) return;
-      setPromptCopied(false);
       setDownloadStatus("idle");
       setShareStatus("idle");
       setPendingImageId(null);
@@ -1225,7 +1283,6 @@ export function DesktopLightbox() {
       .slice(start, end)
       .map((entry, offset) => ({ entry, index: start + offset }));
   }, [currentIdx, gallery]);
-  const formattedDate = formatImageDate(currentImageMeta?.created_at);
   const posterSrc =
     currentImageMeta?.thumb_url ??
     currentImageMeta?.preview_url ??
@@ -1636,61 +1693,12 @@ export function DesktopLightbox() {
                 </div>
 
                 <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4 scrollbar-thin">
-                  {lightbox.imageAlt && (
-                    <section>
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <h3 className="text-[11px] font-mono uppercase tracking-wide text-white/45">
-                          prompt
-                        </h3>
-                        <button
-                          type="button"
-                          onClick={handleCopyPrompt}
-                          className={cn(
-                            "inline-flex h-8 items-center gap-1.5 rounded-full px-2.5",
-                            "border border-white/10 bg-white/5 text-[11px] text-white/72",
-                            "hover:border-white/25 hover:bg-white/10 hover:text-white",
-                            "transition-colors duration-150 cursor-pointer",
-                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
-                          )}
-                        >
-                          {promptCopied ? (
-                            <Check className="h-3.5 w-3.5" />
-                          ) : (
-                            <Copy className="h-3.5 w-3.5" />
-                          )}
-                          {promptCopied ? "已复制" : "复制"}
-                        </button>
-                      </div>
-                      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-white/84">
-                        {lightbox.imageAlt}
-                      </p>
-                    </section>
-                  )}
-
-                  <section className="space-y-2">
-                    <h3 className="text-[11px] font-mono uppercase tracking-wide text-white/45">
-                      元数据
-                    </h3>
-                    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
-                      <DetailRow label="编号" value={lightbox.imageId ?? "-"} />
-                      <DetailRow
-                        label="尺寸"
-                        value={
-                          currentImageMeta?.size_actual ??
-                          (currentImageMeta?.width && currentImageMeta.height
-                            ? `${currentImageMeta.width} x ${currentImageMeta.height}`
-                            : "-")
-                        }
-                      />
-                      <DetailRow label="MIME" value={currentImageMeta?.mime ?? "-"} />
-                      <DetailRow label="渲染" value={currentImageMeta?.quality ?? "-"} />
-                      <DetailRow
-                        label="模式"
-                        value={currentImageMeta?.fast === true ? "快速" : currentImageMeta?.fast === false ? "标准" : "-"}
-                      />
-                      <DetailRow label="时间" value={formattedDate ?? "-"} />
-                    </div>
-                  </section>
+                  {currentLightboxItem ? (
+                    <LightboxDetailsContent
+                      item={currentLightboxItem}
+                      tone="media"
+                    />
+                  ) : null}
 
                   <section className="space-y-2">
                     <h3 className="text-[11px] font-mono uppercase tracking-wide text-white/45">
@@ -1975,15 +1983,6 @@ function TopButton({
       <Icon className={cn("w-4 h-4", iconClassName)} aria-hidden />
       <span>{children}</span>
     </button>
-  );
-}
-
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid grid-cols-[4.5rem_1fr] gap-2 py-1.5 text-xs">
-      <span className="text-white/42">{label}</span>
-      <span className="min-w-0 break-words font-mono text-white/76">{value}</span>
-    </div>
   );
 }
 

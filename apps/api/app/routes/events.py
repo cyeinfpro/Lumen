@@ -210,6 +210,7 @@ async def _stream_id_for_pubsub_event(
     event_name: str,
     envelope_event_id: str | None,
     payload: object,
+    channel: str | None = None,
 ) -> str | None:
     """Persist legacy PubSub-only events so live SSE always advances `id`.
 
@@ -226,6 +227,8 @@ async def _stream_id_for_pubsub_event(
         "ts_ms": int(time.time() * 1000),
         "data": payload_for_stream,
     }
+    if channel:
+        envelope["channel"] = channel
     try:
         raw = await redis.xadd(  # type: ignore[attr-defined]
             stream_key,
@@ -274,9 +277,17 @@ def _replay_payload_matches_channels(
     requested_channels: set[str],
     include_user_channel: bool,
     user_channel: str,
+    envelope_channel: str | None = None,
 ) -> bool:
     if not requested_channels:
         return True
+    if envelope_channel:
+        if envelope_channel in requested_channels:
+            return True
+        if envelope_channel == user_channel:
+            return include_user_channel and user_channel in requested_channels
+        if envelope_channel.startswith(("conv:", "task:")):
+            return False
     if not isinstance(payload, dict):
         return include_user_channel and user_channel in requested_channels
 
@@ -297,7 +308,7 @@ def _replay_field(fields: dict, name: str) -> object | None:
     return value
 
 
-def _decode_replay_fields(fields: object) -> tuple[str, object] | None:
+def _decode_replay_fields(fields: object) -> tuple[str, object, str | None] | None:
     if not isinstance(fields, dict):
         return None
     data = _replay_field(fields, "data")
@@ -308,19 +319,27 @@ def _decode_replay_fields(fields: object) -> tuple[str, object] | None:
     try:
         parsed = json.loads(data)
     except Exception:
-        return event_name or "message", {"raw": data}
+        return event_name or "message", {"raw": data}, None
     if not isinstance(parsed, dict):
-        return event_name or "message", parsed
+        return event_name or "message", parsed, None
 
     ev_name = event_name or parsed.get("event") or "message"
     if not isinstance(ev_name, str) or not ev_name:
         ev_name = "message"
+    envelope_channel = parsed.get("channel")
+    envelope_channel = envelope_channel if isinstance(envelope_channel, str) else None
     payload = parsed.get("data", parsed)
     envelope_event_id = parsed.get("event_id")
     if isinstance(payload, dict) and isinstance(envelope_event_id, str):
         payload = {**payload}
         payload.setdefault("event_id", envelope_event_id)
-    return ev_name, payload
+    return ev_name, payload, envelope_channel
+
+
+def _payload_with_sse_id(payload: object, sse_id: str) -> dict:
+    if isinstance(payload, dict):
+        return {**payload, "msg_id": sse_id, "sse_id": sse_id}
+    return {"data": payload, "msg_id": sse_id, "sse_id": sse_id}
 
 
 async def _iter_replay_events(
@@ -360,21 +379,19 @@ async def _iter_replay_events(
                 if scanned >= _REPLAY_MAX_EVENTS:
                     break
                 continue
-            ev_name, payload = decoded
+            ev_name, payload, envelope_channel = decoded
             if not _replay_payload_matches_channels(
                 payload,
                 requested_channels=requested_channels,
                 include_user_channel=include_user_channel,
                 user_channel=user_channel,
+                envelope_channel=envelope_channel,
             ):
                 if scanned >= _REPLAY_MAX_EVENTS:
                     break
                 continue
 
-            if isinstance(payload, dict):
-                payload = {**payload, "msg_id": msg_id}
-            else:
-                payload = {"data": payload, "msg_id": msg_id}
+            payload = _payload_with_sse_id(payload, msg_id)
             yield {
                 "id": msg_id,
                 "event": ev_name,
@@ -414,10 +431,8 @@ async def events(
     client_requested = list(
         dict.fromkeys(c.strip() for c in channels.split(",") if c.strip())
     )
-    requested = list(client_requested)
-    # ensure the personal user channel is always included.
-    if f"user:{user.id}" not in requested:
-        requested.append(f"user:{user.id}")
+    user_channel = f"user:{user.id}"
+    requested = list(client_requested or [user_channel])
     if len(requested) > MAX_SSE_CHANNELS:
         raise _http(
             "too_many_channels",
@@ -430,11 +445,9 @@ async def events(
             },
         )
     valid = await _validate_channels(requested, user.id, db)
-    client_valid = await _validate_channels(client_requested, user.id, db)
-    user_channel = f"user:{user.id}"
-    replay_requested_channels = set(client_valid)
-    if user_channel in valid:
-        replay_requested_channels.add(user_channel)
+    replay_requested_channels = set(valid)
+    if client_requested and user_channel not in client_requested:
+        replay_requested_channels.discard(user_channel)
     include_user_channel = user_channel in replay_requested_channels
 
     last_event_id = request.headers.get("Last-Event-ID")
@@ -550,7 +563,38 @@ async def events(
                                     payload = json.loads(out["data"])
                                     phase = payload.get("phase")
                                 except Exception:
+                                    payload = None
                                     phase = None
+                                channel_text = _decode_pubsub_text(channel)
+                                public_channel = (
+                                    bridge_channels.get(channel_text)
+                                    if channel_text
+                                    else None
+                                )
+                                if isinstance(payload, dict):
+                                    event_id = await _stream_id_for_pubsub_event(
+                                        redis,
+                                        stream_key=stream_key,
+                                        event_name=_COMPACTION_EVENT,
+                                        envelope_event_id=(
+                                            payload.get("event_id")
+                                            if isinstance(payload.get("event_id"), str)
+                                            else None
+                                        ),
+                                        payload=payload,
+                                        channel=public_channel,
+                                    )
+                                    if isinstance(event_id, str) and event_id:
+                                        payload = _payload_with_sse_id(
+                                            payload, event_id
+                                        )
+                                        out = {
+                                            "id": event_id,
+                                            "event": _COMPACTION_EVENT,
+                                            "data": json.dumps(
+                                                payload, separators=(",", ":")
+                                            ),
+                                        }
                                 if phase == "started":
                                     pending_compaction_started[conv_id] = (
                                         time.monotonic()
@@ -585,6 +629,7 @@ async def events(
                         envelope_event_id = (
                             parsed.get("event_id") if isinstance(parsed, dict) else None
                         )
+                        channel_text = _decode_pubsub_text(channel)
                         if not isinstance(event_id, str) or not event_id:
                             event_id = await _stream_id_for_pubsub_event(
                                 redis,
@@ -596,13 +641,11 @@ async def events(
                                     else None
                                 ),
                                 payload=payload,
+                                channel=channel_text,
                             )
                         # 同时把 msg_id 放进 payload 方便前端 JSON 级去重
                         if isinstance(event_id, str) and event_id:
-                            if isinstance(payload, dict):
-                                payload = {**payload, "msg_id": event_id}
-                            else:
-                                payload = {"data": payload, "msg_id": event_id}
+                            payload = _payload_with_sse_id(payload, event_id)
                         if isinstance(envelope_event_id, str) and envelope_event_id:
                             if isinstance(payload, dict):
                                 if "event_id" not in payload:

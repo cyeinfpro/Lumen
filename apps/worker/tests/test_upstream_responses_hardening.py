@@ -142,7 +142,7 @@ class _FakeStreamResponse:
         return self
 
     async def __aexit__(self, *_args: Any) -> None:
-        return None
+        await self.aclose()
 
     async def aiter_lines(self):
         for line in self._sse_lines or []:
