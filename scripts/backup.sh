@@ -102,7 +102,8 @@ mark_backup_pending_if_retriggered() {
 
 release_lock() {
     if [ "$LOCK_KIND" = "flock" ]; then
-        flock -u 9 2>/dev/null || true
+        flock -u 7 2>/dev/null || true
+        exec 7>&- 2>/dev/null || true
     elif [ "$LOCK_KIND" = "mkdir" ]; then
         rm -rf "$LOCKDIR" 2>/dev/null || true
     fi
@@ -146,11 +147,11 @@ acquire_lock() {
     mkdir -p "$lock_parent"
 
     if command -v flock >/dev/null 2>&1; then
-        if ! { exec 9>"$LOCKFILE"; } 2>/dev/null; then
+        if ! { exec 7>"$LOCKFILE"; } 2>/dev/null; then
             log "ERROR: cannot open lock file: $LOCKFILE"
             exit 10
         fi
-        if ! flock -n 9; then
+        if ! flock -n 7; then
             log "ERROR: another backup/restore is already running (lock: $LOCKFILE)"
             exit 10
         fi
@@ -250,7 +251,7 @@ docker_cp_redis() {
     case "$err_msg" in
         *"Could not find"*|*"not found"*|*"No such container:path"*)
             if [ "$required" = "required" ]; then
-                log "WARN: redis $label missing: ${err_msg:-docker cp exit $rc}"
+                log "ERROR: redis $label missing: ${err_msg:-docker cp exit $rc}"
             else
                 log "redis $label not present; skipping"
             fi
@@ -260,6 +261,64 @@ docker_cp_redis() {
             ;;
     esac
     return "$rc"
+}
+
+redis_info_value() {
+    local section="$1"
+    local key="$2"
+    local out
+    if ! out="$(redis_cli INFO "$section" | tr -d '\r')"; then
+        return 1
+    fi
+    printf '%s\n' "$out" | sed -n "s/^${key}://p" | head -n1
+}
+
+redis_bgsave_start() {
+    local out rc
+    if [ -n "$REDIS_PASSWORD" ]; then
+        out="$(REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH "$REDIS_CONTAINER" redis-cli --no-auth-warning BGSAVE 2>&1)"
+    else
+        out="$(docker exec "$REDIS_CONTAINER" redis-cli BGSAVE 2>&1)"
+    fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "ERROR: redis-cli BGSAVE exit=$rc out=${out}"
+        return "$rc"
+    fi
+    case "$out" in
+        *"Background save already in progress"*)
+            return 2
+            ;;
+    esac
+    if lumen_redis_is_error_reply "$out"; then
+        log "ERROR: redis-cli BGSAVE protocol error: ${out}"
+        return 1
+    fi
+    printf '%s' "$out"
+}
+
+wait_for_redis_bgsave() {
+    local last_now in_progress status
+    for _ in $(seq 1 60); do
+        in_progress="$(redis_info_value persistence rdb_bgsave_in_progress 2>/dev/null || true)"
+        last_now="$(redis_cli LASTSAVE | tr -d '\r\n')"
+        if ! [[ "$last_now" =~ ^[0-9]+$ ]]; then
+            log "ERROR: LASTSAVE returned non-numeric: ${last_now}"
+            return 1
+        fi
+        if [ "$in_progress" != "1" ]; then
+            status="$(redis_info_value persistence rdb_last_bgsave_status 2>/dev/null || true)"
+            if [ -n "$status" ] && [ "$status" != "ok" ]; then
+                log "ERROR: redis last BGSAVE status is ${status}"
+                return 1
+            fi
+            LAST_NOW="$last_now"
+            return 0
+        fi
+        sleep 1
+    done
+    log "ERROR: redis BGSAVE did not complete in 60s"
+    return 1
 }
 
 trap cleanup EXIT
@@ -339,32 +398,34 @@ if ! ping_out="$(redis_cli PING)" || [ "$ping_out" != "PONG" ]; then
     exit 3
 fi
 log "triggering redis BGSAVE"
-# 记录 lastsave 时间戳，轮询到它变化视为 BGSAVE 完成。
-# LASTSAVE 协议返回 unix timestamp（纯数字），非数字一律视为异常。
+# 记录 lastsave 时间戳作为观测字段；真正完成条件看 rdb_bgsave_in_progress。
+# 只看 LASTSAVE 秒级变化不可靠：同一秒内 BGSAVE 完成会被误判超时。
 LAST_BEFORE="$(redis_cli LASTSAVE | tr -d '\r\n')"
 if ! [[ "$LAST_BEFORE" =~ ^[0-9]+$ ]]; then
     log "ERROR: LASTSAVE returned non-numeric: ${LAST_BEFORE}"
     exit 3
 fi
 LAST_NOW="$LAST_BEFORE"
-redis_cli BGSAVE >/dev/null
-for _ in $(seq 1 60); do
-    sleep 1
-    LAST_NOW="$(redis_cli LASTSAVE | tr -d '\r\n')"
-    if [ "$LAST_NOW" != "$LAST_BEFORE" ]; then
-        break
-    fi
-done
-if [ "$LAST_NOW" = "$LAST_BEFORE" ]; then
-    log "ERROR: redis BGSAVE did not complete in 60s"
+set +e
+bgsave_out="$(redis_bgsave_start)"
+bgsave_rc=$?
+set -e
+if [ "$bgsave_rc" -eq 0 ]; then
+    log "redis BGSAVE response: ${bgsave_out}"
+elif [ "$bgsave_rc" -eq 2 ]; then
+    log "redis BGSAVE already in progress; waiting for current save"
+else
     exit 3
 fi
-log "BGSAVE done, packaging"
+if ! wait_for_redis_bgsave; then
+    exit 3
+fi
+log "BGSAVE done (lastsave ${LAST_BEFORE} -> ${LAST_NOW}), packaging"
 
 # 从 redis 容器里把 dump.rdb 和 appendonly 拷出来打包
 TMP_DIR="$(make_tmp_dir)"
-if docker_cp_redis "/data/dump.rdb" "$TMP_DIR/dump.rdb" "dump.rdb" "required"; then
-    :
+if ! docker_cp_redis "/data/dump.rdb" "$TMP_DIR/dump.rdb" "dump.rdb" "required"; then
+    exit 4
 fi
 # appendonly 在 redis 7 可能是目录 appendonlydir/ 或旧版单文件 appendonly.aof
 if docker_cp_redis "/data/appendonlydir" "$TMP_DIR/appendonlydir" "appendonlydir" "optional"; then

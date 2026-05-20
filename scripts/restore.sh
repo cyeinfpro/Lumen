@@ -65,7 +65,8 @@ log() { printf '[restore %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
 release_lock() {
     if [ "$LOCK_KIND" = "flock" ]; then
-        flock -u 9 2>/dev/null || true
+        flock -u 7 2>/dev/null || true
+        exec 7>&- 2>/dev/null || true
     elif [ "$LOCK_KIND" = "mkdir" ]; then
         rm -rf "$LOCKDIR" 2>/dev/null || true
     fi
@@ -126,11 +127,11 @@ acquire_lock() {
     mkdir -p "$lock_parent"
 
     if command -v flock >/dev/null 2>&1; then
-        if ! { exec 9>"$LOCKFILE"; } 2>/dev/null; then
+        if ! { exec 7>"$LOCKFILE"; } 2>/dev/null; then
             log "ERROR: cannot open lock file: $LOCKFILE"
             exit 10
         fi
-        if ! flock -n 9; then
+        if ! flock -n 7; then
             log "ERROR: another backup/restore is already running (lock: $LOCKFILE)"
             exit 10
         fi

@@ -1315,14 +1315,29 @@ if ! migrate_postgres_uid; then
     exit 1
 fi
 
+_infra_healthy=0
 if [ "${LUMEN_UPDATE_MODE}" = "fast" ] \
         && LUMEN_HEALTH_COMPOSE_ATTEMPTS="${LUMEN_UPDATE_FAST_HEALTH_ATTEMPTS:-1}" \
            LUMEN_HEALTH_COMPOSE_INTERVAL="${LUMEN_UPDATE_FAST_HEALTH_INTERVAL:-1}" \
            lumen_health_compose postgres redis >/dev/null 2>&1; then
-    log_info "[start_infra] fast 模式：postgres/redis 已 healthy，跳过基础设施容器重建。"
-    emit_info start_infra action "reuse_healthy_infra"
+    _infra_healthy=1
+fi
+
+if [ "${LUMEN_UPDATE_MODE}" = "fast" ] && [ "${_infra_healthy}" = "1" ]; then
+    log_info "[start_infra] fast 模式：postgres/redis 已 healthy，复用 postgres。"
+    emit_info start_infra postgres "reuse_healthy"
+    # redis 挂载 release 内的 entrypoint 脚本；如果跨 release 复用旧容器，
+    # cleanup 删除旧 release 后 docker cp/重启会被坏 bind mount 卡住。
+    # 因此 fast 模式也重建 redis，保留 /data bind mount，不丢数据。
+    if ! lumen_compose_in "${NEW_RELEASE}" up --pull missing -d --wait --force-recreate redis; then
+        log_error "[start_infra] redis 重建或健康检查失败。"
+        log_error "  当前 API/Worker/Web 服务保持不变。"
+        emit_fail start_infra 1
+        exit 1
+    fi
+    emit_info start_infra redis "recreated_for_release_bind_mount"
 else
-    # standard 模式保留 force-recreate；fast 模式只在 infra 不健康/缺失时启动，不主动重建。
+    # standard 模式保留 force-recreate；fast 模式只在 infra 不健康/缺失时启动。
     if [ "${LUMEN_UPDATE_MODE}" = "fast" ]; then
         if ! lumen_compose_in "${NEW_RELEASE}" up --pull missing -d --wait postgres redis; then
             log_error "[start_infra] postgres / redis 启动或健康检查失败。"
