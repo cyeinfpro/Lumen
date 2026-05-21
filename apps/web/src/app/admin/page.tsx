@@ -7,21 +7,33 @@
 // - 用户：搜索 + 角色过滤 + 表格（数字 tabular-nums）+ 加载更多
 // - 子 panel 另见 _panels/*
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import { format } from "date-fns";
 import {
+  Activity,
   AlertCircle,
   ArrowLeft,
+  Archive,
+  CreditCard,
+  HardDrive,
   Inbox,
+  KeyRound,
+  Link2,
   Loader2,
+  MailCheck,
+  MessageCircle,
   Search,
+  Server,
   ShieldCheck,
+  SlidersHorizontal,
   UserCog,
   Users as UsersIcon,
+  Wifi,
+  type LucideIcon,
 } from "lucide-react";
 
 import {
@@ -31,6 +43,7 @@ import {
   useRemoveAllowedEmailMutation,
 } from "@/lib/queries";
 import { ApiError, getMe, type AuthUser } from "@/lib/apiClient";
+import { cn } from "@/lib/utils";
 import { BackupsPanel } from "./_panels/BackupsPanel";
 import { InvitesPanel } from "./_panels/InvitesPanel";
 import { ByokPanel } from "./_panels/ByokPanel";
@@ -60,21 +73,156 @@ type Tab =
   | "storage"
   | "backups";
 
-const TABS: { key: Tab; label: string }[] = [
-  { key: "health", label: "健康" },
-  { key: "emails", label: "白名单" },
-  { key: "users", label: "用户" },
-  { key: "events", label: "请求事件" },
-  { key: "invites", label: "邀请链接" },
-  { key: "byok", label: "API 站接入" },
-  { key: "billing", label: "计费" },
-  { key: "providers", label: "供应商" },
-  { key: "proxies", label: "代理池" },
-  { key: "telegram", label: "Telegram 机器人" },
-  { key: "settings", label: "系统设置" },
-  { key: "storage", label: "存储后端" },
-  { key: "backups", label: "备份与恢复" },
+type TabGroup = "overview" | "access" | "operations" | "infrastructure";
+
+type TabMeta = {
+  key: Tab;
+  group: TabGroup;
+  label: string;
+  title: string;
+  description: string;
+  icon: LucideIcon;
+};
+
+const TAB_GROUPS: {
+  key: TabGroup;
+  label: string;
+  description: string;
+}[] = [
+  {
+    key: "overview",
+    label: "总览",
+    description: "先看风险，再进细节",
+  },
+  {
+    key: "access",
+    label: "访问与用户",
+    description: "账号、邀请、费用与自带 Key",
+  },
+  {
+    key: "operations",
+    label: "运行与审计",
+    description: "请求、供应商、代理与机器人",
+  },
+  {
+    key: "infrastructure",
+    label: "系统与数据",
+    description: "配置、存储、备份与恢复",
+  },
 ];
+
+const TABS: TabMeta[] = [
+  {
+    key: "health",
+    group: "overview",
+    label: "健康",
+    title: "健康总览",
+    description: "集中查看供应商、代理、计费、Telegram 和错误样本。",
+    icon: Activity,
+  },
+  {
+    key: "emails",
+    group: "access",
+    label: "白名单",
+    title: "注册白名单",
+    description: "允许指定邮箱注册，并追踪邀请来源。",
+    icon: MailCheck,
+  },
+  {
+    key: "users",
+    group: "access",
+    label: "用户",
+    title: "用户与用量",
+    description: "按角色筛选用户，查看生成、对话和消息统计。",
+    icon: UsersIcon,
+  },
+  {
+    key: "invites",
+    group: "access",
+    label: "邀请链接",
+    title: "邀请链接",
+    description: "生成、复制和撤销面向新用户的邀请链接。",
+    icon: Link2,
+  },
+  {
+    key: "byok",
+    group: "access",
+    label: "API 站接入",
+    title: "API 站接入",
+    description: "管理用户自带 API Key 的接入、验证和降级策略。",
+    icon: KeyRound,
+  },
+  {
+    key: "billing",
+    group: "access",
+    label: "计费",
+    title: "计费与兑换",
+    description: "检查余额、价格、兑换码和异常资金占用。",
+    icon: CreditCard,
+  },
+  {
+    key: "events",
+    group: "operations",
+    label: "请求事件",
+    title: "请求事件",
+    description: "排查请求失败、上游 attempt 和用户侧异常。",
+    icon: ShieldCheck,
+  },
+  {
+    key: "providers",
+    group: "operations",
+    label: "供应商",
+    title: "供应商路由",
+    description: "配置模型供应商、探活、优先级和图片任务能力。",
+    icon: Server,
+  },
+  {
+    key: "proxies",
+    group: "operations",
+    label: "代理池",
+    title: "代理池",
+    description: "维护出站代理，给供应商、Telegram 和更新流程使用。",
+    icon: Wifi,
+  },
+  {
+    key: "telegram",
+    group: "operations",
+    label: "Telegram",
+    title: "Telegram 机器人",
+    description: "配置机器人 token、用户白名单和代理策略。",
+    icon: MessageCircle,
+  },
+  {
+    key: "settings",
+    group: "infrastructure",
+    label: "系统设置",
+    title: "系统设置",
+    description: "用更直白的方式调整生图、上游、长对话和更新参数。",
+    icon: SlidersHorizontal,
+  },
+  {
+    key: "storage",
+    group: "infrastructure",
+    label: "存储后端",
+    title: "存储后端",
+    description: "切换本地或 SMB 存储，测试连接并应用配置。",
+    icon: HardDrive,
+  },
+  {
+    key: "backups",
+    group: "infrastructure",
+    label: "备份恢复",
+    title: "备份与恢复",
+    description: "查看自动备份、手动备份，并在必要时恢复快照。",
+    icon: Archive,
+  },
+];
+
+const adminInputShellClassName =
+  "flex items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 transition-colors focus-within:border-accent-border focus-within:ring-2 focus-within:ring-accent/20";
+
+const tableShellClassName =
+  "overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 shadow-[var(--shadow-1)] backdrop-blur-sm";
 
 const AUTH_STORAGE_KEYS = new Set([
   "lumen.auth",
@@ -103,6 +251,9 @@ export default function AdminPage() {
   const isLoadingMe =
     meQuery.isLoading || (meQuery.isFetching && !meQuery.data);
   const refetchMe = meQuery.refetch;
+  const refreshMe = useCallback(() => {
+    void refetchMe();
+  }, [refetchMe]);
 
   useEffect(() => {
     if (meQuery.isSuccess && role !== "admin") {
@@ -123,28 +274,25 @@ export default function AdminPage() {
   // 单纯依赖 staleTime 可能让本 tab 长时间停留管理面板而身份失效却毫无察觉。
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const refresh = () => {
-      void refetchMe();
-    };
     const onStorage = (e: StorageEvent) => {
-      if (isAuthStorageEvent(e)) refresh();
+      if (isAuthStorageEvent(e)) refreshMe();
     };
-    window.addEventListener("focus", refresh);
+    window.addEventListener("focus", refreshMe);
     window.addEventListener("storage", onStorage);
     return () => {
-      window.removeEventListener("focus", refresh);
+      window.removeEventListener("focus", refreshMe);
       window.removeEventListener("storage", onStorage);
     };
-  }, [refetchMe]);
+  }, [refreshMe]);
 
   if (isLoadingMe) {
     return (
       <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)]">
         <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10 space-y-5">
-          <div className="h-8 w-48 bg-white/5 rounded-lg animate-pulse" />
-          <div className="h-4 w-64 bg-white/5 rounded animate-pulse" />
-          <div className="h-10 w-80 bg-white/5 rounded-full animate-pulse mt-6" />
-          <div className="h-72 w-full bg-white/5 rounded-2xl animate-pulse mt-4" />
+          <div className="h-8 w-48 animate-pulse rounded-[var(--radius-card)] bg-[var(--bg-1)]" />
+          <div className="h-4 w-64 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-1)]" />
+          <div className="mt-6 h-10 w-80 animate-pulse rounded-full bg-[var(--bg-1)]" />
+          <div className="mt-4 h-72 w-full animate-pulse rounded-[var(--radius-panel)] bg-[var(--bg-1)]" />
         </div>
       </div>
     );
@@ -154,7 +302,7 @@ export default function AdminPage() {
     return (
       <div className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-1)] flex items-center justify-center px-4">
         <div className="text-center space-y-3">
-          <div className="mx-auto w-12 h-12 rounded-full bg-white/5 border border-[var(--border)] flex items-center justify-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-1)]">
             <ShieldCheck className="w-5 h-5 text-[var(--fg-2)]" />
           </div>
           <p className="text-lg">仅管理员可访问</p>
@@ -174,6 +322,7 @@ export default function AdminPage() {
 
 function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
   const [tab, setTab] = useState<Tab>("health");
+  const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
 
   return (
     <motion.div
@@ -182,24 +331,24 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
       transition={{ duration: 0.2, ease: "easeOut" }}
       className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)]"
     >
-      <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10">
+      <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-10">
         <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
           <div className="min-w-0">
             <h1 className="type-page-title">
               管理后台
             </h1>
             <p className="type-body mt-1.5">
-              管理用户、权限、系统配置
+              按任务分组管理访问、运行状态、基础设施和系统配置。
             </p>
           </div>
           <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
             {me?.email && (
-              <div className="flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-full bg-white/5 border border-[var(--border)] text-xs min-h-[32px]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[0_0_8px_var(--color-lumen-amber)]" />
+              <div className="flex min-h-[32px] items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/70 px-2.5 py-1.5 text-xs sm:px-3">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[var(--shadow-amber)]" />
                 <span className="text-[var(--fg-1)] truncate max-w-[140px] sm:max-w-[180px]">
                   {me.email}
                 </span>
-                <span className="px-1.5 py-0.5 rounded-md bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/25 text-[10px] font-medium">
+                <span className="rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">
                   管理员
                 </span>
               </div>
@@ -215,8 +364,9 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
         </header>
 
         <TabNav tab={tab} onChange={setTab} />
+        <PanelIntro tab={activeTab} />
 
-        <div className="mt-6">
+        <div className="mt-5">
           <AnimatePresence mode="wait">
             <motion.div
               key={tab}
@@ -262,43 +412,74 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
 
 function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
   return (
-    <div className="overflow-x-auto scrollbar-thin -mx-4 px-4 md:mx-0 md:px-0 [-webkit-overflow-scrolling:touch]">
-      <nav
-        role="tablist"
-        className="inline-flex items-center gap-1 p-1 rounded-full bg-white/[0.04] border border-[var(--border)] backdrop-blur-sm"
-      >
-        {TABS.map((t) => {
-          const active = tab === t.key;
+    <nav aria-label="管理后台菜单" className="space-y-3">
+      <div className="grid gap-3 lg:grid-cols-4">
+        {TAB_GROUPS.map((group) => {
+          const items = TABS.filter((item) => item.group === group.key);
           return (
-            <button
-              key={t.key}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => onChange(t.key)}
-              className="relative whitespace-nowrap shrink-0 px-3.5 md:px-4 py-1.5 text-xs md:text-sm rounded-full transition-colors"
+            <section
+              key={group.key}
+              className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/62 p-2.5 shadow-[var(--shadow-1)] backdrop-blur-sm"
             >
-              {active && (
-                <motion.span
-                  layoutId="admin-tab-pill"
-                  className="absolute inset-0 rounded-full bg-[var(--color-lumen-amber)] shadow-[0_6px_20px_-8px_var(--color-lumen-amber)]"
-                  transition={{ type: "spring", stiffness: 400, damping: 34 }}
-                />
-              )}
-              <span
-                className={
-                  "relative z-10 whitespace-nowrap " +
-                  (active
-                    ? "text-black font-medium"
-                    : "text-[var(--fg-1)] hover:text-[var(--fg-0)]")
-                }
-              >
-                {t.label}
-              </span>
-            </button>
+              <div className="px-1.5 pb-2">
+                <p className="type-overline text-[var(--fg-1)]">
+                  {group.label}
+                </p>
+                <p className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
+                  {group.description}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-1">
+                {items.map((item) => {
+                  const active = tab === item.key;
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => onChange(item.key)}
+                      className={cn(
+                        "flex min-h-[40px] w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-left type-caption transition-colors",
+                        active
+                          ? "border-accent-border bg-accent text-[var(--accent-on)] shadow-[var(--shadow-amber)]"
+                          : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+                      )}
+                    >
+                      <Icon
+                        className={cn(
+                          "h-3.5 w-3.5 shrink-0",
+                          active ? "text-[var(--accent-on)]" : "text-[var(--fg-2)]",
+                        )}
+                      />
+                      <span className="min-w-0 truncate">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
           );
         })}
-      </nav>
+      </div>
+    </nav>
+  );
+}
+
+function PanelIntro({ tab }: { tab: TabMeta }) {
+  const Icon = tab.icon;
+  return (
+    <div className="mt-6 flex flex-col gap-3 border-b border-[var(--border-subtle)] pb-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-accent-border bg-accent-soft">
+          <Icon className="h-4 w-4 text-accent" />
+        </div>
+        <div className="min-w-0">
+          <h2 className="type-section-title">{tab.title}</h2>
+          <p className="mt-1 max-w-3xl type-body-sm text-[var(--fg-2)]">
+            {tab.description}
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -355,12 +536,12 @@ function AllowedEmailsPanel() {
   return (
     <section className="space-y-5">
       {/* —— 添加 / 搜索行 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-2xl p-4 md:p-5 space-y-3">
+      <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)] backdrop-blur-sm md:p-5">
         <form
           onSubmit={onSubmit}
-          className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center"
+          className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center"
         >
-          <div className="flex-1 flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/60 border border-[var(--border)] focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25 transition-colors">
+          <div className={`h-10 flex-1 ${adminInputShellClassName}`}>
             <label htmlFor="add-allowed-email" className="sr-only">
               邮箱
             </label>
@@ -375,11 +556,10 @@ function AllowedEmailsPanel() {
               className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-[var(--fg-2)]"
             />
           </div>
-          {/* @hit-area-ok: admin desktop form submit button, desktop-only page */}
           <button
             type="submit"
             disabled={addMut.isPending}
-            className="inline-flex items-center justify-center gap-1.5 h-9 px-4 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium disabled:opacity-50 transition-all"
+            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-[var(--accent-on)] transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:opacity-50"
           >
             {addMut.isPending ? (
               <>
@@ -397,7 +577,7 @@ function AllowedEmailsPanel() {
           </p>
         )}
 
-        <div className="flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/40 border border-[var(--border-subtle)] focus-within:border-[var(--border-strong)] transition-colors">
+        <div className={`mt-3 h-10 ${adminInputShellClassName}`}>
           <Search className="w-3.5 h-3.5 text-[var(--fg-2)]" />
           <label htmlFor="search-allowed" className="sr-only">
             搜索白名单
@@ -414,7 +594,7 @@ function AllowedEmailsPanel() {
       </div>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-2xl overflow-hidden">
+      <div className={tableShellClassName}>
         {q.isLoading ? (
           <ListSkeleton rows={4} />
         ) : q.isError ? (
@@ -454,7 +634,7 @@ function AllowedEmailsPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.03, 0.18),
                       }}
-                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors align-middle"
+                      className="border-t border-[var(--border-subtle)] transition-colors hover:bg-[var(--bg-2)]/60 align-middle"
                     >
                       <td className="py-3 px-4 text-[var(--fg-0)] break-all">{row.email}</td>
                       <td className="py-3 px-4 text-[var(--fg-1)] break-all">
@@ -481,7 +661,7 @@ function AllowedEmailsPanel() {
               </table>
             </div>
             {/* 移动端卡片列表 */}
-            <ul className="md:hidden divide-y divide-white/5">
+            <ul className="divide-y divide-[var(--border-subtle)] md:hidden">
               {filtered.map((row) => (
                 <li key={row.id} className="p-4 space-y-2">
                   <div className="flex items-start justify-between gap-2">
@@ -574,7 +754,7 @@ function ConfirmInlineRemove({
         type="button"
         onClick={onCancel}
         disabled={pending}
-        className="text-xs px-3 py-1.5 min-h-[32px] rounded-md bg-white/5 hover:bg-white/10 text-[var(--fg-1)] disabled:opacity-50 transition-colors"
+        className="min-h-[32px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
       >
         取消
       </button>
@@ -613,8 +793,8 @@ function UsersPanel() {
   return (
     <section className="space-y-5">
       {/* —— 过滤行 —— */}
-      <div className="flex flex-col md:flex-row gap-3 md:items-center">
-        <div className="flex-1 w-full md:min-w-[220px] flex items-center gap-2 px-3 h-9 rounded-xl bg-[var(--bg-0)]/60 border border-[var(--border)] focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25 transition-colors">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center">
+        <div className={`h-10 w-full flex-1 md:min-w-[220px] ${adminInputShellClassName}`}>
           <Search className="w-3.5 h-3.5 text-[var(--fg-2)]" />
           <label htmlFor="search-users" className="sr-only">
             搜索用户
@@ -631,7 +811,7 @@ function UsersPanel() {
         <div
           role="tablist"
           aria-label="按角色过滤"
-          className="inline-flex items-center gap-0.5 p-0.5 rounded-xl bg-white/[0.04] border border-[var(--border)] text-xs"
+          className="inline-flex h-10 items-center gap-0.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-0.5 text-xs"
         >
           {(["all", "admin", "member"] as const).map((r) => (
             <button
@@ -641,9 +821,9 @@ function UsersPanel() {
               type="button"
               onClick={() => setRoleFilter(r)}
               className={
-                "px-3 h-8 sm:h-7 rounded-lg transition-colors " +
+                "h-8 rounded-[var(--radius-control)] px-3 transition-colors " +
                 (roleFilter === r
-                  ? "bg-white/10 text-[var(--fg-0)]"
+                  ? "bg-[var(--bg-3)] text-[var(--fg-0)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]")
               }
             >
@@ -654,7 +834,7 @@ function UsersPanel() {
       </div>
 
       {/* —— 表格 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-2xl overflow-hidden">
+      <div className={tableShellClassName}>
         {q.isLoading && rows.length === 0 ? (
           <ListSkeleton rows={6} />
         ) : q.isError && rows.length === 0 ? (
@@ -697,7 +877,7 @@ function UsersPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.02, 0.2),
                       }}
-                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors"
+                      className="border-t border-[var(--border-subtle)] transition-colors hover:bg-[var(--bg-2)]/60"
                     >
                       <td className="py-3 px-4 text-[var(--fg-0)] break-all">{u.email}</td>
                       <td className="py-3 px-4">
@@ -724,7 +904,7 @@ function UsersPanel() {
               </table>
             </div>
             {/* 移动端卡片列表 */}
-            <ul className="md:hidden divide-y divide-white/5">
+            <ul className="divide-y divide-[var(--border-subtle)] md:hidden">
               {filtered.map((u) => (
                 <li key={u.id} className="p-4 space-y-2">
                   <div className="flex items-start justify-between gap-2">
@@ -761,7 +941,7 @@ function UsersPanel() {
             type="button"
             onClick={() => void q.fetchNextPage()}
             disabled={q.isFetchingNextPage}
-            className="inline-flex items-center gap-1.5 h-9 px-5 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-[var(--border)] text-sm disabled:opacity-50 transition-colors"
+            className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-5 text-sm transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50"
           >
             {q.isFetchingNextPage ? (
               <>
@@ -779,7 +959,7 @@ function UsersPanel() {
 
 function MiniStat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-lg bg-white/[0.03] border border-[var(--border-subtle)] px-2 py-1.5">
+    <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)]/70 px-2 py-1.5">
       <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
@@ -806,10 +986,10 @@ export function ListSkeleton({ rows = 5 }: { rows?: number }) {
           className="flex items-center gap-3 animate-pulse"
           style={{ animationDelay: `${i * 60}ms` }}
         >
-          <div className="h-4 w-1/3 bg-white/5 rounded" />
-          <div className="h-4 w-16 bg-white/5 rounded" />
-          <div className="h-4 flex-1 bg-white/5 rounded" />
-          <div className="h-4 w-20 bg-white/5 rounded" />
+          <div className="h-4 w-1/3 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
+          <div className="h-4 w-16 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
+          <div className="h-4 flex-1 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
+          <div className="h-4 w-20 rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
         </div>
       ))}
     </div>
@@ -827,7 +1007,7 @@ export function EmptyBlock({
 }) {
   return (
     <div className="py-14 flex flex-col items-center gap-3 text-center">
-      <div className="w-12 h-12 rounded-2xl bg-white/5 border border-[var(--border)] flex items-center justify-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-2)]">
         <Inbox className="w-5 h-5 text-[var(--fg-2)]" />
       </div>
       <div>
@@ -858,11 +1038,10 @@ export function ErrorBlock({
         </div>
       </div>
       {onRetry && (
-        /* @hit-area-ok: admin desktop error retry button, desktop-only page */
         <button
           type="button"
           onClick={onRetry}
-          className="h-8 px-3 rounded-lg bg-white/10 hover:bg-white/15 border border-[var(--border-strong)] text-xs transition-colors"
+          className="h-8 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-2)] px-3 text-xs transition-colors hover:bg-[var(--bg-3)]"
         >
           重试
         </button>
@@ -874,14 +1053,14 @@ export function ErrorBlock({
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
+      <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-2 py-0.5 text-xs text-accent">
         <UserCog className="w-3 h-3" />
         管理员
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-[var(--fg-1)] border border-[var(--border)]">
+    <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-xs text-[var(--fg-1)]">
       <UsersIcon className="w-3 h-3" />
       成员
     </span>
