@@ -32,6 +32,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/primitives/Button";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
 import type {
@@ -1071,16 +1072,14 @@ function UploadDialog({
   });
 
   // ESC 关闭 + body lock
+  useBodyScrollLock(true);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
     };
   }, [onClose]);
 
@@ -1347,16 +1346,14 @@ function MobileFilterSheet({
   onClose: () => void;
 }) {
   // ESC 关闭 + body lock
+  useBodyScrollLock(true);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
     };
   }, [onClose]);
 

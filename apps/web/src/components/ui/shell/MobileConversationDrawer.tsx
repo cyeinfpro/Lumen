@@ -42,6 +42,7 @@ import {
 import type { ConversationSummary } from "@/lib/apiClient";
 import { useChatStore } from "@/store/useChatStore";
 import { useHaptic } from "@/hooks/useHaptic";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 import { copy } from "@/lib/copy";
@@ -168,14 +169,7 @@ export function MobileConversationDrawer({
   }, [open, onClose]);
 
   // ── body scroll lock ──
-  useEffect(() => {
-    if (!open) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, [open]);
+  useBodyScrollLock(open);
 
   // ── infinite scroll sentinel ──
   const sentinelRef = useRef<HTMLDivElement | null>(null);

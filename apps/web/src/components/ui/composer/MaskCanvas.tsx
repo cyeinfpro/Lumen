@@ -15,6 +15,7 @@ import { Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 
 import { MaskBoard, type MaskBoardHandle, type MaskExport } from "../inpaint/MaskBoard";
@@ -55,6 +56,7 @@ function MaskCanvasInner({
 
   // ———— Esc 关闭 + body 滚动锁 ————
   const submittingRef = useRef(submitting);
+  useBodyScrollLock(true);
   useEffect(() => {
     submittingRef.current = submitting;
   }, [submitting]);
@@ -66,11 +68,8 @@ function MaskCanvasInner({
       }
     };
     document.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prev;
     };
   }, [onClose]);
 

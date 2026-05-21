@@ -57,7 +57,6 @@ import {
   ApiError,
   checkAdminUpdate,
   getAdminContextHealth,
-  type AdminUpdateCheckOut,
   type AdminUpdateStatusOut,
   type AdminUpdateVersionOut,
   type ReleaseInfo,
@@ -691,6 +690,18 @@ const GROUPS: {
   },
 ];
 
+const GROUP_NAV_SECTIONS: {
+  label: string;
+  ids: FilterId[];
+}[] = [
+  { label: "核心", ids: ["all", "image", "upstream", "providers", "site"] },
+  {
+    label: "上下文",
+    ids: ["context_auto", "context_caption", "context_manual"],
+  },
+  { label: "运维", ids: ["library", "update", "advanced"] },
+];
+
 const SETTINGS_SKELETON_KEYS = [
   "settings-skeleton-summary",
   "settings-skeleton-image",
@@ -1176,83 +1187,6 @@ export function SettingsPanel() {
       </AnimatePresence>
 
       <SettingsSectionHeader
-        icon={Activity}
-        title="运行状态与版本"
-        description="这一组是只读状态和即时运维操作，不需要通过底部保存条提交。"
-        badge="即时生效"
-      />
-
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
-        <ContextHealthBlock
-          loading={contextHealthQ.isLoading}
-          error={contextHealthQ.error}
-          onRetry={() => void contextHealthQ.refetch()}
-          data={contextHealthQ.data}
-        />
-        <div className="space-y-4">
-          <UpdateAvailableCard
-            check={updateCheckQ.data}
-            status={updateStatusQ.data}
-            version={updateVersionQ.data}
-            checking={updateCheckQ.isLoading || manualCheckPending}
-            triggering={triggerUpdateMut.isPending || rollbackMut.isPending || previousRollbackMut.isPending}
-            onCheck={(force) => {
-              void runUpdateCheck(force);
-            }}
-            onTrigger={() => {
-              setUpdateBanner(null);
-              clearLogs();
-              triggerUpdateMut.mutate({
-                target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
-                channel: updateCheckQ.data?.channel ?? undefined,
-                force_redeploy: false,
-              });
-            }}
-            onRollbackPrevious={() => {
-              setUpdateBanner(null);
-              clearLogs();
-              previousRollbackMut.mutate();
-            }}
-          />
-
-          <LumenUpdateBlock
-            status={updateStatusQ.data}
-            loading={updateStatusQ.isLoading}
-            error={updateStatusQ.error}
-            triggering={triggerUpdateMut.isPending}
-            banner={updateBanner}
-            releases={releasesQ.data}
-            releasesLoading={releasesQ.isLoading}
-            releasesError={releasesQ.error}
-            rollbackPendingId={
-              rollbackMut.isPending ? rollbackMut.variables ?? null : null
-            }
-            logBuffer={logBuffer}
-            streamStatus={streamStatus}
-            onTrigger={() => {
-              setUpdateBanner(null);
-              clearLogs();
-              triggerUpdateMut.mutate({
-                target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
-                channel: updateCheckQ.data?.channel ?? undefined,
-                force_redeploy: false,
-              });
-            }}
-            onRefresh={() => {
-              void updateStatusQ.refetch();
-              void releasesQ.refetch();
-            }}
-            onRollback={(releaseId) => {
-              setUpdateBanner(null);
-              clearLogs();
-              rollbackMut.mutate(releaseId);
-            }}
-            onClearBanner={() => setUpdateBanner(null)}
-          />
-        </div>
-      </div>
-
-      <SettingsSectionHeader
         icon={SlidersHorizontal}
         title="配置项"
         description="按业务场景分组编辑。左侧选分类，右侧只显示相关设置。"
@@ -1332,6 +1266,98 @@ export function SettingsPanel() {
               ))}
             </div>
           )}
+        </div>
+      </div>
+
+      <SettingsSectionHeader
+        icon={Activity}
+        title="运行状态与版本"
+        description="即时运维操作默认收起，日常调设置时不用被日志和发布历史打断。"
+        badge="即时生效"
+      />
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.84fr)_minmax(0,1.16fr)]">
+        <ContextHealthBlock
+          loading={contextHealthQ.isLoading}
+          error={contextHealthQ.error}
+          onRetry={() => void contextHealthQ.refetch()}
+          data={contextHealthQ.data}
+        />
+        <div className="space-y-3">
+          <UpdateAvailableCard
+            check={updateCheckQ.data}
+            status={updateStatusQ.data}
+            version={updateVersionQ.data}
+            checking={updateCheckQ.isLoading || manualCheckPending}
+            triggering={triggerUpdateMut.isPending || rollbackMut.isPending || previousRollbackMut.isPending}
+            compact
+            showRollbackPrevious={false}
+            onCheck={(force) => {
+              void runUpdateCheck(force);
+            }}
+            onTrigger={() => {
+              setUpdateBanner(null);
+              clearLogs();
+              triggerUpdateMut.mutate({
+                target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
+                channel: updateCheckQ.data?.channel ?? undefined,
+                force_redeploy: false,
+              });
+            }}
+            onRollbackPrevious={() => {
+              setUpdateBanner(null);
+              clearLogs();
+              previousRollbackMut.mutate();
+            }}
+          />
+
+          <LumenUpdateBlock
+            status={updateStatusQ.data}
+            loading={updateStatusQ.isLoading}
+            error={updateStatusQ.error}
+            triggering={
+              triggerUpdateMut.isPending ||
+              rollbackMut.isPending ||
+              previousRollbackMut.isPending
+            }
+            banner={updateBanner}
+            releases={releasesQ.data}
+            releasesLoading={releasesQ.isLoading}
+            releasesError={releasesQ.error}
+            rollbackPendingId={
+              previousRollbackMut.isPending
+                ? "__previous__"
+                : rollbackMut.isPending
+                  ? rollbackMut.variables ?? null
+                  : null
+            }
+            logBuffer={logBuffer}
+            streamStatus={streamStatus}
+            onTrigger={() => {
+              setUpdateBanner(null);
+              clearLogs();
+              triggerUpdateMut.mutate({
+                target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
+                channel: updateCheckQ.data?.channel ?? undefined,
+                force_redeploy: false,
+              });
+            }}
+            onRefresh={() => {
+              void updateStatusQ.refetch();
+              void releasesQ.refetch();
+            }}
+            onRollbackPrevious={() => {
+              setUpdateBanner(null);
+              clearLogs();
+              previousRollbackMut.mutate();
+            }}
+            onRollback={(releaseId) => {
+              setUpdateBanner(null);
+              clearLogs();
+              rollbackMut.mutate(releaseId);
+            }}
+            onClearBanner={() => setUpdateBanner(null)}
+          />
         </div>
       </div>
 
@@ -1487,50 +1513,70 @@ function SettingsGroupNav({
   onChange: (group: FilterId) => void;
 }) {
   return (
-    <div className="space-y-1" aria-label="系统设置分类">
-      {GROUPS.map((group) => {
-        const count = group.id === "all" ? totalCount : groupCounts[group.id] ?? 0;
-        if (group.id !== "all" && count === 0) return null;
-        const active = activeGroup === group.id;
-        const Icon = group.icon;
+    <div className="space-y-3" aria-label="系统设置分类">
+      {GROUP_NAV_SECTIONS.map((section) => {
+        const groupsInSection = section.ids
+          .map((id) => GROUPS.find((group) => group.id === id))
+          .filter((group): group is (typeof GROUPS)[number] => {
+            if (!group) return false;
+            const count =
+              group.id === "all" ? totalCount : groupCounts[group.id] ?? 0;
+            return group.id === "all" || count > 0;
+          });
+        if (groupsInSection.length === 0) return null;
         return (
-          <button
-            key={group.id}
-            type="button"
-            onClick={() => onChange(group.id)}
-            className={cn(
-              "flex min-h-[44px] w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-left transition-colors",
-              active
-                ? "border-accent-border bg-accent-soft text-[var(--fg-0)]"
-                : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)]",
-            )}
-            title={group.description}
-          >
-            <Icon
-              className={cn(
-                "h-3.5 w-3.5 shrink-0",
-                active ? "text-accent" : "text-[var(--fg-2)]",
-              )}
-            />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate type-caption text-current">
-                {group.label}
-              </span>
-              <span className="mt-0.5 block truncate text-[11px] leading-4 text-[var(--fg-2)]">
-                {group.description}
-              </span>
-            </span>
-            <span
-              className={cn(
-                "shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[10px]",
-                active
-                  ? "border-accent-border bg-[var(--bg-0)]/35 text-accent"
-                  : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
-              )}
-            >
-              {count}
-            </span>
-          </button>
+          <div key={section.label}>
+            <p className="mb-1.5 px-2 text-[10px] font-medium uppercase tracking-[0.08em] text-[var(--fg-3)]">
+              {section.label}
+            </p>
+            <div className="space-y-1">
+              {groupsInSection.map((group) => {
+                const count =
+                  group.id === "all" ? totalCount : groupCounts[group.id] ?? 0;
+                const active = activeGroup === group.id;
+                const Icon = group.icon;
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    onClick={() => onChange(group.id)}
+                    className={cn(
+                      "flex min-h-[40px] w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-1.5 text-left transition-colors",
+                      active
+                        ? "border-accent-border bg-accent-soft text-[var(--fg-0)]"
+                        : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)]",
+                    )}
+                    title={group.description}
+                  >
+                    <Icon
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0",
+                        active ? "text-accent" : "text-[var(--fg-2)]",
+                      )}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate type-caption text-current">
+                        {group.label}
+                      </span>
+                      <span className="mt-0.5 hidden truncate text-[11px] leading-4 text-[var(--fg-2)] xl:block">
+                        {group.description}
+                      </span>
+                    </span>
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[10px]",
+                        active
+                          ? "border-accent-border bg-[var(--bg-0)]/35 text-accent"
+                          : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
+                      )}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         );
       })}
     </div>
@@ -2611,6 +2657,7 @@ interface LumenUpdateBlockProps {
   streamStatus: AdminStreamStatus;
   onTrigger: () => void;
   onRefresh: () => void;
+  onRollbackPrevious: () => void;
   onRollback: (releaseId: string) => void;
   onClearBanner: () => void;
 }
@@ -2629,6 +2676,7 @@ function LumenUpdateBlock({
   streamStatus,
   onTrigger,
   onRefresh,
+  onRollbackPrevious,
   onRollback,
   onClearBanner,
 }: LumenUpdateBlockProps) {
@@ -2688,6 +2736,11 @@ function LumenUpdateBlock({
   const onLogToggle = useCallback(() => {
     setUserLogOpen((prev) => !(prev ?? running));
   }, [running]);
+  const [userDetailsOpen, setUserDetailsOpen] = useState<boolean | null>(null);
+  const detailsOpen = userDetailsOpen ?? (running || failed);
+  const onDetailsToggle = useCallback(() => {
+    setUserDetailsOpen((prev) => !(prev ?? (running || failed)));
+  }, [failed, running]);
 
   // 更新成功完成后倒计时自动刷新页面（让用户看到新版本前端 bundle 生效）。
   // 失败时不自动刷新，让用户能停留看 checklist / log。
@@ -2758,23 +2811,67 @@ function LumenUpdateBlock({
       : null);
 
   return (
-    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)] backdrop-blur-sm">
-      {/* —— 顶部状态条 —— */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-3 shadow-[var(--shadow-1)] backdrop-blur-sm">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="flex min-w-0 gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-accent-border bg-accent-soft">
-            <Rocket className="h-4 w-4 text-[var(--color-lumen-amber)]" />
+          <div
+            className={cn(
+              "flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
+              running
+                ? "border-info-border bg-info-soft"
+                : failed
+                  ? "border-danger-border bg-danger-soft"
+                  : "border-[var(--border)] bg-[var(--bg-2)]",
+            )}
+          >
+            {running ? (
+              <Loader2 className="h-4 w-4 animate-spin text-info" />
+            ) : failed ? (
+              <X className="h-4 w-4 text-danger" />
+            ) : (
+              <Terminal className="h-4 w-4 text-[var(--fg-2)]" />
+            )}
           </div>
           <div className="min-w-0">
-            <h3 className="type-card-title text-sm">
-              一键更新 Lumen
-            </h3>
-            <p className="mt-1 type-caption text-[var(--fg-2)]">
-              后台执行更新脚本，失败可在下方 release 历史里回滚到旧版本。
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="type-card-title text-sm">更新控制台</h3>
+              <span
+                className={cn(
+                  "rounded-[var(--radius-control)] border px-2 py-0.5 text-[11px]",
+                  running
+                    ? isRollingBack
+                      ? "border-warning-border bg-warning-soft text-warning"
+                      : "border-info-border bg-info-soft text-info"
+                    : failed
+                      ? "border-danger-border bg-danger-soft text-danger"
+                      : phases.length > 0
+                        ? "border-success-border bg-success-soft text-success"
+                        : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
+                )}
+              >
+                {running
+                  ? isRollingBack
+                    ? "回滚运行中"
+                    : "更新运行中"
+                  : failed
+                    ? "上次失败"
+                    : phases.length > 0
+                      ? "上次完成"
+                      : "空闲"}
+              </span>
+            </div>
+            <p className="mt-1 truncate type-caption text-[var(--fg-2)]">
+              {running
+                ? `${runningTarget} · ${phaseLabel(activePhase?.phase ?? "")}`
+                : failed
+                  ? `失败于 ${phaseLabel(activePhase?.phase ?? "")}`
+                  : status?.started_at
+                    ? `最近任务 ${formatDateTime(status.started_at)}`
+                    : "步骤、实时输出和 release 历史已收起。"}
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 md:justify-end">
           <Button
             variant="secondary"
             size="sm"
@@ -2783,48 +2880,36 @@ function LumenUpdateBlock({
             loading={loading}
             leftIcon={!loading ? <RotateCcw className="h-3.5 w-3.5" /> : undefined}
           >
-            刷新状态
+            刷新
           </Button>
           <Button
-            variant="primary"
+            variant="secondary"
             size="sm"
-            onClick={onTrigger}
+            onClick={onRollbackPrevious}
             disabled={disabled}
-            loading={triggering || running}
-            leftIcon={!(triggering || running) ? <Rocket className="h-3.5 w-3.5" /> : undefined}
+            loading={isRollingBack}
+            leftIcon={!isRollingBack ? <Undo2 className="h-3.5 w-3.5" /> : undefined}
           >
-            {triggering || running ? "更新中" : "一键更新"}
+            回滚上一版
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onDetailsToggle}
+            leftIcon={
+              detailsOpen ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )
+            }
+          >
+            {detailsOpen ? "收起详情" : "查看详情"}
           </Button>
         </div>
       </div>
 
-      {/* —— 状态徽章 —— */}
-      <div className="mt-4 flex flex-wrap gap-2 text-xs">
-        <span
-          className={cn(
-            "rounded-[var(--radius-control)] border px-2 py-1",
-            running
-              ? isRollingBack
-                ? "border-warning-border bg-warning-soft text-warning"
-                : "border-info-border bg-info-soft text-info"
-              : failed
-                ? "border-danger-border bg-danger-soft text-danger"
-                : "border-success-border bg-success-soft text-success",
-          )}
-        >
-          {running
-            ? `${isRollingBack ? "回滚运行中" : "更新运行中"} · ${runningTarget}`
-            : failed
-              ? "上次任务失败"
-              : phases.length > 0
-                ? "上次任务完成"
-                : "当前没有更新任务"}
-        </span>
-        {status?.started_at && (
-          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[var(--fg-1)]">
-            启动时间 {formatDateTime(status.started_at)}
-          </span>
-        )}
+      <div className="mt-3 flex flex-wrap gap-2 text-xs">
         {running && (
           <span
             className={cn(
@@ -2848,6 +2933,16 @@ function LumenUpdateBlock({
                   : streamStatus === "error"
                     ? "重连中"
                     : "未连接"}
+          </span>
+        )}
+        {phases.length > 0 && (
+          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[var(--fg-1)]">
+            步骤 {completedCount}/{totalCount}
+          </span>
+        )}
+        {logBuffer.length > 0 && (
+          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 font-mono text-[var(--fg-2)]">
+            log {logBuffer.length}
           </span>
         )}
       </div>
@@ -2882,19 +2977,16 @@ function LumenUpdateBlock({
         </div>
       )}
 
-      {/* —— 完成后自动刷新倒计时 —— */}
       {reloadCountdown != null && (
         <div className="mt-3 flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-3 py-2.5 type-body-sm text-success">
           <div className="flex min-w-0 items-center gap-2">
             <Check className="h-4 w-4 shrink-0 text-success" />
             <span className="min-w-0">
-              更新成功 ·{" "}
-              <span className="font-mono">{reloadCountdown}s</span>{" "}
+              更新成功 · <span className="font-mono">{reloadCountdown}s</span>{" "}
               后自动刷新页面以加载新版本
             </span>
           </div>
           <div className="flex shrink-0 gap-1.5">
-            {/* 24px 紧凑内联按钮，复用 Button 会过宽 */}
             <button
               type="button"
               onClick={cancelReload}
@@ -2913,166 +3005,158 @@ function LumenUpdateBlock({
         </div>
       )}
 
-      {/* —— 当前 phase 高亮 + 进度条（运行时最直观的"在哪一步") —— */}
-      {(running || (phases.length > 0 && !running)) && (
-        <div className="mt-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 p-3">
-          <div className="flex items-center gap-3">
+      {(running || phases.length > 0) && (
+        <div className="mt-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="truncate text-xs font-medium text-[var(--fg-1)]">
+              {running
+                ? `正在执行：${phaseLabel(activePhase?.phase ?? "")}`
+                : failed
+                  ? `失败于：${phaseLabel(activePhase?.phase ?? "")}`
+                  : "更新已完成"}
+            </span>
+            <span className="shrink-0 font-mono text-[11px] text-[var(--fg-2)]">
+              {progressPct}%
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
             <div
               className={cn(
-                "flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
-                running
-                  ? "border-info-border bg-info-soft"
-                  : failed
-                    ? "border-danger-border bg-danger-soft"
-                    : "border-success-border bg-success-soft",
+                "h-full transition-[width] duration-500 ease-out",
+                failed ? "bg-danger/80" : running ? "bg-info/80" : "bg-success/80",
               )}
-              aria-hidden="true"
-            >
-              {running ? (
-                <Loader2 className="h-4 w-4 animate-spin text-info" />
-              ) : failed ? (
-                <X className="h-4 w-4 text-danger" />
-              ) : (
-                <Check className="h-4 w-4 text-success" />
-              )}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="truncate text-sm font-medium text-[var(--fg-0)]">
-                  {running
-                    ? `正在执行：${phaseLabel(activePhase?.phase ?? "")}`
-                    : failed
-                      ? `失败于：${phaseLabel(activePhase?.phase ?? "")}`
-                      : "更新已完成"}
-                </span>
-                <span className="shrink-0 font-mono text-[11px] text-[var(--fg-2)]">
-                  {completedCount}/{totalCount}
-                </span>
-              </div>
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
-                <div
-                  className={cn(
-                    "h-full transition-[width] duration-500 ease-out",
-                    failed
-                      ? "bg-danger/80"
-                      : running
-                        ? "bg-info/80"
-                        : "bg-success/80",
-                  )}
-                  style={{ width: `${progressPct}%` }}
-                />
-              </div>
-              {running && activePhase?.info && Object.keys(activePhase.info).length > 0 && (
-                <div className="mt-2 truncate text-[11px] text-[var(--fg-2)]">
-                  {Object.entries(activePhase.info)
-                    .slice(-1)
-                    .map(([k, v]) => `${k} = ${v}`)
-                    .join(" · ")}
-                </div>
-              )}
-            </div>
+              style={{ width: `${progressPct}%` }}
+            />
           </div>
         </div>
       )}
 
-      {/* —— Step Checklist —— */}
-      <div className="mt-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60">
-        <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-3 py-2">
-          <span className="text-xs font-medium text-[var(--fg-1)]">执行步骤</span>
-          {phases.length > 0 && (
-            <span className="text-[11px] text-[var(--fg-2)]">
-              {completedCount} /{" "}
-              {totalCount} 完成
-            </span>
-          )}
-        </div>
-        <ol className="divide-y divide-[var(--border-subtle)]">
-          {checklist.map((phase) => (
-            <PhaseRow key={phase} phase={phase} record={phaseByName.get(phase)} />
-          ))}
-        </ol>
-      </div>
+      <AnimatePresence initial={false}>
+        {detailsOpen && (
+          <motion.div
+            key="update-details"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.18 }}
+            className="overflow-hidden"
+          >
+            <div className="mt-4 space-y-4 border-t border-[var(--border-subtle)] pt-4">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={onTrigger}
+                  disabled={disabled}
+                  loading={triggering || running}
+                  leftIcon={
+                    !(triggering || running) ? (
+                      <Rocket className="h-3.5 w-3.5" />
+                    ) : undefined
+                  }
+                >
+                  {triggering || running ? "更新中" : "运行更新脚本"}
+                </Button>
+              </div>
 
-      {/* —— 实时 Log —— */}
-      <div className="mt-3">
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={onLogToggle}
-          leftIcon={<Terminal className="h-3.5 w-3.5" />}
-          rightIcon={
-            logBuffer.length > 0 ? (
-              <span className="rounded-full bg-[var(--bg-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-2)]">
-                {logBuffer.length}
-              </span>
-            ) : undefined
-          }
-        >
-          {logOpen ? "收起实时输出" : "查看实时输出"}
-        </Button>
-        <AnimatePresence initial={false}>
-          {logOpen && (
-            <motion.div
-              key="log-panel"
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ duration: 0.18 }}
-              className="overflow-hidden"
-            >
-              <pre
-                ref={logRef}
-                onScroll={onLogScroll}
-                className="mt-2 max-h-72 overflow-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 font-mono text-[11px] leading-5 text-[var(--fg-1)]"
-              >
-                {logBuffer.length > 0
-                  ? logBuffer.join("\n")
-                  : status?.log_tail
-                    ? status.log_tail
-                    : "（暂无输出）"}
-              </pre>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+              <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60">
+                <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-3 py-2">
+                  <span className="text-xs font-medium text-[var(--fg-1)]">执行步骤</span>
+                  {phases.length > 0 && (
+                    <span className="text-[11px] text-[var(--fg-2)]">
+                      {completedCount} / {totalCount} 完成
+                    </span>
+                  )}
+                </div>
+                <ol className="divide-y divide-[var(--border-subtle)]">
+                  {checklist.map((phase) => (
+                    <PhaseRow key={phase} phase={phase} record={phaseByName.get(phase)} />
+                  ))}
+                </ol>
+              </div>
 
-      {/* —— Release 历史 —— */}
-      <div className="mt-5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60">
-        <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
-          <History className="h-3.5 w-3.5 text-[var(--fg-2)]" />
-          <span className="text-xs font-medium text-[var(--fg-1)]">Release 历史</span>
-          <span className="text-[11px] text-[var(--fg-2)]">最近 10 个版本</span>
-        </div>
-        {releasesError ? (
-          <p role="alert" className="px-3 py-3 type-caption text-danger">
-            读取 release 列表失败：{releasesError.message}
-          </p>
-        ) : releasesLoading && !releases ? (
-          <div className="space-y-1.5 p-3">
-            {[0, 1, 2].map((i) => (
-              <div
-                key={i}
-                className="h-10 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]"
-                style={{ animationDelay: `${i * 60}ms` }}
-              />
-            ))}
-          </div>
-        ) : !releases || releases.length === 0 ? (
-          <p className="px-3 py-3 text-xs text-[var(--fg-2)]">暂无 release 记录。</p>
-        ) : (
-          <ul className="divide-y divide-[var(--border-subtle)]">
-            {releases.map((r) => (
-              <ReleaseRow
-                key={r.id}
-                release={r}
-                rollingBack={rollbackPendingId === r.id}
-                disabled={disabled}
-                onRollback={() => setPendingRollback(r)}
-              />
-            ))}
-          </ul>
+              <div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={onLogToggle}
+                  leftIcon={<Terminal className="h-3.5 w-3.5" />}
+                  rightIcon={
+                    logBuffer.length > 0 ? (
+                      <span className="rounded-full bg-[var(--bg-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-2)]">
+                        {logBuffer.length}
+                      </span>
+                    ) : undefined
+                  }
+                >
+                  {logOpen ? "收起实时输出" : "查看实时输出"}
+                </Button>
+                <AnimatePresence initial={false}>
+                  {logOpen && (
+                    <motion.div
+                      key="log-panel"
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      transition={{ duration: 0.18 }}
+                      className="overflow-hidden"
+                    >
+                      <pre
+                        ref={logRef}
+                        onScroll={onLogScroll}
+                        className="mt-2 max-h-72 overflow-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 font-mono text-[11px] leading-5 text-[var(--fg-1)]"
+                      >
+                        {logBuffer.length > 0
+                          ? logBuffer.join("\n")
+                          : status?.log_tail
+                            ? status.log_tail
+                            : "（暂无输出）"}
+                      </pre>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60">
+                <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
+                  <History className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+                  <span className="text-xs font-medium text-[var(--fg-1)]">Release 历史</span>
+                  <span className="text-[11px] text-[var(--fg-2)]">最近 10 个版本</span>
+                </div>
+                {releasesError ? (
+                  <p role="alert" className="px-3 py-3 type-caption text-danger">
+                    读取 release 列表失败：{releasesError.message}
+                  </p>
+                ) : releasesLoading && !releases ? (
+                  <div className="space-y-1.5 p-3">
+                    {[0, 1, 2].map((i) => (
+                      <div
+                        key={i}
+                        className="h-10 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]"
+                        style={{ animationDelay: `${i * 60}ms` }}
+                      />
+                    ))}
+                  </div>
+                ) : !releases || releases.length === 0 ? (
+                  <p className="px-3 py-3 text-xs text-[var(--fg-2)]">暂无 release 记录。</p>
+                ) : (
+                  <ul className="divide-y divide-[var(--border-subtle)]">
+                    {releases.map((r) => (
+                      <ReleaseRow
+                        key={r.id}
+                        release={r}
+                        rollingBack={rollbackPendingId === r.id}
+                        disabled={disabled}
+                        onRollback={() => setPendingRollback(r)}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </motion.div>
         )}
-      </div>
+      </AnimatePresence>
 
       <ConfirmDialog
         open={pendingRollback != null}
@@ -3161,7 +3245,7 @@ function PhaseRow({
           </span>
           <span className="font-mono text-[10px] text-[var(--fg-3)]">{phase}</span>
           {isFailed && rc != null && (
-            <span className="rounded-md border border-danger-border bg-danger-soft px-1.5 py-0.5 font-mono text-[10px] text-danger">
+            <span className="rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-1.5 py-0.5 font-mono text-[10px] text-danger">
               rc={rc}
             </span>
           )}
@@ -3206,7 +3290,7 @@ function ReleaseRow({
             {shortReleaseId(release.id)}
           </span>
           {release.is_current && (
-            <span className="rounded-md border border-success-border bg-success-soft px-1.5 py-0.5 text-[10px] text-success">
+            <span className="rounded-[var(--radius-control)] border border-success-border bg-success-soft px-1.5 py-0.5 text-[10px] text-success">
               当前
             </span>
           )}

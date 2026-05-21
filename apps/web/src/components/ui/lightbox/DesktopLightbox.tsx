@@ -49,6 +49,7 @@ import { cn } from "@/lib/utils";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { Tooltip } from "@/components/ui/primitives/Tooltip";
 import { useCreateShareMutation } from "@/lib/queries";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { LightboxDetailsContent } from "./LightboxDetailsContent";
 
 const RESET_PAN_OFFSET = { x: 0, y: 0 };
@@ -1143,21 +1144,10 @@ export function DesktopLightbox() {
   }, [clampPanForCurrentView, lightbox.open, updateImageState]);
 
   // body scroll lock：打开期间禁止背景滚动，关闭时还原
-  useEffect(() => {
-    if (!lightbox.open) return;
-    const { body, documentElement } = document;
-    const prevBodyOverflow = body.style.overflow;
-    const prevBodyOverscroll = body.style.overscrollBehavior;
-    const prevDocOverscroll = documentElement.style.overscrollBehavior;
-    document.body.style.overflow = "hidden";
-    body.style.overscrollBehavior = "contain";
-    documentElement.style.overscrollBehavior = "contain";
-    return () => {
-      body.style.overflow = prevBodyOverflow;
-      body.style.overscrollBehavior = prevBodyOverscroll;
-      documentElement.style.overscrollBehavior = prevDocOverscroll;
-    };
-  }, [lightbox.open]);
+  useBodyScrollLock(lightbox.open, {
+    bodyOverscrollBehavior: "contain",
+    documentOverscrollBehavior: "contain",
+  });
 
   // 触摸手势：
   // - 1 指（zoom=1）：水平 swipe 翻页 / 下拉关闭

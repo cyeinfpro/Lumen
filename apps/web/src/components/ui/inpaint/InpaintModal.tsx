@@ -28,6 +28,7 @@ import {
 
 import { Button, IconButton, Textarea, Tooltip } from "@/components/ui/primitives";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { logError } from "@/lib/logger";
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
 import { nearestAspectRatio } from "@/lib/sizing";
@@ -100,6 +101,7 @@ function InpaintModalInner() {
     null,
   );
   const submittingRef = useRef(submitting);
+  useBodyScrollLock(true);
   useEffect(() => {
     submittingRef.current = submitting;
   }, [submitting]);
@@ -135,9 +137,6 @@ function InpaintModalInner() {
 
   // ———— body 滚动锁 + main inert（无障碍：辅助技术不会跳到背景） ————
   useEffect(() => {
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
     const mainEls = Array.from(document.querySelectorAll("main"));
     const restore: Array<() => void> = [];
     for (const el of mainEls) {
@@ -154,7 +153,6 @@ function InpaintModalInner() {
     }
 
     return () => {
-      document.body.style.overflow = prevOverflow;
       restore.forEach((f) => f());
     };
   }, []);
