@@ -697,6 +697,11 @@ const SETTINGS_SKELETON_KEYS = [
   "settings-skeleton-context",
 ] as const;
 
+const settingInputClassName =
+  "h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 text-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-accent-border focus:ring-2 focus:ring-accent/20";
+
+const settingMonoInputClassName = `${settingInputClassName} font-mono`;
+
 export function SettingsPanel() {
   const queryClient = useQueryClient();
   const q = useSystemSettingsQuery();
@@ -1125,56 +1130,12 @@ export function SettingsPanel() {
   };
 
   return (
-    <section className="space-y-5 pb-24">
-      <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/70 p-4 shadow-[var(--shadow-2)] backdrop-blur-sm md:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex min-w-0 items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
-              <SlidersHorizontal className="h-4 w-4 text-[var(--color-lumen-amber)]" />
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-base font-semibold text-[var(--fg-0)]">
-                系统设置
-              </h2>
-              <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-                这些设置会影响图片生成、上游请求和长对话处理。保存后通常几秒内对 API 和 Worker 生效。
-              </p>
-            </div>
-          </div>
-          <div className="inline-flex w-fit items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-neutral-300">
-            <Database className="h-3.5 w-3.5 text-neutral-500" />
-            数据库设置优先生效
-          </div>
-        </div>
-
-        <div className="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-          <OverviewMetric
-            icon={Bot}
-            label="默认模型"
-            value={overview.defaultModelLabel}
-          />
-          <OverviewMetric
-            icon={ImageIcon}
-            label="生图引擎"
-            value={overview.engineLabel}
-          />
-          <OverviewMetric
-            icon={Activity}
-            label="异步通道"
-            value={overview.channelLabel}
-          />
-          <OverviewMetric
-            icon={ImageIcon}
-            label="输出格式"
-            value={overview.formatLabel}
-          />
-          <OverviewMetric
-            icon={BrainCircuit}
-            label="自动压缩"
-            value={overview.compressionLabel}
-          />
-        </div>
-      </div>
+    <section className="space-y-6 pb-24">
+      <SettingsOverviewCard
+        overview={overview}
+        dirtyCount={dirtyCount}
+        visibleCount={visibleItems.length}
+      />
 
       <AnimatePresence>
         {normalizeImageEngine(imageEngine) === "dual_race" && (
@@ -1182,6 +1143,7 @@ export function SettingsPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
+            role="alert"
             className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-danger"
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1193,6 +1155,7 @@ export function SettingsPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
+            role="alert"
             className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-danger"
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1204,6 +1167,7 @@ export function SettingsPanel() {
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
+            role="status"
             className="flex items-center gap-2 rounded-[var(--radius-card)] border border-success-border bg-success-soft px-4 py-3 type-body-sm text-success"
           >
             <Check className="h-4 w-4" /> {copy.state.saved}
@@ -1211,175 +1175,165 @@ export function SettingsPanel() {
         )}
       </AnimatePresence>
 
-      <ContextHealthBlock
-        loading={contextHealthQ.isLoading}
-        error={contextHealthQ.error}
-        onRetry={() => void contextHealthQ.refetch()}
-        data={contextHealthQ.data}
+      <SettingsSectionHeader
+        icon={Activity}
+        title="运行状态与版本"
+        description="这一组是只读状态和即时运维操作，不需要通过底部保存条提交。"
+        badge="即时生效"
       />
 
-      <UpdateAvailableCard
-        check={updateCheckQ.data}
-        status={updateStatusQ.data}
-        version={updateVersionQ.data}
-        checking={updateCheckQ.isLoading || manualCheckPending}
-        triggering={triggerUpdateMut.isPending || rollbackMut.isPending || previousRollbackMut.isPending}
-        onCheck={(force) => {
-          void runUpdateCheck(force);
-        }}
-        onTrigger={() => {
-          setUpdateBanner(null);
-          clearLogs();
-          triggerUpdateMut.mutate({
-            target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
-            channel: updateCheckQ.data?.channel ?? undefined,
-            force_redeploy: false,
-          });
-        }}
-        onRollbackPrevious={() => {
-          setUpdateBanner(null);
-          clearLogs();
-          previousRollbackMut.mutate();
-        }}
-      />
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
+        <ContextHealthBlock
+          loading={contextHealthQ.isLoading}
+          error={contextHealthQ.error}
+          onRetry={() => void contextHealthQ.refetch()}
+          data={contextHealthQ.data}
+        />
+        <div className="space-y-4">
+          <UpdateAvailableCard
+            check={updateCheckQ.data}
+            status={updateStatusQ.data}
+            version={updateVersionQ.data}
+            checking={updateCheckQ.isLoading || manualCheckPending}
+            triggering={triggerUpdateMut.isPending || rollbackMut.isPending || previousRollbackMut.isPending}
+            onCheck={(force) => {
+              void runUpdateCheck(force);
+            }}
+            onTrigger={() => {
+              setUpdateBanner(null);
+              clearLogs();
+              triggerUpdateMut.mutate({
+                target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
+                channel: updateCheckQ.data?.channel ?? undefined,
+                force_redeploy: false,
+              });
+            }}
+            onRollbackPrevious={() => {
+              setUpdateBanner(null);
+              clearLogs();
+              previousRollbackMut.mutate();
+            }}
+          />
 
-      <LumenUpdateBlock
-        status={updateStatusQ.data}
-        loading={updateStatusQ.isLoading}
-        error={updateStatusQ.error}
-        triggering={triggerUpdateMut.isPending}
-        banner={updateBanner}
-        releases={releasesQ.data}
-        releasesLoading={releasesQ.isLoading}
-        releasesError={releasesQ.error}
-        rollbackPendingId={
-          rollbackMut.isPending ? rollbackMut.variables ?? null : null
-        }
-        logBuffer={logBuffer}
-        streamStatus={streamStatus}
-        onTrigger={() => {
-          setUpdateBanner(null);
-          clearLogs();
-          triggerUpdateMut.mutate({
-            target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
-            channel: updateCheckQ.data?.channel ?? undefined,
-            force_redeploy: false,
-          });
-        }}
-        onRefresh={() => {
-          void updateStatusQ.refetch();
-          void releasesQ.refetch();
-        }}
-        onRollback={(releaseId) => {
-          setUpdateBanner(null);
-          clearLogs();
-          rollbackMut.mutate(releaseId);
-        }}
-        onClearBanner={() => setUpdateBanner(null)}
-      />
-
-      <div className="space-y-3">
-        <div className="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
-          <div className="inline-flex min-w-max items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] p-1">
-            {GROUPS.map((group) => {
-              const active = activeGroup === group.id;
-              const Icon = group.icon;
-              const count =
-                group.id === "all" ? visibleItems.length : groupCounts[group.id] ?? 0;
-              if (group.id !== "all" && count === 0) return null;
-              return (
-                <button
-                  key={group.id}
-                  type="button"
-                  onClick={() => setActiveGroup(group.id)}
-                  className={cn(
-                    "inline-flex min-h-[36px] cursor-pointer items-center gap-1.5 rounded-full px-3 text-xs transition-colors",
-                    active
-                      ? "bg-[var(--color-lumen-amber)] text-black"
-                      : "text-neutral-400 hover:bg-white/8 hover:text-neutral-200",
-                  )}
-                  title={group.description}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  <span>{group.label}</span>
-                  <span
-                    className={cn(
-                      "rounded-full px-1.5 py-0.5 font-mono text-[10px]",
-                      active ? "bg-black/10" : "bg-white/8 text-neutral-500",
-                    )}
-                  >
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <label className="relative block md:w-80">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜索设置、说明或技术名"
-              className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/70 pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
-            />
-          </label>
-          <p className="text-xs text-neutral-500">
-            当前显示 {visibleCount} 项，已修改 {dirtyCount} 项
-          </p>
+          <LumenUpdateBlock
+            status={updateStatusQ.data}
+            loading={updateStatusQ.isLoading}
+            error={updateStatusQ.error}
+            triggering={triggerUpdateMut.isPending}
+            banner={updateBanner}
+            releases={releasesQ.data}
+            releasesLoading={releasesQ.isLoading}
+            releasesError={releasesQ.error}
+            rollbackPendingId={
+              rollbackMut.isPending ? rollbackMut.variables ?? null : null
+            }
+            logBuffer={logBuffer}
+            streamStatus={streamStatus}
+            onTrigger={() => {
+              setUpdateBanner(null);
+              clearLogs();
+              triggerUpdateMut.mutate({
+                target_tag: updateCheckQ.data?.resolved_image_tag ?? undefined,
+                channel: updateCheckQ.data?.channel ?? undefined,
+                force_redeploy: false,
+              });
+            }}
+            onRefresh={() => {
+              void updateStatusQ.refetch();
+              void releasesQ.refetch();
+            }}
+            onRollback={(releaseId) => {
+              setUpdateBanner(null);
+              clearLogs();
+              rollbackMut.mutate(releaseId);
+            }}
+            onClearBanner={() => setUpdateBanner(null)}
+          />
         </div>
       </div>
 
-      {q.isLoading ? (
-        <div className="space-y-3">
-          {SETTINGS_SKELETON_KEYS.map((key, i) => (
-            <div
-              key={key}
-              className="h-32 animate-pulse rounded-2xl bg-white/5"
-              style={{ animationDelay: `${i * 80}ms` }}
+      <SettingsSectionHeader
+        icon={SlidersHorizontal}
+        title="配置项"
+        description="按业务场景分组编辑。左侧选分类，右侧只显示相关设置。"
+        badge={`${visibleCount} 项显示`}
+      />
+
+      <div className="grid gap-4 lg:grid-cols-[250px_minmax(0,1fr)]">
+        <aside className="self-start rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/64 p-3 shadow-[var(--shadow-1)] backdrop-blur-sm lg:sticky lg:top-4">
+          <SettingsGroupNav
+            activeGroup={activeGroup}
+            totalCount={visibleItems.length}
+            groupCounts={groupCounts}
+            onChange={setActiveGroup}
+          />
+          <div className="mt-3 border-t border-[var(--border-subtle)] pt-3">
+            <label className="relative block">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="搜索设置或技术名"
+                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 pl-9 pr-3 type-body-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-accent-border focus:ring-2 focus:ring-accent/20"
+              />
+            </label>
+            <p className="mt-2 type-caption text-[var(--fg-2)]">
+              已修改 {dirtyCount} 项。修改后使用底部保存条统一提交。
+            </p>
+          </div>
+        </aside>
+
+        <div className="min-w-0">
+          {q.isLoading ? (
+            <div className="space-y-3">
+              {SETTINGS_SKELETON_KEYS.map((key, i) => (
+                <div
+                  key={key}
+                  className="h-32 animate-pulse rounded-[var(--radius-card)] bg-[var(--bg-1)]/70"
+                  style={{ animationDelay: `${i * 80}ms` }}
+                />
+              ))}
+            </div>
+          ) : q.isError ? (
+            <ErrorBlock
+              message={q.error?.message ?? "未知错误"}
+              onRetry={() => void q.refetch()}
             />
-          ))}
+          ) : items.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 py-14 text-center type-body-sm text-[var(--fg-2)] backdrop-blur-sm">
+              <Sparkles className="h-5 w-5 text-[var(--fg-2)]" />
+              没有可配置项
+            </div>
+          ) : visibleCount === 0 ? (
+            <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-4 py-12 text-center type-body-sm text-[var(--fg-2)]">
+              没有找到匹配的设置
+            </div>
+          ) : (
+            <div className="space-y-8">
+              {groups.map((group) => (
+                <SettingsGroup
+                  key={group.id}
+                  group={group}
+                  ops={ops}
+                  fieldErrors={fieldErrors}
+                  dependencyState={dependencyState}
+                  modelsQuery={{
+                    isLoading: adminModelsQ.isLoading,
+                    isError: adminModelsQ.isError,
+                    errorMessage: adminModelsQ.error?.message,
+                    models: Array.isArray(adminModelsQ.data?.models)
+                      ? adminModelsQ.data.models.map((model) => model.id)
+                      : [],
+                  }}
+                  providerStatus={providerStatus}
+                  updateProxyOptions={proxiesQ.data?.items ?? []}
+                  onChange={setOp}
+                />
+              ))}
+            </div>
+          )}
         </div>
-      ) : q.isError ? (
-        <ErrorBlock
-          message={q.error?.message ?? "未知错误"}
-          onRetry={() => void q.refetch()}
-        />
-      ) : items.length === 0 ? (
-        <div className="flex flex-col items-center gap-3 rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 py-14 text-center text-sm text-neutral-500 backdrop-blur-sm">
-          <Sparkles className="h-5 w-5 text-neutral-600" />
-          没有可配置项
-        </div>
-      ) : visibleCount === 0 ? (
-        <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 px-4 py-12 text-center text-sm text-neutral-500">
-          没有找到匹配的设置
-        </div>
-      ) : (
-        <div className="space-y-8">
-          {groups.map((group) => (
-            <SettingsGroup
-              key={group.id}
-              group={group}
-              ops={ops}
-              fieldErrors={fieldErrors}
-              dependencyState={dependencyState}
-              modelsQuery={{
-                isLoading: adminModelsQ.isLoading,
-                isError: adminModelsQ.isError,
-                errorMessage: adminModelsQ.error?.message,
-                models: Array.isArray(adminModelsQ.data?.models)
-                  ? adminModelsQ.data.models.map((model) => model.id)
-                  : [],
-              }}
-              providerStatus={providerStatus}
-              updateProxyOptions={proxiesQ.data?.items ?? []}
-              onChange={setOp}
-            />
-          ))}
-        </div>
-      )}
+      </div>
 
       <AnimatePresence>
         {dirtyCount > 0 && (
@@ -1390,9 +1344,9 @@ export function SettingsPanel() {
             transition={{ duration: 0.2 }}
             className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[env(safe-area-inset-bottom)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4"
           >
-            <div className="flex items-center gap-2 rounded-2xl border border-[var(--color-lumen-amber)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] backdrop-blur-xl sm:gap-3 sm:px-4">
-              <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-neutral-300">
-                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[0_0_8px_currentColor]" />
+            <div className="flex items-center gap-2 rounded-[var(--radius-dialog)] border border-accent-border bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:gap-3 sm:px-4">
+              <span className="inline-flex items-center gap-1.5 whitespace-nowrap type-caption text-[var(--fg-1)]">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[var(--shadow-amber)]" />
                 <span className="font-mono tabular-nums">{dirtyCount}</span>
                 <span>项待保存</span>
               </span>
@@ -1424,6 +1378,165 @@ export function SettingsPanel() {
   );
 }
 
+function SettingsOverviewCard({
+  overview,
+  dirtyCount,
+  visibleCount,
+}: {
+  overview: {
+    defaultModelLabel: string;
+    engineLabel: string;
+    channelLabel: string;
+    formatLabel: string;
+    compressionLabel: string;
+  };
+  dirtyCount: number;
+  visibleCount: number;
+}) {
+  return (
+    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 shadow-[var(--shadow-2)] backdrop-blur-sm md:p-5">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-accent-border bg-accent-soft">
+            <SlidersHorizontal className="h-4 w-4 text-accent" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="type-card-title">系统配置概览</h2>
+            <p className="mt-1 max-w-3xl type-body-sm text-[var(--fg-2)]">
+              常用开关在这里先给出结果，下面再按任务分区编辑。数据库设置优先生效，保存后通常几秒内同步到 API 和 Worker。
+            </p>
+          </div>
+        </div>
+        <div className="inline-flex w-fit items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-3 py-1.5 type-caption text-[var(--fg-1)]">
+          <Database className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+          {dirtyCount > 0 ? `${dirtyCount} 项待保存` : `${visibleCount} 项可配置`}
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        <OverviewMetric
+          icon={Bot}
+          label="默认模型"
+          value={overview.defaultModelLabel}
+        />
+        <OverviewMetric
+          icon={ImageIcon}
+          label="生图引擎"
+          value={overview.engineLabel}
+        />
+        <OverviewMetric
+          icon={Activity}
+          label="异步通道"
+          value={overview.channelLabel}
+        />
+        <OverviewMetric
+          icon={ImageIcon}
+          label="输出格式"
+          value={overview.formatLabel}
+        />
+        <OverviewMetric
+          icon={BrainCircuit}
+          label="自动压缩"
+          value={overview.compressionLabel}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SettingsSectionHeader({
+  icon: Icon,
+  title,
+  description,
+  badge,
+}: {
+  icon: LucideIcon;
+  title: string;
+  description: string;
+  badge?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-3 border-b border-[var(--border-subtle)] pb-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]">
+          <Icon className="h-4 w-4 text-[var(--fg-1)]" />
+        </div>
+        <div className="min-w-0">
+          <h3 className="type-card-title">{title}</h3>
+          <p className="mt-1 type-body-sm text-[var(--fg-2)]">{description}</p>
+        </div>
+      </div>
+      {badge && (
+        <span className="w-fit rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2.5 py-1 type-caption text-[var(--fg-1)]">
+          {badge}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SettingsGroupNav({
+  activeGroup,
+  totalCount,
+  groupCounts,
+  onChange,
+}: {
+  activeGroup: FilterId;
+  totalCount: number;
+  groupCounts: Record<SettingGroupId, number>;
+  onChange: (group: FilterId) => void;
+}) {
+  return (
+    <div className="space-y-1" aria-label="系统设置分类">
+      {GROUPS.map((group) => {
+        const count = group.id === "all" ? totalCount : groupCounts[group.id] ?? 0;
+        if (group.id !== "all" && count === 0) return null;
+        const active = activeGroup === group.id;
+        const Icon = group.icon;
+        return (
+          <button
+            key={group.id}
+            type="button"
+            onClick={() => onChange(group.id)}
+            className={cn(
+              "flex min-h-[44px] w-full cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-left transition-colors",
+              active
+                ? "border-accent-border bg-accent-soft text-[var(--fg-0)]"
+                : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)]",
+            )}
+            title={group.description}
+          >
+            <Icon
+              className={cn(
+                "h-3.5 w-3.5 shrink-0",
+                active ? "text-accent" : "text-[var(--fg-2)]",
+              )}
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate type-caption text-current">
+                {group.label}
+              </span>
+              <span className="mt-0.5 block truncate text-[11px] leading-4 text-[var(--fg-2)]">
+                {group.description}
+              </span>
+            </span>
+            <span
+              className={cn(
+                "shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[10px]",
+                active
+                  ? "border-accent-border bg-[var(--bg-0)]/35 text-accent"
+                  : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
+              )}
+            >
+              {count}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function SettingsGroup({
   group,
   ops,
@@ -1450,19 +1563,19 @@ function SettingsGroup({
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04]">
-            <Icon className="h-4 w-4 text-neutral-400" />
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]">
+            <Icon className="h-4 w-4 text-[var(--fg-1)]" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-sm font-medium text-neutral-100">
+            <h3 className="type-card-title">
               {group.label}
             </h3>
-            <p className="mt-0.5 text-xs text-neutral-500">
+            <p className="mt-0.5 type-caption text-[var(--fg-2)]">
               {group.description}
             </p>
           </div>
         </div>
-        <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] text-neutral-500">
+        <span className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 font-mono text-[11px] text-[var(--fg-2)]">
           {group.items.length}
         </span>
       </div>
@@ -1521,23 +1634,23 @@ function SettingCard({
       layout
       transition={{ duration: 0.18 }}
       className={cn(
-        "rounded-xl border p-3 backdrop-blur-sm transition-colors md:p-4",
+        "rounded-[var(--radius-card)] border p-3 backdrop-blur-sm transition-colors md:p-4",
         isDirty
-          ? "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/[0.05] shadow-[0_10px_30px_-15px_var(--color-lumen-amber)]"
-          : "border-white/10 bg-[var(--bg-1)]/60",
+          ? "border-accent-border bg-accent-soft shadow-[var(--shadow-1)]"
+          : "border-[var(--border)] bg-[var(--bg-1)]/60",
       )}
     >
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 gap-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04]">
-            <Icon className="h-4 w-4 text-[var(--color-lumen-amber)]" />
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-accent-border bg-accent-soft">
+            <Icon className="h-4 w-4 text-accent" />
           </div>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h4 className="text-sm font-medium text-neutral-100">
+              <h4 className="type-body-sm font-medium text-[var(--fg-0)]">
                 {meta.title}
               </h4>
-              <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-neutral-300">
+              <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-[11px] text-[var(--fg-1)]">
                 当前：{displayValue}
               </span>
               <SourceBadge
@@ -1545,7 +1658,7 @@ function SettingCard({
                 hasAnyValue={item.has_value}
               />
             </div>
-            <p className="mt-1 text-sm leading-6 text-neutral-400">
+            <p className="mt-1 type-body-sm text-[var(--fg-2)]">
               {meta.summary}
             </p>
           </div>
@@ -1588,12 +1701,12 @@ function SettingCard({
 
       <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--fg-2)]">
         {meta.recommended && (
-          <span className="rounded-md border border-success-border bg-success-soft px-2 py-1 text-success">
+          <span className="rounded-[var(--radius-control)] border border-success-border bg-success-soft px-2 py-1 text-success">
             {meta.recommended}
           </span>
         )}
         {(meta.min != null || meta.max != null) && (
-          <span className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-1">
+          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1">
             范围 {meta.min != null ? formatPlainNumber(meta.min) : "不限"}
             {" 到 "}
             {meta.max != null ? formatPlainNumber(meta.max) : "不限"}
@@ -1610,11 +1723,11 @@ function SettingCard({
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <div className="mt-3 space-y-2 rounded-lg border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-2 text-xs leading-5 text-[var(--fg-2)]">
+            <div className="mt-3 space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-2 type-caption text-[var(--fg-2)]">
               {meta.detail && <p>{meta.detail}</p>}
               <p>
                 技术名{" "}
-                <code className="font-mono text-neutral-400">{item.key}</code>
+                <code className="font-mono text-[var(--fg-1)]">{item.key}</code>
               </p>
               {item.description && item.description !== meta.summary && (
                 <p>{item.description}</p>
@@ -1716,12 +1829,12 @@ function SettingControl({
                   option.value === "dual_race"
                     ? "border-danger-border bg-danger-soft"
                     : selected
-                      ? "border-[var(--color-lumen-amber)]/60 bg-[var(--color-lumen-amber)]/10 text-[var(--fg-0)]"
-                      : "border-[var(--border)] bg-[var(--bg-0)]/60 text-[var(--fg-1)] hover:bg-white/5",
+                      ? "border-accent-border bg-accent-soft text-[var(--fg-0)]"
+                      : "border-[var(--border)] bg-[var(--bg-0)]/60 text-[var(--fg-1)] hover:bg-[var(--bg-2)]",
                 )}
               >
                 <span className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium">{option.label}</span>
+                  <span className="type-body-sm font-medium text-current">{option.label}</span>
                   {option.badge && (
                     <span
                       className={cn(
@@ -1735,7 +1848,7 @@ function SettingControl({
                     </span>
                   )}
                 </span>
-                <span className="mt-1 block text-xs leading-5 text-[var(--fg-2)]">
+                <span className="mt-1 block type-caption text-[var(--fg-2)]">
                   {option.description}
                 </span>
               </button>
@@ -1753,7 +1866,7 @@ function SettingControl({
           </button>
         )}
         {item.key === IMAGE_CHANNEL_KEY && (
-          <p className="text-xs text-neutral-500">{providerStatus.label}</p>
+          <p className="type-caption text-[var(--fg-2)]">{providerStatus.label}</p>
         )}
         <ResetEditButton
           dirty={!!op}
@@ -1804,26 +1917,26 @@ function SettingControl({
           aria-label={`${meta.title} ${checked ? "关闭" : "开启"}`}
           onClick={() => onChange({ kind: "set", value: checked ? "0" : "1" })}
           className={cn(
-            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/30",
+            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30",
             checked
-              ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]"
-              : "border-white/15 bg-white/10",
+              ? "border-accent-border bg-accent"
+              : "border-[var(--border)] bg-[var(--bg-2)]",
           )}
         >
           <span
             aria-hidden
             className={cn(
-              "inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+              "inline-block h-5 w-5 rounded-full bg-[var(--bg-0)] shadow-[var(--shadow-1)] transition-transform",
               checked ? "translate-x-[22px]" : "translate-x-0.5",
             )}
           />
         </button>
         <span
           className={cn(
-            "inline-flex rounded-md border px-2 py-1 text-xs",
+            "inline-flex rounded-[var(--radius-control)] border px-2 py-1 type-caption",
             checked
               ? "border-success-border bg-success-soft text-success"
-              : "border-white/10 bg-white/5 text-[var(--fg-2)]",
+              : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
           )}
         >
           {checked ? "开启" : "关闭"}
@@ -1863,10 +1976,10 @@ function SettingControl({
                 : "填写数值"
             }
             inputMode={meta.kind === "integer" ? "numeric" : "decimal"}
-            className="h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 pr-16 font-mono text-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
+            className={`${settingMonoInputClassName} pr-16`}
           />
           {meta.unit && (
-            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-neutral-500">
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 type-caption text-[var(--fg-2)]">
               {meta.unit}
             </span>
           )}
@@ -1903,7 +2016,7 @@ function SettingControl({
               : "填写内容"
         }
         autoComplete="off"
-        className="h-11 w-full flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 font-mono text-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
+        className={`flex-1 ${settingMonoInputClassName}`}
       />
       {meta.kind === "url" && browserOrigin && (
         <Button
@@ -2004,7 +2117,7 @@ function ModelSelectControl({
             }
             onChange({ kind: "set", value: next });
           }}
-          className="h-11 flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 font-mono text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
+          className={`flex-1 ${settingMonoInputClassName}`}
         >
           {modelIds.map((model) => (
             <option key={model} value={model}>
@@ -2031,7 +2144,7 @@ function ModelSelectControl({
         onUseDefault={(defaultValue) => onChange({ kind: "set", value: defaultValue })}
       />
       {modelsQuery.isLoading && (
-        <span className="inline-flex items-center gap-1 text-xs text-neutral-500">
+        <span className="inline-flex items-center gap-1 type-caption text-[var(--fg-2)]">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           模型列表读取中
         </span>
@@ -2073,7 +2186,7 @@ function UpdateProxySelectControl({
               onChange({ kind: "set", value: next });
             }
           }}
-          className="h-11 flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 text-sm text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
+          className={`flex-1 ${settingInputClassName}`}
         >
           <option value="">自动选择第一个启用代理</option>
           {enabledProxies.map((proxy) => (
@@ -2100,7 +2213,7 @@ function UpdateProxySelectControl({
           代理池没有启用代理；开启“{proxyFeatureLabel}”后，请求会被后端拒绝。
         </p>
       ) : (
-        <p className="text-xs text-neutral-500">
+        <p className="type-caption text-[var(--fg-2)]">
           可用代理 {enabledProxies.length} 个，选择后记得保存设置。
         </p>
       )}
@@ -2140,7 +2253,7 @@ function TextSettingInput({
               : "填写内容"
         }
         autoComplete="off"
-        className="h-11 flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 font-mono text-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/55 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/20"
+        className={`flex-1 ${settingMonoInputClassName}`}
       />
     </>
   );
@@ -2645,18 +2758,18 @@ function LumenUpdateBlock({
       : null);
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm">
+    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)] backdrop-blur-sm">
       {/* —— 顶部状态条 —— */}
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="flex min-w-0 gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-accent-border bg-accent-soft">
             <Rocket className="h-4 w-4 text-[var(--color-lumen-amber)]" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-sm font-medium text-neutral-100">
+            <h3 className="type-card-title text-sm">
               一键更新 Lumen
             </h3>
-            <p className="mt-1 text-xs leading-5 text-neutral-500">
+            <p className="mt-1 type-caption text-[var(--fg-2)]">
               后台执行更新脚本，失败可在下方 release 历史里回滚到旧版本。
             </p>
           </div>
@@ -2689,7 +2802,7 @@ function LumenUpdateBlock({
       <div className="mt-4 flex flex-wrap gap-2 text-xs">
         <span
           className={cn(
-            "rounded-md border px-2 py-1",
+            "rounded-[var(--radius-control)] border px-2 py-1",
             running
               ? isRollingBack
                 ? "border-warning-border bg-warning-soft text-warning"
@@ -2708,21 +2821,21 @@ function LumenUpdateBlock({
                 : "当前没有更新任务"}
         </span>
         {status?.started_at && (
-          <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-neutral-400">
+          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[var(--fg-1)]">
             启动时间 {formatDateTime(status.started_at)}
           </span>
         )}
         {running && (
           <span
             className={cn(
-              "rounded-md border px-2 py-1",
+              "rounded-[var(--radius-control)] border px-2 py-1",
               streamStatus === "open"
                 ? "border-success-border bg-success-soft text-success"
                 : streamStatus === "connecting"
                   ? "border-info-border bg-info-soft text-info"
                   : streamStatus === "broken"
                     ? "border-danger-border bg-danger-soft text-danger"
-                    : "border-white/10 bg-white/[0.04] text-[var(--fg-2)]",
+                    : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
             )}
           >
             实时流：
@@ -2785,14 +2898,14 @@ function LumenUpdateBlock({
             <button
               type="button"
               onClick={cancelReload}
-              className="rounded-md border border-white/15 bg-white/[0.04] px-2 py-1 text-[11px] text-[var(--fg-1)] transition-colors hover:bg-white/8"
+              className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
             >
               {copy.action.cancel}
             </button>
             <button
               type="button"
               onClick={reloadNow}
-              className="rounded-md bg-success px-2 py-1 text-[11px] font-medium text-black transition-[filter] hover:brightness-110"
+              className="rounded-[var(--radius-control)] bg-success px-2 py-1 text-[11px] font-medium text-[var(--success-on)] transition-[filter] hover:brightness-110"
             >
               立即刷新
             </button>
@@ -2802,7 +2915,7 @@ function LumenUpdateBlock({
 
       {/* —— 当前 phase 高亮 + 进度条（运行时最直观的"在哪一步") —— */}
       {(running || (phases.length > 0 && !running)) && (
-        <div className="mt-4 rounded-xl border border-white/10 bg-[var(--bg-0)]/60 p-3">
+        <div className="mt-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 p-3">
           <div className="flex items-center gap-3">
             <div
               className={cn(
@@ -2825,18 +2938,18 @@ function LumenUpdateBlock({
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline justify-between gap-2">
-                <span className="truncate text-sm font-medium text-neutral-100">
+                <span className="truncate text-sm font-medium text-[var(--fg-0)]">
                   {running
                     ? `正在执行：${phaseLabel(activePhase?.phase ?? "")}`
                     : failed
                       ? `失败于：${phaseLabel(activePhase?.phase ?? "")}`
                       : "更新已完成"}
                 </span>
-                <span className="shrink-0 font-mono text-[11px] text-neutral-500">
+                <span className="shrink-0 font-mono text-[11px] text-[var(--fg-2)]">
                   {completedCount}/{totalCount}
                 </span>
               </div>
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
                 <div
                   className={cn(
                     "h-full transition-[width] duration-500 ease-out",
@@ -2850,7 +2963,7 @@ function LumenUpdateBlock({
                 />
               </div>
               {running && activePhase?.info && Object.keys(activePhase.info).length > 0 && (
-                <div className="mt-2 truncate text-[11px] text-neutral-500">
+                <div className="mt-2 truncate text-[11px] text-[var(--fg-2)]">
                   {Object.entries(activePhase.info)
                     .slice(-1)
                     .map(([k, v]) => `${k} = ${v}`)
@@ -2863,17 +2976,17 @@ function LumenUpdateBlock({
       )}
 
       {/* —— Step Checklist —— */}
-      <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60">
+      <div className="mt-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60">
         <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-3 py-2">
-          <span className="text-xs font-medium text-neutral-300">执行步骤</span>
+          <span className="text-xs font-medium text-[var(--fg-1)]">执行步骤</span>
           {phases.length > 0 && (
-            <span className="text-[11px] text-neutral-500">
+            <span className="text-[11px] text-[var(--fg-2)]">
               {completedCount} /{" "}
               {totalCount} 完成
             </span>
           )}
         </div>
-        <ol className="divide-y divide-white/5">
+        <ol className="divide-y divide-[var(--border-subtle)]">
           {checklist.map((phase) => (
             <PhaseRow key={phase} phase={phase} record={phaseByName.get(phase)} />
           ))}
@@ -2889,7 +3002,7 @@ function LumenUpdateBlock({
           leftIcon={<Terminal className="h-3.5 w-3.5" />}
           rightIcon={
             logBuffer.length > 0 ? (
-              <span className="rounded-full bg-white/8 px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-2)]">
+              <span className="rounded-full bg-[var(--bg-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-2)]">
                 {logBuffer.length}
               </span>
             ) : undefined
@@ -2910,7 +3023,7 @@ function LumenUpdateBlock({
               <pre
                 ref={logRef}
                 onScroll={onLogScroll}
-                className="mt-2 max-h-72 overflow-auto rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 font-mono text-[11px] leading-5 text-[var(--fg-1)]"
+                className="mt-2 max-h-72 overflow-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 font-mono text-[11px] leading-5 text-[var(--fg-1)]"
               >
                 {logBuffer.length > 0
                   ? logBuffer.join("\n")
@@ -2924,14 +3037,14 @@ function LumenUpdateBlock({
       </div>
 
       {/* —— Release 历史 —— */}
-      <div className="mt-5 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60">
+      <div className="mt-5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60">
         <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
-          <History className="h-3.5 w-3.5 text-neutral-400" />
-          <span className="text-xs font-medium text-neutral-300">Release 历史</span>
-          <span className="text-[11px] text-neutral-500">最近 10 个版本</span>
+          <History className="h-3.5 w-3.5 text-[var(--fg-2)]" />
+          <span className="text-xs font-medium text-[var(--fg-1)]">Release 历史</span>
+          <span className="text-[11px] text-[var(--fg-2)]">最近 10 个版本</span>
         </div>
         {releasesError ? (
-          <p className="px-3 py-3 type-caption text-danger">
+          <p role="alert" className="px-3 py-3 type-caption text-danger">
             读取 release 列表失败：{releasesError.message}
           </p>
         ) : releasesLoading && !releases ? (
@@ -2939,15 +3052,15 @@ function LumenUpdateBlock({
             {[0, 1, 2].map((i) => (
               <div
                 key={i}
-                className="h-10 animate-pulse rounded-md bg-white/5"
+                className="h-10 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]"
                 style={{ animationDelay: `${i * 60}ms` }}
               />
             ))}
           </div>
         ) : !releases || releases.length === 0 ? (
-          <p className="px-3 py-3 text-xs text-neutral-500">暂无 release 记录。</p>
+          <p className="px-3 py-3 text-xs text-[var(--fg-2)]">暂无 release 记录。</p>
         ) : (
-          <ul className="divide-y divide-white/5">
+          <ul className="divide-y divide-[var(--border-subtle)]">
             {releases.map((r) => (
               <ReleaseRow
                 key={r.id}
@@ -3016,7 +3129,7 @@ function PhaseRow({
               ? "border-success-border bg-success-soft text-success"
               : isFailed
                 ? "border-danger-border bg-danger-soft text-danger"
-                : "border-white/15 bg-white/[0.03] text-[var(--fg-2)]",
+                : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
         )}
         aria-hidden="true"
       >
@@ -3054,7 +3167,7 @@ function PhaseRow({
           )}
         </div>
         {infoEntries.length > 0 && (
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--fg-2)]">
             {infoEntries.map(([k, v]) => (
               <span key={k} className="font-mono">
                 {k}={v}
@@ -3064,7 +3177,7 @@ function PhaseRow({
         )}
       </div>
       {dur && (
-        <span className="ml-2 shrink-0 self-center text-[11px] tabular-nums text-neutral-500">
+        <span className="ml-2 shrink-0 self-center text-[11px] tabular-nums text-[var(--fg-2)]">
           {dur}
         </span>
       )}
@@ -3089,7 +3202,7 @@ function ReleaseRow({
     <li className="flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="font-mono text-xs text-neutral-200" title={release.id}>
+          <span className="font-mono text-xs text-[var(--fg-1)]" title={release.id}>
             {shortReleaseId(release.id)}
           </span>
           {release.is_current && (
@@ -3098,12 +3211,12 @@ function ReleaseRow({
             </span>
           )}
           {release.is_previous && !release.is_current && (
-            <span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] text-neutral-400">
+            <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--fg-2)]">
               上一个
             </span>
           )}
         </div>
-        <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
+        <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--fg-2)]">
           <span>{formatDateTime(release.created_at)}</span>
           <span className="font-mono" title={release.sha ?? undefined}>
             sha {shortSha(release.sha)}
@@ -3151,23 +3264,23 @@ function ContextHealthBlock({
   const state = formatCircuitState(data?.circuit_breaker_state);
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm">
+    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)] backdrop-blur-sm">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04]">
-            <ShieldCheck className="h-4 w-4 text-neutral-400" />
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-info-border bg-info-soft">
+            <ShieldCheck className="h-4 w-4 text-info" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-sm font-medium text-neutral-100">
+            <h3 className="type-card-title text-sm">
               长对话摘要状态
             </h3>
-            <p className="mt-1 text-xs leading-5 text-neutral-500">
+            <p className="mt-1 type-caption text-[var(--fg-2)]">
               用来判断自动摘要是否稳定。这里是只读状态，不需要手动保存。
             </p>
           </div>
         </div>
         {loading ? (
-          <span className="inline-flex items-center gap-1.5 text-xs text-neutral-400">
+          <span className="inline-flex items-center gap-1.5 text-xs text-[var(--fg-1)]">
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> 读取中
           </span>
         ) : error ? (
@@ -3182,7 +3295,7 @@ function ContextHealthBlock({
         ) : (
           <span
             className={cn(
-              "inline-flex items-center rounded-md border px-2 py-0.5 text-xs",
+              "inline-flex items-center rounded-[var(--radius-control)] border px-2 py-0.5 text-xs",
               state.tone === "danger"
                 ? "border-danger-border bg-danger-soft text-danger"
                 : state.tone === "warning"
@@ -3196,7 +3309,7 @@ function ContextHealthBlock({
       </div>
 
       {error ? (
-        <p className="mt-3 text-xs text-neutral-500">
+        <p role="alert" className="mt-3 type-caption text-[var(--fg-2)]">
           暂时读不到摘要状态：{error.message}
         </p>
       ) : data ? (
@@ -3240,8 +3353,8 @@ function OverviewMetric({
   value: string;
 }) {
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-2.5">
-      <div className="flex items-center gap-2 text-[11px] text-neutral-500">
+    <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-2.5">
+      <div className="flex items-center gap-2 text-[11px] text-[var(--fg-2)]">
         <Icon className="h-3.5 w-3.5" />
         {label}
       </div>
@@ -3254,8 +3367,8 @@ function OverviewMetric({
 
 function HealthMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-2">
-      <p className="text-[11px] text-neutral-500">{label}</p>
+    <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-2">
+      <p className="text-[11px] text-[var(--fg-2)]">{label}</p>
       <p className="mt-1 font-mono text-sm text-[var(--fg-0)]">{value}</p>
     </div>
   );
@@ -3271,13 +3384,13 @@ function DependencyNotice({
   body: string;
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3 text-sm text-neutral-300">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-white/5">
-        <Icon className="h-4 w-4 text-neutral-400" />
+    <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-3 text-sm text-[var(--fg-1)]">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]">
+        <Icon className="h-4 w-4 text-[var(--fg-2)]" />
       </div>
       <div>
-        <p className="font-medium text-neutral-100">{title}</p>
-        <p className="mt-1 text-xs leading-5 text-neutral-500">{body}</p>
+        <p className="font-medium text-[var(--fg-0)]">{title}</p>
+        <p className="mt-1 type-caption text-[var(--fg-2)]">{body}</p>
       </div>
     </div>
   );
@@ -3292,20 +3405,20 @@ function SourceBadge({
 }) {
   if (hasDbOverride) {
     return (
-      <span className="rounded-md border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/10 px-2 py-0.5 text-[11px] text-[var(--color-lumen-amber)]">
+      <span className="rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-2 py-0.5 text-[11px] text-accent">
         已覆盖默认
       </span>
     );
   }
   if (hasAnyValue) {
     return (
-      <span className="rounded-md border border-info-border bg-info-soft px-2 py-0.5 text-[11px] text-info">
+      <span className="rounded-[var(--radius-control)] border border-info-border bg-info-soft px-2 py-0.5 text-[11px] text-info">
         使用环境变量
       </span>
     );
   }
   return (
-    <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-neutral-500">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-[11px] text-[var(--fg-2)]">
       使用程序默认
     </span>
   );
