@@ -325,13 +325,8 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
 
   return (
-    <motion.div
-      initial={false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, ease: "easeOut" }}
-      className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]"
-    >
-      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y scrollbar-thin">
+    <div className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
+      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-thin">
         <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-10">
           <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
             <div className="min-w-0">
@@ -371,9 +366,9 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
             <AnimatePresence mode="wait">
               <motion.div
                 key={tab}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 transition={{ duration: 0.18, ease: "easeOut" }}
               >
                 {tab === "health" ? (
@@ -408,13 +403,17 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
           </div>
         </div>
       </main>
-    </motion.div>
+    </div>
   );
 }
 
 function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
   return (
-    <nav aria-label="管理后台菜单" className="space-y-3">
+    <nav
+      aria-label="管理后台菜单"
+      data-testid="admin-tab-menu"
+      className="space-y-3"
+    >
       <div className="grid gap-3 lg:grid-cols-4">
         {TAB_GROUPS.map((group) => {
           const items = TABS.filter((item) => item.group === group.key);
