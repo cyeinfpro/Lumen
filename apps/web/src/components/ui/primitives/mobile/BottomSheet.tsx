@@ -23,6 +23,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { SPRING, DURATION, EASE } from "@/lib/motion";
 
 export type SnapPoint = "auto" | `${number}%` | number;
@@ -87,6 +88,7 @@ export function BottomSheet({
   const contentRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const labelId = useId();
+  useBodyScrollLock(open);
 
   const [viewportH, setViewportH] = useState<number>(
     typeof window === "undefined" ? 800 : window.innerHeight,
@@ -152,13 +154,9 @@ export function BottomSheet({
       (first ?? el).focus();
     }, 60);
 
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
     return () => {
       document.removeEventListener("keydown", onKey);
       window.clearTimeout(t);
-      document.body.style.overflow = prevOverflow;
       previouslyFocusedRef.current?.focus?.();
     };
   }, [open, onClose]);

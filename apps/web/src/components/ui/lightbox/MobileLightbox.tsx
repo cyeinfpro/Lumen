@@ -47,6 +47,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { DURATION, EASE, SPRING } from "@/lib/motion";
@@ -761,17 +762,7 @@ export function MobileLightbox() {
 
   // —— body 滚动锁（防 iOS 橡皮筋穿透）——
   const isOpen = state !== null;
-  useEffect(() => {
-    if (!isOpen) return;
-    const prev = document.body.style.overflow;
-    const prevOverscroll = document.documentElement.style.overscrollBehavior;
-    document.body.style.overflow = "hidden";
-    document.documentElement.style.overscrollBehavior = "none";
-    return () => {
-      document.body.style.overflow = prev;
-      document.documentElement.style.overscrollBehavior = prevOverscroll;
-    };
-  }, [isOpen]);
+  useBodyScrollLock(isOpen, { documentOverscrollBehavior: "none" });
 
   const openCurrentId = state?.currentId ?? null;
   useEffect(() => {

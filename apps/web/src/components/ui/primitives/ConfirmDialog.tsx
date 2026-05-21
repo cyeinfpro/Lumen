@@ -7,6 +7,7 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useRef } from "react";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 import { Button } from "./Button";
 
@@ -38,6 +39,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const prevActiveRef = useRef<HTMLElement | null>(null);
+  useBodyScrollLock(open);
 
   useEffect(() => {
     if (!open) return;
@@ -82,13 +84,9 @@ export function ConfirmDialog({
       }
     };
     document.addEventListener("keydown", handleKey);
-    // scroll lock
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     return () => {
       cancelAnimationFrame(raf);
       document.removeEventListener("keydown", handleKey);
-      document.body.style.overflow = prevOverflow;
       prevActiveRef.current?.focus?.();
     };
   }, [open, onOpenChange, onCancel]);

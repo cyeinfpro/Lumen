@@ -43,7 +43,7 @@ export function SettingsShell({
         <DesktopTopNav active="me" />
       </div>
 
-      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-[calc(72px+env(safe-area-inset-bottom,0px))] pt-4 md:pb-10 md:pt-8">
+      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y px-4 pb-[calc(72px+env(safe-area-inset-bottom,0px))] pt-4 md:pb-10 md:pt-8">
         <div className={`mx-auto w-full min-w-0 ${maxWidth} safe-x mobile-compact`}>{children}</div>
       </main>
 

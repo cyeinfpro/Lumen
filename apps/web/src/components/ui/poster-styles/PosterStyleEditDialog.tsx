@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { toast } from "@/components/ui/primitives/Toast";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import {
   POSTER_STYLE_ASPECT_OPTIONS,
   POSTER_STYLE_CATEGORY_LABEL,
@@ -52,16 +53,14 @@ export function PosterStyleEditDialog({
   });
 
   // ESC + body lock
+  useBodyScrollLock(true);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previous;
     };
   }, [onClose]);
 

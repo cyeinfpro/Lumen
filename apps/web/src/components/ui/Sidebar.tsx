@@ -22,6 +22,7 @@ import {
 
 import { useUiStore } from "@/store/useUiStore";
 import { useChatStore } from "@/store/useChatStore";
+import { acquireBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import {
   useCreateConversationMutation,
   useDeleteConversationMutation,
@@ -103,15 +104,21 @@ export function Sidebar() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const mobileQuery = window.matchMedia("(max-width: 767px)");
+    let releaseScrollLock: (() => void) | null = null;
     const apply = () => {
       const shouldLock = sidebarOpen && mobileQuery.matches;
-      document.body.style.overflow = shouldLock ? "hidden" : "";
+      if (shouldLock && !releaseScrollLock) {
+        releaseScrollLock = acquireBodyScrollLock();
+      } else if (!shouldLock && releaseScrollLock) {
+        releaseScrollLock();
+        releaseScrollLock = null;
+      }
     };
     apply();
     mobileQuery.addEventListener("change", apply);
     return () => {
       mobileQuery.removeEventListener("change", apply);
-      document.body.style.overflow = "";
+      releaseScrollLock?.();
     };
   }, [sidebarOpen]);
 

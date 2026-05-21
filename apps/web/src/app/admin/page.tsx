@@ -329,83 +329,85 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
       initial={false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
-      className="min-h-[100dvh] w-full flex-1 bg-[var(--bg-0)] text-[var(--fg-0)]"
+      className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]"
     >
-      <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-10">
-        <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
-          <div className="min-w-0">
-            <h1 className="type-page-title">
-              管理后台
-            </h1>
-            <p className="type-body mt-1.5">
-              按任务分组管理访问、运行状态、基础设施和系统配置。
-            </p>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-            {me?.email && (
-              <div className="flex min-h-[32px] items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/70 px-2.5 py-1.5 text-xs sm:px-3">
-                <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[var(--shadow-amber)]" />
-                <span className="text-[var(--fg-1)] truncate max-w-[140px] sm:max-w-[180px]">
-                  {me.email}
-                </span>
-                <span className="rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                  管理员
-                </span>
-              </div>
-            )}
-            <Link
-              href="/"
-              className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors min-h-[44px] sm:min-h-0 px-2 sm:px-0"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              返回工作台
-            </Link>
-          </div>
-        </header>
-
-        <TabNav tab={tab} onChange={setTab} />
-        <PanelIntro tab={activeTab} />
-
-        <div className="mt-5">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={tab}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-            >
-              {tab === "health" ? (
-                <HealthPanel onOpenTab={setTab} />
-              ) : tab === "emails" ? (
-                <AllowedEmailsPanel />
-              ) : tab === "users" ? (
-                <UsersPanel />
-              ) : tab === "events" ? (
-                <RequestEventsPanel />
-              ) : tab === "invites" ? (
-                <InvitesPanel />
-              ) : tab === "byok" ? (
-                <ByokPanel />
-              ) : tab === "billing" ? (
-                <BillingPanel />
-              ) : tab === "providers" ? (
-                <ProvidersPanel />
-              ) : tab === "proxies" ? (
-                <ProxiesPanel />
-              ) : tab === "telegram" ? (
-                <TelegramPanel />
-              ) : tab === "settings" ? (
-                <SettingsPanel />
-              ) : tab === "storage" ? (
-                <StoragePanel />
-              ) : (
-                <BackupsPanel />
+      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y">
+        <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-10">
+          <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
+            <div className="min-w-0">
+              <h1 className="type-page-title">
+                管理后台
+              </h1>
+              <p className="type-body mt-1.5">
+                按任务分组管理访问、运行状态、基础设施和系统配置。
+              </p>
+            </div>
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+              {me?.email && (
+                <div className="flex min-h-[32px] items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/70 px-2.5 py-1.5 text-xs sm:px-3">
+                  <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[var(--shadow-amber)]" />
+                  <span className="text-[var(--fg-1)] truncate max-w-[140px] sm:max-w-[180px]">
+                    {me.email}
+                  </span>
+                  <span className="rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                    管理员
+                  </span>
+                </div>
               )}
-            </motion.div>
-          </AnimatePresence>
+              <Link
+                href="/"
+                className="inline-flex items-center gap-1.5 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors min-h-[44px] sm:min-h-0 px-2 sm:px-0"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                返回工作台
+              </Link>
+            </div>
+          </header>
+
+          <TabNav tab={tab} onChange={setTab} />
+          <PanelIntro tab={activeTab} />
+
+          <div className="mt-5">
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={tab}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.18, ease: "easeOut" }}
+              >
+                {tab === "health" ? (
+                  <HealthPanel onOpenTab={setTab} />
+                ) : tab === "emails" ? (
+                  <AllowedEmailsPanel />
+                ) : tab === "users" ? (
+                  <UsersPanel />
+                ) : tab === "events" ? (
+                  <RequestEventsPanel />
+                ) : tab === "invites" ? (
+                  <InvitesPanel />
+                ) : tab === "byok" ? (
+                  <ByokPanel />
+                ) : tab === "billing" ? (
+                  <BillingPanel />
+                ) : tab === "providers" ? (
+                  <ProvidersPanel />
+                ) : tab === "proxies" ? (
+                  <ProxiesPanel />
+                ) : tab === "telegram" ? (
+                  <TelegramPanel />
+                ) : tab === "settings" ? (
+                  <SettingsPanel />
+                ) : tab === "storage" ? (
+                  <StoragePanel />
+                ) : (
+                  <BackupsPanel />
+                )}
+              </motion.div>
+            </AnimatePresence>
+          </div>
         </div>
-      </div>
+      </main>
     </motion.div>
   );
 }

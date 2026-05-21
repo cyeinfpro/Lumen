@@ -14,6 +14,8 @@ import {
   useRef,
 } from "react";
 
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+
 export interface LightboxShellProps {
   onClose: () => void;
   ariaLabel?: string;
@@ -43,13 +45,7 @@ export function LightboxShell({
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
   // body scroll lock
-  useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, []);
+  useBodyScrollLock(true);
 
   // <main> inert（React 19 支持原生 inert 属性；这里用 DOM 赋值避免 SSR 警告）
   useEffect(() => {
