@@ -1009,7 +1009,10 @@ export function SettingsPanel() {
       />
 
       <div className="grid gap-4 lg:grid-cols-[250px_minmax(0,1fr)]">
-        <aside className="self-start rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/64 p-3 shadow-[var(--shadow-1)] backdrop-blur-sm lg:sticky lg:top-4">
+        <aside
+          data-testid="admin-settings-group-menu"
+          className="self-start rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/64 p-3 shadow-[var(--shadow-1)] backdrop-blur-sm lg:sticky lg:top-4 lg:max-h-[calc(100dvh-2rem)] lg:overflow-y-auto lg:pr-2 lg:scrollbar-thin"
+        >
           <SettingsGroupNav
             activeGroup={activeGroup}
             totalCount={visibleItems.length}
@@ -2091,11 +2094,15 @@ function ContextHealthBlock({
   error: Error | null;
   onRetry: () => void;
 }) {
+  const last24h = data?.last_24h;
   const successRate =
-    data?.last_24h.summary_success_rate == null
+    last24h?.summary_success_rate == null
       ? null
-      : `${Math.round(data.last_24h.summary_success_rate * 1000) / 10}%`;
-  const state = formatCircuitState(data?.circuit_breaker_state);
+      : `${Math.round(last24h.summary_success_rate * 1000) / 10}%`;
+  const state = formatCircuitState(
+    data?.circuit_breaker_state ??
+      (data as { state?: string } | undefined)?.state,
+  );
 
   return (
     <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)] backdrop-blur-sm">
@@ -2151,19 +2158,19 @@ function ContextHealthBlock({
           <HealthMetric label="摘要成功率" value={successRate ?? "暂无数据"} />
           <HealthMetric
             label="自动摘要次数"
-            value={String(data.last_24h.summary_attempts)}
+            value={String(last24h?.summary_attempts ?? (data as { total?: number }).total ?? 0)}
           />
           <HealthMetric
             label="P95 响应时间"
             value={
-              data.last_24h.summary_p95_latency_ms == null
+              last24h?.summary_p95_latency_ms == null
                 ? "暂无数据"
-                : `${data.last_24h.summary_p95_latency_ms}ms`
+                : `${last24h.summary_p95_latency_ms}ms`
             }
           />
           <HealthMetric
             label="手动压缩次数"
-            value={String(data.last_24h.manual_compact_calls)}
+            value={String(last24h?.manual_compact_calls ?? 0)}
           />
         </div>
       ) : null}

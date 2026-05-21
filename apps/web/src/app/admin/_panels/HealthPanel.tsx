@@ -95,6 +95,20 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
     settingValue(settingMap, "telegram.bot_username", "") !== "";
   const failedEvents = failedEventsQ.data?.items ?? [];
   const orphanCount = orphanQ.data?.length ?? 0;
+  const thresholdsPricingAligned = billing?.thresholds_pricing_aligned ?? true;
+  const thresholdsMissingPrices = billing?.thresholds_missing_prices ?? [];
+  const contextState =
+    context?.circuit_breaker_state ??
+    (context as { state?: string } | undefined)?.state ??
+    "未知";
+  const summaryAttempts =
+    context?.last_24h?.summary_attempts ??
+    (context as { total?: number } | undefined)?.total ??
+    0;
+  const summarySuccessRate =
+    context?.last_24h?.summary_success_rate ??
+    (context as { success_rate?: number } | undefined)?.success_rate ??
+    null;
 
   const tiles = [
     {
@@ -124,13 +138,13 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
       label: "计费",
       value: billingQ.isLoading ? "加载中" : billing?.billing_enabled ? "已开启" : "未开启",
       detail:
-        billing && !billing.thresholds_pricing_aligned
-          ? `缺少尺寸价格：${billing.thresholds_missing_prices.join(", ") || "-"}`
+        billing && !thresholdsPricingAligned
+          ? `缺少尺寸价格：${thresholdsMissingPrices.join(", ") || "-"}`
           : orphanCount > 0
           ? `${orphanCount} 个孤儿 hold 待处理`
           : "价格、兑换码和 hold 状态可用",
       tone:
-        !billing?.billing_enabled || !billing?.thresholds_pricing_aligned || orphanCount > 0
+        !billing?.billing_enabled || !thresholdsPricingAligned || orphanCount > 0
           ? "warn"
           : "ok",
       tab: "billing" as const,
@@ -148,12 +162,12 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
       key: "context",
       icon: <TimerReset className="h-4 w-4" />,
       label: "上下文",
-      value: contextQ.isLoading ? "加载中" : context?.circuit_breaker_state ?? "未知",
+      value: contextQ.isLoading ? "加载中" : contextState,
       detail:
-        context && context.last_24h.summary_attempts > 0
-          ? `摘要成功率 ${Math.round(context.last_24h.summary_success_rate * 100)}%`
+        summaryAttempts > 0 && summarySuccessRate != null
+          ? `摘要成功率 ${Math.round(summarySuccessRate * 100)}%`
           : "暂无 24h 摘要样本",
-      tone: context?.circuit_breaker_state === "closed" ? "ok" : "warn",
+      tone: contextState === "closed" ? "ok" : "warn",
       tab: "settings" as const,
     },
     {

@@ -70,6 +70,7 @@ export function UpdateAvailableCard({
   const unknown = state === "UNKNOWN";
 
   const releaseHtml = check?.release?.body_html ?? "";
+  const cache = check?.cache;
   const currentLine = useMemo(() => {
     const cur = check?.current_version ?? version?.version ?? "unknown";
     return `${cur} · ${check?.channel ?? version?.channel ?? "stable"} · ${
@@ -147,8 +148,8 @@ export function UpdateAvailableCard({
             </span>
             {!compact && (
               <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1">
-                cache {check?.cache.cached ? "hit" : "miss"}
-                {check?.cache.stale ? " · stale" : ""}
+                cache {cache ? (cache.cached ? "hit" : "miss") : "unknown"}
+                {cache?.stale ? " · stale" : ""}
               </span>
             )}
             {check?.warm_pull?.state && (
