@@ -25,6 +25,7 @@ import {
 } from "@/lib/apiClient";
 import { useAdminProxiesQuery, useProvidersQuery } from "@/lib/queries";
 import { Button, Card } from "@/components/ui/primitives";
+import { AdminUpdatePanel } from "./AdminUpdatePanel";
 
 type HealthTargetTab =
   | "events"
@@ -231,6 +232,8 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
           />
         ))}
       </div>
+
+      <AdminUpdatePanel />
 
       <Card variant="subtle" padding="none" className="overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-3">

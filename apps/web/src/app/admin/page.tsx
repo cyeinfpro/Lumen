@@ -329,9 +329,9 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
       initial={false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
-      className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]"
+      className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]"
     >
-      <main className="flex-1 overflow-x-hidden touch-pan-y">
+      <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y scrollbar-thin">
         <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-10">
           <header className="mb-6 md:mb-8 flex items-start justify-between gap-4 flex-wrap">
             <div className="min-w-0">
