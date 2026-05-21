@@ -323,7 +323,7 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
 
 def test_admin_update_panel_arms_stream_after_trigger_success() -> None:
     """The panel should live-update after a trigger without requiring Refresh status."""
-    panel = (ROOT / "apps/web/src/app/admin/_panels/SettingsPanel.tsx").read_text(
+    panel = (ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.tsx").read_text(
         encoding="utf-8"
     )
 
@@ -2034,7 +2034,7 @@ def test_admin_update_checklist_uses_docker_phases() -> None:
         / "app"
         / "admin"
         / "_panels"
-        / "SettingsPanel.tsx"
+        / "AdminUpdatePanel.tsx"
     ).read_text(encoding="utf-8")
     for phase in (
         "lock",
