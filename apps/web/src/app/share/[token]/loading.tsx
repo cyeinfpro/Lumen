@@ -2,12 +2,12 @@ export default function ShareLoading() {
   return (
     <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[linear-gradient(180deg,var(--bg-0)_0%,var(--bg-1)_52%,var(--bg-0)_100%)] text-[var(--fg-0)]">
       <header className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg-0)]/88 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 safe-x md:px-8">
+        <div className="safe-x-page-wide mx-auto flex h-14 max-w-6xl items-center justify-between">
           <div className="h-6 w-28 animate-pulse rounded bg-white/5" />
           <div className="h-9 w-28 animate-pulse rounded-full bg-white/5" />
         </div>
       </header>
-      <main className="flex flex-1 flex-col items-center justify-start px-4 py-6 safe-x md:px-8 md:py-10">
+      <main className="safe-x-page-wide flex flex-1 flex-col items-center justify-start py-6 md:py-10">
         <div className="mx-auto flex w-full max-w-[min(94vw,1320px)] flex-col gap-5 md:gap-7">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
             <div className="space-y-2">

@@ -20,7 +20,7 @@ export function SettingsShell({
   maxWidth = "max-w-6xl",
 }: SettingsShellProps) {
   return (
-    <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
+    <div className="flex h-[100dvh] min-h-0 w-full flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)] md:h-auto md:min-h-[100dvh] md:overflow-visible">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <div className="md:hidden">
         <MobileTopBar
@@ -43,7 +43,7 @@ export function SettingsShell({
         <DesktopTopNav active="me" />
       </div>
 
-      <main className="flex-1 overflow-x-hidden touch-pan-y px-4 pb-[calc(72px+env(safe-area-inset-bottom,0px))] pt-4 md:pb-10 md:pt-8">
+      <main className="max-md:mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pb-4 pt-4 touch-pan-y md:overflow-visible md:pb-10 md:pt-8">
         <div className={`mx-auto w-full min-w-0 ${maxWidth} safe-x mobile-compact`}>{children}</div>
       </main>
 

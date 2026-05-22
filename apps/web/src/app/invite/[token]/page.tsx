@@ -55,7 +55,7 @@ export default function InvitePage({
 
   return (
     <div className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <main className="flex min-h-0 flex-1 flex-col items-center justify-start overflow-y-auto overscroll-contain px-4 py-8 safe-x md:justify-center md:py-16">
+      <main className="safe-x-page flex min-h-0 flex-1 flex-col items-center justify-start overflow-y-auto overscroll-contain py-8 md:justify-center md:py-16">
         <motion.div
           initial={false}
           animate={{ opacity: 1, y: 0 }}
@@ -89,10 +89,10 @@ export default function InvitePage({
         </motion.div>
       </main>
 
-      <footer className="py-4 px-4 text-center text-xs text-[var(--fg-2)] safe-bottom">
+      <footer className="px-4 py-6 text-center text-xs text-[var(--fg-2)] safe-bottom">
         <Link
           href="/login"
-          className="hover:text-[var(--fg-0)] transition-colors"
+          className="inline-flex min-h-11 items-center justify-center px-2 hover:text-[var(--fg-0)] transition-colors"
         >
           已有账号？直接登录
         </Link>

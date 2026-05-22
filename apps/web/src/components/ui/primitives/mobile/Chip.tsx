@@ -11,7 +11,7 @@ export interface ChipProps
 }
 
 /**
- * 32px 高的 Chip。外扩 padding 把 tap 区撑到 ≥44。
+ * 44px 高的 Chip，保证触控命中区和可见边界一致。
  * 反馈走 Pressable（scale + opacity + haptic）。
  */
 export function Chip({
@@ -31,10 +31,8 @@ export function Chip({
       aria-pressed={active}
       onPress={onClick as (() => void) | undefined}
       className={[
-        "relative h-8 px-3 rounded-full gap-1.5",
-        "text-caption whitespace-nowrap font-medium",
-        // 外扩 padding 撑 tap 区
-        "before:content-[''] before:absolute before:inset-0 before:-my-3 before:-mx-1",
+        "relative min-h-11 px-3 rounded-full gap-1.5",
+        "text-caption leading-none whitespace-nowrap font-medium",
         active
           ? "bg-[rgba(242,169,58,0.15)] text-[var(--amber-300)] border border-[rgba(242,169,58,0.40)]"
           : "bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border-subtle)]",

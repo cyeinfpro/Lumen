@@ -207,7 +207,7 @@ function ShareShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-[100dvh] w-full flex-1 flex-col bg-[linear-gradient(180deg,var(--bg-0)_0%,var(--bg-1)_52%,var(--bg-0)_100%)] text-[var(--fg-0)]">
       <header className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg-0)]/88 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
-        <div className="max-w-6xl mx-auto px-4 md:px-8 h-14 flex items-center justify-between safe-x">
+        <div className="safe-x-page-wide mx-auto flex h-14 max-w-6xl items-center justify-between">
           <Link
             href="/"
             className="inline-flex items-center gap-2 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors"
@@ -230,15 +230,15 @@ function ShareShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <main className="flex flex-1 flex-col items-center justify-start px-4 py-6 safe-x md:px-8 md:py-10">
+      <main className="safe-x-page-wide flex flex-1 flex-col items-center justify-start py-6 md:py-10">
         {children}
       </main>
 
-      <footer className="border-t border-[var(--border)] px-4 py-6 text-center text-xs text-[var(--fg-2)] safe-bottom safe-x">
+      <footer className="safe-x-page-wide safe-bottom border-t border-[var(--border)] py-8 text-center text-xs text-[var(--fg-2)]">
         <p>
           <Link
             href="/"
-            className="text-[var(--fg-1)] hover:text-[var(--color-lumen-amber)] transition-colors"
+            className="inline-flex min-h-11 items-center justify-center px-2 text-[var(--fg-1)] hover:text-[var(--color-lumen-amber)] transition-colors"
           >
             主页
           </Link>

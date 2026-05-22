@@ -65,7 +65,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
   return (
     <header
       className={[
-        "sticky top-0 grid w-full h-11 items-center gap-2 px-3 md:px-5",
+        "sticky top-0 grid h-12 w-full items-center gap-2 px-3 md:px-5",
         "grid-cols-[auto_minmax(0,1fr)_auto]",
         "backdrop-blur-xl bg-[var(--bg-0)]/70 border-b border-[var(--border-subtle)]",
       ].join(" ")}
@@ -78,7 +78,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
       <div className="flex items-center gap-3 md:gap-4 min-w-0">
         {onToggleSidebar && (
           <IconButton
-            size="sm"
+            size="md"
             aria-label="切换侧栏"
             title="切换侧栏 (⌘/Ctrl+B)"
             tooltip="切换侧栏 (⌘/Ctrl+B)"
@@ -88,7 +88,11 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
             <Menu className="w-4.5 h-4.5" />
           </IconButton>
         )}
-        <Link href="/" className="flex items-center gap-2 shrink-0" aria-label="Lumen 首页">
+        <Link
+          href="/"
+          className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full px-1 transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+          aria-label="Lumen 首页"
+        >
           {/* Lumen 品牌徽标渐变：琥珀→orange，非状态色，token 化无意义 */}
           {/* eslint-disable-next-line no-restricted-syntax */}
           <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-[var(--amber-400)] to-orange-200 shadow-[var(--shadow-amber)]" />
@@ -109,7 +113,7 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
                   onClick={() => onTap(tab)}
                   aria-current={isActive ? "page" : undefined}
                   className={[
-                    "relative px-2.5 py-1.5 rounded-md text-[13px] font-medium transition-colors cursor-pointer whitespace-nowrap",
+                    "relative inline-flex h-10 cursor-pointer items-center rounded-[var(--radius-control)] px-3 text-[13px] font-medium leading-none transition-colors whitespace-nowrap",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                     isActive
                       ? "text-[var(--fg-0)]"
@@ -117,15 +121,15 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
                   ].join(" ")}
                 >
                   {tab.label}
-                  {isActive && (
-                    <motion.span
-                      layoutId="desktop-nav-underline"
-                      aria-hidden
-                      className="absolute left-2 right-2 -bottom-[9px] h-0.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
-                      transition={SPRING.snap}
-                    />
-                  )}
                 </button>
+                {isActive && (
+                  <motion.span
+                    layoutId="desktop-nav-underline"
+                    aria-hidden
+                    className="absolute inset-x-2 -bottom-1 h-0.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
+                    transition={SPRING.snap}
+                  />
+                )}
               </li>
             );
           })}
@@ -178,7 +182,7 @@ function WalletBalancePill() {
       aria-label={low ? `钱包余额低 ¥${balanceText}` : `钱包余额 ¥${balanceText}`}
       title={`¥${balanceText}`}
       className={[
-        "hidden max-w-[140px] shrink-0 items-center rounded-full border px-2.5 py-1 text-[12px] font-medium tabular-nums sm:inline-flex",
+        "hidden h-10 max-w-[140px] shrink-0 items-center rounded-full border px-3 text-[12px] font-medium tabular-nums sm:inline-flex",
         "truncate font-mono",
         low || negative
           ? "border-danger-border bg-danger-soft text-[var(--danger-fg)]"

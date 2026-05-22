@@ -66,7 +66,7 @@ function ResetPasswordInner() {
 
   return (
     <main className="flex h-[100dvh] min-h-0 w-full flex-1 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <section className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain px-4 py-8 safe-x md:items-center">
+      <section className="safe-x-page flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain py-8 md:items-center">
         <div className="w-full max-w-md space-y-6">
           <header className="space-y-2">
             <Link

@@ -9,18 +9,18 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { MotionConfig } from "framer-motion";
 import { makeQueryClient } from "@/lib/queryClient";
-import { useIsMobile } from "@/hooks/useMediaQuery";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 
 export function QueryProvider({ children }: { children: React.ReactNode }) {
   const [client] = useState(() => makeQueryClient());
-  const isMobile = useIsMobile();
+  const showDevtools = useMediaQuery("(min-width: 1024px)");
 
   return (
     <QueryClientProvider client={client}>
       <MotionConfig reducedMotion="user">
         {children}
-        {process.env.NODE_ENV !== "production" && isMobile === false ? (
-          <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
+        {process.env.NODE_ENV !== "production" && showDevtools ? (
+          <ReactQueryDevtools initialIsOpen={false} buttonPosition="top-left" />
         ) : null}
       </MotionConfig>
     </QueryClientProvider>

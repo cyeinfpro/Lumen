@@ -126,7 +126,7 @@ function LibraryHeader({
         <Tabs current={current} onChange={onChange} compact />
         <Link
           href="/projects"
-          className="inline-flex h-7 items-center gap-1.5 border border-[var(--border)] px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+          className="inline-flex min-h-9 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
           返回项目
@@ -169,7 +169,7 @@ function Tabs({
             className={cn(
               "group relative inline-flex shrink-0 cursor-pointer items-center font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               compact
-                ? "min-h-7 px-2.5 py-1 text-[12px]"
+                ? "min-h-9 px-3 py-1.5 text-[12px]"
                 : "min-h-10 px-3 py-2.5 text-[13px] md:min-h-9 md:px-3 md:py-2",
               active
                 ? "text-[var(--fg-0)]"

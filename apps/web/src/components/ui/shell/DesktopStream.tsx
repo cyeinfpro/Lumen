@@ -82,7 +82,7 @@ function StreamToolbar({
         {total} 张
       </span>
       <IconButton
-        size="sm"
+        size="md"
         aria-label="搜索"
         aria-pressed={searchActive}
         onClick={onToggleSearch}
@@ -96,7 +96,7 @@ function StreamToolbar({
         <Search className="w-4 h-4" />
       </IconButton>
       <IconButton
-        size="sm"
+        size="md"
         aria-label="筛选"
         aria-pressed={filterActive}
         onClick={onToggleFilter}
@@ -110,7 +110,7 @@ function StreamToolbar({
         <Filter className="w-4 h-4" />
       </IconButton>
       <IconButton
-        size="sm"
+        size="md"
         aria-label="刷新"
         onClick={onRefresh}
         disabled={refreshing}

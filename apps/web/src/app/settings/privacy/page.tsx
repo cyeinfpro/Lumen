@@ -77,7 +77,7 @@ export default function PrivacyPage() {
           </div>
           <Link
             href="/me"
-            className="inline-flex items-center gap-1.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors whitespace-nowrap"
+            className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] whitespace-nowrap"
           >
             <ArrowLeft className="w-4 h-4" />
             返回我的

@@ -144,7 +144,7 @@ export default function SignupPage() {
 
   return (
     <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-[var(--bg-0)] text-[var(--fg-0)]">
-      <main className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain px-4 py-8 safe-x md:items-center">
+      <main className="safe-x-page flex min-h-0 flex-1 items-start justify-center overflow-y-auto overscroll-contain py-8 md:items-center">
         <div className="w-full max-w-md space-y-7">
           <header className="space-y-2">
             <Link

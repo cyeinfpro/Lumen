@@ -139,7 +139,7 @@ export default function WalletPage() {
           </p>
           <Link
             href="/me"
-            className="inline-flex h-8 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
+            className="inline-flex min-h-9 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
           >
             返回我的
           </Link>
@@ -158,7 +158,7 @@ export default function WalletPage() {
           </div>
           <Link
             href="/me"
-            className="inline-flex items-center gap-1.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+            className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
           >
             <ArrowLeft className="w-4 h-4" />
             返回我的
@@ -318,14 +318,14 @@ export default function WalletPage() {
               刷新
             </Button>
           </div>
-          <div className="scrollbar-thin flex flex-nowrap gap-2 overflow-x-auto overscroll-x-contain border-b border-[var(--border-subtle)] px-4 py-3">
+          <div className="scrollbar-thin flex flex-wrap gap-2 border-b border-[var(--border-subtle)] px-4 py-3 md:flex-nowrap md:overflow-x-auto md:overscroll-x-contain">
             {TX_KIND_FILTERS.map((item) => (
               <button
                 key={item.key}
                 type="button"
                 onClick={() => setTxKind(item.key)}
                 className={[
-                  "shrink-0 rounded-full border px-3 py-1 text-xs",
+                  "shrink-0 rounded-full border min-h-9 px-3 text-xs",
                   txKind === item.key
                     ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
                     : "border-[var(--border)] text-[var(--fg-2)]",
