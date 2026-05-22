@@ -38,7 +38,7 @@ export function FilterBar({ open, filters, onChange, onClear }: FilterBarProps) 
           role="group"
           aria-label="筛选"
         >
-          <div className="flex min-w-max items-center gap-2 px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 md:flex-nowrap">
             <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] text-[var(--fg-2)]">
               <SlidersHorizontal className="h-3.5 w-3.5" />
               筛选

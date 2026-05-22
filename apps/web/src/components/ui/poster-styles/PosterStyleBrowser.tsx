@@ -221,7 +221,7 @@ export function PosterStyleBrowser({
                   type="button"
                   onClick={() => setSource(value)}
                   className={cn(
-                    "group relative flex h-8 cursor-pointer items-center justify-between border-b border-[var(--border)] py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors",
+                    "group relative flex min-h-9 cursor-pointer items-center justify-between border-b border-[var(--border)] py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors",
                     active
                       ? "text-[var(--fg-0)]"
                       : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
@@ -455,7 +455,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-8 shrink-0 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "group relative inline-flex min-h-9 min-w-9 shrink-0 cursor-pointer items-center justify-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >

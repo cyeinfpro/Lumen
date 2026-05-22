@@ -36,7 +36,7 @@ export function SegmentedControl<V extends string = string>({
       role="tablist"
       aria-label={ariaLabel}
       className={[
-        "relative flex h-10 items-center rounded-[var(--radius-card)] p-px",
+        "relative flex min-h-11 items-center rounded-[var(--radius-card)] p-px md:min-h-10",
         "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
         className,
       ].join(" ")}
@@ -54,7 +54,7 @@ export function SegmentedControl<V extends string = string>({
             haptic="light"
             onPress={() => onChange(item.value)}
             className={[
-              "relative z-[1] h-9 flex-1 min-w-0 rounded-[var(--radius-md)] px-2 sm:px-3 gap-1.5",
+              "relative z-[1] min-h-10 flex-1 min-w-0 rounded-[var(--radius-md)] px-2 sm:px-3 gap-1.5 md:min-h-9",
               "text-[13px] font-medium transition-colors",
               active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
             ].join(" ")}

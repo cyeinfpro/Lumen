@@ -119,13 +119,13 @@ export function ProjectFunctionHub() {
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-              <span className="inline-flex h-7 items-baseline gap-1.5 border border-[var(--border-subtle)] px-2">
+              <span className="inline-flex min-h-9 items-baseline gap-1.5 border border-[var(--border-subtle)] px-3">
                 <span className="text-[13px] font-semibold tabular-nums leading-[1.9] text-[var(--fg-0)]">
                   {String(FEATURES.filter((feature) => feature.available).length).padStart(2, "0")}
                 </span>
                 <span className="text-[10px] text-[var(--fg-2)]">可用</span>
               </span>
-              <span className="inline-flex h-7 items-baseline gap-1.5 border border-[var(--border-subtle)] px-2">
+              <span className="inline-flex min-h-9 items-baseline gap-1.5 border border-[var(--border-subtle)] px-3">
                 <span className="text-[13px] font-semibold tabular-nums leading-[1.9] text-[var(--fg-0)]">
                   {String(FEATURES.length).padStart(2, "0")}
                 </span>

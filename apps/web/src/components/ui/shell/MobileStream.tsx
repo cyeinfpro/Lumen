@@ -354,26 +354,31 @@ export function MobileStream() {
         </PullToRefresh>
       </div>
 
-      <Pressable
-        size="default"
-        minHit={true}
-        pressScale="tight"
-        haptic="light"
-        aria-label="回到顶部"
-        onPress={scrollToTop}
+      <div
         className={cn(
-          "fixed right-4 z-30 flex h-11 w-11 items-center justify-center rounded-full",
-          "border border-[var(--border-subtle)] bg-[var(--bg-1)]/85 text-[var(--fg-1)] shadow-[var(--shadow-2)] backdrop-blur-xl",
-          "transition-[opacity,transform] duration-200",
-          "hover:text-[var(--fg-0)]",
+          "fixed right-4 z-30 h-11 w-11 transition-[opacity,transform] duration-200",
           showScrollTop
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-3 opacity-0",
         )}
         style={{ bottom: "calc(72px + env(safe-area-inset-bottom, 0px))" }}
       >
-        <ArrowUp className="h-[18px] w-[18px]" />
-      </Pressable>
+        <Pressable
+          size="default"
+          minHit={true}
+          pressScale="tight"
+          haptic="light"
+          aria-label="回到顶部"
+          onPress={scrollToTop}
+          className={cn(
+            "h-11 w-11 rounded-full",
+            "border border-[var(--border-subtle)] bg-[var(--bg-1)]/85 text-[var(--fg-1)] shadow-[var(--shadow-2)] backdrop-blur-xl",
+            "hover:text-[var(--fg-0)]",
+          )}
+        >
+          <ArrowUp className="h-[18px] w-[18px]" />
+        </Pressable>
+      </div>
 
       <MobileTabBar />
     </div>

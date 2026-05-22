@@ -66,7 +66,7 @@ export function MobileTabBar() {
       aria-hidden={lightboxOpen || undefined}
       inert={lightboxOpen ? true : undefined}
       className={[
-        "fixed inset-x-0 bottom-0 border-t border-[var(--border-amber)]/20 bg-[var(--bg-1)]/85 backdrop-blur-2xl mobile-perf-surface safe-x",
+        "fixed inset-x-0 bottom-0 border-t border-[var(--border-amber)]/20 bg-[var(--bg-1)] backdrop-blur-2xl mobile-perf-surface safe-x",
         "transition-[transform,opacity] duration-[var(--dur-normal)] ease-[var(--ease-shutter)]",
         lightboxOpen ? "opacity-0 pointer-events-none" : "opacity-100",
         isKeyboardOpen ? "translate-y-full pointer-events-none" : "translate-y-0",

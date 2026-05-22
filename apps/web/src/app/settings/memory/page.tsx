@@ -264,7 +264,7 @@ export default function MemorySettingsPage() {
           </div>
           <Link
             href="/me"
-            className="inline-flex items-center gap-1.5 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
+            className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
           >
             <ArrowLeft className="h-4 w-4" />
             返回我的
@@ -381,13 +381,13 @@ export default function MemorySettingsPage() {
                   value={newScopeEmoji}
                   onChange={(e) => setNewScopeEmoji(e.target.value.slice(0, 4))}
                   placeholder="图标"
-                  className="h-9 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
+                  className="h-11 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
                 />
                 <input
                   value={newScopeName}
                   onChange={(e) => setNewScopeName(e.target.value)}
                   placeholder="工作"
-                  className="h-9 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
+                  className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
                 />
                 <IconButton
                   variant="primary"
@@ -427,7 +427,7 @@ export default function MemorySettingsPage() {
                 <select
                   value={newMemoryType}
                   onChange={(e) => setNewMemoryType(e.target.value as MemoryType)}
-                  className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
+                  className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
                 >
                   {TYPE_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -440,7 +440,7 @@ export default function MemorySettingsPage() {
                   onChange={(e) => setNewMemoryContent(e.target.value)}
                   placeholder="例如：偏好 200 字以内的回答"
                   maxLength={200}
-                  className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60"
+                  className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-10"
                 />
                 <Button
                   variant="primary"
@@ -469,7 +469,7 @@ export default function MemorySettingsPage() {
                   <>
                     <IconButton
                       variant="outline"
-                      size="sm"
+                      size="md"
                       onClick={() => void memoriesQ.refetch()}
                       aria-label="刷新记忆"
                       tooltip="刷新"
@@ -494,7 +494,7 @@ export default function MemorySettingsPage() {
                     value={memorySearch}
                     onChange={(event) => setMemorySearch(event.target.value)}
                     placeholder={selectedScope === "all" ? "跨作用域搜索" : "搜索当前作用域"}
-                    className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60"
+                    className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-9"
                   />
                 </label>
                 {selectedScope === "all" && selectedMemoryIds.size > 0 ? (
@@ -511,7 +511,7 @@ export default function MemorySettingsPage() {
                         });
                         event.currentTarget.value = "";
                       }}
-                      className="h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none"
+                      className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none sm:h-9"
                       defaultValue=""
                     >
                       <option value="" disabled>
@@ -596,16 +596,16 @@ export default function MemorySettingsPage() {
                           {formatTime(item.created_at)}
                         </span>
                       </div>
-                      <input
-                        value={stagingEdits[item.id] ?? item.content}
-                        onChange={(e) =>
-                          setStagingEdits((prev) => ({
-                            ...prev,
-                            [item.id]: e.target.value,
-                          }))
-                        }
-                        className="mb-3 h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
-                      />
+                        <input
+                          value={stagingEdits[item.id] ?? item.content}
+                          onChange={(e) =>
+                            setStagingEdits((prev) => ({
+                              ...prev,
+                              [item.id]: e.target.value,
+                            }))
+                          }
+                        className="mb-3 h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
+                        />
                       <div className="flex flex-wrap gap-2">
                         <select
                           value={item.scope_id}
@@ -847,7 +847,7 @@ function ScopeButton({
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          className="h-8 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none"
+          className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-2 text-xs text-[var(--fg-0)] outline-none md:h-8"
         />
         <Button
           variant="secondary"
@@ -876,14 +876,14 @@ function ScopeButton({
           <button
             type="button"
             onClick={() => setEditing(true)}
-            className="h-7 rounded-[var(--radius-control)] px-1.5 text-[11px] text-[var(--fg-2)] hover:text-[var(--fg-0)]"
+            className="h-8 rounded-[var(--radius-control)] px-1.5 text-[11px] text-[var(--fg-2)] hover:text-[var(--fg-0)]"
           >
             改
           </button>
           <button
             type="button"
             onClick={onDelete}
-            className="h-7 rounded-[var(--radius-control)] px-1.5 text-[11px] text-danger/70 hover:text-danger"
+            className="h-8 rounded-[var(--radius-control)] px-1.5 text-[11px] text-danger/70 hover:text-danger"
           >
             删
           </button>
@@ -895,7 +895,7 @@ function ScopeButton({
 
 function scopeButtonClass(active: boolean): string {
   return [
-    "flex h-9 min-w-0 flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 text-sm transition-colors",
+    "flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 text-sm transition-colors md:h-9 md:min-h-0",
     active
       ? "bg-accent-soft text-accent"
       : "text-[var(--fg-1)] hover:bg-white/[0.04] hover:text-[var(--fg-0)]",

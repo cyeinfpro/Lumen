@@ -105,7 +105,7 @@ function LoginInner() {
         <BrandPanel />
 
         {/* —— 右：登录表单 —— */}
-        <section className="flex min-h-full items-start justify-center px-4 py-8 safe-x md:items-center md:py-16">
+        <section className="safe-x-page flex min-h-full items-start justify-center py-8 md:items-center md:py-16">
           <motion.div
             initial={false}
             animate={{ opacity: 1, y: 0 }}
@@ -157,7 +157,7 @@ function LoginInner() {
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="输入密码"
                       autoComplete="current-password"
-                      className="w-full h-10 pl-3 pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+                      className="w-full h-10 pl-3 pr-12 md:pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
                     />
                     <button
                       type="button"
@@ -248,8 +248,8 @@ function LoginInner() {
         </section>
       </main>
 
-      <footer className="py-4 px-4 text-center text-xs text-[var(--fg-2)] safe-bottom">
-        <Link href="/" className="hover:text-[var(--fg-0)] transition-colors">
+      <footer className="px-4 py-6 text-center text-xs text-[var(--fg-2)] safe-bottom">
+        <Link href="/" className="inline-flex min-h-11 items-center justify-center px-2 hover:text-[var(--fg-0)] transition-colors">
           返回首页
         </Link>
       </footer>
@@ -310,7 +310,7 @@ function BrandPanel() {
     <aside className="hidden md:flex relative overflow-hidden bg-[var(--bg-1)]/30 border-r border-[var(--border)]">
       {/* 背景装饰 */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute -top-20 -left-20 w-80 h-80 rounded-full bg-[var(--color-lumen-amber)]/10 blur-3xl" />
+        <div className="absolute left-0 top-0 h-64 w-64 rounded-full bg-[var(--color-lumen-amber)]/10 blur-3xl" />
         {/* eslint-disable-next-line no-restricted-syntax -- 品牌装饰 blur，非状态色 */}
         <div className="absolute bottom-0 right-0 w-96 h-96 rounded-full bg-orange-500/5 blur-3xl" />
         <div

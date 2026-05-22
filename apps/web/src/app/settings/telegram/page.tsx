@@ -46,7 +46,7 @@ export default function TelegramSettingsPage() {
           </div>
           <Link
             href="/me"
-            className="inline-flex items-center gap-1.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+            className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
           >
             <ArrowLeft className="w-4 h-4" />
             返回我的

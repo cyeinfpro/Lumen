@@ -60,7 +60,7 @@ export function StreamSearchBar({
               placeholder="搜索提示词…"
               aria-label="搜索已加载作品"
               className={[
-                "flex-1 bg-transparent border-none outline-none",
+                "flex-1 min-h-11 bg-transparent border-none outline-none",
                 "text-[15px] text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
               ].join(" ")}
             />

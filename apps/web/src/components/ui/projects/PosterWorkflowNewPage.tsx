@@ -311,7 +311,7 @@ export function PosterWorkflowNewPage() {
             </div>
             <Link
               href="/projects"
-              className="inline-flex h-7 shrink-0 items-center gap-1.5 border border-[var(--border)] px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+              className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
               返回项目
@@ -347,7 +347,7 @@ export function PosterWorkflowNewPage() {
                   <button
                     type="button"
                     onClick={() => setStyleOpen(true)}
-                    className="inline-flex h-7 items-center gap-1.5 border border-[var(--border)] px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
+                    className="inline-flex min-h-9 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
                   >
                     <Palette className="h-3.5 w-3.5" />
                     {style ? "更换风格" : "从风格库选择"}
@@ -457,7 +457,7 @@ export function PosterWorkflowNewPage() {
                         type="color"
                         value={primaryColor || "#ffd166"}
                         onChange={(event) => setPrimaryColor(event.target.value)}
-                        className="h-8 w-12 cursor-pointer border border-[var(--border)] bg-transparent"
+                        className="h-9 w-12 cursor-pointer border border-[var(--border)] bg-transparent"
                       />
                       <input
                         value={primaryColor}
@@ -514,7 +514,7 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => setQualityMode("standard")}
                       className={cn(
-                        "inline-flex h-8 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                        "inline-flex min-h-9 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                         qualityMode === "standard"
                           ? "bg-[var(--amber-400)] text-black"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -526,7 +526,7 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => setQualityMode("premium")}
                       className={cn(
-                        "inline-flex h-8 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                        "inline-flex min-h-9 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
                         qualityMode === "premium"
                           ? "bg-[var(--amber-400)] text-black"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",

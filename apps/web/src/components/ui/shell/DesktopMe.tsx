@@ -45,7 +45,7 @@ export function DesktopMe() {
 
             <div
               className={cn(
-                "flex items-center gap-2 h-10 px-3.5 mb-5",
+                "mb-5 flex min-h-11 items-center gap-2 px-3.5 md:min-h-10",
                 "rounded-[var(--radius-card)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",
                 "focus-within:border-[var(--amber-400)]/40",
                 "transition-colors",
@@ -60,6 +60,7 @@ export function DesktopMe() {
                 aria-label="搜索会话"
                 className={cn(
                   "flex-1 bg-transparent border-none outline-none",
+                  "h-10",
                   "text-[14px] text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
                 )}
               />

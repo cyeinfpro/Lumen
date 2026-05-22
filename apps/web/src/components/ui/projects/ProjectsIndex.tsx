@@ -206,7 +206,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
         </div>
         <Link
           href="/projects/apparel-model-showcase/new"
-          className="group inline-flex h-7 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-2.5 text-[12px] font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
+          className="group inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-3 text-[12px] font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
         >
           <Plus className="h-3.5 w-3.5" />
           新建项目
@@ -227,7 +227,7 @@ function CompactStat({
   accent?: boolean;
 }) {
   return (
-    <span className="inline-flex h-7 items-baseline gap-1.5 border border-[var(--border-subtle)] px-2">
+    <span className="inline-flex min-h-9 items-baseline gap-1.5 border border-[var(--border-subtle)] px-3">
       <span
         className={cn(
           "text-[13px] font-semibold tabular-nums leading-[1.9]",

@@ -213,12 +213,12 @@ export function DesktopStudio() {
   const topNavRight = (
     <>
       <IconButton
-        size="sm"
+        size="md"
         variant="ghost"
         onClick={() => setFast(!fast)}
         aria-label={fast ? "关闭快速模式" : "开启快速模式"}
         title={fast ? "快速模式 · 已开启" : "快速模式 · 点击开启"}
-        className="w-7 h-7 max-sm:min-h-7 max-sm:min-w-7 rounded-full"
+        className="rounded-full"
       >
         <FastLamp on={fast} />
       </IconButton>
@@ -233,7 +233,7 @@ export function DesktopStudio() {
             exit={{ opacity: 0, scale: 0.8 }}
             onClick={() => setTaskTrayMinimized(false)}
             aria-label={`生成中 ${running.total} 张，点击查看任务面板`}
-            className="inline-flex items-center justify-center w-7 h-7 rounded-full hover:bg-white/8 cursor-pointer"
+            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full hover:bg-white/8"
           >
             <GenerationRing pct={running.pct} total={running.total} />
           </motion.button>
@@ -261,19 +261,19 @@ export function DesktopStudio() {
         </Link>
       )}
       <IconButton
-        size="sm"
+        size="md"
         variant="ghost"
         onClick={() => !createMut.isPending && createMut.mutate({})}
         aria-label="新建对话"
         title="新建对话"
         disabled={createMut.isPending}
-        className="w-7 h-7 max-sm:min-h-7 max-sm:min-w-7 rounded-full"
+        className="rounded-full"
       >
         <Plus className="w-4 h-4" />
       </IconButton>
       <Link
         href="/me"
-        className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-full bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
+        className="inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full bg-white/10 transition-colors hover:bg-white/15"
         aria-label="我的账号"
         title="我的账号"
       >
