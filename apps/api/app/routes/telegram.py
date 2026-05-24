@@ -57,7 +57,11 @@ from ..redis_client import get_redis
 from .messages import submit_user_message
 from .prompts import _resolve_provider_order, _stream_enhance
 from .providers import _parse_config, _read_providers
-from lumen_core.providers import parse_proxy_item, resolve_provider_proxy_url
+from lumen_core.providers import (
+    parse_provider_bool,
+    parse_proxy_item,
+    resolve_provider_proxy_url,
+)
 from lumen_core.runtime_settings import get_spec
 from ..proxy_pool import (
     DEFAULT_STRATEGY,
@@ -103,6 +107,12 @@ if redis.call('SET', KEYS[2], ARGV[1], 'NX', 'EX', tonumber(ARGV[2])) then
   return {1, raw}
 end
 return {2, ''}
+"""
+_RELEASE_LINK_CODE_CLAIM_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
 """
 
 
@@ -157,9 +167,16 @@ async def _claim_link_code(redis: object, code: str, *, owner: str) -> str | Non
     return _decode_redis_text(raw)
 
 
-async def _release_link_code_claim(redis: object, code: str) -> None:
+async def _release_link_code_claim(redis: object, code: str, *, owner: str) -> None:
+    claim_key = _link_code_claim_key(code)
     try:
-        await redis.delete(_link_code_claim_key(code))  # type: ignore[attr-defined]
+        eval_fn = getattr(redis, "eval", None)
+        if callable(eval_fn):
+            await eval_fn(_RELEASE_LINK_CODE_CLAIM_LUA, 1, claim_key, owner)
+            return
+        raw = await redis.get(claim_key)  # type: ignore[attr-defined]
+        if raw is not None and _decode_redis_text(raw) == owner:
+            await redis.delete(claim_key)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "telegram link code claim release failed code=%s err=%s", code, exc
@@ -394,10 +411,11 @@ async def bind_telegram(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BindOut:
     redis = get_redis()
+    claim_owner = f"chat:{body.chat_id}"
     user_id = await _claim_link_code(
         redis,
         body.code,
-        owner=f"chat:{body.chat_id}",
+        owner=claim_owner,
     )
     if user_id is None:
         # Why: key is IP-only. Including `len:{len(body.code)}` partitions
@@ -417,7 +435,7 @@ async def bind_telegram(
         )
     ).scalar_one_or_none()
     if user is None:
-        await _release_link_code_claim(redis, body.code)
+        await _release_link_code_claim(redis, body.code, owner=claim_owner)
         raise _http("user_not_found", "user no longer exists", 404)
 
     # upsert by chat_id：同一 chat 重新绑可换 user
@@ -450,13 +468,13 @@ async def bind_telegram(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        await _release_link_code_claim(redis, body.code)
+        await _release_link_code_claim(redis, body.code, owner=claim_owner)
         raise _http(
             "bind_conflict", "binding conflict, retry the link flow", 409
         ) from exc
     except Exception:
         await db.rollback()
-        await _release_link_code_claim(redis, body.code)
+        await _release_link_code_claim(redis, body.code, owner=claim_owner)
         raise
     try:
         await _consume_link_code(redis, body.code)
@@ -528,6 +546,13 @@ class RuntimeConfigOut(BaseModel):
 class RuntimeAccessOut(BaseModel):
     bot_enabled: bool
     allowed_user_ids: str
+
+
+def _bool_option(value: object, default: bool = False) -> bool:
+    try:
+        return parse_provider_bool(value, default=default)
+    except ValueError:
+        return default
 
 
 async def _get_setting_str(db: AsyncSession, key: str, default: str = "") -> str:
@@ -814,7 +839,7 @@ async def get_generation(
         size_requested=gen.size_requested,
         render_quality=str(upstream.get("render_quality") or "medium"),
         output_format=str(upstream.get("output_format") or "jpeg"),
-        fast=bool(upstream.get("fast", False)),
+        fast=_bool_option(upstream.get("fast"), False),
         web_url=web_url,
         edit_url=edit_url,
         project_url=project_url,

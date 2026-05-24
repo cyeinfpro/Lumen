@@ -174,7 +174,7 @@ export default function SignupPage() {
                   type="button"
                   onClick={() => void suppliersQ.refetch()}
                   disabled={suppliersQ.isFetching}
-                  className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-xs text-[var(--fg-1)] hover:bg-[var(--bg-2)] disabled:opacity-50"
+                  className="inline-flex items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-xs text-[var(--fg-1)] hover:bg-[var(--bg-2)] disabled:opacity-50"
                 >
                   {suppliersQ.isFetching ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -191,7 +191,7 @@ export default function SignupPage() {
                 value={activeSupplierId}
                 disabled={disabled || verifying || Boolean(verificationToken)}
                 onChange={(e) => setSupplierId(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl bg-[var(--bg-1)] border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+                className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
               >
                 {suppliers.length === 0 ? (
                   <option value="">暂无可用供应商</option>
@@ -215,7 +215,7 @@ export default function SignupPage() {
                   onChange={(e) => setApiKey(e.target.value)}
                   placeholder="sk-..."
                   autoComplete="off"
-                  className="w-full h-10 pl-10 pr-3 rounded-xl bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+                  className="w-full h-10 pl-10 pr-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
                 />
               </div>
             </label>
@@ -223,7 +223,7 @@ export default function SignupPage() {
               type="button"
               onClick={onVerify}
               disabled={disabled || verifying || Boolean(verificationToken)}
-              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm disabled:opacity-50"
+              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm disabled:opacity-50"
             >
               {verifying ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -247,7 +247,7 @@ export default function SignupPage() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@example.com"
               autoComplete="email"
-              className="w-full h-10 px-3 rounded-xl bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+              className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
             />
             <div className="relative">
               <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
@@ -257,12 +257,12 @@ export default function SignupPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="至少 8 位密码"
                 autoComplete="new-password"
-                className="w-full h-10 pl-10 pr-11 rounded-xl bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+                className="w-full h-10 pl-10 pr-11 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword((value) => !value)}
-                className="absolute right-1 top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg flex items-center justify-center text-[var(--fg-2)] hover:text-[var(--fg-0)]"
+                className="absolute right-1 top-1/2 -translate-y-1/2 w-9 h-9 rounded-[var(--radius-card)] flex items-center justify-center text-[var(--fg-2)] hover:text-[var(--fg-0)]"
                 aria-label={showPassword ? "隐藏密码" : "显示密码"}
               >
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -274,7 +274,7 @@ export default function SignupPage() {
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="确认密码"
               autoComplete="new-password"
-              className="w-full h-10 px-3 rounded-xl bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
+              className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50"
             />
 
             {error && (
@@ -291,7 +291,7 @@ export default function SignupPage() {
             <button
               type="submit"
               disabled={submitting || !verificationToken}
-              className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--color-lumen-amber)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50"
+              className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "创建账号"}
               {!submitting && <ArrowRight className="w-4 h-4" />}

@@ -115,7 +115,7 @@ export function BackupsPanel() {
   return (
     <section className="space-y-5">
       {/* —— 顶部：立即备份 + 说明 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-start gap-3 min-w-0">
             <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25 flex items-center justify-center shrink-0">
@@ -125,7 +125,7 @@ export function BackupsPanel() {
               <p className="type-card-title">备份与恢复</p>
               <p className="type-caption text-[var(--fg-2)] mt-1 leading-relaxed break-words">
                 系统每 4 小时自动备份数据库和缓存到
-                <code className="mx-1 px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[11px] break-all">
+                <code className="mx-1 px-1.5 py-0.5 rounded bg-white/5 border border-[var(--border)] text-[11px] break-all">
                   /opt/lumendata/backup
                 </code>
                 ，最多保留 40 份。恢复会成对还原数据库和缓存。
@@ -165,7 +165,7 @@ export function BackupsPanel() {
               type="button"
               onClick={() => setBanner(null)}
               aria-label={copy.action.close}
-              className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md hover:bg-white/10 transition-colors"
+              className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] hover:bg-white/10 transition-colors"
             >
               <X className="w-3 h-3" />
             </button>
@@ -174,7 +174,7 @@ export function BackupsPanel() {
       </AnimatePresence>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] overflow-hidden">
         {q.isLoading ? (
           <ListSkeleton rows={4} />
         ) : q.isError ? (
@@ -192,7 +192,7 @@ export function BackupsPanel() {
             {/* 桌面端表格 */}
             <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
               <table className="w-full text-sm">
-                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-white/10">
+                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
                   <tr>
                     <th className="text-left py-3 px-4 font-medium">时间</th>
                     <th className="text-left py-3 px-4 font-medium">相对</th>
@@ -215,21 +215,21 @@ export function BackupsPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.02, 0.2),
                       }}
-                      className="border-t border-white/5 hover:bg-white/[0.03] transition-colors"
+                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors"
                     >
-                      <td className="py-3 px-4 text-neutral-100 font-mono text-xs tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-0)] font-mono text-xs tabular-nums">
                         {formatTs(b.timestamp, b.created_at)}
                       </td>
-                      <td className="py-3 px-4 text-neutral-400 text-xs">
+                      <td className="py-3 px-4 text-[var(--fg-1)] text-xs">
                         <span className="inline-flex items-center gap-1">
                           <Clock className="w-3 h-3" />
                           {relativeFromIso(b.created_at)}
                         </span>
                       </td>
-                      <td className="py-3 px-4 text-right text-neutral-200 font-mono tabular-nums text-xs">
+                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums text-xs">
                         {formatBytes(b.pg_size)}
                       </td>
-                      <td className="py-3 px-4 text-right text-neutral-200 font-mono tabular-nums text-xs">
+                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums text-xs">
                         {formatBytes(b.redis_size)}
                       </td>
                       <td className="py-3 px-4 text-right">
@@ -253,11 +253,11 @@ export function BackupsPanel() {
               {items.map((b) => (
                 <li
                   key={b.timestamp}
-                  className="p-3 border border-white/10 rounded-lg m-2 space-y-2"
+                  className="p-3 border border-[var(--border)] rounded-[var(--radius-card)] m-2 space-y-2"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm text-neutral-100 font-mono tabular-nums break-all">
+                      <div className="text-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
                         {formatTs(b.timestamp, b.created_at)}
                       </div>
                       <div className="type-caption text-[var(--fg-2)] inline-flex items-center gap-1 mt-1">
@@ -276,19 +276,19 @@ export function BackupsPanel() {
                     </Button>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-md bg-white/[0.03] border border-white/5 px-2 py-1.5">
-                      <div className="text-[11px] uppercase tracking-wider text-neutral-500 inline-flex items-center gap-1">
+                    <div className="rounded-[var(--radius-control)] bg-white/[0.03] border border-[var(--border-subtle)] px-2 py-1.5">
+                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)] inline-flex items-center gap-1">
                         <Database className="w-2.5 h-2.5" /> 数据库
                       </div>
-                      <div className="text-sm text-neutral-200 font-mono tabular-nums break-all">
+                      <div className="text-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
                         {formatBytes(b.pg_size)}
                       </div>
                     </div>
-                    <div className="rounded-md bg-white/[0.03] border border-white/5 px-2 py-1.5">
-                      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+                    <div className="rounded-[var(--radius-control)] bg-white/[0.03] border border-[var(--border-subtle)] px-2 py-1.5">
+                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                         缓存
                       </div>
-                      <div className="text-sm text-neutral-200 font-mono tabular-nums break-all">
+                      <div className="text-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
                         {formatBytes(b.redis_size)}
                       </div>
                     </div>

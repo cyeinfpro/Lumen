@@ -30,6 +30,9 @@ test("idless BroadcastChannel messages are dropped before store delivery", () =>
 
 test("SSE event identity accepts payload ids, sse ids, and EventSource ids", () => {
   match(source, /event_id\?: unknown;[\s\S]*?sse_id\?: unknown;[\s\S]*?msg_id\?: unknown/);
+  match(source, /typeof raw === "number" && Number\.isFinite\(raw\)[\s\S]*?return String\(raw\)/);
+  match(source, /typeof sseId === "number" && Number\.isFinite\(sseId\)[\s\S]*?return String\(sseId\)/);
+  match(source, /typeof msgId === "number" && Number\.isFinite\(msgId\)[\s\S]*?return String\(msgId\)/);
   match(source, /return eventId \|\| null;/);
 });
 

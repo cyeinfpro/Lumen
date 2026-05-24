@@ -561,7 +561,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         className="block focus-visible:outline-none"
         aria-label={item.title || "服饰模特图"}
       >
-        <div className="relative aspect-[3/4] overflow-hidden rounded-lg bg-[var(--bg-2)]">
+        <div className="relative aspect-[3/4] overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)]">
           {thumb ? (
             <Image
               src={thumb}
@@ -858,7 +858,7 @@ function SkeletonGrid() {
     <div className="grid grid-cols-2 gap-x-4 gap-y-8 md:gap-x-6 md:gap-y-12 lg:grid-cols-3 xl:grid-cols-4">
       {Array.from({ length: 8 }).map((_, index) => (
         <div key={index} className="grid gap-3">
-          <Skeleton className="aspect-[3/4] w-full rounded-lg" />
+          <Skeleton className="aspect-[3/4] w-full rounded-[var(--radius-card)]" />
           <div className="space-y-2">
             <Skeleton className="h-4 w-3/4" />
             <Skeleton className="h-3 w-1/2" />

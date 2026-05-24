@@ -17,7 +17,7 @@ export function ImageCountPicker() {
       aria-label="选择生成张数"
       className={cn(
         "inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-white/5 p-0.5",
-        "shadow-[0_1px_0_rgba(255,255,255,0.04)_inset]",
+        "shadow-[var(--shadow-2)]",
       )}
     >
       <span
@@ -51,7 +51,7 @@ export function ImageCountPicker() {
               <motion.span
                 layoutId="image-count-pill"
                 transition={{ type: "spring", damping: 28, stiffness: 380 }}
-                className="absolute inset-0 -z-10 rounded-full bg-[var(--color-lumen-amber)] shadow-[0_0_14px_rgba(242,169,58,0.28)]"
+                className="absolute inset-0 -z-10 rounded-full bg-[var(--color-lumen-amber)] shadow-[var(--shadow-amber)]"
               />
             )}
             {option}

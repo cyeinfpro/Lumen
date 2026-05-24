@@ -52,7 +52,7 @@ export function CandidateCard({
       <div className="relative">
         <div
           className={cn(
-            "relative grid aspect-[4/5] gap-px overflow-hidden rounded-lg bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)]",
+            "relative grid aspect-[4/5] gap-px overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)]",
             images.length > 1 ? "grid-cols-2" : "grid-cols-1",
             selected && "ring-1 ring-inset ring-[var(--border-amber)]",
           )}

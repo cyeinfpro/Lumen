@@ -129,7 +129,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)]",
         // 移动端撑满可用宽度（已扣掉 viewport 两侧 padding）
         "max-sm:w-full",
-        "flex items-start gap-3 px-3 py-2.5 rounded-xl",
+        "flex items-start gap-3 px-3 py-2.5 rounded-[var(--radius-panel)]",
         "bg-[var(--bg-1)]/95 backdrop-blur-xl border text-[var(--fg-0)]",
         "shadow-lumen-pop",
         tone.border,
@@ -169,7 +169,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         aria-label="关闭通知"
         onClick={() => dismiss(item.id)}
         className={cn(
-          "shrink-0 w-6 h-6 rounded-md inline-flex items-center justify-center",
+          "shrink-0 w-6 h-6 rounded-[var(--radius-control)] inline-flex items-center justify-center",
           "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] transition-colors",
         )}
       >

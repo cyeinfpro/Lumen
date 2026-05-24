@@ -438,7 +438,7 @@ export function PromptComposer({ onSubmit }: PromptComposerProps) {
           "w-[min(calc(100vw-var(--sidebar-w)-1rem),48rem)] lg:w-[min(calc(100vw-var(--sidebar-w)-2rem),56rem)]",
           "max-h-[calc(100dvh-var(--system-banner-height,0px)-var(--keyboard-offset,0px)-2rem)]",
           "bottom-[calc(0.75rem+env(safe-area-inset-bottom)+var(--keyboard-offset,0px))] sm:bottom-[calc(1.5rem+env(safe-area-inset-bottom)+var(--keyboard-offset,0px))]",
-          "rounded-[var(--radius-sheet)] shadow-[0_24px_80px_-26px_rgba(0,0,0,0.75),0_0_0_1px_rgba(255,255,255,0.04)]",
+          "rounded-[var(--radius-sheet)] shadow-[var(--shadow-3)]",
           "border transition-[border-color,background-color,box-shadow] duration-300",
           // focus 不再改描边/背景 —— 避免"点进去冒出一个亮框"。
           // amber 只保留给拖拽态（用户正在往里拖图）。
@@ -822,7 +822,7 @@ function SendButton({
           ? [
               "bg-[var(--color-lumen-amber)] text-black",
               "hover:brightness-110",
-              "shadow-[0_0_18px_rgba(242,169,58,0.35)] hover:shadow-[0_0_22px_rgba(242,169,58,0.5)]",
+              "shadow-[var(--shadow-amber)] hover:shadow-[var(--shadow-amber)]",
               "cursor-pointer",
             ].join(" ")
           : "bg-[var(--bg-2)] text-[var(--fg-2)] cursor-not-allowed shadow-none",

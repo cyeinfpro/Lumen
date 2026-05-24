@@ -154,7 +154,7 @@ export function StreamOverview({
       {hasControls && (
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
           {filters.ratio && (
-            <span className="inline-flex h-7 items-center rounded-md border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+            <span className="inline-flex h-7 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
               {filters.ratio}
             </span>
           )}
@@ -162,7 +162,7 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onToggleReferenceFilter}
-              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none"
+              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none"
             >
               <ImageIcon className="h-3 w-3" />
               参考图
@@ -172,14 +172,14 @@ export function StreamOverview({
             <button
               type="button"
               onClick={onToggleFastFilter}
-              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-[rgba(242,169,58,0.22)] bg-[rgba(242,169,58,0.10)] px-2 text-[11px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none"
+              className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[rgba(242,169,58,0.22)] bg-[rgba(242,169,58,0.10)] px-2 text-[11px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none"
             >
               <Gauge className="h-3 w-3" />
               快速
             </button>
           )}
           {hasSearch && (
-            <span className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+            <span className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
               <Search className="h-3 w-3 shrink-0" />
               <span className="min-w-0 truncate">{searchValue.trim()}</span>
             </span>

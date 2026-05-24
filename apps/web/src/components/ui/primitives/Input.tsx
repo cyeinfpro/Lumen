@@ -27,7 +27,7 @@ const FIELD =
   "transition-[border-color,box-shadow,background-color] duration-150 " +
   "hover:bg-[var(--bg-1)]/75 " +
   "focus:outline-none focus:bg-[var(--bg-1)]/75 " +
-  "focus:border-[var(--accent)]/60 focus:shadow-[0_0_0_3px_rgba(242,169,58,0.18)] " +
+  "focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 " +
   "disabled:opacity-50 disabled:cursor-not-allowed";
 
 export function Input({
@@ -74,7 +74,7 @@ export function Input({
             leftIcon && "pl-9",
             rightSlot && "pr-9",
             isInvalid &&
-              "border-[var(--danger)]/60 focus:border-[var(--danger)] focus:shadow-[0_0_0_3px_rgba(229,72,77,0.18)]",
+              "border-[var(--danger)]/60 focus:border-[var(--danger)] focus:ring-danger/20",
             className,
           )}
           {...props}

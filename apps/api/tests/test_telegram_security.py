@@ -50,6 +50,12 @@ def test_link_code_real_token_keeps_mixed_case_alphabet() -> None:
     assert len(code) >= 22
 
 
+def test_telegram_bool_option_treats_string_false_as_disabled() -> None:
+    assert telegram._bool_option("false") is False
+    assert telegram._bool_option("0") is False
+    assert telegram._bool_option("true") is True
+
+
 @pytest.mark.asyncio
 async def test_bind_invalid_code_counts_against_code_limiter(
     monkeypatch: pytest.MonkeyPatch,
@@ -152,6 +158,44 @@ async def test_bind_db_failure_releases_claim_without_deleting_code(
     assert telegram._link_code_key("code-1") in redis.values  # noqa: SLF001
     assert telegram._link_code_claim_key("code-1") in redis.deleted  # noqa: SLF001
     assert telegram._link_code_key("code-1") not in redis.deleted  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_release_link_code_claim_only_deletes_matching_owner() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.values = {
+                telegram._link_code_claim_key("code-1"): "chat:new"  # noqa: SLF001
+            }
+            self.deleted: list[str] = []
+
+        async def get(self, key: str) -> str | None:
+            return self.values.get(key)
+
+        async def delete(self, key: str) -> int:
+            self.deleted.append(key)
+            self.values.pop(key, None)
+            return 1
+
+    redis = Redis()
+
+    await telegram._release_link_code_claim(  # noqa: SLF001
+        redis,
+        "code-1",
+        owner="chat:old",
+    )
+
+    assert telegram._link_code_claim_key("code-1") in redis.values  # noqa: SLF001
+    assert redis.deleted == []
+
+    await telegram._release_link_code_claim(  # noqa: SLF001
+        redis,
+        "code-1",
+        owner="chat:new",
+    )
+
+    assert telegram._link_code_claim_key("code-1") not in redis.values  # noqa: SLF001
+    assert redis.deleted == [telegram._link_code_claim_key("code-1")]  # noqa: SLF001
 
 
 @pytest.mark.asyncio

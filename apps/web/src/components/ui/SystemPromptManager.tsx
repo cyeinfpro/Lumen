@@ -333,7 +333,7 @@ function SystemPromptDialog({
               >
                 系统提示词
               </h2>
-              <p className="mt-0.5 text-xs text-neutral-500">
+              <p className="mt-0.5 text-xs text-[var(--fg-2)]">
                 管理全局默认和当前会话提示词。
               </p>
             </div>
@@ -381,7 +381,7 @@ function SystemPromptDialog({
                 加载失败：{error}
               </p>
             ) : prompts.length === 0 ? (
-              <p className="px-3 py-8 text-center text-xs leading-relaxed text-neutral-500">
+              <p className="px-3 py-8 text-center text-xs leading-relaxed text-[var(--fg-2)]">
                 还没有提示词。可以直接输入，或导入一份 Markdown。
               </p>
             ) : (
@@ -429,22 +429,22 @@ function SystemPromptDialog({
           </div>
 
           <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-4 sm:p-5 scrollbar-thin">
-            <label className="block text-xs font-medium text-neutral-400">
+            <label className="block text-xs font-medium text-[var(--fg-1)]">
               名称
             </label>
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
               maxLength={120}
-              className="mt-1.5 h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 text-base text-[var(--fg-0)] placeholder:text-neutral-600 focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20 md:h-10 md:text-sm"
+              className="mt-1.5 h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 text-base text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20 md:h-10 md:text-sm"
               placeholder="例如：图片导演"
             />
 
             <div className="mt-4 flex items-center justify-between gap-3">
-              <label className="text-xs font-medium text-neutral-400">
+              <label className="text-xs font-medium text-[var(--fg-1)]">
                 内容
               </label>
-              <div className="text-[11px] tabular-nums text-neutral-500">
+              <div className="text-[11px] tabular-nums text-[var(--fg-2)]">
                 {content.length}/10000
               </div>
             </div>
@@ -452,7 +452,7 @@ function SystemPromptDialog({
               value={content}
               onChange={(event) => setContent(event.target.value)}
               rows={14}
-              className="mt-1.5 min-h-[180px] md:min-h-[280px] w-full resize-none rounded-2xl border border-[var(--border)] bg-[var(--bg-1)]/72 px-3.5 py-3 text-sm leading-6 text-[var(--fg-0)] placeholder:text-neutral-600 focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+              className="mt-1.5 min-h-[180px] md:min-h-[280px] w-full resize-none rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3.5 py-3 text-sm leading-6 text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
               placeholder="写入这个会话要遵守的角色、风格、限制和输出格式…"
             />
 

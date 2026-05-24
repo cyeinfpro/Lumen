@@ -105,7 +105,7 @@ export function CompactionToast({
           exit={{ opacity: 0, y: reducedMotion ? 0 : -6, scale: reducedMotion ? 1 : 0.98 }}
           transition={reducedMotionTransition(reducedMotion, lumenMotion.toastEnterMs)}
           className={cn(
-            "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)] rounded-xl border px-3 py-2.5",
+            "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)] rounded-[var(--radius-panel)] border px-3 py-2.5",
             "bg-[var(--bg-1)]/95 text-[var(--fg-0)] shadow-lumen-pop backdrop-blur-xl",
             "max-sm:fixed max-sm:left-4 max-sm:right-4 max-sm:top-[max(1rem,env(safe-area-inset-top))] max-sm:w-auto",
             tone === "success" && "border-[var(--success)]/30",

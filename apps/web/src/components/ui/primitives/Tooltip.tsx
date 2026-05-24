@@ -96,7 +96,7 @@ export function Tooltip({
             transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
               "pointer-events-none absolute z-[60]",
-              "px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap",
+              "px-2 py-1 rounded-[var(--radius-control)] text-[11px] font-medium whitespace-nowrap",
               "bg-[var(--bg-1)]/95 text-[var(--fg-0)] border border-[var(--border)]",
               "shadow-lumen-pop backdrop-blur-md",
               SIDE_POS[side],

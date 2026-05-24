@@ -96,7 +96,7 @@ function ResetPasswordInner() {
                 onChange={(event) => setEmail(event.target.value)}
                 placeholder="you@example.com"
                 autoComplete="email"
-                className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                className="h-10 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
               />
             </Field>
 
@@ -125,7 +125,7 @@ function ResetPasswordInner() {
             <button
               type="submit"
               disabled={submitting}
-              className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[0_8px_24px_-12px_var(--color-lumen-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
+              className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
             >
               {submitting ? (
                 <>

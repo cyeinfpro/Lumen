@@ -129,10 +129,13 @@ def endpoint_kind_allowed(provider: Any, endpoint_kind: str | None) -> bool:
     if endpoint_kind not in {"generations", "responses", "models"}:
         return True
     if isinstance(provider, dict):
-        locked = bool(provider.get("image_jobs_endpoint_lock", False))
+        locked = _parse_optional_bool(provider.get("image_jobs_endpoint_lock")) is True
         configured = provider.get("image_jobs_endpoint", "auto")
     else:
-        locked = bool(getattr(provider, "image_jobs_endpoint_lock", False))
+        locked = (
+            _parse_optional_bool(getattr(provider, "image_jobs_endpoint_lock", False))
+            is True
+        )
         configured = getattr(provider, "image_jobs_endpoint", "auto")
     if not locked or configured not in {"generations", "responses"}:
         return True
@@ -309,6 +312,19 @@ def _parse_optional_bool(raw: Any) -> bool | None:
     return None
 
 
+def _parse_bool(raw: Any, *, default: bool, field: str) -> bool:
+    if raw is None or raw == "":
+        return default
+    parsed = _parse_optional_bool(raw)
+    if parsed is None:
+        raise ValueError(f"{field} must be a boolean")
+    return parsed
+
+
+def parse_provider_bool(raw: Any, *, default: bool = False) -> bool:
+    return _parse_bool(raw, default=default, field="provider boolean")
+
+
 def normalize_image_edit_input_transport(raw: Any) -> str:
     if isinstance(raw, str):
         value = raw.strip().lower()
@@ -351,7 +367,7 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         raise ValueError(f"provider {name}: api_key is required")
     priority = _parse_priority(item.get("priority", 0))
     weight = _parse_weight(item.get("weight", 1))
-    enabled = bool(item.get("enabled", True))
+    enabled = _parse_bool(item.get("enabled"), default=True, field="enabled")
     purposes = normalize_provider_purposes(item.get("purposes"))
     rate_limit_raw = item.get("image_rate_limit")
     image_rate_limit: str | None = None
@@ -408,7 +424,11 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         proxy_name=proxy_name,
         image_rate_limit=image_rate_limit,
         image_daily_quota=image_daily_quota,
-        image_jobs_enabled=bool(item.get("image_jobs_enabled", False)),
+        image_jobs_enabled=_parse_bool(
+            item.get("image_jobs_enabled"),
+            default=False,
+            field="image_jobs_enabled",
+        ),
         image_jobs_endpoint=normalized_endpoint,
         image_jobs_endpoint_lock=image_jobs_endpoint_lock,
         image_jobs_base_url=image_jobs_base_url,
@@ -449,7 +469,7 @@ def parse_proxy_item(item: dict[str, Any], *, index: int) -> ProviderProxyDefini
         username=username,
         password=password,
         private_key_path=private_key_path,
-        enabled=bool(item.get("enabled", True)),
+        enabled=_parse_bool(item.get("enabled"), default=True, field="enabled"),
     )
 
 
@@ -1002,6 +1022,7 @@ __all__ = [
     "parse_provider_item",
     "parse_provider_config_json",
     "parse_provider_json",
+    "parse_provider_bool",
     "parse_proxy_item",
     "parse_proxy_json",
     "normalize_image_edit_input_transport",

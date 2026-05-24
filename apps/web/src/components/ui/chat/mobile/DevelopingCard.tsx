@@ -195,7 +195,7 @@ export function DevelopingCard({
         )}
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
           <span
-            className="text-body-sm font-medium text-[var(--fg-0)]/90 drop-shadow-[0_1px_6px_rgba(0,0,0,0.5)] pointer-events-none"
+            className="text-body-sm font-medium text-[var(--fg-0)]/90 drop-shadow-[var(--shadow-2)] pointer-events-none"
             style={{ fontFamily: "var(--font-zh-display)" }}
           >
             {stageText}

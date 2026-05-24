@@ -130,7 +130,7 @@ export function ReasoningEffortPicker() {
               aria-checked={isActive}
               onClick={() => select(opt.id)}
               className={cn(
-                "w-full flex items-center justify-between gap-3 px-2.5 py-2 rounded-xl",
+                "w-full flex items-center justify-between gap-3 px-2.5 py-2 rounded-[var(--radius-panel)]",
                 "min-h-11",
                 "text-left transition-colors duration-150 cursor-pointer",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
@@ -141,7 +141,7 @@ export function ReasoningEffortPicker() {
             >
               <div className="flex flex-col">
                 <span className="text-xs font-medium">{opt.label}</span>
-                <span className="text-[10px] text-neutral-500">
+                <span className="text-[10px] text-[var(--fg-2)]">
                   {opt.hint}
                 </span>
               </div>

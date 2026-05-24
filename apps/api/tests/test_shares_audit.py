@@ -226,7 +226,27 @@ async def test_delete_conversation_writes_audit_log(monkeypatch: pytest.MonkeyPa
     async def fake_write_audit(db, **kwargs):
         db.add(AuditLog(**kwargs))
 
+    async def fake_cancel_active_tasks(*_args, **_kwargs):
+        return {
+            "generations_canceled": 0,
+            "completions_canceled": 0,
+            "holds_released": 0,
+            "active_generation_ids": [],
+            "active_completion_ids": [],
+        }
+
+    async def fake_post_commit_cleanup(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(conversations, "write_audit", fake_write_audit)
+    monkeypatch.setattr(
+        conversations, "_cancel_conversation_active_tasks", fake_cancel_active_tasks
+    )
+    monkeypatch.setattr(
+        conversations,
+        "_post_commit_conversation_task_cleanup",
+        fake_post_commit_cleanup,
+    )
     conv = SimpleNamespace(id="conv-1", deleted_at=None)
     db = _Db(conv)
 
@@ -245,6 +265,7 @@ async def test_delete_conversation_writes_audit_log(monkeypatch: pytest.MonkeyPa
     assert audits[0].event_type == "conversation.delete"
     assert audits[0].details == {
         "conversation_id": "conv-1",
+        "completions_canceled": 0,
         "generations_canceled": 0,
         "images_deleted": 0,
     }

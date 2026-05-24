@@ -446,7 +446,7 @@ function InpaintModalInner() {
             {source ? (
               <div
                 className={cn(
-                  "shrink-0 w-9 h-9 sm:w-10 sm:h-10 rounded-md overflow-hidden",
+                  "shrink-0 w-9 h-9 sm:w-10 sm:h-10 rounded-[var(--radius-control)] overflow-hidden",
                   "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
                 )}
                 aria-hidden
@@ -572,7 +572,7 @@ function InpaintModalInner() {
             </div>
 
             {/* 引导提示：保持简短，移动端隐藏省空间 */}
-            <div className="hidden md:block rounded-md border border-[var(--border-subtle)] bg-[var(--bg-1)]/40 p-2.5 text-[11.5px] leading-relaxed text-[var(--fg-1)]/90">
+            <div className="hidden md:block rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/40 p-2.5 text-[11.5px] leading-relaxed text-[var(--fg-1)]/90">
               <strong className="font-medium text-[var(--fg-0)]">提示</strong>
               ：仅描述涂抹区域，越具体越准。
               <Tooltip
@@ -592,7 +592,7 @@ function InpaintModalInner() {
                 exit={{ opacity: 0, y: -4 }}
                 transition={{ duration: 0.18 }}
                 className={cn(
-                  "rounded-md p-2 text-[11.5px]",
+                  "rounded-[var(--radius-control)] p-2 text-[11.5px]",
                   "bg-warning-soft text-warning",
                 )}
                 role="status"

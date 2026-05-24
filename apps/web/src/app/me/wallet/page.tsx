@@ -91,8 +91,14 @@ export default function WalletPage() {
 
   const wallet = walletQ.data;
   const snapshot = snapshotQ.data;
-  const txItems = txQ.data?.pages.flatMap((page) => page.items) ?? [];
-  const redemptionItems = redemptionsQ.data?.pages.flatMap((page) => page.items) ?? [];
+  const txItems = useMemo(
+    () => txQ.data?.pages.flatMap((page) => page.items) ?? [],
+    [txQ.data],
+  );
+  const redemptionItems = useMemo(
+    () => redemptionsQ.data?.pages.flatMap((page) => page.items) ?? [],
+    [redemptionsQ.data],
+  );
   const low = useMemo(() => {
     if (!wallet?.balance || !wallet.low_balance_threshold) return false;
     return wallet.balance.micro < wallet.low_balance_threshold.micro;

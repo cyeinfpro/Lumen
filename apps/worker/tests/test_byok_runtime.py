@@ -194,6 +194,72 @@ async def test_resolve_user_credential_runtime_builds_resolved_provider(
 
 
 @pytest.mark.asyncio
+async def test_resolve_user_credential_runtime_parses_string_false_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("cryptography")
+    from lumen_core.byok import encrypt_api_key
+
+    secret = "x" * 32
+    monkeypatch.setattr(byok_runtime.settings, "byok_api_key_master_secret", secret)
+    credential = SimpleNamespace(
+        id="cred-string-false",
+        key_ciphertext=encrypt_api_key("sk-user-runtime", secret),
+    )
+    supplier = SimpleNamespace(
+        slug="openai",
+        base_url="https://upstream.example",
+        proxy_name=None,
+        image_concurrency_per_key=1,
+        purposes=["image"],
+        capabilities_jsonb={
+            "image_jobs_enabled": "false",
+            "image_jobs_endpoint": "responses",
+        },
+    )
+    db = _Db([_Result((credential, supplier))])
+
+    provider = await byok_runtime.resolve_user_credential_runtime(
+        db,  # type: ignore[arg-type]
+        credential.id,
+    )
+
+    assert provider.image_jobs_enabled is False
+    assert provider.image_jobs_endpoint == "responses"
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_credential_runtime_disables_invalid_boolean_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("cryptography")
+    from lumen_core.byok import encrypt_api_key
+
+    secret = "x" * 32
+    monkeypatch.setattr(byok_runtime.settings, "byok_api_key_master_secret", secret)
+    credential = SimpleNamespace(
+        id="cred-invalid-capability",
+        key_ciphertext=encrypt_api_key("sk-user-runtime", secret),
+    )
+    supplier = SimpleNamespace(
+        slug="openai",
+        base_url="https://upstream.example",
+        proxy_name=None,
+        image_concurrency_per_key=1,
+        purposes=["image"],
+        capabilities_jsonb={"image_jobs_enabled": "sometimes"},
+    )
+    db = _Db([_Result((credential, supplier))])
+
+    provider = await byok_runtime.resolve_user_credential_runtime(
+        db,  # type: ignore[arg-type]
+        credential.id,
+    )
+
+    assert provider.image_jobs_enabled is False
+
+
+@pytest.mark.asyncio
 async def test_supplier_base_url_validation_is_ttl_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -156,7 +156,7 @@ export function ModelLibraryDialog({
         role="dialog"
         aria-modal="true"
         aria-label="模特库"
-        className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
+        className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]"
       >
         <DialogHeader
           onOpenFullLibrary={openFullLibrary}

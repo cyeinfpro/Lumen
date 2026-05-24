@@ -37,7 +37,7 @@ export function StreamLoadingState({ columns = 2 }: { columns?: number }) {
             {col.map(({ ratio, index }) => (
               <div
                 key={index}
-                className="overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-1)] shadow-[var(--shadow-1)]"
+                className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] shadow-[var(--shadow-1)]"
                 style={{ animationDelay: `${index * 60}ms` }}
               >
                 <div

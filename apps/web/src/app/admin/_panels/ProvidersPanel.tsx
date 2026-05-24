@@ -634,14 +634,14 @@ export function ProvidersPanel() {
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2.5">
-              <div className="shrink-0 w-9 h-9 rounded-xl bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25 flex items-center justify-center">
+              <div className="shrink-0 w-9 h-9 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25 flex items-center justify-center">
                 <Server className="w-4 h-4 text-[var(--color-lumen-amber)]" />
               </div>
               <div>
-                <h3 className="text-sm font-medium text-neutral-100">
+                <h3 className="text-sm font-medium text-[var(--fg-0)]">
                   供应商池
                 </h3>
-                <p className="text-xs text-neutral-500 mt-0.5">
+                <p className="text-xs text-[var(--fg-2)] mt-0.5">
                   加权轮询 · 断路器 · 主动探活
                 </p>
               </div>
@@ -742,7 +742,7 @@ export function ProvidersPanel() {
           {[0, 1, 2].map((i) => (
             <div
               key={`skel-${i}`}
-              className="h-28 rounded-2xl bg-white/5 animate-pulse"
+              className="h-28 rounded-[var(--radius-dialog)] bg-white/5 animate-pulse"
               style={{ animationDelay: `${i * 80}ms` }}
             />
           ))}
@@ -781,9 +781,9 @@ export function ProvidersPanel() {
           />
         </div>
       ) : serverItems.length === 0 ? (
-        <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] py-16 text-center">
+        <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] py-16 text-center">
           <div className="flex flex-col items-center gap-4">
-            <div className="w-14 h-14 rounded-[var(--radius-dialog)] bg-white/5 border border-white/10 flex items-center justify-center">
+            <div className="w-14 h-14 rounded-[var(--radius-dialog)] bg-white/5 border border-[var(--border)] flex items-center justify-center">
               <CloudOff className="w-6 h-6 text-[var(--fg-2)]" />
             </div>
             <div>
@@ -837,7 +837,7 @@ export function ProvidersPanel() {
             <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2.5 rounded-[var(--radius-dialog)] bg-[var(--bg-1)]/95 backdrop-blur-xl border border-[var(--color-lumen-amber)]/40 shadow-[var(--shadow-3)]">
               <span className="type-caption text-[var(--fg-1)] whitespace-nowrap">
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[0_0_8px_currentColor]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[var(--shadow-amber)]" />
                   编辑中
                   <span className="text-[var(--fg-2)]">·</span>
                   <span className="font-mono tabular-nums">
@@ -917,7 +917,7 @@ function StatsRow({
         label="供应商"
         value={total}
         sub={
-          <span className="inline-flex items-center gap-1 text-neutral-500">
+          <span className="inline-flex items-center gap-1 text-[var(--fg-2)]">
             {sourceIcon} {sourceLabel}
           </span>
         }
@@ -949,9 +949,9 @@ function StatsRow({
         }
         sub={
           probedAt ? (
-            <span className="text-neutral-500">{relativeTime(probedAt)}</span>
+            <span className="text-[var(--fg-2)]">{relativeTime(probedAt)}</span>
           ) : (
-            <span className="text-neutral-600">未探测</span>
+            <span className="text-[var(--fg-2)]">未探测</span>
           )
         }
         accent={
@@ -986,16 +986,16 @@ function StatCard({
         ? "border-danger-border"
         : accent === "amber"
           ? "border-[var(--color-lumen-amber)]/20"
-          : "border-white/10";
+          : "border-[var(--border)]";
 
   return (
     <div
-      className={`rounded-xl border bg-[var(--bg-1)]/60 backdrop-blur-sm px-4 py-3 ${ring}`}
+      className={`rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 backdrop-blur-sm px-4 py-3 ${ring}`}
     >
-      <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-1">
+      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)] mb-1">
         {label}
       </div>
-      <div className="text-lg font-semibold text-neutral-100 tabular-nums leading-tight">
+      <div className="text-lg font-semibold text-[var(--fg-0)] tabular-nums leading-tight">
         {value}
       </div>
       {sub && <div className="text-[11px] mt-1">{sub}</div>}
@@ -1019,16 +1019,16 @@ function WeightBar({ items }: { items: ProviderItemOut[] }) {
   const totalWeight = topGroup.reduce((s, p) => s + p.weight, 0);
 
   return (
-    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-xl p-4">
-      <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-2.5">
+    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-panel)] p-4">
+      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)] mb-2.5">
         流量分配
         {items.some((p) => p.enabled && p.priority < maxPriority) && (
-          <span className="normal-case tracking-normal ml-1.5 text-neutral-600">
+          <span className="normal-case tracking-normal ml-1.5 text-[var(--fg-2)]">
             (Priority {maxPriority} 活跃组)
           </span>
         )}
       </div>
-      <div className="flex rounded-lg overflow-hidden h-3 gap-px">
+      <div className="flex rounded-[var(--radius-card)] overflow-hidden h-3 gap-px">
         {topGroup.map((p, i) => {
           const pct = (p.weight / totalWeight) * 100;
           return (
@@ -1037,7 +1037,7 @@ function WeightBar({ items }: { items: ProviderItemOut[] }) {
               initial={{ width: 0 }}
               animate={{ width: `${pct}%` }}
               transition={{ duration: 0.5, delay: i * 0.08, ease: "easeOut" }}
-              className="h-full rounded-sm"
+              className="h-full rounded-[var(--radius-control)]"
               style={{
                 backgroundColor: WEIGHT_COLORS[i % WEIGHT_COLORS.length],
                 opacity: 0.8,
@@ -1053,14 +1053,14 @@ function WeightBar({ items }: { items: ProviderItemOut[] }) {
           return (
             <span key={p.name} className="inline-flex items-center gap-1.5 text-xs">
               <span
-                className="w-2 h-2 rounded-sm shrink-0"
+                className="w-2 h-2 rounded-[var(--radius-control)] shrink-0"
                 style={{
                   backgroundColor: WEIGHT_COLORS[i % WEIGHT_COLORS.length],
                 }}
               />
-              <span className="text-neutral-300">{p.name}</span>
-              <span className="text-neutral-500 tabular-nums">{pct}%</span>
-              <span className="text-neutral-600 tabular-nums">(w={p.weight})</span>
+              <span className="text-[var(--fg-1)]">{p.name}</span>
+              <span className="text-[var(--fg-2)] tabular-nums">{pct}%</span>
+              <span className="text-[var(--fg-2)] tabular-nums">(w={p.weight})</span>
             </span>
           );
         })}
@@ -1093,15 +1093,15 @@ function AutoProbeSettings({
 }) {
   const isOff = interval <= 0;
   return (
-    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-xl p-4">
+    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-panel)] p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
-          <Activity className="w-4 h-4 text-neutral-400" />
+          <Activity className="w-4 h-4 text-[var(--fg-1)]" />
           <div>
-            <div className="text-xs font-medium text-neutral-200">
+            <div className="text-xs font-medium text-[var(--fg-0)]">
               自动探活
             </div>
-            <div className="text-[11px] text-neutral-500 mt-0.5">
+            <div className="text-[11px] text-[var(--fg-2)] mt-0.5">
               {isOff
                 ? "已关闭，仅手动探活"
                 : `每 ${interval >= 60 ? `${interval / 60} 分钟` : `${interval} 秒`}自动检测`}
@@ -1109,12 +1109,12 @@ function AutoProbeSettings({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {saving && <Loader2 className="w-3 h-3 animate-spin text-neutral-500" />}
+          {saving && <Loader2 className="w-3 h-3 animate-spin text-[var(--fg-2)]" />}
           <select
             value={interval}
             onChange={(e) => onChangeInterval(Number(e.target.value))}
             disabled={saving}
-            className="min-h-[36px] sm:h-8 px-2.5 pr-7 rounded-lg bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs text-[var(--fg-0)] focus:outline-none focus:border-[var(--color-lumen-amber)]/50 disabled:opacity-50 transition-colors appearance-none cursor-pointer"
+            className="min-h-[36px] sm:h-8 px-2.5 pr-7 rounded-[var(--radius-card)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs text-[var(--fg-0)] focus:outline-none focus:border-[var(--color-lumen-amber)]/50 disabled:opacity-50 transition-colors appearance-none cursor-pointer"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
               backgroundRepeat: "no-repeat",
@@ -1142,12 +1142,12 @@ function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
   if (grandTotal === 0) return null;
 
   return (
-    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-xl p-4">
+    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-panel)] p-4">
       <div className="flex items-center justify-between mb-3">
-        <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+        <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
           请求统计
         </div>
-        <span className="text-[11px] text-neutral-500 tabular-nums">
+        <span className="text-[11px] text-[var(--fg-2)] tabular-nums">
           总计 {grandTotal.toLocaleString()} 次请求
         </span>
       </div>
@@ -1158,8 +1158,8 @@ function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
           return (
             <div key={s.name} className="space-y-1.5">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-neutral-300 font-medium">{s.name}</span>
-                <div className="flex items-center gap-3 text-neutral-400">
+                <span className="text-[var(--fg-1)] font-medium">{s.name}</span>
+                <div className="flex items-center gap-3 text-[var(--fg-1)]">
                   <span className="tabular-nums">
                     {s.total.toLocaleString()} 次
                   </span>
@@ -1179,7 +1179,7 @@ function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
                   </span>
                 </div>
               </div>
-              <div className="flex rounded-md overflow-hidden h-1.5 bg-white/5">
+              <div className="flex rounded-[var(--radius-control)] overflow-hidden h-1.5 bg-white/5">
                 {s.success > 0 && (
                   <div
                     className="h-full bg-success/70"
@@ -1233,13 +1233,13 @@ function PriorityGroupView({
           <span className="text-[10px] uppercase tracking-wider text-[var(--fg-1)] font-medium whitespace-nowrap">
             Priority {group.priority}
             {group.label && (
-              <span className="ml-1.5 text-neutral-600 normal-case tracking-normal">
+              <span className="ml-1.5 text-[var(--fg-2)] normal-case tracking-normal">
                 ({group.label})
               </span>
             )}
           </span>
           <div className="flex-1 h-px bg-white/8" />
-          <span className="text-[10px] text-neutral-600 tabular-nums">
+          <span className="text-[10px] text-[var(--fg-2)] tabular-nums">
             {group.items.length} 个供应商
           </span>
         </div>
@@ -1299,10 +1299,10 @@ function ProviderCard({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, delay: Math.min(index * 0.04, 0.2) }}
       className={
-        "group rounded-2xl border p-5 backdrop-blur-sm transition-colors " +
+        "group rounded-[var(--radius-dialog)] border p-5 backdrop-blur-sm transition-colors " +
         (p.enabled
-          ? "border-white/10 bg-[var(--bg-1)]/60 hover:border-white/15"
-          : "border-white/5 bg-[var(--bg-1)]/30")
+          ? "border-[var(--border)] bg-[var(--bg-1)]/60 hover:border-[var(--border)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-1)]/30")
       }
     >
       {/* 上部：名称 + 状态 */}
@@ -1312,18 +1312,18 @@ function ProviderCard({
             <span
               className={
                 "text-sm font-medium " +
-                (p.enabled ? "text-neutral-100" : "text-neutral-400")
+                (p.enabled ? "text-[var(--fg-0)]" : "text-[var(--fg-1)]")
               }
             >
               {p.name}
             </span>
             {!p.enabled && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-neutral-500/10 text-neutral-500 border border-neutral-500/30">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[10px] bg-[var(--fg-2)]/10 text-[var(--fg-2)] border border-[var(--border)]">
                 <PowerOff className="w-2.5 h-2.5" /> 已禁用
               </span>
             )}
             {p.image_jobs_enabled && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-info-soft text-info border border-info-border">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[10px] bg-info-soft text-info border border-info-border">
                 <ImageIcon className="w-2.5 h-2.5" /> 异步生图
               </span>
             )}
@@ -1331,7 +1331,7 @@ function ProviderCard({
           <code
             className={
               "text-xs mt-1 block break-all " +
-              (p.enabled ? "text-neutral-500" : "text-neutral-600")
+              (p.enabled ? "text-[var(--fg-2)]" : "text-[var(--fg-2)]")
             }
           >
             {p.base_url}
@@ -1347,7 +1347,7 @@ function ProviderCard({
               "inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-control)] border transition-colors " +
               (p.enabled
                 ? "bg-success-soft border-success-border text-success hover:bg-success/20"
-                : "bg-white/10 border-white/20 text-[var(--fg-2)] hover:bg-white/15")
+                : "bg-white/10 border-[var(--border-strong)] text-[var(--fg-2)] hover:bg-white/15")
             }
             aria-label={p.enabled ? "停用供应商" : "启用供应商"}
             title={p.enabled ? "停用供应商" : "启用供应商"}
@@ -1359,7 +1359,7 @@ function ProviderCard({
             type="button"
             onClick={() => onProbeSingle(p.name)}
             disabled={probing || !p.enabled}
-            className="opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-control)] bg-white/5 hover:bg-white/10 border border-white/10 text-[var(--fg-2)] disabled:opacity-30 transition-all"
+            className="opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-control)] bg-white/5 hover:bg-white/10 border border-[var(--border)] text-[var(--fg-2)] disabled:opacity-30 transition-all"
             aria-label="探活此供应商"
             title="探活此供应商"
           >
@@ -1380,10 +1380,10 @@ function ProviderCard({
               onClick={() => togglePurpose(option.value)}
               disabled={disabled}
               className={
-                "inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+                "inline-flex items-center gap-1.5 rounded-[var(--radius-card)] border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
                 (checked
                   ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
-                  : "border-white/10 bg-white/[0.03] text-neutral-500 hover:text-neutral-300")
+                  : "border-[var(--border)] bg-white/[0.03] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
               }
               title={disabled && checked ? "至少保留一个用途" : `切换 ${option.label} 用途`}
             >
@@ -1392,7 +1392,7 @@ function ProviderCard({
                   "h-3 w-3 rounded border flex items-center justify-center " +
                   (checked
                     ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)] text-black"
-                    : "border-neutral-600")
+                    : "border-[var(--border-strong)]")
                 }
                 aria-hidden
               >
@@ -1408,7 +1408,7 @@ function ProviderCard({
       <div
         className={
           "flex flex-wrap items-center gap-x-3 gap-y-1 text-xs " +
-          (p.enabled ? "text-neutral-400" : "text-neutral-500")
+          (p.enabled ? "text-[var(--fg-1)]" : "text-[var(--fg-2)]")
         }
       >
         <MetaItem label="密钥" value={p.api_key_hint} mono />
@@ -1533,7 +1533,7 @@ function MetaItem({
   return (
     <span>
       {label}:{" "}
-      <code className={`${mono ? "tabular-nums" : ""} ${color ?? "text-neutral-300"}`}>
+      <code className={`${mono ? "tabular-nums" : ""} ${color ?? "text-[var(--fg-1)]"}`}>
         {value}
       </code>
     </span>
@@ -1541,7 +1541,7 @@ function MetaItem({
 }
 
 function MetaSep() {
-  return <span className="text-neutral-700">·</span>;
+  return <span className="text-[var(--fg-3)]">·</span>;
 }
 
 function ProbeStatusBadge({
@@ -1553,30 +1553,30 @@ function ProbeStatusBadge({
 }) {
   if (probing) {
     return (
-      <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
+      <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
         <Loader2 className="w-3 h-3 animate-spin" />
       </span>
     );
   }
   if (!probe) {
     return (
-      <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-neutral-500/10 text-neutral-500 border border-neutral-500/20">
-        <span className="w-1.5 h-1.5 rounded-full bg-neutral-600" />
+      <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--fg-2)]/10 text-[var(--fg-2)] border border-[var(--border)]">
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--fg-2)]" />
         未探测
       </span>
     );
   }
   if (probe.status === "disabled") {
     return (
-      <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-neutral-500/10 text-neutral-500 border border-neutral-500/20">
+      <span className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--fg-2)]/10 text-[var(--fg-2)] border border-[var(--border)]">
         <PowerOff className="w-3 h-3" /> 跳过
       </span>
     );
   }
   if (probe.ok) {
     return (
-      <span className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-success-soft text-success border border-success-border">
-        <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_6px_currentColor]" />
+      <span className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-success-soft text-success border border-success-border">
+        <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[var(--shadow-2)]" />
         健康
         {probe.latency_ms != null && (
           <span className="tabular-nums text-success/80">
@@ -1588,10 +1588,10 @@ function ProbeStatusBadge({
   }
   return (
     <span
-      className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs bg-danger-soft text-danger border border-danger-border"
+      className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-danger-soft text-danger border border-danger-border"
       title={probe.error ?? undefined}
     >
-      <span className="w-1.5 h-1.5 rounded-full bg-danger shadow-[0_0_6px_currentColor]" />
+      <span className="w-1.5 h-1.5 rounded-full bg-danger shadow-[var(--shadow-2)]" />
       异常
     </span>
   );
@@ -1720,7 +1720,7 @@ const DraftCard = forwardRef<
           ? hasErrors
             ? "border-danger-border bg-danger-soft"
             : "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/[0.04]"
-          : "border-white/10 bg-[var(--bg-1)]/60")
+          : "border-[var(--border)] bg-[var(--bg-1)]/60")
       }
     >
       {/* 折叠头 */}
@@ -1729,45 +1729,45 @@ const DraftCard = forwardRef<
         onClick={onToggle}
         className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-white/[0.02] transition-colors"
       >
-        <span className="shrink-0 text-neutral-600">
+        <span className="shrink-0 text-[var(--fg-2)]">
           <GripVertical className="w-3.5 h-3.5" />
         </span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-xs text-neutral-500 font-mono tabular-nums shrink-0">
+            <span className="text-xs text-[var(--fg-2)] font-mono tabular-nums shrink-0">
               #{index + 1}
             </span>
-            <span className="text-sm font-medium text-neutral-100 truncate">
+            <span className="text-sm font-medium text-[var(--fg-0)] truncate">
               {draft.name || "(未命名)"}
             </span>
             {!draft.enabled && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-neutral-500/10 text-neutral-500 border border-neutral-500/30 shrink-0">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[10px] bg-[var(--fg-2)]/10 text-[var(--fg-2)] border border-[var(--border)] shrink-0">
                 <PowerOff className="w-2.5 h-2.5" /> 禁用
               </span>
             )}
             {hasErrors && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-danger-soft text-danger border border-danger-border shrink-0">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[10px] bg-danger-soft text-danger border border-danger-border shrink-0">
                 <AlertCircle className="w-2.5 h-2.5" />
               </span>
             )}
             {!isExisting && draft.name.trim() !== "" && (
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] bg-info-soft text-info border border-info-border shrink-0">
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-control)] text-[10px] bg-info-soft text-info border border-info-border shrink-0">
                 新增
               </span>
             )}
           </div>
           {draft.base_url && (
-            <code className="text-xs text-neutral-500 mt-0.5 block truncate">
+            <code className="text-xs text-[var(--fg-2)] mt-0.5 block truncate">
               {draft.base_url}
             </code>
           )}
-          <div className="mt-1 text-[11px] text-neutral-600">
+          <div className="mt-1 text-[11px] text-[var(--fg-2)]">
             代理：{draft.proxy || "直连"} · 异步生图：
             {draft.image_jobs_enabled ? "支持" : "不支持"} · 用途：
             {normalizePurposes(draft.purposes).map(purposeLabel).join(" / ")}
           </div>
         </div>
-        <div className="shrink-0 text-neutral-500">
+        <div className="shrink-0 text-[var(--fg-2)]">
           {expanded ? (
             <ChevronUp className="w-4 h-4" />
           ) : (
@@ -1786,7 +1786,7 @@ const DraftCard = forwardRef<
             transition={{ duration: 0.2 }}
             className="overflow-hidden"
           >
-            <div className="px-5 pb-5 space-y-4 border-t border-white/5 pt-4">
+            <div className="px-5 pb-5 space-y-4 border-t border-[var(--border-subtle)] pt-4">
               {/* 名称 + URL */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Field
@@ -1858,10 +1858,10 @@ const DraftCard = forwardRef<
                           if (next.length > 0) onUpdate({ purposes: next });
                         }}
                         className={
-                          "inline-flex min-h-[36px] items-center gap-2 rounded-xl border px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+                          "inline-flex min-h-[36px] items-center gap-2 rounded-[var(--radius-panel)] border px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
                           (checked
                             ? "border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/10 text-[var(--color-lumen-amber)]"
-                            : "border-white/10 bg-white/[0.03] text-neutral-500 hover:text-neutral-300")
+                            : "border-[var(--border)] bg-white/[0.03] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
                         }
                       >
                         <span
@@ -1869,7 +1869,7 @@ const DraftCard = forwardRef<
                             "flex h-3.5 w-3.5 items-center justify-center rounded border " +
                             (checked
                               ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)] text-black"
-                              : "border-neutral-600")
+                              : "border-[var(--border-strong)]")
                           }
                           aria-hidden
                         >
@@ -1944,7 +1944,7 @@ const DraftCard = forwardRef<
                   />
                 </Field>
                 <div className="flex flex-col">
-                  <span className="text-xs text-neutral-300 font-medium mb-1.5">
+                  <span className="text-xs text-[var(--fg-1)] font-medium mb-1.5">
                     状态
                   </span>
                   <button
@@ -1954,7 +1954,7 @@ const DraftCard = forwardRef<
                       "flex-1 inline-flex items-center gap-1.5 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] border text-xs transition-colors justify-center " +
                       (draft.enabled
                         ? "bg-success-soft border-success-border text-success hover:bg-success/20"
-                        : "bg-white/10 border-white/20 text-[var(--fg-2)] hover:bg-white/15")
+                        : "bg-white/10 border-[var(--border-strong)] text-[var(--fg-2)] hover:bg-white/15")
                     }
                   >
                     {draft.enabled ? (
@@ -1969,7 +1969,7 @@ const DraftCard = forwardRef<
                   </button>
                 </div>
                 <div className="flex flex-col">
-                  <span className="text-xs text-neutral-300 font-medium mb-1.5">
+                  <span className="text-xs text-[var(--fg-1)] font-medium mb-1.5">
                     异步生图
                   </span>
                   <button
@@ -1983,21 +1983,21 @@ const DraftCard = forwardRef<
                       "flex-1 inline-flex items-center gap-1.5 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] border text-xs transition-colors justify-center " +
                       (draft.image_jobs_enabled
                         ? "bg-info-soft border-info-border text-info hover:bg-info/20"
-                        : "bg-white/[0.03] border-white/10 text-[var(--fg-2)] hover:bg-white/[0.06]")
+                        : "bg-white/[0.03] border-[var(--border)] text-[var(--fg-2)] hover:bg-white/[0.06]")
                     }
                   >
                     <ImageIcon className="w-3 h-3" />
                     {draft.image_jobs_enabled ? "支持" : "不支持"}
                   </button>
-                  <span className="mt-1 text-[11px] leading-4 text-neutral-600">
+                  <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
                     勾选后，图片任务路由才会使用这个供应商。
                   </span>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-xl bg-white/[0.02] border border-white/5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-[var(--radius-panel)] bg-white/[0.02] border border-[var(--border-subtle)]">
                 <div className="flex flex-col">
-                  <label className="text-xs text-neutral-300 font-medium mb-1.5">
+                  <label className="text-xs text-[var(--fg-1)] font-medium mb-1.5">
                     接口偏好
                   </label>
                   <select
@@ -2008,13 +2008,13 @@ const DraftCard = forwardRef<
                           (e.target.value as "auto" | "generations" | "responses") || "auto",
                       })
                     }
-                    className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-white/10 text-xs text-[var(--fg-1)] focus:outline-none focus:border-info-border"
+                    className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-[var(--border)] text-xs text-[var(--fg-1)] focus:outline-none focus:border-info-border"
                   >
                     <option value="auto">自动（按健康度自适应）</option>
                     <option value="generations">生成接口（/v1/images/generations · /v1/images/edits）</option>
                     <option value="responses">响应接口（/v1/responses + image_generation）</option>
                   </select>
-                  <span className="mt-1 text-[11px] leading-4 text-neutral-600">
+                  <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
                     适用于异步与同步生图：自动时按健康度在两种接口间切换；锁定后该号只服务对应接口，由其他号兜底对端。
                   </span>
                   {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
@@ -2030,7 +2030,7 @@ const DraftCard = forwardRef<
                         "mt-2 inline-flex items-center gap-1.5 min-h-[36px] sm:h-8 px-3 rounded-[var(--radius-control)] border text-xs transition-colors justify-center " +
                         (draft.image_jobs_endpoint_lock
                           ? "bg-warning-soft border-warning-border text-warning hover:bg-warning/20"
-                          : "bg-white/[0.03] border-white/10 text-[var(--fg-2)] hover:bg-white/[0.06]")
+                          : "bg-white/[0.03] border-[var(--border)] text-[var(--fg-2)] hover:bg-white/[0.06]")
                       }
                     >
                       {draft.image_jobs_endpoint_lock
@@ -2039,14 +2039,14 @@ const DraftCard = forwardRef<
                     </button>
                   )}
                   {(draft.image_jobs_endpoint ?? "auto") !== "auto" && (
-                    <span className="mt-1 text-[11px] leading-4 text-neutral-600">
+                    <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
                       锁定后该号不再服务另一个接口：选号阶段直接被过滤，失败也不再回退到对端，由其它号兜底。
                     </span>
                   )}
                 </div>
                 {draft.image_jobs_enabled && (
                   <div className="flex flex-col">
-                    <label className="text-xs text-neutral-300 font-medium mb-1.5">
+                    <label className="text-xs text-[var(--fg-1)] font-medium mb-1.5">
                       旁路服务地址（可选）
                     </label>
                     <input
@@ -2056,16 +2056,16 @@ const DraftCard = forwardRef<
                       onChange={(e) =>
                         onUpdate({ image_jobs_base_url: e.target.value })
                       }
-                      className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-white/10 text-xs text-[var(--fg-1)] placeholder:text-[var(--fg-3)] focus:outline-none focus:border-info-border"
+                      className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-[var(--border)] text-xs text-[var(--fg-1)] placeholder:text-[var(--fg-3)] focus:outline-none focus:border-info-border"
                     />
-                    <span className="mt-1 text-[11px] leading-4 text-neutral-600">
+                    <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
                       支持给不同供应商指定独立的图片任务旁路服务，例如多区域部署时按供应商路由。
                     </span>
                   </div>
                 )}
                 {draft.image_jobs_enabled && (
                   <div className="flex flex-col">
-                    <label className="text-xs text-neutral-300 font-medium mb-1.5">
+                    <label className="text-xs text-[var(--fg-1)] font-medium mb-1.5">
                       编辑接口输入
                     </label>
                     <select
@@ -2076,12 +2076,12 @@ const DraftCard = forwardRef<
                             (e.target.value as "url" | "file") || "url",
                         })
                       }
-                      className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-white/10 text-xs text-[var(--fg-1)] focus:outline-none focus:border-info-border"
+                      className="min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-white/[0.03] border border-[var(--border)] text-xs text-[var(--fg-1)] focus:outline-none focus:border-info-border"
                     >
                       <option value="url">链接（JSON image_url）</option>
                       <option value="file">文件（multipart image[]）</option>
                     </select>
-                    <span className="mt-1 text-[11px] leading-4 text-neutral-600">
+                    <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
                       只影响图片任务转发 /v1/images/edits；未启用图片任务时直连始终是 multipart 文件。
                     </span>
                   </div>
@@ -2089,12 +2089,12 @@ const DraftCard = forwardRef<
               </div>
 
               {/* 操作栏 */}
-              <div className="flex items-center gap-2 pt-3 border-t border-white/5">
+              <div className="flex items-center gap-2 pt-3 border-t border-[var(--border-subtle)]">
                 <button
                   type="button"
                   onClick={() => onMove(-1)}
                   disabled={index === 0}
-                  className="inline-flex items-center gap-1 min-h-[36px] sm:h-7 px-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-400 disabled:opacity-25 transition-colors"
+                  className="inline-flex items-center gap-1 min-h-[36px] sm:h-7 px-2 rounded-[var(--radius-card)] bg-white/5 hover:bg-white/10 border border-[var(--border)] text-xs text-[var(--fg-1)] disabled:opacity-25 transition-colors"
                 >
                   <ChevronUp className="w-3 h-3" /> 上移
                 </button>
@@ -2102,7 +2102,7 @@ const DraftCard = forwardRef<
                   type="button"
                   onClick={() => onMove(1)}
                   disabled={index === total - 1}
-                  className="inline-flex items-center gap-1 min-h-[36px] sm:h-7 px-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-neutral-400 disabled:opacity-25 transition-colors"
+                  className="inline-flex items-center gap-1 min-h-[36px] sm:h-7 px-2 rounded-[var(--radius-card)] bg-white/5 hover:bg-white/10 border border-[var(--border)] text-xs text-[var(--fg-1)] disabled:opacity-25 transition-colors"
                 >
                   <ChevronDown className="w-3 h-3" /> 下移
                 </button>
@@ -2161,7 +2161,7 @@ function fieldCls(hasError: boolean): string {
   if (hasError) {
     return `${base} border-danger-border focus:border-danger-border focus:ring-danger/25`;
   }
-  return `${base} border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25`;
+  return `${base} border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25`;
 }
 
 function Field({

@@ -119,10 +119,13 @@ function payloadEventId(data: unknown, eventId?: string): string | null {
     };
     const raw = record.event_id;
     if (typeof raw === "string" && raw) return raw;
+    if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
     const sseId = record.sse_id;
     if (typeof sseId === "string" && sseId) return sseId;
+    if (typeof sseId === "number" && Number.isFinite(sseId)) return String(sseId);
     const msgId = record.msg_id;
     if (typeof msgId === "string" && msgId) return msgId;
+    if (typeof msgId === "number" && Number.isFinite(msgId)) return String(msgId);
   }
   return eventId || null;
 }

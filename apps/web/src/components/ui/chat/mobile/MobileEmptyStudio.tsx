@@ -105,7 +105,7 @@ export function MobileEmptyStudio({
         <div className="flex items-center gap-2.5 mb-3">
           <span
             className={cn(
-              "inline-flex items-center justify-center w-9 h-9 rounded-xl",
+              "inline-flex items-center justify-center w-9 h-9 rounded-[var(--radius-panel)]",
               "bg-[var(--amber-400)]/12",
             )}
           >
@@ -124,7 +124,7 @@ export function MobileEmptyStudio({
         <div
           role="alert"
           className={cn(
-            "mb-4 flex items-center gap-2 rounded-xl border px-3 py-2.5",
+            "mb-4 flex items-center gap-2 rounded-[var(--radius-panel)] border px-3 py-2.5",
             "border-[var(--danger)]/25 bg-[var(--danger-soft)] text-body-sm text-[var(--fg-0)]",
           )}
         >
@@ -176,7 +176,7 @@ export function MobileEmptyStudio({
               <span className="flex flex-col gap-2">
                 <span
                   className={cn(
-                    "shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg",
+                    "shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-card)]",
                     "bg-[var(--amber-400)]/10 text-[var(--amber-400)]",
                   )}
                 >
@@ -218,7 +218,7 @@ export function MobileEmptyStudio({
                 <span className="flex items-center gap-3">
                   <span
                     className={cn(
-                      "shrink-0 inline-flex items-center justify-center w-8 h-8 rounded-lg",
+                      "shrink-0 inline-flex items-center justify-center w-8 h-8 rounded-[var(--radius-card)]",
                       "bg-[var(--info)]/10 text-[var(--info)]",
                     )}
                   >

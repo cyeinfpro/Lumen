@@ -71,6 +71,11 @@ from lumen_core.schemas import (
 )
 
 from ..audit import hash_email, request_ip_hash, write_audit
+from ..billing_cache_state import (
+    billing_cache as _shared_billing_cache,
+    configure_billing_cache as _configure_shared_billing_cache,
+    invalidate_balance_cache as _invalidate_shared_balance_cache,
+)
 from ..db import get_db
 from ..deps import AdminUser, CurrentUser, verify_csrf
 from ..observability import (
@@ -94,7 +99,6 @@ from ..services.redemption_secret import (
 
 router = APIRouter(tags=["billing"])
 logger = logging.getLogger(__name__)
-_billing_cache_service: BillingCacheService | None = None
 _CHARGE_KINDS = ("charge", "charge_completion")
 
 REDEMPTION_LIMITER = RateLimiter(
@@ -138,12 +142,11 @@ _BULK_RATE_UNITS: dict[str, str] = {
 
 
 def configure_billing_cache(service: BillingCacheService | None) -> None:
-    global _billing_cache_service
-    _billing_cache_service = service
+    _configure_shared_billing_cache(service)
 
 
 def _billing_cache() -> BillingCacheService | None:
-    return _billing_cache_service
+    return _shared_billing_cache()
 
 
 def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
@@ -906,12 +909,12 @@ async def _billing_rows_for_range(
 
 
 async def _billing_balance_micro(db: AsyncSession, user_id: str) -> int:
-    service = _billing_cache()
-    if service is not None:
-        return await service.get_balance(db, user_id)
     use_cache = billing_core.parse_bool_setting(
         await _setting_raw(db, "billing.use_redis_cache"), True
     )
+    service = _billing_cache() if use_cache else None
+    if service is not None:
+        return await service.get_balance(db, user_id)
     redis = None
     if use_cache:
         try:
@@ -922,10 +925,7 @@ async def _billing_balance_micro(db: AsyncSession, user_id: str) -> int:
 
 
 async def _invalidate_balance_cache(user_id: str) -> None:
-    service = _billing_cache()
-    if service is None:
-        return
-    await service.invalidate(user_id)
+    await _invalidate_shared_balance_cache(user_id)
 
 
 async def _billing_snapshot_parts(
@@ -1419,12 +1419,24 @@ async def admin_billing_bootstrap(
     low_balance_micro = _rmb_to_micro_or_422(
         body.low_balance_warn_rmb, field="low_balance_warn_rmb"
     )
+    if low_balance_micro < 0:
+        raise _http(
+            "invalid_amount",
+            "low_balance_warn_rmb: amount must be non-negative",
+            422,
+        )
     pricing_items = []
     for tier, threshold in body.image_size_thresholds.items():
         if threshold < 0:
             raise _http("invalid_request", "thresholds must be non-negative", 422)
         price_rmb = body.image_prices_rmb.get(tier, "0")
         price_micro = _rmb_to_micro_or_422(price_rmb, field=f"image_prices_rmb.{tier}")
+        if price_micro < 0:
+            raise _http(
+                "invalid_amount",
+                f"image_prices_rmb.{tier}: price must be non-negative",
+                422,
+            )
         pricing_items.append(
             {
                 "id": new_uuid7(),

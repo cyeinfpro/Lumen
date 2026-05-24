@@ -70,7 +70,7 @@ export function AttachmentTray() {
                 "border bg-[var(--bg-2)] cursor-default",
                 "transition-[border-color,box-shadow] duration-150",
                 idx === 0
-                  ? "border-[var(--color-lumen-amber)]/60 ring-1 ring-[var(--color-lumen-amber)]/40 shadow-[0_0_14px_rgba(242,169,58,0.18)]"
+                  ? "border-[var(--color-lumen-amber)]/60 ring-1 ring-[var(--color-lumen-amber)]/40 shadow-[var(--shadow-amber)]"
                   : "border-white/10 hover:border-white/25",
               )}
               title={
@@ -145,7 +145,7 @@ export function AttachmentTray() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             aria-hidden
-            className="pointer-events-none absolute top-0 left-0 h-full w-6 bg-gradient-to-r from-neutral-900/95 to-transparent"
+            className="pointer-events-none absolute top-0 left-0 h-full w-6 bg-gradient-to-r from-[var(--bg-1)]/95 to-transparent"
           />
         )}
         {fadeRight && (
@@ -155,7 +155,7 @@ export function AttachmentTray() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             aria-hidden
-            className="pointer-events-none absolute top-0 right-0 h-full w-6 bg-gradient-to-l from-neutral-900/95 to-transparent"
+            className="pointer-events-none absolute top-0 right-0 h-full w-6 bg-gradient-to-l from-[var(--bg-1)]/95 to-transparent"
           />
         )}
       </AnimatePresence>

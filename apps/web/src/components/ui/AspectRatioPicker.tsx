@@ -188,7 +188,7 @@ export function AspectRatioPicker() {
           className={cn(
             "text-[9px] uppercase tracking-wider px-1 py-0.5 rounded",
             params.size_mode === "auto"
-              ? "bg-white/10 text-neutral-300"
+              ? "bg-white/10 text-[var(--fg-1)]"
               : "bg-[var(--color-lumen-amber)]/20 text-[var(--color-lumen-amber)]",
           )}
         >
@@ -223,7 +223,7 @@ export function AspectRatioPicker() {
         {/* 顶部：横/竖 toggle + 反转按钮 */}
         <div className="flex items-center gap-2 mb-3">
           <div
-            className="flex-1 flex p-0.5 rounded-lg bg-white/5 border border-[var(--border)]"
+            className="flex-1 flex p-0.5 rounded-[var(--radius-card)] bg-white/5 border border-[var(--border)]"
             role="radiogroup"
             aria-label="构图方向"
           >
@@ -242,11 +242,11 @@ export function AspectRatioPicker() {
                   aria-checked={active}
                   onClick={() => toggleOrientation(opt.id)}
                   className={cn(
-                    "flex-1 px-2 py-1 text-xs font-medium rounded-md",
+                    "flex-1 px-2 py-1 text-xs font-medium rounded-[var(--radius-control)]",
                     "transition-colors duration-150",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                     active
-                      ? "bg-[var(--color-lumen-amber)] text-black shadow-[0_0_10px_rgba(242,169,58,0.35)]"
+                      ? "bg-[var(--color-lumen-amber)] text-black shadow-[var(--shadow-amber)]"
                       : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                   )}
                 >
@@ -263,7 +263,7 @@ export function AspectRatioPicker() {
             animate={{ rotate: orientation === "vertical" ? 180 : 0 }}
             transition={{ type: "spring", damping: 22, stiffness: 260 }}
             className={cn(
-              "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md md:h-7 md:min-h-0 md:w-7 md:min-w-0",
+              "inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-control)] md:h-7 md:min-h-0 md:w-7 md:min-w-0",
               "bg-white/5 border border-[var(--border)] text-[var(--fg-1)]",
               "hover:bg-white/10 hover:text-[var(--fg-0)] active:scale-[0.94]",
               "transition-colors duration-150",
@@ -294,11 +294,11 @@ export function AspectRatioPicker() {
                 aria-pressed={active}
                 className={cn(
                   "group flex flex-col items-center justify-center gap-1.5",
-                  "min-h-[4.25rem] rounded-lg border transition-all duration-150 md:h-16 md:min-h-0",
+                  "min-h-[4.25rem] rounded-[var(--radius-card)] border transition-all duration-150 md:h-16 md:min-h-0",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
                   "active:scale-[0.96]",
                   active
-                    ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/12 shadow-[0_0_12px_rgba(242,169,58,0.22)]"
+                    ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/12 shadow-[var(--shadow-amber)]"
                     : "border-[var(--border)] bg-white/5 hover:bg-white/10 hover:border-[var(--border-strong)]",
                 )}
               >
@@ -328,7 +328,7 @@ export function AspectRatioPicker() {
         </div>
 
         {/* Size mode */}
-        <div className="mt-3 text-[11px] uppercase tracking-wider text-neutral-500 mb-2">
+        <div className="mt-3 text-[11px] uppercase tracking-wider text-[var(--fg-2)] mb-2">
           Size mode
         </div>
         <div className="grid grid-cols-2 gap-1.5">
@@ -341,7 +341,7 @@ export function AspectRatioPicker() {
                 onClick={() => selectSizeMode(m)}
                 aria-pressed={active}
                 className={cn(
-                  "px-2 py-1.5 rounded-lg text-xs font-medium border",
+                  "px-2 py-1.5 rounded-[var(--radius-card)] text-xs font-medium border",
                   "min-h-11 md:min-h-0",
                   "transition-all duration-150 active:scale-[0.97]",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
@@ -357,7 +357,7 @@ export function AspectRatioPicker() {
         </div>
 
         {/* 4K 快捷预设 */}
-        <div className="mt-3 text-[11px] uppercase tracking-wider text-neutral-500 mb-2 flex items-center gap-1.5">
+        <div className="mt-3 text-[11px] uppercase tracking-wider text-[var(--fg-2)] mb-2 flex items-center gap-1.5">
           <Sparkles
             className="w-3 h-3 text-[var(--color-lumen-amber)]/80"
             aria-hidden
@@ -370,7 +370,7 @@ export function AspectRatioPicker() {
             onClick={() => select4K("horizontal")}
             aria-pressed={is4KLandscape}
             className={cn(
-              "px-2 py-1.5 rounded-lg text-xs font-medium border",
+              "px-2 py-1.5 rounded-[var(--radius-card)] text-xs font-medium border",
               "min-h-11 md:min-h-0",
               "transition-all duration-150 active:scale-[0.97]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
@@ -386,7 +386,7 @@ export function AspectRatioPicker() {
             onClick={() => select4K("vertical")}
             aria-pressed={is4KPortrait}
             className={cn(
-              "px-2 py-1.5 rounded-lg text-xs font-medium border",
+              "px-2 py-1.5 rounded-[var(--radius-card)] text-xs font-medium border",
               "min-h-11 md:min-h-0",
               "transition-all duration-150 active:scale-[0.97]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/60",
@@ -398,7 +398,7 @@ export function AspectRatioPicker() {
             4K 竖 2160×3840
           </button>
         </div>
-        <p className="mt-1.5 text-[10px] text-neutral-500 leading-snug">
+        <p className="mt-1.5 text-[10px] text-[var(--fg-2)] leading-snug">
           默认 preset 已按 4K 级别自动分配；这两个按钮直接下发 3840×2160 /
           2160×3840。
         </p>

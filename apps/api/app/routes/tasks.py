@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core import billing as billing_core
 from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
     CompletionStage,
@@ -23,7 +24,8 @@ from lumen_core.constants import (
     GenerationStatus,
     task_channel,
 )
-from lumen_core.models import Completion, Generation, OutboxEvent
+from lumen_core.runtime_settings import get_spec
+from lumen_core.models import Completion, Generation, OutboxEvent, WalletTransaction
 from lumen_core.models import Conversation, Image, ImageVariant, Message
 from lumen_core.schemas import (
     ActiveTasksOut,
@@ -35,10 +37,12 @@ from lumen_core.schemas import (
 )
 
 from ..arq_pool import get_arq_pool
+from ..billing_cache_state import invalidate_balance_cache
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..observability import task_publish_errors_total
 from ..redis_client import get_redis
+from ..runtime_settings import get_setting
 from ..sse_publish import publish_sse_event
 
 
@@ -110,6 +114,177 @@ def _redis_text(value: object) -> str | None:
     if isinstance(value, str):
         return value
     return None
+
+
+def _generation_billing_ref_id(task_id: str, retry_count: int | None) -> str:
+    return billing_core.retry_billing_ref_id(task_id, retry_count)
+
+
+def _completion_billing_ref_id(task_id: str, retry_count: int | None) -> str:
+    return billing_core.retry_billing_ref_id(task_id, retry_count)
+
+
+def _completion_billing_retry_count(task: Completion) -> int:
+    return billing_core.completion_billing_retry_count(task)
+
+
+def _completion_task_billing_ref_id(task: Completion) -> str:
+    return billing_core.completion_billing_ref_id(task)
+
+
+async def _setting_raw(db: AsyncSession, key: str) -> str | None:
+    spec = get_spec(key)
+    if spec is None:
+        return None
+    try:
+        return await get_setting(db, spec)
+    except (AssertionError, IndexError):
+        if key.startswith("billing."):
+            return None
+        raise
+
+
+async def _billing_enabled(db: AsyncSession) -> bool:
+    return billing_core.parse_bool_setting(
+        await _setting_raw(db, "billing.enabled"),
+        False,
+    )
+
+
+async def _billing_allow_negative(db: AsyncSession) -> bool:
+    return billing_core.parse_bool_setting(
+        await _setting_raw(db, "billing.allow_negative_balance"),
+        False,
+    )
+
+
+async def _generation_retry_hold_micro(db: AsyncSession, gen: Generation) -> int:
+    if not await _billing_enabled(db):
+        return 0
+    request = _json_dict(getattr(gen, "upstream_request", None))
+    tier = _string_value(request.get("billing_tier"))
+    if tier in {"1k", "2k", "4k"}:
+        amount, _tier = await billing_core.estimate_image_cost_for_tier(
+            db,
+            tier=tier,
+            n=1,
+        )
+        return int(amount or 0)
+    pixels = (
+        int(getattr(gen, "upstream_pixels", 0) or 0)
+        or _task_request_int(gen, "pixel_count")
+        or _task_request_int(gen, "upstream_pixels")
+        or 0
+    )
+    if pixels <= 0:
+        size = getattr(gen, "size_requested", None)
+        if isinstance(size, str) and "x" in size:
+            width_raw, height_raw = size.lower().split("x", 1)
+            if width_raw.isdigit() and height_raw.isdigit():
+                pixels = int(width_raw) * int(height_raw)
+    amount, _tier = await billing_core.estimate_image_cost(
+        db,
+        size_px=max(0, pixels),
+        n=1,
+        thresholds=billing_core.parse_thresholds(
+            await _setting_raw(db, "billing.image_size_thresholds")
+        ),
+    )
+    return int(amount or 0)
+
+
+async def _hold_generation_retry_wallet(
+    db: AsyncSession,
+    user_id: str,
+    gen: Generation,
+) -> bool:
+    if not await _billing_enabled(db):
+        return False
+    amount = await _generation_retry_hold_micro(db, gen)
+    if amount <= 0:
+        return False
+    ref_id = _generation_billing_ref_id(gen.id, getattr(gen, "retry_count", 0))
+    try:
+        tx = await billing_core.hold(
+            db,
+            user_id,
+            amount,
+            ref_type="generation",
+            ref_id=ref_id,
+            idempotency_key=f"hold:{ref_id}",
+            allow_negative=await _billing_allow_negative(db),
+            meta={
+                "generation_id": gen.id,
+                "reason": "generation retry",
+                "retry_count": int(getattr(gen, "retry_count", 0) or 0),
+            },
+        )
+    except billing_core.BillingError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+    return tx is not None
+
+
+async def _completion_retry_hold_micro(
+    db: AsyncSession,
+    completion: Completion,
+    previous_retry_count: int,
+) -> int:
+    if not await _billing_enabled(db):
+        return 0
+    prev_ref_id = _completion_billing_ref_id(completion.id, previous_retry_count)
+    hold_tx = (
+        await db.execute(
+            select(WalletTransaction)
+            .where(
+                WalletTransaction.user_id == completion.user_id,
+                WalletTransaction.kind == "hold",
+                WalletTransaction.ref_type == "completion",
+                WalletTransaction.ref_id == prev_ref_id,
+            )
+            .order_by(WalletTransaction.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if hold_tx is None:
+        return 0
+    try:
+        return max(0, -int(hold_tx.amount_micro))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _hold_completion_retry_wallet(
+    db: AsyncSession,
+    user_id: str,
+    completion: Completion,
+    previous_retry_count: int,
+) -> bool:
+    if not await _billing_enabled(db):
+        return False
+    amount = await _completion_retry_hold_micro(db, completion, previous_retry_count)
+    if amount <= 0:
+        return False
+    next_retry_count = previous_retry_count + 1
+    ref_id = _completion_billing_ref_id(completion.id, next_retry_count)
+    try:
+        tx = await billing_core.hold(
+            db,
+            user_id,
+            amount,
+            ref_type="completion",
+            ref_id=ref_id,
+            idempotency_key=f"hold:{ref_id}",
+            allow_negative=await _billing_allow_negative(db),
+            meta={
+                "completion_id": completion.id,
+                "reason": "completion retry",
+                "billing_retry_count": next_retry_count,
+                "previous_billing_retry_count": previous_retry_count,
+            },
+        )
+    except billing_core.BillingError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+    return tx is not None
 
 
 def _task_request(task: Generation | Completion) -> dict[str, Any]:
@@ -528,6 +703,33 @@ async def _release_generation_queue_state(redis: Any, task_id: str) -> None:
         await pipe.execute()
 
 
+async def _release_queued_task_hold(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+    reason: str,
+) -> bool:
+    try:
+        tx = await billing_core.release(
+            db,
+            user_id,
+            ref_type=ref_type,
+            ref_id=ref_id,
+            idempotency_key=f"cancel:{ref_type}:{ref_id}",
+            meta={"reason": reason},
+        )
+    except billing_core.BillingError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+    return tx is not None
+
+
+async def _task_wallet_exists(db: AsyncSession, user_id: str) -> bool:
+    wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
+    return wallet is not None
+
+
 # ---------- generations ----------
 
 @router.get("/generations/{gen_id}", response_model=GenerationOut)
@@ -586,7 +788,22 @@ async def cancel_generation(
 
     gen.status = GenerationStatus.CANCELED.value
     gen.finished_at = datetime.now(timezone.utc)
+    released_hold = False
+    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
+        db, user.id
+    ):
+        released_hold = await _release_queued_task_hold(
+            db,
+            user_id=user.id,
+            ref_type="generation",
+            ref_id=_generation_billing_ref_id(
+                gen.id, getattr(gen, "retry_count", 0)
+            ),
+            reason="queued generation cancelled by user",
+        )
     await db.commit()
+    if released_hold:
+        await invalidate_balance_cache(user.id)
     # Queued tasks do not have an upstream process to stop. Clear any stale
     # image_queue side state so a canceled queued row cannot keep capacity.
     try:
@@ -642,23 +859,25 @@ async def retry_generation(
         raise _http("not_retryable", f"status is {gen.status}", 409)
 
     redis = get_redis()
-    # Why: clearing the prior cancel flag is best-effort cleanup. The
-    # worker double-checks the cancel key before each terminal write, so
-    # even if a stale flag survives a transient redis blip, the worst
-    # case is a re-cancel on the next attempt — never a corrupted row.
-    # Don't 503 the user for a transient redis issue.
     try:
         await redis.delete(f"task:{gen.id}:cancel")
     except Exception as exc:  # noqa: BLE001
         logger.warning("retry cancel-flag cleanup failed gen=%s err=%s", gen.id, exc)
+        raise _http("retry_unavailable", "could not clear prior cancel signal", 503) from exc
 
     gen.status = GenerationStatus.QUEUED.value
     gen.progress_stage = GenerationStage.QUEUED.value
     gen.attempt = 0
+    gen.retry_count = int(getattr(gen, "retry_count", 0) or 0) + 1
     gen.error_code = None
     gen.error_message = None
     gen.started_at = None
     gen.finished_at = None
+    held_retry = False
+    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
+        db, user.id
+    ):
+        held_retry = await _hold_generation_retry_wallet(db, user.id, gen)
 
     payload = {"task_id": gen.id, "user_id": user.id, "kind": "generation"}
     outbox = OutboxEvent(kind="generation", payload=payload, published_at=None)
@@ -667,6 +886,8 @@ async def retry_generation(
     payload["outbox_id"] = str(outbox.id)
     outbox.payload = dict(payload)
     await db.commit()
+    if held_retry:
+        await invalidate_balance_cache(user.id)
 
     # best-effort publish
     await _publish_queued(payload, gen.message_id)
@@ -726,7 +947,20 @@ async def cancel_completion(
     comp.status = CompletionStatus.CANCELED.value
     comp.progress_stage = CompletionStage.FINALIZING.value
     comp.finished_at = datetime.now(timezone.utc)
+    released_hold = False
+    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
+        db, user.id
+    ):
+        released_hold = await _release_queued_task_hold(
+            db,
+            user_id=user.id,
+            ref_type="completion",
+            ref_id=_completion_task_billing_ref_id(comp),
+            reason="queued completion cancelled by user",
+        )
     await db.commit()
+    if released_hold:
+        await invalidate_balance_cache(user.id)
     return {"status": comp.status}
 
 
@@ -762,6 +996,20 @@ async def retry_completion(
     comp.error_message = None
     comp.started_at = None
     comp.finished_at = None
+    previous_retry_count = _completion_billing_retry_count(comp)
+    held_retry = False
+    if getattr(user, "account_mode", "wallet") == "wallet" or await _task_wallet_exists(
+        db, user.id
+    ):
+        held_retry = await _hold_completion_retry_wallet(
+            db,
+            user.id,
+            comp,
+            previous_retry_count,
+        )
+    upstream_request = dict(comp.upstream_request or {})
+    upstream_request["billing_retry_count"] = previous_retry_count + 1
+    comp.upstream_request = upstream_request or None
 
     payload = {"task_id": comp.id, "user_id": user.id, "kind": "completion"}
     outbox = OutboxEvent(kind="completion", payload=payload, published_at=None)
@@ -770,6 +1018,8 @@ async def retry_completion(
     payload["outbox_id"] = str(outbox.id)
     outbox.payload = dict(payload)
     await db.commit()
+    if held_retry:
+        await invalidate_balance_cache(user.id)
 
     await _publish_queued(payload, comp.message_id)
     return {"status": comp.status}

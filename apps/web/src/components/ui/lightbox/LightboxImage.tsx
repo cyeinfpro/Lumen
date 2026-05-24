@@ -181,7 +181,7 @@ export function LightboxImage({
           }
           className={cn(
             "w-full h-full object-contain select-none pointer-events-auto",
-            "rounded-md shadow-2xl",
+            "rounded-[var(--radius-control)] shadow-2xl",
           )}
           style={{ touchAction: "none", transformOrigin: "top left" }}
           onLoad={() => {

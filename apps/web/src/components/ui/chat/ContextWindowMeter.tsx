@@ -395,7 +395,7 @@ export function ContextWindowMeter({
             aria-valuenow={meta.rounded}
             title={meta.title}
             className={cn(
-              "inline-flex h-8 w-12 flex-col justify-center gap-1 rounded-lg",
+              "inline-flex h-8 w-12 flex-col justify-center gap-1 rounded-[var(--radius-card)]",
               "border border-[var(--border-subtle)] bg-[var(--bg-1)]/70 px-1.5",
               "text-[10px] tabular-nums text-[var(--fg-2)]",
             )}
@@ -456,7 +456,7 @@ export function ContextWindowMeter({
           aria-valuenow={meta.rounded}
           title={meta.title}
           className={cn(
-            "inline-flex h-8 w-[168px] flex-col justify-center gap-1 rounded-lg",
+            "inline-flex h-8 w-[168px] flex-col justify-center gap-1 rounded-[var(--radius-card)]",
             "border border-[var(--border-subtle)] bg-[var(--bg-1)]/70 px-2.5",
             "text-[10px] text-[var(--fg-2)]",
           )}

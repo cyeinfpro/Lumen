@@ -346,7 +346,7 @@ export function Sidebar() {
           <div className="flex items-center gap-2">
             {/* Lumen 品牌徽标渐变：琥珀→orange，非状态色，token 化无意义 */}
             {/* eslint-disable-next-line no-restricted-syntax */}
-            <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--accent)] to-orange-300 flex items-center justify-center shadow-[0_0_12px_rgba(242,169,58,0.4)]">
+            <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--accent)] to-orange-300 flex items-center justify-center shadow-[var(--shadow-amber)]">
               <Sparkles className="w-3 h-3 text-black/70" strokeWidth={2.5} />
             </span>
             <span className="font-medium tracking-tight text-[var(--fg-0)]">
@@ -375,10 +375,10 @@ export function Sidebar() {
             whileTap={createMut.isPending ? undefined : { scale: 0.96 }}
             transition={{ type: "spring", stiffness: 400, damping: 25 }}
             className={cn(
-              "group w-full flex items-center gap-2 h-10 px-3 rounded-xl",
+              "group w-full flex items-center gap-2 h-10 px-3 rounded-[var(--radius-panel)]",
               "bg-gradient-to-br from-[var(--accent)] to-[#D68A1E] text-black font-medium",
-              "shadow-[0_6px_20px_-6px_rgba(242,169,58,0.55)]",
-              "hover:shadow-[0_8px_26px_-6px_rgba(242,169,58,0.75)] hover:brightness-[1.04]",
+              "shadow-[var(--shadow-amber)]",
+              "hover:shadow-[var(--shadow-amber)] hover:brightness-[1.04]",
               "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-1)]",
               "disabled:opacity-60 disabled:cursor-wait",
             )}
@@ -410,7 +410,7 @@ export function Sidebar() {
 
         {/* ——— 高频入口：对话 / 图片；归档收进更多菜单 ——— */}
         <div className="px-4 pb-2" role="tablist" aria-label="会话类型">
-          <div className="flex gap-1 p-0.5 rounded-lg bg-white/[0.03] border border-white/5">
+          <div className="flex gap-1 p-0.5 rounded-[var(--radius-card)] bg-white/[0.03] border border-[var(--border-subtle)]">
             <TabButton
               active={studioView === "chat" && tab === "active"}
               onClick={() => {
@@ -655,7 +655,7 @@ export function Sidebar() {
             className={cn(
               "md:hidden fixed top-0 left-0 z-40 h-[100dvh]",
               "w-[min(320px,85vw)] max-[375px]:w-[85vw]",
-              "bg-[var(--bg-1)] border-r border-white/5 flex flex-col overflow-hidden shrink-0",
+              "bg-[var(--bg-1)] border-r border-[var(--border-subtle)] flex flex-col overflow-hidden shrink-0",
               "pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]",
             )}
           >
@@ -669,7 +669,7 @@ export function Sidebar() {
         {...ariaCommon}
         className={cn(
           "hidden md:flex relative h-[100dvh] shrink-0 flex-col overflow-hidden",
-          "bg-[var(--bg-1)] border-r border-white/5",
+          "bg-[var(--bg-1)] border-r border-[var(--border-subtle)]",
           "transition-[width,border-color] duration-200 ease-out",
           sidebarOpen ? "w-72" : "w-0 border-r-0 pointer-events-none",
         )}
@@ -913,7 +913,7 @@ function ListSkeleton() {
       {SIDEBAR_SKELETON_ROWS.map((row) => (
         <div
           key={row.id}
-          className="flex items-center gap-2 h-10 px-2 rounded-md"
+          className="flex items-center gap-2 h-10 px-2 rounded-[var(--radius-control)]"
         >
           <div className="w-3.5 h-3.5 rounded bg-white/5 animate-pulse" />
           <div

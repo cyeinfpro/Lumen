@@ -96,7 +96,7 @@ export function MobileTabBar() {
                   <motion.span
                     layoutId="mtab-dot"
                     aria-hidden
-                    className="absolute top-0 left-1/2 -translate-x-1/2 h-[2px] w-6 rounded-full bg-[var(--amber-400)] shadow-[0_0_10px_var(--amber-glow)]"
+                    className="absolute top-0 left-1/2 -translate-x-1/2 h-[2px] w-6 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
                     transition={SPRING.snap}
                   />
                 )}

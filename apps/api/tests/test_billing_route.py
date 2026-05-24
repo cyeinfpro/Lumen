@@ -9,7 +9,7 @@ from fastapi import Request, Response
 
 from app.routes import billing
 from lumen_core import billing as billing_core
-from lumen_core.schemas import AdminRedemptionCodeCreateIn
+from lumen_core.schemas import AdminBillingBootstrapIn, AdminRedemptionCodeCreateIn
 
 
 def _request(
@@ -208,6 +208,33 @@ class _FirstDb:
 
 
 @pytest.mark.asyncio
+async def test_billing_balance_respects_disabled_redis_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Cache:
+        async def get_balance(self, *_args: Any, **_kwargs: Any) -> int:
+            raise AssertionError("shared redis cache must be bypassed when disabled")
+
+    class Result:
+        def scalar_one_or_none(self) -> int:
+            return 321
+
+    class Db:
+        async def execute(self, *_args: Any, **_kwargs: Any) -> Result:
+            return Result()
+
+    async def setting_raw(_db: Any, key: str) -> str | None:
+        if key == "billing.use_redis_cache":
+            return "0"
+        return None
+
+    monkeypatch.setattr(billing, "_billing_cache", lambda: Cache())
+    monkeypatch.setattr(billing, "_setting_raw", setting_raw)
+
+    assert await billing._billing_balance_micro(Db(), "user-1") == 321  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_redemption_secret_missing_returns_actionable_412(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -261,6 +288,37 @@ async def test_redemption_operational_gate_requires_bootstrap(
 
     assert getattr(excinfo.value, "status_code", None) == 412
     assert excinfo.value.detail["error"]["code"] == "BOOTSTRAP_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_billing_bootstrap_rejects_negative_low_balance_threshold() -> None:
+    with pytest.raises(Exception) as excinfo:
+        await billing.admin_billing_bootstrap(
+            AdminBillingBootstrapIn(low_balance_warn_rmb="-0.01"),
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            object(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_amount"
+
+
+@pytest.mark.asyncio
+async def test_billing_bootstrap_rejects_negative_image_price() -> None:
+    with pytest.raises(Exception) as excinfo:
+        await billing.admin_billing_bootstrap(
+            AdminBillingBootstrapIn(
+                image_size_thresholds={"1k": 1_572_864},
+                image_prices_rmb={"1k": "-0.01"},
+            ),
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            object(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_amount"
 
 
 @pytest.mark.asyncio

@@ -547,11 +547,11 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
         "fixed bottom-4 left-1/2 -translate-x-1/2",
         "w-[calc(100%-40px)] max-w-[860px]",
         "overflow-visible",
-        "rounded-xl backdrop-blur-xl",
+        "rounded-[var(--radius-panel)] backdrop-blur-xl",
         "bg-[var(--bg-1)]/88 supports-[not(backdrop-filter:blur(1px))]:bg-[var(--bg-1)]/95",
         "border transition-[border-color,box-shadow] duration-200",
         isDragActive
-          ? "border-[var(--amber-400)] shadow-[0_0_0_2px_rgba(242,169,58,0.22),var(--shadow-2)]"
+          ? "border-[var(--amber-400)] shadow-[var(--shadow-amber)]"
           : isImageMode
           ? "border-[var(--border-amber)]"
           : "border-[var(--border-subtle)]",
@@ -597,7 +597,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
             aria-label="展开输入框"
             aria-expanded={false}
             className={cn(
-              "flex-1 min-w-0 h-8 px-3 text-left rounded-lg cursor-text",
+              "flex-1 min-w-0 h-8 px-3 text-left rounded-[var(--radius-card)] cursor-text",
               "bg-transparent transition-colors",
               "hover:bg-[var(--bg-2)]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
@@ -638,7 +638,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               >
                 <div
                   className={cn(
-                    "mx-3 mt-3 flex items-center justify-center gap-2 rounded-lg",
+                    "mx-3 mt-3 flex items-center justify-center gap-2 rounded-[var(--radius-card)]",
                     "border border-dashed border-[var(--amber-400)]/60 bg-[var(--amber-400)]/10",
                     "px-3 py-3 text-xs text-[var(--amber-400)]",
                   )}
@@ -673,7 +673,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                     onDrop={(event) => handleAttachmentDrop(event, att.id)}
                     onDragEnd={handleAttachmentDragEnd}
                     className={cn(
-                      "relative shrink-0 w-16 h-16 rounded-xl overflow-hidden",
+                      "relative shrink-0 w-16 h-16 rounded-[var(--radius-panel)] overflow-hidden",
                       "border bg-[var(--bg-2)]",
                       attachments.length > 1 &&
                         "cursor-grab active:cursor-grabbing",
@@ -737,7 +737,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                   title={inpaint.tooltip}
                   className={cn(
                     "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
-                    "w-16 h-16 rounded-xl border text-[10px] font-medium",
+                    "w-16 h-16 rounded-[var(--radius-panel)] border text-[10px] font-medium",
                     "transition-colors",
                     inpaint.disabled
                       ? "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed"
@@ -774,7 +774,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               >
                 <div
                   className={cn(
-                    "mx-3 mt-2 flex items-start gap-2 px-2.5 py-1.5 rounded-lg",
+                    "mx-3 mt-2 flex items-start gap-2 px-2.5 py-1.5 rounded-[var(--radius-card)]",
                     "bg-[rgba(229,72,77,0.12)] border border-[rgba(229,72,77,0.4)]",
                     "text-xs text-[var(--danger)]",
                   )}
@@ -784,7 +784,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
                     type="button"
                     aria-label="关闭错误提示"
                     onClick={() => setComposerError(null)}
-                    className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md hover:bg-[var(--bg-2)]"
+                    className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] hover:bg-[var(--bg-2)]"
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -805,7 +805,7 @@ export function DesktopComposerPill({ onSubmit }: DesktopComposerPillProps) {
               >
                 <div
                   className={cn(
-                    "mx-3 mt-2 flex items-center gap-2 px-2.5 py-1 rounded-lg",
+                    "mx-3 mt-2 flex items-center gap-2 px-2.5 py-1 rounded-[var(--radius-card)]",
                     "bg-[var(--amber-400)]/10 border border-[var(--amber-400)]/25 text-[var(--amber-400)]",
                     "text-xs",
                   )}
@@ -1243,7 +1243,7 @@ function SendButton({
           ? [
               "bg-[var(--amber-400)] text-[var(--bg-0)]",
               burst
-                ? "shadow-[0_0_0_1px_rgba(242,169,58,0.8),0_0_36px_8px_var(--amber-glow-strong)]"
+                ? "shadow-[var(--shadow-amber)]"
                 : "shadow-[var(--shadow-shutter)]",
             ].join(" ")
           : "bg-[var(--bg-3)] text-[var(--fg-3)] cursor-not-allowed",

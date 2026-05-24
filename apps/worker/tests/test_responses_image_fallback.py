@@ -52,6 +52,16 @@ def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
     assert fast_4k["output_compression"] == 95
 
 
+def test_image_request_options_treat_string_false_fast_as_disabled() -> None:
+    options = generation._image_request_options(  # noqa: SLF001
+        {"render_quality": "high", "fast": "false"},
+        size="1024x1024",
+    )
+
+    assert options["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
+    assert options["render_quality"] == "high"
+
+
 async def _first_image_result(
     image_iter: Any,
 ) -> tuple[str, str | None]:

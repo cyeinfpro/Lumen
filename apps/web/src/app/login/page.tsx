@@ -115,7 +115,7 @@ function LoginInner() {
             {/* 移动端品牌头 */}
             <header className="mb-8 md:mb-10 flex items-center gap-3 md:hidden">
               {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
-              <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_20px_-4px_var(--color-lumen-amber)]" />
+              <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[var(--shadow-amber)]" />
               <span className="text-lg font-medium tracking-tight">Lumen</span>
             </header>
 
@@ -139,7 +139,7 @@ function LoginInner() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="name@示例.com"
                     autoComplete="email"
-                    className="w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+                    className="w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
                   />
                 </Field>
 
@@ -157,13 +157,13 @@ function LoginInner() {
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="输入密码"
                       autoComplete="current-password"
-                      className="w-full h-10 pl-3 pr-12 md:pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+                      className="w-full h-10 pl-3 pr-12 md:pr-11 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
                     />
                     <button
                       type="button"
                       onClick={() => setShowPwd((v) => !v)}
                       aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-[var(--radius-card)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
                     >
                       {showPwd ? (
                         <EyeOff className="w-4 h-4" />
@@ -204,7 +204,7 @@ function LoginInner() {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[0_8px_24px_-12px_var(--color-lumen-amber)]"
+                  className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[var(--shadow-amber)]"
                 >
                   {submitting ? (
                     <>
@@ -331,7 +331,7 @@ function BrandPanel() {
           className="flex items-center gap-3"
         >
           {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
-          <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_24px_-4px_var(--color-lumen-amber)]" />
+          <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[var(--shadow-amber)]" />
           <span className="text-xl font-semibold tracking-tight">Lumen</span>
         </motion.div>
 
@@ -392,7 +392,7 @@ function Feature({
       transition={{ duration: 0.3, delay }}
       className="flex items-start gap-3"
     >
-      <span className="shrink-0 w-8 h-8 rounded-lg bg-[var(--color-lumen-amber)]/12 border border-[var(--color-lumen-amber)]/25 text-[var(--color-lumen-amber)] flex items-center justify-center">
+      <span className="shrink-0 w-8 h-8 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)]/12 border border-[var(--color-lumen-amber)]/25 text-[var(--color-lumen-amber)] flex items-center justify-center">
         {icon}
       </span>
       <div>

@@ -41,11 +41,11 @@ export function SearchBox({
   return (
     <div
       className={cn(
-        "relative flex items-center h-10 md:h-9 rounded-lg bg-white/[0.04] border border-[var(--border)] focus-within:border-[var(--accent)]/60 focus-within:bg-white/[0.06] transition-colors",
+        "relative flex items-center h-10 md:h-9 rounded-[var(--radius-card)] bg-white/[0.04] border border-[var(--border)] focus-within:border-[var(--accent)]/60 focus-within:bg-white/[0.06] transition-colors",
         className,
       )}
     >
-      <Search className="w-3.5 h-3.5 text-neutral-500 absolute left-2.5 pointer-events-none" />
+      <Search className="w-3.5 h-3.5 text-[var(--fg-2)] absolute left-2.5 pointer-events-none" />
       <input
         ref={inputRef}
         type="search"

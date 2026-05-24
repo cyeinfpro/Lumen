@@ -30,7 +30,7 @@ const BASE =
 const VARIANTS: Record<Variant, string> = {
   primary:
     "bg-[var(--accent)] text-[var(--accent-on)] hover:bg-[var(--amber-300)] " +
-    "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_var(--amber-glow-strong)]",
+    "shadow-[var(--shadow-amber)]",
   secondary:
     "bg-[var(--bg-2)] text-[var(--fg-0)] hover:bg-[var(--bg-3)] " +
     "border border-[var(--border)] hover:border-[var(--border-strong)] backdrop-blur-sm",
@@ -39,8 +39,7 @@ const VARIANTS: Record<Variant, string> = {
     "border border-transparent",
   danger:
     "bg-[var(--danger)] text-[var(--danger-on)] hover:brightness-110 " +
-    // shadow 内部 rgba 是 --danger 同源色（暂无 token），保留硬编码不引用 Tailwind 强调色。
-    "shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_6px_18px_-8px_rgba(229,72,77,0.55)]",
+    "shadow-[var(--shadow-2)]",
   outline:
     "bg-transparent text-[var(--fg-0)] border border-[var(--border)] " +
     "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",

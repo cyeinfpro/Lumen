@@ -71,6 +71,12 @@ def test_generation_feed_fast_filter_accepts_legacy_true_values() -> None:
     assert "lower((generations.upstream_request ->> 'fast')) IN ('true', '1')" in rendered
 
 
+def test_generation_feed_output_treats_string_false_fast_as_disabled() -> None:
+    assert generations._bool_option("false") is False
+    assert generations._bool_option("0") is False
+    assert generations._bool_option("true") is True
+
+
 def test_generation_feed_cursor_carries_total_for_next_page() -> None:
     created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
 

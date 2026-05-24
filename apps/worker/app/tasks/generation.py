@@ -102,6 +102,7 @@ from lumen_core.model_image_metadata import (
 )
 from lumen_core.queue_metadata import generation_queue_metadata, merge_queue_metadata
 from lumen_core.sizing import resolve_size, validate_explicit_size
+from lumen_core.providers import parse_provider_bool
 
 from ..config import settings
 from ..db import SessionLocal
@@ -177,6 +178,7 @@ _IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S = 5.0
 # `_ready_queued_generation_ids` 检查时同时看 redis 和本地，确保抖动期间也能
 # 拉开窗口。worker 重启会自然清空，无需 TTL。
 _PROVIDER_COOLDOWN_LOCAL: dict[str, float] = {}
+_RUNNING_GENERATION_STATUSES = (GenerationStatus.RUNNING.value,)
 # task 失败 retry 时把刚刚 reserved 的 provider 写入 avoid set，下次 reserve
 # 跳过它一次，避免 retry 反复打到同一个有问题的 provider（如 model_not_found / 401）。
 # 全部 enabled provider 都被 avoid 时退化为不过滤（防止永远 reserve 失败）。
@@ -2298,11 +2300,19 @@ def _retry_not_before_ttl(delay: float) -> int:
     return max(1, math.ceil(delay + _IMAGE_QUEUE_NOT_BEFORE_GRACE_S))
 
 
-def _generation_attempt_update(task_id: str, attempt_epoch: int):
-    return update(Generation).where(
+def _generation_attempt_update(
+    task_id: str,
+    attempt_epoch: int,
+    *,
+    statuses: tuple[str, ...] | None = None,
+):
+    stmt = update(Generation).where(
         Generation.id == task_id,
         Generation.attempt == attempt_epoch,
     )
+    if statuses:
+        stmt = stmt.where(Generation.status.in_(statuses))
+    return stmt
 
 
 def _workflow_qc_prompt(
@@ -2969,7 +2979,11 @@ def _request_responses_model(upstream_request: dict[str, Any]) -> str:
     value = upstream_request.get("responses_model")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    if bool(upstream_request.get("fast")):
+    try:
+        fast = parse_provider_bool(upstream_request.get("fast"), default=False)
+    except ValueError:
+        fast = False
+    if fast:
         return DEFAULT_IMAGE_RESPONSES_MODEL_FAST
     return DEFAULT_IMAGE_RESPONSES_MODEL
 
@@ -2980,7 +2994,10 @@ def _image_request_options(
     size: str,
 ) -> dict[str, Any]:
     req = upstream_request if isinstance(upstream_request, dict) else {}
-    fast_mode = bool(req.get("fast"))
+    try:
+        fast_mode = parse_provider_bool(req.get("fast"), default=False)
+    except ValueError:
+        fast_mode = False
     render_quality = _request_render_quality(
         req,
         size=size,
@@ -3442,11 +3459,16 @@ async def _mark_generation_attempt_failed(
     error_code: str,
     error_message: str,
     retriable: bool,
+    statuses: tuple[str, ...] = _RUNNING_GENERATION_STATUSES,
 ) -> bool:
     try:
         async with SessionLocal() as session:
             result = await session.execute(
-                _generation_attempt_update(task_id, attempt).values(
+                _generation_attempt_update(
+                    task_id,
+                    attempt,
+                    statuses=statuses,
+                ).values(
                     status=GenerationStatus.FAILED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
@@ -3467,6 +3489,7 @@ async def _mark_generation_attempt_failed(
                         reason=error_code,
                     )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
     except _StaleGenerationAttempt as stale_exc:
         logger.info(
             "generation failed update skipped by stale attempt task=%s attempt=%s err=%s",
@@ -3508,7 +3531,11 @@ async def _mark_generation_attempt_retrying(
     try:
         async with SessionLocal() as session:
             result = await session.execute(
-                _generation_attempt_update(task_id, attempt).values(
+                _generation_attempt_update(
+                    task_id,
+                    attempt,
+                    statuses=_RUNNING_GENERATION_STATUSES,
+                ).values(
                     status=GenerationStatus.QUEUED.value,
                     progress_stage=GenerationStage.QUEUED,
                     error_code=error_code,
@@ -3549,6 +3576,7 @@ async def _mark_generation_attempt_retrying(
             error_code=enqueue_err,
             error_message=enqueue_msg[:2000],
             retriable=False,
+            statuses=(GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value),
         )
         return False
 
@@ -4372,9 +4400,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             )
         except _TaskCancelled as exc:
             result = await session.execute(
-                update(Generation)
-                .where(Generation.id == task_id, Generation.attempt == gen.attempt)
-                .values(
+                _generation_attempt_update(
+                    task_id,
+                    gen.attempt,
+                    statuses=(GenerationStatus.QUEUED.value,),
+                ).values(
                     status=GenerationStatus.CANCELED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
@@ -4395,6 +4425,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 reason=EC.CANCELLED.value,
             )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
             await publish_event(
                 redis,
                 user_id,
@@ -4415,9 +4446,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             err_code = EC.INVALID_PARAM.value
             err_msg = "primary_input_image_id must be included in input_image_ids"
             result = await session.execute(
-                update(Generation)
-                .where(Generation.id == task_id, Generation.attempt == gen.attempt)
-                .values(
+                _generation_attempt_update(
+                    task_id,
+                    gen.attempt,
+                    statuses=(GenerationStatus.QUEUED.value,),
+                ).values(
                     status=GenerationStatus.FAILED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
@@ -4435,6 +4468,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 reason=err_code,
             )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
             await publish_event(
                 redis,
                 user_id,
@@ -4463,9 +4497,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 existing_img.id,
             )
             result = await session.execute(
-                update(Generation)
-                .where(Generation.id == task_id, Generation.attempt == gen.attempt)
-                .values(
+                _generation_attempt_update(
+                    task_id,
+                    gen.attempt,
+                    statuses=(GenerationStatus.QUEUED.value,),
+                ).values(
                     status=GenerationStatus.SUCCEEDED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
@@ -4488,6 +4524,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 height=existing_img.height,
             )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
             channel_short = task_channel(task_id)
             await publish_event(
                 redis,
@@ -4524,9 +4561,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             err_code = "max_attempts_exceeded"
             err_msg = f"generation exceeded max attempts ({_MAX_ATTEMPTS})"
             result = await session.execute(
-                update(Generation)
-                .where(Generation.id == task_id, Generation.attempt == gen.attempt)
-                .values(
+                _generation_attempt_update(
+                    task_id,
+                    gen.attempt,
+                    statuses=(GenerationStatus.QUEUED.value,),
+                ).values(
                     status=GenerationStatus.FAILED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     attempt=attempt,
@@ -4539,7 +4578,15 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             msg_failed = await session.get(Message, message_id)
             if msg_failed is not None:
                 msg_failed.status = MessageStatus.FAILED
+            gen_failed = await session.get(Generation, task_id)
+            if gen_failed is not None:
+                await worker_billing.release_generation(
+                    session,
+                    gen_failed,
+                    reason=err_code,
+                )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
             await publish_event(
                 redis,
                 user_id,
@@ -4593,12 +4640,14 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             try:
                 async with SessionLocal() as session:
                     result = await session.execute(
-                        update(Generation)
-                        .where(
-                            Generation.id == task_id,
-                            Generation.attempt == loaded_attempt,
-                        )
-                        .values(
+                        _generation_attempt_update(
+                            task_id,
+                            loaded_attempt,
+                            statuses=(
+                                GenerationStatus.QUEUED.value,
+                                GenerationStatus.RUNNING.value,
+                            ),
+                        ).values(
                             status=GenerationStatus.FAILED.value,
                             progress_stage=GenerationStage.FINALIZING,
                             # 不要把 attempt 写回成局部 attempt（初值 0）；该任务可能
@@ -4614,7 +4663,15 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     msg_failed = await session.get(Message, message_id)
                     if msg_failed is not None:
                         msg_failed.status = MessageStatus.FAILED
+                    gen_failed = await session.get(Generation, task_id)
+                    if gen_failed is not None:
+                        await worker_billing.release_generation(
+                            session,
+                            gen_failed,
+                            reason=err_code,
+                        )
                     await session.commit()
+                    await worker_billing.flush_balance_cache_refreshes(session)
             except _StaleGenerationAttempt:
                 _task_outcome = "stale_attempt"
                 return
@@ -5652,7 +5709,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 parent_upstream_request_for_bonus = dict(upstream_req)
 
                 result = await session.execute(
-                    _generation_attempt_update(task_id, attempt).values(
+                    _generation_attempt_update(
+                        task_id,
+                        attempt,
+                        statuses=_RUNNING_GENERATION_STATUSES,
+                    ).values(
                         status=GenerationStatus.SUCCEEDED.value,
                         progress_stage=GenerationStage.FINALIZING,
                         finished_at=datetime.now(timezone.utc),
@@ -5755,6 +5816,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     height=height,
                 )
                 await session.commit()
+                await worker_billing.flush_balance_cache_refreshes(session)
 
         # --- publish succeeded ---
         await publish_event(
@@ -5906,7 +5968,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         try:
             async with SessionLocal() as session:
                 result = await session.execute(
-                    _generation_attempt_update(task_id, attempt).values(
+                    _generation_attempt_update(
+                        task_id,
+                        attempt,
+                        statuses=_RUNNING_GENERATION_STATUSES,
+                    ).values(
                         status=GenerationStatus.CANCELED.value,
                         progress_stage=GenerationStage.FINALIZING,
                         finished_at=datetime.now(timezone.utc),
@@ -5929,6 +5995,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         reason="cancelled",
                     )
                 await session.commit()
+                await worker_billing.flush_balance_cache_refreshes(session)
         except _StaleGenerationAttempt as stale_exc:
             logger.info(
                 "generation cancel stale attempt task=%s attempt=%s err=%s",
@@ -6105,7 +6172,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             try:
                 async with SessionLocal() as session:
                     result = await session.execute(
-                        _generation_attempt_update(task_id, attempt).values(
+                        _generation_attempt_update(
+                            task_id,
+                            attempt,
+                            statuses=_RUNNING_GENERATION_STATUSES,
+                        ).values(
                             status=GenerationStatus.QUEUED.value,
                             progress_stage=GenerationStage.QUEUED,
                             error_code=err_code,
@@ -6152,6 +6223,10 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     error_code=enqueue_err,
                     error_message=enqueue_msg[:2000],
                     retriable=False,
+                    statuses=(
+                        GenerationStatus.QUEUED.value,
+                        GenerationStatus.RUNNING.value,
+                    ),
                 )
                 _task_outcome = "failed"
                 return
@@ -6199,7 +6274,11 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         try:
             async with SessionLocal() as session:
                 result = await session.execute(
-                    _generation_attempt_update(task_id, attempt).values(
+                    _generation_attempt_update(
+                        task_id,
+                        attempt,
+                        statuses=_RUNNING_GENERATION_STATUSES,
+                    ).values(
                         status=GenerationStatus.FAILED.value,
                         progress_stage=GenerationStage.FINALIZING,
                         finished_at=datetime.now(timezone.utc),
@@ -6220,6 +6299,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         reason=err_code,
                     )
                 await session.commit()
+                await worker_billing.flush_balance_cache_refreshes(session)
         except _StaleGenerationAttempt as stale_exc:
             logger.info(
                 "generation terminal stale attempt task=%s attempt=%s err=%s",

@@ -143,7 +143,7 @@ export function AssistantBubble({
       <div className="max-w-[96%] md:max-w-[96%] w-full min-w-0 flex flex-col gap-2">
         {/* Thinking 折叠区：默认收起；点击后展开 */}
         {msg.thinking && (
-          <div className="rounded-[var(--radius-card)] border border-white/[0.06] bg-white/[0.03] overflow-hidden">
+          <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.03] overflow-hidden">
             {/* 全宽折叠头：内嵌 chevron + 状态点，不匹配标准 Button variant */}
             <button
               type="button"
@@ -200,7 +200,7 @@ export function AssistantBubble({
             onMouseUp={handleSelectionChange}
             onTouchEnd={handleSelectionChange}
             className={cn(
-              "relative px-4 py-3 md:px-5 md:py-3.5 rounded-2xl rounded-bl-md text-[0.9rem] md:text-[0.95rem] leading-relaxed",
+              "relative px-4 py-3 md:px-5 md:py-3.5 rounded-[var(--radius-dialog)] rounded-bl-md text-[0.9rem] md:text-[0.95rem] leading-relaxed",
               "bg-[var(--bg-1)]/70 border border-[var(--border)] text-[var(--fg-0)]",
               "backdrop-blur-sm shadow-sm min-w-0 break-words [overflow-wrap:anywhere]",
               "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_img]:max-w-full [&_img]:h-auto",
@@ -223,7 +223,7 @@ export function AssistantBubble({
               </span>
             )}
             {msg.memory_writes && msg.memory_writes.length > 0 && (
-              <div className="mt-3 flex flex-col gap-1.5 border-t border-white/8 pt-2">
+              <div className="mt-3 flex flex-col gap-1.5 border-t border-[var(--border-subtle)] pt-2">
                 <MemoryWriteHints
                   conversationId={currentConvId}
                   writes={msg.memory_writes}
@@ -231,7 +231,7 @@ export function AssistantBubble({
               </div>
             )}
             {msg.used_memory_summary && msg.used_memory_summary.length > 0 && (
-              <div className="mt-3 border-t border-white/8 pt-2">
+              <div className="mt-3 border-t border-[var(--border-subtle)] pt-2">
                 <Button
                   size="sm"
                   variant="secondary"
@@ -247,7 +247,7 @@ export function AssistantBubble({
                   用了 {msg.used_memory_summary.length} 条记忆
                 </Button>
                 {memoryOpen && (
-                  <div className="mt-2 space-y-1.5 rounded-[var(--radius-control)] border border-white/10 bg-black/20 p-2">
+                  <div className="mt-2 space-y-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/45 p-2">
                     {msg.used_memory_summary.map((memory) => (
                       <div
                         key={memory.id}
@@ -786,7 +786,7 @@ function MemoryWriteHint({
         <select
           value={scopeId}
           onChange={(e) => void handleScopeChange(e.target.value)}
-          className="h-6 rounded-md border border-white/10 bg-white/[0.03] px-1 text-[11px] text-[var(--fg-1)] outline-none"
+          className="h-6 rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.03] px-1 text-[11px] text-[var(--fg-1)] outline-none"
           title={
             write.recommended_scope_id && write.recommended_scope_id === scopeId
               ? "推荐作用域"
@@ -849,7 +849,7 @@ function MemoryWriteHint({
         管理
       </a>
       {detailOpen && write.kind === "staged" && !doneLabel && (
-        <div className="mt-1 w-full rounded-[var(--radius-card)] border border-white/10 bg-white/[0.03] p-2 text-[11px] text-[var(--fg-2)]">
+        <div className="mt-1 w-full rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.03] p-2 text-[11px] text-[var(--fg-2)]">
           {write.source_excerpt && (
             <div className="mb-2 leading-5 text-[var(--fg-2)]/80">
               来源:{write.source_excerpt}
@@ -858,7 +858,7 @@ function MemoryWriteHint({
           <input
             value={editedContent}
             onChange={(e) => setEditedContent(e.target.value.slice(0, 200))}
-            className="h-7 w-full rounded-[var(--radius-control)] border border-white/10 bg-white/[0.04] px-2 text-[11px] text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
+            className="h-7 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-white/[0.04] px-2 text-[11px] text-[var(--fg-0)] outline-none focus:border-[var(--color-lumen-amber)]/60"
             placeholder="编辑后再保存"
           />
           <div className="mt-1 text-right text-[10px] text-[var(--fg-2)]/70">
@@ -875,7 +875,7 @@ export default AssistantBubble;
 function GenerationViewFallback() {
   return (
     <div className="flex flex-col gap-2.5">
-      <div className="aspect-[4/3] w-full rounded-2xl border border-white/10 bg-white/[0.03]" />
+      <div className="aspect-[4/3] w-full rounded-[var(--radius-dialog)] border border-[var(--border)] bg-white/[0.03]" />
       <div className="h-4 w-2/3 rounded bg-white/[0.04]" />
     </div>
   );

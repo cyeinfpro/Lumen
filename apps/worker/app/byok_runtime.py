@@ -18,7 +18,7 @@ from lumen_core.models import (
     SystemSetting,
     UserApiCredential,
 )
-from lumen_core.providers import parse_proxy_json
+from lumen_core.providers import parse_provider_bool, parse_proxy_json
 from lumen_core.url_security import assert_public_http_target
 
 from .config import settings
@@ -165,8 +165,14 @@ async def resolve_user_credential_runtime(
             error_code=EC.UPSTREAM_INVALID_REQUEST.value,
             payload={"credential_id": credential_id},
         ) from exc
-    caps = supplier.capabilities_jsonb or {}
-    image_jobs_enabled = bool(caps.get("image_jobs_enabled", False))
+    caps = supplier.capabilities_jsonb if isinstance(supplier.capabilities_jsonb, dict) else {}
+    try:
+        image_jobs_enabled = parse_provider_bool(
+            caps.get("image_jobs_enabled", False),
+            default=False,
+        )
+    except ValueError:
+        image_jobs_enabled = False
     image_jobs_endpoint = str(caps.get("image_jobs_endpoint", "auto"))
     return ResolvedProvider(
         name=_credential_provider_name(supplier, credential.id),

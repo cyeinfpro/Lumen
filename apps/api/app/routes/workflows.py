@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from lumen_core import billing as billing_core
 from lumen_core.providers import (
     ProviderProxyDefinition,
     parse_proxy_json,
@@ -132,6 +133,7 @@ from lumen_core.schemas import (
 
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
+from ..billing_cache_state import invalidate_balance_cache
 from ..config import settings
 from ..observability import (
     apparel_model_library_generate_mode_total,
@@ -2829,13 +2831,105 @@ async def _workflow_generation_rows_from_task_ids(
     return [*base_generations, *bonus_generations]
 
 
+async def _release_soft_deleted_task_hold(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+    reason: str,
+) -> bool:
+    try:
+        tx = await billing_core.release(
+            db,
+            user_id,
+            ref_type=ref_type,
+            ref_id=ref_id,
+            idempotency_key=f"workflow_delete:{ref_type}:{ref_id}",
+            meta={"reason": reason},
+        )
+    except billing_core.BillingError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+    return tx is not None
+
+
+async def _workflow_wallet_exists(db: AsyncSession, user_id: str) -> bool:
+    wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
+    return wallet is not None
+
+
+def _cleanup_string_list(cleanup: dict[str, Any], key: str) -> list[str]:
+    values = cleanup.get(key)
+    if not isinstance(values, list):
+        return []
+    return _dedupe_nonempty(value for value in values if isinstance(value, str))
+
+
+async def _release_workflow_generation_queue_state(redis: Any, task_id: str) -> None:
+    from .tasks import _release_generation_queue_state
+
+    await _release_generation_queue_state(redis, task_id)
+
+
+async def _post_commit_workflow_generated_cleanup(
+    *,
+    user_id: str,
+    cleanup: dict[str, Any],
+) -> None:
+    queued_generation_ids = _cleanup_string_list(cleanup, "queued_generation_ids")
+    running_generation_ids = _cleanup_string_list(cleanup, "running_generation_ids")
+    streaming_completion_ids = _cleanup_string_list(cleanup, "streaming_completion_ids")
+    released_holds = cleanup.get("holds_released")
+    if not queued_generation_ids and not running_generation_ids and not streaming_completion_ids:
+        if isinstance(released_holds, int) and released_holds > 0:
+            try:
+                await invalidate_balance_cache(user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "workflow delete balance cache invalidation failed user=%s err=%s",
+                    user_id,
+                    exc,
+                )
+        return
+
+    redis = get_redis()
+    for task_id in queued_generation_ids:
+        try:
+            await _release_workflow_generation_queue_state(redis, task_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "workflow delete image_queue release failed task=%s err=%s",
+                task_id,
+                exc,
+            )
+    for task_id in [*running_generation_ids, *streaming_completion_ids]:
+        try:
+            await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "workflow delete cancel signal failed task=%s err=%s",
+                task_id,
+                exc,
+            )
+    if isinstance(released_holds, int) and released_holds > 0:
+        try:
+            await invalidate_balance_cache(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "workflow delete balance cache invalidation failed user=%s err=%s",
+                user_id,
+                exc,
+            )
+
+
 async def _soft_delete_workflow_generated_images(
     db: AsyncSession,
     *,
     run: WorkflowRun,
     deleted_at: datetime,
     cancel_message: str,
-) -> dict[str, int]:
+    account_mode: str = "wallet",
+) -> dict[str, Any]:
     """Soft-delete images produced by a workflow and cancel its active tasks.
 
     Images explicitly saved into the user's model library are preserved; those
@@ -2844,53 +2938,107 @@ async def _soft_delete_workflow_generated_images(
     steps, candidates = await _workflow_steps_and_candidates(db, run)
     task_ids = _workflow_direct_task_ids(steps, candidates)
     image_ids = _workflow_direct_image_ids(steps, candidates)
-    generation_ids = await _workflow_generation_ids_from_task_ids(
-        db, user_id=run.user_id, task_ids=task_ids
+    generation_rows = await _workflow_generation_rows_from_task_ids(
+        db,
+        user_id=run.user_id,
+        task_ids=task_ids,
+        include_dual_bonus=True,
     )
+    generation_ids = _dedupe_nonempty(generation.id for generation in generation_rows)
 
     canceled_generations = 0
+    canceled_generation_rows: list[Generation] = []
+    queued_generation_ids: list[str] = []
+    running_generation_ids: list[str] = []
     if generation_ids:
-        result = await db.execute(
-            update(Generation)
-            .where(
-                Generation.user_id == run.user_id,
-                Generation.id.in_(generation_ids),
-                Generation.status.in_(
-                    [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
-                ),
+        canceled_generation_rows = list(
+            (
+                await db.execute(
+                    select(Generation).where(
+                        Generation.user_id == run.user_id,
+                        Generation.id.in_(generation_ids),
+                        Generation.status.in_(
+                            [
+                                GenerationStatus.QUEUED.value,
+                                GenerationStatus.RUNNING.value,
+                            ]
+                        ),
+                    )
+                    .with_for_update()
+                )
             )
-            .values(
-                status=GenerationStatus.CANCELED.value,
-                progress_stage="finalizing",
-                finished_at=deleted_at,
-                error_code="cancelled",
-                error_message=cancel_message,
-            )
-            .execution_options(synchronize_session=False)
+            .scalars()
+            .all()
         )
-        canceled_generations = int(result.rowcount or 0)
+        for generation in canceled_generation_rows:
+            if generation.status == GenerationStatus.QUEUED.value:
+                queued_generation_ids.append(generation.id)
+            elif generation.status == GenerationStatus.RUNNING.value:
+                running_generation_ids.append(generation.id)
+            generation.status = GenerationStatus.CANCELED.value
+            generation.progress_stage = "finalizing"
+            generation.finished_at = deleted_at
+            generation.error_code = "cancelled"
+            generation.error_message = cancel_message
+        canceled_generations = len(canceled_generation_rows)
 
     canceled_completions = 0
+    canceled_completion_rows: list[Completion] = []
+    streaming_completion_ids: list[str] = []
     if task_ids:
-        result = await db.execute(
-            update(Completion)
-            .where(
-                Completion.user_id == run.user_id,
-                Completion.id.in_(task_ids),
-                Completion.status.in_(
-                    [CompletionStatus.QUEUED.value, CompletionStatus.RUNNING.value]
-                ),
+        canceled_completion_rows = list(
+            (
+                await db.execute(
+                    select(Completion).where(
+                        Completion.user_id == run.user_id,
+                        Completion.id.in_(task_ids),
+                        Completion.status.in_(
+                            [
+                                CompletionStatus.QUEUED.value,
+                                CompletionStatus.STREAMING.value,
+                            ]
+                        ),
+                    )
+                    .with_for_update()
+                )
             )
-            .values(
-                status=CompletionStatus.CANCELED.value,
-                progress_stage="finalizing",
-                finished_at=deleted_at,
-                error_code="cancelled",
-                error_message=cancel_message,
-            )
-            .execution_options(synchronize_session=False)
+            .scalars()
+            .all()
         )
-        canceled_completions = int(result.rowcount or 0)
+        for completion in canceled_completion_rows:
+            if completion.status == CompletionStatus.STREAMING.value:
+                streaming_completion_ids.append(completion.id)
+            completion.status = CompletionStatus.CANCELED.value
+            completion.progress_stage = "finalizing"
+            completion.finished_at = deleted_at
+            completion.error_code = "cancelled"
+            completion.error_message = cancel_message
+        canceled_completions = len(canceled_completion_rows)
+
+    released_holds = 0
+    if account_mode == "wallet" or await _workflow_wallet_exists(db, run.user_id):
+        for generation in canceled_generation_rows:
+            released_holds += int(
+                await _release_soft_deleted_task_hold(
+                    db,
+                    user_id=run.user_id,
+                    ref_type="generation",
+                    ref_id=billing_core.retry_billing_ref_id(
+                        generation.id, getattr(generation, "retry_count", 0)
+                    ),
+                    reason=cancel_message,
+                )
+            )
+        for completion in canceled_completion_rows:
+            released_holds += int(
+                await _release_soft_deleted_task_hold(
+                    db,
+                    user_id=run.user_id,
+                    ref_type="completion",
+                    ref_id=billing_core.completion_billing_ref_id(completion),
+                    reason=cancel_message,
+                )
+            )
 
     deleted_images = 0
     image_matchers = []
@@ -2920,6 +3068,10 @@ async def _soft_delete_workflow_generated_images(
         "images_deleted": deleted_images,
         "generations_canceled": canceled_generations,
         "completions_canceled": canceled_completions,
+        "holds_released": released_holds,
+        "queued_generation_ids": queued_generation_ids,
+        "running_generation_ids": running_generation_ids,
+        "streaming_completion_ids": streaming_completion_ids,
     }
 
 
@@ -6390,11 +6542,12 @@ async def delete_workflow(
 ) -> dict[str, bool]:
     run = await _get_run(db, user_id=user.id, run_id=workflow_run_id, lock=True)
     deleted_at = _now()
-    await _soft_delete_workflow_generated_images(
+    cleanup = await _soft_delete_workflow_generated_images(
         db,
         run=run,
         deleted_at=deleted_at,
         cancel_message="workflow deleted",
+        account_mode=getattr(user, "account_mode", "wallet"),
     )
     run.deleted_at = deleted_at
     if run.conversation_id:
@@ -6410,6 +6563,7 @@ async def delete_workflow(
         if conv is not None:
             conv.deleted_at = deleted_at
     await db.commit()
+    await _post_commit_workflow_generated_cleanup(user_id=user.id, cleanup=cleanup)
     return {"ok": True}
 
 
@@ -9036,11 +9190,12 @@ async def delete_apparel_model_library_job(
             400,
         )
     deleted_at = _now()
-    await _soft_delete_workflow_generated_images(
+    cleanup = await _soft_delete_workflow_generated_images(
         db,
         run=run,
         deleted_at=deleted_at,
         cancel_message="model library job deleted",
+        account_mode=getattr(user, "account_mode", "wallet"),
     )
     run.deleted_at = deleted_at
     if run.conversation_id:
@@ -9056,6 +9211,7 @@ async def delete_apparel_model_library_job(
         if conv is not None:
             conv.deleted_at = deleted_at
     await db.commit()
+    await _post_commit_workflow_generated_cleanup(user_id=user.id, cleanup=cleanup)
     return {"ok": True}
 
 
@@ -9083,13 +9239,16 @@ async def clear_apparel_model_library_jobs(
         .all()
     )
     now = _now()
+    cleanups: list[dict[str, Any]] = []
     for run in rows:
-        await _soft_delete_workflow_generated_images(
+        cleanup = await _soft_delete_workflow_generated_images(
             db,
             run=run,
             deleted_at=now,
             cancel_message="model library job cleared",
+            account_mode=getattr(user, "account_mode", "wallet"),
         )
+        cleanups.append(cleanup)
         run.deleted_at = now
         if run.conversation_id:
             conv = (
@@ -9104,6 +9263,8 @@ async def clear_apparel_model_library_jobs(
             if conv is not None:
                 conv.deleted_at = now
     await db.commit()
+    for cleanup in cleanups:
+        await _post_commit_workflow_generated_cleanup(user_id=user.id, cleanup=cleanup)
     return ApparelModelLibraryJobsClearOut(deleted=len(rows))
 
 

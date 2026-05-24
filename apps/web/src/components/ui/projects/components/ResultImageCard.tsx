@@ -54,7 +54,7 @@ export function ResultImageCard({
         type="button"
         onClick={onPreview}
         className={cn(
-          "relative block aspect-[4/5] w-full overflow-hidden rounded-lg bg-[var(--bg-2)] focus-visible:outline-none",
+          "relative block aspect-[4/5] w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none",
           selected && "ring-1 ring-inset ring-[var(--border-amber)]",
         )}
       >

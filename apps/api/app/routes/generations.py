@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import GenerationStatus
 from lumen_core.models import Conversation, Generation, Image, ImageVariant, Message
+from lumen_core.providers import parse_provider_bool
 
 from ..db import get_db
 from ..deps import CurrentUser
@@ -45,6 +46,13 @@ COUNT_CAP = 10_000
 # ---------- 支持的 aspect ratio 白名单 ----------
 
 _ALLOWED_RATIOS = {"1:1", "16:9", "9:16", "4:5", "3:4", "21:9"}
+
+
+def _bool_option(value: object, default: bool = False) -> bool:
+    try:
+        return parse_provider_bool(value, default=default)
+    except ValueError:
+        return default
 
 
 # ---------- Schemas ----------
@@ -340,7 +348,7 @@ async def list_generation_feed(
                     g.primary_input_image_id
                     or (g.input_image_ids and len(g.input_image_ids) > 0)
                 ),
-                fast=bool(upstream_request.get("fast")),
+                fast=_bool_option(upstream_request.get("fast"), False),
                 quality=(
                     upstream_request.get("render_quality")
                     if isinstance(upstream_request.get("render_quality"), str)

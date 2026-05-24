@@ -34,6 +34,10 @@ class _One:
         return self.value
 
 
+async def _billing_disabled(_db: Any) -> bool:
+    return False
+
+
 @pytest.mark.asyncio
 async def test_retry_generation_locks_row_and_clears_cancel_key(
     monkeypatch: pytest.MonkeyPatch,
@@ -86,6 +90,7 @@ async def test_retry_generation_locks_row_and_clears_cancel_key(
     db = Db()
     monkeypatch.setattr(tasks, "get_redis", lambda: redis)
     monkeypatch.setattr(tasks, "_publish_queued", noop_publish)
+    monkeypatch.setattr(tasks, "_billing_enabled", _billing_disabled)
 
     out = await tasks.retry_generation(
         "gen-1",

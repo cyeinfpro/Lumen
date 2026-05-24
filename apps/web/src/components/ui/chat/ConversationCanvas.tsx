@@ -96,7 +96,7 @@ function HistoryLoadControl({
         <div
           role="alert"
           className={cn(
-            "flex max-w-full items-center gap-3 rounded-md border px-3 py-2",
+            "flex max-w-full items-center gap-3 rounded-[var(--radius-control)] border px-3 py-2",
             "border-[var(--danger)]/25 bg-[var(--danger-soft)] text-sm text-[var(--fg-0)]",
           )}
         >
@@ -349,7 +349,7 @@ function JumpToLatestButton({
         variant="secondary"
         leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
         onClick={onClick}
-        className="border-white/15 bg-[var(--bg-1)]/88 shadow-lg backdrop-blur-xl"
+        className="border-[var(--border)] bg-[var(--bg-1)]/88 shadow-lg backdrop-blur-xl"
       >
         最新
       </Button>

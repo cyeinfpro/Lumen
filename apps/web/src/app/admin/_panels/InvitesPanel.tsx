@@ -125,7 +125,7 @@ export function InvitesPanel() {
       {/* —— 生成表单 —— */}
       <form
         onSubmit={onSubmit}
-        className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-5 space-y-4"
+        className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-5 space-y-4"
       >
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2">
           <h2 className="type-card-title">生成邀请链接</h2>
@@ -142,7 +142,7 @@ export function InvitesPanel() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@示例.com"
               autoComplete="off"
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-neutral-600 transition-colors"
+              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
             />
           </FormField>
           <FormField id="invite-new-days" label="有效期（天）">
@@ -154,7 +154,7 @@ export function InvitesPanel() {
               inputMode="numeric"
               value={days}
               onChange={(e) => setDays(Number(e.target.value))}
-              className="w-full sm:w-24 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 text-sm font-mono tabular-nums focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
+              className="w-full sm:w-24 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm font-mono tabular-nums focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
             />
           </FormField>
           <FormField id="invite-new-role" label="角色">
@@ -162,7 +162,7 @@ export function InvitesPanel() {
               id="invite-new-role"
               value={role}
               onChange={(e) => setRole(e.target.value as "member" | "admin")}
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
+              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 transition-colors"
             >
               <option value="member">成员</option>
               <option value="admin">管理员</option>
@@ -231,12 +231,12 @@ export function InvitesPanel() {
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                 <Field label="令牌">
-                  <span className="font-mono text-neutral-300">
+                  <span className="font-mono text-[var(--fg-1)]">
                     {created.token.slice(0, 12)}…
                   </span>
                 </Field>
                 <Field label="邮箱">
-                  <span className="text-neutral-300">
+                  <span className="text-[var(--fg-1)]">
                     {created.email ?? "—"}
                   </span>
                 </Field>
@@ -244,7 +244,7 @@ export function InvitesPanel() {
                   <RoleBadge role={created.role} />
                 </Field>
                 <Field label="过期时间">
-                  <span className="text-neutral-300 font-mono tabular-nums">
+                  <span className="text-[var(--fg-1)] font-mono tabular-nums">
                     {created.expires_at
                       ? formatISODate(created.expires_at)
                       : "永久"}
@@ -257,7 +257,7 @@ export function InvitesPanel() {
       </form>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] overflow-hidden">
         {q.isLoading ? (
           <ListSkeleton rows={5} />
         ) : q.isError ? (
@@ -281,10 +281,10 @@ export function InvitesPanel() {
               return (
                 <li
                   key={row.id}
-                  className="p-3 border border-white/10 rounded-[var(--radius-card)] space-y-3"
+                  className="p-3 border border-[var(--border)] rounded-[var(--radius-card)] space-y-3"
                 >
                   <div className="flex flex-col gap-2">
-                    <code className="w-full min-w-0 px-2 py-2 rounded-md bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all leading-relaxed">
+                    <code className="w-full min-w-0 px-2 py-2 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all leading-relaxed">
                       {row.url}
                     </code>
                     <Button
@@ -306,15 +306,15 @@ export function InvitesPanel() {
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                         邮箱
                       </div>
-                      <div className="text-neutral-300 break-all">
+                      <div className="text-[var(--fg-1)] break-all">
                         {row.email ?? "—"}
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                         角色
                       </div>
                       <div className="mt-0.5">
@@ -322,7 +322,7 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                         状态
                       </div>
                       <div className="mt-0.5">
@@ -330,18 +330,18 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                         过期
                       </div>
-                      <div className="text-sm text-neutral-300 font-mono tabular-nums break-all">
+                      <div className="text-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
                         {row.expires_at ? formatISODate(row.expires_at) : "永久"}
                       </div>
                     </div>
                     <div className="col-span-2">
-                      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
                         创建
                       </div>
-                      <div className="text-sm text-neutral-400 font-mono tabular-nums break-all">
+                      <div className="text-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
                         {formatISODate(row.created_at)}
                       </div>
                     </div>
@@ -390,7 +390,7 @@ export function InvitesPanel() {
           {/* 桌面端表格 */}
           <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
             <table className="w-full text-sm">
-              <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-white/10">
+              <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
                 <tr>
                   <th className="text-left py-3 px-4 font-medium">链接</th>
                   <th className="text-left py-3 px-4 font-medium">邮箱</th>
@@ -415,18 +415,18 @@ export function InvitesPanel() {
                         duration: 0.18,
                         delay: Math.min(i * 0.03, 0.2),
                       }}
-                      className="border-t border-white/5 hover:bg-white/[0.03] transition-colors align-middle"
+                      className="border-t border-[var(--border-subtle)] hover:bg-white/[0.03] transition-colors align-middle"
                     >
                       <td className="py-3 px-4 max-w-[280px]">
                         <div className="flex items-center gap-2">
-                          <code className="text-xs font-mono text-neutral-300 truncate">
+                          <code className="text-xs font-mono text-[var(--fg-1)] truncate">
                             {row.url}
                           </code>
                           {/* 24px 紧凑内联按钮无法用 Button primitive sm（h-8 太大） */}
                           <button
                             type="button"
                             onClick={() => onCopy(`row:${row.id}`, row.url)}
-                            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] text-neutral-400 hover:text-neutral-100 hover:bg-white/5 transition-colors"
+                            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-white/5 transition-colors"
                             aria-label="复制链接"
                           >
                             {copiedKey === `row:${row.id}` ? (
@@ -443,7 +443,7 @@ export function InvitesPanel() {
                           </button>
                         </div>
                       </td>
-                      <td className="py-3 px-4 text-neutral-300">
+                      <td className="py-3 px-4 text-[var(--fg-1)]">
                         {row.email ?? "—"}
                       </td>
                       <td className="py-3 px-4">
@@ -452,10 +452,10 @@ export function InvitesPanel() {
                       <td className="py-3 px-4">
                         <StatusBadge status={st} usedBy={row.used_by_email} />
                       </td>
-                      <td className="py-3 px-4 text-neutral-400 font-mono text-xs tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums">
                         {row.expires_at ? formatISODate(row.expires_at) : "永久"}
                       </td>
-                      <td className="py-3 px-4 text-neutral-400 font-mono text-xs tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums">
                         {formatISODate(row.created_at)}
                       </td>
                       <td className="py-3 px-4 text-right">
@@ -550,7 +550,7 @@ function Field({
 }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
       <div className="mt-0.5">{children}</div>
@@ -561,14 +561,14 @@ function Field({
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
         <UserCog className="w-3 h-3" />
         管理员
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-neutral-400 border border-white/10">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-white/5 text-[var(--fg-1)] border border-[var(--border)]">
       <UsersIcon className="w-3 h-3" />
       成员
     </span>
@@ -584,8 +584,8 @@ function StatusBadge({
 }) {
   if (status === "valid") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-success-soft text-success border border-success-border">
-        <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_6px_currentColor]" />
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-success-soft text-success border border-success-border">
+        <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[var(--shadow-2)]" />
         valid
       </span>
     );
@@ -593,7 +593,7 @@ function StatusBadge({
   if (status === "used") {
     return (
       <span
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-info-soft text-info border border-info-border"
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-info-soft text-info border border-info-border"
         title={usedBy ? `被 ${usedBy} 使用` : undefined}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-info" />
@@ -603,14 +603,14 @@ function StatusBadge({
   }
   if (status === "revoked") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-danger-soft text-danger border border-danger-border">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-danger-soft text-danger border border-danger-border">
         <span className="w-1.5 h-1.5 rounded-full bg-danger" />
         revoked
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
       <span className="w-1.5 h-1.5 rounded-full bg-[var(--fg-3)]" />
       expired
     </span>

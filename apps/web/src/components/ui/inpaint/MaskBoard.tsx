@@ -850,7 +850,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
         <div
           ref={boardAreaRef}
           className={cn(
-            "relative flex-1 min-h-0 rounded-lg bg-[var(--bg-0)]",
+            "relative flex-1 min-h-0 rounded-[var(--radius-card)] bg-[var(--bg-0)]",
             "p-2 sm:p-4 overflow-hidden",
             "flex items-center justify-center",
           )}
@@ -876,7 +876,7 @@ export const MaskBoard = forwardRef<MaskBoardHandle, MaskBoardProps>(
               <div
                 data-mask-canvas-stage
                 className={cn(
-                  "relative rounded-lg overflow-hidden border border-[var(--border-subtle)]",
+                  "relative rounded-[var(--radius-card)] overflow-hidden border border-[var(--border-subtle)]",
                   "shadow-[var(--shadow-1)]",
                   "touch-none select-none",
                   !isTouchDevice() && "cursor-crosshair",

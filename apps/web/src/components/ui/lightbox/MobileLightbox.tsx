@@ -1145,7 +1145,7 @@ export function MobileLightbox() {
         style={{ touchAction: "none" }}
       >
         {imgStatus === "error" ? (
-          <div className="rounded-2xl border border-white/10 bg-black/50 px-8 py-10 text-center max-w-[280px]">
+          <div className="rounded-[var(--radius-dialog)] border border-white/10 bg-black/50 px-8 py-10 text-center max-w-[280px]">
             <p className="text-base text-white/90">图片加载失败</p>
             <p className="text-xs text-white/50 mt-2">
               数据可能已过期或网络异常，可关闭后重试。
@@ -1416,7 +1416,7 @@ export function MobileLightbox() {
                   aria-label={`第 ${itemIdx + 1} 张`}
                   aria-current={active}
                   className={cn(
-                    "relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border",
+                    "relative h-12 w-12 shrink-0 overflow-hidden rounded-[var(--radius-panel)] border",
                     "bg-black/45 shadow-sm transition-all duration-200",
                     active
                       ? "border-white ring-2 ring-[var(--color-lumen-amber)]/80 opacity-100 scale-105"
@@ -1496,7 +1496,7 @@ export function MobileLightbox() {
               className={cn(
                 "pointer-events-auto inline-flex items-center gap-2 h-11 px-5 rounded-full",
                 "bg-[var(--color-lumen-amber)] text-black text-[14px] font-semibold",
-                "shadow-[0_8px_24px_rgba(242,169,58,0.4)]",
+                "shadow-[var(--shadow-amber)]",
                 "active:scale-95 transition-transform",
                 "disabled:cursor-not-allowed disabled:opacity-70",
               )}

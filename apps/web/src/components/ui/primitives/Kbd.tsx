@@ -20,7 +20,7 @@ export function Kbd({
         "text-[11px] font-mono tracking-tight",
         "bg-[var(--bg-2)] text-[var(--fg-0)]",
         "border border-[var(--border)]",
-        "rounded-[4px] shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_1px_0_0_rgba(0,0,0,0.25)]",
+        "rounded-[4px] shadow-[var(--shadow-2)]",
         className,
       )}
       {...props}

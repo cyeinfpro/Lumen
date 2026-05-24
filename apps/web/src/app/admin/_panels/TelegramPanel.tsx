@@ -178,9 +178,9 @@ export function TelegramPanel() {
   return (
     <section className="space-y-5">
       {/* 提示条 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-[var(--border)] flex items-center justify-center shrink-0">
             <Bot className="w-4 h-4 text-[var(--fg-2)]" />
           </div>
           <div className="min-w-0 type-caption text-[var(--fg-2)] leading-relaxed">
@@ -191,7 +191,7 @@ export function TelegramPanel() {
       </div>
 
       {/* 基本 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
         <h3 className="type-card-title">基本设置</h3>
 
         <ToggleField
@@ -247,7 +247,7 @@ export function TelegramPanel() {
       </div>
 
       {/* 代理 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
         <div>
           <h3 className="type-card-title">代理设置</h3>
           <p className="type-caption text-[var(--fg-2)] mt-0.5">
@@ -277,7 +277,7 @@ export function TelegramPanel() {
                       "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border text-xs transition-colors " +
                       (sel
                         ? "bg-[var(--color-lumen-amber)]/15 border-[var(--color-lumen-amber)]/40 text-[var(--color-lumen-amber)]"
-                        : "bg-white/5 border-white/10 text-[var(--fg-1)] hover:bg-white/10")
+                        : "bg-white/5 border-[var(--border)] text-[var(--fg-1)] hover:bg-white/10")
                     }
                     disabled={!p.enabled}
                     title={p.enabled ? p.host + ":" + p.port : "（已禁用，不能选）"}
@@ -308,7 +308,7 @@ export function TelegramPanel() {
                     "text-left p-3 rounded-[var(--radius-card)] border text-xs transition-colors " +
                     (active
                       ? "bg-[var(--color-lumen-amber)]/10 border-[var(--color-lumen-amber)]/40"
-                      : "bg-white/[0.02] border-white/10 hover:bg-white/[0.05]")
+                      : "bg-white/[0.02] border-[var(--border)] hover:bg-white/[0.05]")
                   }
                 >
                   <div className="flex items-center gap-2 mb-1">
@@ -482,7 +482,7 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           autoComplete="off"
           className={
-            "w-full h-9 pr-20 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
+            "w-full h-9 pr-20 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
             (mono ? "font-mono" : "")
           }
         />
@@ -529,7 +529,7 @@ function ToggleField({
           "shrink-0 mt-0.5 w-11 h-6 rounded-full transition-colors relative " +
           (on
             ? "bg-[var(--color-lumen-amber)]"
-            : "bg-white/10 border border-white/10")
+            : "bg-white/10 border border-[var(--border)]")
         }
       >
         <span

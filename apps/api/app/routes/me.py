@@ -11,13 +11,14 @@ import tempfile
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, BinaryIO, Iterator
+from typing import Annotated, Any, BinaryIO, Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core import billing as billing_core
 from lumen_core.constants import GenerationStatus, CompletionStatus
 from lumen_core.models import (
     AuthSession,
@@ -31,6 +32,7 @@ from lumen_core.models import (
 from lumen_core.schemas import SessionOut, SessionsOut, UsageOut
 
 from ..audit import request_ip_hash, write_audit
+from ..billing_cache_state import invalidate_balance_cache
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf_session
@@ -117,6 +119,185 @@ def _open_storage_file_safe(storage_key: str | None) -> BinaryIO | None:
             except OSError:
                 pass
         return None
+
+
+async def _release_account_delete_task_hold(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+) -> bool:
+    try:
+        tx = await billing_core.release(
+            db,
+            user_id,
+            ref_type=ref_type,
+            ref_id=ref_id,
+            idempotency_key=f"account_delete:{ref_type}:{ref_id}",
+            meta={"reason": "account deleted"},
+        )
+    except billing_core.BillingError as exc:
+        raise _http(exc.code, exc.message, exc.status_code) from exc
+    return tx is not None
+
+
+async def _account_wallet_exists(db: AsyncSession, user_id: str) -> bool:
+    wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
+    return wallet is not None
+
+
+async def _cancel_account_active_tasks(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    canceled_at: datetime,
+    account_mode: str = "wallet",
+) -> dict[str, object]:
+    generations = list(
+        (
+            await db.execute(
+                select(Generation)
+                .where(
+                    Generation.user_id == user_id,
+                    Generation.status.in_(
+                        [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
+                    ),
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    completions = list(
+        (
+            await db.execute(
+                select(Completion)
+                .where(
+                    Completion.user_id == user_id,
+                    Completion.status.in_(
+                        [
+                            CompletionStatus.QUEUED.value,
+                            CompletionStatus.STREAMING.value,
+                        ]
+                    ),
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    task_ids: list[str] = []
+    queued_generation_ids: list[str] = []
+    running_generation_ids: list[str] = []
+    streaming_completion_ids: list[str] = []
+    holds_released = 0
+    for generation in generations:
+        task_ids.append(generation.id)
+        if generation.status == GenerationStatus.QUEUED.value:
+            queued_generation_ids.append(generation.id)
+        elif generation.status == GenerationStatus.RUNNING.value:
+            running_generation_ids.append(generation.id)
+        generation.status = GenerationStatus.CANCELED.value
+        generation.finished_at = canceled_at
+        if account_mode == "wallet" or await _account_wallet_exists(db, user_id):
+            holds_released += int(
+                await _release_account_delete_task_hold(
+                    db,
+                    user_id=user_id,
+                    ref_type="generation",
+                    ref_id=billing_core.retry_billing_ref_id(
+                        generation.id, getattr(generation, "retry_count", 0)
+                    ),
+                )
+            )
+    for completion in completions:
+        task_ids.append(completion.id)
+        if completion.status == CompletionStatus.STREAMING.value:
+            streaming_completion_ids.append(completion.id)
+        completion.status = CompletionStatus.CANCELED.value
+        completion.finished_at = canceled_at
+        if account_mode == "wallet" or await _account_wallet_exists(db, user_id):
+            holds_released += int(
+                await _release_account_delete_task_hold(
+                    db,
+                    user_id=user_id,
+                    ref_type="completion",
+                    ref_id=billing_core.completion_billing_ref_id(completion),
+                )
+            )
+    return {
+        "generations_canceled": len(generations),
+        "completions_canceled": len(completions),
+        "holds_released": holds_released,
+        "task_ids": task_ids,
+        "queued_generation_ids": queued_generation_ids,
+        "running_generation_ids": running_generation_ids,
+        "streaming_completion_ids": streaming_completion_ids,
+    }
+
+
+async def _release_account_generation_queue_state(redis: Any, task_id: str) -> None:
+    from .tasks import _release_generation_queue_state
+
+    await _release_generation_queue_state(redis, task_id)
+
+
+async def _post_commit_account_task_cleanup(
+    *,
+    user_id: str,
+    cleanup: dict[str, object],
+) -> None:
+    queued_generation_ids = [
+        task_id
+        for task_id in cleanup.get("queued_generation_ids", [])
+        if isinstance(task_id, str)
+    ]
+    cancel_task_ids = [
+        *[
+            task_id
+            for task_id in cleanup.get("running_generation_ids", [])
+            if isinstance(task_id, str)
+        ],
+        *[
+            task_id
+            for task_id in cleanup.get("streaming_completion_ids", [])
+            if isinstance(task_id, str)
+        ],
+    ]
+    if not queued_generation_ids and not cancel_task_ids:
+        if int(cleanup.get("holds_released") or 0) > 0:
+            try:
+                await invalidate_balance_cache(user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "account deletion balance cache invalidation failed "
+                    "user=%s err=%s",
+                    user_id,
+                    exc,
+                )
+        return
+    try:
+        redis = get_redis()
+        for task_id in queued_generation_ids:
+            await _release_account_generation_queue_state(redis, task_id)
+        for task_id in cancel_task_ids:
+            await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "account deletion cancel signal write failed user=%s err=%s", user_id, exc
+        )
+    if int(cleanup.get("holds_released") or 0) > 0:
+        try:
+            await invalidate_balance_cache(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "account deletion balance cache invalidation failed user=%s err=%s",
+                user_id,
+                exc,
+            )
 
 
 @router.get("/usage", response_model=UsageOut)
@@ -512,70 +693,11 @@ async def delete_my_account(
         )
         .values(deleted_at=now)
     )
-    # SELECT-then-UPDATE race: there is a small window between this SELECT and
-    # the UPDATE below where a worker could finalize a row (QUEUED/RUNNING ->
-    # SUCCEEDED/FAILED). The list may therefore include rows the UPDATE then
-    # skipped because they were already terminal. Writing a redis cancel flag
-    # for an already-terminal row is harmless noise (the worker has already
-    # exited and there is no consumer of the flag), so we accept the race
-    # rather than serialize via FOR UPDATE / advisory lock here. The flag's
-    # 1-hour TTL also self-cleans the redundant key.
-    active_generation_ids = (
-        (
-            await db.execute(
-                select(Generation.id).where(
-                    Generation.user_id == user.id,
-                    Generation.status.in_(
-                        [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
-                    ),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    active_completion_ids = (
-        (
-            await db.execute(
-                select(Completion.id).where(
-                    Completion.user_id == user.id,
-                    Completion.status.in_(
-                        [
-                            CompletionStatus.QUEUED.value,
-                            CompletionStatus.STREAMING.value,
-                        ]
-                    ),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    generations_canceled = await db.execute(
-        update(Generation)
-        .where(
-            Generation.user_id == user.id,
-            Generation.status.in_(
-                [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
-            ),
-        )
-        .values(
-            status=GenerationStatus.CANCELED.value,
-            finished_at=now,
-        )
-    )
-    completions_canceled = await db.execute(
-        update(Completion)
-        .where(
-            Completion.user_id == user.id,
-            Completion.status.in_(
-                [CompletionStatus.QUEUED.value, CompletionStatus.STREAMING.value]
-            ),
-        )
-        .values(
-            status=CompletionStatus.CANCELED.value,
-            finished_at=now,
-        )
+    task_cleanup = await _cancel_account_active_tasks(
+        db,
+        user_id=user.id,
+        canceled_at=now,
+        account_mode=getattr(user, "account_mode", "wallet"),
     )
     await write_audit(
         db,
@@ -589,23 +711,15 @@ async def delete_my_account(
             "sessions_revoked": sessions_result.rowcount,
             "conversations_deleted": conversations_result.rowcount,
             "images_deleted": images_result.rowcount,
-            "generations_canceled": generations_canceled.rowcount,
-            "completions_canceled": completions_canceled.rowcount,
+            "generations_canceled": task_cleanup["generations_canceled"],
+            "completions_canceled": task_cleanup["completions_canceled"],
         },
     )
     await db.commit()
 
-    # DB state is now durable. Redis cancel keys are intentionally written only
-    # after commit so a failed account deletion cannot leave stale cancel flags
-    # that kill future tasks for an account that still exists.
-    try:
-        redis = get_redis()
-        for task_id in [*active_generation_ids, *active_completion_ids]:
-            await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "account deletion cancel signal write failed user=%s err=%s", user.id, exc
-        )
+    # DB state is now durable. Redis/cache side effects are intentionally written
+    # only after commit so a failed account deletion cannot leave stale cancels.
+    await _post_commit_account_task_cleanup(user_id=user.id, cleanup=task_cleanup)
 
     # Best-effort: clear cookies
     response.delete_cookie("session", path="/")
