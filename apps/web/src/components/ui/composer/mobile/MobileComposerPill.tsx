@@ -707,7 +707,7 @@ export function MobileComposerPill({
         className={cn(
           "fixed inset-x-3 mx-auto max-w-[616px]",
           "overflow-hidden",
-          "rounded-xl backdrop-blur-xl mobile-perf-surface",
+          "rounded-[var(--radius-panel)] backdrop-blur-xl mobile-perf-surface",
           "bg-[var(--bg-1)]/88 supports-[not(backdrop-filter:blur(1px))]:bg-[var(--bg-1)]/95",
           "border transition-[border-color,box-shadow] duration-200",
           isDragActive
@@ -844,7 +844,7 @@ export function MobileComposerPill({
                 >
                   <div
                     className={cn(
-                      "mx-3 mt-2 flex items-center justify-center gap-2 rounded-lg",
+                      "mx-3 mt-2 flex items-center justify-center gap-2 rounded-[var(--radius-card)]",
                       "border border-dashed border-[var(--amber-400)]/60 bg-[var(--amber-400)]/10",
                       "px-3 py-3 text-xs text-[var(--amber-400)]",
                     )}
@@ -878,7 +878,7 @@ export function MobileComposerPill({
                       onClickCapture={handleAttachmentClickCapture}
                       aria-grabbed={draggingAttachmentId === att.id || undefined}
                       className={cn(
-                        "relative shrink-0 w-12 h-12 rounded-lg overflow-hidden",
+                        "relative shrink-0 w-12 h-12 rounded-[var(--radius-card)] overflow-hidden",
                         "border bg-[var(--bg-2)]",
                         attachments.length > 1 &&
                           "cursor-grab active:cursor-grabbing",
@@ -946,7 +946,7 @@ export function MobileComposerPill({
                     title={inpaint.tooltip}
                     className={cn(
                       "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
-                      "w-12 h-12 rounded-lg border text-[9px] font-medium",
+                      "w-12 h-12 rounded-[var(--radius-card)] border text-[9px] font-medium",
                       "transition-colors",
                       inpaint.disabled
                         ? "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed"
@@ -982,7 +982,7 @@ export function MobileComposerPill({
                 >
                   <div
                     className={cn(
-                      "mx-3 mt-2 flex items-start gap-2 px-2.5 py-1.5 rounded-lg",
+                      "mx-3 mt-2 flex items-start gap-2 px-2.5 py-1.5 rounded-[var(--radius-card)]",
                       "bg-[rgba(229,72,77,0.12)] border border-[rgba(229,72,77,0.4)]",
                       "text-xs text-[var(--danger)]",
                     )}
@@ -992,7 +992,7 @@ export function MobileComposerPill({
                       type="button"
                       aria-label="关闭错误提示"
                       onClick={() => setComposerError(null)}
-                      className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md active:bg-[var(--bg-2)]"
+                      className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] active:bg-[var(--bg-2)]"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -1013,7 +1013,7 @@ export function MobileComposerPill({
                 >
                   <div
                     className={cn(
-                      "mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-xl",
+                      "mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-[var(--radius-panel)]",
                       "bg-[rgba(242,169,58,0.08)] border border-[rgba(242,169,58,0.18)]",
                       "text-xs",
                     )}
@@ -1033,7 +1033,7 @@ export function MobileComposerPill({
                           data-inline
                           onClick={handleUndoEnhance}
                           className={cn(
-                            "inline-flex items-center gap-1 px-2 py-0.5 rounded-md",
+                            "inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)]",
                             "text-xs font-medium text-[var(--amber-400)]",
                             "bg-[rgba(242,169,58,0.1)] active:bg-[rgba(242,169,58,0.2)]",
                             "transition-colors",
@@ -1047,7 +1047,7 @@ export function MobileComposerPill({
                           data-inline
                           onClick={() => setOriginalText(null)}
                           aria-label="关闭提示"
-                          className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-md text-[var(--fg-2)] active:text-[var(--fg-0)] transition-colors"
+                          className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] active:text-[var(--fg-0)] transition-colors"
                         >
                           <X className="w-3 h-3" />
                         </button>
@@ -1478,7 +1478,7 @@ function SendButton({
           ? [
               "bg-[var(--amber-400)] text-[var(--bg-0)]",
               burst
-                ? "shadow-[0_0_0_1px_rgba(242,169,58,0.8),0_0_36px_8px_var(--amber-glow-strong)]"
+                ? "shadow-[var(--shadow-amber)]"
                 : "shadow-[var(--shadow-shutter)]",
             ].join(" ")
           : "bg-[var(--bg-3)] text-[var(--fg-3)] cursor-not-allowed",
@@ -1562,7 +1562,7 @@ function SheetList({
               onClick={it.onSelect}
               className={cn(
                 "w-full min-h-[48px] flex items-center gap-3 px-3 py-2 text-left",
-                "text-[15px] rounded-lg active:bg-[var(--bg-2)] transition-colors",
+                "text-[15px] rounded-[var(--radius-card)] active:bg-[var(--bg-2)] transition-colors",
                 it.selected ? "text-[var(--amber-300)] font-medium" : "text-[var(--fg-0)]",
               )}
             >
@@ -1573,7 +1573,7 @@ function SheetList({
               {it.selected && (
                 <span
                   aria-hidden
-                  className="w-2.5 h-2.5 rounded-full bg-[var(--amber-400)] shadow-[0_0_8px_var(--amber-glow)]"
+                  className="w-2.5 h-2.5 rounded-full bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
                 />
               )}
             </button>

@@ -352,7 +352,7 @@ function PosterDetailHeader({
           {menuOpen ? (
             <div
               role="menu"
-              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
+              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
             >
               {confirmDelete ? (
                 <div className="grid gap-2 p-2">
@@ -443,7 +443,7 @@ function DetailSkeleton() {
 
 function DetailError({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="m-6 max-w-md rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-soft)]/20 p-5 text-sm">
+    <div className="m-6 max-w-md rounded-[var(--radius-card)] border border-[var(--danger)]/30 bg-[var(--danger-soft)]/20 p-5 text-sm">
       <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
         错误
       </p>

@@ -140,7 +140,7 @@ export function ConversationRowMobile({
           {active && (
             <span
               aria-hidden
-              className="absolute left-0 top-3 bottom-3 w-[3px] rounded-r bg-[var(--amber-400)] shadow-[0_0_8px_var(--amber-glow)]"
+              className="absolute left-0 top-3 bottom-3 w-[3px] rounded-r bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
             />
           )}
 
@@ -158,7 +158,7 @@ export function ConversationRowMobile({
             <span
               aria-hidden
               className={cn(
-                "inline-flex items-center justify-center w-11 h-11 rounded-xl shrink-0",
+                "inline-flex items-center justify-center w-11 h-11 rounded-[var(--radius-panel)] shrink-0",
                 isImageConv
                   ? "bg-[var(--amber-400)]/12 text-[var(--amber-400)]"
                   : "bg-[var(--bg-2)] text-[var(--fg-2)]",

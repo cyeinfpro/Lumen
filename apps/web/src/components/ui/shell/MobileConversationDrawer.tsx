@@ -300,7 +300,7 @@ export function MobileConversationDrawer({
             {/* Header */}
             <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
               <div className="flex items-center gap-2 min-w-0">
-                <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)] flex items-center justify-center shadow-[0_0_10px_var(--amber-glow)]">
+                <span className="relative w-6 h-6 rounded-full bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)] flex items-center justify-center shadow-[var(--shadow-amber)]">
                   <Sparkles
                     className="w-3 h-3 text-black/80"
                     strokeWidth={2.5}
@@ -341,7 +341,7 @@ export function MobileConversationDrawer({
                   "h-12 w-full gap-2 rounded-[var(--radius-card)]",
                   "bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)]",
                   "text-black text-[15px] font-medium",
-                  "shadow-[0_8px_22px_-8px_var(--amber-glow-strong)]",
+                  "shadow-[var(--shadow-amber)]",
                   "disabled:opacity-60 disabled:cursor-wait",
                 )}
               >
@@ -518,7 +518,7 @@ function ListSkeleton() {
           key={row.id}
           className="flex items-center gap-3.5 min-h-[68px] pl-4 pr-3 border-b border-[var(--border-subtle)]"
         >
-          <div className="w-11 h-11 rounded-xl bg-[var(--bg-2)] animate-pulse" />
+          <div className="w-11 h-11 rounded-[var(--radius-panel)] bg-[var(--bg-2)] animate-pulse" />
           <div className="flex-1 space-y-1.5">
             <div
               className="h-3 rounded bg-[var(--bg-2)] animate-pulse"

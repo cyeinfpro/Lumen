@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from typing import Any
 
 import pytest
@@ -490,6 +491,258 @@ async def test_prompt_enhance_charge_uses_completion_wallet_kind(
 
 
 @pytest.mark.asyncio
+async def test_prompt_enhance_releases_hold_when_charge_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient(
+        [
+            _StubStreamResponse(
+                200,
+                [
+                    _sse({"type": "response.output_text.delta", "delta": "better"}),
+                    _sse(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp-1",
+                                "model": "gpt-5.5",
+                                "usage": {
+                                    "input_tokens": 12,
+                                    "output_tokens": 5,
+                                },
+                            },
+                        }
+                    ),
+                ],
+            ),
+        ]
+    )
+    calls: dict[str, Any] = {}
+
+    async def fail_charge(
+        _billing: prompts._EnhanceBillingContext,
+        _capture: prompts._EnhanceUsageCapture,
+    ) -> None:
+        raise RuntimeError("db commit failed")
+
+    async def release_hold(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["release_reason"] = reason
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
+    monkeypatch.setattr(prompts, "_charge_prompt_enhance", fail_charge)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == [
+        'data: {"text": "better"}\n\n',
+        'data: {"error": "billing_failed"}\n\n',
+    ]
+    assert calls["release_reason"] == "charge_failed"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_releases_hold_when_success_has_no_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient(
+        [
+            _StubStreamResponse(
+                200,
+                [
+                    _sse({"type": "response.output_text.delta", "delta": "better"}),
+                    _sse(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp-1",
+                                "model": "gpt-5.5",
+                            },
+                        }
+                    ),
+                ],
+            ),
+        ]
+    )
+    calls: dict[str, Any] = {}
+
+    async def release_hold(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["release_user"] = billing.user_id if billing is not None else None
+        calls["release_reason"] = reason
+
+    async def estimate_breakdown(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("missing usage must release the hold before pricing")
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == ['data: {"text": "better"}\n\n', "data: [DONE]\n\n"]
+    assert calls == {"release_user": "user-1", "release_reason": "missing_usage"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_releases_hold_when_stream_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def cancelled_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+    ):
+        yield 'data: {"text": "partial"}\n\n'
+        raise asyncio.CancelledError()
+
+    async def release_hold(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["release_user"] = billing.user_id if billing is not None else None
+        calls["release_reason"] = reason
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", cancelled_stream)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    stream = prompts._stream_enhance("cat", [provider], billing)
+
+    assert await anext(stream) == 'data: {"text": "partial"}\n\n'
+    with pytest.raises(asyncio.CancelledError):
+        await anext(stream)
+
+    assert calls == {"release_user": "user-1", "release_reason": "stream_cancelled"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_releases_hold_when_stream_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def slow_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+    ):
+        yield 'data: {"text": "partial"}\n\n'
+        await asyncio.sleep(60)
+
+    async def release_hold(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["release_user"] = billing.user_id if billing is not None else None
+        calls["release_reason"] = reason
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", slow_stream)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    stream = prompts._stream_enhance("cat", [provider], billing)
+
+    assert await anext(stream) == 'data: {"text": "partial"}\n\n'
+    await stream.aclose()
+
+    assert calls == {"release_user": "user-1", "release_reason": "stream_cancelled"}
+
+
+@pytest.mark.asyncio
 async def test_prompt_enhance_billing_preauthorizes_before_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -519,11 +772,15 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
         calls["hold"] = kwargs
         return SimpleNamespace(id="tx-hold")
 
+    async def invalidate(user_id: str) -> None:
+        calls["invalidated"] = user_id
+
     monkeypatch.setattr(prompts, "_billing_enabled", true_setting)
     monkeypatch.setattr(prompts, "_billing_cache_aware", true_setting)
     monkeypatch.setattr(prompts, "_billing_allow_negative", false_setting)
     monkeypatch.setattr(prompts.billing_core, "estimate_completion_cost", estimate)
     monkeypatch.setattr(prompts.billing_core, "hold", hold)
+    monkeypatch.setattr(prompts, "invalidate_balance_cache", invalidate)
 
     db = Db()
     out = await prompts._prepare_prompt_enhance_billing(  # noqa: SLF001
@@ -543,6 +800,7 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     assert calls["hold"]["ref_type"] == "prompt_enhance"
     assert calls["hold"]["ref_id"] == out.request_id
     assert calls["hold"]["idempotency_key"] == f"prompt_enhance:hold:{out.request_id}"
+    assert calls["invalidated"] == "user-1"
 
 
 @pytest.mark.asyncio
@@ -589,6 +847,9 @@ async def test_prompt_enhance_charge_settles_existing_hold(
         calls["audit"] = kwargs
         return True
 
+    async def invalidate(user_id: str) -> None:
+        calls["invalidated"] = user_id
+
     monkeypatch.setattr(
         prompts.billing_core,
         "estimate_completion_breakdown",
@@ -597,6 +858,7 @@ async def test_prompt_enhance_charge_settles_existing_hold(
     monkeypatch.setattr(prompts.billing_core, "settle", settle)
     monkeypatch.setattr(prompts.billing_core, "charge", charge)
     monkeypatch.setattr(prompts, "write_audit", write_audit)
+    monkeypatch.setattr(prompts, "invalidate_balance_cache", invalidate)
 
     billing = prompts._EnhanceBillingContext(
         db=Db(),  # type: ignore[arg-type]
@@ -622,3 +884,4 @@ async def test_prompt_enhance_charge_settles_existing_hold(
     assert calls["settle"]["actual_micro"] == 22
     assert calls["settle"]["idempotency_key"] == "prompt_enhance:settle:enhance-1"
     assert calls["audit"]["details"]["response_id"] == "resp-1"
+    assert calls["invalidated"] == "user-1"

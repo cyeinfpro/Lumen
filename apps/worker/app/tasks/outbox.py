@@ -575,6 +575,18 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                     msg = await session.get(Message, c.message_id)
                     if msg is not None:
                         msg.status = MessageStatus.FAILED.value
+                    # Completion holds follow the same lifecycle as image
+                    # generation holds: if the worker died before settling,
+                    # the reconciler is the last owner that can free them.
+                    try:
+                        await worker_billing.release_completion(
+                            session, c, reason=_RECON_TIMEOUT_CODE
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "reconcile release_completion failed comp=%s",
+                            c.id,
+                        )
                     pending_sse.append(
                         (
                             c.user_id,
@@ -594,6 +606,7 @@ async def reconcile_tasks(ctx: dict[str, Any]) -> int:
                 touched += 1
 
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
 
         for user_id, channel, event_name, data in pending_sse:
             await publish_event(redis, user_id, channel, event_name, data)

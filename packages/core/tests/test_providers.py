@@ -15,6 +15,7 @@ from lumen_core.providers import (
     RoundRobinState,
     build_effective_provider_config,
     build_effective_providers,
+    endpoint_kind_allowed,
     has_embedding_purpose,
     parse_provider_item,
     parse_proxy_item,
@@ -121,6 +122,34 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
     assert provider.purposes == DEFAULT_PROVIDER_PURPOSES
 
 
+def test_parse_provider_item_parses_string_booleans_without_truthy_coercion():
+    provider = parse_provider_item(
+        {
+            "base_url": "https://upstream.example",
+            "api_key": "sk-test",
+            "enabled": "false",
+            "image_jobs_enabled": "0",
+        },
+        index=0,
+    )
+
+    assert provider.enabled is False
+    assert provider.image_jobs_enabled is False
+
+    enabled_provider = parse_provider_item(
+        {
+            "base_url": "https://upstream.example",
+            "api_key": "sk-test",
+            "enabled": "yes",
+            "image_jobs_enabled": "true",
+        },
+        index=0,
+    )
+
+    assert enabled_provider.enabled is True
+    assert enabled_provider.image_jobs_enabled is True
+
+
 def test_parse_provider_item_normalizes_purposes() -> None:
     provider = parse_provider_item(
         {
@@ -174,6 +203,20 @@ def test_parse_proxy_item_normalizes_s5_alias_and_hides_password_in_repr():
     assert proxy.username == "user"
     assert proxy.password == "secret"
     assert "secret" not in repr(proxy)
+
+
+def test_parse_proxy_item_parses_string_enabled_without_truthy_coercion():
+    proxy = parse_proxy_item(
+        {
+            "name": "egress",
+            "type": "socks5",
+            "host": "127.0.0.1",
+            "enabled": "false",
+        },
+        index=0,
+    )
+
+    assert proxy.enabled is False
 
 
 def test_build_effective_provider_config_attaches_named_proxy():
@@ -307,6 +350,25 @@ def test_parse_provider_item_rejects_non_integral_priority():
             parse_provider_item({**base, "priority": value}, index=0)
 
 
+def test_parse_provider_item_rejects_invalid_boolean_strings():
+    base = {"base_url": "https://upstream.example", "api_key": "sk-test"}
+    for field in ("enabled", "image_jobs_enabled"):
+        with pytest.raises(ValueError, match=f"{field} must be a boolean"):
+            parse_provider_item({**base, field: "sometimes"}, index=0)
+
+
+def test_parse_proxy_item_rejects_invalid_enabled_string():
+    with pytest.raises(ValueError, match="enabled must be a boolean"):
+        parse_proxy_item(
+            {
+                "type": "socks5",
+                "host": "127.0.0.1",
+                "enabled": "sometimes",
+            },
+            index=0,
+        )
+
+
 def test_parse_provider_item_requires_locked_image_endpoint_to_be_explicit():
     base = {"base_url": "https://upstream.example", "api_key": "sk-test"}
     with pytest.raises(ValueError, match="image_jobs_endpoint_lock"):
@@ -325,6 +387,20 @@ def test_parse_provider_item_requires_locked_image_endpoint_to_be_explicit():
     )
     assert provider.image_jobs_endpoint == "generations"
     assert provider.image_jobs_endpoint_lock is True
+
+
+def test_endpoint_kind_allowed_parses_dict_lock_without_truthy_coercion():
+    unlocked = {
+        "image_jobs_endpoint": "generations",
+        "image_jobs_endpoint_lock": "false",
+    }
+    locked = {
+        "image_jobs_endpoint": "generations",
+        "image_jobs_endpoint_lock": "true",
+    }
+
+    assert endpoint_kind_allowed(unlocked, "responses") is True
+    assert endpoint_kind_allowed(locked, "responses") is False
 
 
 def test_parse_provider_json_accumulates_item_errors():

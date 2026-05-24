@@ -110,6 +110,80 @@ async def test_completion_abort_iterator_closes_inner_stream() -> None:
     assert stream.closed is True
 
 
+@pytest.mark.asyncio
+async def test_completion_tool_image_budget_checks_byok_task_with_wallet_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        async def get(self, _model: Any, _task_id: str) -> Any:
+            return type(
+                "CompletionRow",
+                (),
+                {
+                    "id": "comp-1",
+                    "upstream_request": {"billing_retry_count": 1},
+                },
+            )()
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    checked_refs: list[str] = []
+
+    async def wallet_billing_applies(*_args: Any, **kwargs: Any) -> bool:
+        checked_refs.append(kwargs["ref_id"])
+        return True
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return type("Wallet", (), {"balance_micro": 10})()
+
+    async def held_amount_for_ref(*args: Any, **_kwargs: Any) -> int:
+        checked_refs.append(args[3])
+        return 5
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def resolve_int(*_args: Any) -> int:
+        return 20
+
+    monkeypatch.setattr(completion.runtime_settings, "resolve_int", resolve_int)
+    monkeypatch.setattr(completion, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "_wallet_billing_applies",
+        wallet_billing_applies,
+    )
+    monkeypatch.setattr(completion.worker_billing, "billing_enabled", billing_enabled)
+    monkeypatch.setattr(completion.billing_core, "get_wallet", get_wallet)
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+
+    with pytest.raises(completion._CompletionToolInsufficientBalance) as excinfo:  # noqa: SLF001
+        await completion._ensure_completion_tool_image_wallet_budget(  # noqa: SLF001
+            user_id="user-1",
+            task_id="comp-1",
+        )
+
+    assert excinfo.value.payload["balance_micro"] == 10
+    assert excinfo.value.payload["held_micro"] == 5
+    assert checked_refs == ["comp-1:retry:1", "comp-1:retry:1"]
+
+
 def test_generation_retry_delay_is_jittered() -> None:
     helper_source = inspect.getsource(generation._retry_delay_seconds)  # noqa: SLF001
     runner_source = inspect.getsource(generation.run_generation)
@@ -265,6 +339,113 @@ def test_generation_lease_lost_max_attempts_fails_without_requeue() -> None:
     assert max_idx < fail_idx < retry_idx
     assert "retriable=False" in lease_branch[fail_idx:retry_idx]
     assert "redis.enqueue_job" not in lease_branch[fail_idx:retry_idx]
+
+
+def test_generation_attempt_update_can_guard_current_status() -> None:
+    from sqlalchemy.dialects import postgresql
+    from lumen_core.constants import GenerationStatus
+
+    rendered = str(
+        generation._generation_attempt_update(  # noqa: SLF001
+            "gen-1",
+            2,
+            statuses=(GenerationStatus.RUNNING.value,),
+        ).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "generations.id = 'gen-1'" in rendered
+    assert "generations.attempt = 2" in rendered
+    assert "generations.status IN ('running')" in rendered
+
+
+def test_generation_success_write_requires_running_status() -> None:
+    source = inspect.getsource(generation.run_generation)
+    marker = "parent_upstream_request_for_bonus = dict(upstream_req)"
+    start = source.index("status=GenerationStatus.SUCCEEDED.value", source.index(marker))
+    update_start = source.rindex("_generation_attempt_update(", 0, start)
+    update_end = source.index(").values(", update_start)
+    success_update = source[update_start:update_end]
+
+    assert "statuses=_RUNNING_GENERATION_STATUSES" in success_update
+
+
+def test_completion_terminal_writes_require_streaming_status() -> None:
+    assert completion._RUNNING_COMPLETION_STATUSES == (  # noqa: SLF001
+        completion.CompletionStatus.STREAMING.value,
+    )
+
+
+def test_generation_max_attempts_failure_releases_hold() -> None:
+    source = inspect.getsource(generation.run_generation)
+    start = source.index('err_code = "max_attempts_exceeded"')
+    end = source.index("return", start)
+    branch = source[start:end]
+
+    assert "_generation_attempt_update(" in branch
+    assert "statuses=(GenerationStatus.QUEUED.value,)" in branch
+    assert "worker_billing.release_generation(" in branch
+    assert "reason=err_code" in branch
+    assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
+
+
+def test_generation_prequeue_terminal_writes_guard_queued_status() -> None:
+    source = inspect.getsource(generation.run_generation)
+    markers = [
+        "await _ensure_generation_conversation_alive(",
+        '"primary_input_image_id must be included in input_image_ids"',
+        '"generation already has image task_id=%s image_id=%s',
+    ]
+    for marker in markers:
+        start = source.index(marker)
+        end = source.index("return", start)
+        branch = source[start:end]
+        assert "_generation_attempt_update(" in branch
+        assert "statuses=(GenerationStatus.QUEUED.value,)" in branch
+
+
+def test_completion_max_attempts_failure_releases_hold() -> None:
+    source = inspect.getsource(completion.run_completion)
+    start = source.index('err_code = "max_attempts_exceeded"')
+    end = source.index("return", start)
+    branch = source[start:end]
+
+    assert "worker_billing.release_completion(" in branch
+    assert "reason=err_code" in branch
+    assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
+
+
+def test_completion_cancel_branch_checks_rowcount_before_message_update() -> None:
+    source = inspect.getsource(completion.run_completion)
+    start = source.index("except _TaskCancelled as exc:")
+    end = source.index("await publish_event(", start)
+    branch = source[start:end]
+
+    assert "res = await session.execute(" in branch
+    assert "if (res.rowcount or 0) == 0:" in branch
+    assert branch.index("if (res.rowcount or 0) == 0:") < branch.index(
+        "msg_c = await session.get(Message, message_id)"
+    )
+    assert "except _CompletionEpochSuperseded as stale_exc:" in branch
+    assert branch.index("except _CompletionEpochSuperseded as stale_exc:") < branch.index(
+        "except Exception as db_exc:"
+    )
+
+
+def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None:
+    source = inspect.getsource(generation.run_generation)
+    start = source.index("byok_error = classify_user_credential_error(exc)")
+    end = source.index("await publish_event(", start)
+    branch = source[start:end]
+
+    assert "_generation_attempt_update(" in branch
+    assert "GenerationStatus.QUEUED.value" in branch
+    assert "GenerationStatus.RUNNING.value" in branch
+    assert "worker_billing.release_generation(" in branch
+    assert "reason=err_code" in branch
+    assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
 
 
 def test_sse_timestamp_lock_is_eagerly_initialized() -> None:

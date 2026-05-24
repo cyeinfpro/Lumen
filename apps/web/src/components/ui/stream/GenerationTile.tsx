@@ -277,7 +277,7 @@ function GenerationTileComponent({
     <>
     <article
         className={cn(
-          "group relative block w-full overflow-hidden rounded-lg",
+          "group relative block w-full overflow-hidden rounded-[var(--radius-card)]",
           "border border-[var(--border-subtle)] bg-[var(--bg-1)]/94 text-left shadow-[var(--shadow-1)]",
           "transition-[border-color,box-shadow,transform,background-color] duration-200 ease-[var(--ease-develop)]",
           "hover:-translate-y-0.5 hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] hover:shadow-[var(--shadow-2)]",
@@ -353,7 +353,7 @@ function GenerationTileComponent({
             )}
             <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-black/20 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
             {age && (
-              <span className="pointer-events-none absolute left-2 top-2 rounded-md bg-black/45 px-1.5 py-1 text-[10px] tabular-nums text-white/82 opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100">
+              <span className="pointer-events-none absolute left-2 top-2 rounded-[var(--radius-control)] bg-black/45 px-1.5 py-1 text-[10px] tabular-nums text-white/82 opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100">
                 {age}
               </span>
             )}
@@ -483,7 +483,7 @@ function TileAction({
       aria-label={label}
       title={label}
       onClick={(e) => { e.stopPropagation(); onClick(); }}
-      className="pointer-events-auto inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-white/10 bg-black/50 text-white shadow-[0_6px_18px_rgba(0,0,0,0.24)] backdrop-blur-md transition-[background-color,transform] hover:bg-black/70 active:scale-95 focus-visible:outline-none"
+      className="pointer-events-auto inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-white/10 bg-black/50 text-white shadow-[var(--shadow-2)] backdrop-blur-md transition-[background-color,transform] hover:bg-black/70 active:scale-95 focus-visible:outline-none"
     >
       {children}
     </button>

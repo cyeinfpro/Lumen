@@ -192,7 +192,7 @@ function HistoryLoadControl({
         <div
           role="alert"
           className={cn(
-            "flex max-w-full items-center gap-2 rounded-md border px-2.5 py-2",
+            "flex max-w-full items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2",
             "border-[var(--danger)]/25 bg-[var(--danger-soft)] text-xs text-[var(--fg-0)]",
           )}
         >
@@ -373,7 +373,7 @@ function JumpToLatestButton({
         variant="secondary"
         leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
         onClick={onClick}
-        className="h-8 border-white/15 bg-[var(--bg-1)]/90 px-3 text-xs shadow-lg backdrop-blur-xl"
+        className="h-8 border-[var(--border)] bg-[var(--bg-1)]/90 px-3 text-xs shadow-lg backdrop-blur-xl"
       >
         最新
       </Button>
@@ -398,7 +398,7 @@ function UserTurn({ msg }: { msg: UserMessage }) {
     <div id={`msg-${msg.id}`} className="relative flex flex-col items-end gap-2">
       <span
         aria-hidden
-        className="absolute bg-[var(--amber-400)] shadow-[0_0_8px_var(--amber-glow)]"
+        className="absolute bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
         style={{
           left: "-15px",
           top: "25%",
@@ -414,7 +414,7 @@ function UserTurn({ msg }: { msg: UserMessage }) {
             <div
               key={att.id}
               className={cn(
-                "relative w-11 h-11 rounded-lg overflow-hidden",
+                "relative w-11 h-11 rounded-[var(--radius-card)] overflow-hidden",
                 "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
                 idx === 0 && "ring-1 ring-[var(--amber-400)]/60",
               )}
@@ -446,7 +446,7 @@ function UserTurn({ msg }: { msg: UserMessage }) {
             type="button"
             onClick={copy}
             aria-label="复制"
-            className="mt-1 p-1.5 rounded-lg text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.92] active:bg-[var(--bg-2)] transition-all shrink-0"
+            className="mt-1 p-1.5 rounded-[var(--radius-card)] text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.92] active:bg-[var(--bg-2)] transition-all shrink-0"
           >
             {copied ? <Check className="w-3.5 h-3.5 text-[var(--ok,#30A46C)]" /> : <Copy className="w-3.5 h-3.5" />}
           </button>
@@ -528,7 +528,7 @@ function AssistantTurn({
               type="button"
               onClick={copy}
               aria-label="复制"
-              className="mt-1 p-1.5 rounded-lg text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.92] active:bg-[var(--bg-2)] transition-all shrink-0"
+              className="mt-1 p-1.5 rounded-[var(--radius-card)] text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.92] active:bg-[var(--bg-2)] transition-all shrink-0"
             >
               {copied ? <Check className="w-3.5 h-3.5 text-[var(--ok,#30A46C)]" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
@@ -722,7 +722,7 @@ const FinalImage = memo(function FinalImage({
           )}
         />
         {free && (
-          <span className="pointer-events-none absolute left-2 top-2 z-10 rounded-full border border-white/20 bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
+          <span className="pointer-events-none absolute left-2 top-2 z-10 rounded-full border border-[var(--border-strong)] bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
             free
           </span>
         )}

@@ -1400,7 +1400,7 @@ export function DesktopLightbox() {
                 className={cn(
                   "flex min-h-11 items-center gap-1 rounded-full",
                   "border border-white/10 bg-black/35 p-1 backdrop-blur-xl",
-                  "shadow-[0_16px_40px_rgba(0,0,0,0.24)]",
+                  "shadow-[var(--shadow-2)]",
                 )}
               >
                 <ToolIconButton
@@ -1438,7 +1438,7 @@ export function DesktopLightbox() {
                   "pointer-events-auto place-self-start px-3.5 py-2 rounded-full",
                   "bg-black/35 border border-white/10 text-white/82",
                   "text-xs font-mono tabular-nums backdrop-blur-xl",
-                  "shadow-[0_16px_40px_rgba(0,0,0,0.22)]",
+                  "shadow-[var(--shadow-2)]",
                 )}
               >
                 {currentIdx + 1} / {gallery.length}
@@ -1450,7 +1450,7 @@ export function DesktopLightbox() {
                 className={cn(
                   "flex min-h-11 items-center gap-1 rounded-full",
                   "border border-white/10 bg-black/35 p-1 backdrop-blur-xl",
-                  "shadow-[0_16px_40px_rgba(0,0,0,0.24)]",
+                  "shadow-[var(--shadow-2)]",
                 )}
               >
                 <TopButton
@@ -1561,7 +1561,7 @@ export function DesktopLightbox() {
             )}
           >
             {activeLoadError ? (
-              <div className="pointer-events-auto rounded-2xl border border-white/10 bg-black/50 backdrop-blur px-8 py-10 text-center max-w-md">
+              <div className="pointer-events-auto rounded-[var(--radius-dialog)] border border-white/10 bg-black/50 backdrop-blur px-8 py-10 text-center max-w-md">
                 <p className="text-base text-white/90">图片加载失败</p>
                 <p className="text-xs text-white/50 mt-2">
                   数据可能已过期或网络异常，可关闭后重试。
@@ -1578,7 +1578,7 @@ export function DesktopLightbox() {
                     draggable={false}
                     className={cn(
                       "pointer-events-none absolute max-h-[calc(100%-8rem)] max-w-[calc(100%-4rem)]",
-                      "select-none rounded-md object-contain opacity-45 blur-md saturate-110",
+                      "select-none rounded-[var(--radius-control)] object-contain opacity-45 blur-md saturate-110",
                     )}
                   />
                 )}
@@ -1632,7 +1632,7 @@ export function DesktopLightbox() {
                   onPointerUp={handleImagePointerEnd}
                   onPointerCancel={handleImagePointerCancel}
                   className={cn(
-                    "rounded-md shadow-2xl",
+                    "rounded-[var(--radius-control)] shadow-2xl",
                     activeViewMode === "fill"
                       ? "h-full w-full max-w-none max-h-none object-cover"
                       : activeViewMode === "actual"
@@ -1662,8 +1662,8 @@ export function DesktopLightbox() {
                 }}
                 className={cn(
                   "absolute z-30 flex w-[min(22rem,calc(100vw-2.5rem))] flex-col overflow-hidden",
-                  "rounded-2xl border border-white/12 bg-black/48 text-white",
-                  "backdrop-blur-2xl shadow-[0_28px_80px_rgba(0,0,0,0.45)]",
+                  "rounded-[var(--radius-dialog)] border border-white/12 bg-black/48 text-white",
+                  "backdrop-blur-2xl shadow-[var(--shadow-3)]",
                   "pointer-events-auto",
                 )}
               >
@@ -1711,7 +1711,7 @@ export function DesktopLightbox() {
                     type="button"
                     onClick={handleOpenOriginal}
                     className={cn(
-                      "inline-flex h-10 items-center justify-center gap-2 rounded-xl",
+                      "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)]",
                       "border border-white/10 bg-white/5 text-sm text-white/80",
                       "hover:border-white/25 hover:bg-white/10 hover:text-white",
                       "transition-colors duration-150 cursor-pointer",
@@ -1726,7 +1726,7 @@ export function DesktopLightbox() {
                     onClick={handleDownload}
                     disabled={downloadStatus === "downloading"}
                     className={cn(
-                      "inline-flex h-10 items-center justify-center gap-2 rounded-xl",
+                      "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)]",
                       "border border-[var(--color-lumen-amber)]/35 bg-[var(--color-lumen-amber)]/14",
                       "text-sm text-[var(--amber-100)]",
                       "hover:bg-[var(--color-lumen-amber)]/22",
@@ -1814,7 +1814,7 @@ export function DesktopLightbox() {
                 className={cn(
                   "pointer-events-auto inline-flex items-center gap-2 rounded-full px-5 py-2.5",
                   "bg-[var(--color-lumen-amber)] text-black text-sm font-medium",
-                  "shadow-[0_8px_24px_rgba(242,169,58,0.4)]",
+                  "shadow-[var(--shadow-amber)]",
                   "hover:bg-[var(--amber-200)] active:scale-[0.97] transition-all duration-150",
                   "disabled:cursor-not-allowed disabled:opacity-70",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
@@ -1835,7 +1835,7 @@ export function DesktopLightbox() {
                 className={cn(
                   "pointer-events-auto flex items-center gap-1.5 px-2 py-1.5",
                   "max-w-[min(720px,90vw)] overflow-x-auto",
-                  "bg-black/50 border border-white/10 rounded-xl backdrop-blur-md",
+                  "bg-black/50 border border-white/10 rounded-[var(--radius-panel)] backdrop-blur-md",
                 )}
               >
                 {thumbGalleryItems.map(({ entry: g, index: idx }) => {
@@ -1852,7 +1852,7 @@ export function DesktopLightbox() {
                       aria-label={`第 ${idx + 1} 张`}
                       aria-current={isActive}
                       className={cn(
-                        "relative shrink-0 w-12 h-12 rounded-lg overflow-hidden",
+                        "relative shrink-0 w-12 h-12 rounded-[var(--radius-card)] overflow-hidden",
                         "border transition-all duration-150",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-lumen-amber)]/70",
                         isActive
@@ -1978,7 +1978,7 @@ function TopButton({
 
 function Shortcut({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-2 rounded-lg border border-white/8 bg-white/[0.035] px-2 py-1.5">
+    <div className="flex items-center justify-between gap-2 rounded-[var(--radius-card)] border border-white/8 bg-white/[0.035] px-2 py-1.5">
       <span>{label}</span>
       <span className="font-mono text-white/82">{value}</span>
     </div>

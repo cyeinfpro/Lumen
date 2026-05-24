@@ -471,6 +471,54 @@ async def test_dispatch_auto_dual_race_streams_when_provider_has_no_jobs(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_auto_dual_race_treats_string_false_jobs_as_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_job_called = False
+
+    async def fake_image2(**_kw: Any) -> tuple[str, str | None]:
+        await asyncio.sleep(0.01)
+        return ("img-from-image2", None)
+
+    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+        await asyncio.sleep(0.05)
+        return ("img-from-responses", None)
+
+    async def fake_image_job(**_kw: Any) -> tuple[str, str | None]:
+        nonlocal image_job_called
+        image_job_called = True
+        return ("never", None)
+
+    monkeypatch.setattr(upstream, "_direct_generate_image_with_failover", fake_image2)
+    monkeypatch.setattr(
+        upstream, "_responses_image_stream_with_failover", fake_responses
+    )
+    monkeypatch.setattr(upstream, "_image_job_with_failover", fake_image_job)
+
+    image_iter = upstream._run_image_once_for_provider(
+        action="generate",
+        provider=SimpleNamespace(name="stream", image_jobs_enabled="false"),
+        channel="auto",
+        engine="dual_race",
+        prompt="hi",
+        size="1024x1024",
+        images=None,
+        n=1,
+        quality="high",
+        output_format=None,
+        output_compression=None,
+        background=None,
+        moderation=None,
+        model=None,
+        progress_callback=None,
+    )
+    result = await _first_image_result(image_iter)
+    await image_iter.aclose()
+    assert result == ("img-from-image2", None)
+    assert image_job_called is False
+
+
+@pytest.mark.asyncio
 async def test_dispatch_image_jobs_only_rejects_provider_without_jobs() -> None:
     with pytest.raises(UpstreamError) as exc_info:
         await _first_image_result(

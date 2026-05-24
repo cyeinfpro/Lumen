@@ -86,8 +86,8 @@ const STATUS_META: Record<
 > = {
   queued: {
     label: "排队",
-    badge: "bg-white/[0.06] text-neutral-300 border-white/10",
-    dot: "bg-neutral-400",
+    badge: "bg-white/[0.06] text-[var(--fg-1)] border-[var(--border)]",
+    dot: "bg-[var(--fg-2)]",
     row: "border-l-white/10",
   },
   running: {
@@ -116,8 +116,8 @@ const STATUS_META: Record<
   },
   canceled: {
     label: "已取消",
-    badge: "bg-neutral-400/10 text-neutral-300 border-white/10",
-    dot: "bg-neutral-500",
+    badge: "bg-[var(--fg-2)]/10 text-[var(--fg-1)] border-[var(--border)]",
+    dot: "bg-[var(--fg-2)]",
     row: "border-l-neutral-500/50",
   },
 };
@@ -126,8 +126,8 @@ function getStatusMeta(status: string) {
   return (
     STATUS_META[status] ?? {
       label: status || "未知",
-      badge: "bg-white/[0.06] text-neutral-300 border-white/10",
-      dot: "bg-neutral-500",
+      badge: "bg-white/[0.06] text-[var(--fg-1)] border-[var(--border)]",
+      dot: "bg-[var(--fg-2)]",
       row: "border-l-white/10",
     }
   );
@@ -520,16 +520,16 @@ export function RequestEventsPanel() {
 
   return (
     <section className="space-y-4" aria-labelledby="request-events-title">
-      <div className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/70 p-4 backdrop-blur-sm md:p-5">
+      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 backdrop-blur-sm md:p-5">
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
           <div className="min-w-0">
             <h2
               id="request-events-title"
-              className="text-lg font-semibold tracking-tight text-neutral-100"
+              className="text-lg font-semibold tracking-tight text-[var(--fg-0)]"
             >
               请求事件
             </h2>
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-500">
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--fg-2)]">
               <span className="inline-flex items-center gap-1.5">
                 <Clock3 className="h-3.5 w-3.5" />
                 最新 {formatAge(fetchedSummary.latestAt)}
@@ -541,13 +541,13 @@ export function RequestEventsPanel() {
                 平均 {formatDuration(summary.avgDurationMs)}
               </span>
               {q.isFetching && !q.isLoading && (
-                <span className="inline-flex items-center gap-1.5 text-neutral-400">
+                <span className="inline-flex items-center gap-1.5 text-[var(--fg-1)]">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   同步中
                 </span>
               )}
               {autoRefresh && (
-                <span className="inline-flex items-center gap-1.5 text-neutral-500">
+                <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
                   <TimerReset className="h-3.5 w-3.5" />
                   自动刷新 10s
                 </span>
@@ -584,8 +584,8 @@ export function RequestEventsPanel() {
         </div>
 
         <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(240px,1fr)_auto] lg:items-center">
-          <div className="flex h-10 min-w-0 items-center gap-2 rounded-xl border border-white/10 bg-[var(--bg-0)]/70 px-3 transition-colors focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25">
-            <Search className="h-3.5 w-3.5 shrink-0 text-neutral-500" />
+          <div className="flex h-10 min-w-0 items-center gap-2 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 transition-colors focus-within:border-[var(--color-lumen-amber)]/50 focus-within:ring-2 focus-within:ring-[var(--color-lumen-amber)]/25">
+            <Search className="h-3.5 w-3.5 shrink-0 text-[var(--fg-2)]" />
             <label htmlFor="search-request-events" className="sr-only">
               搜索请求事件
             </label>
@@ -595,13 +595,13 @@ export function RequestEventsPanel() {
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder={FILTERED_SEARCH_PLACEHOLDER}
-              className="min-w-0 flex-1 bg-transparent text-sm text-neutral-200 placeholder:text-neutral-600 focus:outline-none"
+              className="min-w-0 flex-1 bg-transparent text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:outline-none"
             />
             {search.trim() && (
               <button
                 type="button"
                 onClick={() => setSearch("")}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-neutral-500 transition-colors hover:bg-white/10 hover:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-2)] transition-colors hover:bg-white/10 hover:text-[var(--fg-0)] focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
                 aria-label="清空搜索"
               >
                 <X className="h-3.5 w-3.5" />
@@ -622,7 +622,7 @@ export function RequestEventsPanel() {
               id="request-event-status"
               value={status}
               onChange={(event) => setStatus(event.target.value as StatusFilter)}
-              className="h-10 min-w-28 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-xs text-neutral-200 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+              className="h-10 min-w-28 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
             >
               {STATUS_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -639,7 +639,7 @@ export function RequestEventsPanel() {
               onChange={(event) =>
                 setRange(event.target.value as TimeRangeFilter)
               }
-              className="h-10 min-w-24 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-xs text-neutral-200 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+              className="h-10 min-w-24 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
             >
               {RANGE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -680,13 +680,13 @@ export function RequestEventsPanel() {
         </div>
 
         {modelStats.length > 0 && (
-          <div className="mt-4 border-t border-white/8 pt-4">
+          <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <span className="inline-flex items-center gap-1.5 font-medium text-neutral-300">
+              <span className="inline-flex items-center gap-1.5 font-medium text-[var(--fg-1)]">
                 <BarChart3 className="h-3.5 w-3.5 text-[var(--color-lumen-amber)]" />
                 路径统计
               </span>
-              <span className="font-mono tabular-nums text-neutral-500">
+              <span className="font-mono tabular-nums text-[var(--fg-2)]">
                 {hasSearch ? "基于当前显示" : "基于当前筛选"}{" "}
                 {hasSearch ? filtered.length : modelStatsTotal}
               </span>
@@ -701,7 +701,7 @@ export function RequestEventsPanel() {
       </div>
 
       <div
-        className="overflow-hidden rounded-2xl border border-white/10 bg-[var(--bg-1)]/70 backdrop-blur-sm"
+        className="overflow-hidden rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/70 backdrop-blur-sm"
         aria-busy={q.isFetching}
         aria-live="polite"
       >
@@ -725,7 +725,7 @@ export function RequestEventsPanel() {
           <>
             <div className="hidden overflow-x-auto [-webkit-overflow-scrolling:touch] lg:block">
               <table className="w-full min-w-[1040px] text-sm">
-                <thead className="sticky top-0 z-10 border-b border-white/10 bg-[var(--bg-1)]/95 text-xs uppercase tracking-wider text-[var(--fg-1)] backdrop-blur">
+                <thead className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg-1)]/95 text-xs uppercase tracking-wider text-[var(--fg-1)] backdrop-blur">
                   <tr>
                     <th className="w-9 py-3 px-3" />
                     <th className="text-left py-3 px-3 font-medium">结束时间</th>
@@ -746,7 +746,7 @@ export function RequestEventsPanel() {
                       <Fragment key={event.id}>
                         <tr
                           className={cn(
-                            "border-t border-l-2 border-white/5 align-top transition-colors hover:bg-white/[0.035]",
+                            "border-t border-l-2 border-[var(--border-subtle)] align-top transition-colors hover:bg-white/[0.035]",
                             statusMeta.row,
                             expanded && "bg-white/[0.025]",
                           )}
@@ -757,7 +757,7 @@ export function RequestEventsPanel() {
                               onClick={() =>
                                 setExpandedId(expanded ? null : event.id)
                               }
-                              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-neutral-400 transition-colors hover:bg-white/10 hover:text-neutral-100 sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                              className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-white/10 hover:text-[var(--fg-0)] sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
                               aria-label={expanded ? "收起详情" : "展开详情"}
                               aria-expanded={expanded}
                               aria-controls={detailId}
@@ -769,18 +769,18 @@ export function RequestEventsPanel() {
                               )}
                             </button>
                           </td>
-                          <td className="py-3 px-3 font-mono text-xs tabular-nums whitespace-nowrap text-neutral-300">
+                          <td className="py-3 px-3 font-mono text-xs tabular-nums whitespace-nowrap text-[var(--fg-1)]">
                             {formatDateTime(event.finished_at)}
                           </td>
                           <td className="py-3 px-3">
                             <div className="flex flex-col gap-1">
-                              <span className="text-neutral-100">
+                              <span className="text-[var(--fg-0)]">
                                 {eventKindLabel(event)}
                               </span>
                               <StatusBadge status={event.status} />
                             </div>
                           </td>
-                          <td className="py-3 px-3 text-neutral-300 max-w-[220px]">
+                          <td className="py-3 px-3 text-[var(--fg-1)] max-w-[220px]">
                             <span
                               className="line-clamp-2 break-words"
                               title={event.model}
@@ -791,7 +791,7 @@ export function RequestEventsPanel() {
                           <td className="py-3 px-3">
                             <ProviderCell event={event} />
                           </td>
-                          <td className="py-3 px-3 text-neutral-300 max-w-[210px]">
+                          <td className="py-3 px-3 text-[var(--fg-1)] max-w-[210px]">
                             <span
                               className="line-clamp-2 break-all"
                               title={event.user_email}
@@ -802,12 +802,12 @@ export function RequestEventsPanel() {
                           <td className="py-3 px-3">
                             <ImagesButton event={event} />
                           </td>
-                          <td className="py-3 px-3 text-right font-mono text-xs tabular-nums text-neutral-300 whitespace-nowrap">
+                          <td className="py-3 px-3 text-right font-mono text-xs tabular-nums text-[var(--fg-1)] whitespace-nowrap">
                             {formatDuration(event.duration_ms)}
                           </td>
                         </tr>
                         {expanded && (
-                          <tr className="border-t border-white/5" id={detailId}>
+                          <tr className="border-t border-[var(--border-subtle)]" id={detailId}>
                             <td colSpan={8} className="px-4 pb-5 pt-2">
                               <EventDetails event={event} />
                             </td>
@@ -837,26 +837,26 @@ export function RequestEventsPanel() {
                     <button
                       type="button"
                       onClick={() => setExpandedId(expanded ? null : event.id)}
-                      className="w-full min-w-0 space-y-3 rounded-xl text-left focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                      className="w-full min-w-0 space-y-3 rounded-[var(--radius-panel)] text-left focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
                       aria-expanded={expanded}
                       aria-controls={detailId}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className="text-sm text-neutral-100">
+                            <span className="text-sm text-[var(--fg-0)]">
                               {eventKindLabel(event)}
                             </span>
                             <StatusBadge status={event.status} />
                           </div>
-                          <p className="mt-1 font-mono text-xs text-neutral-500 tabular-nums">
+                          <p className="mt-1 font-mono text-xs text-[var(--fg-2)] tabular-nums">
                             结束 {formatDateTime(event.finished_at)}
                           </p>
                         </div>
                         {expanded ? (
-                          <ChevronDown className="w-4 h-4 text-neutral-500 shrink-0" />
+                          <ChevronDown className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
                         ) : (
-                          <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" />
+                          <ChevronRight className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
                         )}
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
@@ -910,19 +910,19 @@ function StatTile({
   }[tone];
 
   return (
-    <div className="min-w-0 rounded-xl border border-white/8 bg-white/[0.035] px-3 py-2.5">
+    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.035] px-3 py-2.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-[11px] text-neutral-500">{label}</span>
+        <span className="truncate text-[11px] text-[var(--fg-2)]">{label}</span>
         <span
           className={cn(
-            "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border",
+            "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
             toneClass,
           )}
         >
           <Icon className="h-3.5 w-3.5" />
         </span>
       </div>
-      <div className="mt-1 font-mono text-lg font-semibold leading-tight tabular-nums text-neutral-100">
+      <div className="mt-1 font-mono text-lg font-semibold leading-tight tabular-nums text-[var(--fg-0)]">
         {value}
       </div>
     </div>
@@ -933,15 +933,15 @@ function ModelStatBar({ stat }: { stat: RequestEventModelStat }) {
   const width = `${Math.max(2, Math.min(100, Math.round(stat.share * 100)))}%`;
 
   return (
-    <div className="min-w-0 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2.5">
+    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.03] px-3 py-2.5">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <span
-          className="min-w-0 truncate font-mono text-xs text-neutral-200"
+          className="min-w-0 truncate font-mono text-xs text-[var(--fg-0)]"
           title={stat.model}
         >
           {stat.model}
         </span>
-        <span className="shrink-0 font-mono text-xs tabular-nums text-neutral-500">
+        <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--fg-2)]">
           {stat.count} · {formatPercent(stat.share)}
         </span>
       </div>
@@ -960,7 +960,7 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span
       className={cn(
-        "inline-flex w-fit items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px]",
+        "inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-control)] border px-1.5 py-0.5 text-[11px]",
         meta.badge,
       )}
     >
@@ -983,7 +983,7 @@ function ProviderCell({ event }: { event: AdminRequestEventOut }) {
         {lanes.map((lane, idx) => (
           <LiveLaneRow key={`${lane.label}-${idx}`} lane={lane} />
         ))}
-        <span className="truncate text-neutral-500" title={route}>
+        <span className="truncate text-[var(--fg-2)]" title={route}>
           {route}
         </span>
       </div>
@@ -993,10 +993,10 @@ function ProviderCell({ event }: { event: AdminRequestEventOut }) {
   const provider = providerDisplayValue(event);
   return (
     <div className="flex max-w-[190px] flex-col gap-1 text-xs">
-      <span className="truncate text-neutral-200" title={provider}>
+      <span className="truncate text-[var(--fg-0)]" title={provider}>
         {provider}
       </span>
-      <span className="truncate text-neutral-500" title={route}>
+      <span className="truncate text-[var(--fg-2)]" title={route}>
         {route}
       </span>
     </div>
@@ -1029,11 +1029,11 @@ function LiveLaneRow({ lane }: { lane: AdminRequestEventLiveLane }) {
     .join(" • ");
   return (
     <span
-      className="flex items-center gap-1.5 truncate text-neutral-200"
+      className="flex items-center gap-1.5 truncate text-[var(--fg-0)]"
       title={tip}
     >
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotClass)} />
-      <span className="shrink-0 text-[10px] uppercase tracking-wide text-neutral-500">
+      <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--fg-2)]">
         {labelText}
       </span>
       <span
@@ -1060,7 +1060,7 @@ function SegmentedControl<T extends string>({
   return (
     <div
       role="tablist"
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-0.5 text-xs"
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.04] p-0.5 text-xs"
     >
       {options.map((option) => {
         const active = option.value === value;
@@ -1072,10 +1072,10 @@ function SegmentedControl<T extends string>({
             aria-selected={active}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-9 rounded-lg px-3 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25",
+              "h-9 rounded-[var(--radius-card)] px-3 transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25",
               active
-                ? "bg-white/10 text-neutral-100"
-                : "text-neutral-400 hover:text-neutral-100",
+                ? "bg-white/10 text-[var(--fg-0)]"
+                : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
             )}
           >
             {option.label}
@@ -1088,7 +1088,7 @@ function SegmentedControl<T extends string>({
 
 function ImagesButton({ event }: { event: AdminRequestEventOut }) {
   if (event.images.length === 0) {
-    return <span className="text-xs text-neutral-600">—</span>;
+    return <span className="text-xs text-[var(--fg-2)]">—</span>;
   }
   const outputCount = outputImageCount(event);
   const canOpen = lightboxItemsForEvent(event).length > 0;
@@ -1101,14 +1101,14 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
         openEventImages(event);
       }}
       disabled={!canOpen}
-      className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-xs text-neutral-200 transition-colors hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+      className="inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] px-2.5 text-xs text-[var(--fg-0)] transition-colors hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
       aria-label={`查看 ${event.images.length} 张事件图片`}
     >
       <span className="flex shrink-0 -space-x-1">
         {previews.map((image) => (
           <span
             key={image.id}
-            className="h-7 w-7 overflow-hidden rounded-md border border-black/40 bg-white/[0.06] shadow-sm"
+            className="h-7 w-7 overflow-hidden rounded-[var(--radius-control)] border border-black/40 bg-white/[0.06] shadow-sm"
           >
             <img
               src={imagePreviewSrc(image)}
@@ -1121,7 +1121,7 @@ function ImagesButton({ event }: { event: AdminRequestEventOut }) {
       </span>
       <Eye className="w-3.5 h-3.5" />
       查看
-      <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-neutral-300">
+      <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-1)]">
         {event.images.length}
       </span>
       {outputCount > 0 && (
@@ -1143,21 +1143,21 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
   const actionSource = upstreamText(event, "action_source");
 
   return (
-    <div className="space-y-4 rounded-xl border border-[var(--border)] bg-[var(--bg-0)]/60 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/8 pb-3">
+    <div className="space-y-4 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)]/60 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border-subtle)] pb-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-neutral-100">
+          <span className="text-sm font-medium text-[var(--fg-0)]">
             {eventKindLabel(event)}
           </span>
           <StatusBadge status={event.status} />
           {outputCount > 0 && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-[var(--color-lumen-amber)]/20 bg-[var(--color-lumen-amber)]/10 px-1.5 py-0.5 text-[11px] text-[var(--color-lumen-amber)]">
+            <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--color-lumen-amber)]/20 bg-[var(--color-lumen-amber)]/10 px-1.5 py-0.5 text-[11px] text-[var(--color-lumen-amber)]">
               <ImageIcon className="h-3 w-3" />
               输出 {outputCount}
             </span>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-500">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--fg-2)]">
           <span className="font-mono tabular-nums">
             {formatDuration(event.duration_ms)}
           </span>
@@ -1221,11 +1221,11 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {isActiveStatus(event.status) && liveLanes(event).length > 0 && (
         <div>
-          <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
+          <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
             <Activity className="w-3.5 h-3.5" />
             实时供应商（任务心跳）
           </div>
-          <div className="flex flex-col gap-1.5 rounded-lg border border-white/8 bg-white/[0.03] p-3">
+          <div className="flex flex-col gap-1.5 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] p-3">
             {liveLanes(event).map((lane, idx) => (
               <LiveLaneRow key={`detail-${lane.label}-${idx}`} lane={lane} />
             ))}
@@ -1235,10 +1235,10 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {event.prompt && (
         <div>
-          <div className="mb-1.5 text-[11px] uppercase tracking-wider text-neutral-500">
+          <div className="mb-1.5 text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
             提示词
           </div>
-          <p className="max-h-32 overflow-auto whitespace-pre-wrap rounded-lg border border-white/8 bg-white/[0.03] p-3 text-xs leading-relaxed text-neutral-300">
+          <p className="max-h-32 overflow-auto whitespace-pre-wrap rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] p-3 text-xs leading-relaxed text-[var(--fg-1)]">
             {event.prompt}
           </p>
         </div>
@@ -1257,7 +1257,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {event.images.length > 0 && (
         <div>
-          <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
+          <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
             <ImageIcon className="w-3.5 h-3.5" />
             图片文件
           </div>
@@ -1271,7 +1271,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
                   openEventImages(event, image.id);
                 }}
                 disabled={!image.url}
-                className="group relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-white/[0.04] text-left transition-colors hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+                className="group relative aspect-square overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] text-left transition-colors hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
               >
                 <img
                   src={imagePreviewSrc(image)}
@@ -1295,7 +1295,7 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
 
       {upstreamEntries.length > 0 && (
         <div>
-          <div className="mb-2 text-[11px] uppercase tracking-wider text-neutral-500">
+          <div className="mb-2 text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
             上游参数
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1303,10 +1303,10 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
               <span
                 key={key}
                 title={formatUnknownValue(value)}
-                className="inline-flex max-w-full items-center gap-1 rounded-lg border border-white/8 bg-white/[0.03] px-2 py-1 text-xs text-neutral-300"
+                className="inline-flex max-w-full items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] px-2 py-1 text-xs text-[var(--fg-1)]"
               >
-                <span className="shrink-0 text-neutral-500">{key}</span>
-                <span className="truncate font-mono text-neutral-300">
+                <span className="shrink-0 text-[var(--fg-2)]">{key}</span>
+                <span className="truncate font-mono text-[var(--fg-1)]">
                   {formatUnknownValue(value)}
                 </span>
               </span>
@@ -1329,12 +1329,12 @@ function Detail({
 }) {
   return (
     <div className="min-w-0">
-      <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
       <div
         className={cn(
-          "mt-1 break-words text-xs text-neutral-300",
+          "mt-1 break-words text-xs text-[var(--fg-1)]",
           mono && "font-mono tabular-nums",
         )}
         title={value || "—"}
@@ -1347,12 +1347,12 @@ function Detail({
 
 function MiniField({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-lg border border-white/5 bg-white/[0.03] px-2 py-1.5">
-      <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+    <div className="min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-white/[0.03] px-2 py-1.5">
+      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
       <div
-        className="mt-0.5 line-clamp-2 break-words text-xs text-neutral-300"
+        className="mt-0.5 line-clamp-2 break-words text-xs text-[var(--fg-1)]"
         title={value || "—"}
       >
         {value || "—"}

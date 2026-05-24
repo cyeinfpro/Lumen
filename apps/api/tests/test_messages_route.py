@@ -1856,6 +1856,30 @@ async def test_publish_message_appended_payload_contains_conversation_and_messag
 
 
 @pytest.mark.asyncio
+async def test_api_sse_publish_preserves_falsy_payload_event_id() -> None:
+    redis = _Redis()
+
+    await messages.publish_sse_event(
+        redis,
+        user_id="user-1",
+        channel="conv:conv-1",
+        event_name="conv.message.appended",
+        data={"conversation_id": "conv-1", "message_id": "msg-1", "event_id": 0},
+    )
+
+    xadd = redis.calls[0]
+    publish = redis.calls[1]
+    assert xadd[0] == "eval"
+    assert xadd[1][4] == "0"
+    stream_payload = json.loads(xadd[1][6])
+    publish_payload = json.loads(publish[1][1])
+    assert stream_payload["event_id"] == "0"
+    assert stream_payload["data"]["event_id"] == "0"
+    assert publish_payload["event_id"] == "0"
+    assert publish_payload["data"]["event_id"] == "0"
+
+
+@pytest.mark.asyncio
 async def test_publish_message_appended_batches_multiple_messages() -> None:
     class Pipe:
         def __init__(self, stream_ids: list[str]) -> None:
@@ -1916,6 +1940,73 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
         "msg-1",
         "msg-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_api_sse_publish_batch_preserves_falsy_payload_event_id() -> None:
+    class Pipe:
+        def __init__(self, stream_ids: list[str]) -> None:
+            self.stream_ids = stream_ids
+            self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+        def eval(self, *args: Any, **kwargs: Any) -> None:
+            self.calls.append(("eval", args, kwargs))
+
+        def publish(self, *args: Any, **kwargs: Any) -> None:
+            self.calls.append(("publish", args, kwargs))
+
+        async def execute(self) -> list[str]:
+            if self.calls and self.calls[0][0] == "eval":
+                return self.stream_ids
+            return []
+
+    class Redis:
+        def __init__(self) -> None:
+            self.pipes: list[Pipe] = []
+
+        def pipeline(self, *, transaction: bool = False) -> Pipe:
+            assert transaction is False
+            pipe = Pipe(
+                ["1710000000000-0", "1710000000000-1"] if not self.pipes else []
+            )
+            self.pipes.append(pipe)
+            return pipe
+
+    redis = Redis()
+
+    await messages.publish_sse_events(
+        redis,  # type: ignore[arg-type]
+        [
+            {
+                "user_id": "user-1",
+                "channel": "conv:conv-1",
+                "event_name": "conv.message.appended",
+                "data": {
+                    "conversation_id": "conv-1",
+                    "message_id": "msg-1",
+                    "event_id": 0,
+                },
+            },
+            {
+                "user_id": "user-1",
+                "channel": "conv:conv-1",
+                "event_name": "conv.message.appended",
+                "data": {
+                    "conversation_id": "conv-1",
+                    "message_id": "msg-2",
+                    "event_id": "event-2",
+                },
+            },
+        ],
+    )
+
+    assert redis.pipes[0].calls[0][1][4] == "0"
+    stream_payload = json.loads(redis.pipes[0].calls[0][1][6])
+    publish_payload = json.loads(redis.pipes[1].calls[0][1][1])
+    assert stream_payload["event_id"] == "0"
+    assert stream_payload["data"]["event_id"] == "0"
+    assert publish_payload["event_id"] == "0"
+    assert publish_payload["data"]["event_id"] == "0"
 
 
 @pytest.mark.asyncio

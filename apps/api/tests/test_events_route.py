@@ -132,6 +132,37 @@ async def test_pubsub_event_envelope_id_does_not_overwrite_payload_event_id() ->
 
 
 @pytest.mark.asyncio
+async def test_pubsub_event_fallback_preserves_falsy_envelope_event_id() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.fields: dict[str, str] | None = None
+
+        async def xadd(
+            self,
+            _stream_key: str,
+            fields: dict[str, str],
+            **_kwargs: Any,
+        ) -> str:
+            self.fields = fields
+            return "1710000000001-0"
+
+    redis = Redis()
+
+    await events._stream_id_for_pubsub_event(  # noqa: SLF001
+        redis,
+        stream_key="events:user:user-1",
+        event_name="generation.completed",
+        envelope_event_id=0,  # type: ignore[arg-type]
+        payload={"generation_id": "gen-1"},
+    )
+
+    assert redis.fields is not None
+    envelope = json.loads(redis.fields["data"])
+    assert envelope["event_id"] == "0"
+    assert redis.fields["event_id"] == "0"
+
+
+@pytest.mark.asyncio
 async def test_events_rejects_too_many_channels_before_subscribing() -> None:
     channels = ",".join(f"task:{i}" for i in range(events.MAX_SSE_CHANNELS + 1))
 
@@ -216,6 +247,101 @@ async def test_events_logs_replay_failure_and_acloses_pubsub(
     assert "sse replay failed" in caplog.text
     assert redis.pubsub_obj.aclose_called is True
     assert redis.pubsub_obj.close_called is False
+
+
+@pytest.mark.asyncio
+async def test_live_pubsub_event_preserves_falsy_payload_event_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PubSub:
+        def __init__(self) -> None:
+            self.sent = False
+
+        async def subscribe(self, *_channels: str) -> None:
+            return None
+
+        async def unsubscribe(self, *_channels: str) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        async def get_message(self, **_kwargs: Any) -> dict[str, str] | None:
+            if self.sent:
+                return None
+            self.sent = True
+            return {
+                "channel": "user:user-1",
+                "data": json.dumps(
+                    {
+                        "event": "generation.completed",
+                        "event_id": 0,
+                        "data": {"generation_id": "gen-1"},
+                    },
+                    separators=(",", ":"),
+                ),
+            }
+
+    class Redis:
+        def __init__(self) -> None:
+            self.pubsub_obj = PubSub()
+            self.xadd_fields: dict[str, str] | None = None
+
+        def pubsub(self) -> PubSub:
+            return self.pubsub_obj
+
+        async def xadd(
+            self,
+            _stream_key: str,
+            fields: dict[str, str],
+            **_kwargs: Any,
+        ) -> str:
+            self.xadd_fields = fields
+            return "1710000000001-0"
+
+    class Request:
+        headers: dict[str, str] = {}
+        checks = 0
+
+        async def is_disconnected(self) -> bool:
+            self.checks += 1
+            return self.checks > 1
+
+    async def fake_validate_channels(
+        channels: list[str],
+        _user_id: str,
+        _db: Any,
+    ) -> list[str]:
+        return channels
+
+    redis = Redis()
+    monkeypatch.setattr(events, "_validate_channels", fake_validate_channels)
+    monkeypatch.setattr(events, "get_redis", lambda: redis)
+
+    response = await events.events(
+        Request(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        channels="user:user-1",
+    )
+
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+
+    assert chunks == [
+        {
+            "id": "1710000000001-0",
+            "event": "generation.completed",
+            "data": (
+                '{"generation_id":"gen-1","msg_id":"1710000000001-0",'
+                '"sse_id":"1710000000001-0","event_id":"0"}'
+            ),
+        }
+    ]
+    assert redis.xadd_fields is not None
+    envelope = json.loads(redis.xadd_fields["data"])
+    assert envelope["event_id"] == "0"
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,7 @@ from ..sse_publish import publish_sse_event
 router = APIRouter(tags=["memories"])
 logger = logging.getLogger(__name__)
 _UNDO_TTL_SECONDS = 300
+_UNDO_CLAIM_TTL_SECONDS = 300
 _STAGING_TTL_DAYS = 7
 
 
@@ -314,6 +315,61 @@ def _audit(
         source_message_id=source_message_id,
         details=details or {},
     )
+
+
+def _undo_token_claim_key(undo_token: str) -> str:
+    return f"memory:undo:claim:{undo_token}"
+
+
+async def _undo_token_consumed(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    undo_token: str,
+) -> bool:
+    row = (
+        await db.execute(
+            select(MemoryAudit.id)
+            .where(
+                MemoryAudit.user_id == user_id,
+                MemoryAudit.event_type == "undo_token_consumed",
+                MemoryAudit.details["undo_token"].as_string() == undo_token,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
+async def _claim_undo_token(redis: Any, undo_token: str, *, owner: str) -> bool:
+    claim_key = _undo_token_claim_key(undo_token)
+    set_fn = getattr(redis, "set", None)
+    if callable(set_fn):
+        claimed = await set_fn(
+            claim_key,
+            owner,
+            ex=_UNDO_CLAIM_TTL_SECONDS,
+            nx=True,
+        )
+        return not (claimed is False or claimed == 0)
+    raw = await redis.get(claim_key)  # type: ignore[attr-defined]
+    return raw is None
+
+
+async def _release_undo_token_claim(redis: Any, undo_token: str, *, owner: str) -> None:
+    claim_key = _undo_token_claim_key(undo_token)
+    try:
+        raw = await redis.get(claim_key)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        if raw == owner:
+            await redis.delete(claim_key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "memory undo claim cleanup failed token=%s err=%s",
+            undo_token,
+            exc,
+        )
 
 
 async def _publish_account_settings_updated(redis: Any, user_id: str) -> None:
@@ -657,6 +713,23 @@ async def undo_memory_write(
         raise _http("undo_expired", "undo token expired", 410) from exc
     if payload.get("user_id") != user.id:
         raise _http("forbidden", "undo token does not belong to this user", 403)
+    if await _undo_token_consumed(db, user_id=user.id, undo_token=body.undo_token):
+        try:
+            await redis.delete(f"memory:undo:{body.undo_token}")
+            await _release_undo_token_claim(
+                redis,
+                body.undo_token,
+                owner=user.id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "memory undo consumed token cleanup failed token=%s err=%s",
+                body.undo_token,
+                exc,
+            )
+        return {"ok": True}
+    if not await _claim_undo_token(redis, body.undo_token, owner=user.id):
+        return {"ok": True}
     action = payload.get("action")
     memory_id = payload.get("memory_id")
     reembed_id: str | None = None
@@ -738,8 +811,31 @@ async def undo_memory_write(
             if row is not None and row.user_id == user.id:
                 row.decision = "rejected"
                 row.decided_at = datetime.now(timezone.utc)
-    await redis.delete(f"memory:undo:{body.undo_token}")
-    await db.commit()
+    db.add(
+        _audit(
+            user_id=user.id,
+            event_type="undo_token_consumed",
+            memory_id=memory_id if isinstance(memory_id, str) else None,
+            details={
+                "undo_token": body.undo_token,
+                "action": action,
+            },
+        )
+    )
+    try:
+        await db.commit()
+    except Exception:
+        await _release_undo_token_claim(redis, body.undo_token, owner=user.id)
+        raise
+    try:
+        await redis.delete(f"memory:undo:{body.undo_token}")
+        await _release_undo_token_claim(redis, body.undo_token, owner=user.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "memory undo token cleanup failed token=%s err=%s",
+            body.undo_token,
+            exc,
+        )
     if reembed_id:
         await _enqueue_memory_reembed("memory", reembed_id)
     return {"ok": True}

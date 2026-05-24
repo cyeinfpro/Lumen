@@ -404,7 +404,7 @@ export function CommandPalette() {
             >
               <span
                 className={cn(
-                  "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md",
+                  "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)]",
                   selected ? "bg-[var(--accent-soft)]" : "bg-[var(--bg-2)]",
                 )}
                 aria-hidden
@@ -522,7 +522,7 @@ export function CommandPalette() {
         aria-labelledby={headingId}
         aria-describedby={descriptionId}
         className={cn(
-          "relative flex w-full max-w-xl flex-col max-h-[70vh] overflow-hidden rounded-lg",
+          "relative flex w-full max-w-xl flex-col max-h-[70vh] overflow-hidden rounded-[var(--radius-card)]",
           "border border-[var(--border-strong)] bg-[var(--bg-1)]/95",
           "shadow-[var(--shadow-3)] backdrop-blur-xl",
         )}

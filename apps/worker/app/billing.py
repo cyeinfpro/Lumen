@@ -27,6 +27,9 @@ from .observability import (
 )
 from .services.billing_cache import get_billing_cache
 
+_POST_COMMIT_BALANCE_CACHE_KEY = "lumen_post_commit_balance_cache"
+_POST_COMMIT_WINDOW_CACHE_KEY = "lumen_post_commit_window_cache"
+
 
 async def _setting_bool(key: str, default: bool = False) -> bool:
     return billing_core.parse_bool_setting(await runtime_settings.resolve(key), default)
@@ -60,6 +63,25 @@ def _generation_billing_tier(generation: Generation) -> str | None:
         return None
     tier = upstream_request.get("billing_tier")
     return tier if tier in {"1k", "2k", "4k"} else None
+
+
+def _generation_billing_ref_id(generation: Generation) -> str:
+    return billing_core.retry_billing_ref_id(
+        generation.id,
+        getattr(generation, "retry_count", 0),
+    )
+
+
+def _completion_billing_ref_id(completion: Completion) -> str:
+    return billing_core.completion_billing_ref_id(completion)
+
+
+def completion_billing_ref_id(completion: Completion) -> str:
+    return _completion_billing_ref_id(completion)
+
+
+def _completion_billing_retry_count(completion: Completion) -> int:
+    return billing_core.completion_billing_retry_count(completion)
 
 
 async def _account_mode(session: AsyncSession, user_id: str) -> str:
@@ -141,6 +163,26 @@ async def _existing_wallet_tx(
     ).scalar_one_or_none()
 
 
+async def _wallet_billing_applies(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+) -> bool:
+    if await _account_mode(session, user_id) == "wallet":
+        return True
+    return (
+        await billing_core._held_amount_for_ref(  # noqa: SLF001
+            session,
+            user_id,
+            ref_type,
+            ref_id,
+        )
+        > 0
+    )
+
+
 async def _existing_fingerprint_tx(
     session: AsyncSession,
     user_id: str,
@@ -191,6 +233,57 @@ def _add_replay_audit(
     )
 
 
+def _record_balance_cache_refresh(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    balance_after: int,
+) -> None:
+    try:
+        pending = session.info.setdefault(_POST_COMMIT_BALANCE_CACHE_KEY, {})
+        pending[str(user_id)] = int(balance_after)
+    except Exception:
+        return
+
+
+def _record_window_cache_increment(
+    session: AsyncSession,
+    *,
+    key_id: str,
+    micro: int,
+    limits: dict[str, int],
+) -> None:
+    try:
+        pending = session.info.setdefault(_POST_COMMIT_WINDOW_CACHE_KEY, [])
+        pending.append((str(key_id), int(micro), dict(limits)))
+    except Exception:
+        return
+
+
+async def flush_balance_cache_refreshes(session: AsyncSession) -> None:
+    try:
+        pending_balance = session.info.pop(_POST_COMMIT_BALANCE_CACHE_KEY, {})
+    except Exception:
+        pending_balance = {}
+    try:
+        pending_window = session.info.pop(_POST_COMMIT_WINDOW_CACHE_KEY, [])
+    except Exception:
+        pending_window = []
+    cache = get_billing_cache()
+    if cache is None:
+        return
+    if isinstance(pending_balance, dict):
+        for user_id, balance_after in pending_balance.items():
+            await cache.set_balance(str(user_id), int(balance_after))
+    if isinstance(pending_window, list):
+        for key_id, micro, limits in pending_window:
+            await cache.queue_window_increment(
+                str(key_id),
+                int(micro),
+                limits if isinstance(limits, dict) else None,
+            )
+
+
 async def settle_generation(
     session: AsyncSession,
     generation: Generation,
@@ -198,11 +291,17 @@ async def settle_generation(
     width: int,
     height: int,
 ) -> None:
-    if await _account_mode(session, generation.user_id) != "wallet":
+    billing_ref_id = _generation_billing_ref_id(generation)
+    if not await _wallet_billing_applies(
+        session,
+        user_id=generation.user_id,
+        ref_type="generation",
+        ref_id=billing_ref_id,
+    ):
         return
     if not await _billing_enabled():
         return
-    idempotency_key = f"settle:{generation.id}"
+    idempotency_key = f"settle:{billing_ref_id}"
     existing = await _existing_wallet_tx(session, generation.user_id, idempotency_key)
     if existing is not None:
         _add_replay_audit(
@@ -247,19 +346,26 @@ async def settle_generation(
         session,
         generation.user_id,
         ref_type="generation",
-        ref_id=generation.id,
+        ref_id=billing_ref_id,
         actual_micro=cost,
         idempotency_key=idempotency_key,
         allow_negative=await _allow_negative_balance(),
         meta={
+            "generation_id": generation.id,
             "tier": tier,
             "width": width,
             "height": height,
             "tier_source": tier_source,
             "model": generation.model,
+            "retry_count": int(getattr(generation, "retry_count", 0) or 0),
         },
     )
     if tx is not None:
+        _record_balance_cache_refresh(
+            session,
+            user_id=generation.user_id,
+            balance_after=tx.balance_after,
+        )
         session.add(
             _audit(
                 event_type="wallet.settle.image",
@@ -296,11 +402,17 @@ async def release_generation(
     *,
     reason: str,
 ) -> None:
-    if await _account_mode(session, generation.user_id) != "wallet":
+    billing_ref_id = _generation_billing_ref_id(generation)
+    if not await _wallet_billing_applies(
+        session,
+        user_id=generation.user_id,
+        ref_type="generation",
+        ref_id=billing_ref_id,
+    ):
         return
     if not await _billing_enabled():
         return
-    idempotency_key = f"release:{generation.id}"
+    idempotency_key = f"release:{billing_ref_id}"
     existing = await _existing_wallet_tx(session, generation.user_id, idempotency_key)
     if existing is not None:
         _add_replay_audit(
@@ -314,11 +426,20 @@ async def release_generation(
         session,
         generation.user_id,
         ref_type="generation",
-        ref_id=generation.id,
+        ref_id=billing_ref_id,
         idempotency_key=idempotency_key,
-        meta={"reason": reason},
+        meta={
+            "generation_id": generation.id,
+            "reason": reason,
+            "retry_count": int(getattr(generation, "retry_count", 0) or 0),
+        },
     )
     if tx is not None:
+        _record_balance_cache_refresh(
+            session,
+            user_id=generation.user_id,
+            balance_after=tx.balance_after,
+        )
         session.add(
             _audit(
                 event_type="wallet.release.image",
@@ -335,11 +456,17 @@ async def release_generation(
 
 
 async def charge_completion(session: AsyncSession, completion: Completion) -> None:
-    if await _account_mode(session, completion.user_id) != "wallet":
+    billing_ref_id = _completion_billing_ref_id(completion)
+    if not await _wallet_billing_applies(
+        session,
+        user_id=completion.user_id,
+        ref_type="completion",
+        ref_id=billing_ref_id,
+    ):
         return
     if not await _billing_enabled():
         return
-    idempotency_key = f"complete:{completion.id}"
+    idempotency_key = f"complete:{billing_ref_id}"
     existing = await _existing_wallet_tx(session, completion.user_id, idempotency_key)
     if existing is not None:
         _add_replay_audit(
@@ -511,17 +638,18 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
             return
     try:
         tx = await billing_core.settle(
-            session,
-            completion.user_id,
-            ref_type="completion",
-            ref_id=completion.id,
-            actual_micro=cost,
-            idempotency_key=idempotency_key,
-            allow_negative=await _allow_negative_balance(),
-            meta={
-                "model": completion.model,
-                "tokens_in": usage.input_tokens,
-                "tokens_out": usage.output_tokens,
+        session,
+        completion.user_id,
+        ref_type="completion",
+        ref_id=billing_ref_id,
+        actual_micro=cost,
+        idempotency_key=idempotency_key,
+        allow_negative=await _allow_negative_balance(),
+        meta={
+            "completion_id": completion.id,
+            "model": completion.model,
+            "tokens_in": usage.input_tokens,
+            "tokens_out": usage.output_tokens,
                 "cache_read_tokens": usage.cache_read_tokens,
                 "cache_creation_tokens": usage.cache_creation_tokens,
                 "cache_creation_5m_tokens": usage.cache_creation_5m_tokens,
@@ -549,10 +677,19 @@ async def charge_completion(session: AsyncSession, completion: Completion) -> No
             if value > 0:
                 billing_cost_micro_total.labels(kind=kind).inc(value)
         if cache is not None:
-            await cache.queue_deduct(completion.user_id, max(0, cost))
+            _record_balance_cache_refresh(
+                session,
+                user_id=completion.user_id,
+                balance_after=tx.balance_after,
+            )
             if key_id:
                 limits = await cache.credential_limits(session, key_id)
-                await cache.queue_window_increment(key_id, max(0, cost), limits)
+                _record_window_cache_increment(
+                    session,
+                    key_id=key_id,
+                    micro=max(0, cost),
+                    limits=limits,
+                )
         session.add(
             _audit(
                 event_type="wallet.charge.completion",
@@ -602,11 +739,17 @@ async def release_completion(
     *,
     reason: str,
 ) -> None:
-    if await _account_mode(session, completion.user_id) != "wallet":
+    billing_ref_id = _completion_billing_ref_id(completion)
+    if not await _wallet_billing_applies(
+        session,
+        user_id=completion.user_id,
+        ref_type="completion",
+        ref_id=billing_ref_id,
+    ):
         return
     if not await _billing_enabled():
         return
-    idempotency_key = f"release:{completion.id}"
+    idempotency_key = f"release:{billing_ref_id}"
     existing = await _existing_wallet_tx(session, completion.user_id, idempotency_key)
     if existing is not None:
         _add_replay_audit(
@@ -620,11 +763,20 @@ async def release_completion(
         session,
         completion.user_id,
         ref_type="completion",
-        ref_id=completion.id,
+        ref_id=billing_ref_id,
         idempotency_key=idempotency_key,
-        meta={"reason": reason},
+        meta={
+            "completion_id": completion.id,
+            "reason": reason,
+            "billing_retry_count": _completion_billing_retry_count(completion),
+        },
     )
     if tx is not None:
+        _record_balance_cache_refresh(
+            session,
+            user_id=completion.user_id,
+            balance_after=tx.balance_after,
+        )
         session.add(
             _audit(
                 event_type="wallet.release.completion",

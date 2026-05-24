@@ -121,7 +121,7 @@ export function Onboarding({
             )}
           >
             <div className="flex items-start gap-3">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)] transition-colors group-hover:text-[var(--accent)]">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)] transition-colors group-hover:text-[var(--accent)]">
                 {preset.icon}
               </span>
               <span className="min-w-0 flex-1">
@@ -159,7 +159,7 @@ export function Onboarding({
         <div
           role="status"
           aria-live="polite"
-          className="absolute inset-0 flex items-center justify-center rounded-xl bg-[var(--bg-0)]/50 backdrop-blur-[2px]"
+          className="absolute inset-0 flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-0)]/50 backdrop-blur-[2px]"
         >
           <span className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/5 px-3 py-1.5 text-sm text-[var(--fg-1)]">
             <Sparkles className="h-4 w-4 animate-spin text-[var(--accent)]" />

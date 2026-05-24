@@ -53,7 +53,7 @@ export function UserBubble({ msg }: UserBubbleProps) {
                   delay: idx * 0.03,
                 }}
                 className={cn(
-                  "relative w-16 h-16 rounded-xl overflow-hidden",
+                  "relative w-16 h-16 rounded-[var(--radius-panel)] overflow-hidden",
                   "border border-[var(--border)] bg-white/5",
                   idx === 0 && "ring-1 ring-[var(--color-lumen-amber)]/60",
                 )}
@@ -79,7 +79,7 @@ export function UserBubble({ msg }: UserBubbleProps) {
         {msg.text && (
           <div
             className={cn(
-              "relative px-4 py-3 md:px-5 md:py-3.5 rounded-2xl rounded-br-md text-[0.9rem] md:text-[0.95rem] whitespace-pre-wrap leading-relaxed",
+              "relative px-4 py-3 md:px-5 md:py-3.5 rounded-[var(--radius-dialog)] rounded-br-md text-[0.9rem] md:text-[0.95rem] whitespace-pre-wrap leading-relaxed",
               "bg-[var(--color-lumen-amber)]/15 border border-[var(--color-lumen-amber)]/25",
               "text-[var(--fg-0)] shadow-sm break-words [overflow-wrap:anywhere]",
             )}

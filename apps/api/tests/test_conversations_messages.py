@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.routes import conversations
+from lumen_core.constants import CompletionStatus, GenerationStatus
 
 
 class _Result:
@@ -71,6 +72,20 @@ class _WriteDb:
         return _WriteResult(self.rowcount)
 
 
+class _ActiveTaskDb:
+    def __init__(self, responses: list[list[Any]]) -> None:
+        self.responses = responses
+        self.statements: list[Any] = []
+        self.committed = False
+
+    async def execute(self, statement: Any) -> _Result:
+        self.statements.append(statement)
+        return _Result(self.responses.pop(0) if self.responses else [])
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
 @pytest.mark.asyncio
 async def test_list_conversations_filters_workflow_backing_conversations() -> None:
     db = _Db([])
@@ -124,6 +139,248 @@ async def test_delete_conversation_soft_deletes_generated_images() -> None:
     assert "FROM generations JOIN messages" in rendered
     assert "messages.conversation_id" in rendered
     assert "generations.user_id" in rendered
+
+
+@pytest.mark.asyncio
+async def test_cancel_conversation_active_tasks_releases_generation_and_completion_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen = SimpleNamespace(
+        id="gen-1",
+        status=GenerationStatus.RUNNING.value,
+        progress_stage="rendering",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    comp = SimpleNamespace(
+        id="comp-1",
+        status=CompletionStatus.STREAMING.value,
+        progress_stage="streaming",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+        upstream_request={"billing_retry_count": 1},
+    )
+    db = _ActiveTaskDb([[gen], [comp]])
+    released: list[dict[str, Any]] = []
+
+    async def release_conversation_task_hold(
+        db: _ActiveTaskDb,
+        *,
+        user_id: str,
+        ref_type: str,
+        ref_id: str,
+        reason: str,
+    ) -> bool:
+        released.append(
+            {
+                "committed": db.committed,
+                "user_id": user_id,
+                "ref_type": ref_type,
+                "ref_id": ref_id,
+                "reason": reason,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        conversations,
+        "_release_conversation_task_hold",
+        release_conversation_task_hold,
+    )
+    monkeypatch.setattr(
+        conversations,
+        "_conversation_wallet_exists",
+        lambda *_args, **_kwargs: False,
+    )
+
+    cleanup = await conversations._cancel_conversation_active_tasks(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        conv_id="conv-1",
+        user_id="user-1",
+        canceled_at=datetime.now(timezone.utc),
+    )
+
+    assert cleanup == {
+        "generations_canceled": 1,
+        "completions_canceled": 1,
+        "holds_released": 2,
+        "active_generation_ids": ["gen-1"],
+        "active_completion_ids": ["comp-1"],
+        "queued_generation_ids": [],
+        "running_generation_ids": ["gen-1"],
+        "streaming_completion_ids": ["comp-1"],
+    }
+    assert gen.status == GenerationStatus.CANCELED.value
+    assert comp.status == CompletionStatus.CANCELED.value
+    assert [call["ref_id"] for call in released] == ["gen-1", "comp-1:retry:1"]
+    assert all(call["committed"] is False for call in released)
+
+
+@pytest.mark.asyncio
+async def test_cancel_conversation_active_tasks_skips_holds_for_byok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen = SimpleNamespace(id="gen-1", status=GenerationStatus.RUNNING.value)
+    comp = SimpleNamespace(id="comp-1", status=CompletionStatus.STREAMING.value)
+    db = _ActiveTaskDb([[gen], [comp]])
+    released: list[str] = []
+
+    async def release_conversation_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(
+        conversations,
+        "_release_conversation_task_hold",
+        release_conversation_task_hold,
+    )
+
+    cleanup = await conversations._cancel_conversation_active_tasks(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        conv_id="conv-1",
+        user_id="user-1",
+        canceled_at=datetime.now(timezone.utc),
+        account_mode="byok",
+    )
+
+    assert cleanup["holds_released"] == 0
+    assert released == []
+    assert gen.status == GenerationStatus.CANCELED.value
+    assert comp.status == CompletionStatus.CANCELED.value
+
+
+@pytest.mark.asyncio
+async def test_post_commit_conversation_task_cleanup_runs_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _ActiveTaskDb([])
+    invalidated: list[tuple[str, bool]] = []
+    redis_calls: list[tuple[str, str, int]] = []
+    queue_released: list[tuple[str, bool]] = []
+
+    class Redis:
+        async def set(self, key: str, value: str, *, ex: int) -> None:
+            redis_calls.append((key, value, ex))
+
+    async def invalidate_balance_cache(user_id: str) -> None:
+        invalidated.append((user_id, db.committed))
+
+    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
+        queue_released.append((task_id, db.committed))
+
+    monkeypatch.setattr(conversations, "get_redis", lambda: Redis())
+    monkeypatch.setattr(
+        conversations,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
+    monkeypatch.setattr(
+        conversations,
+        "_release_conversation_generation_queue_state",
+        release_generation_queue_state,
+    )
+
+    await db.commit()
+    await conversations._post_commit_conversation_task_cleanup(  # noqa: SLF001
+        user_id="user-1",
+        cleanup={
+            "holds_released": 1,
+            "queued_generation_ids": ["gen-queued"],
+            "running_generation_ids": ["gen-running"],
+            "streaming_completion_ids": ["comp-1"],
+        },
+    )
+
+    assert invalidated == [("user-1", True)]
+    assert queue_released == [("gen-queued", True)]
+    assert redis_calls == [
+        ("task:gen-running:cancel", "1", 3600),
+        ("task:comp-1:cancel", "1", 3600),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_conversation_task_cleanup_keeps_cancel_when_cache_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis_calls: list[tuple[str, str, int]] = []
+    queue_released: list[str] = []
+
+    class Redis:
+        async def set(self, key: str, value: str, *, ex: int) -> None:
+            redis_calls.append((key, value, ex))
+
+    async def invalidate_balance_cache(_user_id: str) -> None:
+        raise RuntimeError("cache unavailable")
+
+    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
+        queue_released.append(task_id)
+
+    monkeypatch.setattr(conversations, "get_redis", lambda: Redis())
+    monkeypatch.setattr(
+        conversations,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
+    monkeypatch.setattr(
+        conversations,
+        "_release_conversation_generation_queue_state",
+        release_generation_queue_state,
+    )
+
+    await conversations._post_commit_conversation_task_cleanup(  # noqa: SLF001
+        user_id="user-1",
+        cleanup={
+            "holds_released": 1,
+            "queued_generation_ids": ["gen-queued"],
+            "running_generation_ids": ["gen-running"],
+            "streaming_completion_ids": ["comp-1"],
+        },
+    )
+
+    assert queue_released == ["gen-queued"]
+    assert redis_calls == [
+        ("task:gen-running:cancel", "1", 3600),
+        ("task:comp-1:cancel", "1", 3600),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_conversation_task_cleanup_invalidates_hold_only_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidated: list[str] = []
+    redis_requested = False
+
+    async def invalidate_balance_cache(user_id: str) -> None:
+        invalidated.append(user_id)
+
+    def get_redis() -> object:
+        nonlocal redis_requested
+        redis_requested = True
+        return object()
+
+    monkeypatch.setattr(conversations, "get_redis", get_redis)
+    monkeypatch.setattr(
+        conversations,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
+
+    await conversations._post_commit_conversation_task_cleanup(  # noqa: SLF001
+        user_id="user-1",
+        cleanup={
+            "holds_released": 1,
+            "queued_generation_ids": [],
+            "running_generation_ids": [],
+            "streaming_completion_ids": [],
+        },
+    )
+
+    assert invalidated == ["user-1"]
+    assert redis_requested is False
 
 
 @pytest.mark.asyncio

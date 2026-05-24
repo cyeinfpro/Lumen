@@ -69,7 +69,7 @@ export function ModeSwitcher() {
                 className={cn(
                   "absolute inset-0 rounded-full -z-10",
                   isImageActive
-                    ? "bg-[var(--color-lumen-amber)] shadow-[0_0_14px_rgba(242,169,58,0.35)]"
+                    ? "bg-[var(--color-lumen-amber)] shadow-[var(--shadow-amber)]"
                     : "bg-white/15",
                 )}
               />

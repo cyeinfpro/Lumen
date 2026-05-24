@@ -296,7 +296,7 @@ export function PosterInpaintDialog({
         if (event.target === event.currentTarget && !submitBusy) onClose();
       }}
     >
-      <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-lg md:border md:border-[var(--border)]">
+      <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-[var(--radius-card)] md:border md:border-[var(--border)]">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">

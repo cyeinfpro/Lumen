@@ -1,6 +1,6 @@
 "use client";
 // 卡片归一原语（V1 设计语言统一, 2026-05-09）。
-// 替代散在各处的 "rounded-2xl border border-white/15 bg-..." 拼接写法。
+// 替代散在各处的 "rounded-2xl border border-[var(--border)] bg-..." 拼接写法。
 // variant × elevation × padding 正交。default/subtle 复用 globals.css 的 surface-* class。
 
 import { cn } from "@/lib/utils";

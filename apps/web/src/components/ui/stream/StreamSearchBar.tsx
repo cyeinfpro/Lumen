@@ -42,8 +42,8 @@ export function StreamSearchBar({
           <div
             className={[
               "flex min-h-11 items-center gap-2 px-3",
-              "rounded-xl bg-[var(--bg-1)] border border-[var(--border-subtle)]",
-              "focus-within:border-[var(--border-amber)] focus-within:shadow-[0_0_0_3px_rgba(242,169,58,0.1)]",
+              "rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",
+              "focus-within:border-[var(--border-amber)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20",
               "transition-[border-color,box-shadow] duration-200",
             ].join(" ")}
           >

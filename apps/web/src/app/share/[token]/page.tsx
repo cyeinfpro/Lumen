@@ -213,7 +213,7 @@ function ShareShell({ children }: { children: React.ReactNode }) {
             className="inline-flex items-center gap-2 text-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] transition-colors"
           >
             {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
-            <span className="w-6 h-6 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_16px_-4px_var(--color-lumen-amber)]" />
+            <span className="w-6 h-6 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[var(--shadow-amber)]" />
             <span className="font-medium tracking-tight">Lumen</span>
             <span className="hidden sm:inline text-xs text-[var(--fg-2)]">
               · 分享
@@ -255,14 +255,14 @@ function ShareError({ error }: { error: ShareLoadError }) {
 
   return (
     <div className="w-full max-w-md">
-      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-1)]/72 backdrop-blur-sm p-8 text-center space-y-4 shadow-[var(--shadow-2)]">
-        <div className="mx-auto w-14 h-14 rounded-lg bg-white/5 border border-[var(--border)] flex items-center justify-center">
+      <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 backdrop-blur-sm p-8 text-center space-y-4 shadow-[var(--shadow-2)]">
+        <div className="mx-auto w-14 h-14 rounded-[var(--radius-card)] bg-white/5 border border-[var(--border)] flex items-center justify-center">
           {isNotFound ? (
-            <FileX className="w-6 h-6 text-neutral-400" />
+            <FileX className="w-6 h-6 text-[var(--fg-1)]" />
           ) : isGone ? (
-            <Clock className="w-6 h-6 text-neutral-400" />
+            <Clock className="w-6 h-6 text-[var(--fg-1)]" />
           ) : (
-            <ImageOff className="w-6 h-6 text-neutral-400" />
+            <ImageOff className="w-6 h-6 text-[var(--fg-1)]" />
           )}
         </div>
         <div className="space-y-1.5">
@@ -292,7 +292,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
         </div>
         <Link
           href="/"
-          className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-lg bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium transition-all"
+          className="inline-flex items-center justify-center gap-1.5 h-9 px-5 rounded-[var(--radius-card)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.97] text-black text-sm font-medium transition-all"
         >
           <Sparkles className="w-3.5 h-3.5" /> 打开主页
         </Link>

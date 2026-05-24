@@ -583,7 +583,7 @@ export function ConversationImageGallery({
                 aria-label="取消选择"
                 disabled={bulkBusy}
                 className={cn(
-                  "inline-flex h-7 w-7 items-center justify-center rounded-lg",
+                  "inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)]",
                   "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)]",
                   "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] transition-colors disabled:opacity-55",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
@@ -598,7 +598,7 @@ export function ConversationImageGallery({
               onClick={() => setSelectionMode((value) => !value)}
               aria-pressed={selectionMode}
               className={cn(
-                "inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[11px]",
+                "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
                 "border transition-colors",
                 selectionMode
                   ? "border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.14)] text-[var(--amber-300)]"
@@ -613,7 +613,7 @@ export function ConversationImageGallery({
           <div
             role="tablist"
             aria-label="图片来源"
-            className="flex gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-1)] p-0.5"
+            className="flex gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-0.5"
           >
             <FilterButton
               active={filter === "all"}
@@ -638,7 +638,7 @@ export function ConversationImageGallery({
             type="button"
             onClick={() => setStudioView("chat")}
             className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[11px]",
+              "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
               "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)]",
               "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] transition-colors",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
@@ -682,7 +682,7 @@ export function ConversationImageGallery({
                   aria-label={`查看${image.sourceLabel}图片`}
                   aria-pressed={selectionActive ? selected : undefined}
                   className={cn(
-                    "group block w-full overflow-hidden rounded-lg",
+                    "group block w-full overflow-hidden rounded-[var(--radius-card)]",
                     "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-left",
                     "shadow-[var(--shadow-1)] transition-colors duration-200",
                     "hover:border-[var(--amber-400)]/45 hover:bg-[var(--bg-2)]",
@@ -709,12 +709,12 @@ export function ConversationImageGallery({
                       className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.025]"
                     />
                     <span className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/60 to-transparent" />
-                    <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-0.5 rounded-full border border-white/15 bg-black/45 px-1.5 py-0.5 text-[10px] text-white/80 backdrop-blur">
+                    <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-black/45 px-1.5 py-0.5 text-[10px] text-white/80 backdrop-blur">
                       <Icon className="h-2.5 w-2.5" aria-hidden />
                       {image.sourceLabel}
                     </span>
                     {longImage && (
-                      <span className="absolute bottom-2 left-2 rounded-full border border-white/15 bg-black/45 px-2 py-1 text-[11px] text-white/82 backdrop-blur">
+                      <span className="absolute bottom-2 left-2 rounded-full border border-[var(--border)] bg-black/45 px-2 py-1 text-[11px] text-white/82 backdrop-blur">
                         长图
                       </span>
                     )}
@@ -724,13 +724,13 @@ export function ConversationImageGallery({
                           "absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full border backdrop-blur",
                           selected
                             ? "border-[rgba(242,169,58,0.55)] bg-[var(--amber-400)] text-black"
-                            : "border-white/20 bg-black/45 text-white/80",
+                            : "border-[var(--border-strong)] bg-black/45 text-white/80",
                         )}
                       >
                         {selected && <Check className="h-4 w-4" aria-hidden />}
                       </span>
                     ) : (
-                      <span className="absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/82 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                      <span className="absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-black/45 text-white/82 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
                         <Maximize2 className="h-4 w-4" aria-hidden />
                       </span>
                     )}
@@ -813,7 +813,7 @@ function GalleryActionButton({
       disabled={disabled || loading}
       title={title}
       className={cn(
-        "inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[11px]",
+        "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
         "border transition-colors disabled:cursor-not-allowed disabled:opacity-55",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
         tone === "accent"
@@ -861,7 +861,7 @@ function FavoriteOptionsForm({
             onAgeSegmentChange(event.target.value as ModelLibraryItemAgeSegment)
           }
           className={cn(
-            "h-9 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-0)] px-2.5",
+            "h-9 w-full rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-2.5",
             "text-[13px] text-[var(--fg-0)] focus:border-[var(--border-amber)] focus:outline-none",
           )}
         >
@@ -884,7 +884,7 @@ function FavoriteOptionsForm({
               aria-pressed={gender === value}
               onClick={() => onGenderChange(value)}
               className={cn(
-                "inline-flex h-8 items-center rounded-lg border px-3 text-[12px] transition-colors",
+                "inline-flex h-8 items-center rounded-[var(--radius-card)] border px-3 text-[12px] transition-colors",
                 gender === value
                   ? "border-[var(--border-amber)] bg-[var(--amber-soft)] text-[var(--amber-300)]"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -917,7 +917,7 @@ function FilterButton({
       aria-selected={active}
       onClick={onClick}
       className={cn(
-        "inline-flex h-7 items-center gap-1 rounded-md px-2.5 text-[11px] transition-colors",
+        "inline-flex h-7 items-center gap-1 rounded-[var(--radius-control)] px-2.5 text-[11px] transition-colors",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
         active
           ? "bg-[var(--bg-2)] text-[var(--fg-0)]"

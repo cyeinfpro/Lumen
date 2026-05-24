@@ -31,6 +31,7 @@ from lumen_core.providers import (
 )
 from lumen_core.runtime_settings import get_spec
 
+from ..billing_cache_state import invalidate_balance_cache
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..audit import hash_email, write_audit
@@ -266,6 +267,7 @@ async def _prepare_prompt_enhance_billing(
             detail={"error": {"code": exc.code, "message": exc.message}},
         ) from exc
     await db.commit()
+    await invalidate_balance_cache(user.id)
     return _EnhanceBillingContext(
         db=db,
         user_id=user.id,
@@ -452,6 +454,8 @@ async def _charge_prompt_enhance(
             autocommit=False,
         )
     await billing.db.commit()
+    if tx is not None:
+        await invalidate_balance_cache(billing.user_id)
 
 
 async def _release_prompt_enhance_hold(
@@ -471,6 +475,7 @@ async def _release_prompt_enhance_hold(
             meta={"route": "prompts.enhance", "reason": reason},
         )
         await billing.db.commit()
+        await invalidate_balance_cache(billing.user_id)
     except Exception:
         logger.exception("prompt enhance billing hold release failed")
 
@@ -653,67 +658,86 @@ async def _stream_enhance(
     last_error = "upstream_error"
     total_attempts = len(_ENHANCE_ATTEMPTS) * len(providers)
     seen_attempts = 0
-    for attempt in _ENHANCE_ATTEMPTS:
-        for provider in providers:
-            seen_attempts += 1
-            emitted = False
-            capture = _EnhanceUsageCapture()
-            try:
-                async for chunk in _stream_enhance_one(
-                    text,
-                    provider,
-                    attempt,
-                    capture,
-                ):
-                    emitted = True
-                    yield chunk
-                if billing is not None and capture.usage:
-                    try:
-                        await _charge_prompt_enhance(billing, capture)
-                    except Exception:
-                        logger.exception("prompt enhance billing charge failed")
-                        yield f"data: {json.dumps({'error': 'billing_failed'})}\n\n"
+    settled = False
+    try:
+        for attempt in _ENHANCE_ATTEMPTS:
+            for provider in providers:
+                seen_attempts += 1
+                emitted = False
+                capture = _EnhanceUsageCapture()
+                try:
+                    async for chunk in _stream_enhance_one(
+                        text,
+                        provider,
+                        attempt,
+                        capture,
+                    ):
+                        emitted = True
+                        yield chunk
+                    if billing is not None:
+                        try:
+                            await _charge_prompt_enhance(billing, capture)
+                            settled = True
+                        except Exception:
+                            logger.exception("prompt enhance billing charge failed")
+                            await _release_prompt_enhance_hold(
+                                billing,
+                                reason="charge_failed",
+                            )
+                            settled = True
+                            yield f"data: {json.dumps({'error': 'billing_failed'})}\n\n"
+                            return
+                    yield "data: [DONE]\n\n"
+                    return
+                except _EnhanceProviderError as exc:
+                    last_error = "timeout" if str(exc) == "timeout" else "upstream_error"
+                    logger.warning(
+                        (
+                            "enhance provider failed provider=%s attempt=%s "
+                            "remaining=%d retryable=%s err=%s"
+                        ),
+                        provider.name,
+                        attempt.name,
+                        total_attempts - seen_attempts,
+                        exc.retryable,
+                        exc,
+                    )
+                    if emitted or not exc.retryable:
+                        await _release_prompt_enhance_hold(
+                            billing,
+                            reason="provider_error_after_emit"
+                            if emitted
+                            else "provider_error",
+                        )
+                        settled = True
+                        yield f"data: {json.dumps({'error': last_error})}\n\n"
                         return
-                yield "data: [DONE]\n\n"
-                return
-            except _EnhanceProviderError as exc:
-                last_error = "timeout" if str(exc) == "timeout" else "upstream_error"
-                logger.warning(
-                    (
-                        "enhance provider failed provider=%s attempt=%s "
-                        "remaining=%d retryable=%s err=%s"
-                    ),
-                    provider.name,
-                    attempt.name,
-                    total_attempts - seen_attempts,
-                    exc.retryable,
-                    exc,
-                )
-                if emitted or not exc.retryable:
-                    await _release_prompt_enhance_hold(
-                        billing,
-                        reason="provider_error_after_emit"
-                        if emitted
-                        else "provider_error",
+                except GeneratorExit:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "enhance provider exception provider=%s attempt=%s",
+                        provider.name,
+                        attempt.name,
                     )
-                    yield f"data: {json.dumps({'error': last_error})}\n\n"
-                    return
-            except Exception:
-                logger.exception(
-                    "enhance provider exception provider=%s attempt=%s",
-                    provider.name,
-                    attempt.name,
-                )
-                last_error = "internal"
-                if emitted:
-                    await _release_prompt_enhance_hold(
-                        billing,
-                        reason="internal_error_after_emit",
-                    )
-                    yield f"data: {json.dumps({'error': last_error})}\n\n"
-                    return
-    await _release_prompt_enhance_hold(billing, reason="no_success")
-    yield f"data: {json.dumps({'error': last_error})}\n\n"
+                    last_error = "internal"
+                    if emitted:
+                        await _release_prompt_enhance_hold(
+                            billing,
+                            reason="internal_error_after_emit",
+                        )
+                        settled = True
+                        yield f"data: {json.dumps({'error': last_error})}\n\n"
+                        return
+        await _release_prompt_enhance_hold(billing, reason="no_success")
+        settled = True
+        yield f"data: {json.dumps({'error': last_error})}\n\n"
+    except (asyncio.CancelledError, GeneratorExit):
+        if not settled:
+            await _release_prompt_enhance_hold(billing, reason="stream_cancelled")
+        raise
 
 
 @router.post("/enhance")

@@ -364,7 +364,7 @@ function ListSkeleton() {
           key={row.id}
           className="flex items-center gap-3.5 min-h-[68px] pl-4 pr-3 border-b border-[var(--border-subtle)]"
         >
-          <div className="w-11 h-11 rounded-xl bg-[var(--bg-2)] animate-pulse" />
+          <div className="w-11 h-11 rounded-[var(--radius-panel)] bg-[var(--bg-2)] animate-pulse" />
           <div className="flex-1 space-y-1.5">
             <div
               className="h-3 rounded bg-[var(--bg-2)] animate-pulse"
@@ -382,7 +382,7 @@ function EmptyState({ query, tab }: { query: string; tab: TabKind }) {
   if (query) {
     return (
       <div className="px-6 py-14 text-center">
-        <div className="mx-auto w-11 h-11 rounded-2xl bg-[var(--bg-2)] flex items-center justify-center mb-3">
+        <div className="mx-auto w-11 h-11 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
           <Search className="w-4.5 h-4.5 text-[var(--fg-2)]" />
         </div>
         <p className="text-[14px] text-[var(--fg-1)]">
@@ -397,7 +397,7 @@ function EmptyState({ query, tab }: { query: string; tab: TabKind }) {
   if (tab === "archived") {
     return (
       <div className="px-6 py-14 text-center">
-        <div className="mx-auto w-11 h-11 rounded-2xl bg-[var(--bg-2)] flex items-center justify-center mb-3">
+        <div className="mx-auto w-11 h-11 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
           <Inbox className="w-4.5 h-4.5 text-[var(--fg-2)]" />
         </div>
         <p className="text-[14px] text-[var(--fg-1)]">暂无归档会话</p>
@@ -409,7 +409,7 @@ function EmptyState({ query, tab }: { query: string; tab: TabKind }) {
   }
   return (
     <div className="px-6 py-14 text-center">
-      <div className="mx-auto w-11 h-11 rounded-2xl bg-[var(--bg-2)] flex items-center justify-center mb-3">
+      <div className="mx-auto w-11 h-11 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
         <Inbox className="w-4.5 h-4.5 text-[var(--fg-2)]" />
       </div>
       <p className="text-[14px] text-[var(--fg-1)]">还没有会话</p>

@@ -107,14 +107,42 @@ def parse_thresholds(raw: str | None) -> dict[str, int]:
         key = str(raw_key).strip()
         if not key:
             continue
-        try:
-            ivalue = int(value)
-        except (TypeError, ValueError):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             if key not in DEFAULT_IMAGE_SIZE_THRESHOLDS:
                 continue
-            ivalue = DEFAULT_IMAGE_SIZE_THRESHOLDS[key]
-        out[key] = max(0, ivalue)
+            out[key] = DEFAULT_IMAGE_SIZE_THRESHOLDS[key]
+            continue
+        out[key] = value
     return out
+
+
+def retry_billing_ref_id(task_id: str, retry_count: int | None) -> str:
+    try:
+        count = max(0, int(retry_count or 0))
+    except (TypeError, ValueError):
+        count = 0
+    return task_id if count <= 0 else f"{task_id}:retry:{count}"
+
+
+def completion_billing_retry_count(completion_or_request: Any) -> int:
+    upstream_request = getattr(
+        completion_or_request,
+        "upstream_request",
+        completion_or_request,
+    )
+    if isinstance(upstream_request, dict):
+        try:
+            return max(0, int(upstream_request.get("billing_retry_count") or 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def completion_billing_ref_id(completion: Any) -> str:
+    return retry_billing_ref_id(
+        str(getattr(completion, "id")),
+        completion_billing_retry_count(completion),
+    )
 
 
 def tier_for_pixels(px: int, thresholds: dict[str, int] | None = None) -> str:
@@ -468,6 +496,11 @@ async def settle(
     allow_negative: bool = False,
     meta: dict[str, Any] | None = None,
 ) -> WalletTransaction | None:
+    raw_actual = int(actual_micro)
+    if raw_actual < 0:
+        raise BillingError(
+            "NEGATIVE_AMOUNT", "settle actual amount must not be negative", 422
+        )
     existing = await _existing_tx(db, user_id, idempotency_key)
     if existing is not None:
         return existing
@@ -480,10 +513,10 @@ async def settle(
     if consumed is not None:
         return consumed
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
-    if held <= 0 and actual_micro <= 0:
+    if held <= 0 and raw_actual <= 0:
         return None
     before_balance = wallet.balance_micro
-    actual = max(0, int(actual_micro))
+    actual = raw_actual
     balance_delta = held - actual
     next_balance = wallet.balance_micro + balance_delta
     overdraw_micro = 0
@@ -657,6 +690,8 @@ async def topup_redeem(
     meta: dict[str, Any] | None = None,
 ) -> WalletTransaction:
     amount = int(amount_micro)
+    if amount <= 0:
+        raise BillingError("INVALID_AMOUNT", "redeem amount must be positive", 422)
     key = idempotency_key or f"redeem:{usage_id}"
     existing = await _existing_tx(db, user_id, key)
     if existing is not None:

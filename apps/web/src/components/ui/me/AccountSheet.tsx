@@ -44,11 +44,11 @@ export function AccountSheet({ open, onClose, user, loading }: AccountSheetProps
         <div className="flex items-center gap-3 px-4 py-3">
           <div
             className={cn(
-              "w-10 h-10 rounded-xl shrink-0",
+              "w-10 h-10 rounded-[var(--radius-panel)] shrink-0",
               "bg-gradient-to-br from-[var(--amber-300)] via-[var(--amber-400)] to-[var(--amber-600)]",
               "flex items-center justify-center",
               "text-[15px] font-bold text-[var(--bg-0)]",
-              "shadow-[0_0_14px_-4px_var(--amber-glow)]",
+              "shadow-[var(--shadow-amber)]",
             )}
           >
             {avatarChar}

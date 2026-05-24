@@ -247,7 +247,7 @@ function HistoryLoadControl({
         <div
           role="alert"
           className={cn(
-            "flex max-w-full items-center gap-2 rounded-md border px-2.5 py-1.5",
+            "flex max-w-full items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-1.5",
             "border-[var(--danger)]/25 bg-[var(--danger-soft)] text-xs text-[var(--fg-0)]",
           )}
         >
@@ -555,7 +555,7 @@ function JumpToLatestButton({
         variant="secondary"
         leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
         onClick={onClick}
-        className="border-white/15 bg-[var(--bg-1)]/88 shadow-lg backdrop-blur-xl"
+        className="border-[var(--border)] bg-[var(--bg-1)]/88 shadow-lg backdrop-blur-xl"
       >
         最新
       </Button>
@@ -587,7 +587,7 @@ function CopyButton({
       onClick={handleCopy}
       aria-label={copied ? "已复制" : "复制"}
       className={cn(
-        "shrink-0 inline-flex items-center gap-1 h-6 rounded-md",
+        "shrink-0 inline-flex items-center gap-1 h-6 rounded-[var(--radius-control)]",
         "transition-all duration-150",
         copied
           ? "opacity-100 px-1.5 text-[var(--ok,#30A46C)] bg-[var(--ok,#30A46C)]/8"
@@ -623,7 +623,7 @@ function UserTurn({ msg }: { msg: UserMessage }) {
     >
       <span
         aria-hidden
-        className="absolute bg-[var(--amber-400)] shadow-[0_0_8px_var(--amber-glow)]"
+        className="absolute bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
         style={{
           left: "-24px",
           top: "30%",
@@ -639,7 +639,7 @@ function UserTurn({ msg }: { msg: UserMessage }) {
             <div
               key={att.id}
               className={cn(
-                "relative w-12 h-12 rounded-lg overflow-hidden",
+                "relative w-12 h-12 rounded-[var(--radius-card)] overflow-hidden",
                 "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
                 idx === 0 && "ring-1 ring-[var(--amber-400)]/60",
               )}
@@ -941,7 +941,7 @@ const FinalImage = memo(function FinalImage({
                 aria-hidden
                 className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/70 to-transparent"
               />
-              <span className="absolute bottom-3 left-3 rounded-full border border-white/15 bg-black/45 px-2.5 py-1 text-[11px] text-white/85 backdrop-blur">
+              <span className="absolute bottom-3 left-3 rounded-full border border-[var(--border)] bg-black/45 px-2.5 py-1 text-[11px] text-[var(--fg-0)] backdrop-blur">
                 长图 · 点击查看完整
               </span>
             </>
@@ -949,7 +949,7 @@ const FinalImage = memo(function FinalImage({
         </button>
 
         {free && (
-          <span className="pointer-events-none absolute left-2 top-2 z-10 rounded-full border border-white/20 bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
+          <span className="pointer-events-none absolute left-2 top-2 z-10 rounded-full border border-[var(--border-strong)] bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
             free
           </span>
         )}
@@ -1139,7 +1139,7 @@ function ImageContextMenuInner({
       aria-label="图片操作"
       className={cn(
         "fixed z-[1000] min-w-[172px] py-1",
-        "rounded-xl border border-[var(--border)]",
+        "rounded-[var(--radius-panel)] border border-[var(--border)]",
         "bg-[var(--bg-1)]/90 backdrop-blur-xl shadow-[var(--shadow-3)]",
       )}
       style={style}

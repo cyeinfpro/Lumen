@@ -8,7 +8,7 @@ import pytest
 
 from app.routes import regenerate
 from app.routes.messages import AssistantTaskResult
-from lumen_core.constants import GenerationAction, GenerationStatus
+from lumen_core.constants import CompletionStatus, GenerationAction, GenerationStatus
 from lumen_core.models import Generation
 from lumen_core.schemas import RegenerateIn
 
@@ -57,6 +57,20 @@ class _Db:
             item.created_at = datetime.now(timezone.utc)
 
 
+class _ActiveTaskDb:
+    def __init__(self, responses: list[list[Any]]) -> None:
+        self.responses = responses
+        self.statements: list[Any] = []
+        self.committed = False
+
+    async def execute(self, statement: Any) -> _Result:
+        self.statements.append(statement)
+        return _Result(all_values=self.responses.pop(0) if self.responses else [])
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
 def _conv() -> SimpleNamespace:
     return SimpleNamespace(
         id="conv-1",
@@ -69,7 +83,11 @@ def _conv() -> SimpleNamespace:
 
 
 def _user() -> SimpleNamespace:
-    return SimpleNamespace(id="user-1", default_system_prompt_id=None)
+    return SimpleNamespace(
+        id="user-1",
+        default_system_prompt_id=None,
+        account_mode="wallet",
+    )
 
 
 def _target() -> SimpleNamespace:
@@ -141,6 +159,33 @@ async def test_image_params_from_target_does_not_inherit_old_default_jpeg() -> N
 
     assert out.output_format is None
     assert out.output_compression is None
+
+
+@pytest.mark.asyncio
+async def test_image_params_from_target_treats_string_false_fast_as_disabled() -> None:
+    gen = Generation(
+        id="gen-old",
+        message_id="assistant-old",
+        user_id="user-1",
+        action=GenerationAction.GENERATE.value,
+        prompt="old prompt",
+        size_requested="2048x2048",
+        aspect_ratio="1:1",
+        input_image_ids=[],
+        status=GenerationStatus.SUCCEEDED.value,
+        idempotency_key="old-idem",
+        upstream_request={"fast": "false"},
+    )
+    db = _Db([_Result(all_values=[gen])])
+
+    out = await regenerate._image_params_from_target(
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        conv_id="conv-1",
+        target_msg_id="assistant-old",
+    )
+
+    assert out.fast is False
 
 
 @pytest.mark.asyncio
@@ -379,3 +424,230 @@ async def test_regenerate_uses_current_image_output_format_setting(
     assert out.generation_ids == ["gen-new"]
     assert captured["default_image_output_format"] == "png"
     assert captured["image_params"].output_format is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_regenerate_target_active_tasks_releases_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen_queued = SimpleNamespace(
+        id="gen-queued",
+        status=GenerationStatus.QUEUED.value,
+        progress_stage="queued",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    gen_running = SimpleNamespace(
+        id="gen-running",
+        status=GenerationStatus.RUNNING.value,
+        progress_stage="rendering",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    comp_queued = SimpleNamespace(
+        id="comp-queued",
+        status=CompletionStatus.QUEUED.value,
+        progress_stage="queued",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+        upstream_request={"billing_retry_count": 1},
+    )
+    comp_streaming = SimpleNamespace(
+        id="comp-streaming",
+        status=CompletionStatus.STREAMING.value,
+        progress_stage="streaming",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    db = _ActiveTaskDb([[gen_queued, gen_running], [comp_queued, comp_streaming]])
+    released: list[dict[str, Any]] = []
+
+    async def release_regenerate_cancel_hold(
+        db: _ActiveTaskDb,
+        *,
+        user_id: str,
+        ref_type: str,
+        ref_id: str,
+    ) -> bool:
+        released.append(
+            {
+                "committed": db.committed,
+                "user_id": user_id,
+                "ref_type": ref_type,
+                "ref_id": ref_id,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        regenerate,
+        "_release_regenerate_cancel_hold",
+        release_regenerate_cancel_hold,
+    )
+
+    cleanup = await regenerate._cancel_regenerate_target_active_tasks(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        target_msg_id="assistant-old",
+        user_id="user-1",
+        canceled_at=datetime.now(timezone.utc),
+        account_mode="wallet",
+    )
+
+    assert cleanup == {
+        "generations_canceled": 2,
+        "completions_canceled": 2,
+        "holds_released": 4,
+        "queued_generation_ids": ["gen-queued"],
+        "running_generation_ids": ["gen-running"],
+        "streaming_completion_ids": ["comp-streaming"],
+    }
+    assert [call["ref_id"] for call in released] == [
+        "gen-queued",
+        "gen-running",
+        "comp-queued:retry:1",
+        "comp-streaming",
+    ]
+    assert all(call["committed"] is False for call in released)
+    assert gen_queued.status == GenerationStatus.CANCELED.value
+    assert gen_running.status == GenerationStatus.CANCELED.value
+    assert comp_queued.status == CompletionStatus.CANCELED.value
+    assert comp_streaming.status == CompletionStatus.CANCELED.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_regenerate_target_active_tasks_releases_holds_for_byok_wallet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen_queued = SimpleNamespace(
+        id="gen-queued",
+        status=GenerationStatus.QUEUED.value,
+        progress_stage="queued",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    db = _ActiveTaskDb([[gen_queued], []])
+    released: list[str] = []
+
+    async def release_regenerate_cancel_hold(
+        db: _ActiveTaskDb,
+        *,
+        user_id: str,
+        ref_type: str,
+        ref_id: str,
+    ) -> bool:
+        released.append(f"{ref_type}:{ref_id}:{db.committed}")
+        return True
+
+    async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        regenerate,
+        "_release_regenerate_cancel_hold",
+        release_regenerate_cancel_hold,
+    )
+    monkeypatch.setattr(regenerate, "_regenerate_wallet_exists", wallet_exists)
+
+    cleanup = await regenerate._cancel_regenerate_target_active_tasks(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        target_msg_id="assistant-old",
+        user_id="user-1",
+        canceled_at=datetime.now(timezone.utc),
+        account_mode="byok",
+    )
+
+    assert cleanup["holds_released"] == 1
+    assert released == ["generation:gen-queued:False"]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_regenerate_cancel_cleanup_runs_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _ActiveTaskDb([])
+    invalidated: list[tuple[str, bool]] = []
+    queue_released: list[tuple[str, bool]] = []
+    redis_calls: list[tuple[str, str, int]] = []
+
+    class Redis:
+        async def set(self, key: str, value: str, *, ex: int) -> None:
+            redis_calls.append((key, value, ex))
+
+    async def invalidate_balance_cache(user_id: str) -> None:
+        invalidated.append((user_id, db.committed))
+
+    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
+        queue_released.append((task_id, db.committed))
+
+    monkeypatch.setattr(regenerate, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(
+        regenerate,
+        "_release_generation_queue_state",
+        release_generation_queue_state,
+    )
+
+    await db.commit()
+    await regenerate._post_commit_regenerate_cancel_cleanup(  # noqa: SLF001
+        Redis(),
+        user_id="user-1",
+        cleanup={
+            "holds_released": 2,
+            "queued_generation_ids": ["gen-queued"],
+            "running_generation_ids": ["gen-running"],
+            "streaming_completion_ids": ["comp-streaming"],
+        },
+    )
+
+    assert invalidated == [("user-1", True)]
+    assert queue_released == [("gen-queued", True)]
+    assert redis_calls == [
+        ("task:gen-running:cancel", "1", 3600),
+        ("task:comp-streaming:cancel", "1", 3600),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_regenerate_cancel_cleanup_keeps_cancel_when_cache_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue_released: list[str] = []
+    redis_calls: list[tuple[str, str, int]] = []
+
+    class Redis:
+        async def set(self, key: str, value: str, *, ex: int) -> None:
+            redis_calls.append((key, value, ex))
+
+    async def invalidate_balance_cache(_user_id: str) -> None:
+        raise RuntimeError("cache unavailable")
+
+    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
+        queue_released.append(task_id)
+
+    monkeypatch.setattr(regenerate, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(
+        regenerate,
+        "_release_generation_queue_state",
+        release_generation_queue_state,
+    )
+
+    await regenerate._post_commit_regenerate_cancel_cleanup(  # noqa: SLF001
+        Redis(),
+        user_id="user-1",
+        cleanup={
+            "holds_released": 1,
+            "queued_generation_ids": ["gen-queued"],
+            "running_generation_ids": ["gen-running"],
+            "streaming_completion_ids": ["comp-streaming"],
+        },
+    )
+
+    assert queue_released == ["gen-queued"]
+    assert redis_calls == [
+        ("task:gen-running:cancel", "1", 3600),
+        ("task:comp-streaming:cancel", "1", 3600),
+    ]

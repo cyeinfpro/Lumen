@@ -1254,7 +1254,18 @@ async def _ensure_completion_tool_image_wallet_budget(
     if budget_micro <= 0:
         return
     async with SessionLocal() as session:
-        if await worker_billing.account_mode(session, user_id) != "wallet":
+        comp = await session.get(Completion, task_id)
+        billing_ref_id = (
+            worker_billing.completion_billing_ref_id(comp)
+            if comp is not None
+            else task_id
+        )
+        if not await worker_billing._wallet_billing_applies(  # noqa: SLF001
+            session,
+            user_id=user_id,
+            ref_type="completion",
+            ref_id=billing_ref_id,
+        ):
             return
         if not await worker_billing.billing_enabled():
             return
@@ -1264,7 +1275,7 @@ async def _ensure_completion_tool_image_wallet_budget(
             session,
             user_id,
             "completion",
-            task_id,
+            billing_ref_id,
         )
         available_micro = balance_micro + int(held_micro or 0)
         if (
@@ -1535,10 +1546,7 @@ end
 return 0
 """
 
-_RUNNING_COMPLETION_STATUSES = (
-    CompletionStatus.QUEUED.value,
-    CompletionStatus.STREAMING.value,
-)
+_RUNNING_COMPLETION_STATUSES = (CompletionStatus.STREAMING.value,)
 
 
 async def _acquire_lease(redis: Any, task_id: str, worker_id: str) -> None:
@@ -2998,7 +3006,15 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
             msg_failed = await session.get(Message, message_id)
             if msg_failed is not None:
                 msg_failed.status = MessageStatus.FAILED
+            comp_failed = await session.get(Completion, task_id)
+            if comp_failed is not None:
+                await worker_billing.release_completion(
+                    session,
+                    comp_failed,
+                    reason=err_code,
+                )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
             await publish_event(
                 redis,
                 user_id,
@@ -3893,6 +3909,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                     "cancelled before success commit",
                 )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
 
         # publish_event 是 SSE 推送+回放写入；万一 lease 已丢，就别再以"我"的身份
         # 把 succeeded 推给前端——接管 worker 会再推一次造成重复。
@@ -3981,7 +3998,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
         )
         try:
             async with SessionLocal() as session:
-                await session.execute(
+                res = await session.execute(
                     update(Completion)
                     .where(
                         Completion.id == task_id,
@@ -3996,6 +4013,11 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         error_message="cancelled by user",
                     )
                 )
+                if (res.rowcount or 0) == 0:
+                    raise _CompletionEpochSuperseded(
+                        f"completion cancel superseded task={task_id} "
+                        f"attempt_epoch={attempt_epoch}"
+                    )
                 msg_c = await session.get(Message, message_id)
                 if msg_c is not None and msg_c.status not in (
                     MessageStatus.SUCCEEDED,
@@ -4015,6 +4037,17 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         reason=EC.CANCELLED.value,
                     )
                 await session.commit()
+                await worker_billing.flush_balance_cache_refreshes(session)
+        except _CompletionEpochSuperseded as stale_exc:
+            logger.info(
+                "completion cancel skipped by newer epoch task=%s "
+                "attempt_epoch=%s err=%s",
+                task_id,
+                attempt_epoch,
+                stale_exc,
+            )
+            _task_outcome = "superseded"
+            return
         except Exception as db_exc:  # noqa: BLE001
             logger.warning(
                 "completion cancel DB update failed task=%s err=%s",
@@ -4219,6 +4252,7 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         reason=str(err_code),
                     )
             await session.commit()
+            await worker_billing.flush_balance_cache_refreshes(session)
 
         await publish_event(
             redis,

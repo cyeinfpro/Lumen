@@ -182,7 +182,7 @@ function MasterCard({
         }}
         disabled={!image}
         className={cn(
-          "relative block aspect-square w-full overflow-hidden rounded-lg bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          "relative block aspect-square w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
           isSelected && "ring-1 ring-inset ring-[var(--border-amber)]",
         )}
       >

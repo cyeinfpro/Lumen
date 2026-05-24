@@ -71,7 +71,7 @@ export function PosterStyleSelector({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-lg md:border md:border-[var(--border)]">
+      <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-[var(--radius-card)] md:border md:border-[var(--border)]">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
             <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
@@ -171,7 +171,7 @@ function StyleCard({
         type="button"
         onClick={onSelect}
         className={cn(
-          "group relative block w-full overflow-hidden rounded-lg bg-[var(--bg-2)] text-left transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          "group relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] text-left transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
           selected ? "ring-1 ring-inset ring-[var(--border-amber)]" : "",
         )}
       >

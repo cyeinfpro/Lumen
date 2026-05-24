@@ -16,7 +16,7 @@ export function ExecutionSummaryBar({
       aria-label={summary.text}
       title={summary.text}
       className={cn(
-        "mx-3 flex min-h-7 items-center gap-1.5 rounded-lg border px-2.5 py-1.5",
+        "mx-3 flex min-h-7 items-center gap-1.5 rounded-[var(--radius-card)] border px-2.5 py-1.5",
         "text-[11px] leading-4 text-[var(--fg-1)]",
         "overflow-x-auto overscroll-x-contain no-scrollbar",
         compact ? "mt-1 whitespace-nowrap" : "mt-1.5 flex-wrap",

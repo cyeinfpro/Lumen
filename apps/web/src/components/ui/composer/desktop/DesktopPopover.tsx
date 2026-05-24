@@ -178,7 +178,7 @@ export function DesktopPopover({
             "fixed z-[var(--z-tray,50)]",
             originClass(),
             "min-w-[220px] max-h-[360px] overflow-auto",
-            "rounded-xl bg-[var(--bg-1)] border border-[var(--border-subtle)]",
+            "rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",
             "shadow-[var(--shadow-2)] backdrop-blur-xl",
             "p-1",
             className,
@@ -230,7 +230,7 @@ export function PopoverList({
               type="button"
               onClick={it.onSelect}
               className={cn(
-                "w-full h-10 flex items-center gap-3 px-3 text-left rounded-lg",
+                "w-full h-10 flex items-center gap-3 px-3 text-left rounded-[var(--radius-card)]",
                 "text-[13px] transition-colors",
                 "hover:bg-[var(--bg-2)]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",

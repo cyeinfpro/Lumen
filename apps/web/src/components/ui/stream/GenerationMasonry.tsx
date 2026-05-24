@@ -131,7 +131,7 @@ function GenerationMasonryComponent({
         return (
           <section key={b} aria-label={BUCKET_LABEL[b]} className="pt-7 first:pt-4">
             <div className="mb-3.5 flex items-center gap-3 px-3 md:px-0">
-              <span className="flex h-6 items-center rounded-md border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
+              <span className="flex h-6 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
                 {BUCKET_LABEL[b]}
               </span>
               <span className="text-[11px] tabular-nums text-[var(--fg-2)]" aria-label={`${arr.length} 张作品`}>

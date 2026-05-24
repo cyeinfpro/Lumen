@@ -176,6 +176,12 @@ def _decode_pubsub_text(value: object) -> str | None:
     return None
 
 
+def _normalize_event_id(raw: object) -> str | None:
+    if raw is None or raw == "":
+        return None
+    return str(raw)
+
+
 def _is_compaction_channel(channel: object, bridge_channels: dict[str, str]) -> bool:
     channel_text = _decode_pubsub_text(channel)
     return bool(channel_text and channel_text in bridge_channels)
@@ -219,7 +225,7 @@ async def _stream_id_for_pubsub_event(
     SSE id, browser reconnects keep an old Last-Event-ID and replay duplicates.
     """
 
-    event_id = envelope_event_id or str(uuid.uuid4())
+    event_id = _normalize_event_id(envelope_event_id) or str(uuid.uuid4())
     payload_for_stream = payload if isinstance(payload, dict) else {"data": payload}
     envelope = {
         "event": event_name,
@@ -329,8 +335,8 @@ def _decode_replay_fields(fields: object) -> tuple[str, object, str | None] | No
     envelope_channel = parsed.get("channel")
     envelope_channel = envelope_channel if isinstance(envelope_channel, str) else None
     payload = parsed.get("data", parsed)
-    envelope_event_id = parsed.get("event_id")
-    if isinstance(payload, dict) and isinstance(envelope_event_id, str):
+    envelope_event_id = _normalize_event_id(parsed.get("event_id"))
+    if isinstance(payload, dict) and envelope_event_id is not None:
         payload = {**payload}
         payload.setdefault("event_id", envelope_event_id)
     return ev_name, payload, envelope_channel
@@ -576,10 +582,8 @@ async def events(
                                         redis,
                                         stream_key=stream_key,
                                         event_name=_COMPACTION_EVENT,
-                                        envelope_event_id=(
+                                        envelope_event_id=_normalize_event_id(
                                             payload.get("event_id")
-                                            if isinstance(payload.get("event_id"), str)
-                                            else None
                                         ),
                                         payload=payload,
                                         channel=public_channel,
@@ -623,30 +627,26 @@ async def events(
                         # GEN-P0-7: publisher 在 XADD 之后把 stream msg_id 写进 envelope.sse_id
                         # 再 PUBLISH——这里直接透传，绝不本地生成。重连时浏览器的
                         # Last-Event-ID 即为这个 id，下次 XREAD 严格 resume。
-                        event_id = (
+                        event_id = _normalize_event_id(
                             parsed.get("sse_id") if isinstance(parsed, dict) else None
                         )
-                        envelope_event_id = (
+                        envelope_event_id = _normalize_event_id(
                             parsed.get("event_id") if isinstance(parsed, dict) else None
                         )
                         channel_text = _decode_pubsub_text(channel)
-                        if not isinstance(event_id, str) or not event_id:
+                        if event_id is None:
                             event_id = await _stream_id_for_pubsub_event(
                                 redis,
                                 stream_key=stream_key,
                                 event_name=ev_name,
-                                envelope_event_id=(
-                                    envelope_event_id
-                                    if isinstance(envelope_event_id, str)
-                                    else None
-                                ),
+                                envelope_event_id=envelope_event_id,
                                 payload=payload,
                                 channel=channel_text,
                             )
                         # 同时把 msg_id 放进 payload 方便前端 JSON 级去重
-                        if isinstance(event_id, str) and event_id:
+                        if event_id is not None:
                             payload = _payload_with_sse_id(payload, event_id)
-                        if isinstance(envelope_event_id, str) and envelope_event_id:
+                        if envelope_event_id is not None:
                             if isinstance(payload, dict):
                                 if "event_id" not in payload:
                                     payload = {**payload, "event_id": envelope_event_id}
@@ -659,7 +659,7 @@ async def events(
                             "event": ev_name,
                             "data": json.dumps(payload, separators=(",", ":")),
                         }
-                        if isinstance(event_id, str) and event_id:
+                        if event_id is not None:
                             out["id"] = event_id
                         # 真实的 upstream 业务事件，刷新 idle 计时
                         last_upstream = time.monotonic()

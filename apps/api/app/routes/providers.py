@@ -209,6 +209,11 @@ def _normalize_capability(raw: Any) -> bool | None:
     return None
 
 
+def _normalize_bool(raw: Any, *, default: bool = False) -> bool:
+    parsed = _normalize_capability(raw)
+    return default if parsed is None else parsed
+
+
 def _normalize_purposes(raw: Any) -> list[str]:
     return list(normalize_provider_purposes(raw))
 
@@ -221,10 +226,13 @@ def _to_out(it: dict, idx: int) -> ProviderItemOut:
         api_key_hint=_mask_key(it.get("api_key", "")),
         priority=_safe_int(it.get("priority"), 0),
         weight=_safe_int(it.get("weight"), 1, minimum=1),
-        enabled=bool(it.get("enabled", True)),
+        enabled=_normalize_bool(it.get("enabled"), default=True),
         purposes=_normalize_purposes(it.get("purposes")),
         proxy=it.get("proxy") if isinstance(it.get("proxy"), str) else None,
-        image_jobs_enabled=bool(it.get("image_jobs_enabled", False)),
+        image_jobs_enabled=_normalize_bool(
+            it.get("image_jobs_enabled"),
+            default=False,
+        ),
         image_jobs_endpoint=endpoint,
         image_jobs_endpoint_lock=_normalize_image_jobs_endpoint_lock(
             it.get("image_jobs_endpoint_lock"), endpoint
@@ -263,7 +271,7 @@ def _normalize_image_jobs_endpoint_lock(raw: Any, endpoint: str) -> bool:
     # auto 时 lock 没有意义——避免 UI 残留 lock=true 但 endpoint 改回 auto 的脏配置。
     if endpoint == "auto":
         return False
-    return bool(raw)
+    return _normalize_bool(raw, default=False)
 
 
 def _normalize_image_jobs_base_url(raw: Any) -> str:
@@ -311,7 +319,7 @@ def _to_proxy_out(it: dict, idx: int) -> ProviderProxyOut:
             if isinstance(it.get("private_key_path"), str)
             else None
         ),
-        enabled=bool(it.get("enabled", True)),
+        enabled=_normalize_bool(it.get("enabled"), default=True),
     )
 
 
@@ -533,7 +541,10 @@ async def update_providers(
                 enabled=it["enabled"],
                 purposes=_normalize_purposes(it.get("purposes")),
                 proxy=it.get("proxy"),
-                image_jobs_enabled=bool(it.get("image_jobs_enabled", False)),
+                image_jobs_enabled=_normalize_bool(
+                    it.get("image_jobs_enabled"),
+                    default=False,
+                ),
                 image_jobs_endpoint=endpoint,
                 image_jobs_endpoint_lock=_normalize_image_jobs_endpoint_lock(
                     it.get("image_jobs_endpoint_lock"), endpoint
@@ -883,7 +894,7 @@ async def probe_providers(
                 name=name, ok=False, status="skipped"
             )
 
-        if not bool(it.get("enabled", True)):
+        if not _normalize_bool(it.get("enabled"), default=True):
             return ProviderProbeResult(
                 name=name, ok=False, status="disabled"
             )

@@ -72,7 +72,7 @@ export function PosterRenderCard({
         }}
         disabled={!image}
         className={cn(
-          "relative block w-full overflow-hidden rounded-lg bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
           aspectClass(render.aspect_ratio),
         )}
       >

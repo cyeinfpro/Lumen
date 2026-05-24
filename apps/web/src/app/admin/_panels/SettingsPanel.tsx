@@ -2501,21 +2501,6 @@ function formatPlainNumber(value: number) {
   }).format(value);
 }
 
-function formatDateTime(value: string) {
-  try {
-    return new Intl.DateTimeFormat("zh-CN", {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    }).format(new Date(value));
-  } catch {
-    return value;
-  }
-}
-
 function formatCircuitState(state: string | undefined): {
   label: string;
   tone: "success" | "warning" | "danger";

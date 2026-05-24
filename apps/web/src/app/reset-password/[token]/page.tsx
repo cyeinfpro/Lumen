@@ -118,7 +118,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               </div>
               <Link
                 href="/login"
-                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] transition-all hover:brightness-110 active:scale-[0.98] sm:h-10"
+                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] transition-all hover:brightness-110 active:scale-[0.98] sm:h-10"
               >
                 去登录 <ArrowRight className="h-4 w-4" />
               </Link>
@@ -136,13 +136,13 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                     onChange={(event) => setPassword(event.target.value)}
                     placeholder="至少 8 位"
                     autoComplete="new-password"
-                    className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-11 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
+                    className="h-10 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 pl-3 pr-11 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--color-lumen-amber)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 md:text-sm"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPwd((value) => !value)}
                     aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                    className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] md:h-8 md:w-8"
+                    className="absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] md:h-8 md:w-8"
                   >
                     {showPwd ? (
                       <EyeOff className="h-4 w-4" />
@@ -179,7 +179,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                   placeholder="再输入一次"
                   autoComplete="new-password"
                   className={
-                    "h-10 w-full rounded-xl border bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
+                    "h-10 w-full rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-3 text-base text-[var(--fg-0)] transition-colors placeholder:text-[var(--fg-2)] focus:outline-none focus:ring-2 md:text-sm " +
                     (confirmMismatch
                       ? "border-danger-border focus:border-danger focus:ring-danger/20"
                       : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
@@ -210,7 +210,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               <button
                 type="submit"
                 disabled={!canSubmit}
-                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[0_8px_24px_-12px_var(--color-lumen-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
+                className="inline-flex h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] px-5 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 sm:h-10"
               >
                 {submitting ? (
                   <>

@@ -318,7 +318,7 @@ export function ByokPanel() {
     <div className="space-y-6">
       <Overview mode={currentMode} supplierCount={suppliers.length} activeCredentials={totalActive} loading={loading} />
 
-      <section className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-5 space-y-4">
+      <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5 space-y-4">
         <header className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
           <ShieldCheck className="w-3.5 h-3.5" />
           BYOK 模式
@@ -338,12 +338,12 @@ export function ByokPanel() {
           </p>
         )}
 
-        <details className="group rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+        <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.02] overflow-hidden">
           <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
             <span>高级覆盖（手动改 4 个原始开关）</span>
             <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
           </summary>
-          <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-white/8">
+          <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-[var(--border-subtle)]">
             {ADVANCED_TOGGLES.map(({ key, label, hint, requiresMode }) => {
               const modeOn = Boolean(effectiveSettings?.mode_enabled);
               const disabled = requiresMode && !modeOn;
@@ -421,7 +421,7 @@ export function ByokPanel() {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-5 space-y-4">
+      <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5 space-y-4">
         <header className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
             <Plus className="w-3.5 h-3.5" />
@@ -496,7 +496,7 @@ export function ByokPanel() {
           </div>
         </header>
         {suppliers.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] py-10 text-center text-sm text-neutral-400">
+          <div className="rounded-[var(--radius-dialog)] border border-dashed border-[var(--border)] bg-white/[0.02] py-10 text-center text-sm text-[var(--fg-1)]">
             还没有供应商模板，使用上方「新供应商」创建。
           </div>
         ) : (
@@ -576,7 +576,7 @@ function Overview({
   const def = mode ? MODE_DEFS.find((m) => m.value === mode) : undefined;
   const ModeIcon = def?.icon ?? AlertCircle;
   return (
-    <section className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 p-5">
+    <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5">
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <OverviewItem icon={<ModeIcon className="w-4 h-4" />} label="当前模式" value={loading ? "加载中…" : (def?.label ?? "自定义")} />
         <OverviewItem icon={<Server className="w-4 h-4" />} label="供应商模板" value={loading ? "—" : `${supplierCount} 个`} />
@@ -589,12 +589,12 @@ function Overview({
 function OverviewItem({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-white/[0.05] border border-white/8 text-[var(--color-lumen-amber)]">
+      <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] bg-white/[0.05] border border-[var(--border-subtle)] text-[var(--color-lumen-amber)]">
         {icon}
       </span>
       <div className="flex flex-col">
         <span className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">{label}</span>
-        <span className="text-sm text-neutral-100 mt-0.5">{value}</span>
+        <span className="text-sm text-[var(--fg-0)] mt-0.5">{value}</span>
       </div>
     </div>
   );
@@ -608,25 +608,25 @@ function ModeCard({ def, active, onSelect }: { def: ModeDef; active: boolean; on
       onClick={onSelect}
       aria-pressed={active}
       className={
-        "text-left rounded-xl border p-3 transition-colors " +
+        "text-left rounded-[var(--radius-panel)] border p-3 transition-colors " +
         (active
           ? "border-[var(--color-lumen-amber)]/60 bg-[var(--color-lumen-amber)]/10"
-          : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]")
+          : "border-[var(--border)] bg-white/[0.03] hover:bg-white/[0.06]")
       }
     >
       <div className="flex items-center gap-2">
         <span
           className={
-            "flex h-7 w-7 items-center justify-center rounded-lg " +
-            (active ? "bg-[var(--color-lumen-amber)] text-black" : "bg-white/[0.05] text-neutral-300")
+            "flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] " +
+            (active ? "bg-[var(--color-lumen-amber)] text-black" : "bg-white/[0.05] text-[var(--fg-1)]")
           }
         >
           <Icon className="w-3.5 h-3.5" />
         </span>
-        <span className="text-sm font-medium text-neutral-100">{def.label}</span>
+        <span className="text-sm font-medium text-[var(--fg-0)]">{def.label}</span>
       </div>
       <p className="mt-2 text-xs text-[var(--fg-2)] leading-relaxed">{def.hint}</p>
-      <p className="mt-2 text-[11px] text-neutral-500">适合：{def.scenario}</p>
+      <p className="mt-2 text-[11px] text-[var(--fg-2)]">适合：{def.scenario}</p>
     </button>
   );
 }
@@ -657,30 +657,30 @@ function SupplierRow({
   busy: boolean;
 }) {
   return (
-    <article className="rounded-2xl border border-white/10 bg-[var(--bg-1)]/60 overflow-hidden">
+    <article className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 overflow-hidden">
       <header className="flex flex-wrap items-center gap-3 px-4 py-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-sm text-neutral-100 truncate">{supplier.name}</h3>
+            <h3 className="text-sm text-[var(--fg-0)] truncate">{supplier.name}</h3>
             {supplier.enabled ? (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-success-soft text-success border border-success-border">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[11px] bg-success-soft text-success border border-success-border">
                 <Check className="w-3 h-3" /> 启用
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-white/5 text-[var(--fg-2)] border border-white/10">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[11px] bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
                 已禁用
               </span>
             )}
           </div>
-          <p className="text-xs text-neutral-500 truncate mt-0.5">
+          <p className="text-xs text-[var(--fg-2)] truncate mt-0.5">
             {safeHostname(supplier.base_url)} · {supplier.purposes.join("/")}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap text-xs">
-          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-neutral-300">
+          <span className="rounded-full border border-[var(--border)] bg-white/5 px-2.5 py-1 text-[var(--fg-1)]">
             活跃 Key {supplier.active_credentials}
           </span>
-          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-neutral-400">
+          <span className="rounded-full border border-[var(--border)] bg-white/5 px-2.5 py-1 text-[var(--fg-1)]">
             验证模型 {supplier.validation_model}
           </span>
           <Button
@@ -696,14 +696,14 @@ function SupplierRow({
       </header>
 
       {Object.keys(supplier.recent_error_counts).length > 0 && (
-        <p className="px-4 pb-2 text-xs text-neutral-500">
+        <p className="px-4 pb-2 text-xs text-[var(--fg-2)]">
           近期错误：
           {Object.entries(supplier.recent_error_counts).map(([k, v]) => `${k}:${v}`).join(" · ")}
         </p>
       )}
 
       {open && (
-        <div className="border-t border-white/10 p-4 space-y-4 bg-white/[0.02]">
+        <div className="border-t border-[var(--border)] p-4 space-y-4 bg-white/[0.02]">
           <SupplierForm draft={draft} urlError={urlError} onChange={onChange} onUrlBlur={onUrlBlur} showProbe />
           <div className="flex items-center gap-2 flex-wrap">
             <Button
@@ -781,12 +781,12 @@ function SupplierForm({
         />
       </div>
 
-      <details className="group rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+      <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-white/[0.02] overflow-hidden">
         <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
           <span>高级配置</span>
           <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
         </summary>
-        <div className="p-3 space-y-3 border-t border-white/8">
+        <div className="p-3 space-y-3 border-t border-[var(--border-subtle)]">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <FieldText label="Slug" hint="可选；留空后端自动从 name 生成（仅小写英文/数字）" value={draft.slug ?? ""} onChange={(v) => set({ slug: v })} placeholder="auto" />
             <FieldText label="代理名 proxy_name" hint="可选；走 admin 已配置的 proxy 池" value={draft.proxy_name ?? ""} onChange={(v) => set({ proxy_name: v })} placeholder="无" />
@@ -818,7 +818,7 @@ function SupplierForm({
               onChange={(v) => set({ image_concurrency_per_key: clampInt(v, CONCURRENCY_MIN, CONCURRENCY_MAX) })}
             />
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-white/8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-[var(--border-subtle)]">
             <ToggleRow
               checked={draft.public_signup_enabled}
               label="允许公开注册使用"
@@ -921,7 +921,7 @@ function FieldNumber({
         max={max}
         value={value}
         onChange={(e) => onChange(clampInt(e.target.value, min, max))}
-        className="h-10 rounded-xl border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
+        className="h-10 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25"
       />
       {hint && <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>}
     </label>
@@ -941,10 +941,10 @@ function PurposesField({ purposes, onToggle }: { purposes: ByokPurpose[]; onTogg
               type="button"
               onClick={() => onToggle(p.value)}
               className={
-                "px-2.5 py-1 rounded-lg border text-xs transition-colors " +
+                "px-2.5 py-1 rounded-[var(--radius-card)] border text-xs transition-colors " +
                 (active
                   ? "bg-[var(--color-lumen-amber)] text-black border-[var(--color-lumen-amber)]"
-                  : "bg-white/[0.03] text-neutral-300 border-white/10 hover:bg-white/[0.08]")
+                  : "bg-white/[0.03] text-[var(--fg-1)] border-[var(--border)] hover:bg-white/[0.08]")
               }
             >
               {p.label}
@@ -975,12 +975,12 @@ function ToggleRow({
   return (
     <label
       className={
-        "flex items-start justify-between gap-3 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 " +
+        "flex items-start justify-between gap-3 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.03] px-3 py-2 " +
         (disabled ? "opacity-50" : "")
       }
     >
       <span className="flex flex-col">
-        <span className="text-sm text-neutral-200">{label}</span>
+        <span className="text-sm text-[var(--fg-0)]">{label}</span>
         {hint && <span className="text-[11px] text-[var(--fg-2)] mt-0.5">{hint}</span>}
       </span>
       <input

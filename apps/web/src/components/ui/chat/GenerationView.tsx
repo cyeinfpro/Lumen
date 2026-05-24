@@ -129,7 +129,7 @@ export function GenerationView({
       >
         <div
           className={cn(
-            "aspect-[4/3] w-full rounded-2xl border-2",
+            "aspect-[4/3] w-full rounded-[var(--radius-dialog)] border-2",
             "border-danger-border bg-danger-soft",
             "flex flex-col items-center justify-center gap-3 p-6",
           )}
@@ -213,7 +213,7 @@ export function GenerationView({
         {free && (
           <span
             className={cn(
-              "absolute top-2 z-10 rounded-full border border-white/20 bg-black/60 px-2 py-0.5",
+              "absolute top-2 z-10 rounded-full border border-[var(--border-strong)] bg-black/60 px-2 py-0.5",
               "font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur",
               ordinal ? "left-10" : "left-2",
             )}
@@ -240,12 +240,12 @@ export function GenerationView({
       <div className="flex flex-col gap-2 px-1 opacity-70">
         <div
           className={cn(
-            "aspect-[4/3] w-full rounded-2xl",
-            "border border-dashed border-white/15 bg-white/[0.02]",
+            "aspect-[4/3] w-full rounded-[var(--radius-dialog)]",
+            "border border-dashed border-[var(--border)] bg-white/[0.02]",
             "flex flex-col items-center justify-center gap-2",
           )}
         >
-          <span className="px-2 py-0.5 type-overline rounded-[var(--radius-control)] bg-[var(--bg-2)] text-[var(--fg-1)] border border-white/5">
+          <span className="px-2 py-0.5 type-overline rounded-[var(--radius-control)] bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border-subtle)]">
             已取消
           </span>
           <p className="type-caption">本次生成被取消</p>
@@ -316,7 +316,7 @@ function OrdinalBadge({ value, className }: { value: number; className?: string 
     <span
       className={cn(
         "pointer-events-none absolute top-2 left-2 z-10 inline-flex h-6 min-w-6 items-center justify-center rounded-full",
-        "border border-white/15 bg-black/55 px-2 text-[10px] font-mono text-white/85 backdrop-blur-md",
+        "border border-[var(--border)] bg-black/55 px-2 text-[10px] font-mono text-white/85 backdrop-blur-md",
         className,
       )}
       aria-hidden
@@ -343,7 +343,7 @@ function ProgressRing({ pct }: { pct: number }) {
       width={size}
       height={size}
       viewBox={`0 0 ${size} ${size}`}
-      className="drop-shadow-[0_0_10px_rgba(242,169,58,0.4)]"
+      className="drop-shadow-[var(--shadow-amber)]"
       aria-hidden
     >
       <circle

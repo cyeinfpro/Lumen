@@ -257,9 +257,9 @@ export function ProxiesPanel() {
   return (
     <section className="space-y-5">
       {/* 全局参数 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
         <div className="flex items-start gap-3">
-          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-[var(--radius-card)] bg-white/5 border border-[var(--border)] flex items-center justify-center shrink-0">
             <Network className="w-4 h-4 text-[var(--fg-2)]" />
           </div>
           <div className="min-w-0">
@@ -382,7 +382,7 @@ export function ProxiesPanel() {
       </div>
 
       {/* 列表（只读 / 编辑） */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-white/10 rounded-[var(--radius-dialog)] overflow-hidden">
+      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] overflow-hidden">
         {q.isLoading ? (
           <div className="p-6 space-y-3">
             {[1, 2].map((i) => (
@@ -434,7 +434,7 @@ export function ProxiesPanel() {
         )}
       </div>
 
-      <p className="text-xs text-neutral-500 px-1">
+      <p className="text-xs text-[var(--fg-2)] px-1">
         提示：测试只会发一个空请求验证代理通路，不会消耗 API 配额。
       </p>
     </section>
@@ -477,7 +477,7 @@ function ProxyViewRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="type-body-sm font-medium text-[var(--fg-0)]">{proxy.name}</span>
-            <span className="type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-2)] border border-white/10">
+            <span className="type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-2)] border border-[var(--border)]">
               {proxy.type}
             </span>
             {proxy.enabled ? (
@@ -485,7 +485,7 @@ function ProxyViewRow({
                 <Power className="w-2.5 h-2.5" /> 启用
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-3)] border border-white/10">
+              <span className="inline-flex items-center gap-1 type-overline px-1.5 py-0.5 rounded bg-white/5 text-[var(--fg-3)] border border-[var(--border)]">
                 <PowerOff className="w-2.5 h-2.5" /> 禁用
               </span>
             )}
@@ -588,7 +588,7 @@ function ProxyEditRow({
                 onChange={(e) => onChange({ password: e.target.value })}
                 autoComplete="new-password"
                 placeholder={draft.has_password_on_server ? "已设置（留空不改）" : "代理需要鉴权时填"}
-                className="w-full h-9 pr-9 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm font-mono transition-colors"
+                className="w-full h-9 pr-9 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm font-mono transition-colors"
               />
               <IconButton
                 variant="ghost"
@@ -621,7 +621,7 @@ function ProxyEditRow({
             className={
               draft.enabled
                 ? "bg-success-soft text-success border-success-border"
-                : "bg-white/5 text-[var(--fg-2)] border-white/10"
+                : "bg-white/5 text-[var(--fg-2)] border-[var(--border)]"
             }
           >
             {draft.enabled ? "启用" : "禁用"}
@@ -742,7 +742,7 @@ function Field({
         value={value}
         inputMode={inputMode}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
+        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
       />
       <span className="text-[11px] text-[var(--fg-2)] leading-relaxed">{hint}</span>
     </label>
@@ -775,7 +775,7 @@ function FieldInline({
         inputMode={inputMode}
         autoComplete="off"
         className={
-          "h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
+          "h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors " +
           (mono ? "font-mono" : "")
         }
       />
@@ -800,7 +800,7 @@ function FieldSelect({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-white/10 focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
+        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 outline-none text-sm transition-colors"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

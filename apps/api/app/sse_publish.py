@@ -80,6 +80,13 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _payload_event_id(payload: dict[str, Any]) -> str:
+    raw = payload.get("event_id")
+    if raw is None or raw == "":
+        raw = uuid.uuid4()
+    return str(raw)
+
+
 async def _xadd_event_once(
     redis: Any,
     *,
@@ -174,7 +181,7 @@ async def publish_sse_events(
     payload_jsons: list[str] = []
     for event in events:
         payload = dict(event["data"])
-        event_id = str(payload.get("event_id") or uuid.uuid4())
+        event_id = _payload_event_id(payload)
         payload["event_id"] = event_id
         envelope: dict[str, Any] = {
             "event": event["event_name"],
@@ -263,7 +270,7 @@ async def _publish_sse_event_single(
     data: dict[str, Any],
 ) -> str:
     payload = dict(data)
-    event_id = str(payload.get("event_id") or uuid.uuid4())
+    event_id = _payload_event_id(payload)
     payload["event_id"] = event_id
     envelope: dict[str, Any] = {
         "event": event_name,

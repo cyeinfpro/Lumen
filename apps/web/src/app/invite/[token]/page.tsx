@@ -64,7 +64,7 @@ export default function InvitePage({
         >
           <header className="mb-8 flex items-center gap-3">
             {/* eslint-disable-next-line no-restricted-syntax -- amber→orange-200 品牌徽章渐变 */}
-            <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[0_0_24px_-4px_var(--color-lumen-amber)]" />
+            <span className="w-9 h-9 rounded-full bg-gradient-to-tr from-[var(--color-lumen-amber)] to-orange-200 shadow-[var(--shadow-amber)]" />
             <div>
               <p className="text-lg font-medium tracking-tight leading-none">
                 Lumen
@@ -118,8 +118,8 @@ function SkeletonInvite() {
     <div className="space-y-5">
       <div className="h-8 w-48 bg-[var(--bg-2)] rounded animate-pulse" />
       <div className="h-4 w-72 bg-[var(--bg-2)] rounded animate-pulse" />
-      <div className="h-40 rounded-2xl bg-[var(--bg-2)] animate-pulse mt-6" />
-      <div className="h-44 rounded-2xl bg-[var(--bg-2)] animate-pulse" />
+      <div className="h-40 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] animate-pulse mt-6" />
+      <div className="h-44 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] animate-pulse" />
     </div>
   );
 }
@@ -230,7 +230,7 @@ function SignupForm({
       </div>
 
       {/* 邀请信息 */}
-      <div className="rounded-2xl border border-[var(--color-lumen-amber)]/30 bg-[var(--color-lumen-amber)]/[0.05] backdrop-blur-sm p-4 space-y-2">
+      <div className="rounded-[var(--radius-dialog)] border border-[var(--color-lumen-amber)]/30 bg-[var(--color-lumen-amber)]/[0.05] backdrop-blur-sm p-4 space-y-2">
         <div className="flex items-center gap-1.5 text-xs uppercase tracking-wider text-[var(--color-lumen-amber)]">
           <Sparkles className="w-3.5 h-3.5" /> 邀请详情
         </div>
@@ -264,7 +264,7 @@ function SignupForm({
             placeholder="you@example.com"
             autoComplete="email"
             className={
-              "w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors " +
+              "w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors " +
               (lockedEmail ? "opacity-70 cursor-not-allowed" : "")
             }
           />
@@ -290,13 +290,13 @@ function SignupForm({
               onChange={(e) => setPassword(e.target.value)}
               placeholder="至少 8 位"
               autoComplete="new-password"
-              className="w-full h-10 pl-3 pr-11 rounded-xl bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
+              className="w-full h-10 pl-3 pr-11 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border border-[var(--border)] text-base md:text-sm focus:outline-none focus:border-[var(--color-lumen-amber)]/50 focus:ring-2 focus:ring-[var(--color-lumen-amber)]/25 placeholder:text-[var(--fg-2)] transition-colors"
             />
             <button
               type="button"
               onClick={() => setShowPwd((v) => !v)}
               aria-label={showPwd ? "隐藏密码" : "显示密码"}
-              className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-lg text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
+              className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 md:w-8 md:h-8 rounded-[var(--radius-card)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)] flex items-center justify-center transition-colors"
             >
               {showPwd ? (
                 <EyeOff className="w-4 h-4" />
@@ -333,7 +333,7 @@ function SignupForm({
             placeholder="再输入一次"
             autoComplete="new-password"
             className={
-              "w-full h-10 px-3 rounded-xl bg-[var(--bg-1)]/60 border text-base md:text-sm focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors " +
+              "w-full h-10 px-3 rounded-[var(--radius-panel)] bg-[var(--bg-1)]/60 border text-base md:text-sm focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors " +
               (confirmMismatch
                 ? "border-danger-border focus:border-danger focus:ring-danger/20"
                 : "border-[var(--border)] focus:border-[var(--color-lumen-amber)]/50 focus:ring-[var(--color-lumen-amber)]/25")
@@ -369,7 +369,7 @@ function SignupForm({
         <button
           type="submit"
           disabled={!canSubmit}
-          className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-xl bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[0_8px_24px_-12px_var(--color-lumen-amber)]"
+          className="w-full inline-flex items-center justify-center gap-1.5 h-11 sm:h-10 px-5 rounded-[var(--radius-panel)] bg-[var(--color-lumen-amber)] hover:brightness-110 active:scale-[0.98] text-[var(--accent-on)] text-sm font-medium disabled:opacity-50 transition-all shadow-[var(--shadow-amber)]"
         >
           {submitting ? (
             <>
@@ -430,8 +430,8 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
+      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
+        <div className="mx-auto w-14 h-14 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
           {icon}
         </div>
         <h1 className="type-section-title">邀请不可用</h1>
@@ -443,13 +443,13 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
       <div className="grid grid-cols-2 gap-2">
         <Link
           href="/login"
-          className="h-10 inline-flex items-center justify-center rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
+          className="h-10 inline-flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
         >
           去登录
         </Link>
         <Link
           href="/"
-          className="h-10 inline-flex items-center justify-center rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
+          className="h-10 inline-flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
         >
           返回首页
         </Link>
@@ -463,8 +463,8 @@ function ErrorView({ error }: { error: unknown }) {
   const message = error instanceof Error ? error.message : "未知错误";
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
+      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
+        <div className="mx-auto w-14 h-14 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
           <FileX className="w-6 h-6 text-[var(--fg-2)]" />
         </div>
         <h1 className="type-section-title">
@@ -478,7 +478,7 @@ function ErrorView({ error }: { error: unknown }) {
       </div>
       <Link
         href="/"
-        className="h-10 w-full inline-flex items-center justify-center rounded-xl bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
+        className="h-10 w-full inline-flex items-center justify-center rounded-[var(--radius-panel)] bg-[var(--bg-1)] hover:bg-[var(--bg-2)] border border-[var(--border)] text-sm transition-colors"
       >
         返回首页
       </Link>
@@ -534,14 +534,14 @@ function InfoLine({
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--color-lumen-amber)]/15 text-[var(--color-lumen-amber)] border border-[var(--color-lumen-amber)]/30">
         <UserCog className="w-3 h-3" />
         admin
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border)]">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border)]">
       <UsersIcon className="w-3 h-3" />
       member
     </span>

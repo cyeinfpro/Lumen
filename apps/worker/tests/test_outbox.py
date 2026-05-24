@@ -119,6 +119,8 @@ class FakeReconSession:
         self.completions = completions
         self.messages = messages or {}
         self.select_skip_locked: list[bool] = []
+        self.info: dict[str, object] = {}
+        self.commits = 0
 
     async def __aenter__(self):
         return self
@@ -143,6 +145,7 @@ class FakeReconSession:
         return None
 
     async def commit(self) -> None:
+        self.commits += 1
         return None
 
 
@@ -460,6 +463,94 @@ async def test_reconcile_marks_max_attempt_generation_failed_and_message_failed(
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_flushes_generation_release_balance_cache_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = Generation(
+        id="gen-1",
+        user_id="user-1",
+        message_id="msg-1",
+        status="running",
+        progress_stage="rendering",
+        attempt=5,
+    )
+    fake_session = _patch_recon_session_local(monkeypatch, [generation], [])
+    _patch_publish_event(monkeypatch)
+    redis = FakeRedis()
+    calls: list[tuple[str, int, dict[str, object]]] = []
+
+    async def release_generation(session, gen, *, reason: str) -> None:
+        assert gen is generation
+        assert reason == "timeout"
+        session.info["pending-balance-refresh"] = {"user-1": 960}
+        calls.append(("release", session.commits, dict(session.info)))
+
+    async def flush_balance_cache_refreshes(session) -> None:
+        calls.append(("flush", session.commits, dict(session.info)))
+        session.info.clear()
+
+    monkeypatch.setattr(outbox.worker_billing, "release_generation", release_generation)
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "flush_balance_cache_refreshes",
+        flush_balance_cache_refreshes,
+    )
+
+    touched = await outbox.reconcile_tasks({"redis": redis})
+
+    assert touched == 1
+    assert calls == [
+        ("release", 0, {"pending-balance-refresh": {"user-1": 960}}),
+        ("flush", 1, {"pending-balance-refresh": {"user-1": 960}}),
+    ]
+    assert fake_session.info == {}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_flushes_completion_release_balance_cache_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion = Completion(
+        id="comp-1",
+        user_id="user-1",
+        message_id="msg-1",
+        status="streaming",
+        progress_stage="streaming",
+        attempt=3,
+    )
+    fake_session = _patch_recon_session_local(monkeypatch, [], [completion])
+    _patch_publish_event(monkeypatch)
+    redis = FakeRedis()
+    calls: list[tuple[str, int, dict[str, object]]] = []
+
+    async def release_completion(session, comp, *, reason: str) -> None:
+        assert comp is completion
+        assert reason == "timeout"
+        session.info["pending-balance-refresh"] = {"user-1": 970}
+        calls.append(("release", session.commits, dict(session.info)))
+
+    async def flush_balance_cache_refreshes(session) -> None:
+        calls.append(("flush", session.commits, dict(session.info)))
+        session.info.clear()
+
+    monkeypatch.setattr(outbox.worker_billing, "release_completion", release_completion)
+    monkeypatch.setattr(
+        outbox.worker_billing,
+        "flush_balance_cache_refreshes",
+        flush_balance_cache_refreshes,
+    )
+
+    touched = await outbox.reconcile_tasks({"redis": redis})
+
+    assert touched == 1
+    assert calls == [
+        ("release", 0, {"pending-balance-refresh": {"user-1": 970}}),
+        ("flush", 1, {"pending-balance-refresh": {"user-1": 970}}),
+    ]
+    assert fake_session.info == {}
 
 
 @pytest.mark.asyncio

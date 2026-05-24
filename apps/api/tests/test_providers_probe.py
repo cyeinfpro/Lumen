@@ -86,6 +86,37 @@ def test_provider_probe_normalizes_responses_url() -> None:
     )
 
 
+def test_provider_admin_output_parses_string_booleans_without_truthy_coercion() -> None:
+    from app.routes import providers
+
+    item = providers._to_out(
+        {
+            "name": "manual",
+            "base_url": "https://upstream.example",
+            "api_key": "sk-test",
+            "enabled": "false",
+            "image_jobs_enabled": "0",
+            "image_jobs_endpoint": "generations",
+            "image_jobs_endpoint_lock": "false",
+        },
+        0,
+    )
+    proxy = providers._to_proxy_out(
+        {
+            "name": "egress",
+            "type": "socks5",
+            "host": "127.0.0.1",
+            "enabled": "false",
+        },
+        0,
+    )
+
+    assert item.enabled is False
+    assert item.image_jobs_enabled is False
+    assert item.image_jobs_endpoint_lock is False
+    assert proxy.enabled is False
+
+
 @pytest.mark.asyncio
 async def test_manual_provider_probe_calls_responses_model(
     monkeypatch: pytest.MonkeyPatch,
@@ -172,6 +203,38 @@ async def test_manual_provider_probe_skips_generation_locked_provider(
     assert out.items[0].ok is False
     assert out.items[0].status == "skipped"
     assert out.items[0].error == "endpoint_locked_to_generations"
+    assert client.posts == []
+
+
+@pytest.mark.asyncio
+async def test_manual_provider_probe_treats_string_false_enabled_as_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    client = _StubAsyncClient(_StubResponse(200, {"output_text": "9801"}))
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    out = await providers.probe_providers(
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        _FakeProvidersDb(
+            json.dumps(
+                [
+                    {
+                        "name": "disabled",
+                        "base_url": "https://upstream.example",
+                        "api_key": "sk-test",
+                        "enabled": "false",
+                    }
+                ]
+            )
+        ),  # type: ignore[arg-type]
+        None,
+    )
+
+    assert out.items[0].name == "disabled"
+    assert out.items[0].ok is False
+    assert out.items[0].status == "disabled"
     assert client.posts == []
 
 

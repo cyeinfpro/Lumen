@@ -125,7 +125,7 @@ export function StoragePanel() {
   if (q.isLoading && !cfg) {
     return (
       <section className="space-y-5">
-        <div className="rounded-[var(--radius-dialog)] border border-white/10 bg-[var(--bg-1)]/60 p-6 backdrop-blur-sm">
+        <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-6 backdrop-blur-sm">
           <div className="flex items-center gap-3 type-body-sm text-[var(--fg-1)]">
             <Loader2 className="h-4 w-4 animate-spin" /> 加载存储配置中
           </div>
@@ -413,7 +413,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
     <section className="space-y-5 pb-12">
       <StatusCard cfg={cfg} applying={isApplying} />
 
-      <div className="rounded-[var(--radius-dialog)] border border-white/10 bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5">
+      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--color-lumen-amber)]/25 bg-[var(--color-lumen-amber)]/12">
@@ -582,7 +582,7 @@ function StatusCard({
     <div
       className={cn(
         "rounded-[var(--radius-dialog)] border bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5",
-        "border-white/10",
+        "border-[var(--border)]",
       )}
     >
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -607,38 +607,38 @@ function StatusCard({
           </div>
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-medium text-neutral-100">
+              <span className="text-sm font-medium text-[var(--fg-0)]">
                 {headLine}
               </span>
               <span
                 className={cn(
-                  "rounded-md border px-2 py-0.5 text-[11px]",
+                  "rounded-[var(--radius-control)] border px-2 py-0.5 text-[11px]",
                   toneClasses[tone],
                 )}
               >
                 {modeLabel}
               </span>
               {status?.disabled && (
-                <span className="rounded-md border border-warning-border bg-warning-soft px-2 py-0.5 text-[11px] text-warning">
+                <span className="rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-2 py-0.5 text-[11px] text-warning">
                   禁用 flag 已生效
                 </span>
               )}
             </div>
             {status && (
-              <div className="text-xs leading-5 text-neutral-400">
+              <div className="text-xs leading-5 text-[var(--fg-1)]">
                 target{" "}
-                <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-neutral-200">
+                <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[11px] text-[var(--fg-0)]">
                   {status.target || "—"}
                 </code>{" "}
                 · fstype{" "}
-                <span className="font-mono text-neutral-200">
+                <span className="font-mono text-[var(--fg-0)]">
                   {status.fstype || "—"}
                 </span>
                 {status.source && (
                   <>
                     {" "}
                     · source{" "}
-                    <span className="font-mono break-all text-neutral-200">
+                    <span className="font-mono break-all text-[var(--fg-0)]">
                       {status.source}
                     </span>
                   </>
@@ -719,16 +719,16 @@ function SubLine({
   ts: number;
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-xl border border-white/8 bg-white/[0.02] px-3 py-2 text-xs">
+    <div className="flex items-start gap-2 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-white/[0.02] px-3 py-2 text-xs">
       <span className="mt-0.5 shrink-0">{icon}</span>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-neutral-300">{label}</span>
-          <span className="font-mono text-[10px] tabular-nums text-neutral-500">
+          <span className="text-[var(--fg-1)]">{label}</span>
+          <span className="font-mono text-[10px] tabular-nums text-[var(--fg-2)]">
             {formatTs(ts)}
           </span>
         </div>
-        <p className="mt-0.5 break-words text-neutral-400">{detail}</p>
+        <p className="mt-0.5 break-words text-[var(--fg-1)]">{detail}</p>
       </div>
     </div>
   );
@@ -748,9 +748,9 @@ function Badge({
         ? "border-danger-border bg-danger-soft text-danger"
         : tone === "info"
           ? "border-info-border bg-info-soft text-info"
-          : "border-white/10 bg-white/[0.04] text-[var(--fg-2)]";
+          : "border-[var(--border)] bg-white/[0.04] text-[var(--fg-2)]";
   return (
-    <span className={cn("inline-flex items-center rounded-md border px-2 py-0.5", cls)}>
+    <span className={cn("inline-flex items-center rounded-[var(--radius-control)] border px-2 py-0.5", cls)}>
       {children}
     </span>
   );
@@ -805,7 +805,7 @@ function BackendSwitch({
               "disabled:cursor-not-allowed disabled:opacity-60",
               active
                 ? "border-[var(--color-lumen-amber)]/45 bg-[var(--color-lumen-amber)]/8"
-                : "border-white/10 bg-white/[0.02] hover:bg-white/[0.04]",
+                : "border-[var(--border)] bg-white/[0.02] hover:bg-white/[0.04]",
             )}
           >
             <span
@@ -813,7 +813,7 @@ function BackendSwitch({
                 "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
                 active
                   ? "border-[var(--color-lumen-amber)] bg-[var(--color-lumen-amber)]/15"
-                  : "border-white/15 bg-white/[0.04]",
+                  : "border-[var(--border)] bg-white/[0.04]",
               )}
             >
               {active && (
@@ -825,11 +825,11 @@ function BackendSwitch({
               )}
             </span>
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1.5 text-sm font-medium text-neutral-100">
+              <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--fg-0)]">
                 {o.icon}
                 {o.label}
               </span>
-              <span className="mt-0.5 block text-[11px] leading-relaxed text-neutral-500">
+              <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--fg-2)]">
                 {o.hint}
               </span>
             </span>
@@ -942,7 +942,7 @@ function SmbForm({
 
 function RecoveryHints() {
   return (
-    <div className="rounded-[var(--radius-dialog)] border border-white/8 bg-white/[0.02] p-4 type-caption leading-relaxed text-[var(--fg-2)]">
+    <div className="rounded-[var(--radius-dialog)] border border-[var(--border-subtle)] bg-white/[0.02] p-4 type-caption leading-relaxed text-[var(--fg-2)]">
       <div className="flex items-start gap-2">
         <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
         <div className="space-y-1.5">

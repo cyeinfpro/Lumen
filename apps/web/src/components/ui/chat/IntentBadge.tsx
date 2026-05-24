@@ -232,7 +232,7 @@ export function IntentBadge({
               })}
             </div>
             {error && (
-              <p className="px-3 pt-1.5 pb-2 text-[10px] text-danger border-t border-white/10">
+              <p className="px-3 pt-1.5 pb-2 text-[10px] text-danger border-t border-[var(--border)]">
                 {error}
               </p>
             )}

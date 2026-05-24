@@ -65,6 +65,7 @@ from lumen_core.providers import (
     ProviderProxyDefinition,
     close_provider_proxy_tunnels,
     endpoint_kind_allowed,
+    parse_provider_bool,
     provider_supports_route,
     resolve_provider_proxy_url,
 )
@@ -5087,9 +5088,16 @@ async def _image_job_with_failover(
             _pool_acquire_inflight(pool, provider.name, inflight_ek)
         try:
             configured_endpoint = getattr(provider, "image_jobs_endpoint", "auto")
-            endpoint_locked = bool(
-                getattr(provider, "image_jobs_endpoint_lock", False)
-            ) and configured_endpoint in ("generations", "responses")
+            try:
+                endpoint_locked = parse_provider_bool(
+                    getattr(provider, "image_jobs_endpoint_lock", False),
+                    default=False,
+                )
+            except ValueError:
+                endpoint_locked = False
+            endpoint_locked = (
+                endpoint_locked and configured_endpoint in ("generations", "responses")
+            )
 
             # lock 防御层：override / preference 任一与本号 lock 冲突都视为本号
             # 不可用——dual_race lane 由对端 lane 兜底，单路场景由下一个号兜底。
@@ -6495,7 +6503,13 @@ def _image_jobs_endpoint_for_engine(engine: str) -> str:
 
 
 def _provider_supports_image_jobs(provider: Any) -> bool:
-    return bool(getattr(provider, "image_jobs_enabled", False))
+    try:
+        return parse_provider_bool(
+            getattr(provider, "image_jobs_enabled", False),
+            default=False,
+        )
+    except ValueError:
+        return False
 
 
 def _should_use_image_jobs(channel: str, provider: Any) -> bool:

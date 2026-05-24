@@ -123,8 +123,23 @@ class BillingCacheService:
     async def _apply_decr(self, user_id: str, amount_micro: int) -> None:
         if self.redis is None:
             return
+        amount = int(amount_micro)
+        if amount <= 0:
+            return
         try:
-            await self.redis.decrby(self._balance_key(user_id), int(amount_micro))
+            await self.redis.decrby(self._balance_key(user_id), amount)
+        except Exception:
+            return
+
+    async def set_balance(self, user_id: str, balance_micro: int) -> None:
+        if self.redis is None:
+            return
+        try:
+            await self.redis.set(
+                self._balance_key(user_id),
+                int(balance_micro),
+                ex=self.balance_ttl_sec,
+            )
         except Exception:
             return
 
@@ -137,6 +152,9 @@ class BillingCacheService:
     ) -> None:
         if self.redis is None:
             return
+        amount = int(amount_micro)
+        if amount <= 0:
+            return
         current = now or datetime.now(timezone.utc)
         ts = int(current.timestamp())
         limits = limits or {}
@@ -147,7 +165,7 @@ class BillingCacheService:
                 1,
                 key,
                 ts,
-                int(amount_micro),
+                amount,
                 int(limits.get("5h") or 0),
                 int(limits.get("1d") or 0),
                 int(limits.get("7d") or 0),
@@ -186,15 +204,28 @@ class BillingCacheService:
     async def queue_deduct(self, user_id: str, micro: int) -> None:
         if self.redis is None:
             return
+        amount = int(micro)
+        if amount <= 0:
+            return
         try:
-            self._queue.put_nowait(("decr", (user_id, int(micro)), {}))
+            self._queue.put_nowait(("decr", (user_id, amount), {}))
         except asyncio.QueueFull:
             try:
-                await self._apply_decr(user_id, int(micro))
+                await self._apply_decr(user_id, amount)
             except Exception:
                 return
 
     async def deduct_sync(self, db: AsyncSession, user_id: str, micro: int) -> int:
+        amount = int(micro)
+        if amount <= 0:
+            row = (
+                await db.execute(
+                    select(UserWallet.balance_micro).where(
+                        UserWallet.user_id == user_id
+                    )
+                )
+            ).scalar_one_or_none()
+            return int(row or 0)
         row = (
             await db.execute(
                 select(UserWallet)
@@ -207,7 +238,7 @@ class BillingCacheService:
             row = UserWallet(user_id=user_id)
             db.add(row)
             await db.flush()
-        row.balance_micro = max(0, row.balance_micro - int(micro))
+        row.balance_micro = max(0, row.balance_micro - amount)
         row.version += 1
         await db.flush()
         if self.redis is not None:
@@ -278,10 +309,13 @@ class BillingCacheService:
     ) -> None:
         if self.redis is None:
             return
+        amount = int(micro)
+        if amount <= 0:
+            return
         try:
-            self._queue.put_nowait(("window", (key_id, int(micro), limits), {}))
+            self._queue.put_nowait(("window", (key_id, amount, limits), {}))
         except asyncio.QueueFull:
-            await self._apply_window_increment(key_id, int(micro), limits)
+            await self._apply_window_increment(key_id, amount, limits)
 
     async def credential_limits(
         self,

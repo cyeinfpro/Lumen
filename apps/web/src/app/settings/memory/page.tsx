@@ -108,7 +108,7 @@ export default function MemorySettingsPage() {
     queryFn: () => listMemoryTimeline(),
   });
 
-  const scopes = scopesQ.data ?? [];
+  const scopes = useMemo(() => scopesQ.data ?? [], [scopesQ.data]);
   const defaultScope = scopes.find((scope) => scope.is_default) ?? scopes[0];
   // settings 还没加载时默认按 "可用" 处理, 避免首次渲染闪烁出 banner;
   // 加载完后以服务端真实值为准.
@@ -123,7 +123,7 @@ export default function MemorySettingsPage() {
     }
     settingsMut.mutate({ disabled: !next });
   };
-  const memories = memoriesQ.data?.items ?? [];
+  const memories = useMemo(() => memoriesQ.data?.items ?? [], [memoriesQ.data]);
   const filteredMemories = useMemo(() => {
     const query = memorySearch.trim().toLowerCase();
     if (!query) return memories;
@@ -487,7 +487,7 @@ export default function MemorySettingsPage() {
                   </>
                 }
               />
-              <div className="flex flex-col gap-2 border-t border-white/5 p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-2 border-t border-[var(--border-subtle)] p-3 sm:flex-row sm:items-center sm:justify-between">
                 <label className="relative min-w-0 flex-1">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
                   <input
@@ -762,7 +762,7 @@ function SectionHeader({
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 border-b border-white/5 p-4">
+    <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] p-4">
       <div className="flex items-baseline gap-2">
         <h2 className="type-card-title">{title}</h2>
         {suffix ? <span className="type-caption text-[var(--fg-2)]">{suffix}</span> : null}
@@ -811,7 +811,7 @@ function SettingToggle({
           "mt-1 inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
           checked
             ? "border-accent bg-accent"
-            : "border-white/15 bg-white/5",
+            : "border-[var(--border)] bg-white/5",
         ].join(" ")}
         aria-hidden
       >
@@ -936,7 +936,7 @@ function MemoryRow({
             type="checkbox"
             checked={selected}
             onChange={(event) => onToggleSelected?.(event.target.checked)}
-            className="h-4 w-4 rounded border-white/20 bg-white/[0.03]"
+            className="h-4 w-4 rounded border-[var(--border-strong)] bg-white/[0.03]"
             aria-label="选择记忆"
           />
         ) : null}

@@ -46,12 +46,46 @@ def test_parse_thresholds_logs_invalid_json(caplog: pytest.LogCaptureFixture):
     assert "Invalid billing image size thresholds JSON" in caplog.text
 
 
+def test_parse_thresholds_rejects_fractional_bool_and_negative_values():
+    thresholds = billing.parse_thresholds(
+        '{"1k": 1.9, "2k": true, "4k": -1, "8k": 800.5, "16k": 1600}'
+    )
+
+    assert thresholds["1k"] == billing.DEFAULT_IMAGE_SIZE_THRESHOLDS["1k"]
+    assert thresholds["2k"] == billing.DEFAULT_IMAGE_SIZE_THRESHOLDS["2k"]
+    assert thresholds["4k"] == billing.DEFAULT_IMAGE_SIZE_THRESHOLDS["4k"]
+    assert "8k" not in thresholds
+    assert thresholds["16k"] == 1600
+
+
 def test_parse_bool_setting_matches_zero_one_runtime_settings():
     assert billing.parse_bool_setting("1") is True
     assert billing.parse_bool_setting("0", default=True) is False
     assert billing.parse_bool_setting("yes") is False
     assert billing.parse_bool_setting("true") is False
     assert billing.parse_bool_setting(None, default=True) is True
+
+
+def test_retry_billing_refs_use_retry_suffix_only_after_first_attempt():
+    assert billing.retry_billing_ref_id("task-1", None) == "task-1"
+    assert billing.retry_billing_ref_id("task-1", 0) == "task-1"
+    assert billing.retry_billing_ref_id("task-1", "bad") == "task-1"
+    assert billing.retry_billing_ref_id("task-1", 2) == "task-1:retry:2"
+
+
+def test_completion_billing_ref_id_reads_retry_count_from_upstream_request():
+    completion = SimpleNamespace(
+        id="comp-1",
+        upstream_request={"billing_retry_count": "3"},
+    )
+    invalid = SimpleNamespace(
+        id="comp-2",
+        upstream_request={"billing_retry_count": "invalid"},
+    )
+
+    assert billing.completion_billing_retry_count(completion) == 3
+    assert billing.completion_billing_ref_id(completion) == "comp-1:retry:3"
+    assert billing.completion_billing_ref_id(invalid) == "comp-2"
 
 
 def test_redemption_code_normalization_and_hash_are_dash_tolerant():
@@ -158,6 +192,27 @@ async def test_billing_cache_window_increment_uses_atomic_lua():
 
 
 @pytest.mark.asyncio
+async def test_billing_cache_window_increment_ignores_nonpositive_amounts():
+    class Redis:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        async def eval(self, *args: Any) -> int:
+            self.calls.append(args)
+            return 1
+
+    redis = Redis()
+    service = BillingCacheService(redis=redis)
+
+    await service._apply_window_increment("cred-1", -10)  # noqa: SLF001
+    await service.queue_window_increment("cred-1", -10)
+    await service.queue_window_increment("cred-1", 0)
+
+    assert redis.calls == []
+    assert service._queue.qsize() == 0  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_billing_cache_window_usage_accepts_bytes_hash_keys():
     started = int(datetime(2026, 5, 15, tzinfo=timezone.utc).timestamp())
 
@@ -230,6 +285,59 @@ async def test_billing_cache_deduct_lock_refreshes_existing_identity_map():
     assert balance == 90
     assert row.version == 1
     assert session.statements[0].get_execution_options()["populate_existing"] is True
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_queue_deduct_ignores_nonpositive_amounts():
+    class Redis:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        async def decrby(self, key: str, amount: int) -> None:
+            self.calls.append((key, amount))
+
+    redis = Redis()
+    service = BillingCacheService(redis=redis)
+
+    await service._apply_decr("user-1", -10)  # noqa: SLF001
+    await service.queue_deduct("user-1", -10)
+    await service.queue_deduct("user-1", 0)
+
+    assert redis.calls == []
+    assert service._queue.qsize() == 0  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_deduct_sync_does_not_credit_negative_amount():
+    class Result:
+        def scalar_one_or_none(self) -> int:
+            return 100
+
+    class Session:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+            self.added: list[Any] = []
+            self.flushed = False
+
+        async def execute(self, stmt: Any) -> Result:
+            self.statements.append(stmt)
+            return Result()
+
+        def add(self, row: Any) -> None:
+            self.added.append(row)
+
+        async def flush(self) -> None:
+            self.flushed = True
+
+    session = Session()
+    service = BillingCacheService(redis=None)
+
+    balance = await service.deduct_sync(session, "user-1", -10)  # type: ignore[arg-type]
+
+    assert balance == 100
+    assert len(session.statements) == 1
+    assert session.added == []
+    assert session.flushed is False
 
 
 @pytest.mark.asyncio
@@ -333,6 +441,26 @@ async def test_settle_returns_existing_ref_consumption_when_hold_is_gone(
     assert result is consumed_tx
     assert wallet.balance_micro == 0
     assert wallet.version == 4
+
+
+@pytest.mark.asyncio
+async def test_settle_rejects_negative_actual_amount(monkeypatch: pytest.MonkeyPatch):
+    async def fail_existing_tx(*_args: Any) -> None:
+        raise AssertionError("negative settle must fail before DB access")
+
+    monkeypatch.setattr(billing, "_existing_tx", fail_existing_tx)
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.settle(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            ref_type="generation",
+            ref_id="gen-1",
+            actual_micro=-1,
+            idempotency_key="settle:gen-1",
+        )
+
+    assert exc.value.code == "NEGATIVE_AMOUNT"
 
 
 @pytest.mark.asyncio
@@ -563,6 +691,27 @@ async def test_charge_does_not_decrease_lifetime_spend_for_existing_debt(
     assert wallet.balance_micro == 0
     assert wallet.lifetime_spend_micro == 50
     assert tx.meta["overdraw_micro"] == 130
+
+
+@pytest.mark.asyncio
+async def test_topup_redeem_rejects_nonpositive_amount(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail_existing_tx(*_args: Any) -> None:
+        raise AssertionError("invalid redeem amount must fail before DB access")
+
+    monkeypatch.setattr(billing, "_existing_tx", fail_existing_tx)
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.topup_redeem(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            0,
+            usage_id="usage-1",
+            code_id="code-1",
+        )
+
+    assert exc.value.code == "INVALID_AMOUNT"
 
 
 @pytest.mark.asyncio

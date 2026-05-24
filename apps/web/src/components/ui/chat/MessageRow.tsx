@@ -60,7 +60,7 @@ export const MessageRow = memo(function MessageRow({
 function AssistantBubbleFallback() {
   return (
     <div className="flex justify-start">
-      <div className="h-14 w-full max-w-[96%] rounded-2xl rounded-bl-md border border-white/10 bg-white/[0.03]" />
+      <div className="h-14 w-full max-w-[96%] rounded-[var(--radius-dialog)] rounded-bl-md border border-[var(--border)] bg-white/[0.03]" />
     </div>
   );
 }

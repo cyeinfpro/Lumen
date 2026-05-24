@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from app.routes import _apparel_scene_planner as scene_planner
 from app.routes import workflows
-from lumen_core.constants import MAX_PROMPT_CHARS
+from lumen_core.constants import CompletionStatus, GenerationStatus, MAX_PROMPT_CHARS
 from lumen_core.schemas import (
     ApparelModelLibraryBatchDeleteIn,
     ApparelModelLibraryGenerateIn,
@@ -63,6 +63,20 @@ class _Db:
 
     async def commit(self) -> None:
         self.committed = True
+
+
+class _WorkflowDeleteDb(_Db):
+    def __init__(self, responses: list[list[Any]]) -> None:
+        super().__init__([], responses=responses)
+        self.release_calls: list[dict[str, Any]] = []
+
+
+class _WorkflowRedis:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def set(self, key: str, value: str, *, ex: int) -> None:
+        self.calls.append(("set", key, value, ex))
 
 
 class _BackgroundTasks:
@@ -403,11 +417,285 @@ async def test_soft_delete_workflow_generated_images_uses_explicit_image_ids() -
         "images_deleted": 0,
         "generations_canceled": 0,
         "completions_canceled": 0,
+        "holds_released": 0,
+        "queued_generation_ids": [],
+        "running_generation_ids": [],
+        "streaming_completion_ids": [],
     }
     rendered = str(db.statements[-1].compile(dialect=postgresql.dialect()))
     assert "UPDATE images" in rendered
     assert "images.id IN" in rendered
     assert "model_library_items.image_id IS NOT NULL" in rendered
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_workflow_generated_images_releases_active_task_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = SimpleNamespace(
+        step_key="showcase_generation",
+        image_ids=[],
+        task_ids=["gen-queued", "gen-running", "comp-queued", "comp-streaming"],
+    )
+    gen_queued = SimpleNamespace(
+        id="gen-queued",
+        status=GenerationStatus.QUEUED.value,
+        progress_stage="queued",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    gen_running = SimpleNamespace(
+        id="gen-running",
+        status=GenerationStatus.RUNNING.value,
+        progress_stage="rendering",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    comp_queued = SimpleNamespace(
+        id="comp-queued",
+        status=CompletionStatus.QUEUED.value,
+        progress_stage="queued",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+        upstream_request={"billing_retry_count": 1},
+    )
+    comp_streaming = SimpleNamespace(
+        id="comp-streaming",
+        status=CompletionStatus.STREAMING.value,
+        progress_stage="streaming",
+        finished_at=None,
+        error_code=None,
+        error_message=None,
+    )
+    db = _WorkflowDeleteDb(
+        responses=[
+            [step],
+            [],
+            [gen_queued, gen_running],
+            [],
+            [gen_queued, gen_running],
+            [comp_queued, comp_streaming],
+            [],
+        ],
+    )
+
+    async def release_soft_deleted_task_hold(
+        db: _WorkflowDeleteDb,
+        *,
+        user_id: str,
+        ref_type: str,
+        ref_id: str,
+        reason: str,
+    ) -> bool:
+        db.release_calls.append(
+            {
+                "committed": db.committed,
+                "user_id": user_id,
+                "ref_type": ref_type,
+                "ref_id": ref_id,
+                "reason": reason,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(
+        workflows,
+        "_release_soft_deleted_task_hold",
+        release_soft_deleted_task_hold,
+    )
+    monkeypatch.setattr(workflows, "_workflow_wallet_exists", lambda *_args, **_kwargs: False)
+
+    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        run=SimpleNamespace(id="run-1", user_id="user-1"),  # type: ignore[arg-type]
+        deleted_at=datetime.now(timezone.utc),
+        cancel_message="workflow deleted",
+    )
+
+    assert out["generations_canceled"] == 2
+    assert out["completions_canceled"] == 2
+    assert out["holds_released"] == 4
+    assert out["queued_generation_ids"] == ["gen-queued"]
+    assert out["running_generation_ids"] == ["gen-running"]
+    assert out["streaming_completion_ids"] == ["comp-streaming"]
+    assert [call["ref_id"] for call in db.release_calls] == [
+        "gen-queued",
+        "gen-running",
+        "comp-queued:retry:1",
+        "comp-streaming",
+    ]
+    assert all(call["reason"] == "workflow deleted" for call in db.release_calls)
+    assert all(call["committed"] is False for call in db.release_calls)
+    assert gen_queued.status == GenerationStatus.CANCELED.value
+    assert gen_running.status == GenerationStatus.CANCELED.value
+    assert comp_queued.status == CompletionStatus.CANCELED.value
+    assert comp_streaming.status == CompletionStatus.CANCELED.value
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_workflow_generated_images_skips_holds_for_byok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = SimpleNamespace(
+        step_key="showcase_generation",
+        image_ids=[],
+        task_ids=["gen-running", "comp-streaming"],
+    )
+    gen = SimpleNamespace(id="gen-running", status=GenerationStatus.RUNNING.value)
+    comp = SimpleNamespace(id="comp-streaming", status=CompletionStatus.STREAMING.value)
+    db = _WorkflowDeleteDb(
+        responses=[
+            [step],
+            [],
+            [gen],
+            [],
+            [gen],
+            [comp],
+            [],
+        ],
+    )
+    released: list[str] = []
+
+    async def release_soft_deleted_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(
+        workflows,
+        "_release_soft_deleted_task_hold",
+        release_soft_deleted_task_hold,
+    )
+    async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(workflows, "_workflow_wallet_exists", wallet_exists)
+
+    out = await workflows._soft_delete_workflow_generated_images(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        run=SimpleNamespace(id="run-1", user_id="user-1"),  # type: ignore[arg-type]
+        deleted_at=datetime.now(timezone.utc),
+        cancel_message="workflow deleted",
+        account_mode="byok",
+    )
+
+    assert out["holds_released"] == 0
+    assert released == []
+    assert gen.status == GenerationStatus.CANCELED.value
+    assert comp.status == CompletionStatus.CANCELED.value
+
+
+@pytest.mark.asyncio
+async def test_post_commit_workflow_generated_cleanup_runs_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _Db([])
+    invalidated: list[tuple[str, bool]] = []
+    queue_released: list[tuple[str, bool]] = []
+    redis = _WorkflowRedis()
+
+    async def invalidate_balance_cache(user_id: str) -> None:
+        invalidated.append((user_id, db.committed))
+
+    async def release_workflow_generation_queue_state(
+        _redis: _WorkflowRedis, task_id: str
+    ) -> None:
+        queue_released.append((task_id, db.committed))
+
+    monkeypatch.setattr(workflows, "get_redis", lambda: redis)
+    monkeypatch.setattr(workflows, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(
+        workflows,
+        "_release_workflow_generation_queue_state",
+        release_workflow_generation_queue_state,
+    )
+
+    await db.commit()
+    await workflows._post_commit_workflow_generated_cleanup(  # noqa: SLF001
+        user_id="user-1",
+        cleanup={
+            "holds_released": 2,
+            "queued_generation_ids": ["gen-queued"],
+            "running_generation_ids": ["gen-running"],
+            "streaming_completion_ids": ["comp-streaming"],
+        },
+    )
+
+    assert invalidated == [("user-1", True)]
+    assert queue_released == [("gen-queued", True)]
+    assert redis.calls == [
+        ("set", "task:gen-running:cancel", "1", 3600),
+        ("set", "task:comp-streaming:cancel", "1", 3600),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_workflow_generated_cleanup_keeps_cancel_when_cache_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue_released: list[str] = []
+    redis = _WorkflowRedis()
+
+    async def invalidate_balance_cache(_user_id: str) -> None:
+        raise RuntimeError("cache unavailable")
+
+    async def release_workflow_generation_queue_state(
+        _redis: _WorkflowRedis, task_id: str
+    ) -> None:
+        queue_released.append(task_id)
+
+    monkeypatch.setattr(workflows, "get_redis", lambda: redis)
+    monkeypatch.setattr(workflows, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(
+        workflows,
+        "_release_workflow_generation_queue_state",
+        release_workflow_generation_queue_state,
+    )
+
+    await workflows._post_commit_workflow_generated_cleanup(  # noqa: SLF001
+        user_id="user-1",
+        cleanup={
+            "holds_released": 1,
+            "queued_generation_ids": ["gen-queued"],
+            "running_generation_ids": ["gen-running"],
+            "streaming_completion_ids": ["comp-streaming"],
+        },
+    )
+
+    assert queue_released == ["gen-queued"]
+    assert redis.calls == [
+        ("set", "task:gen-running:cancel", "1", 3600),
+        ("set", "task:comp-streaming:cancel", "1", 3600),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_workflow_generated_cleanup_invalidates_hold_only_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidated: list[str] = []
+    redis = _WorkflowRedis()
+
+    async def invalidate_balance_cache(user_id: str) -> None:
+        invalidated.append(user_id)
+
+    monkeypatch.setattr(workflows, "get_redis", lambda: redis)
+    monkeypatch.setattr(workflows, "invalidate_balance_cache", invalidate_balance_cache)
+
+    await workflows._post_commit_workflow_generated_cleanup(  # noqa: SLF001
+        user_id="user-1",
+        cleanup={
+            "holds_released": 1,
+            "queued_generation_ids": [],
+            "running_generation_ids": [],
+            "streaming_completion_ids": [],
+        },
+    )
+
+    assert invalidated == ["user-1"]
+    assert redis.calls == []
 
 
 @pytest.mark.asyncio
@@ -441,7 +729,9 @@ async def test_delete_workflow_cleans_generated_outputs_and_backing_conversation
         run: Any,
         deleted_at: datetime,
         cancel_message: str,
+        account_mode: str,
     ) -> dict[str, int]:
+        assert account_mode == "wallet"
         cleanup_calls.append(
             {
                 "run_id": run.id,
@@ -510,7 +800,9 @@ async def test_delete_apparel_model_library_job_cleans_generated_outputs(
         run: Any,
         deleted_at: datetime,
         cancel_message: str,
+        account_mode: str,
     ) -> dict[str, int]:
+        assert account_mode == "wallet"
         assert deleted_at.tzinfo is not None
         cleanup_calls.append(f"{run.id}:{cancel_message}")
         return {
@@ -557,7 +849,9 @@ async def test_clear_apparel_model_library_jobs_cleans_each_finished_job(
         run: Any,
         deleted_at: datetime,
         cancel_message: str,
+        account_mode: str,
     ) -> dict[str, int]:
+        assert account_mode == "wallet"
         cleanup_calls.append(f"{run.id}:{cancel_message}:{deleted_at.isoformat()}")
         return {
             "images_deleted": 1,
