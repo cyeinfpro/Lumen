@@ -14,11 +14,11 @@ if (-not (Test-Path $Executable)) {
 }
 
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("lumen-desktop-smoke-" + [System.Guid]::NewGuid().ToString("N"))
-$home = Join-Path $work "home"
+$smokeHome = Join-Path $work "home"
 $localAppData = Join-Path $work "LocalAppData"
 $stdoutPath = Join-Path $work "app.stdout.log"
 $stderrPath = Join-Path $work "app.stderr.log"
-New-Item -ItemType Directory -Force $home, $localAppData | Out-Null
+New-Item -ItemType Directory -Force $smokeHome, $localAppData | Out-Null
 $appProcess = $null
 
 function Stop-ProcessTree {
@@ -59,7 +59,7 @@ try {
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
-  $psi.Environment["USERPROFILE"] = $home
+  $psi.Environment["USERPROFILE"] = $smokeHome
   $psi.Environment["LOCALAPPDATA"] = $localAppData
   $psi.Environment["APPDATA"] = Join-Path $work "AppDataRoaming"
   $psi.Environment.Remove("HTTP_PROXY") | Out-Null
