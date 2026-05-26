@@ -179,6 +179,12 @@ PY
   TAURI_CONFIG_ARGS_COUNT=${#TAURI_CONFIG_ARGS[@]}
 }
 
+prepare_macos_signing_env() {
+  if [ -n "${APPLE_SIGNING_IDENTITY+x}" ] && [ -z "${APPLE_SIGNING_IDENTITY//[[:space:]]/}" ]; then
+    unset APPLE_SIGNING_IDENTITY
+  fi
+}
+
 python3 scripts/version.py check
 if ! cargo tauri --version >/dev/null 2>&1; then
   cargo install tauri-cli --locked
@@ -232,6 +238,7 @@ chmod +x "apps/desktop/binaries/lumen-web-${TRIPLE}"
 
 clean_tauri_outputs
 prepare_tauri_config_args
+prepare_macos_signing_env
 (
   cd apps/desktop
   if [ "${TAURI_CONFIG_ARGS_COUNT:-0}" -gt 0 ]; then
