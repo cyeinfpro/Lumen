@@ -71,6 +71,78 @@ function Get-HttpStatus {
   }
 }
 
+function Get-HttpStatusNoRedirect {
+  param([string]$Uri)
+  $request = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Uri)
+  $request.AllowAutoRedirect = $false
+  $request.Timeout = 2000
+  try {
+    $response = $request.GetResponse()
+    try {
+      return [int]$response.StatusCode
+    } finally {
+      $response.Close()
+    }
+  } catch [System.Net.WebException] {
+    if ($_.Exception.Response) {
+      $response = $_.Exception.Response
+      try {
+        return [int]$response.StatusCode
+      } finally {
+        $response.Close()
+      }
+    }
+    throw
+  }
+}
+
+function Invoke-JsonRequest {
+  param(
+    [string]$Method = "GET",
+    [string]$Uri,
+    [object]$Body = $null
+  )
+  $params = @{
+    UseBasicParsing = $true
+    TimeoutSec = 2
+    Uri = $Uri
+    Method = $Method
+    Headers = @{ Accept = "application/json" }
+  }
+  if ($null -ne $Body) {
+    $params["ContentType"] = "application/json"
+    $params["Body"] = ($Body | ConvertTo-Json -Depth 8 -Compress)
+  }
+  try {
+    $response = Invoke-WebRequest @params
+    $json = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$response.Content)) {
+      $json = $response.Content | ConvertFrom-Json
+    }
+    return [pscustomobject]@{
+      StatusCode = [int]$response.StatusCode
+      Json = $json
+      Content = [string]$response.Content
+    }
+  } catch {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+      return [pscustomobject]@{
+        StatusCode = [int]$_.Exception.Response.StatusCode
+        Json = $null
+        Content = ""
+      }
+    }
+    if ($_.Exception.StatusCode) {
+      return [pscustomobject]@{
+        StatusCode = [int]$_.Exception.StatusCode
+        Json = $null
+        Content = ""
+      }
+    }
+    throw
+  }
+}
+
 try {
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName = $Executable
@@ -417,6 +489,132 @@ try {
       }
     } catch {
       $errors.Add("web proxy desktop-activity request failed: $($_.Exception.Message)")
+    }
+    $desktopRoutes = @(
+      "/",
+      "/assets",
+      "/stream",
+      "/me",
+      "/settings/providers",
+      "/settings/storage",
+      "/settings/diagnostics",
+      "/settings/update",
+      "/settings/memory",
+      "/settings/prompts"
+    )
+    foreach ($route in $desktopRoutes) {
+      try {
+        $status = Get-HttpStatus -Uri "http://127.0.0.1:$webPort$route"
+        if ($status -ne 200) {
+          $errors.Add("desktop web route $route did not return 200")
+        }
+      } catch {
+        $errors.Add("desktop web route $route request failed: $($_.Exception.Message)")
+      }
+    }
+    $dockerOnlyRoutes = @(
+      "/admin",
+      "/login",
+      "/projects",
+      "/me/wallet",
+      "/settings/api-key",
+      "/settings/privacy",
+      "/settings/telegram",
+      "/settings/usage"
+    )
+    foreach ($route in $dockerOnlyRoutes) {
+      try {
+        $status = Get-HttpStatusNoRedirect -Uri "http://127.0.0.1:$webPort$route"
+        if (@(301, 302, 303, 307, 308) -notcontains $status) {
+          $errors.Add("desktop unsupported route $route did not redirect")
+        }
+      } catch {
+        $errors.Add("desktop unsupported route $route request failed: $($_.Exception.Message)")
+      }
+    }
+    $apiGets = [ordered]@{
+      "/api/auth/me" = 200
+      "/api/auth/csrf" = 200
+      "/api/settings/bootstrap-status" = 200
+      "/api/settings/diagnostics" = 200
+      "/api/settings/system" = 200
+      "/api/settings/providers" = 200
+      "/api/settings/providers/stats" = 200
+      "/api/conversations?limit=1" = 200
+      "/api/system/desktop-activity" = 200
+    }
+    foreach ($path in $apiGets.Keys) {
+      try {
+        $status = Get-HttpStatus -Uri "http://127.0.0.1:$webPort$path"
+        if ($status -ne $apiGets[$path]) {
+          $errors.Add("desktop web proxy $path returned $status, expected $($apiGets[$path])")
+        }
+      } catch {
+        $errors.Add("desktop web proxy $path request failed: $($_.Exception.Message)")
+      }
+    }
+    try {
+      $bootstrap = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/settings/bootstrap-complete" -Body @{
+        settings = @{
+          theme = "system"
+          language = "zh-CN"
+          auto_check_updates = $true
+          crash_reports_enabled = $false
+        }
+      }
+      if ($bootstrap.StatusCode -ne 200 -or -not $bootstrap.Json -or $bootstrap.Json.complete -ne $true) {
+        $errors.Add("desktop bootstrap-complete did not return complete=true")
+      }
+    } catch {
+      $errors.Add("desktop bootstrap-complete request failed: $($_.Exception.Message)")
+    }
+    try {
+      $bootstrapStatus = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/settings/bootstrap-status"
+      if ($bootstrapStatus.StatusCode -ne 200 -or -not $bootstrapStatus.Json -or $bootstrapStatus.Json.complete -ne $true) {
+        $errors.Add("desktop bootstrap status did not persist complete=true")
+      }
+    } catch {
+      $errors.Add("desktop bootstrap-status request failed: $($_.Exception.Message)")
+    }
+    try {
+      $settings = Invoke-JsonRequest -Method "PUT" -Uri "http://127.0.0.1:$webPort/api/settings/system" -Body @{
+        items = @(
+          @{ key = "providers.auto_probe_interval"; value = "0" },
+          @{ key = "providers.auto_image_probe_interval"; value = "0" }
+        )
+      }
+      if ($settings.StatusCode -ne 200) {
+        $errors.Add("desktop settings/system PUT returned $($settings.StatusCode)")
+      }
+    } catch {
+      $errors.Add("desktop settings/system PUT request failed: $($_.Exception.Message)")
+    }
+    try {
+      $created = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/conversations" -Body @{
+        title = "desktop smoke"
+      }
+      $convId = if ($created.Json) { [string]$created.Json.id } else { "" }
+      if ($created.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($convId)) {
+        $errors.Add("desktop conversation create did not return an id")
+      } else {
+        $escapedId = [System.Uri]::EscapeDataString($convId)
+        $patched = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId" -Body @{
+          title = "desktop smoke updated"
+        }
+        if ($patched.StatusCode -ne 200 -or -not $patched.Json -or $patched.Json.title -ne "desktop smoke updated") {
+          $errors.Add("desktop conversation patch did not persist title")
+        }
+        $loaded = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId"
+        if ($loaded.StatusCode -ne 200) {
+          $errors.Add("desktop conversation get returned $($loaded.StatusCode)")
+        }
+        $deleted = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId"
+        if ($deleted.StatusCode -ne 200 -or -not $deleted.Json -or $deleted.Json.ok -ne $true) {
+          $errors.Add("desktop conversation delete did not return ok=true")
+        }
+      }
+    } catch {
+      $errors.Add("desktop conversation CRUD request failed: $($_.Exception.Message)")
     }
   }
   $deadProcessCount = @($processes.Values | Where-Object { -not $_ }).Count

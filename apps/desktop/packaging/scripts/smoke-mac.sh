@@ -68,6 +68,7 @@ disown "$app_pid" 2>/dev/null || true
 
 HOME_DIR="$home" WORK_DIR="$work" MOUNT_DIR="$mount" APP_PID="$app_pid" python3 - <<'PY'
 import os
+import json
 import pathlib
 import re
 import signal
@@ -75,6 +76,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 home = pathlib.Path(os.environ["HOME_DIR"])
@@ -85,6 +87,14 @@ mount_markers = {mount, os.path.realpath(mount)}
 logs_root = home / "Library/Application Support/com.lumen.desktop/data/logs"
 api_port = None
 web_port = None
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+no_redirect_opener = urllib.request.build_opener(NoRedirect)
 
 
 def read_log(name):
@@ -103,20 +113,48 @@ def process_alive(pid):
     )
 
 
-def get_http(port, path, headers=None):
+def http_request(port, path, method="GET", body=None, headers=None, follow_redirects=True):
     request_headers = {"Connection": "close"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+        request_headers["Accept"] = "application/json"
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(
-        f"http://127.0.0.1:{port}{path}", headers=request_headers
+        f"http://127.0.0.1:{port}{path}",
+        data=data,
+        headers=request_headers,
+        method=method,
     )
+    opener = urllib.request.urlopen if follow_redirects else no_redirect_opener.open
     try:
-        with urllib.request.urlopen(request, timeout=2) as response:
-            response.read(512)
-            return response.status
+        with opener(request, timeout=2) as response:
+            raw = response.read(4096)
+            return response.status, raw.decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        exc.read(512)
-        return exc.code
+        raw = exc.read(4096)
+        return exc.code, raw.decode("utf-8", "replace")
+
+
+def get_http(port, path, headers=None, follow_redirects=True):
+    status, _ = http_request(
+        port,
+        path,
+        headers=headers,
+        follow_redirects=follow_redirects,
+    )
+    return status
+
+
+def json_request(port, path, method="GET", body=None):
+    status, text = http_request(port, path, method=method, body=body)
+    try:
+        payload = json.loads(text) if text else None
+    except json.JSONDecodeError:
+        payload = None
+    return status, payload
 
 
 def listening_pids(port):
@@ -343,6 +381,131 @@ else:
             errors.append("web proxy desktop-activity did not return 200")
     except Exception as exc:
         errors.append(f"web proxy desktop-activity request failed: {exc}")
+    desktop_routes = [
+        "/",
+        "/assets",
+        "/stream",
+        "/me",
+        "/settings/providers",
+        "/settings/storage",
+        "/settings/diagnostics",
+        "/settings/update",
+        "/settings/memory",
+        "/settings/prompts",
+    ]
+    for route in desktop_routes:
+        try:
+            if get_http(web_port, route) != 200:
+                errors.append(f"desktop web route {route} did not return 200")
+        except Exception as exc:
+            errors.append(f"desktop web route {route} request failed: {exc}")
+    docker_only_routes = [
+        "/admin",
+        "/login",
+        "/projects",
+        "/me/wallet",
+        "/settings/api-key",
+        "/settings/privacy",
+        "/settings/telegram",
+        "/settings/usage",
+    ]
+    for route in docker_only_routes:
+        try:
+            status = get_http(web_port, route, follow_redirects=False)
+            if status not in (301, 302, 303, 307, 308):
+                errors.append(f"desktop unsupported route {route} did not redirect")
+        except Exception as exc:
+            errors.append(f"desktop unsupported route {route} request failed: {exc}")
+    api_gets = {
+        "/api/auth/me": 200,
+        "/api/auth/csrf": 200,
+        "/api/settings/bootstrap-status": 200,
+        "/api/settings/diagnostics": 200,
+        "/api/settings/system": 200,
+        "/api/settings/providers": 200,
+        "/api/settings/providers/stats": 200,
+        "/api/conversations?limit=1": 200,
+        "/api/system/desktop-activity": 200,
+    }
+    for path, expected in api_gets.items():
+        try:
+            status = get_http(web_port, path)
+            if status != expected:
+                errors.append(f"desktop web proxy {path} returned {status}, expected {expected}")
+        except Exception as exc:
+            errors.append(f"desktop web proxy {path} request failed: {exc}")
+    try:
+        status, payload = json_request(
+            web_port,
+            "/api/settings/bootstrap-complete",
+            method="POST",
+            body={
+                "settings": {
+                    "theme": "system",
+                    "language": "zh-CN",
+                    "auto_check_updates": True,
+                    "crash_reports_enabled": False,
+                }
+            },
+        )
+        if status != 200 or not isinstance(payload, dict) or payload.get("complete") is not True:
+            errors.append("desktop bootstrap-complete did not return complete=true")
+    except Exception as exc:
+        errors.append(f"desktop bootstrap-complete request failed: {exc}")
+    try:
+        status, payload = json_request(web_port, "/api/settings/bootstrap-status")
+        if status != 200 or not isinstance(payload, dict) or payload.get("complete") is not True:
+            errors.append("desktop bootstrap status did not persist complete=true")
+    except Exception as exc:
+        errors.append(f"desktop bootstrap-status request failed: {exc}")
+    try:
+        status, _ = json_request(
+            web_port,
+            "/api/settings/system",
+            method="PUT",
+            body={
+                "items": [
+                    {"key": "providers.auto_probe_interval", "value": "0"},
+                    {"key": "providers.auto_image_probe_interval", "value": "0"},
+                ]
+            },
+        )
+        if status != 200:
+            errors.append(f"desktop settings/system PUT returned {status}")
+    except Exception as exc:
+        errors.append(f"desktop settings/system PUT request failed: {exc}")
+    try:
+        status, conversation = json_request(
+            web_port,
+            "/api/conversations",
+            method="POST",
+            body={"title": "desktop smoke"},
+        )
+        conv_id = conversation.get("id") if isinstance(conversation, dict) else None
+        if status != 200 or not conv_id:
+            errors.append("desktop conversation create did not return an id")
+        else:
+            escaped_id = urllib.parse.quote(str(conv_id), safe="")
+            status, patched = json_request(
+                web_port,
+                f"/api/conversations/{escaped_id}",
+                method="PATCH",
+                body={"title": "desktop smoke updated"},
+            )
+            if status != 200 or not isinstance(patched, dict) or patched.get("title") != "desktop smoke updated":
+                errors.append("desktop conversation patch did not persist title")
+            status, _ = json_request(web_port, f"/api/conversations/{escaped_id}")
+            if status != 200:
+                errors.append(f"desktop conversation get returned {status}")
+            status, deleted = json_request(
+                web_port,
+                f"/api/conversations/{escaped_id}",
+                method="DELETE",
+            )
+            if status != 200 or not isinstance(deleted, dict) or deleted.get("ok") is not True:
+                errors.append("desktop conversation delete did not return ok=true")
+    except Exception as exc:
+        errors.append(f"desktop conversation CRUD request failed: {exc}")
 if not all(processes.values()):
     errors.append("not all sidecar processes are alive")
 
