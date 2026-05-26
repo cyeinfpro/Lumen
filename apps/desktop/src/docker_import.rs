@@ -279,6 +279,7 @@ fn apply_pending_docker_import_inner(
     };
 
     let mut command = Command::new(resolve_sidecar("lumen-api")?);
+    hide_windows_console(&mut command);
     command
         .arg("desktop-import")
         .arg("--dump")
@@ -349,6 +350,17 @@ fn apply_pending_docker_import_inner(
         report,
     })
 }
+
+#[cfg(windows)]
+fn hide_windows_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_windows_console(_command: &mut Command) {}
 
 fn read_json(path: &Path) -> Result<Value> {
     let raw = fs::read_to_string(path)?;

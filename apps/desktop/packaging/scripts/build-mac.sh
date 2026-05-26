@@ -183,6 +183,19 @@ prepare_macos_signing_env() {
   if [ -n "${APPLE_SIGNING_IDENTITY+x}" ] && [ -z "${APPLE_SIGNING_IDENTITY//[[:space:]]/}" ]; then
     unset APPLE_SIGNING_IDENTITY
   fi
+  if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    export APPLE_SIGNING_IDENTITY="-"
+    echo "APPLE_SIGNING_IDENTITY is not configured; using ad-hoc bundle signing." >&2
+  fi
+}
+
+verify_macos_bundle_signature() {
+  local app_path="apps/desktop/target/release/bundle/macos/Lumen.app"
+  if [ ! -d "$app_path" ]; then
+    echo "missing macOS app bundle: $app_path" >&2
+    exit 1
+  fi
+  codesign --verify --deep --strict --verbose=2 "$app_path"
 }
 
 python3 scripts/version.py check
@@ -247,3 +260,4 @@ prepare_macos_signing_env
     cargo tauri build --bundles dmg
   fi
 )
+verify_macos_bundle_signature
