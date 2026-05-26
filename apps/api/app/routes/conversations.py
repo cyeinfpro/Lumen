@@ -669,6 +669,7 @@ async def delete_conversation(
             "generations_canceled": task_cleanup["generations_canceled"],
             "completions_canceled": task_cleanup["completions_canceled"],
         },
+        autocommit=False,
     )
     await db.commit()
     await _post_commit_conversation_task_cleanup(

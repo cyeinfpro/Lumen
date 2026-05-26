@@ -224,6 +224,7 @@ async def test_create_multi_image_share_preserves_image_order(
 @pytest.mark.asyncio
 async def test_delete_conversation_writes_audit_log(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_write_audit(db, **kwargs):
+        assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
 
     async def fake_cancel_active_tasks(*_args, **_kwargs):
