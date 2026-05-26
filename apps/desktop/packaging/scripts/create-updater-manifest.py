@@ -26,10 +26,7 @@ def _parse_artifact(raw: str) -> tuple[str, Path]:
 
 
 def _signature_path(artifact_path: Path) -> Path:
-    suffix = artifact_path.suffix
-    if suffix:
-        return artifact_path.with_suffix(f"{suffix}.sig")
-    return artifact_path.with_suffix(".sig")
+    return artifact_path.with_name(f"{artifact_path.name}.sig")
 
 
 def _asset_url(base_url: str, artifact_path: Path) -> str:
