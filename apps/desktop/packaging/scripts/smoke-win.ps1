@@ -203,14 +203,47 @@ try {
             break
           }
         } catch {
-          Start-Sleep -Milliseconds 250
-        }
+	    Start-Sleep -Milliseconds 250
+  }
       }
     }
     if ($appProcess.HasExited) {
       break
     }
     Start-Sleep -Milliseconds 250
+  }
+
+  $operationErrors = [System.Collections.Generic.List[string]]::new()
+  if ($baselineReady -and $webPort) {
+    try {
+      $created = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/conversations" -Body @{
+        title = "desktop smoke"
+      }
+      $convId = if ($created.Json) { [string]$created.Json.id } else { "" }
+      if ($created.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($convId)) {
+        $operationErrors.Add("desktop conversation create did not return an id")
+      } else {
+        $escapedId = [System.Uri]::EscapeDataString($convId)
+        $patched = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId" -Body @{
+          title = "desktop smoke updated"
+        }
+        if ($patched.StatusCode -ne 200 -or -not $patched.Json -or $patched.Json.title -ne "desktop smoke updated") {
+          $operationErrors.Add("desktop conversation patch did not persist title")
+        }
+        $loaded = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId"
+        if ($loaded.StatusCode -ne 200) {
+          $operationErrors.Add("desktop conversation get returned $($loaded.StatusCode)")
+        }
+        $deleted = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId"
+        if ($deleted.StatusCode -ne 200 -or -not $deleted.Json -or $deleted.Json.ok -ne $true) {
+          $operationErrors.Add("desktop conversation delete did not return ok=true")
+        }
+      }
+    } catch {
+      $operationErrors.Add("desktop conversation CRUD request failed: $($_.Exception.Message)")
+    }
+  } else {
+    $operationErrors.Add("desktop conversation CRUD skipped before baseline readiness")
   }
 
   $workerRestarted = $false
@@ -399,6 +432,9 @@ try {
 
   $combined = ($logs.Values -join "`n")
   $errors = [System.Collections.Generic.List[string]]::new()
+  foreach ($item in $operationErrors) {
+    $errors.Add($item)
+  }
   if ($combined.Contains("--logdir") -or $combined.Contains("LogDir specified without enabling tiered storage")) {
     $errors.Add("old Garnet logdir failure is present")
   }
@@ -593,33 +629,6 @@ try {
       }
     } catch {
       $errors.Add("desktop settings/system PUT request failed: $($_.Exception.Message)")
-    }
-    try {
-      $created = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/conversations" -Body @{
-        title = "desktop smoke"
-      }
-      $convId = if ($created.Json) { [string]$created.Json.id } else { "" }
-      if ($created.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($convId)) {
-        $errors.Add("desktop conversation create did not return an id")
-      } else {
-        $escapedId = [System.Uri]::EscapeDataString($convId)
-        $patched = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId" -Body @{
-          title = "desktop smoke updated"
-        }
-        if ($patched.StatusCode -ne 200 -or -not $patched.Json -or $patched.Json.title -ne "desktop smoke updated") {
-          $errors.Add("desktop conversation patch did not persist title")
-        }
-        $loaded = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId"
-        if ($loaded.StatusCode -ne 200) {
-          $errors.Add("desktop conversation get returned $($loaded.StatusCode)")
-        }
-        $deleted = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedId"
-        if ($deleted.StatusCode -ne 200 -or -not $deleted.Json -or $deleted.Json.ok -ne $true) {
-          $errors.Add("desktop conversation delete did not return ok=true")
-        }
-      }
-    } catch {
-      $errors.Add("desktop conversation CRUD request failed: $($_.Exception.Message)")
     }
   }
   $deadProcessCount = @($processes.Values | Where-Object { -not $_ }).Count

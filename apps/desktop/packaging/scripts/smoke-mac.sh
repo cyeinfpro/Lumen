@@ -228,6 +228,42 @@ def wait_until_ready(seconds):
     return False
 
 baseline_ready = wait_until_ready(60)
+operation_errors = []
+if baseline_ready and web_port is not None:
+    try:
+        status, conversation = json_request(
+            web_port,
+            "/api/conversations",
+            method="POST",
+            body={"title": "desktop smoke"},
+        )
+        conv_id = conversation.get("id") if isinstance(conversation, dict) else None
+        if status != 200 or not conv_id:
+            operation_errors.append("desktop conversation create did not return an id")
+        else:
+            escaped_id = urllib.parse.quote(str(conv_id), safe="")
+            status, patched = json_request(
+                web_port,
+                f"/api/conversations/{escaped_id}",
+                method="PATCH",
+                body={"title": "desktop smoke updated"},
+            )
+            if status != 200 or not isinstance(patched, dict) or patched.get("title") != "desktop smoke updated":
+                operation_errors.append("desktop conversation patch did not persist title")
+            status, _ = json_request(web_port, f"/api/conversations/{escaped_id}")
+            if status != 200:
+                operation_errors.append(f"desktop conversation get returned {status}")
+            status, deleted = json_request(
+                web_port,
+                f"/api/conversations/{escaped_id}",
+                method="DELETE",
+            )
+            if status != 200 or not isinstance(deleted, dict) or deleted.get("ok") is not True:
+                operation_errors.append("desktop conversation delete did not return ok=true")
+    except Exception as exc:
+        operation_errors.append(f"desktop conversation CRUD request failed: {exc}")
+else:
+    operation_errors.append("desktop conversation CRUD skipped before baseline readiness")
 worker_restarted = False
 worker_before = set(sidecar_pids("lumen-worker"))
 if worker_before:
@@ -315,7 +351,7 @@ for name, text in logs.items():
     print(f"--- {name} tail ---")
     print(text[-1600:])
 
-errors = []
+errors = list(operation_errors)
 if "--logdir" in combined or "LogDir specified without enabling tiered storage" in combined:
     errors.append("old Garnet logdir failure is present")
 if "api_key is required" in logs["worker.err.log"]:
@@ -479,38 +515,6 @@ else:
             errors.append(f"desktop settings/system PUT returned {status}")
     except Exception as exc:
         errors.append(f"desktop settings/system PUT request failed: {exc}")
-    try:
-        status, conversation = json_request(
-            web_port,
-            "/api/conversations",
-            method="POST",
-            body={"title": "desktop smoke"},
-        )
-        conv_id = conversation.get("id") if isinstance(conversation, dict) else None
-        if status != 200 or not conv_id:
-            errors.append("desktop conversation create did not return an id")
-        else:
-            escaped_id = urllib.parse.quote(str(conv_id), safe="")
-            status, patched = json_request(
-                web_port,
-                f"/api/conversations/{escaped_id}",
-                method="PATCH",
-                body={"title": "desktop smoke updated"},
-            )
-            if status != 200 or not isinstance(patched, dict) or patched.get("title") != "desktop smoke updated":
-                errors.append("desktop conversation patch did not persist title")
-            status, _ = json_request(web_port, f"/api/conversations/{escaped_id}")
-            if status != 200:
-                errors.append(f"desktop conversation get returned {status}")
-            status, deleted = json_request(
-                web_port,
-                f"/api/conversations/{escaped_id}",
-                method="DELETE",
-            )
-            if status != 200 or not isinstance(deleted, dict) or deleted.get("ok") is not True:
-                errors.append("desktop conversation delete did not return ok=true")
-    except Exception as exc:
-        errors.append(f"desktop conversation CRUD request failed: {exc}")
 if not all(processes.values()):
     errors.append("not all sidecar processes are alive")
 
