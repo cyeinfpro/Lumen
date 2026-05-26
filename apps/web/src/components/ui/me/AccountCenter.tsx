@@ -7,10 +7,13 @@ import {
   BarChart3,
   Brain,
   CreditCard,
+  Database,
   FileText,
+  HardDrive,
   KeyRound,
   LogOut,
   Lock,
+  RefreshCw,
   Shield,
   Zap,
 } from "lucide-react";
@@ -28,6 +31,7 @@ import { formatRmb } from "@/lib/money";
 import { useSystemPromptsQuery } from "@/lib/queries";
 import { logWarn } from "@/lib/logger";
 import { useChatStore } from "@/store/useChatStore";
+import { isDesktopRuntime } from "@/lib/desktop/runtime";
 
 import { AccountRow } from "./AccountRow";
 
@@ -54,11 +58,12 @@ export function AccountCenter() {
     staleTime: 60_000,
   });
   const isAdmin = meQuery.data?.role === "admin";
+  const desktop = isDesktopRuntime();
   const accountMode = meQuery.data?.account_mode ?? "wallet";
   const walletQuery = useQuery({
     queryKey: ["me", "wallet"],
     queryFn: getMyWallet,
-    enabled: accountMode === "wallet",
+    enabled: !desktop && accountMode === "wallet",
     retry: false,
     staleTime: 30_000,
   });
@@ -106,13 +111,22 @@ export function AccountCenter() {
     <div className="flex flex-col">
       <SectionLabel>设置</SectionLabel>
       <div className="mx-4 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
-        <AccountRow
-          href="/settings/usage"
-          icon={<BarChart3 className="w-4 h-4" />}
-          label="用量统计"
-          grouped
-        />
-        {accountMode === "wallet" ? (
+        {!desktop && (
+          <AccountRow
+            href="/settings/usage"
+            icon={<BarChart3 className="w-4 h-4" />}
+            label="用量统计"
+            grouped
+          />
+        )}
+        {desktop ? (
+          <AccountRow
+            href="/settings/providers"
+            icon={<KeyRound className="w-4 h-4" />}
+            label="供应商池"
+            grouped
+          />
+        ) : accountMode === "wallet" ? (
           <AccountRow
             href="/me/wallet"
             icon={<CreditCard className="w-4 h-4" />}
@@ -128,12 +142,38 @@ export function AccountCenter() {
             grouped
           />
         )}
-        <AccountRow
-          href="/settings/privacy"
-          icon={<Lock className="w-4 h-4" />}
-          label="隐私 & 数据"
-          grouped
-        />
+        {!desktop && (
+          <AccountRow
+            href="/settings/privacy"
+            icon={<Lock className="w-4 h-4" />}
+            label="隐私 & 数据"
+            grouped
+          />
+        )}
+        {desktop && (
+          <AccountRow
+            href="/settings/storage"
+            icon={<HardDrive className="w-4 h-4" />}
+            label="存储与备份"
+            grouped
+          />
+        )}
+        {desktop && (
+          <AccountRow
+            href="/settings/diagnostics"
+            icon={<Database className="w-4 h-4" />}
+            label="诊断"
+            grouped
+          />
+        )}
+        {desktop && (
+          <AccountRow
+            href="/settings/update"
+            icon={<RefreshCw className="w-4 h-4" />}
+            label="检查更新"
+            grouped
+          />
+        )}
         <AccountRow
           href="/settings/memory"
           icon={<Brain className="w-4 h-4" />}
@@ -166,7 +206,7 @@ export function AccountCenter() {
         />
       </div>
 
-      {isAdmin && (
+      {isAdmin && !desktop && (
         <>
           <SectionLabel>管理</SectionLabel>
           <div className="mx-4 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
@@ -181,16 +221,18 @@ export function AccountCenter() {
         </>
       )}
 
-      <div className="mx-4 mt-5 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
-        <AccountRow
-          icon={<LogOut className="w-4 h-4" />}
-          label="退出登录"
-          destructive
-          onClick={() => setLogoutOpen(true)}
-          grouped
-          last
-        />
-      </div>
+      {!desktop && (
+        <div className="mx-4 mt-5 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
+          <AccountRow
+            icon={<LogOut className="w-4 h-4" />}
+            label="退出登录"
+            destructive
+            onClick={() => setLogoutOpen(true)}
+            grouped
+            last
+          />
+        </div>
+      )}
 
       <div className="flex items-center justify-center gap-1.5 pt-6 pb-4">
         <span className="text-[11px] text-[var(--fg-2)]">Lumen</span>

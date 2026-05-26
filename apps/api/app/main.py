@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import faulthandler
+import hmac
 import signal
 import sys
 from contextlib import asynccontextmanager
@@ -18,11 +19,13 @@ from fastapi.responses import JSONResponse
 from lumen_core import __version__ as lumen_core_version
 from lumen_core.context_window import warm_tiktoken
 from lumen_core.constants import MAX_PROMPT_CHARS
+from lumen_core.desktop_runtime import DESKTOP_TOKEN_HEADER, is_desktop_runtime
 from sqlalchemy import text
 
 from .arq_pool import close_arq_pool, get_arq_pool
 from .config import settings
 from .db import SessionLocal, engine
+from .desktop_migrations import run_desktop_migrations
 from .observability import init_otel, init_sentry, setup_prometheus
 from .ratelimit import _is_trusted_proxy
 from .redis_client import get_redis
@@ -189,8 +192,61 @@ class _BodySizeLimitMiddleware:
         await self.app(scope, limited_receive, send_wrapper)
 
 
+class _DesktopLocalTokenMiddleware:
+    """Reject direct calls to the desktop API port.
+
+    In desktop mode the WebView talks to the local Next sidecar; that sidecar
+    injects the per-launch token before rewrites reach FastAPI.  A random local
+    port alone is not enough because another local process could discover it.
+    """
+
+    _PUBLIC_PATHS = {"/healthz", "/readyz", "/system/desktop-ready"}
+
+    def __init__(self, app):  # type: ignore[no-untyped-def]
+        self.app = app
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        if scope["type"] != "http" or not is_desktop_runtime(settings.lumen_runtime):
+            await self.app(scope, receive, send)
+            return
+        if scope.get("path") in self._PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+        expected = settings.lumen_local_token.strip()
+        if not expected:
+            await self.app(scope, receive, send)
+            return
+        provided = ""
+        header_name = DESKTOP_TOKEN_HEADER.lower().encode("latin-1")
+        for name, value in scope.get("headers", []):
+            if name.lower() == header_name:
+                provided = value.decode("latin-1")
+                break
+        if not provided or not hmac.compare_digest(provided, expected):
+            response = JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={
+                    "error": {
+                        "code": "desktop_token_required",
+                        "message": "desktop local token is required",
+                    }
+                },
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def _is_prod_env() -> bool:
-    return settings.app_env.strip().lower() not in {"dev", "development", "local", "test"}
+    if is_desktop_runtime(settings.lumen_runtime):
+        return False
+    return settings.app_env.strip().lower() not in {
+        "dev",
+        "development",
+        "local",
+        "desktop",
+        "test",
+    }
 
 
 async def _check_alembic_head() -> None:
@@ -199,6 +255,8 @@ async def _check_alembic_head() -> None:
     跳过条件：env LUMEN_SKIP_MIGRATION_CHECK=1，或 alembic 元数据不可用（开发树外的安装路径）。
     复用 db.engine（不开新连接池）。
     """
+    if is_desktop_runtime(settings.lumen_runtime):
+        return
     if os.environ.get("LUMEN_SKIP_MIGRATION_CHECK", "").strip() in {"1", "true", "yes"}:
         return
 
@@ -223,7 +281,9 @@ async def _check_alembic_head() -> None:
 
         async with engine.connect() as conn:
             current_revs = await conn.run_sync(
-                lambda sync_conn: set(MigrationContext.configure(sync_conn).get_current_heads())
+                lambda sync_conn: set(
+                    MigrationContext.configure(sync_conn).get_current_heads()
+                )
             )
     except Exception as exc:  # noqa: BLE001
         # connection / parsing failures: warn in dev, raise in prod so prod doesn't
@@ -258,6 +318,8 @@ async def lifespan(app: FastAPI):
         settings.otel_exporter_endpoint,
         app=app,
     )
+    if is_desktop_runtime(settings.lumen_runtime):
+        await run_desktop_migrations()
     # Alembic 启动门禁：prod 必须在 head；非 prod 仅 warn；测试期通过 env 跳过。
     await _check_alembic_head()
     # 限流可观测性：明确记录限流是否启用，避免生产忘开等于无限流。
@@ -274,25 +336,30 @@ async def lifespan(app: FastAPI):
             settings.app_env,
             is_rl_enabled,
         )
-    try:
-        async with SessionLocal() as session:
-            changed = await migrate_image_primary_route(session)
-            changed = await migrate_provider_purposes(session) or changed
-            if changed:
-                await session.commit()
-    except Exception:  # noqa: BLE001
-        logger.warning("runtime settings image route migration failed", exc_info=True)
+    if not is_desktop_runtime(settings.lumen_runtime):
+        try:
+            async with SessionLocal() as session:
+                changed = await migrate_image_primary_route(session)
+                changed = await migrate_provider_purposes(session) or changed
+                if changed:
+                    await session.commit()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "runtime settings image route migration failed", exc_info=True
+            )
     # 提前建立 redis 连接（失败早暴露）
     r = get_redis()
     await r.ping()
-    billing_cache = BillingCacheService(redis=r)
-    await billing_cache.start_workers()
-    try:
-        from .routes import billing as billing_routes
+    billing_cache: BillingCacheService | None = None
+    if not is_desktop_runtime(settings.lumen_runtime):
+        billing_cache = BillingCacheService(redis=r)
+        await billing_cache.start_workers()
+        try:
+            from .routes import billing as billing_routes
 
-        billing_routes.configure_billing_cache(billing_cache)
-    except Exception:  # noqa: BLE001
-        logger.warning("billing cache route wiring failed", exc_info=True)
+            billing_routes.configure_billing_cache(billing_cache)
+        except Exception:  # noqa: BLE001
+            logger.warning("billing cache route wiring failed", exc_info=True)
     # 初始化 arq 入队池（与 Worker 注册的 run_generation / run_completion 对接）
     await get_arq_pool()
     # Opportunistic only: if tiktoken's cache is cold and the metadata download is
@@ -302,13 +369,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        await billing_cache.stop_workers()
-        try:
-            from .routes import billing as billing_routes
+        if billing_cache is not None:
+            await billing_cache.stop_workers()
+            try:
+                from .routes import billing as billing_routes
 
-            billing_routes.configure_billing_cache(None)
-        except Exception:  # noqa: BLE001
-            pass
+                billing_routes.configure_billing_cache(None)
+            except Exception:  # noqa: BLE001
+                pass
         await close_arq_pool()
         await r.aclose()
 
@@ -347,9 +415,11 @@ def build_app() -> FastAPI:
             "X-CSRF-Token",
             "Authorization",
             "Last-Event-ID",
+            DESKTOP_TOKEN_HEADER,
         ],
     )
     app.add_middleware(_BodySizeLimitMiddleware)
+    app.add_middleware(_DesktopLocalTokenMiddleware)
     app.add_middleware(_SecurityHeadersMiddleware)
     return app
 
@@ -358,6 +428,7 @@ app = build_app()
 
 
 # ---------- 统一错误结构（DESIGN §5.8） ----------
+
 
 def _wrap_error(
     code: str,
@@ -379,7 +450,11 @@ def _wrap_error(
 async def http_exc_handler(_req: Request, exc: HTTPException) -> JSONResponse:
     # Routes raise HTTPException(detail={"error": {...}}) to preserve structure.
     detail = exc.detail
-    if isinstance(detail, dict) and "error" in detail and isinstance(detail["error"], dict):
+    if (
+        isinstance(detail, dict)
+        and "error" in detail
+        and isinstance(detail["error"], dict)
+    ):
         err = detail["error"]
         return _wrap_error(
             code=str(err.get("code", "http_error")),
@@ -399,14 +474,21 @@ async def http_exc_handler(_req: Request, exc: HTTPException) -> JSONResponse:
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exc_handler(_req: Request, exc: RequestValidationError) -> JSONResponse:
+async def validation_exc_handler(
+    _req: Request, exc: RequestValidationError
+) -> JSONResponse:
     errors = exc.errors()
     for err in errors:
         loc = tuple(str(part) for part in err.get("loc", ()))
-        if err.get("type") == "string_too_long" and loc and loc[-1] in {
-            "text",
-            "prompt",
-        }:
+        if (
+            err.get("type") == "string_too_long"
+            and loc
+            and loc[-1]
+            in {
+                "text",
+                "prompt",
+            }
+        ):
             return _wrap_error(
                 code="prompt_too_long",
                 message=f"提示词不能超过 {MAX_PROMPT_CHARS} 字，请精简后再发送",
@@ -454,79 +536,108 @@ async def readyz(
         logger.warning("readiness check failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"code": "not_ready", "message": "dependency check failed"}},
+            detail={
+                "error": {"code": "not_ready", "message": "dependency check failed"}
+            },
         ) from exc
     return {"status": "ok"}
 
 
 # 路由挂载
-from .routes import auth, conversations, events, images, messages, tasks, workflows  # noqa: E402
+from .routes import conversations, events, images, messages, tasks  # noqa: E402
 from .routes import generations as generations_router  # noqa: E402
-from .routes import poster_styles as poster_styles_router  # noqa: E402
-
-app.include_router(auth.router, prefix="/auth", tags=["auth"])
-app.include_router(conversations.router, prefix="/conversations", tags=["conversations"])
-app.include_router(messages.router, tags=["messages"])
-# 静态路径 /generations/feed 必须先于 tasks.router 注册，否则会被 tasks 里的
-# /generations/{gen_id} 通配路由吞掉（gen_id="feed" 查 DB → 稳定 404）。
-app.include_router(generations_router.router, prefix="/generations", tags=["generations"])
-app.include_router(tasks.router, tags=["tasks"])
-app.include_router(images.router, prefix="/images", tags=["images"])
-app.include_router(events.router, tags=["events"])
-app.include_router(workflows.router)
-# Poster Style Library（V1.1 海报工作流）。挂在 workflows.router 之后，
-# 路径前缀 /poster-styles 与 workflows 的 /apparel-model-library 不冲突。
-app.include_router(poster_styles_router.router)
-
-from .routes import admin as admin_router  # noqa: E402
-from .routes import admin_backups as admin_backups_router  # noqa: E402
-from .routes import admin_models as admin_models_router  # noqa: E402
-from .routes import shares as shares_router  # noqa: E402
-from .routes import me as me_router  # noqa: E402
-from .routes import invites as invites_router  # noqa: E402
-from .routes import providers as providers_router  # noqa: E402
-from .routes import system_settings as system_settings_router  # noqa: E402
-from .routes import system_prompts as system_prompts_router  # noqa: E402
-from .routes import regenerate as regenerate_router  # noqa: E402
 from .routes import prompts as prompts_router  # noqa: E402
-from .routes import telegram as telegram_router  # noqa: E402
-from .routes import admin_proxies as admin_proxies_router  # noqa: E402
-from .routes import admin_storage as admin_storage_router  # noqa: E402
-from .routes import admin_telegram as admin_telegram_router  # noqa: E402
-from .routes import admin_update as admin_update_router  # noqa: E402
-from .routes import admin_release as admin_release_router  # noqa: E402
-from .routes import memories as memories_router  # noqa: E402
-from .routes import byok as byok_router  # noqa: E402
-from .routes import billing as billing_router  # noqa: E402
+from .routes import regenerate as regenerate_router  # noqa: E402
+from .routes import shares as shares_router  # noqa: E402
+from .routes import system_prompts as system_prompts_router  # noqa: E402
 
-app.include_router(admin_router.router)
-app.include_router(admin_backups_router.router)  # /admin/backups
-app.include_router(admin_models_router.router)  # /admin/models
-app.include_router(shares_router.router_authed)
-app.include_router(shares_router.router_public)
-app.include_router(me_router.router)
-app.include_router(invites_router.router_authed)  # /admin/invite_links
-app.include_router(invites_router.router_public)  # /invite/{token}
-app.include_router(providers_router.router)  # /admin/providers
-app.include_router(system_settings_router.router)  # /admin/settings
-app.include_router(system_prompts_router.router)
-app.include_router(regenerate_router.router)  # /conversations/{cid}/messages/{mid}/regenerate
-app.include_router(prompts_router.router)  # /prompts/enhance
-app.include_router(telegram_router.router_me, tags=["telegram"])  # /me/telegram/*
-app.include_router(telegram_router.router_bot, tags=["telegram"])  # /telegram/* (bot-token auth)
-app.include_router(admin_proxies_router.router)  # /admin/proxies/*
-app.include_router(admin_storage_router.router)  # /admin/storage
-app.include_router(admin_telegram_router.router)  # /admin/telegram/restart
-app.include_router(admin_update_router.router)  # /admin/update
-app.include_router(admin_update_router.router_public)  # /system/maintenance
-app.include_router(admin_release_router.router)  # /admin/release
-app.include_router(admin_release_router.update_router)  # /admin/update/rollback-previous
-app.include_router(memories_router.router)
-app.include_router(byok_router.router_admin)
-app.include_router(byok_router.router_auth_public)
-app.include_router(byok_router.router_me)
-app.include_router(billing_router.router)
+
+def _include_core_routers(target: FastAPI) -> None:
+    target.include_router(
+        conversations.router,
+        prefix="/conversations",
+        tags=["conversations"],
+    )
+    target.include_router(messages.router, tags=["messages"])
+    # 静态路径 /generations/feed 必须先于 tasks.router 注册，否则会被 tasks 里的
+    # /generations/{gen_id} 通配路由吞掉（gen_id="feed" 查 DB → 稳定 404）。
+    target.include_router(
+        generations_router.router,
+        prefix="/generations",
+        tags=["generations"],
+    )
+    target.include_router(tasks.router, tags=["tasks"])
+    target.include_router(images.router, prefix="/images", tags=["images"])
+    target.include_router(events.router, tags=["events"])
+    target.include_router(shares_router.router_authed)
+    target.include_router(shares_router.router_public)
+    target.include_router(system_prompts_router.router)
+    target.include_router(regenerate_router.router)
+    target.include_router(prompts_router.router)
+
+
+def _include_desktop_routers(target: FastAPI) -> None:
+    from .routes import desktop as desktop_router  # noqa: E402
+    from .routes import memories as memories_router  # noqa: E402
+
+    target.include_router(desktop_router.router)
+    _include_core_routers(target)
+    target.include_router(memories_router.router)
+
+
+def _include_docker_routers(target: FastAPI) -> None:
+    from .routes import admin as admin_router  # noqa: E402
+    from .routes import admin_backups as admin_backups_router  # noqa: E402
+    from .routes import admin_models as admin_models_router  # noqa: E402
+    from .routes import admin_proxies as admin_proxies_router  # noqa: E402
+    from .routes import admin_release as admin_release_router  # noqa: E402
+    from .routes import admin_storage as admin_storage_router  # noqa: E402
+    from .routes import admin_telegram as admin_telegram_router  # noqa: E402
+    from .routes import admin_update as admin_update_router  # noqa: E402
+    from .routes import auth, workflows  # noqa: E402
+    from .routes import billing as billing_router  # noqa: E402
+    from .routes import byok as byok_router  # noqa: E402
+    from .routes import invites as invites_router  # noqa: E402
+    from .routes import me as me_router  # noqa: E402
+    from .routes import memories as memories_router  # noqa: E402
+    from .routes import poster_styles as poster_styles_router  # noqa: E402
+    from .routes import providers as providers_router  # noqa: E402
+    from .routes import system_settings as system_settings_router  # noqa: E402
+    from .routes import telegram as telegram_router  # noqa: E402
+
+    target.include_router(auth.router, prefix="/auth", tags=["auth"])
+    _include_core_routers(target)
+    target.include_router(workflows.router)
+    target.include_router(poster_styles_router.router)
+    target.include_router(admin_router.router)
+    target.include_router(admin_backups_router.router)
+    target.include_router(admin_models_router.router)
+    target.include_router(me_router.router)
+    target.include_router(invites_router.router_authed)
+    target.include_router(invites_router.router_public)
+    target.include_router(providers_router.router)
+    target.include_router(system_settings_router.router)
+    target.include_router(telegram_router.router_me, tags=["telegram"])
+    target.include_router(telegram_router.router_bot, tags=["telegram"])
+    target.include_router(admin_proxies_router.router)
+    target.include_router(admin_storage_router.router)
+    target.include_router(admin_telegram_router.router)
+    target.include_router(admin_update_router.router)
+    target.include_router(admin_update_router.router_public)
+    target.include_router(admin_release_router.router)
+    target.include_router(admin_release_router.update_router)
+    target.include_router(memories_router.router)
+    target.include_router(byok_router.router_admin)
+    target.include_router(byok_router.router_auth_public)
+    target.include_router(byok_router.router_me)
+    target.include_router(billing_router.router)
+
+
+if is_desktop_runtime(settings.lumen_runtime):
+    _include_desktop_routers(app)
+else:
+    _include_docker_routers(app)
 
 # Prometheus /metrics（路由挂载后）
-if settings.metrics_enabled:
+if settings.metrics_enabled and not is_desktop_runtime(settings.lumen_runtime):
     setup_prometheus(app)

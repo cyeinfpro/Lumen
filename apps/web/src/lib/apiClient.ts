@@ -2251,14 +2251,19 @@ export async function getPublicInvite(
 
 // ——— Admin: system settings ———
 
+const SYSTEM_SETTINGS_BASE =
+  process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop"
+    ? "/settings/system"
+    : "/admin/settings";
+
 export function getSystemSettings(): Promise<SystemSettingsOut> {
-  return apiFetch<SystemSettingsOut>("/admin/settings");
+  return apiFetch<SystemSettingsOut>(SYSTEM_SETTINGS_BASE);
 }
 
 export function updateSystemSettings(
   items: { key: string; value: string }[],
 ): Promise<SystemSettingsOut> {
-  return apiFetch<SystemSettingsOut>("/admin/settings", {
+  return apiFetch<SystemSettingsOut>(SYSTEM_SETTINGS_BASE, {
     method: "PUT",
     body: JSON.stringify({ items }),
   });
@@ -2274,20 +2279,51 @@ export function getAdminContextHealth(): Promise<AdminContextHealthOut> {
 
 // ——— Admin: providers ———
 
+const PROVIDERS_BASE =
+  process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop"
+    ? "/settings/providers"
+    : "/admin/providers";
+
 export function getProviders(): Promise<ProvidersOut> {
-  return apiFetch<ProvidersOut>("/admin/providers");
+  return apiFetch<ProvidersOut>(PROVIDERS_BASE);
 }
 
-export function updateProviders(
+export async function updateProviders(
   payload: ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] },
 ): Promise<ProvidersOut> {
   const body = Array.isArray(payload)
     ? { items: payload, proxies: [] }
     : { items: payload.items, proxies: payload.proxies ?? [] };
-  return apiFetch<ProvidersOut>("/admin/providers", {
+  if (
+    process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
+    typeof window !== "undefined"
+  ) {
+    const bridge = await import("./desktop/runtime");
+    await Promise.all([
+      ...body.items
+        .filter((item) => item.api_key?.trim())
+        .map((item) =>
+          bridge.saveProviderSecret(item.name.trim(), item.api_key?.trim() ?? ""),
+        ),
+      ...body.proxies
+        .filter((proxy) => proxy.password?.trim())
+        .map((proxy) =>
+          bridge.saveProxySecret(proxy.name.trim(), proxy.password?.trim() ?? ""),
+        ),
+    ]);
+  }
+  const result = await apiFetch<ProvidersOut>(PROVIDERS_BASE, {
     method: "PUT",
     body: JSON.stringify(body),
   });
+  if (
+    process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
+    typeof window !== "undefined"
+  ) {
+    const bridge = await import("./desktop/runtime");
+    await bridge.refreshProviderRuntime();
+  }
+  return result;
 }
 
 export function patchProviderEnabled(
@@ -2295,7 +2331,7 @@ export function patchProviderEnabled(
   enabled: boolean,
 ): Promise<ProviderItemOut> {
   return apiFetch<ProviderItemOut>(
-    `/admin/providers/${encodeURIComponent(name)}/enabled`,
+    `${PROVIDERS_BASE}/${encodeURIComponent(name)}/enabled`,
     {
       method: "PATCH",
       body: JSON.stringify({ enabled }),
@@ -2306,14 +2342,14 @@ export function patchProviderEnabled(
 export function probeProviders(
   names?: string[],
 ): Promise<ProvidersProbeOut> {
-  return apiFetch<ProvidersProbeOut>("/admin/providers/probe", {
+  return apiFetch<ProvidersProbeOut>(`${PROVIDERS_BASE}/probe`, {
     method: "POST",
     ...(names ? { body: JSON.stringify({ names }) } : {}),
   });
 }
 
 export function getProviderStats(): Promise<ProviderStatsOut> {
-  return apiFetch<ProviderStatsOut>("/admin/providers/stats");
+  return apiFetch<ProviderStatsOut>(`${PROVIDERS_BASE}/stats`);
 }
 
 // ——— BYOK ———
@@ -2951,19 +2987,40 @@ export function getConversationUsedMemories(
   );
 }
 
-// ——— Admin: 代理池（独立路由，CRUD 仍走 /admin/providers PUT） ———
+// ——— Admin: 代理池（独立路由） ———
 
 export function listAdminProxies(): Promise<import("./types").ProxyListOut> {
   return apiFetch<import("./types").ProxyListOut>("/admin/proxies");
 }
 
-export function updateAdminProxies(
+export async function updateAdminProxies(
   items: ProviderProxyIn[],
 ): Promise<import("./types").ProxyListOut> {
-  return apiFetch<import("./types").ProxyListOut>("/admin/proxies", {
+  if (
+    process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
+    typeof window !== "undefined"
+  ) {
+    const bridge = await import("./desktop/runtime");
+    await Promise.all(
+      items
+        .filter((proxy) => proxy.password?.trim())
+        .map((proxy) =>
+          bridge.saveProxySecret(proxy.name.trim(), proxy.password?.trim() ?? ""),
+        ),
+    );
+  }
+  const result = await apiFetch<import("./types").ProxyListOut>("/admin/proxies", {
     method: "PUT",
     body: JSON.stringify({ items }),
   });
+  if (
+    process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
+    typeof window !== "undefined"
+  ) {
+    const bridge = await import("./desktop/runtime");
+    await bridge.refreshProviderRuntime();
+  }
+  return result;
 }
 
 export function restartTelegramBot(): Promise<{ ok: boolean; receivers: number }> {

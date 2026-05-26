@@ -667,7 +667,7 @@ export interface ProviderProxyOut {
 export interface ProvidersOut {
   items: ProviderItemOut[];
   proxies: ProviderProxyOut[];
-  source: "db" | "env" | "none";
+  source: "db" | "env" | "none" | "desktop";
 }
 
 export interface ProviderItemIn {

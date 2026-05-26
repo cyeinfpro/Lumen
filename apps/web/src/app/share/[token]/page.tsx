@@ -144,6 +144,10 @@ async function shareApiHeaders(): Promise<HeadersInit> {
   const out: Record<string, string> = {
     Accept: "application/json",
   };
+  const localToken = process.env.LUMEN_LOCAL_TOKEN?.trim();
+  if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" && localToken) {
+    out["x-lumen-local-token"] = localToken;
+  }
   const incoming = await headers();
   for (const name of [
     "forwarded",

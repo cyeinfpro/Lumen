@@ -59,6 +59,17 @@ docs/superpowers/
 # Internal planning / audit / fix-plans (本机保留，不入库)
 docs/internal/
 
+# Desktop build artifacts
+apps/desktop/target/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+apps/desktop/binaries/
+apps/desktop/resources/
+apps/desktop/gen/
+*.dmg
+*.exe.unsigned
+*.nsis.zip
+
 # 一次性整理 checklist
 RELEASE-CHECKLIST.md
 

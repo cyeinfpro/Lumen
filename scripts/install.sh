@@ -198,6 +198,11 @@ overlay_repo_into_existing() {
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/.env.local' \
         --exclude='/apps/web/node_modules/' \
+        --exclude='/apps/desktop/target/' \
+        --exclude='/apps/desktop/dist/' \
+        --exclude='/apps/desktop/binaries/' \
+        --exclude='/apps/desktop/resources/' \
+        --exclude='/apps/desktop/gen/' \
         --exclude='/.lumen-script.lock/' \
         --exclude='/.update.log' \
         "${tmp_dir}/repo/" "${install_dir}/"
@@ -1407,6 +1412,11 @@ prepare_release_layout() {
         --exclude='/apps/worker/var/' \
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/node_modules/' \
+        --exclude='/apps/desktop/target/' \
+        --exclude='/apps/desktop/dist/' \
+        --exclude='/apps/desktop/binaries/' \
+        --exclude='/apps/desktop/resources/' \
+        --exclude='/apps/desktop/gen/' \
         --exclude='/.lumen-script.lock/' \
         --exclude='/.update.log' \
         --exclude='/.install-logs/' \

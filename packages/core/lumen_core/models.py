@@ -11,7 +11,6 @@ from functools import cached_property
 from typing import Any
 
 from sqlalchemy import (
-    ARRAY,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -28,11 +27,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .constants import DEFAULT_CHAT_MODEL
 from .queue_metadata import completion_queue_metadata, generation_queue_metadata
+from .sqltypes import JsonType, StringListType
 
 
 # review #14：BYOK 凭证状态全局唯一来源；migration / ORM / route / worker 共用。
@@ -57,6 +56,7 @@ class Base(DeclarativeBase):
 
 # ---------- Mixins ----------
 
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -77,6 +77,7 @@ class SoftDeleteMixin:
 
 # ---------- Users / Auth ----------
 
+
 class User(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "users"
 
@@ -87,7 +88,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     oauth_providers: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
     notification_email: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
@@ -152,6 +153,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
 
 class AllowedEmail(Base, TimestampMixin):
     """邮箱白名单：注册/OAuth 回调时查，命中才创建 user（DESIGN §4 users 注释）。"""
+
     __tablename__ = "allowed_emails"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -170,10 +172,14 @@ class AuthSession(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    refresh_token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    refresh_token_hash: Mapped[str] = mapped_column(
+        String(128), nullable=False, unique=True
+    )
     ua: Mapped[str | None] = mapped_column(Text, nullable=True)
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -197,6 +203,7 @@ class SystemPrompt(Base, TimestampMixin):
 
 
 # ---------- BYOK Supplier Templates / User Credentials ----------
+
 
 class ApiSupplierTemplate(Base, TimestampMixin, SoftDeleteMixin):
     """Admin-managed BYOK supplier template.
@@ -235,7 +242,7 @@ class ApiSupplierTemplate(Base, TimestampMixin, SoftDeleteMixin):
         Boolean, default=True, nullable=False, server_default=text("true")
     )
     purposes: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
     validation_model: Mapped[str] = mapped_column(
         String(64), nullable=False, default="gpt-5.4", server_default="gpt-5.4"
@@ -263,7 +270,7 @@ class ApiSupplierTemplate(Base, TimestampMixin, SoftDeleteMixin):
         Integer, nullable=False, default=1, server_default="1"
     )
     capabilities_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     created_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -345,7 +352,7 @@ class UserApiCredential(Base, TimestampMixin, SoftDeleteMixin):
         BigInteger, nullable=False, default=0, server_default="0"
     )
     capabilities_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
 
     # review #23：back_populates 双向；lazy="raise" 强制显式 eager load。
@@ -365,7 +372,9 @@ class PendingApiKeyVerification(Base, TimestampMixin):
 
     __tablename__ = "pending_api_key_verifications"
     __table_args__ = (
-        UniqueConstraint("token_hash", name="uq_pending_api_key_verifications_token_hash"),
+        UniqueConstraint(
+            "token_hash", name="uq_pending_api_key_verifications_token_hash"
+        ),
         Index("ix_pending_api_key_verifications_expires", "expires_at"),
         Index("ix_pending_api_key_verifications_supplier", "supplier_id"),
     )
@@ -381,7 +390,7 @@ class PendingApiKeyVerification(Base, TimestampMixin):
     key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     key_hint: Mapped[str] = mapped_column(String(64), nullable=False)
     challenge_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     verified_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -398,6 +407,7 @@ class PendingApiKeyVerification(Base, TimestampMixin):
 
 # ---------- Conversations / Messages ----------
 
+
 class Conversation(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "conversations"
 
@@ -412,14 +422,16 @@ class Conversation(Base, TimestampMixin, SoftDeleteMixin):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     default_params: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     default_system: Mapped[str | None] = mapped_column(Text, nullable=True)
     default_system_prompt_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("system_prompts.id", ondelete="SET NULL"), nullable=True
     )
     # { up_to_message_id, text, tokens, updated_at }
-    summary_jsonb: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    summary_jsonb: Mapped[dict[str, Any] | None] = mapped_column(
+        JsonType(), nullable=True
+    )
     memory_disabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default=text("false")
     )
@@ -438,7 +450,12 @@ class Message(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "messages"
     __table_args__ = (
         Index("ix_messages_conv_created", "conversation_id", "created_at"),
-        Index("ix_messages_conv_alive_created", "conversation_id", "deleted_at", "created_at"),
+        Index(
+            "ix_messages_conv_alive_created",
+            "conversation_id",
+            "deleted_at",
+            "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -447,9 +464,11 @@ class Message(Base, TimestampMixin, SoftDeleteMixin):
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
     )
-    role: Mapped[str] = mapped_column(String(16), nullable=False)  # user/assistant/system
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # user/assistant/system
     content: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     parent_message_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
@@ -463,6 +482,7 @@ class Message(Base, TimestampMixin, SoftDeleteMixin):
 
 
 # ---------- Account Memory ----------
+
 
 class UserMemoryScope(Base, TimestampMixin):
     __tablename__ = "user_memory_scopes"
@@ -533,9 +553,13 @@ class UserMemory(Base, TimestampMixin, SoftDeleteMixin):
         Integer, default=0, nullable=False, server_default="0"
     )
     superseded_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     scope_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("user_memory_scopes.id", ondelete="CASCADE"), nullable=False
+        String(36),
+        ForeignKey("user_memory_scopes.id", ondelete="CASCADE"),
+        nullable=False,
     )
     last_confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -563,16 +587,24 @@ class UserMemoryStaging(Base, TimestampMixin):
     embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     scope_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("user_memory_scopes.id", ondelete="CASCADE"), nullable=False
+        String(36),
+        ForeignKey("user_memory_scopes.id", ondelete="CASCADE"),
+        nullable=False,
     )
     recommended_scope_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("user_memory_scopes.id", ondelete="SET NULL"), nullable=True
+        String(36),
+        ForeignKey("user_memory_scopes.id", ondelete="SET NULL"),
+        nullable=True,
     )
     decision: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
     )
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
 
 
 class MemoryAudit(Base):
@@ -590,14 +622,16 @@ class MemoryAudit(Base):
         String(36), ForeignKey("user_memories.id", ondelete="SET NULL"), nullable=True
     )
     staging_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("user_memory_staging.id", ondelete="SET NULL"), nullable=True
+        String(36),
+        ForeignKey("user_memory_staging.id", ondelete="SET NULL"),
+        nullable=True,
     )
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     old_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     new_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     details: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -605,6 +639,7 @@ class MemoryAudit(Base):
 
 
 # ---------- Tasks (generation / completion) ----------
+
 
 class Generation(Base, TimestampMixin):
     __tablename__ = "generations"
@@ -621,14 +656,16 @@ class Generation(Base, TimestampMixin):
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     action: Mapped[str] = mapped_column(String(16), nullable=False)  # generate/edit
-    model: Mapped[str] = mapped_column(String(64), nullable=False, default=DEFAULT_CHAT_MODEL)
+    model: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=DEFAULT_CHAT_MODEL
+    )
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     size_requested: Mapped[str] = mapped_column(String(32), nullable=False)
     aspect_ratio: Mapped[str] = mapped_column(String(16), nullable=False)
     # PG ARRAY 字面量必须是 ARRAY[]::type 或 '{}' 文本字面量，不能是裸字符串 "{}"（被当作非法字符串字面量）。
     # requires alembic migration to alter server_default to ARRAY[]::varchar[]
     input_image_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
@@ -639,10 +676,10 @@ class Generation(Base, TimestampMixin):
     # 局部 inpaint mask 引用（PostMessageIn.mask_image_id）。指向 images.id；
     # 不加 FK 约束，与 input_image_ids 保持一致：图片记录可能后续被软删，
     # 但 generation 行需要保留历史记录。worker 读到该字段后从存储拉 mask PNG。
-    mask_image_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True
+    mask_image_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    upstream_request: Mapped[dict[str, Any] | None] = mapped_column(
+        JsonType(), nullable=True
     )
-    upstream_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     user_api_credential_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("user_api_credentials.id", ondelete="SET NULL"),
@@ -679,13 +716,17 @@ class Generation(Base, TimestampMixin):
 
     @property
     def parent_generation_id(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("parent_generation_id")
         return value if isinstance(value, str) and value else None
 
     @property
     def diagnostics(self) -> dict[str, Any]:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         raw = request.get("generation_diagnostics")
         if isinstance(raw, dict):
             return raw
@@ -741,25 +782,33 @@ class Generation(Base, TimestampMixin):
 
     @property
     def source(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("source")
         return value if isinstance(value, str) and value else None
 
     @property
     def action_source(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("action_source")
         return value if isinstance(value, str) and value else None
 
     @property
     def trace_id(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("trace_id") or self.diagnostics.get("trace_id")
         return value if isinstance(value, str) and value else None
 
     @property
     def attachment_roles(self) -> list[dict[str, Any]]:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("attachment_roles")
         if not isinstance(value, list):
             return []
@@ -767,9 +816,13 @@ class Generation(Base, TimestampMixin):
 
     @property
     def source_image_id(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("source_image_id") or request.get("primary_input_image_id")
-        return value if isinstance(value, str) and value else self.primary_input_image_id
+        return (
+            value if isinstance(value, str) and value else self.primary_input_image_id
+        )
 
     @cached_property
     def queue_metadata(self) -> dict[str, Any]:
@@ -840,13 +893,15 @@ class Completion(Base, TimestampMixin):
     # 见 Generation.input_image_ids 注释。
     # requires alembic migration to alter server_default to ARRAY[]::varchar[]
     input_image_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
     )
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    upstream_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    upstream_request: Mapped[dict[str, Any] | None] = mapped_column(
+        JsonType(), nullable=True
+    )
     user_api_credential_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("user_api_credentials.id", ondelete="SET NULL"),
@@ -903,19 +958,25 @@ class Completion(Base, TimestampMixin):
 
     @property
     def source(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("source")
         return value if isinstance(value, str) and value else None
 
     @property
     def action_source(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("action_source")
         return value if isinstance(value, str) and value else None
 
     @property
     def trace_id(self) -> str | None:
-        request = self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        request = (
+            self.upstream_request if isinstance(self.upstream_request, dict) else {}
+        )
         value = request.get("trace_id")
         return value if isinstance(value, str) and value else None
 
@@ -967,6 +1028,7 @@ class Completion(Base, TimestampMixin):
 
 # ---------- Images ----------
 
+
 class Image(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "images"
     __table_args__ = (
@@ -983,7 +1045,9 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
     owner_generation_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("generations.id", ondelete="SET NULL"), nullable=True
     )
-    source: Mapped[str] = mapped_column(String(16), nullable=False)  # generated/uploaded
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # generated/uploaded
     # 父图被删除时保留 edit 派生图（用户可能仍想找回），同样 SET NULL 而不是 RESTRICT。
     parent_image_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
@@ -996,9 +1060,11 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     blurhash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     nsfw_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    visibility: Mapped[str] = mapped_column(String(16), nullable=False, default="private")
+    visibility: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="private"
+    )
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
 
 
@@ -1021,6 +1087,7 @@ class ImageVariant(Base, TimestampMixin):
 
 # ---------- Structured Workflows ----------
 
+
 class WorkflowRun(Base, TimestampMixin, SoftDeleteMixin):
     """A resumable structured workflow project.
 
@@ -1031,7 +1098,9 @@ class WorkflowRun(Base, TimestampMixin, SoftDeleteMixin):
 
     __tablename__ = "workflow_runs"
     __table_args__ = (
-        Index("ix_workflow_runs_user_status_updated", "user_id", "status", "updated_at"),
+        Index(
+            "ix_workflow_runs_user_status_updated", "user_id", "status", "updated_at"
+        ),
         Index("ix_workflow_runs_user_type_updated", "user_id", "type", "updated_at"),
     )
 
@@ -1047,15 +1116,17 @@ class WorkflowRun(Base, TimestampMixin, SoftDeleteMixin):
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     user_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     product_image_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
     )
     current_step: Mapped[str] = mapped_column(String(64), nullable=False)
-    quality_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="premium")
+    quality_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="premium"
+    )
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
 
 
@@ -1064,7 +1135,9 @@ class WorkflowStep(Base, TimestampMixin):
 
     __tablename__ = "workflow_steps"
     __table_args__ = (
-        UniqueConstraint("workflow_run_id", "step_key", name="uq_workflow_steps_run_key"),
+        UniqueConstraint(
+            "workflow_run_id", "step_key", name="uq_workflow_steps_run_key"
+        ),
         Index("ix_workflow_steps_run_key", "workflow_run_id", "step_key"),
         Index("ix_workflow_steps_run_status", "workflow_run_id", "status"),
     )
@@ -1074,26 +1147,30 @@ class WorkflowStep(Base, TimestampMixin):
         String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
     )
     step_key: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="waiting_input")
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="waiting_input"
+    )
     input_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     output_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     task_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
     )
     image_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
     )
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     approved_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -1104,7 +1181,9 @@ class ModelCandidate(Base, TimestampMixin):
 
     __tablename__ = "model_candidates"
     __table_args__ = (
-        UniqueConstraint("workflow_run_id", "candidate_index", name="uq_model_candidates_run_index"),
+        UniqueConstraint(
+            "workflow_run_id", "candidate_index", name="uq_model_candidates_run_index"
+        ),
         Index("ix_model_candidates_run_status", "workflow_run_id", "status"),
     )
 
@@ -1129,16 +1208,18 @@ class ModelCandidate(Base, TimestampMixin):
         String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
     )
     model_brief_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     task_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
-    selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    selected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class QualityReport(Base, TimestampMixin):
@@ -1146,8 +1227,12 @@ class QualityReport(Base, TimestampMixin):
 
     __tablename__ = "quality_reports"
     __table_args__ = (
-        UniqueConstraint("workflow_run_id", "image_id", name="uq_quality_reports_run_image"),
-        Index("ix_quality_reports_run_recommendation", "workflow_run_id", "recommendation"),
+        UniqueConstraint(
+            "workflow_run_id", "image_id", name="uq_quality_reports_run_image"
+        ),
+        Index(
+            "ix_quality_reports_run_recommendation", "workflow_run_id", "recommendation"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -1158,17 +1243,24 @@ class QualityReport(Base, TimestampMixin):
         String(36), ForeignKey("images.id", ondelete="CASCADE"), nullable=False
     )
     overall_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    product_fidelity_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    model_consistency_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    product_fidelity_score: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    model_consistency_score: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
     aesthetic_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     artifact_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     issues_json: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
-    recommendation: Mapped[str] = mapped_column(String(32), nullable=False, default="review")
+    recommendation: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="review"
+    )
 
 
 # ---------- Shares ----------
+
 
 class Share(Base, TimestampMixin):
     __tablename__ = "shares"
@@ -1178,7 +1270,7 @@ class Share(Base, TimestampMixin):
         String(36), ForeignKey("images.id", ondelete="CASCADE"), nullable=False
     )
     image_ids: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
     token: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
     show_prompt: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -1191,6 +1283,7 @@ class Share(Base, TimestampMixin):
 
 
 # ---------- Outbox (DESIGN §6.1) ----------
+
 
 class OutboxEvent(Base, TimestampMixin):
     """Transactional outbox：API 在写 generations/completions 的同一事务里
@@ -1205,14 +1298,17 @@ class OutboxEvent(Base, TimestampMixin):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # generation/completion
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # generation/completion
+    payload: Mapped[dict[str, Any]] = mapped_column(JsonType(), nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
 
 # ---------- Billing / Wallet ----------
+
 
 class UserWallet(Base, TimestampMixin):
     __tablename__ = "user_wallets"
@@ -1269,7 +1365,7 @@ class WalletTransaction(Base):
     ref_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(96), nullable=False)
     meta: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -1348,7 +1444,9 @@ class RedemptionCodeUsage(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
     code_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("redemption_codes.id", ondelete="RESTRICT"), nullable=False
+        String(36),
+        ForeignKey("redemption_codes.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     user_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
@@ -1364,6 +1462,7 @@ class RedemptionCodeUsage(Base):
 
 
 # ---------- Invite Links（V1.0 收尾） ----------
+
 
 class InviteLink(Base, TimestampMixin):
     """站长生成一次性邀请链接给朋友。"""
@@ -1398,6 +1497,7 @@ class InviteLink(Base, TimestampMixin):
 
 # ---------- System Settings（V1.0 收尾） ----------
 
+
 class SystemSetting(Base, TimestampMixin):
     """管理员可调系统设置（Provider Pool、像素预算等）。
 
@@ -1405,9 +1505,7 @@ class SystemSetting(Base, TimestampMixin):
     """
 
     __tablename__ = "system_settings"
-    __table_args__ = (
-        UniqueConstraint("key", name="uq_system_settings_key"),
-    )
+    __table_args__ = (UniqueConstraint("key", name="uq_system_settings_key"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
     key: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1415,6 +1513,7 @@ class SystemSetting(Base, TimestampMixin):
 
 
 # ---------- Audit Logs（V1.0 收尾） ----------
+
 
 class AuditLog(Base):
     """结构化审计日志双写：进程 logger.info 仍记，同时落 PG 留痕。
@@ -1439,7 +1538,7 @@ class AuditLog(Base):
     actor_ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     target_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     details: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -1447,6 +1546,7 @@ class AuditLog(Base):
 
 
 # ---------- Telegram Bot 绑定 ----------
+
 
 class TelegramBinding(Base, TimestampMixin):
     """TG chat_id ↔ Lumen user 的一对一绑定。
@@ -1471,6 +1571,7 @@ class TelegramBinding(Base, TimestampMixin):
 
 
 # ---------- Apparel Model Library（V1.x 收藏 + 自动识别） ----------
+
 
 class ModelLibraryItem(Base, TimestampMixin):
     """User-owned saved/favorited/generated apparel model.
@@ -1511,11 +1612,9 @@ class ModelLibraryItem(Base, TimestampMixin):
         String(32), nullable=False, default="user_favorites"
     )
     gender: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    appearance_direction: Mapped[str | None] = mapped_column(
-        String(80), nullable=True
-    )
+    appearance_direction: Mapped[str | None] = mapped_column(String(80), nullable=True)
     style_tags: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
     library_folder: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1524,7 +1623,7 @@ class ModelLibraryItem(Base, TimestampMixin):
     )
     auto_tag_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
 
 
@@ -1547,6 +1646,7 @@ class ModelLibraryHiddenPreset(Base):
 
 
 # ---------- Poster Style Library（V1.1 海报工作流） ----------
+
 
 class PosterStyleItem(Base, TimestampMixin):
     """User-owned saved/favorited/generated poster visual style.
@@ -1580,7 +1680,7 @@ class PosterStyleItem(Base, TimestampMixin):
         String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
     )
     sample_image_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
@@ -1592,13 +1692,13 @@ class PosterStyleItem(Base, TimestampMixin):
     mood: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prompt_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     palette: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
     recommended_aspects: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
     style_tags: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default="[]"
+        JsonType(), nullable=False, default=list, server_default="[]"
     )
     library_folder: Mapped[str | None] = mapped_column(String(64), nullable=True)
     auto_tagged_at: Mapped[datetime | None] = mapped_column(
@@ -1606,7 +1706,7 @@ class PosterStyleItem(Base, TimestampMixin):
     )
     auto_tag_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
 
 
@@ -1651,10 +1751,10 @@ class PosterMaster(Base, TimestampMixin):
         String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
     )
     style_summary_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     task_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
@@ -1694,18 +1794,19 @@ class PosterRender(Base, TimestampMixin):
         String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
     )
     task_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(String(36)),
+        StringListType(36),
         nullable=False,
         default=list,
         server_default=text("ARRAY[]::varchar[]"),
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
 
 
 # ---------- Outbox Dead Letter（V1.0 收尾） ----------
+
 
 class OutboxDeadLetter(Base):
     """Outbox/SSE publish 链路最终失败的事件持久化 DLQ；admin 端可列表 + 重试。"""
@@ -1723,7 +1824,7 @@ class OutboxDeadLetter(Base):
     )
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default="{}"
+        JsonType(), nullable=False, default=dict, server_default="{}"
     )
     error_class: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

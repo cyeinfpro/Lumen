@@ -1,10 +1,11 @@
 {
   "name": "web",
-  "version": "1.1.54",
+  "version": "1.1.55",
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
+    "build:desktop": "node scripts/build-desktop.mjs",
     "start": "next start -H 0.0.0.0 -p 3000",
     "lint": "npm run check:ui-governance && npm run lint:eslint",
     "lint:eslint": "eslint",

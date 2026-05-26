@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-api"
-version = "1.1.54"
+version = "1.1.55"
 description = "Lumen FastAPI — DESIGN.md §5 REST + SSE"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,6 +13,8 @@ dependencies = [
     "pydantic[email]>=2.7,<3.0",
     "pydantic-settings>=2.3,<3.0",
     "sqlalchemy[asyncio]>=2.0.30,<3.0",
+    "aiosqlite>=0.20,<1.0",
+    "sqlite-vec>=0.1,<1.0",
     "asyncpg>=0.29,<1.0",
     "psycopg2>=2.9,<3.0",
     "alembic>=1.13,<2.0",

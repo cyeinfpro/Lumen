@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { ArrowUp, Filter, Loader2, RefreshCw, Search } from "lucide-react";
 
 import { DesktopTopNav } from "@/components/ui/shell";
@@ -124,6 +125,7 @@ function StreamToolbar({
 
 export function DesktopStream() {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const isWide = useMediaQuery("(min-width: 1180px)");
   const desktopCols = isWide ? 4 : 3;
@@ -143,9 +145,9 @@ export function DesktopStream() {
     ) => {
       setter(next);
       const qs = filtersToQueryString(next);
-      router.replace(`/stream${qs}`, { scroll: false });
+      router.replace(`${pathname || "/stream"}${qs}`, { scroll: false });
     },
-    [router],
+    [pathname, router],
   );
 
   const clearFilters = useCallback(() => {

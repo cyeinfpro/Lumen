@@ -45,7 +45,7 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             settings.sentry_traces_sample_rate,
         )
         init_otel(settings.otel_service_name, settings.otel_exporter_endpoint)
-        start_metrics_server(settings.worker_metrics_port)
+        start_metrics_server(settings.worker_metrics_port, settings.worker_metrics_host)
         # P1-4: 预热 tiktoken o200k_base encoding，避免首条请求承担 ~100-200 ms 加载耗时。
         # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
         loaded = warm_tiktoken()

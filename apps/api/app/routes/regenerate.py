@@ -25,6 +25,7 @@ from lumen_core.constants import (
     MessageStatus,
     Role,
 )
+from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -42,6 +43,7 @@ from lumen_core.providers import parse_provider_bool
 from lumen_core.runtime_settings import get_spec
 
 from ..billing_cache_state import invalidate_balance_cache
+from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..ratelimit import MESSAGES_LIMITER
@@ -93,6 +95,8 @@ async def _release_regenerate_cancel_hold(
 
 
 async def _regenerate_wallet_exists(db: AsyncSession, user_id: str) -> bool:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return False
     wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
     return wallet is not None
 

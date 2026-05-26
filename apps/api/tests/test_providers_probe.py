@@ -117,6 +117,46 @@ def test_provider_admin_output_parses_string_booleans_without_truthy_coercion() 
     assert proxy.enabled is False
 
 
+def test_write_desktop_provider_config_strips_metadata_secrets(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    metadata_path = tmp_path / "providers.json"
+    runtime_path = tmp_path / "providers.runtime.json"
+    monkeypatch.setattr(providers, "desktop_provider_metadata_path", lambda: metadata_path)
+    monkeypatch.setattr(providers, "desktop_provider_runtime_file", lambda: runtime_path)
+
+    providers._write_desktop_provider_config(
+        [
+            {
+                "name": "primary",
+                "base_url": "https://upstream.example",
+                "api_key": "sk-secret",
+                "enabled": True,
+            }
+        ],
+        [
+            {
+                "name": "egress",
+                "type": "socks5",
+                "host": "127.0.0.1",
+                "port": 1080,
+                "password": "proxy-secret",
+                "enabled": True,
+            }
+        ],
+    )
+
+    metadata = json.loads(metadata_path.read_text())
+    runtime = json.loads(runtime_path.read_text())
+    assert "api_key" not in metadata["providers"][0]
+    assert "password" not in metadata["proxies"][0]
+    assert runtime["providers"][0]["api_key"] == "sk-secret"
+    assert runtime["proxies"][0]["password"] == "proxy-secret"
+
+
 @pytest.mark.asyncio
 async def test_manual_provider_probe_calls_responses_model(
     monkeypatch: pytest.MonkeyPatch,
@@ -312,6 +352,48 @@ async def test_update_providers_preserves_existing_ssh_proxy_password(
     assert saved["providers"][0]["image_jobs_enabled"] is True
     assert out.items[0].image_jobs_enabled is True
     assert out.proxies[0].password_hint == "****cret"
+
+
+@pytest.mark.asyncio
+async def test_update_providers_allows_disabled_provider_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    db = _FakeProvidersDb(json.dumps({"providers": [], "proxies": []}))
+
+    async def fake_write_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(providers, "write_audit", fake_write_audit)
+
+    from app.routes import admin_models
+
+    monkeypatch.setattr(admin_models, "invalidate_admin_models_cache", lambda: None)
+
+    out = await providers.update_providers(
+        ProvidersUpdateIn(
+            items=[
+                {
+                    "name": "disabled-placeholder",
+                    "base_url": "https://upstream.example",
+                    "api_key": "",
+                    "priority": 0,
+                    "weight": 1,
+                    "enabled": False,
+                }
+            ],
+        ),
+        _admin_request(),
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        db,  # type: ignore[arg-type]
+    )
+
+    saved = json.loads(db.setting.value)
+    assert db.committed is True
+    assert saved["providers"][0]["api_key"] == ""
+    assert saved["providers"][0]["enabled"] is False
+    assert out.items[0].enabled is False
 
 
 @pytest.mark.asyncio

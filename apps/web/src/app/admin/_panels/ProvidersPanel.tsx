@@ -490,7 +490,7 @@ export function ProvidersPanel() {
         return;
       }
       const isExisting = serverItems.some((s) => s.name === d.name.trim());
-      if (!d.api_key && !isExisting) {
+      if (!d.api_key && !isExisting && d.enabled) {
         setGlobalError(`「${d.name}」缺少 API 密钥`);
         setEditingIdx(i);
         return;
@@ -903,7 +903,13 @@ function StatsRow({
   source: string;
 }) {
   const sourceLabel =
-    source === "db" ? "数据库" : source === "env" ? "环境变量" : "未配置";
+    source === "db"
+      ? "数据库"
+      : source === "env"
+        ? "环境变量"
+        : source === "desktop"
+          ? "本机"
+          : "未配置";
   const sourceIcon =
     source === "db" ? (
       <Server className="w-3 h-3" />

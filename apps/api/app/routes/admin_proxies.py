@@ -45,7 +45,12 @@ from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ._admin_common import admin_http as _http, write_admin_audit
 from .admin_models import invalidate_admin_models_cache
-from .providers import _parse_config, _read_providers
+from .providers import (
+    _is_desktop_provider_runtime,
+    _parse_config,
+    _read_providers,
+    _write_desktop_provider_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +279,16 @@ async def update_proxies(
         validated = validate_providers(new_raw)
     except ValueError as exc:
         raise _http("invalid_config", str(exc), 422) from exc
+
+    if _is_desktop_provider_runtime():
+        providers = config.get("providers") or []
+        if not isinstance(providers, list):
+            providers = []
+        _write_desktop_provider_config(
+            [it for it in providers if isinstance(it, dict)],
+            new_proxies,
+        )
+        return await list_proxies(_admin=admin, db=db)
 
     existing = (
         await db.execute(

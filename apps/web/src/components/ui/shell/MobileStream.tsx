@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ArrowUp, Loader2 } from "lucide-react";
 import { MobileTabBar } from "./MobileTabBar";
 import { PullToRefresh, pushMobileToast } from "@/components/ui/primitives/mobile";
@@ -59,6 +59,7 @@ function hasAnyFilter(f: StreamFeedFilters): boolean {
 
 export function MobileStream() {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
 
   const initialFilters = useMemo(
@@ -73,9 +74,9 @@ export function MobileStream() {
     (next: StreamFeedFilters, setter: Dispatch<SetStateAction<StreamFeedFilters>> = setFilters) => {
       setter(next);
       const qs = filtersToQueryString(next);
-      router.replace(`/stream${qs}`, { scroll: false });
+      router.replace(`${pathname || "/stream"}${qs}`, { scroll: false });
     },
-    [router],
+    [pathname, router],
   );
 
   const clearFilters = useCallback(() => {

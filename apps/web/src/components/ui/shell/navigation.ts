@@ -9,7 +9,9 @@ export interface AppNavItem {
   matchPrefixes: readonly string[];
 }
 
-export const APP_NAV_ITEMS: readonly AppNavItem[] = [
+const IS_DESKTOP_RUNTIME = process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
+
+const DOCKER_NAV_ITEMS: readonly AppNavItem[] = [
   {
     key: "studio",
     label: "创作",
@@ -43,6 +45,37 @@ export const APP_NAV_ITEMS: readonly AppNavItem[] = [
     matchPrefixes: ["/me", "/settings"],
   },
 ];
+
+const DESKTOP_NAV_ITEMS: readonly AppNavItem[] = [
+  {
+    key: "studio",
+    label: "创作",
+    route: "/",
+    detail: "本机对话、生图、图生图、修图",
+    keywords: ["new", "studio", "home", "创作", "首页", "工作台", "聊天", "生图"],
+    matchPrefixes: ["/"],
+  },
+  {
+    key: "assets",
+    label: "资产",
+    route: "/assets",
+    detail: "本机生成图、上传图和会话素材",
+    keywords: ["assets", "stream", "feed", "资产", "图库", "图片"],
+    matchPrefixes: ["/assets", "/stream"],
+  },
+  {
+    key: "me",
+    label: "设置",
+    route: "/me",
+    detail: "供应商池、记忆、数据目录、诊断和更新",
+    keywords: ["me", "profile", "account", "settings", "我的", "账号", "设置", "记忆"],
+    matchPrefixes: ["/me", "/settings"],
+  },
+];
+
+export const APP_NAV_ITEMS: readonly AppNavItem[] = IS_DESKTOP_RUNTIME
+  ? DESKTOP_NAV_ITEMS
+  : DOCKER_NAV_ITEMS;
 
 export function matchesPathPrefix(pathname: string, prefix: string): boolean {
   if (prefix === "/") return pathname === "/" || pathname === "";

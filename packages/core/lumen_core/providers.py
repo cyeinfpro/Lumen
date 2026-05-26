@@ -362,12 +362,14 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
     base_url = item.get("base_url", "")
     if not isinstance(base_url, str) or not base_url.strip():
         raise ValueError(f"provider {name}: base_url is required")
+    enabled = _parse_bool(item.get("enabled"), default=True, field="enabled")
     api_key = item.get("api_key", "")
-    if not isinstance(api_key, str) or not api_key.strip():
+    if not isinstance(api_key, str):
+        raise ValueError(f"provider {name}: api_key must be a string")
+    if enabled and not api_key.strip():
         raise ValueError(f"provider {name}: api_key is required")
     priority = _parse_priority(item.get("priority", 0))
     weight = _parse_weight(item.get("weight", 1))
-    enabled = _parse_bool(item.get("enabled"), default=True, field="enabled")
     purposes = normalize_provider_purposes(item.get("purposes"))
     rate_limit_raw = item.get("image_rate_limit")
     image_rate_limit: str | None = None

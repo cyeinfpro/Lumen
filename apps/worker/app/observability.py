@@ -402,9 +402,9 @@ class _SilentMetricsHandler(WSGIRequestHandler):
         return
 
 
-def _start_metrics_wsgi_server(port: int) -> tuple[Any, threading.Thread]:
+def _start_metrics_wsgi_server(host: str, port: int) -> tuple[Any, threading.Thread]:
     httpd = make_server(
-        "0.0.0.0",
+        host,
         port,
         make_wsgi_app(REGISTRY),
         _ThreadingMetricsWSGIServer,
@@ -419,26 +419,40 @@ def _start_metrics_wsgi_server(port: int) -> tuple[Any, threading.Thread]:
     return httpd, thread
 
 
-def start_metrics_server(port: int) -> None:
+def start_metrics_server(port: int, host: str = "0.0.0.0") -> None:
     """在指定端口起一个独立的 prometheus_client HTTP server。幂等。"""
     global _metrics_httpd, _metrics_server_started, _metrics_thread
     if _metrics_server_started:
         return
+    bind_host = host.strip() or "0.0.0.0"
     try:
-        _metrics_httpd, _metrics_thread = _start_metrics_wsgi_server(port)
+        _metrics_httpd, _metrics_thread = _start_metrics_wsgi_server(bind_host, port)
         _metrics_server_started = True
-        logger.info("worker metrics server started on :%d", port)
+        logger.info("worker metrics server started on %s:%d", bind_host, port)
     except OSError as exc:
         if getattr(exc, "errno", None) == EADDRINUSE:
-            logger.error("worker metrics server port already in use: :%d", port)
+            logger.error(
+                "worker metrics server port already in use: %s:%d",
+                bind_host,
+                port,
+            )
             raise RuntimeError(
-                f"worker metrics server port already in use: {port}"
+                f"worker metrics server port already in use: {bind_host}:{port}"
             ) from exc
-        logger.error("worker metrics server could not bind :%d: %s", port, exc)
-        raise RuntimeError(f"worker metrics server could not bind port {port}") from exc
+        logger.error(
+            "worker metrics server could not bind %s:%d: %s",
+            bind_host,
+            port,
+            exc,
+        )
+        raise RuntimeError(
+            f"worker metrics server could not bind {bind_host}:{port}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.error("worker metrics server failed on :%d: %s", port, exc)
-        raise RuntimeError(f"worker metrics server failed on port {port}") from exc
+        logger.error("worker metrics server failed on %s:%d: %s", bind_host, port, exc)
+        raise RuntimeError(
+            f"worker metrics server failed on {bind_host}:{port}"
+        ) from exc
 
 
 def stop_metrics_server() -> None:
