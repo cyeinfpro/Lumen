@@ -314,6 +314,92 @@ if baseline_ready and web_port is not None:
     except Exception as exc:
         operation_errors.append(f"desktop system prompt CRUD request failed: {exc}")
     try:
+        provider_name = "desktop-smoke-provider"
+        provider_payload = {
+            "items": [
+                {
+                    "name": provider_name,
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "sk-desktop-smoke-key",
+                    "priority": 0,
+                    "weight": 1,
+                    "enabled": True,
+                    "purposes": ["chat", "image"],
+                    "image_jobs_enabled": True,
+                    "image_jobs_endpoint": "generations",
+                    "image_jobs_endpoint_lock": True,
+                    "image_jobs_base_url": "",
+                    "image_edit_input_transport": "url",
+                    "image_concurrency": 1,
+                }
+            ],
+            "proxies": [],
+        }
+        status, providers = json_request(
+            web_port,
+            "/api/settings/providers",
+            method="PUT",
+            body=provider_payload,
+        )
+        items = providers.get("items") if isinstance(providers, dict) else None
+        first_provider = items[0] if isinstance(items, list) and items else None
+        if (
+            status != 200
+            or not isinstance(first_provider, dict)
+            or first_provider.get("name") != provider_name
+            or first_provider.get("enabled") is not True
+            or first_provider.get("api_key_hint") == "sk-desktop-smoke-key"
+        ):
+            operation_errors.append("desktop providers PUT did not persist masked provider")
+        status, probe = json_request(
+            web_port,
+            "/api/settings/providers/probe",
+            method="POST",
+            body={"names": [provider_name]},
+        )
+        probe_items = probe.get("items") if isinstance(probe, dict) else None
+        first_probe = probe_items[0] if isinstance(probe_items, list) and probe_items else None
+        if (
+            status != 200
+            or not isinstance(first_probe, dict)
+            or first_probe.get("name") != provider_name
+            or first_probe.get("status") != "skipped"
+            or first_probe.get("error") != "endpoint_locked_to_generations"
+        ):
+            operation_errors.append("desktop providers probe did not skip generation-locked provider")
+        escaped_provider_name = urllib.parse.quote(provider_name, safe="")
+        status, disabled_provider = json_request(
+            web_port,
+            f"/api/settings/providers/{escaped_provider_name}/enabled",
+            method="PATCH",
+            body={"enabled": False},
+        )
+        if (
+            status != 200
+            or not isinstance(disabled_provider, dict)
+            or disabled_provider.get("enabled") is not False
+        ):
+            operation_errors.append("desktop provider enabled PATCH did not persist false")
+        status, stats = json_request(web_port, "/api/settings/providers/stats")
+        stat_items = stats.get("items") if isinstance(stats, dict) else None
+        if (
+            status != 200
+            or not isinstance(stat_items, list)
+            or not any(isinstance(item, dict) and item.get("name") == provider_name for item in stat_items)
+        ):
+            operation_errors.append("desktop provider stats did not include saved provider")
+        status, cleared = json_request(
+            web_port,
+            "/api/settings/providers",
+            method="PUT",
+            body={"items": [], "proxies": []},
+        )
+        cleared_items = cleared.get("items") if isinstance(cleared, dict) else None
+        if status != 200 or cleared_items != []:
+            operation_errors.append("desktop providers clear did not return empty items")
+    except Exception as exc:
+        operation_errors.append(f"desktop providers save/probe/clear request failed: {exc}")
+    try:
         status, settings = json_request(web_port, "/api/me/memory-settings")
         if status != 200 or not isinstance(settings, dict):
             operation_errors.append("desktop memory settings did not return 200")

@@ -268,6 +268,7 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         "/api/settings/diagnostics",
         "/api/settings/system",
         "/api/settings/providers",
+        "/api/settings/providers/probe",
         "/api/settings/providers/stats",
         "/api/conversations",
         "/api/system-prompts",
@@ -296,6 +297,11 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop system prompt create did not return a default prompt" in text
         assert "desktop system prompt patch did not persist name" in text
         assert "desktop system prompt delete returned" in text
+        assert "desktop providers PUT did not persist masked provider" in text
+        assert "desktop providers probe did not skip generation-locked provider" in text
+        assert "desktop provider enabled PATCH did not persist false" in text
+        assert "desktop providers clear did not return empty items" in text
+        assert "endpoint_locked_to_generations" in text
         assert "desktop memory settings patch did not persist" in text
         assert "desktop memory create did not return a pinned memory" in text
         assert "desktop memory patch did not persist" in text

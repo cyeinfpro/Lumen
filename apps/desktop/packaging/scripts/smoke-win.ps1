@@ -278,6 +278,77 @@ try {
       $operationErrors.Add("desktop system prompt CRUD request failed: $($_.Exception.Message)")
     }
     try {
+      $providerName = "desktop-smoke-provider"
+      $providers = Invoke-JsonRequest -Method "PUT" -Uri "http://127.0.0.1:$webPort/api/settings/providers" -Body @{
+        items = @(
+          @{
+            name = $providerName
+            base_url = "http://127.0.0.1:9"
+            api_key = "sk-desktop-smoke-key"
+            priority = 0
+            weight = 1
+            enabled = $true
+            purposes = @("chat", "image")
+            image_jobs_enabled = $true
+            image_jobs_endpoint = "generations"
+            image_jobs_endpoint_lock = $true
+            image_jobs_base_url = ""
+            image_edit_input_transport = "url"
+            image_concurrency = 1
+          }
+        )
+        proxies = @()
+      }
+      $providerItems = if ($providers.Json) { @($providers.Json.items) } else { @() }
+      if (
+        $providers.StatusCode -ne 200 -or
+        $providerItems.Count -lt 1 -or
+        $providerItems[0].name -ne $providerName -or
+        $providerItems[0].enabled -ne $true -or
+        $providerItems[0].api_key_hint -eq "sk-desktop-smoke-key"
+      ) {
+        $operationErrors.Add("desktop providers PUT did not persist masked provider")
+      }
+      $probe = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/settings/providers/probe" -Body @{
+        names = @($providerName)
+      }
+      $probeItems = if ($probe.Json) { @($probe.Json.items) } else { @() }
+      if (
+        $probe.StatusCode -ne 200 -or
+        $probeItems.Count -lt 1 -or
+        $probeItems[0].name -ne $providerName -or
+        $probeItems[0].status -ne "skipped" -or
+        $probeItems[0].error -ne "endpoint_locked_to_generations"
+      ) {
+        $operationErrors.Add("desktop providers probe did not skip generation-locked provider")
+      }
+      $escapedProviderName = [System.Uri]::EscapeDataString($providerName)
+      $disabledProvider = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/settings/providers/$escapedProviderName/enabled" -Body @{
+        enabled = $false
+      }
+      if ($disabledProvider.StatusCode -ne 200 -or -not $disabledProvider.Json -or $disabledProvider.Json.enabled -ne $false) {
+        $operationErrors.Add("desktop provider enabled PATCH did not persist false")
+      }
+      $stats = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/settings/providers/stats"
+      $statItems = if ($stats.Json) { @($stats.Json.items) } else { @() }
+      if (
+        $stats.StatusCode -ne 200 -or
+        -not ($statItems | Where-Object { $_.name -eq $providerName })
+      ) {
+        $operationErrors.Add("desktop provider stats did not include saved provider")
+      }
+      $cleared = Invoke-JsonRequest -Method "PUT" -Uri "http://127.0.0.1:$webPort/api/settings/providers" -Body @{
+        items = @()
+        proxies = @()
+      }
+      $clearedItems = if ($cleared.Json) { @($cleared.Json.items) } else { @("__missing__") }
+      if ($cleared.StatusCode -ne 200 -or $clearedItems.Count -ne 0) {
+        $operationErrors.Add("desktop providers clear did not return empty items")
+      }
+    } catch {
+      $operationErrors.Add("desktop providers save/probe/clear request failed: $($_.Exception.Message)")
+    }
+    try {
       $memorySettings = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memory-settings"
       if ($memorySettings.StatusCode -ne 200 -or -not $memorySettings.Json) {
         $operationErrors.Add("desktop memory settings did not return 200")
