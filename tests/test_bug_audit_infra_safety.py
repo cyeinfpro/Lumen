@@ -112,6 +112,12 @@ def test_desktop_release_builds_windows_arm64_artifact() -> None:
     assert "apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis" in workflow
     assert "$BuildTarget = if ($env:LUMEN_DESKTOP_BUILD_TARGET)" in build_win
     assert 'cargoArgs += @("--target", $BuildTarget)' in build_win
+    assert "function Test-TargetRunsOnHost" in build_win
+    assert "if (Test-TargetRunsOnHost)" in build_win
+    assert (
+        "Skipping executable Node runtime check for cross-architecture target"
+        in build_win
+    )
 
 
 def test_desktop_mac_release_requires_valid_bundle_signature() -> None:
