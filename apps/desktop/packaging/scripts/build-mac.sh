@@ -11,6 +11,13 @@ GARNET_VERSION="${GARNET_VERSION:-1.1.9}"
 DOTNET_RUNTIME_VERSION="${DOTNET_RUNTIME_VERSION:-8.0.27}"
 NODE_RUNTIME_VERSION="${NODE_RUNTIME_VERSION:-$(node -p 'process.versions.node')}"
 
+if command -v brew >/dev/null 2>&1; then
+  LIBPQ_PREFIX="$(brew --prefix libpq 2>/dev/null || true)"
+  if [ -n "$LIBPQ_PREFIX" ]; then
+    export PATH="$LIBPQ_PREFIX/bin:$PATH"
+  fi
+fi
+
 prepare_garnet() {
   local dest="apps/desktop/resources/runtime/lumen-redis"
   rm -rf "$dest"
@@ -191,6 +198,9 @@ uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath app
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist \
   apps/desktop/packaging/pyinstaller/lumen-worker.spec
 clean_tauri_outputs
+mkdir -p apps/desktop/binaries
+: > "apps/desktop/binaries/lumen-web-${TRIPLE}"
+chmod +x "apps/desktop/binaries/lumen-web-${TRIPLE}"
 (
   cd apps/desktop
   cargo build --release --bin lumen-web
@@ -204,8 +214,7 @@ prepare_garnet
 prepare_dotnet_runtime
 prepare_static_resource_placeholders
 
-mkdir -p apps/desktop/binaries
-cp -R apps/desktop/target/release/lumen-web "apps/desktop/binaries/lumen-web-${TRIPLE}"
+cp -f apps/desktop/target/release/lumen-web "apps/desktop/binaries/lumen-web-${TRIPLE}"
 chmod +x "apps/desktop/binaries/lumen-web-${TRIPLE}"
 
 clean_tauri_outputs

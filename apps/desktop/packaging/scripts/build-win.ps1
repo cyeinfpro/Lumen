@@ -176,6 +176,9 @@ uv sync --all-packages
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist apps/desktop/packaging/pyinstaller/lumen-api.spec
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist apps/desktop/packaging/pyinstaller/lumen-worker.spec
 Clean-TauriOutputs
+New-Item -ItemType Directory -Force apps/desktop/binaries | Out-Null
+$LumenWebSidecar = "apps/desktop/binaries/lumen-web-$Triple.exe"
+New-Item -ItemType File -Force $LumenWebSidecar | Out-Null
 Push-Location apps/desktop
 cargo build --release --bin lumen-web
 Pop-Location
@@ -189,8 +192,7 @@ Prepare-Garnet
 Prepare-DotnetRuntime
 Prepare-StaticResourcePlaceholders
 
-New-Item -ItemType Directory -Force apps/desktop/binaries | Out-Null
-Copy-Item apps/desktop/target/release/lumen-web.exe "apps/desktop/binaries/lumen-web-$Triple.exe"
+Copy-Item apps/desktop/target/release/lumen-web.exe $LumenWebSidecar -Force
 
 Clean-TauriOutputs
 $tauriConfigArgs = Get-TauriConfigArgs
