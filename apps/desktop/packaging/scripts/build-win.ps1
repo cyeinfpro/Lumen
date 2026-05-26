@@ -102,6 +102,19 @@ function Prepare-NodeRuntime {
   }
 }
 
+function Test-TargetRunsOnHost {
+  if (-not $BuildTarget) {
+    return $true
+  }
+  if ($Triple -eq $HostTriple) {
+    return $true
+  }
+
+  $targetArch = ($Triple -split "-")[0]
+  $hostArch = ($HostTriple -split "-")[0]
+  return $targetArch -eq $hostArch
+}
+
 function Clean-TauriOutputs {
   $targetDir = Join-Path $Root "apps/desktop/target"
   foreach ($profile in @("release", "debug")) {
@@ -145,7 +158,13 @@ function Verify-DesktopResources {
   if ($missing.Count -gt 0) {
     throw ($missing -join "`n")
   }
-  & "apps/desktop/resources/runtime/node/node.exe" --version | Out-Null
+
+  $nodeRuntime = "apps/desktop/resources/runtime/node/node.exe"
+  if (Test-TargetRunsOnHost) {
+    & $nodeRuntime --version | Out-Null
+  } else {
+    Write-Host "Skipping executable Node runtime check for cross-architecture target $Triple on host $HostTriple."
+  }
 }
 
 function Get-TauriConfigArgs {
