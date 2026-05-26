@@ -16,9 +16,11 @@ if (-not (Test-Path $Executable)) {
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("lumen-desktop-smoke-" + [System.Guid]::NewGuid().ToString("N"))
 $smokeHome = Join-Path $work "home"
 $localAppData = Join-Path $work "LocalAppData"
+$roamingAppData = Join-Path $work "AppDataRoaming"
+$dataRoot = Join-Path $work "data-root"
 $stdoutPath = Join-Path $work "app.stdout.log"
 $stderrPath = Join-Path $work "app.stderr.log"
-New-Item -ItemType Directory -Force $smokeHome, $localAppData | Out-Null
+New-Item -ItemType Directory -Force $smokeHome, $localAppData, $roamingAppData, $dataRoot | Out-Null
 $appProcess = $null
 
 function Stop-ProcessTree {
@@ -61,7 +63,9 @@ try {
   $psi.RedirectStandardError = $true
   $psi.Environment["USERPROFILE"] = $smokeHome
   $psi.Environment["LOCALAPPDATA"] = $localAppData
-  $psi.Environment["APPDATA"] = Join-Path $work "AppDataRoaming"
+  $psi.Environment["APPDATA"] = $roamingAppData
+  $psi.Environment["LUMEN_DATA_ROOT"] = $dataRoot
+  $psi.Environment["LUMEN_DESKTOP_HEADLESS_SMOKE"] = "1"
   $psi.Environment.Remove("HTTP_PROXY") | Out-Null
   $psi.Environment.Remove("HTTPS_PROXY") | Out-Null
   $psi.Environment.Remove("ALL_PROXY") | Out-Null
@@ -73,15 +77,19 @@ try {
   $stdoutTask = $appProcess.StandardOutput.ReadToEndAsync()
   $stderrTask = $appProcess.StandardError.ReadToEndAsync()
 
-  $logsRoot = $null
+  $logsRoot = Join-Path $dataRoot "data/logs"
   $apiPort = $null
   $webPort = $null
   $deadline = (Get-Date).AddSeconds(75)
   while ((Get-Date) -lt $deadline) {
-    $matches = Get-ChildItem -Path $work -Directory -Recurse -ErrorAction SilentlyContinue |
-      Where-Object { $_.FullName -match "[/\\]data[/\\]logs$" }
-    if ($matches) {
-      $logsRoot = $matches[0].FullName
+    if (-not (Test-Path $logsRoot)) {
+      $matches = Get-ChildItem -Path $work -Directory -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match "[/\\]data[/\\]logs$" }
+      if ($matches) {
+        $logsRoot = $matches[0].FullName
+      }
+    }
+    if ($logsRoot -and (Test-Path $logsRoot)) {
       $apiErr = Join-Path $logsRoot "api.err.log"
       $webLog = Join-Path $logsRoot "web.log"
       if (Test-Path $apiErr) {
@@ -354,11 +362,30 @@ try {
   }
 
   if ($errors.Count -gt 0) {
+    if ($appProcess.HasExited) {
+      Write-Host "app_exit_code=$($appProcess.ExitCode)"
+    } else {
+      Write-Host "app_exit_code=running"
+    }
     if ($stdoutTask.IsCompleted) {
       Set-Content -Path $stdoutPath -Value $stdoutTask.Result -Encoding UTF8
+      Write-Host "--- app.stdout.log tail ---"
+      $stdoutText = [string]$stdoutTask.Result
+      if ($stdoutText.Length -gt 1600) {
+        Write-Host $stdoutText.Substring($stdoutText.Length - 1600)
+      } else {
+        Write-Host $stdoutText
+      }
     }
     if ($stderrTask.IsCompleted) {
       Set-Content -Path $stderrPath -Value $stderrTask.Result -Encoding UTF8
+      Write-Host "--- app.stderr.log tail ---"
+      $stderrText = [string]$stderrTask.Result
+      if ($stderrText.Length -gt 1600) {
+        Write-Host $stderrText.Substring($stderrText.Length - 1600)
+      } else {
+        Write-Host $stderrText
+      }
     }
     foreach ($errorItem in $errors) {
       Write-Host "ERROR: $errorItem"
