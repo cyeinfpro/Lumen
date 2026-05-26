@@ -108,7 +108,7 @@ jobs:
       - name: Install macOS packaging dependencies
         run: |
           brew list libpq >/dev/null 2>&1 || brew install libpq
-          echo "$(brew --prefix libpq)/bin" >> "$GITHUB_PATH"
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
       - name: Build dmg
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}

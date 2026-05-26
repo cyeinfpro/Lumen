@@ -147,9 +147,7 @@ function Get-TauriConfigArgs {
 }
 
 python scripts/version.py check
-try {
-  cargo tauri --version | Out-Null
-} catch {
+if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
   cargo install tauri-cli --locked
 }
 
@@ -179,6 +177,7 @@ Clean-TauriOutputs
 New-Item -ItemType Directory -Force apps/desktop/binaries | Out-Null
 $LumenWebSidecar = "apps/desktop/binaries/lumen-web-$Triple.exe"
 New-Item -ItemType File -Force $LumenWebSidecar | Out-Null
+Prepare-StaticResourcePlaceholders
 Push-Location apps/desktop
 cargo build --release --bin lumen-web
 Pop-Location

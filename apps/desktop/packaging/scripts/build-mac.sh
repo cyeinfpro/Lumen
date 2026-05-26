@@ -15,6 +15,18 @@ if command -v brew >/dev/null 2>&1; then
   LIBPQ_PREFIX="$(brew --prefix libpq 2>/dev/null || true)"
   if [ -n "$LIBPQ_PREFIX" ]; then
     export PATH="$LIBPQ_PREFIX/bin:$PATH"
+    export LDFLAGS="-L$LIBPQ_PREFIX/lib ${LDFLAGS:-}"
+    export CPPFLAGS="-I$LIBPQ_PREFIX/include ${CPPFLAGS:-}"
+    export PKG_CONFIG_PATH="$LIBPQ_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    export LIBRARY_PATH="$LIBPQ_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+  fi
+  OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || true)"
+  if [ -n "$OPENSSL_PREFIX" ]; then
+    export PATH="$OPENSSL_PREFIX/bin:$PATH"
+    export LDFLAGS="-L$OPENSSL_PREFIX/lib ${LDFLAGS:-}"
+    export CPPFLAGS="-I$OPENSSL_PREFIX/include ${CPPFLAGS:-}"
+    export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    export LIBRARY_PATH="$OPENSSL_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
   fi
 fi
 
@@ -201,6 +213,7 @@ clean_tauri_outputs
 mkdir -p apps/desktop/binaries
 : > "apps/desktop/binaries/lumen-web-${TRIPLE}"
 chmod +x "apps/desktop/binaries/lumen-web-${TRIPLE}"
+prepare_static_resource_placeholders
 (
   cd apps/desktop
   cargo build --release --bin lumen-web
