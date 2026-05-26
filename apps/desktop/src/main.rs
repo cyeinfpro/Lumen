@@ -13,6 +13,7 @@ use docker_import::{DesktopDockerImportPlanOut, PendingDockerImportStatus};
 use serde::Serialize;
 use serde_json::json;
 use sidecar::{RuntimeInfo, SidecarRecovery, SidecarStatus, Supervisor};
+use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -344,6 +345,14 @@ fn open_path(path: &PathBuf) -> Result<(), String> {
 }
 
 fn main() {
+    if env::var_os("LUMEN_DESKTOP_HEADLESS_SMOKE").is_some() {
+        if let Err(err) = run_headless_smoke() {
+            eprintln!("desktop headless smoke failed: {err:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -409,6 +418,59 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Lumen desktop");
+}
+
+fn run_headless_smoke() -> anyhow::Result<()> {
+    let data_root = env::var_os("LUMEN_DATA_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::temp_dir().join(format!("lumen-desktop-smoke-{}", unix_epoch_ms()))
+        });
+    let mut supervisor = Supervisor::new(data_root)?;
+    tauri::async_runtime::block_on(supervisor.spawn_all())?;
+    let supervisor = Arc::new(Mutex::new(supervisor));
+    let monitor = supervisor.clone();
+    std::thread::spawn(move || {
+        let mut last_heartbeat = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let mut guard = match monitor.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            match guard.recover_exited() {
+                Ok(SidecarRecovery::None) => {}
+                Ok(SidecarRecovery::Restarted(names)) => {
+                    eprintln!("desktop sidecar restarted: {}", names.join(", "));
+                }
+                Ok(SidecarRecovery::FullRestart { reason }) => {
+                    eprintln!("desktop sidecar full restart: {reason}");
+                    guard.note_full_restart(&reason);
+                    if let Err(err) = tauri::async_runtime::block_on(guard.spawn_all()) {
+                        eprintln!("desktop sidecar full restart failed: {err:#}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("desktop sidecar monitor failed: {err:#}");
+                }
+            }
+            if last_heartbeat.elapsed() >= Duration::from_secs(5) {
+                if let Err(err) = guard.write_heartbeat() {
+                    eprintln!("desktop sidecar heartbeat failed: {err:#}");
+                }
+                last_heartbeat = Instant::now();
+            }
+        }
+    });
+
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+        drop(
+            supervisor
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state poisoned"))?,
+        );
+    }
 }
 
 fn spawn_desktop_runtime(app_handle: tauri::AppHandle, state: DesktopState) {
