@@ -22,6 +22,7 @@ $stdoutPath = Join-Path $work "app.stdout.log"
 $stderrPath = Join-Path $work "app.stderr.log"
 New-Item -ItemType Directory -Force $smokeHome, $localAppData, $roamingAppData, $dataRoot | Out-Null
 $appProcess = $null
+$httpTimeoutSec = 8
 
 function Stop-ProcessTree {
   param([int]$ProcessId)
@@ -58,7 +59,7 @@ function Get-ListeningProcessIds {
 function Get-HttpStatus {
   param([string]$Uri)
   try {
-    $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri $Uri
+    $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec $httpTimeoutSec -Uri $Uri
     return [int]$response.StatusCode
   } catch {
     if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
@@ -75,7 +76,7 @@ function Get-HttpStatusNoRedirect {
   param([string]$Uri)
   $request = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Uri)
   $request.AllowAutoRedirect = $false
-  $request.Timeout = 2000
+  $request.Timeout = $httpTimeoutSec * 1000
   try {
     $response = $request.GetResponse()
     try {
@@ -104,7 +105,7 @@ function Invoke-JsonRequest {
   )
   $params = @{
     UseBasicParsing = $true
-    TimeoutSec = 2
+    TimeoutSec = $httpTimeoutSec
     Uri = $Uri
     Method = $Method
     Headers = @{ Accept = "application/json" }
@@ -348,6 +349,10 @@ try {
       }
       Start-Sleep -Milliseconds 250
     }
+  }
+
+  if ($apiRestarted -and $apiPort -and $webPort) {
+    Start-Sleep -Seconds 2
   }
 
   $logs = @{}

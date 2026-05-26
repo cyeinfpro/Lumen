@@ -87,6 +87,7 @@ mount_markers = {mount, os.path.realpath(mount)}
 logs_root = home / "Library/Application Support/com.lumen.desktop/data/logs"
 api_port = None
 web_port = None
+HTTP_TIMEOUT_SECONDS = 8
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -130,7 +131,7 @@ def http_request(port, path, method="GET", body=None, headers=None, follow_redir
     )
     opener = urllib.request.urlopen if follow_redirects else no_redirect_opener.open
     try:
-        with opener(request, timeout=2) as response:
+        with opener(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             raw = response.read(4096)
             return response.status, raw.decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
@@ -276,6 +277,10 @@ if api_before:
         if not process_alive(app_pid):
             break
         time.sleep(0.25)
+
+if api_restarted:
+    wait_until_ready(10)
+    time.sleep(2.0)
 
 logs = {
     "supervisor.log": read_log("supervisor.log"),

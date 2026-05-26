@@ -289,6 +289,10 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop conversation create did not return an id" in text
         assert "desktop conversation patch did not persist title" in text
         assert "desktop conversation delete did not return ok=true" in text
+    assert "HTTP_TIMEOUT_SECONDS = 8" in smoke_mac
+    assert "$httpTimeoutSec = 8" in smoke_win
+    assert "time.sleep(2.0)" in smoke_mac
+    assert "Start-Sleep -Seconds 2" in smoke_win
 
 
 def test_desktop_packaged_smoke_rejects_tiktoken_fallbacks() -> None:
