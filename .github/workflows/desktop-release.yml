@@ -29,7 +29,7 @@ jobs:
         run: bash scripts/test.sh -q
       - name: Desktop portability audit
         run: python3 scripts/audit-desktop-portability.py > desktop-portability.json
-      - uses: actions/upload-artifact@35e4212e5d83f0a3a1f780d6a30a6d5dd1325f4f # v4.6.1
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: desktop-portability
           path: desktop-portability.json
@@ -114,7 +114,7 @@ jobs:
         run: apps/desktop/packaging/scripts/build-mac.sh
       - name: Smoke packaged dmg
         run: bash apps/desktop/packaging/scripts/smoke-mac.sh apps/desktop/target/release/bundle/dmg/Lumen_$(cat VERSION)_aarch64.dmg
-      - uses: actions/upload-artifact@35e4212e5d83f0a3a1f780d6a30a6d5dd1325f4f # v4.6.1
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: Lumen-mac-arm64
           path: |
@@ -152,7 +152,7 @@ jobs:
       - name: Smoke release app
         shell: pwsh
         run: apps/desktop/packaging/scripts/smoke-win.ps1 -Executable apps/desktop/target/release/lumen-desktop.exe
-      - uses: actions/upload-artifact@35e4212e5d83f0a3a1f780d6a30a6d5dd1325f4f # v4.6.1
+      - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: Lumen-win-x64
           path: |
