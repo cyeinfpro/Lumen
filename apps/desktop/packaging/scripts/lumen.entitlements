@@ -3,6 +3,8 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- Hardened runtime without App Sandbox is intentional for the current desktop build. -->
+  <!-- Add audio-input or JIT entitlements only when a local inference runtime requires them. -->
   <key>com.apple.security.network.client</key>
   <true/>
   <key>com.apple.security.files.user-selected.read-write</key>

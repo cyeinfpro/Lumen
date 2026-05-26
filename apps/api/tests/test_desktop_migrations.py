@@ -60,6 +60,36 @@ def test_current_revision_reads_alembic_version_table(tmp_path: Path) -> None:
     assert desktop_migrations._current_revision(db_path) == "rev-one"
 
 
+def test_desktop_baseline_migration_creates_sqlite_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "data" / "db" / "lumen.sqlite"
+    monkeypatch.setattr(
+        desktop_migrations.settings,
+        "database_url",
+        f"sqlite+aiosqlite:///{db_path}",
+    )
+
+    desktop_migrations._run_upgrade_sync()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert (
+            conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+            == "0001_desktop_baseline"
+        )
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert {"users", "conversations", "messages", "generations", "images"} <= tables
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    finally:
+        conn.close()
+
+
 def test_failed_migration_restores_pre_migration_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

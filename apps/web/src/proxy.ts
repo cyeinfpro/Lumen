@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const DESKTOP_UNSUPPORTED_PREFIXES = [
   "/admin",
+  "/api/admin",
+  "/api/billing",
   "/invite",
   "/library",
   "/login",

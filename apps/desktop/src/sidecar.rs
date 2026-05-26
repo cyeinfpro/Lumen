@@ -12,10 +12,21 @@ use std::io::{Read, Write};
 use std::net::TcpStream as StdTcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
+
+#[cfg(not(test))]
+const DESKTOP_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+#[cfg(test)]
+const DESKTOP_LOG_ROTATE_BYTES: u64 = 64;
+const DESKTOP_LOG_ROTATE_KEEP: usize = 5;
+const DESKTOP_TOKEN_HEADER: &str = "X-Lumen-Local-Token";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeInfo {
@@ -64,6 +75,8 @@ pub struct Supervisor {
     last_exit_statuses: BTreeMap<String, String>,
     last_restart_reasons: BTreeMap<String, String>,
     started_at_ms: BTreeMap<String, u128>,
+    provider_runtime_lock: Arc<Mutex<()>>,
+    log_sequence: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +97,27 @@ pub struct SidecarStatus {
     pub stderr_log_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+pub struct DesktopActivity {
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub active_tasks: u64,
+    #[serde(default)]
+    pub generation_running: u64,
+    #[serde(default)]
+    pub completion_streaming: u64,
+}
+
+impl DesktopActivity {
+    pub fn should_keep_awake(&self) -> bool {
+        self.active
+            || self.active_tasks > 0
+            || self.generation_running > 0
+            || self.completion_streaming > 0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum SidecarRecovery {
     None,
@@ -94,11 +128,7 @@ pub enum SidecarRecovery {
 impl Supervisor {
     pub fn new(data_root: PathBuf) -> Result<Self> {
         ensure_runtime_dirs(&data_root).context("create desktop runtime directories")?;
-        let api_port = pick_unused_port().ok_or_else(|| anyhow!("no free api port"))?;
-        let web_port = pick_unused_port().ok_or_else(|| anyhow!("no free web port"))?;
-        let redis_port = pick_unused_port().ok_or_else(|| anyhow!("no free redis port"))?;
-        let worker_metrics_port =
-            pick_unused_port().ok_or_else(|| anyhow!("no free worker metrics port"))?;
+        let (api_port, web_port, redis_port, worker_metrics_port) = pick_runtime_ports()?;
         let provider_runtime_file = data_root.join("data/tmp/providers.runtime.json");
         Ok(Self {
             runtime: RuntimeInfo {
@@ -116,10 +146,34 @@ impl Supervisor {
             last_exit_statuses: BTreeMap::new(),
             last_restart_reasons: BTreeMap::new(),
             started_at_ms: BTreeMap::new(),
+            provider_runtime_lock: Arc::new(Mutex::new(())),
+            log_sequence: Arc::new(AtomicU64::new(1)),
         })
     }
 
+    pub fn reassign_ports(&mut self) -> Result<()> {
+        let (api_port, web_port, redis_port, worker_metrics_port) = pick_runtime_ports()?;
+        self.runtime.api_port = api_port;
+        self.runtime.web_port = web_port;
+        self.runtime.redis_port = redis_port;
+        self.runtime.worker_metrics_port = worker_metrics_port;
+        let _ = self.log_supervisor_event(
+            "ports_reassigned",
+            json!({
+                "api_port": api_port,
+                "web_port": web_port,
+                "redis_port": redis_port,
+                "worker_metrics_port": worker_metrics_port,
+            }),
+        );
+        Ok(())
+    }
+
     pub fn refresh_provider_runtime(&self) -> Result<()> {
+        let _refresh_guard = self
+            .provider_runtime_lock
+            .lock()
+            .map_err(|_| anyhow!("provider runtime refresh lock poisoned"))?;
         let metadata_path = self.runtime.data_root.join("data/providers.json");
         let (mut metadata, mut proxy_metadata) = read_provider_config_metadata(&metadata_path)?;
         let (runtime_metadata, runtime_proxy_metadata) =
@@ -134,7 +188,7 @@ impl Supervisor {
         let runtime_proxy_passwords = proxy_secret_map(&runtime_proxy_metadata);
         let mut providers = Vec::with_capacity(metadata.len());
         for item in metadata {
-            let keychain_api_key = get_provider_key(&item.name)?;
+            let keychain_api_key = get_provider_key(&self.runtime.data_root, &item.name)?;
             let api_key = match keychain_api_key.as_deref() {
                 Some(value) if !value.is_empty() => value.to_string(),
                 _ => runtime_provider_keys
@@ -143,7 +197,7 @@ impl Supervisor {
                     .unwrap_or_default(),
             };
             if !api_key.is_empty() && keychain_api_key.as_deref().unwrap_or("").is_empty() {
-                set_provider_key(&item.name, &api_key)?;
+                set_provider_key(&self.runtime.data_root, &item.name, &api_key)?;
             }
             let enabled = item.enabled && !api_key.is_empty();
             let mut row = item.extra;
@@ -168,7 +222,7 @@ impl Supervisor {
                 .unwrap_or("")
                 .to_string();
             if !name.is_empty() {
-                let keychain_password = get_proxy_password(&name)?;
+                let keychain_password = get_proxy_password(&self.runtime.data_root, &name)?;
                 let metadata_password = row
                     .get("password")
                     .and_then(Value::as_str)
@@ -183,7 +237,7 @@ impl Supervisor {
                 };
                 if !password.is_empty() {
                     if keychain_password.as_deref().unwrap_or("").is_empty() {
-                        set_proxy_password(&name, &password)?;
+                        set_proxy_password(&self.runtime.data_root, &name, &password)?;
                     }
                     row.insert("password".into(), json!(password));
                 }
@@ -201,25 +255,23 @@ impl Supervisor {
                 "purposes": ["chat", "image"]
             }));
         }
-        if let Some(parent) = self.runtime.provider_runtime_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let payload =
             serde_json::to_vec_pretty(&json!({ "providers": providers, "proxies": proxies }))?;
-        fs::write(&self.runtime.provider_runtime_file, payload)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                &self.runtime.provider_runtime_file,
-                fs::Permissions::from_mode(0o600),
-            )?;
-        }
+        write_private_atomic(&self.runtime.provider_runtime_file, &payload)?;
         Ok(())
     }
 
     pub async fn spawn_all(&mut self) -> Result<()> {
+        self.spawn_all_with_progress(|_| {}).await
+    }
+
+    pub async fn spawn_all_with_progress<F>(&mut self, mut progress: F) -> Result<()>
+    where
+        F: FnMut(&'static str),
+    {
+        progress("准备本机运行时");
         self.refresh_provider_runtime()?;
+        progress("启动本地缓存");
         self.spawn_redis()?;
         wait_for_redis(
             self.runtime.redis_port,
@@ -227,6 +279,7 @@ impl Supervisor {
             Duration::from_secs(10),
         )
         .await?;
+        progress("准备核心服务");
         self.spawn_api()?;
         wait_for_http_ok(
             self.runtime.api_port,
@@ -235,6 +288,7 @@ impl Supervisor {
             &[],
         )
         .await?;
+        progress("启动任务引擎");
         self.spawn_worker()?;
         wait_for_http_ok(
             self.runtime.worker_metrics_port,
@@ -243,8 +297,10 @@ impl Supervisor {
             &[],
         )
         .await?;
+        progress("打开本机界面");
         self.spawn_web()?;
         wait_for_http_ok(self.runtime.web_port, "/", Duration::from_secs(25), &[]).await?;
+        progress("完成");
         Ok(())
     }
 
@@ -317,8 +373,31 @@ impl Supervisor {
         );
     }
 
+    pub fn note_update_failed(&self, error: &str) {
+        let _ = self.log_supervisor_event(
+            "update_failed",
+            json!({
+                "error": error,
+            }),
+        );
+    }
+
     pub fn redis_info(&self) -> Option<String> {
         redis_info_sync(self.runtime.redis_port, &self.redis_password).ok()
+    }
+
+    pub fn desktop_activity(&self) -> Result<Option<DesktopActivity>> {
+        let headers = [(DESKTOP_TOKEN_HEADER, self.local_token.as_str())];
+        let Some(body) = http_body_sync(
+            self.runtime.api_port,
+            "/system/desktop-activity",
+            &headers,
+            Duration::from_secs(1),
+        )?
+        else {
+            return Ok(None);
+        };
+        parse_desktop_activity_body(&body).map(Some)
     }
 
     pub fn recover_exited(&mut self) -> Result<SidecarRecovery> {
@@ -471,9 +550,14 @@ impl Supervisor {
     fn spawn_web(&mut self) -> Result<()> {
         let server = resolve_web_root()?.join("server.js");
         let node = resolve_node_bin()?;
+        let node_options = env::var("LUMEN_DESKTOP_NODE_OPTIONS")
+            .unwrap_or_else(|_| "--max-old-space-size=512".to_string());
         let child = sidecar_command(node)
             .arg(server)
             .env("NODE_ENV", "production")
+            .env("NODE_OPTIONS", node_options)
+            .env("HOSTNAME", "127.0.0.1")
+            .env("HOST", "127.0.0.1")
             .env("PORT", self.runtime.web_port.to_string())
             .env(
                 "LUMEN_BACKEND_URL",
@@ -509,6 +593,11 @@ impl Supervisor {
             .env("LUMEN_RUNTIME", "desktop")
             .env("LUMEN_DATA_ROOT", &self.runtime.data_root)
             .env("LUMEN_LOCAL_TOKEN", &self.local_token)
+            .env(
+                "LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC",
+                env::var("LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC")
+                    .unwrap_or_else(|_| "2.0".to_string()),
+            )
             .env("APP_ENV", "desktop")
             .env("DATABASE_URL", sqlite_url(&self.runtime.data_root))
             .env("STORAGE_ROOT", self.runtime.data_root.join("data/storage"))
@@ -542,16 +631,11 @@ impl Supervisor {
     }
 
     fn log_supervisor_event(&self, event: &str, payload: Value) -> Result<()> {
-        let path = self.runtime.data_root.join("data/logs/supervisor.log");
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut file = open_rotated_log_file(&self.runtime.data_root, "supervisor.log")?;
+        let sequence = self.log_sequence.fetch_add(1, Ordering::Relaxed);
         let line = serde_json::to_string(&json!({
             "at_ms": unix_epoch_ms(),
+            "sequence": sequence,
             "event": event,
             "payload": payload,
         }))?;
@@ -621,11 +705,11 @@ fn hide_windows_console(_command: &mut Command) {}
 fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
     {
-        signal_unix_process_group(child.id(), "TERM");
+        signal_unix_process_tree(child.id(), "TERM");
         if wait_for_child_exit(child, Duration::from_secs(2)) {
             return;
         }
-        signal_unix_process_group(child.id(), "KILL");
+        signal_unix_process_tree(child.id(), "KILL");
     }
     #[cfg(windows)]
     {
@@ -638,7 +722,7 @@ fn terminate_child(child: &mut Child) {
 fn cleanup_exited_child(child: &mut Child) {
     #[cfg(unix)]
     {
-        signal_unix_process_group(child.id(), "TERM");
+        signal_unix_process_tree(child.id(), "TERM");
     }
     let _ = child.wait();
 }
@@ -659,13 +743,33 @@ fn wait_for_child_exit(child: &mut Child, duration: Duration) -> bool {
 }
 
 #[cfg(unix)]
-fn signal_unix_process_group(pid: u32, signal: &str) {
+fn signal_unix_process_tree(pid: u32, signal: &str) {
+    let current_pgid = unix_process_group(std::process::id());
+    let child_pgid = unix_process_group(pid);
+    let target = match (child_pgid, current_pgid) {
+        (Some(child), Some(current)) if child != current => format!("-{child}"),
+        (Some(child), None) => format!("-{child}"),
+        _ => pid.to_string(),
+    };
     let _ = Command::new("kill")
         .arg(format!("-{signal}"))
-        .arg(format!("-{pid}"))
+        .arg(target)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(unix)]
+fn unix_process_group(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    raw.trim().parse::<u32>().ok()
 }
 
 #[cfg(windows)]
@@ -673,14 +777,19 @@ fn terminate_windows_process_tree(pid: u32) {
     let pid = pid.to_string();
     let mut command = Command::new("taskkill");
     hide_windows_console(&mut command);
-    let _ = command
+    match command
         .arg("/PID")
         .arg(&pid)
         .arg("/T")
         .arg("/F")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("desktop taskkill failed for pid {pid}: {status}"),
+        Err(err) => eprintln!("desktop taskkill failed for pid {pid}: {err}"),
+    }
 }
 
 impl Drop for Supervisor {
@@ -693,6 +802,51 @@ fn random_token() -> String {
     let mut bytes = [0_u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn pick_runtime_ports() -> Result<(u16, u16, u16, u16)> {
+    let mut ports = Vec::with_capacity(4);
+    for label in ["api", "web", "redis", "worker metrics"] {
+        let mut picked = None;
+        for _ in 0..128 {
+            let Some(port) = pick_unused_port() else {
+                continue;
+            };
+            if !ports.contains(&port) {
+                picked = Some(port);
+                break;
+            }
+        }
+        let port = picked.ok_or_else(|| anyhow!("no free {label} port"))?;
+        ports.push(port);
+    }
+    Ok((ports[0], ports[1], ports[2], ports[3]))
+}
+
+fn write_private_atomic(path: &Path, payload: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("json")
+    ));
+    fs::write(&tmp_path, payload)
+        .with_context(|| format!("write temporary private file {}", tmp_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_file(path);
+    }
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("replace private file {}", path.display()))?;
+    Ok(())
 }
 
 fn sqlite_url(data_root: &Path) -> String {
@@ -873,25 +1027,85 @@ fn resolve_node_bin() -> Result<PathBuf> {
 }
 
 fn log_file(data_root: &Path, name: &str) -> Result<Stdio> {
+    Ok(Stdio::from(open_rotated_log_file(data_root, name)?))
+}
+
+fn open_rotated_log_file(data_root: &Path, name: &str) -> Result<fs::File> {
     let path = data_root.join("data/logs").join(name);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    rotate_log_if_needed(&path)?;
     let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;
-    Ok(Stdio::from(file))
+    Ok(file)
+}
+
+fn rotate_log_if_needed(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(());
+    };
+    if metadata.len() < DESKTOP_LOG_ROTATE_BYTES {
+        return Ok(());
+    }
+
+    for idx in (1..=DESKTOP_LOG_ROTATE_KEEP).rev() {
+        let current = rotated_log_path(path, idx);
+        if idx == DESKTOP_LOG_ROTATE_KEEP {
+            match fs::remove_file(&current) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| format!("remove {}", current.display()))
+                }
+            }
+        } else {
+            let next = rotated_log_path(path, idx + 1);
+            match fs::rename(&current, &next) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("rotate {} to {}", current.display(), next.display())
+                    })
+                }
+            }
+        }
+    }
+
+    let first = rotated_log_path(path, 1);
+    fs::rename(path, &first)
+        .with_context(|| format!("rotate {} to {}", path.display(), first.display()))?;
+    Ok(())
+}
+
+fn rotated_log_path(path: &Path, idx: usize) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "desktop.log".to_string());
+    path.with_file_name(format!("{file_name}.{idx}"))
 }
 
 async fn wait_for_redis(port: u16, password: &str, duration: Duration) -> Result<()> {
     let password = password.to_string();
     let deadline = timeout(duration, async move {
+        let mut last_error: Option<anyhow::Error> = None;
         loop {
-            if try_redis_ping(port, &password).await.unwrap_or(false) {
-                return Ok(());
+            match try_redis_ping(port, &password).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(err) => last_error = Some(err),
             }
             sleep(Duration::from_millis(200)).await;
+            if let Some(err) = last_error.take() {
+                if err.to_string().contains("redis auth failed") {
+                    return Err(err);
+                }
+                last_error = Some(err);
+            }
         }
     });
     deadline
@@ -902,16 +1116,31 @@ async fn wait_for_redis(port: u16, password: &str, duration: Duration) -> Result
 async fn try_redis_ping(port: u16, password: &str) -> Result<bool> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
     let auth = format!(
-        "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n*1\r\n$4\r\nPING\r\n",
+        "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n",
         password.len(),
         password
     );
     stream.write_all(auth.as_bytes()).await?;
+    let auth_response = read_redis_response_async(&mut stream, Duration::from_millis(500)).await?;
+    if auth_response.starts_with('-') {
+        return Err(anyhow!(
+            "redis auth failed: {}",
+            auth_response.trim_end_matches("\r\n")
+        ));
+    }
+    if !auth_response.starts_with("+OK") {
+        return Ok(false);
+    }
+    stream.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
+    let ping_response = read_redis_response_async(&mut stream, Duration::from_millis(500)).await?;
+    Ok(ping_response.starts_with("+PONG"))
+}
+
+async fn read_redis_response_async(stream: &mut TcpStream, duration: Duration) -> Result<String> {
     let mut response = Vec::with_capacity(512);
     let mut buf = [0_u8; 256];
-    for _ in 0..4 {
-        let Ok(read_result) = timeout(Duration::from_millis(250), stream.read(&mut buf)).await
-        else {
+    loop {
+        let Ok(read_result) = timeout(duration, stream.read(&mut buf)).await else {
             break;
         };
         let n = read_result?;
@@ -919,11 +1148,14 @@ async fn try_redis_ping(port: u16, password: &str) -> Result<bool> {
             break;
         }
         response.extend_from_slice(&buf[..n]);
-        if response.windows(5).any(|chunk| chunk == b"+PONG") {
-            return Ok(true);
+        if response.ends_with(b"\r\n") {
+            break;
+        }
+        if response.len() > 4096 {
+            return Err(anyhow!("redis response is too large"));
         }
     }
-    Ok(false)
+    Ok(String::from_utf8_lossy(&response).into_owned())
 }
 
 async fn wait_for_http_ok(
@@ -996,27 +1228,90 @@ fn http_ok_sync(port: u16, path: &str) -> bool {
     head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")
 }
 
-fn redis_info_sync(port: u16, password: &str) -> Result<String> {
-    let mut stream = StdTcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-    let auth = format!(
-        "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n*1\r\n$4\r\nINFO\r\n",
-        password.len(),
-        password
+fn http_body_sync(
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    duration: Duration,
+) -> Result<Option<String>> {
+    let addr = format!("127.0.0.1:{port}")
+        .parse()
+        .context("parse localhost socket address")?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, duration)?;
+    stream.set_read_timeout(Some(duration))?;
+    stream.set_write_timeout(Some(duration))?;
+    let mut request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nConnection: close\r\n"
     );
-    stream.write_all(auth.as_bytes())?;
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes())?;
+
     let mut response = Vec::new();
     let mut buf = [0_u8; 4096];
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => {
-                response.extend_from_slice(&buf[..n]);
-                if response.windows(5).any(|chunk| chunk == b"\r\n# ") {
-                    break;
-                }
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
             }
+            Err(err) => return Err(err.into()),
+        }
+        if response.len() > 64 * 1024 {
+            return Err(anyhow!("http response is too large"));
+        }
+    }
+
+    let response = String::from_utf8_lossy(&response);
+    let Some((head, body)) = response.split_once("\r\n\r\n") else {
+        return Err(anyhow!("malformed http response"));
+    };
+    let status_line = head.lines().next().unwrap_or_default();
+    if !(status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")) {
+        return Ok(None);
+    }
+    Ok(Some(body.to_string()))
+}
+
+fn parse_desktop_activity_body(body: &str) -> Result<DesktopActivity> {
+    serde_json::from_str::<DesktopActivity>(body).context("parse desktop activity payload")
+}
+
+fn redis_info_sync(port: u16, password: &str) -> Result<String> {
+    let mut stream = StdTcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let auth = format!(
+        "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n",
+        password.len(),
+        password
+    );
+    stream.write_all(auth.as_bytes())?;
+    let auth_response = read_redis_response_sync(&mut stream, 4096)?;
+    if auth_response.starts_with('-') {
+        return Err(anyhow!(
+            "redis auth failed: {}",
+            auth_response.trim_end_matches("\r\n")
+        ));
+    }
+    stream.write_all(b"*1\r\n$4\r\nINFO\r\n")?;
+    let mut response = Vec::new();
+    let mut buf = [0_u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
             Err(err)
                 if matches!(
                     err.kind(),
@@ -1036,6 +1331,35 @@ fn redis_info_sync(port: u16, password: &str) -> Result<String> {
     }
 }
 
+fn read_redis_response_sync(stream: &mut StdTcpStream, max_bytes: usize) -> Result<String> {
+    let mut response = Vec::with_capacity(256);
+    let mut buf = [0_u8; 256];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+                if response.ends_with(b"\r\n") {
+                    break;
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(err) => return Err(err.into()),
+        }
+        if response.len() > max_bytes {
+            return Err(anyhow!("redis response is too large"));
+        }
+    }
+    Ok(String::from_utf8_lossy(&response).into_owned())
+}
+
 #[cfg(unix)]
 fn process_rss_bytes(pid: u32) -> Option<u64> {
     let output = Command::new("ps")
@@ -1049,21 +1373,92 @@ fn process_rss_bytes(pid: u32) -> Option<u64> {
 
 #[cfg(windows)]
 fn process_rss_bytes(pid: u32) -> Option<u64> {
-    let mut command = Command::new("powershell");
-    hide_windows_console(&mut command);
-    let output = command
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!("(Get-Process -Id {pid}).WorkingSet64"),
-        ])
-        .output()
-        .ok()?;
-    let raw = String::from_utf8_lossy(&output.stdout);
-    raw.trim().parse::<u64>().ok()
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if handle == 0 {
+            return None;
+        }
+        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ok = K32GetProcessMemoryInfo(
+            handle,
+            &mut counters,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        );
+        CloseHandle(handle);
+        if ok == 0 {
+            None
+        } else {
+            Some(counters.WorkingSetSize as u64)
+        }
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
 fn process_rss_bytes(_pid: u32) -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{open_rotated_log_file, parse_desktop_activity_body, pick_runtime_ports};
+    use std::fs;
+    use std::io::Write;
+
+    #[test]
+    fn runtime_ports_are_distinct() {
+        let (api, web, redis, worker) = pick_runtime_ports().expect("pick runtime ports");
+        let mut ports = vec![api, web, redis, worker];
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), 4);
+    }
+
+    #[test]
+    fn desktop_logs_rotate_before_append() {
+        let root =
+            std::env::temp_dir().join(format!("lumen-log-rotate-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let logs = root.join("data/logs");
+        fs::create_dir_all(&logs).expect("create logs dir");
+        fs::write(logs.join("web.log"), vec![b'x'; 80]).expect("seed active log");
+
+        {
+            let mut file = open_rotated_log_file(&root, "web.log").expect("open rotated log");
+            writeln!(file, "fresh").expect("write fresh log");
+        }
+
+        let active = fs::read_to_string(logs.join("web.log")).expect("read active log");
+        let rotated = fs::read(logs.join("web.log.1")).expect("read rotated log");
+        assert!(active.contains("fresh"));
+        assert_eq!(rotated.len(), 80);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn desktop_activity_payload_controls_sleep_protection() {
+        let inactive = parse_desktop_activity_body(
+            r#"{"active":false,"active_tasks":0,"generation_running":0,"completion_streaming":0}"#,
+        )
+        .expect("parse inactive activity");
+        assert!(!inactive.should_keep_awake());
+
+        let active = parse_desktop_activity_body(
+            r#"{"active":false,"active_tasks":1,"generation_running":1,"completion_streaming":0}"#,
+        )
+        .expect("parse active activity");
+        assert!(active.should_keep_awake());
+
+        let explicit = parse_desktop_activity_body(r#"{"active":true}"#)
+            .expect("parse explicit active activity");
+        assert!(explicit.should_keep_awake());
+    }
 }

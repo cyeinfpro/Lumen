@@ -4,9 +4,11 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PENDING_IMPORT_JSON: &str = "pending-docker-import.json";
 const FAILED_IMPORT_JSON: &str = "pending-docker-import.failed.json";
@@ -252,6 +254,29 @@ pub fn apply_pending_docker_import(
     }
 }
 
+pub fn clear_failed_docker_import_marker(data_root: &Path) -> Result<()> {
+    match fs::remove_file(failed_import_json_path(data_root)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).context("clear failed Docker import marker"),
+    }
+}
+
+pub fn mark_pending_docker_import_failed(data_root: &Path, error: &str) -> Result<()> {
+    let pending_json = pending_import_json_path(data_root);
+    let pending = fs::read_to_string(&pending_json)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PendingDockerImport>(&raw).ok());
+    let failed = serde_json::json!({
+        "failed_at_ms": unix_epoch_ms(),
+        "error": error,
+        "pending": pending,
+    });
+    write_json_private(&failed_import_json_path(data_root), &failed)?;
+    let _ = fs::remove_file(pending_json);
+    Ok(())
+}
+
 fn apply_pending_docker_import_inner(
     data_root: &Path,
     app_version: &str,
@@ -300,7 +325,7 @@ fn apply_pending_docker_import_inner(
         command.arg("--user-id").arg(user_id);
     }
 
-    let output = command.output().context("run Docker desktop importer")?;
+    let output = run_importer_with_timeout(command).context("run Docker desktop importer")?;
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -313,7 +338,7 @@ fn apply_pending_docker_import_inner(
     }
 
     let mut report = read_json(&report_path).unwrap_or(Value::Null);
-    match import_provider_keys(&provider_key_path) {
+    match import_provider_keys(data_root, &provider_key_path) {
         Ok(imported) => annotate_report(&mut report, "provider_keys_imported", json!(imported)),
         Err(err) => annotate_report(
             &mut report,
@@ -351,6 +376,49 @@ fn apply_pending_docker_import_inner(
     })
 }
 
+fn run_importer_with_timeout(mut command: Command) -> Result<std::process::Output> {
+    let timeout_secs = std::env::var("LUMEN_DESKTOP_IMPORT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30 * 60);
+    let capture_root =
+        std::env::temp_dir().join(format!("lumen-desktop-import-{}", unix_epoch_ms()));
+    fs::create_dir_all(&capture_root).context("create Docker import capture directory")?;
+    let stdout_path = capture_root.join("stdout.log");
+    let stderr_path = capture_root.join("stderr.log");
+    let stdout_file = fs::File::create(&stdout_path).context("create Docker import stdout log")?;
+    let stderr_file = fs::File::create(&stderr_path).context("create Docker import stderr log")?;
+    let mut child = command
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .context("spawn Docker desktop importer")?;
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let status = loop {
+        if let Some(status) = child.try_wait().context("poll Docker desktop importer")? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&capture_root);
+            bail!("Docker desktop importer timed out after {timeout_secs}s");
+        }
+        thread::sleep(Duration::from_millis(250));
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let _ = fs::File::open(&stdout_path).and_then(|mut file| file.read_to_end(&mut stdout));
+    let _ = fs::File::open(&stderr_path).and_then(|mut file| file.read_to_end(&mut stderr));
+    let _ = fs::remove_dir_all(&capture_root);
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 #[cfg(windows)]
 fn hide_windows_console(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -367,7 +435,7 @@ fn read_json(path: &Path) -> Result<Value> {
     serde_json::from_str(&raw).map_err(Into::into)
 }
 
-fn import_provider_keys(path: &Path) -> Result<usize> {
+fn import_provider_keys(data_root: &Path, path: &Path) -> Result<usize> {
     if !path.is_file() {
         return Ok(0);
     }
@@ -381,8 +449,8 @@ fn import_provider_keys(path: &Path) -> Result<usize> {
         if name.is_empty() || api_key.is_empty() {
             continue;
         }
-        secrets::set_provider_key(name, api_key)
-            .with_context(|| format!("import provider key into OS keychain for {name}"))?;
+        secrets::set_provider_key(data_root, name, api_key)
+            .with_context(|| format!("import provider key into desktop secret store for {name}"))?;
         imported += 1;
     }
     Ok(imported)

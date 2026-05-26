@@ -20,11 +20,11 @@ def test_create_updater_manifest_finds_compound_suffix_signatures(
     mac_artifact.write_bytes(b"mac")
     win_artifact.write_bytes(b"win")
     mac_artifact.with_name(f"{mac_artifact.name}.sig").write_text(
-        "mac-signature\n",
+        "bWFjLXNpZ25hdHVyZQ==\n",
         encoding="utf-8",
     )
     win_artifact.with_name(f"{win_artifact.name}.sig").write_text(
-        "win-signature\n",
+        "d2luLXNpZ25hdHVyZQ==\n",
         encoding="utf-8",
     )
 
@@ -54,10 +54,45 @@ def test_create_updater_manifest_finds_compound_suffix_signatures(
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert manifest["version"] == "1.2.3"
     assert manifest["platforms"]["darwin-aarch64"] == {
-        "signature": "mac-signature",
+        "signature": "bWFjLXNpZ25hdHVyZQ==",
         "url": "https://example.test/releases/download/v1.2.3/Lumen_1.2.3_aarch64.app.tar.gz",
     }
     assert manifest["platforms"]["windows-x86_64"] == {
-        "signature": "win-signature",
+        "signature": "d2luLXNpZ25hdHVyZQ==",
         "url": "https://example.test/releases/download/v1.2.3/Lumen_1.2.3_x64.nsis.zip",
     }
+
+
+def test_create_updater_manifest_rejects_invalid_base64_signature(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "Lumen_1.2.3_aarch64.app.tar.gz"
+    artifact.write_bytes(b"mac")
+    artifact.with_name(f"{artifact.name}.sig").write_text(
+        "not valid base64!\n",
+        encoding="utf-8",
+    )
+
+    output = tmp_path / "latest.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MANIFEST_SCRIPT),
+            "--version",
+            "v1.2.3",
+            "--base-url",
+            "https://example.test/releases/download/v1.2.3",
+            "--output",
+            str(output),
+            "--artifact",
+            f"darwin-aarch64={artifact}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "invalid base64 updater signature" in result.stderr
+    assert not output.exists()

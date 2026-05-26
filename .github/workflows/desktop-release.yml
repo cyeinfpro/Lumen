@@ -59,6 +59,9 @@ jobs:
       - name: Rust check
         working-directory: apps/desktop
         run: cargo check
+      - name: Rust tests
+        working-directory: apps/desktop
+        run: cargo test --bin lumen-desktop
 
   desktop-smoke-win-x64:
     runs-on: windows-2022
@@ -86,6 +89,9 @@ jobs:
       - name: Rust check
         working-directory: apps/desktop
         run: cargo check
+      - name: Rust tests
+        working-directory: apps/desktop
+        run: cargo test --bin lumen-desktop
 
   build-mac-arm64:
     needs: [unit-docker-regression, desktop-smoke-mac-arm64]
@@ -109,6 +115,14 @@ jobs:
         run: |
           brew list libpq >/dev/null 2>&1 || brew install libpq
           brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+      - name: Validate updater signing secrets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          test -n "$TAURI_UPDATER_PUBKEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
       - name: Build dmg
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -146,6 +160,15 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
+      - name: Validate updater signing secrets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_UPDATER_PUBKEY) { throw "TAURI_UPDATER_PUBKEY is required for tag releases" }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required for tag releases" }
       - name: Build NSIS
         shell: pwsh
         env:
@@ -164,9 +187,55 @@ jobs:
             apps/desktop/target/release/bundle/nsis/*.nsis.zip
             apps/desktop/target/release/bundle/nsis/*.nsis.zip.sig
 
+  build-win-arm64:
+    needs: [unit-docker-regression, desktop-smoke-win-x64]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Setup Python
+        shell: pwsh
+        run: uv python install 3.12
+      - name: Setup Rust
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-pc-windows-msvc
+      - name: Validate updater signing secrets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_UPDATER_PUBKEY) { throw "TAURI_UPDATER_PUBKEY is required for tag releases" }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required for tag releases" }
+      - name: Build NSIS
+        shell: pwsh
+        env:
+          LUMEN_DESKTOP_BUILD_TARGET: aarch64-pc-windows-msvc
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: apps/desktop/packaging/scripts/build-win.ps1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Lumen-win-arm64
+          path: |
+            apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+            apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip
+            apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip.sig
+
   publish-updater-manifest:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-mac-arm64, build-win-x64]
+    needs: [build-mac-arm64, build-win-x64, build-win-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -181,19 +250,28 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
           mac_update="$(find desktop-artifacts -type f -name '*.app.tar.gz' | sort | head -n 1)"
-          win_update="$(find desktop-artifacts -type f -name '*.nsis.zip' | sort | head -n 1)"
-          if [ -z "$mac_update" ] && [ -z "$win_update" ]; then
+          win_x64_update="$(find desktop-artifacts/Lumen-win-x64 -type f -name '*.nsis.zip' | sort | head -n 1)"
+          win_arm64_update=""
+          if [ -d desktop-artifacts/Lumen-win-arm64 ]; then
+            win_arm64_update="$(find desktop-artifacts/Lumen-win-arm64 -type f -name '*.nsis.zip' | sort | head -n 1)"
+          fi
+          if [ -z "$mac_update" ] && [ -z "$win_x64_update" ] && [ -z "$win_arm64_update" ]; then
             echo "No signed updater artifacts found; skipping latest.json."
           else
             test -n "$mac_update"
-            test -n "$win_update"
-            python3 apps/desktop/packaging/scripts/create-updater-manifest.py \
+            test -n "$win_x64_update"
+            args=(
               --version "$tag" \
               --base-url "$base_url" \
               --notes "see https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
               --output desktop-artifacts/latest.json \
               --artifact "darwin-aarch64=$mac_update" \
-              --artifact "windows-x86_64=$win_update"
+              --artifact "windows-x86_64=$win_x64_update"
+            )
+            if [ -n "$win_arm64_update" ]; then
+              args+=(--artifact "windows-aarch64=$win_arm64_update")
+            fi
+            python3 apps/desktop/packaging/scripts/create-updater-manifest.py "${args[@]}"
           fi
       - name: Upload release assets
         env:

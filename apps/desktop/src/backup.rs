@@ -13,6 +13,13 @@ const BACKUP_FORMAT_VERSION: u32 = 1;
 const PENDING_RESTORE_ZIP: &str = "pending-restore.lumen-backup.zip";
 const PENDING_RESTORE_JSON: &str = "pending-restore.json";
 const FAILED_RESTORE_JSON: &str = "pending-restore.failed.json";
+const FIXED_BACKUP_ENTRIES: &[&str] = &[
+    "data/db/lumen.sqlite",
+    "data/settings.json",
+    "data/providers.json",
+    "data/.bootstrap-done",
+];
+const BACKUP_ENTRY_PREFIXES: &[&str] = &["data/storage/"];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BackupEntry {
@@ -220,6 +227,29 @@ pub fn apply_pending_restore(
     }
 }
 
+pub fn clear_failed_restore_marker(data_root: &Path) -> Result<()> {
+    match fs::remove_file(failed_restore_json_path(data_root)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).context("clear failed restore marker"),
+    }
+}
+
+pub fn mark_pending_restore_failed(data_root: &Path, error: &str) -> Result<()> {
+    let pending_json = pending_restore_json_path(data_root);
+    let pending = fs::read_to_string(&pending_json)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PendingRestore>(&raw).ok());
+    let failed = serde_json::json!({
+        "failed_at_ms": unix_epoch_ms(),
+        "error": error,
+        "pending": pending,
+    });
+    write_json_private(&failed_restore_json_path(data_root), &failed)?;
+    let _ = fs::remove_file(pending_json);
+    Ok(())
+}
+
 fn create_desktop_backup_inner(
     data_root: &Path,
     app_version: &str,
@@ -286,7 +316,7 @@ fn create_desktop_backup_inner(
         database,
         entries,
         excluded: vec![
-            "provider API keys in OS keychain".to_string(),
+            "provider API keys in desktop secret storage".to_string(),
             "redis runtime state".to_string(),
             "cache".to_string(),
             "logs".to_string(),
@@ -511,7 +541,18 @@ fn apply_pending_restore_inner(
         restore_database(data_root, &extract_root, manifest.database.present)?;
         restore_optional_top_file(data_root, &extract_root, "data/settings.json")?;
         restore_optional_top_file(data_root, &extract_root, "data/providers.json")?;
-        restore_optional_top_file(data_root, &extract_root, "data/.bootstrap-done")?;
+        if should_restore_bootstrap_marker(&manifest.app_version, app_version) {
+            restore_optional_top_file(data_root, &extract_root, "data/.bootstrap-done")?;
+        } else {
+            let _ = fs::remove_file(data_root.join("data/.bootstrap-done"));
+            write_restore_log(
+                data_root,
+                &format!(
+                    "restore skipped data/.bootstrap-done backup_version={} current_version={}\n",
+                    manifest.app_version, app_version
+                ),
+            );
+        }
         restore_storage_dir(data_root, &extract_root, now)?;
         write_restore_log(
             data_root,
@@ -604,14 +645,32 @@ fn restore_storage_dir(data_root: &Path, extract_root: &Path, now: u128) -> Resu
     let old = data_root
         .join("data")
         .join(format!("storage.before-restore-{now}"));
-    if target.exists() {
-        let _ = fs::remove_dir_all(&old);
-        fs::rename(&target, &old).context("move current storage out of the way")?;
-    }
-    if source.is_dir() {
-        copy_dir_all(&source, &target).context("restore storage directory")?;
+    let tmp = data_root
+        .join("data")
+        .join(format!("storage.restore-tmp-{now}"));
+    let _ = fs::remove_dir_all(&old);
+    let _ = fs::remove_dir_all(&tmp);
+    let stage_result = if source.is_dir() {
+        copy_dir_all(&source, &tmp).context("stage restored storage directory")
     } else {
-        fs::create_dir_all(&target).context("create empty storage directory")?;
+        fs::create_dir_all(&tmp).context("stage empty storage directory")
+    };
+    if let Err(err) = stage_result {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(err);
+    }
+    if target.exists() {
+        if let Err(err) = fs::rename(&target, &old).context("move current storage out of the way") {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(err);
+        }
+    }
+    if let Err(err) = fs::rename(&tmp, &target).context("install restored storage directory") {
+        if old.exists() && !target.exists() {
+            let _ = fs::rename(&old, &target);
+        }
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(err);
     }
     let _ = fs::remove_dir_all(old);
     Ok(())
@@ -666,13 +725,28 @@ fn is_allowed_backup_entry(raw: &str) -> bool {
     {
         return false;
     }
-    matches!(
-        raw,
-        "data/db/lumen.sqlite"
-            | "data/settings.json"
-            | "data/providers.json"
-            | "data/.bootstrap-done"
-    ) || raw.starts_with("data/storage/")
+    FIXED_BACKUP_ENTRIES.contains(&raw)
+        || BACKUP_ENTRY_PREFIXES
+            .iter()
+            .any(|prefix| raw.starts_with(prefix))
+}
+
+fn should_restore_bootstrap_marker(backup_version: &str, current_version: &str) -> bool {
+    let Some((backup_major, backup_minor)) = version_major_minor(backup_version) else {
+        return true;
+    };
+    let Some((current_major, current_minor)) = version_major_minor(current_version) else {
+        return true;
+    };
+    backup_major == current_major && backup_minor == current_minor
+}
+
+fn version_major_minor(version: &str) -> Option<(u64, u64)> {
+    let normalized = version.trim().trim_start_matches('v');
+    let mut parts = normalized.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    Some((major, minor))
 }
 
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
@@ -806,5 +880,13 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         Ok(())
+    }
+
+    #[test]
+    fn bootstrap_marker_only_survives_same_major_minor_restore() {
+        assert!(should_restore_bootstrap_marker("1.1.50", "1.1.64"));
+        assert!(!should_restore_bootstrap_marker("1.1.50", "1.2.0"));
+        assert!(!should_restore_bootstrap_marker("1.1.50", "2.0.0"));
+        assert!(should_restore_bootstrap_marker("test", "1.2.0"));
     }
 }

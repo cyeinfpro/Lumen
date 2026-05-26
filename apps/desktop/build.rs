@@ -1,19 +1,11 @@
 fn main() {
     if std::env::var("PROFILE").as_deref() == Ok("debug") {
-        create_debug_sidecar_placeholders();
+        create_debug_resource_placeholders();
     }
     tauri_build::build();
 }
 
-fn create_debug_sidecar_placeholders() {
-    let Ok(target) = std::env::var("TARGET") else {
-        return;
-    };
-    let _ = std::fs::create_dir_all("binaries");
-    for name in ["lumen-web"] {
-        create_placeholder(&format!("binaries/{name}-{target}"));
-        create_placeholder(&format!("binaries/{name}-{target}.exe"));
-    }
+fn create_debug_resource_placeholders() {
     for path in [
         "resources/alembic/desktop/.placeholder",
         "resources/runtime/.placeholder",

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parents[3]
 
@@ -16,7 +16,7 @@ hiddenimports = [
     "app.tasks.memory_extraction",
     "app.tasks.outbox",
     "app.tasks.state",
-]
+] + collect_submodules("tiktoken_ext")
 
 excluded_db_drivers = [
     "asyncpg",

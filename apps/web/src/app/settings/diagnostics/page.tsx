@@ -69,12 +69,12 @@ function Row({
   );
 }
 
-function SidecarPanel({ status }: { status: DesktopStatus | undefined }) {
+function RuntimeComponentPanel({ status }: { status: DesktopStatus | undefined }) {
   const expected = [
-    { name: "redis", label: "Redis", port: status?.runtime.redis_port },
-    { name: "api", label: "API", port: status?.runtime.api_port },
-    { name: "worker", label: "Worker", port: status?.runtime.worker_metrics_port },
-    { name: "web", label: "Web", port: status?.runtime.web_port },
+    { name: "redis", label: "本机缓存", port: status?.runtime.redis_port },
+    { name: "api", label: "业务接口", port: status?.runtime.api_port },
+    { name: "worker", label: "任务引擎", port: status?.runtime.worker_metrics_port },
+    { name: "web", label: "界面服务", port: status?.runtime.web_port },
   ];
   const byName = new Map((status?.sidecars ?? []).map((item) => [item.name, item]));
 
@@ -109,7 +109,7 @@ function SidecarPanel({ status }: { status: DesktopStatus | undefined }) {
                 }
               >
                 {ready ? <CheckCircle2 className="h-3.5 w-3.5" /> : <CircleAlert className="h-3.5 w-3.5" />}
-                {ready ? "ready" : running ? "未就绪" : "异常"}
+                {ready ? "正常" : running ? "启动中" : "异常"}
               </span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-[12px] text-[var(--fg-2)]">
@@ -155,7 +155,7 @@ export default function DiagnosticsPage() {
   return (
     <SettingsShell
       title="诊断"
-      subtitle="本机数据、日志与 sidecar 状态"
+      subtitle="本机数据、日志与内置运行时状态"
       maxWidth="max-w-4xl"
     >
       <div className="space-y-4">
@@ -172,7 +172,7 @@ export default function DiagnosticsPage() {
             <div className="min-w-0">
               <h1 className="type-section-title">运行状态</h1>
               <p className="mt-1 text-[13px] text-[var(--fg-2)]">
-                用于定位本机数据库、日志和 provider runtime 文件。
+                用于定位本机数据库、日志和供应商配置文件。
               </p>
             </div>
             <Button
@@ -218,7 +218,7 @@ export default function DiagnosticsPage() {
               />
               <Row
                 icon={<Database className="h-4 w-4" />}
-                label="供应商文件"
+                label="供应商配置"
                 value={q.data.provider_metadata_path}
               />
               <div className="mt-5 flex justify-end">
@@ -266,12 +266,12 @@ export default function DiagnosticsPage() {
         {desktop ? (
           <Card padding="lg">
             <div className="mb-5">
-              <h2 className="type-section-title">Sidecar</h2>
+              <h2 className="type-section-title">内置运行时</h2>
               <p className="mt-1 text-[13px] text-[var(--fg-2)]">
-                本地运行时进程、端口与最近退出状态。
+                应用内部组件的就绪状态、端口与最近恢复记录。
               </p>
             </div>
-            <SidecarPanel status={statusQ.data} />
+            <RuntimeComponentPanel status={statusQ.data} />
             {statusQ.error ? (
               <div
                 role="alert"

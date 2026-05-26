@@ -189,12 +189,20 @@ export async function getDesktopRestoreStatus(): Promise<DesktopRestoreStatus> {
   return desktopInvoke<DesktopRestoreStatus>("desktop_restore_status");
 }
 
+export async function clearFailedRestoreMarker(): Promise<void> {
+  await desktopInvoke("clear_failed_restore_marker");
+}
+
 export async function selectDesktopRestoreBackup(): Promise<DesktopRestorePlan | null> {
   return desktopInvoke<DesktopRestorePlan | null>("select_desktop_restore_backup");
 }
 
 export async function getDesktopDockerImportStatus(): Promise<DesktopDockerImportStatus> {
   return desktopInvoke<DesktopDockerImportStatus>("desktop_docker_import_status");
+}
+
+export async function clearFailedDockerImportMarker(): Promise<void> {
+  await desktopInvoke("clear_failed_docker_import_marker");
 }
 
 export async function selectDockerImportBackup(

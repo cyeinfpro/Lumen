@@ -244,7 +244,7 @@ export function DesktopBootstrapGate() {
                         从桌面端备份恢复
                       </div>
                       <div className="mt-1 text-[13px] text-[var(--fg-2)]">
-                        选择 `.lumen-backup.zip`，重启后在 sidecar 启动前恢复。
+                        选择 `.lumen-backup.zip`，重启后在应用启动前恢复。
                       </div>
                     </div>
                     <Button

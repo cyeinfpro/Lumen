@@ -55,6 +55,22 @@ function Get-ListeningProcessIds {
   }
 }
 
+function Get-HttpStatus {
+  param([string]$Uri)
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri $Uri
+    return [int]$response.StatusCode
+  } catch {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+      return [int]$_.Exception.Response.StatusCode
+    }
+    if ($_.Exception.StatusCode) {
+      return [int]$_.Exception.StatusCode
+    }
+    throw
+  }
+}
+
 try {
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName = $Executable
@@ -80,6 +96,7 @@ try {
   $logsRoot = Join-Path $dataRoot "data/logs"
   $apiPort = $null
   $webPort = $null
+  $baselineReady = $false
   $deadline = (Get-Date).AddSeconds(75)
   while ((Get-Date) -lt $deadline) {
     if (-not (Test-Path $logsRoot)) {
@@ -100,7 +117,7 @@ try {
       }
       if (Test-Path $webLog) {
         $text = Get-Content $webLog -Raw -ErrorAction SilentlyContinue
-        if ($text -match "Local:\s+http://localhost:(\d+)") {
+        if ($text -match "Local:\s+http://(?:localhost|127\.0\.0\.1):(\d+)") {
           $webPort = [int]$Matches[1]
         }
       }
@@ -109,6 +126,7 @@ try {
           $api = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$apiPort/system/desktop-ready"
           $web = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$webPort/"
           if ($api.StatusCode -eq 200 -and $web.StatusCode -eq 200) {
+            $baselineReady = $true
             break
           }
         } catch {
@@ -287,6 +305,7 @@ try {
 
   Write-Host "logs_root=$logsRoot"
   Write-Host "api_port=$apiPort web_port=$webPort"
+  Write-Host "baseline_ready=$($baselineReady.ToString().ToLowerInvariant())"
   Write-Host "worker_restarted=$($workerRestarted.ToString().ToLowerInvariant())"
   Write-Host "web_restarted=$($webRestarted.ToString().ToLowerInvariant())"
   Write-Host "api_restarted=$($apiRestarted.ToString().ToLowerInvariant())"
@@ -309,6 +328,15 @@ try {
   if ([string]$logs["worker.err.log"] -match "api_key is required") {
     $errors.Add("worker rejects disabled desktop provider without api_key")
   }
+  if ($combined.Contains("context_window.tiktoken_unavailable")) {
+    $errors.Add("packaged Python runtime could not load tiktoken")
+  }
+  if ($combined.Contains("context_window.tiktoken_loading_slow")) {
+    $errors.Add("packaged Python runtime fell back before tiktoken warmed")
+  }
+  if ([string]$logs["web.log"] -match "Network:\s+http://(?!(?:localhost|127\.0\.0\.1)(?::|/))|0\.0\.0\.0") {
+    $errors.Add("web runtime is listening on a non-loopback interface")
+  }
   if (-not ([string]$logs["supervisor.log"]).Contains('"event":"heartbeat"')) {
     $errors.Add("supervisor heartbeat event was not logged")
   }
@@ -317,6 +345,9 @@ try {
   }
   if (-not ([string]$logs["supervisor.log"]).Contains('"event":"full_restart"')) {
     $errors.Add("supervisor full_restart event was not logged")
+  }
+  if (-not $baselineReady) {
+    $errors.Add("baseline desktop readiness was not reached")
   }
   if (-not ([string]$logs["redis.log"]).Contains("Ready to accept connections")) {
     $errors.Add("redis readiness not proven")
@@ -340,6 +371,30 @@ try {
     $errors.Add("api/web ports not discovered")
   } else {
     try {
+      $ready = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$apiPort/system/desktop-ready"
+      if ($ready.StatusCode -ne 200) {
+        $errors.Add("api desktop-ready did not return 200")
+      }
+    } catch {
+      $errors.Add("api desktop-ready request failed: $($_.Exception.Message)")
+    }
+    try {
+      $directAuth = Get-HttpStatus -Uri "http://127.0.0.1:$apiPort/auth/me"
+      if ($directAuth -ne 401) {
+        $errors.Add("direct api auth/me without desktop token did not return 401")
+      }
+    } catch {
+      $errors.Add("direct api auth/me request failed: $($_.Exception.Message)")
+    }
+    try {
+      $directActivity = Get-HttpStatus -Uri "http://127.0.0.1:$apiPort/system/desktop-activity"
+      if ($directActivity -ne 401) {
+        $errors.Add("direct api desktop-activity without desktop token did not return 401")
+      }
+    } catch {
+      $errors.Add("direct api desktop-activity request failed: $($_.Exception.Message)")
+    }
+    try {
       $authMe = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$webPort/api/auth/me"
       if ($authMe.StatusCode -ne 200) {
         $errors.Add("web proxy auth/me did not return 200")
@@ -354,6 +409,14 @@ try {
       }
     } catch {
       $errors.Add("web proxy conversations request failed: $($_.Exception.Message)")
+    }
+    try {
+      $activity = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$webPort/api/system/desktop-activity"
+      if ($activity.StatusCode -ne 200) {
+        $errors.Add("web proxy desktop-activity did not return 200")
+      }
+    } catch {
+      $errors.Add("web proxy desktop-activity request failed: $($_.Exception.Message)")
     }
   }
   $deadProcessCount = @($processes.Values | Where-Object { -not $_ }).Count

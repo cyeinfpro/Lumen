@@ -6,7 +6,6 @@ cd "$ROOT"
 
 export NEXT_PUBLIC_LUMEN_RUNTIME=desktop
 export LUMEN_BACKEND_URL="${LUMEN_BACKEND_URL:-http://127.0.0.1:8000}"
-TRIPLE="$(rustc -Vv | awk '/^host:/ {print $2}')"
 GARNET_VERSION="${GARNET_VERSION:-1.1.9}"
 DOTNET_RUNTIME_VERSION="${DOTNET_RUNTIME_VERSION:-8.0.27}"
 NODE_RUNTIME_VERSION="${NODE_RUNTIME_VERSION:-$(node -p 'process.versions.node')}"
@@ -52,14 +51,16 @@ prepare_garnet() {
   esac
   local tmp
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-  curl -fsSL \
-    "https://github.com/microsoft/garnet/releases/download/v${GARNET_VERSION}/${asset}" \
-    -o "$tmp/garnet.tar.xz"
-  tar -xf "$tmp/garnet.tar.xz" -C "$tmp"
-  cp -R "$tmp/net8.0"/. "$dest"/
-  mv "$dest/GarnetServer" "$dest/lumen-redis"
-  chmod +x "$dest/lumen-redis"
+  (
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL \
+      "https://github.com/microsoft/garnet/releases/download/v${GARNET_VERSION}/${asset}" \
+      -o "$tmp/garnet.tar.xz"
+    tar -xf "$tmp/garnet.tar.xz" -C "$tmp"
+    cp -R "$tmp/net8.0"/. "$dest"/
+    mv "$dest/GarnetServer" "$dest/lumen-redis"
+    chmod +x "$dest/lumen-redis"
+  )
 }
 
 prepare_dotnet_runtime() {
@@ -80,12 +81,14 @@ prepare_dotnet_runtime() {
   esac
   local tmp
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-  curl -fsSL \
-    "https://dotnetcli.azureedge.net/dotnet/Runtime/${DOTNET_RUNTIME_VERSION}/dotnet-runtime-${DOTNET_RUNTIME_VERSION}-${rid}.tar.gz" \
-    -o "$tmp/dotnet-runtime.tar.gz"
-  tar -xzf "$tmp/dotnet-runtime.tar.gz" -C "$dest"
-  chmod +x "$dest/dotnet" 2>/dev/null || true
+  (
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL \
+      "https://dotnetcli.azureedge.net/dotnet/Runtime/${DOTNET_RUNTIME_VERSION}/dotnet-runtime-${DOTNET_RUNTIME_VERSION}-${rid}.tar.gz" \
+      -o "$tmp/dotnet-runtime.tar.gz"
+    tar -xzf "$tmp/dotnet-runtime.tar.gz" -C "$dest"
+    chmod +x "$dest/dotnet" 2>/dev/null || true
+  )
 }
 
 prepare_node_runtime() {
@@ -111,14 +114,16 @@ prepare_node_runtime() {
   local asset="node-v${version}-darwin-${arch}.tar.xz"
   local tmp
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-  curl -fsSL \
-    "https://nodejs.org/dist/v${version}/${asset}" \
-    -o "$tmp/node.tar.xz"
-  tar -xf "$tmp/node.tar.xz" -C "$tmp"
-  cp -R "$tmp/node-v${version}-darwin-${arch}"/. "$dest"/
-  ln -sf bin/node "$dest/node"
-  chmod +x "$dest/node" "$dest/bin/node" 2>/dev/null || true
+  (
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL \
+      "https://nodejs.org/dist/v${version}/${asset}" \
+      -o "$tmp/node.tar.xz"
+    tar -xf "$tmp/node.tar.xz" -C "$tmp"
+    cp -R "$tmp/node-v${version}-darwin-${arch}"/. "$dest"/
+    ln -sf bin/node "$dest/node"
+    chmod +x "$dest/node" "$dest/bin/node" 2>/dev/null || true
+  )
 }
 
 clean_tauri_outputs() {
@@ -149,18 +154,61 @@ prepare_static_resource_placeholders() {
   done
 }
 
+verify_desktop_resources() {
+  local missing=0
+
+  require_file() {
+    local path="$1"
+    local label="$2"
+    if [ ! -f "$path" ]; then
+      echo "missing bundled $label: $path" >&2
+      missing=1
+    fi
+  }
+
+  require_executable() {
+    local path="$1"
+    local label="$2"
+    if [ ! -f "$path" ]; then
+      echo "missing bundled $label: $path" >&2
+      missing=1
+    elif [ ! -x "$path" ]; then
+      echo "bundled $label is not executable: $path" >&2
+      missing=1
+    fi
+  }
+
+  require_file "apps/desktop/resources/web/server.js" "Next standalone server"
+  require_file "apps/desktop/resources/web/package.json" "Next standalone package metadata"
+  require_executable "apps/desktop/resources/runtime/node/node" "Node runtime"
+  require_executable "apps/desktop/resources/runtime/lumen-api/lumen-api" "API runtime"
+  require_executable "apps/desktop/resources/runtime/lumen-worker/lumen-worker" "worker runtime"
+  require_executable "apps/desktop/resources/runtime/lumen-redis/lumen-redis" "Redis-compatible runtime"
+  require_executable "apps/desktop/resources/runtime/dotnet/dotnet" ".NET runtime"
+
+  if [ "$missing" -ne 0 ]; then
+    exit 1
+  fi
+  apps/desktop/resources/runtime/node/node --version >/dev/null
+}
+
 prepare_tauri_config_args() {
   TAURI_CONFIG_ARGS=()
   TAURI_CONFIG_ARGS_COUNT=0
   if [ -z "${TAURI_UPDATER_PUBKEY:-}" ]; then
+    if [ "${GITHUB_REF_TYPE:-}" = "tag" ] || [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+      echo "TAURI_UPDATER_PUBKEY is required for tagged desktop release builds" >&2
+      exit 1
+    fi
     return
   fi
   if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
     echo "TAURI_UPDATER_PUBKEY requires TAURI_SIGNING_PRIVATE_KEY for updater artifact signing" >&2
     exit 1
   fi
-  local config_path="apps/desktop/target/tauri-updater.conf.json"
+  local config_path="$ROOT/apps/desktop/target/tauri-updater.conf.json"
   mkdir -p "$(dirname "$config_path")"
+  export TAURI_UPDATER_CONFIG_PATH="$config_path"
   python3 - <<'PY'
 import json
 import os
@@ -170,7 +218,7 @@ config = {
     "bundle": {"createUpdaterArtifacts": True},
     "plugins": {"updater": {"pubkey": os.environ["TAURI_UPDATER_PUBKEY"]}},
 }
-Path("apps/desktop/target/tauri-updater.conf.json").write_text(
+Path(os.environ["TAURI_UPDATER_CONFIG_PATH"]).write_text(
     json.dumps(config, ensure_ascii=False, indent=2),
     encoding="utf-8",
 )
@@ -260,14 +308,7 @@ uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath app
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist \
   apps/desktop/packaging/pyinstaller/lumen-worker.spec
 clean_tauri_outputs
-mkdir -p apps/desktop/binaries
-: > "apps/desktop/binaries/lumen-web-${TRIPLE}"
-chmod +x "apps/desktop/binaries/lumen-web-${TRIPLE}"
 prepare_static_resource_placeholders
-(
-  cd apps/desktop
-  cargo build --release --bin lumen-web
-)
 
 rm -rf apps/desktop/resources/runtime/lumen-api apps/desktop/resources/runtime/lumen-worker
 mkdir -p apps/desktop/resources/runtime
@@ -276,9 +317,7 @@ cp -R apps/desktop/dist/lumen-worker apps/desktop/resources/runtime/lumen-worker
 prepare_garnet
 prepare_dotnet_runtime
 prepare_static_resource_placeholders
-
-cp -f apps/desktop/target/release/lumen-web "apps/desktop/binaries/lumen-web-${TRIPLE}"
-chmod +x "apps/desktop/binaries/lumen-web-${TRIPLE}"
+verify_desktop_resources
 
 clean_tauri_outputs
 prepare_tauri_config_args

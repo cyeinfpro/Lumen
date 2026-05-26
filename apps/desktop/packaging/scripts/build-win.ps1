@@ -7,7 +7,9 @@ $env:NEXT_PUBLIC_LUMEN_RUNTIME = "desktop"
 if (-not $env:LUMEN_BACKEND_URL) {
   $env:LUMEN_BACKEND_URL = "http://127.0.0.1:8000"
 }
-$Triple = ((rustc -Vv | Select-String "^host:").ToString() -split "\s+")[1]
+$BuildTarget = if ($env:LUMEN_DESKTOP_BUILD_TARGET) { $env:LUMEN_DESKTOP_BUILD_TARGET.Trim() } else { "" }
+$HostTriple = ((rustc -Vv | Select-String "^host:").ToString() -split "\s+")[1]
+$Triple = if ($BuildTarget) { $BuildTarget } else { $HostTriple }
 $GarnetVersion = if ($env:GARNET_VERSION) { $env:GARNET_VERSION } else { "1.1.9" }
 $DotnetRuntimeVersion = if ($env:DOTNET_RUNTIME_VERSION) { $env:DOTNET_RUNTIME_VERSION } else { "8.0.27" }
 $NodeRuntimeVersion = if ($env:NODE_RUNTIME_VERSION) { $env:NODE_RUNTIME_VERSION.TrimStart("v") } else { (node -p "process.versions.node").Trim() }
@@ -124,8 +126,33 @@ function Prepare-StaticResourcePlaceholders {
   }
 }
 
+function Verify-DesktopResources {
+  $checks = @(
+    @{ Path = "apps/desktop/resources/web/server.js"; Label = "Next standalone server" },
+    @{ Path = "apps/desktop/resources/web/package.json"; Label = "Next standalone package metadata" },
+    @{ Path = "apps/desktop/resources/runtime/node/node.exe"; Label = "Node runtime" },
+    @{ Path = "apps/desktop/resources/runtime/lumen-api/lumen-api.exe"; Label = "API runtime" },
+    @{ Path = "apps/desktop/resources/runtime/lumen-worker/lumen-worker.exe"; Label = "worker runtime" },
+    @{ Path = "apps/desktop/resources/runtime/lumen-redis/lumen-redis.exe"; Label = "Redis-compatible runtime" },
+    @{ Path = "apps/desktop/resources/runtime/dotnet/dotnet.exe"; Label = ".NET runtime" }
+  )
+  $missing = [System.Collections.Generic.List[string]]::new()
+  foreach ($check in $checks) {
+    if (-not (Test-Path -Path $check.Path -PathType Leaf)) {
+      $missing.Add("missing bundled $($check.Label): $($check.Path)")
+    }
+  }
+  if ($missing.Count -gt 0) {
+    throw ($missing -join "`n")
+  }
+  & "apps/desktop/resources/runtime/node/node.exe" --version | Out-Null
+}
+
 function Get-TauriConfigArgs {
   if (-not $env:TAURI_UPDATER_PUBKEY) {
+    if ($env:GITHUB_REF_TYPE -eq "tag" -or ($env:GITHUB_REF -and $env:GITHUB_REF.StartsWith("refs/tags/"))) {
+      throw "TAURI_UPDATER_PUBKEY is required for tagged desktop release builds"
+    }
     return @()
   }
   if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
@@ -174,13 +201,7 @@ uv sync --all-packages
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist apps/desktop/packaging/pyinstaller/lumen-api.spec
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist apps/desktop/packaging/pyinstaller/lumen-worker.spec
 Clean-TauriOutputs
-New-Item -ItemType Directory -Force apps/desktop/binaries | Out-Null
-$LumenWebSidecar = "apps/desktop/binaries/lumen-web-$Triple.exe"
-New-Item -ItemType File -Force $LumenWebSidecar | Out-Null
 Prepare-StaticResourcePlaceholders
-Push-Location apps/desktop
-cargo build --release --bin lumen-web
-Pop-Location
 
 Remove-Item -Recurse -Force apps/desktop/resources/runtime/lumen-api -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force apps/desktop/resources/runtime/lumen-worker -ErrorAction SilentlyContinue
@@ -190,11 +211,15 @@ Copy-Item -Recurse apps/desktop/dist/lumen-worker apps/desktop/resources/runtime
 Prepare-Garnet
 Prepare-DotnetRuntime
 Prepare-StaticResourcePlaceholders
-
-Copy-Item apps/desktop/target/release/lumen-web.exe $LumenWebSidecar -Force
+Verify-DesktopResources
 
 Clean-TauriOutputs
 $tauriConfigArgs = Get-TauriConfigArgs
 Push-Location apps/desktop
-cargo tauri build --bundles nsis @tauriConfigArgs
+$cargoArgs = @("tauri", "build", "--bundles", "nsis")
+if ($BuildTarget) {
+  $cargoArgs += @("--target", $BuildTarget)
+}
+$cargoArgs += $tauriConfigArgs
+cargo @cargoArgs
 Pop-Location

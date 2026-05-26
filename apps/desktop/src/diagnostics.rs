@@ -161,7 +161,14 @@ fn read_tail(path: &Path, max_bytes: u64) -> Result<String> {
 fn redact_text(raw: &str) -> String {
     raw.lines()
         .map(|line| {
-            if line.contains("api_key") || line.contains("Authorization") {
+            if line.contains('\u{0}')
+                || line.contains("-----BEGIN ")
+                || line.contains("PRIVATE KEY-----")
+                || line.to_ascii_lowercase().contains("api_key")
+                || line.contains("Authorization")
+                || line.contains("sk-")
+                || line.contains("sess-")
+            {
                 return "[REDACTED sensitive line]".to_string();
             }
             line.split(' ')

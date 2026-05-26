@@ -17,10 +17,26 @@ STORAGE_MOUNT = ROOT / "deploy" / "scripts" / "lumen_storage_mount.sh"
 FIX_REDIS_PASSWORD = ROOT / "scripts" / "fix-redis-password-mismatch.sh"
 SHIFT_TRAFFIC = ROOT / "scripts" / "lumen-shift-traffic.sh"
 BUILD_MAC = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "build-mac.sh"
+BUILD_WIN = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "build-win.ps1"
+PYINSTALLER_API_SPEC = (
+    ROOT / "apps" / "desktop" / "packaging" / "pyinstaller" / "lumen-api.spec"
+)
+PYINSTALLER_WORKER_SPEC = (
+    ROOT / "apps" / "desktop" / "packaging" / "pyinstaller" / "lumen-worker.spec"
+)
 SMOKE_MAC = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "smoke-mac.sh"
+SMOKE_WIN = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "smoke-win.ps1"
+TAURI_CONF = ROOT / "apps" / "desktop" / "tauri.conf.json"
 DESKTOP_SIDECAR_RS = ROOT / "apps" / "desktop" / "src" / "sidecar.rs"
-DESKTOP_WEB_BIN_RS = ROOT / "apps" / "desktop" / "src" / "bin" / "lumen-web.rs"
+DESKTOP_MAIN_RS = ROOT / "apps" / "desktop" / "src" / "main.rs"
+DESKTOP_POWER_RS = ROOT / "apps" / "desktop" / "src" / "power.rs"
 DESKTOP_DOCKER_IMPORT_RS = ROOT / "apps" / "desktop" / "src" / "docker_import.rs"
+API_DESKTOP_ROUTES = ROOT / "apps" / "api" / "app" / "routes" / "desktop.py"
+API_MAIN = ROOT / "apps" / "api" / "app" / "main.py"
+WEB_PROXY = ROOT / "apps" / "web" / "src" / "proxy.ts"
+WEB_COMMAND_PALETTE = (
+    ROOT / "apps" / "web" / "src" / "components" / "ui" / "CommandPalette.tsx"
+)
 
 
 def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
@@ -77,9 +93,25 @@ def test_desktop_release_allows_installer_only_artifacts() -> None:
     workflow = DESKTOP_RELEASE.read_text(encoding="utf-8")
 
     assert "No signed updater artifacts found; skipping latest.json." in workflow
-    assert 'if [ -z "$mac_update" ] && [ -z "$win_update" ]; then' in workflow
+    assert (
+        'if [ -z "$mac_update" ] && [ -z "$win_x64_update" ] && [ -z "$win_arm64_update" ]; then'
+        in workflow
+    )
     assert 'test -n "$mac_update"' in workflow
-    assert 'test -n "$win_update"' in workflow
+    assert 'test -n "$win_x64_update"' in workflow
+    assert '--artifact "windows-aarch64=$win_arm64_update"' in workflow
+
+
+def test_desktop_release_builds_windows_arm64_artifact() -> None:
+    workflow = DESKTOP_RELEASE.read_text(encoding="utf-8")
+    build_win = BUILD_WIN.read_text(encoding="utf-8")
+
+    assert "build-win-arm64:" in workflow
+    assert "rustup target add aarch64-pc-windows-msvc" in workflow
+    assert "LUMEN_DESKTOP_BUILD_TARGET: aarch64-pc-windows-msvc" in workflow
+    assert "apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis" in workflow
+    assert "$BuildTarget = if ($env:LUMEN_DESKTOP_BUILD_TARGET)" in build_win
+    assert 'cargoArgs += @("--target", $BuildTarget)' in build_win
 
 
 def test_desktop_mac_release_requires_valid_bundle_signature() -> None:
@@ -88,16 +120,178 @@ def test_desktop_mac_release_requires_valid_bundle_signature() -> None:
 
     assert 'export APPLE_SIGNING_IDENTITY="-"' in build_mac
     assert "verify_macos_dmg_bundle_signature" in build_mac
-    assert 'hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" -quiet' in build_mac
+    assert (
+        'hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" -quiet'
+        in build_mac
+    )
     assert 'codesign --verify --deep --strict --verbose=2 "$app"' in build_mac
     assert 'codesign --verify --deep --strict --verbose=2 "$app"' in smoke_mac
 
 
+def test_desktop_web_runtime_is_resource_backed_not_placeholder_external_bin() -> None:
+    tauri_conf = TAURI_CONF.read_text(encoding="utf-8")
+    build_mac = BUILD_MAC.read_text(encoding="utf-8")
+    build_win = BUILD_WIN.read_text(encoding="utf-8")
+
+    assert '"externalBin"' not in tauri_conf
+    assert "resources/runtime/**/*" in tauri_conf
+    assert "resources/web/**/*" in tauri_conf
+    for text in (build_mac, build_win):
+        assert "cargo build --release --bin lumen-web" not in text
+        assert "binaries/lumen-web" not in text
+
+
 def test_windows_desktop_sidecars_do_not_open_console_windows() -> None:
-    for path in (DESKTOP_SIDECAR_RS, DESKTOP_WEB_BIN_RS, DESKTOP_DOCKER_IMPORT_RS):
+    for path in (DESKTOP_SIDECAR_RS, DESKTOP_DOCKER_IMPORT_RS):
         text = path.read_text(encoding="utf-8")
         assert "CREATE_NO_WINDOW" in text
         assert "creation_flags(CREATE_NO_WINDOW)" in text
+
+
+def test_desktop_runtime_logs_are_rotated() -> None:
+    text = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
+
+    assert "DESKTOP_LOG_ROTATE_BYTES" in text
+    assert "DESKTOP_LOG_ROTATE_KEEP" in text
+    assert "open_rotated_log_file" in text
+    assert "rotate_log_if_needed(&path)" in text
+    assert 'open_rotated_log_file(&self.runtime.data_root, "supervisor.log")' in text
+    assert "log_sequence: Arc<AtomicU64>" in text
+    assert '"sequence": sequence' in text
+
+
+def test_desktop_sidecars_allow_packaged_tiktoken_to_warm_before_estimate_mode() -> None:
+    text = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
+
+    assert "LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC" in text
+    assert 'unwrap_or_else(|_| "2.0".to_string())' in text
+
+
+def test_desktop_packaging_verifies_bundled_runtime_resources() -> None:
+    build_mac = BUILD_MAC.read_text(encoding="utf-8")
+    build_win = BUILD_WIN.read_text(encoding="utf-8")
+
+    for text in (build_mac, build_win):
+        assert "server.js" in text
+        assert "resources/runtime/node" in text
+        assert "resources/runtime/lumen-api" in text
+        assert "resources/runtime/lumen-worker" in text
+        assert "resources/runtime/lumen-redis" in text
+        assert "resources/runtime/dotnet" in text
+    assert "verify_desktop_resources" in build_mac
+    assert "Verify-DesktopResources" in build_win
+
+
+def test_desktop_pyinstaller_bundles_tiktoken_encoding_plugins() -> None:
+    for path in (PYINSTALLER_API_SPEC, PYINSTALLER_WORKER_SPEC):
+        text = path.read_text(encoding="utf-8")
+        assert "collect_submodules" in text
+        assert 'collect_submodules("tiktoken_ext")' in text
+
+
+def test_desktop_mac_uses_current_garnet_asset_names() -> None:
+    build_mac = BUILD_MAC.read_text(encoding="utf-8")
+
+    assert 'asset="osx-arm64-based.tar.xz"' in build_mac
+    assert 'asset="osx-x64-based.tar.xz"' in build_mac
+    assert "osx-arm64-based-readytorun.tar.xz" not in build_mac
+    assert "osx-x64-based-readytorun.tar.xz" not in build_mac
+
+
+def test_desktop_mac_smoke_embedded_python_stays_system_compatible() -> None:
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+
+    assert " | None" not in smoke_mac
+    assert "dict[str" not in smoke_mac
+    assert "list[int" not in smoke_mac
+
+
+def test_desktop_smoke_verifies_local_api_token_boundary() -> None:
+    api_main = API_MAIN.read_text(encoding="utf-8")
+    web_proxy = WEB_PROXY.read_text(encoding="utf-8")
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+    smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
+
+    assert "_DesktopLocalTokenMiddleware" in api_main
+    assert '"/system/desktop-ready"' in api_main
+    assert 'requestHeaders.set("x-lumen-local-token", token)' in web_proxy
+    for text in (smoke_mac, smoke_win):
+        assert "/auth/me" in text
+        assert "/system/desktop-activity" in text
+        assert "/api/system/desktop-activity" in text
+        assert "without desktop token did not return 401" in text
+
+
+def test_desktop_packaged_smoke_rejects_tiktoken_fallbacks() -> None:
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+    smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
+
+    for text in (smoke_mac, smoke_win):
+        assert "context_window.tiktoken_unavailable" in text
+        assert "context_window.tiktoken_loading_slow" in text
+        assert "packaged Python runtime could not load tiktoken" in text
+        assert "packaged Python runtime fell back before tiktoken warmed" in text
+
+
+def test_windows_desktop_smoke_requires_baseline_and_final_api_readiness() -> None:
+    smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
+
+    assert "$baselineReady = $false" in smoke_win
+    assert "$baselineReady = $true" in smoke_win
+    assert "baseline_ready=$($baselineReady.ToString().ToLowerInvariant())" in smoke_win
+    assert "baseline desktop readiness was not reached" in smoke_win
+    assert "/system/desktop-ready" in smoke_win
+    assert "api desktop-ready did not return 200" in smoke_win
+
+
+def test_desktop_command_palette_hides_docker_only_routes() -> None:
+    command_palette = WEB_COMMAND_PALETTE.read_text(encoding="utf-8")
+
+    assert "const DOCKER_ONLY_COMMANDS" in command_palette
+    assert "...(IS_DESKTOP_RUNTIME ? [] : DOCKER_ONLY_COMMANDS)" in command_palette
+    docker_only = command_palette.split("const DOCKER_ONLY_COMMANDS", 1)[1]
+    assert 'href: "/settings/usage"' in docker_only
+    assert 'href: "/settings/privacy"' in docker_only
+    assert 'href: "/admin"' in docker_only
+
+
+def test_desktop_close_to_tray_has_explicit_runtime_shutdown_exit() -> None:
+    text = DESKTOP_MAIN_RS.read_text(encoding="utf-8")
+
+    assert "TrayIconBuilder::with_id" in text
+    assert "显示 Lumen" in text
+    assert "退出 Lumen" in text
+    assert "WindowEvent::CloseRequested" in text
+    assert "api.prevent_close()" in text
+    assert "window.hide()" in text
+    assert "fn request_desktop_exit" in text
+    assert "guard.shutdown()" in text
+    assert "app.exit(0)" in text
+
+
+def test_desktop_sleep_protection_tracks_running_tasks_only() -> None:
+    power = DESKTOP_POWER_RS.read_text(encoding="utf-8")
+    main = DESKTOP_MAIN_RS.read_text(encoding="utf-8")
+    sidecar = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
+    api_desktop = API_DESKTOP_ROUTES.read_text(encoding="utf-8")
+    route = re.search(
+        r"(?ms)^async def desktop_activity\(.*?(?=^@router\.get\()",
+        api_desktop,
+    )
+
+    assert route is not None
+    route_body = route.group(0)
+    assert "IOPMAssertionCreateWithName" in power
+    assert "SetThreadExecutionState" in power
+    assert "caffeinate" not in power
+    assert '"/system/desktop-activity"' in api_desktop
+    assert "GenerationStatus.RUNNING.value" in route_body
+    assert "CompletionStatus.STREAMING.value" in route_body
+    assert "GenerationStatus.QUEUED.value" not in route_body
+    assert "CompletionStatus.QUEUED.value" not in route_body
+    assert "SleepGuard::new()" in main
+    assert "sleep_guard.set_active(activity.should_keep_awake())" in main
+    assert "X-Lumen-Local-Token" in sidecar
 
 
 def test_bug_audit_infra_scripts_parse_with_bash_n() -> None:
