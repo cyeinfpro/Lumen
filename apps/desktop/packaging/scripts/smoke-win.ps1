@@ -242,6 +242,105 @@ try {
     } catch {
       $operationErrors.Add("desktop conversation CRUD request failed: $($_.Exception.Message)")
     }
+    try {
+      $prompts = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/system-prompts"
+      if ($prompts.StatusCode -ne 200 -or -not $prompts.Json) {
+        $operationErrors.Add("desktop system prompts list did not return 200")
+      }
+      $prompt = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/system-prompts" -Body @{
+        name = "Desktop Smoke Prompt"
+        content = "You are a desktop smoke test."
+        make_default = $true
+      }
+      $promptId = if ($prompt.Json) { [string]$prompt.Json.id } else { "" }
+      if ($prompt.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($promptId) -or $prompt.Json.is_default -ne $true) {
+        $operationErrors.Add("desktop system prompt create did not return a default prompt")
+      } else {
+        $escapedPromptId = [System.Uri]::EscapeDataString($promptId)
+        $patchedPrompt = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/system-prompts/$escapedPromptId" -Body @{
+          name = "Desktop Smoke Prompt Updated"
+          content = "Updated desktop smoke prompt."
+          make_default = $false
+        }
+        if ($patchedPrompt.StatusCode -ne 200 -or -not $patchedPrompt.Json -or $patchedPrompt.Json.name -ne "Desktop Smoke Prompt Updated") {
+          $operationErrors.Add("desktop system prompt patch did not persist name")
+        }
+        $defaultedPrompt = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/system-prompts/$escapedPromptId/default"
+        if ($defaultedPrompt.StatusCode -ne 200 -or -not $defaultedPrompt.Json -or $defaultedPrompt.Json.is_default -ne $true) {
+          $operationErrors.Add("desktop system prompt default did not persist")
+        }
+        $deletedPrompt = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/system-prompts/$escapedPromptId"
+        if ($deletedPrompt.StatusCode -ne 204) {
+          $operationErrors.Add("desktop system prompt delete returned $($deletedPrompt.StatusCode)")
+        }
+      }
+    } catch {
+      $operationErrors.Add("desktop system prompt CRUD request failed: $($_.Exception.Message)")
+    }
+    try {
+      $memorySettings = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memory-settings"
+      if ($memorySettings.StatusCode -ne 200 -or -not $memorySettings.Json) {
+        $operationErrors.Add("desktop memory settings did not return 200")
+      }
+      $memorySettings = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/me/memory-settings" -Body @{
+        paused = $true
+        confirmation_enabled = $true
+      }
+      if ($memorySettings.StatusCode -ne 200 -or -not $memorySettings.Json -or $memorySettings.Json.paused -ne $true -or $memorySettings.Json.confirmation_enabled -ne $true) {
+        $operationErrors.Add("desktop memory settings patch did not persist")
+      }
+      $scopes = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memory-scopes"
+      if ($scopes.StatusCode -ne 200 -or -not $scopes.Json) {
+        $operationErrors.Add("desktop memory scopes list did not return 200")
+      }
+      $scope = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/me/memory-scopes" -Body @{
+        name = "Desktop Smoke Scope"
+        emoji = "DS"
+      }
+      $scopeId = if ($scope.Json) { [string]$scope.Json.id } else { "" }
+      if ($scope.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($scopeId)) {
+        $operationErrors.Add("desktop memory scope create did not return an id")
+      } else {
+        $escapedScopeId = [System.Uri]::EscapeDataString($scopeId)
+        $memory = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/me/memories" -Body @{
+          type = "preference"
+          content = "Desktop smoke memory preference"
+          pinned = $true
+          scope_id = $scopeId
+        }
+        $memoryId = if ($memory.Json) { [string]$memory.Json.id } else { "" }
+        if ($memory.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($memoryId) -or $memory.Json.pinned -ne $true) {
+          $operationErrors.Add("desktop memory create did not return a pinned memory")
+        } else {
+          $escapedMemoryId = [System.Uri]::EscapeDataString($memoryId)
+          $patchedMemory = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/me/memories/$escapedMemoryId" -Body @{
+            content = "Desktop smoke memory updated"
+            pinned = $false
+          }
+          if ($patchedMemory.StatusCode -ne 200 -or -not $patchedMemory.Json -or $patchedMemory.Json.content -ne "Desktop smoke memory updated" -or $patchedMemory.Json.pinned -ne $false) {
+            $operationErrors.Add("desktop memory patch did not persist")
+          }
+          $memories = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memories?disabled=false"
+          if ($memories.StatusCode -ne 200 -or -not $memories.Json) {
+            $operationErrors.Add("desktop memories list did not return 200")
+          }
+          $exported = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memories/export"
+          if ($exported.StatusCode -ne 200 -or -not $exported.Json) {
+            $operationErrors.Add("desktop memories export did not return 200")
+          }
+          $deletedMemory = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/me/memories/$escapedMemoryId"
+          if ($deletedMemory.StatusCode -ne 200 -or -not $deletedMemory.Json -or $deletedMemory.Json.ok -ne $true) {
+            $operationErrors.Add("desktop memory delete did not return ok=true")
+          }
+        }
+        $deletedScope = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/me/memory-scopes/$escapedScopeId"
+        if ($deletedScope.StatusCode -ne 200 -or -not $deletedScope.Json -or $null -eq $deletedScope.Json.moved) {
+          $operationErrors.Add("desktop memory scope delete did not return moved count")
+        }
+      }
+    } catch {
+      $operationErrors.Add("desktop memory CRUD request failed: $($_.Exception.Message)")
+    }
   } else {
     $operationErrors.Add("desktop conversation CRUD skipped before baseline readiness")
   }
