@@ -236,6 +236,61 @@ def test_desktop_smoke_verifies_local_api_token_boundary() -> None:
         assert "without desktop token did not return 401" in text
 
 
+def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
+    web_proxy = WEB_PROXY.read_text(encoding="utf-8")
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+    smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
+
+    desktop_routes = [
+        "/assets",
+        "/stream",
+        "/me",
+        "/settings/providers",
+        "/settings/storage",
+        "/settings/diagnostics",
+        "/settings/update",
+        "/settings/memory",
+        "/settings/prompts",
+    ]
+    docker_only_routes = [
+        "/admin",
+        "/login",
+        "/projects",
+        "/me/wallet",
+        "/settings/api-key",
+        "/settings/privacy",
+        "/settings/telegram",
+        "/settings/usage",
+    ]
+    api_routes = [
+        "/api/auth/csrf",
+        "/api/settings/bootstrap-status",
+        "/api/settings/diagnostics",
+        "/api/settings/system",
+        "/api/settings/providers",
+        "/api/settings/providers/stats",
+        "/api/conversations",
+    ]
+
+    assert "DESKTOP_UNSUPPORTED_PREFIXES" in web_proxy
+    for route in docker_only_routes:
+        assert f'"{route}"' in web_proxy
+
+    for text in (smoke_mac, smoke_win):
+        for route in desktop_routes:
+            assert route in text
+        for route in docker_only_routes:
+            assert route in text
+        for route in api_routes:
+            assert route in text
+        assert "desktop unsupported route" in text
+        assert "desktop bootstrap-complete did not return complete=true" in text
+        assert "desktop settings/system PUT" in text
+        assert "desktop conversation create did not return an id" in text
+        assert "desktop conversation patch did not persist title" in text
+        assert "desktop conversation delete did not return ok=true" in text
+
+
 def test_desktop_packaged_smoke_rejects_tiktoken_fallbacks() -> None:
     smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
     smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
