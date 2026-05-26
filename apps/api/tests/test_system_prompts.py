@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 from sqlalchemy.exc import IntegrityError
 
 from lumen_core.models import Conversation, SystemPrompt, User
@@ -81,3 +83,16 @@ def test_system_prompt_integrity_uses_structured_constraint_name() -> None:
 
     assert http.status_code == 409
     assert http.detail["error"]["code"] == "duplicate_name"
+
+
+def test_system_prompt_audit_uses_caller_transaction() -> None:
+    source = inspect.getsource(system_prompts)
+
+    for event_type in [
+        "system_prompt.create",
+        "system_prompt.update",
+        "system_prompt.delete",
+    ]:
+        start = source.index(f'event_type="{event_type}"')
+        end = source.index("await db.commit()", start)
+        assert "autocommit=False" in source[start:end]

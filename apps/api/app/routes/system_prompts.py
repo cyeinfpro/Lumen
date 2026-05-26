@@ -131,6 +131,7 @@ async def create_system_prompt(
         actor_email_hash=hash_email(user.email),
         actor_ip_hash=request_ip_hash(request),
         details={"prompt_id": prompt.id, "name": prompt.name},
+        autocommit=False,
     )
     await db.commit()
     await db.refresh(prompt)
@@ -164,6 +165,7 @@ async def patch_system_prompt(
             actor_email_hash=hash_email(user.email),
             actor_ip_hash=request_ip_hash(request),
             details={"prompt_id": prompt.id, "name": prompt.name},
+            autocommit=False,
         )
         await db.commit()
     except IntegrityError as exc:
@@ -198,6 +200,7 @@ async def delete_system_prompt(
         actor_email_hash=hash_email(user.email),
         actor_ip_hash=request_ip_hash(request),
         details={"prompt_id": prompt.id, "name": prompt.name},
+        autocommit=False,
     )
     await db.delete(prompt)
     await db.commit()

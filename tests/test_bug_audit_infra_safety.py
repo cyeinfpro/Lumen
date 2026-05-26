@@ -270,6 +270,10 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         "/api/settings/providers",
         "/api/settings/providers/stats",
         "/api/conversations",
+        "/api/system-prompts",
+        "/api/me/memory-settings",
+        "/api/me/memory-scopes",
+        "/api/me/memories",
     ]
 
     assert "DESKTOP_UNSUPPORTED_PREFIXES" in web_proxy
@@ -289,6 +293,14 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop conversation create did not return an id" in text
         assert "desktop conversation patch did not persist title" in text
         assert "desktop conversation delete did not return ok=true" in text
+        assert "desktop system prompt create did not return a default prompt" in text
+        assert "desktop system prompt patch did not persist name" in text
+        assert "desktop system prompt delete returned" in text
+        assert "desktop memory settings patch did not persist" in text
+        assert "desktop memory create did not return a pinned memory" in text
+        assert "desktop memory patch did not persist" in text
+        assert "desktop memory delete did not return ok=true" in text
+        assert "desktop memory scope delete did not return moved count" in text
     assert "HTTP_TIMEOUT_SECONDS = 8" in smoke_mac
     assert "$httpTimeoutSec = 8" in smoke_win
     assert "time.sleep(2.0)" in smoke_mac

@@ -262,6 +262,142 @@ if baseline_ready and web_port is not None:
                 operation_errors.append("desktop conversation delete did not return ok=true")
     except Exception as exc:
         operation_errors.append(f"desktop conversation CRUD request failed: {exc}")
+    try:
+        status, prompts = json_request(web_port, "/api/system-prompts")
+        if status != 200 or not isinstance(prompts, dict):
+            operation_errors.append("desktop system prompts list did not return 200")
+        status, prompt = json_request(
+            web_port,
+            "/api/system-prompts",
+            method="POST",
+            body={
+                "name": "Desktop Smoke Prompt",
+                "content": "You are a desktop smoke test.",
+                "make_default": True,
+            },
+        )
+        prompt_id = prompt.get("id") if isinstance(prompt, dict) else None
+        if status != 200 or not prompt_id or prompt.get("is_default") is not True:
+            operation_errors.append("desktop system prompt create did not return a default prompt")
+        else:
+            escaped_prompt_id = urllib.parse.quote(str(prompt_id), safe="")
+            status, patched = json_request(
+                web_port,
+                f"/api/system-prompts/{escaped_prompt_id}",
+                method="PATCH",
+                body={
+                    "name": "Desktop Smoke Prompt Updated",
+                    "content": "Updated desktop smoke prompt.",
+                    "make_default": False,
+                },
+            )
+            if (
+                status != 200
+                or not isinstance(patched, dict)
+                or patched.get("name") != "Desktop Smoke Prompt Updated"
+            ):
+                operation_errors.append("desktop system prompt patch did not persist name")
+            status, defaulted = json_request(
+                web_port,
+                f"/api/system-prompts/{escaped_prompt_id}/default",
+                method="POST",
+            )
+            if status != 200 or not isinstance(defaulted, dict) or defaulted.get("is_default") is not True:
+                operation_errors.append("desktop system prompt default did not persist")
+            status, _ = json_request(
+                web_port,
+                f"/api/system-prompts/{escaped_prompt_id}",
+                method="DELETE",
+            )
+            if status != 204:
+                operation_errors.append(f"desktop system prompt delete returned {status}")
+    except Exception as exc:
+        operation_errors.append(f"desktop system prompt CRUD request failed: {exc}")
+    try:
+        status, settings = json_request(web_port, "/api/me/memory-settings")
+        if status != 200 or not isinstance(settings, dict):
+            operation_errors.append("desktop memory settings did not return 200")
+        status, settings = json_request(
+            web_port,
+            "/api/me/memory-settings",
+            method="PATCH",
+            body={"paused": True, "confirmation_enabled": True},
+        )
+        if (
+            status != 200
+            or not isinstance(settings, dict)
+            or settings.get("paused") is not True
+            or settings.get("confirmation_enabled") is not True
+        ):
+            operation_errors.append("desktop memory settings patch did not persist")
+        status, scopes = json_request(web_port, "/api/me/memory-scopes")
+        if status != 200 or not isinstance(scopes, list):
+            operation_errors.append("desktop memory scopes list did not return 200")
+        status, scope = json_request(
+            web_port,
+            "/api/me/memory-scopes",
+            method="POST",
+            body={"name": "Desktop Smoke Scope", "emoji": "DS"},
+        )
+        scope_id = scope.get("id") if isinstance(scope, dict) else None
+        if status != 200 or not scope_id:
+            operation_errors.append("desktop memory scope create did not return an id")
+        else:
+            escaped_scope_id = urllib.parse.quote(str(scope_id), safe="")
+            status, memory = json_request(
+                web_port,
+                "/api/me/memories",
+                method="POST",
+                body={
+                    "type": "preference",
+                    "content": "Desktop smoke memory preference",
+                    "pinned": True,
+                    "scope_id": str(scope_id),
+                },
+            )
+            memory_id = memory.get("id") if isinstance(memory, dict) else None
+            if status != 200 or not memory_id or memory.get("pinned") is not True:
+                operation_errors.append("desktop memory create did not return a pinned memory")
+            else:
+                escaped_memory_id = urllib.parse.quote(str(memory_id), safe="")
+                status, patched_memory = json_request(
+                    web_port,
+                    f"/api/me/memories/{escaped_memory_id}",
+                    method="PATCH",
+                    body={
+                        "content": "Desktop smoke memory updated",
+                        "pinned": False,
+                    },
+                )
+                if (
+                    status != 200
+                    or not isinstance(patched_memory, dict)
+                    or patched_memory.get("content") != "Desktop smoke memory updated"
+                    or patched_memory.get("pinned") is not False
+                ):
+                    operation_errors.append("desktop memory patch did not persist")
+                status, memories = json_request(web_port, "/api/me/memories?disabled=false")
+                if status != 200 or not isinstance(memories, dict):
+                    operation_errors.append("desktop memories list did not return 200")
+                status, exported = json_request(web_port, "/api/me/memories/export")
+                if status != 200 or not isinstance(exported, dict):
+                    operation_errors.append("desktop memories export did not return 200")
+                status, deleted_memory = json_request(
+                    web_port,
+                    f"/api/me/memories/{escaped_memory_id}",
+                    method="DELETE",
+                )
+                if status != 200 or not isinstance(deleted_memory, dict) or deleted_memory.get("ok") is not True:
+                    operation_errors.append("desktop memory delete did not return ok=true")
+            status, deleted_scope = json_request(
+                web_port,
+                f"/api/me/memory-scopes/{escaped_scope_id}",
+                method="DELETE",
+            )
+            if status != 200 or not isinstance(deleted_scope, dict) or "moved" not in deleted_scope:
+                operation_errors.append("desktop memory scope delete did not return moved count")
+    except Exception as exc:
+        operation_errors.append(f"desktop memory CRUD request failed: {exc}")
 else:
     operation_errors.append("desktop conversation CRUD skipped before baseline readiness")
 worker_restarted = False
