@@ -182,15 +182,19 @@ jobs:
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
           mac_update="$(find desktop-artifacts -type f -name '*.app.tar.gz' | sort | head -n 1)"
           win_update="$(find desktop-artifacts -type f -name '*.nsis.zip' | sort | head -n 1)"
-          test -n "$mac_update"
-          test -n "$win_update"
-          python3 apps/desktop/packaging/scripts/create-updater-manifest.py \
-            --version "$tag" \
-            --base-url "$base_url" \
-            --notes "see https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
-            --output desktop-artifacts/latest.json \
-            --artifact "darwin-aarch64=$mac_update" \
-            --artifact "windows-x86_64=$win_update"
+          if [ -z "$mac_update" ] && [ -z "$win_update" ]; then
+            echo "No signed updater artifacts found; skipping latest.json."
+          else
+            test -n "$mac_update"
+            test -n "$win_update"
+            python3 apps/desktop/packaging/scripts/create-updater-manifest.py \
+              --version "$tag" \
+              --base-url "$base_url" \
+              --notes "see https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
+              --output desktop-artifacts/latest.json \
+              --artifact "darwin-aarch64=$mac_update" \
+              --artifact "windows-x86_64=$win_update"
+          fi
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
