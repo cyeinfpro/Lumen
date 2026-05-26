@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "scripts" / "lib.sh"
 WORKFLOWS = ROOT / ".github" / "workflows"
+DESKTOP_RELEASE = WORKFLOWS / "desktop-release.yml"
 COMPOSE = ROOT / "docker-compose.yml"
 BLUEGREEN_COMPOSE = ROOT / "docker-compose.bluegreen.yml"
 STORAGE_MOUNT = ROOT / "deploy" / "scripts" / "lumen_storage_mount.sh"
@@ -65,6 +66,15 @@ def test_github_workflow_actions_are_pinned_to_commit_sha() -> None:
                 floating.append(f"{path.relative_to(ROOT)}:{lineno}: {line.strip()}")
 
     assert floating == []
+
+
+def test_desktop_release_allows_installer_only_artifacts() -> None:
+    workflow = DESKTOP_RELEASE.read_text(encoding="utf-8")
+
+    assert "No signed updater artifacts found; skipping latest.json." in workflow
+    assert 'if [ -z "$mac_update" ] && [ -z "$win_update" ]; then' in workflow
+    assert 'test -n "$mac_update"' in workflow
+    assert 'test -n "$win_update"' in workflow
 
 
 def test_bug_audit_infra_scripts_parse_with_bash_n() -> None:
