@@ -189,13 +189,44 @@ prepare_macos_signing_env() {
   fi
 }
 
-verify_macos_bundle_signature() {
-  local app_path="apps/desktop/target/release/bundle/macos/Lumen.app"
-  if [ ! -d "$app_path" ]; then
-    echo "missing macOS app bundle: $app_path" >&2
+verify_macos_dmg_bundle_signature() {
+  local dmg_dir="apps/desktop/target/release/bundle/dmg"
+  local dmgs=()
+  local dmg
+  if [ -d "$dmg_dir" ]; then
+    while IFS= read -r -d '' dmg; do
+      dmgs+=("$dmg")
+    done < <(find "$dmg_dir" -maxdepth 1 -type f -name '*.dmg' -print0 | sort -z)
+  fi
+  if [ "${#dmgs[@]}" -eq 0 ]; then
+    echo "missing macOS dmg in: $dmg_dir" >&2
     exit 1
   fi
-  codesign --verify --deep --strict --verbose=2 "$app_path"
+
+  for dmg in "${dmgs[@]}"; do
+    local work mount app status
+    work="$(mktemp -d)"
+    mount="$work/mnt"
+    mkdir -p "$mount"
+    hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" -quiet
+    app="$mount/Lumen.app"
+    if [ ! -d "$app" ]; then
+      echo "missing Lumen.app in dmg: $dmg" >&2
+      find "$mount" -maxdepth 2 -print >&2
+      hdiutil detach "$mount" -quiet >/dev/null 2>&1 || hdiutil detach "$mount" -force -quiet >/dev/null 2>&1 || true
+      rm -rf "$work"
+      exit 1
+    fi
+    set +e
+    codesign --verify --deep --strict --verbose=2 "$app"
+    status=$?
+    set -e
+    hdiutil detach "$mount" -quiet >/dev/null 2>&1 || hdiutil detach "$mount" -force -quiet >/dev/null 2>&1 || true
+    rm -rf "$work"
+    if [ "$status" -ne 0 ]; then
+      exit "$status"
+    fi
+  done
 }
 
 python3 scripts/version.py check
@@ -260,4 +291,4 @@ prepare_macos_signing_env
     cargo tauri build --bundles dmg
   fi
 )
-verify_macos_bundle_signature
+verify_macos_dmg_bundle_signature
