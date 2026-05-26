@@ -1383,7 +1383,7 @@ fn process_rss_bytes(pid: u32) -> Option<u64> {
 
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
-        if handle == 0 {
+        if handle.is_null() {
             return None;
         }
         let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();

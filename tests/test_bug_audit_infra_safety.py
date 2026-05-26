@@ -148,6 +148,14 @@ def test_windows_desktop_sidecars_do_not_open_console_windows() -> None:
         assert "creation_flags(CREATE_NO_WINDOW)" in text
 
 
+def test_windows_rss_probe_uses_pointer_null_check() -> None:
+    text = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
+
+    assert "let handle = OpenProcess(" in text
+    assert "handle.is_null()" in text
+    assert "handle == 0" not in text
+
+
 def test_desktop_runtime_logs_are_rotated() -> None:
     text = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
 
