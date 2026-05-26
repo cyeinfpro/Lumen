@@ -87,8 +87,9 @@ def test_desktop_mac_release_requires_valid_bundle_signature() -> None:
     smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
 
     assert 'export APPLE_SIGNING_IDENTITY="-"' in build_mac
-    assert "verify_macos_bundle_signature" in build_mac
-    assert 'codesign --verify --deep --strict --verbose=2 "$app_path"' in build_mac
+    assert "verify_macos_dmg_bundle_signature" in build_mac
+    assert 'hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" -quiet' in build_mac
+    assert 'codesign --verify --deep --strict --verbose=2 "$app"' in build_mac
     assert 'codesign --verify --deep --strict --verbose=2 "$app"' in smoke_mac
 
 
