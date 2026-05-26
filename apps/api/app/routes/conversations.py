@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.constants import CompletionStatus, GenerationStatus
+from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import (
     Completion,
     Conversation,
@@ -60,6 +61,7 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
+from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..redis_client import get_redis
@@ -88,6 +90,7 @@ logger = logging.getLogger(__name__)
 
 # ---------- cursor helpers ----------
 
+
 def _enc_cursor(payload: dict[str, Any]) -> str:
     body = {"v": CURSOR_VERSION, **payload}
     raw = json.dumps(body, separators=(",", ":")).encode()
@@ -107,9 +110,17 @@ def _dec_cursor(raw: str | None) -> dict[str, Any] | None:
         return None
     version = decoded.get("v")
     if version is not None and version != CURSOR_VERSION:
-        logger.warning("cursor version mismatch: got=%r want=%d", version, CURSOR_VERSION)
+        logger.warning(
+            "cursor version mismatch: got=%r want=%d", version, CURSOR_VERSION
+        )
         return None
     return decoded
+
+
+def _exclude_workflow_conversations(stmt):
+    if settings.lumen_runtime.strip().lower() == "desktop":
+        return stmt
+    return stmt.where(Conversation.default_params["workflow_type"].astext.is_(None))
 
 
 def _coerce_aware(dt: datetime) -> datetime:
@@ -258,6 +269,8 @@ async def _release_conversation_task_hold(
 
 
 async def _conversation_wallet_exists(db: AsyncSession, user_id: str) -> bool:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return False
     wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
     return wallet is not None
 
@@ -368,7 +381,9 @@ async def _cancel_conversation_active_tasks(
     }
 
 
-async def _release_conversation_generation_queue_state(redis: Any, task_id: str) -> None:
+async def _release_conversation_generation_queue_state(
+    redis: Any, task_id: str
+) -> None:
     from .tasks import _release_generation_queue_state
 
     await _release_generation_queue_state(redis, task_id)
@@ -433,6 +448,7 @@ async def _post_commit_conversation_task_cleanup(
 
 # ---------- list / search ----------
 
+
 class ConversationListOut(BaseModel):
     items: list[ConversationOut]
     next_cursor: str | None = None
@@ -449,8 +465,8 @@ async def list_conversations(
     stmt = select(Conversation).where(
         Conversation.user_id == user.id,
         Conversation.deleted_at.is_(None),
-        Conversation.default_params["workflow_type"].astext.is_(None),
     )
+    stmt = _exclude_workflow_conversations(stmt)
     if q:
         # Why: escape LIKE wildcards so user input cannot match outside intent.
         # Cap the search length to bound worst-case backend work and reduce
@@ -458,13 +474,9 @@ async def list_conversations(
         q_trimmed = q.strip()[:200]
         if q_trimmed:
             q_escaped = (
-                q_trimmed.replace("\\", "\\\\")
-                .replace("%", "\\%")
-                .replace("_", "\\_")
+                q_trimmed.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             )
-            stmt = stmt.where(
-                Conversation.title.ilike(f"%{q_escaped}%", escape="\\")
-            )
+            stmt = stmt.where(Conversation.title.ilike(f"%{q_escaped}%", escape="\\"))
     cur = _dec_cursor(cursor)
     if cur and "la" in cur and "id" in cur:
         la = _coerce_aware(datetime.fromisoformat(cur["la"]))
@@ -496,6 +508,7 @@ async def list_conversations(
 
 
 # ---------- create ----------
+
 
 class ConversationCreateIn(BaseModel):
     title: str = ""
@@ -554,6 +567,7 @@ async def create_conversation(
 
 
 # ---------- get / patch / delete ----------
+
 
 @router.get("/{conv_id}", response_model=ConversationOut)
 async def get_conversation(
@@ -665,6 +679,7 @@ async def delete_conversation(
 
 
 # ---------- messages listing ----------
+
 
 class MessageListOut(BaseModel):
     items: list[MessageOut]
@@ -840,7 +855,9 @@ def _compare_message_position(
     return 0
 
 
-def _summary_boundary(summary: dict[str, Any] | None) -> tuple[datetime, str | None] | None:
+def _summary_boundary(
+    summary: dict[str, Any] | None,
+) -> tuple[datetime, str | None] | None:
     if not is_summary_usable(summary):
         return None
     created_at = _parse_summary_datetime(summary.get("up_to_created_at"))
@@ -854,12 +871,15 @@ def _message_after_summary(msg: Message, summary: dict[str, Any] | None) -> bool
     if boundary is None:
         return True
     boundary_created_at, boundary_id = boundary
-    return _compare_message_position(
-        msg.created_at,
-        msg.id,
-        boundary_created_at,
-        boundary_id,
-    ) > 0
+    return (
+        _compare_message_position(
+            msg.created_at,
+            msg.id,
+            boundary_created_at,
+            boundary_id,
+        )
+        > 0
+    )
 
 
 def _with_summary_guardrail(system_prompt: str | None, *, enabled: bool) -> str | None:
@@ -902,7 +922,9 @@ def _estimate_sticky_tokens(message: Message | None) -> int:
     sticky = _sticky_text_from_message(message)
     if not sticky:
         return 0
-    return MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens(format_sticky_input_text(sticky))
+    return MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens(
+        format_sticky_input_text(sticky)
+    )
 
 
 async def _load_message_by_id(
@@ -922,7 +944,9 @@ async def _load_message_by_id(
     try:
         return (
             await db.execute(
-                select(Message).where(Message.id == message_id, *_message_alive_filters()).limit(1)
+                select(Message)
+                .where(Message.id == message_id, *_message_alive_filters())
+                .limit(1)
             )
         ).scalar_one_or_none()
     except Exception:
@@ -1078,13 +1102,17 @@ async def _load_messages_for_compaction(
     db: AsyncSession, conv_id: str
 ) -> list[Message]:
     rows = (
-        await db.execute(
-            select(Message)
-            .where(Message.conversation_id == conv_id, *_message_alive_filters())
-            .order_by(desc(Message.created_at), desc(Message.id))
-            .limit(COMPACTION_MESSAGE_LOAD_LIMIT)
+        (
+            await db.execute(
+                select(Message)
+                .where(Message.conversation_id == conv_id, *_message_alive_filters())
+                .order_by(desc(Message.created_at), desc(Message.id))
+                .limit(COMPACTION_MESSAGE_LOAD_LIMIT)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(reversed(rows))
 
 
@@ -1159,7 +1187,14 @@ def _import_worker_context_summary() -> Any | None:
     try:
         return import_module(module_name)
     except ModuleNotFoundError:
-        worker_module = Path(project_root) / "apps" / "worker" / "app" / "tasks" / "context_summary.py"
+        worker_module = (
+            Path(project_root)
+            / "apps"
+            / "worker"
+            / "app"
+            / "tasks"
+            / "context_summary.py"
+        )
         logger.warning("worker context summary module not found at %s", worker_module)
         return None
     except Exception:
@@ -1530,9 +1565,7 @@ async def _estimate_context_window(
             break
 
     percent = min(100.0, round((used_tokens / CONTEXT_INPUT_TOKEN_BUDGET) * 100, 1))
-    compression_enabled = bool(
-        await _setting_int(db, "context.compression_enabled", 0)
-    )
+    compression_enabled = bool(await _setting_int(db, "context.compression_enabled", 0))
     latest_context_meta: dict[str, Any] = {}
     try:
         upstream_request = (
@@ -1802,9 +1835,7 @@ async def list_messages(
     next_cursor = None
     if has_more and items:
         last = items[0] if uses_desc_order else items[-1]
-        next_cursor = _enc_cursor(
-            {"ca": last.created_at.isoformat(), "id": last.id}
-        )
+        next_cursor = _enc_cursor({"ca": last.created_at.isoformat(), "id": last.id})
     out = MessageListOut(
         items=[MessageOut.model_validate(m) for m in items],
         next_cursor=next_cursor,
@@ -1815,37 +1846,45 @@ async def list_messages(
     if "tasks" in include_set and items:
         msg_ids = [m.id for m in items]
         gens = (
-            await db.execute(
-                select(Generation)
-                .join(Message, Message.id == Generation.message_id)
-                .join(Conversation, Conversation.id == Message.conversation_id)
-                .where(
-                    Generation.message_id.in_(msg_ids),
-                    Generation.user_id == user.id,
-                    Conversation.id == conv_id,
-                    Conversation.user_id == user.id,
-                    Conversation.deleted_at.is_(None),
+            (
+                await db.execute(
+                    select(Generation)
+                    .join(Message, Message.id == Generation.message_id)
+                    .join(Conversation, Conversation.id == Message.conversation_id)
+                    .where(
+                        Generation.message_id.in_(msg_ids),
+                        Generation.user_id == user.id,
+                        Conversation.id == conv_id,
+                        Conversation.user_id == user.id,
+                        Conversation.deleted_at.is_(None),
+                    )
+                    .order_by(desc(Generation.created_at), desc(Generation.id))
+                    .limit(TASK_INCLUDE_LIMIT)
                 )
-                .order_by(desc(Generation.created_at), desc(Generation.id))
-                .limit(TASK_INCLUDE_LIMIT)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         comps = (
-            await db.execute(
-                select(Completion)
-                .join(Message, Message.id == Completion.message_id)
-                .join(Conversation, Conversation.id == Message.conversation_id)
-                .where(
-                    Completion.message_id.in_(msg_ids),
-                    Completion.user_id == user.id,
-                    Conversation.id == conv_id,
-                    Conversation.user_id == user.id,
-                    Conversation.deleted_at.is_(None),
+            (
+                await db.execute(
+                    select(Completion)
+                    .join(Message, Message.id == Completion.message_id)
+                    .join(Conversation, Conversation.id == Message.conversation_id)
+                    .where(
+                        Completion.message_id.in_(msg_ids),
+                        Completion.user_id == user.id,
+                        Conversation.id == conv_id,
+                        Conversation.user_id == user.id,
+                        Conversation.deleted_at.is_(None),
+                    )
+                    .order_by(desc(Completion.created_at), desc(Completion.id))
+                    .limit(TASK_INCLUDE_LIMIT)
                 )
-                .order_by(desc(Completion.created_at), desc(Completion.id))
-                .limit(TASK_INCLUDE_LIMIT)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         # 收集所有相关 image id：generation 产出的图（owner_generation_id 反查）
         # + completion tool 产出的图（assistant.content.images）+ user 消息附件里的图
         gen_ids = [g.id for g in gens]
@@ -1924,9 +1963,7 @@ async def get_conversation_context(
     )
 
 
-def _manual_compact_idempotency_key(
-    *, user_id: str, conv_id: str, raw_key: str
-) -> str:
+def _manual_compact_idempotency_key(*, user_id: str, conv_id: str, raw_key: str) -> str:
     digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
     return f"context:manual_compact:idemp:{user_id}:{conv_id}:{digest}"
 
@@ -1960,9 +1997,7 @@ def _manual_compact_job_id(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def _manual_compact_job_key(
-    *, user_id: str, conv_id: str, job_id: str
-) -> str:
+def _manual_compact_job_key(*, user_id: str, conv_id: str, job_id: str) -> str:
     return f"context:manual_compact:job:{user_id}:{conv_id}:{job_id}"
 
 
@@ -1982,7 +2017,9 @@ async def _redis_get_json(redis: Any, key: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-async def _redis_set_json(redis: Any, key: str, value: dict[str, Any], ttl: int) -> None:
+async def _redis_set_json(
+    redis: Any, key: str, value: dict[str, Any], ttl: int
+) -> None:
     raw = json.dumps(value, separators=(",", ":"), default=str)
     setter = getattr(redis, "set", None)
     if setter is not None:
@@ -2102,9 +2139,13 @@ def _build_compact_summary_payload(
     cached entries.
     """
     summary_jsonb = (
-        conv.summary_jsonb if isinstance(getattr(conv, "summary_jsonb", None), dict) else {}
+        conv.summary_jsonb
+        if isinstance(getattr(conv, "summary_jsonb", None), dict)
+        else {}
     )
-    compressed_at = summary_jsonb.get("compressed_at") if isinstance(summary_jsonb, dict) else None
+    compressed_at = (
+        summary_jsonb.get("compressed_at") if isinstance(summary_jsonb, dict) else None
+    )
     summary_tokens = int(result.get("summary_tokens") or 0)
     source_token_estimate = int(result.get("source_token_estimate") or 0)
     tokens_freed = int(
@@ -2193,7 +2234,12 @@ async def _enqueue_manual_compact_job(
         tid = _trace_id()
         logger.exception(
             "manual compact active lock failed",
-            extra={"trace_id": tid, "user_id": user_id, "conv_id": conv_id, "job_id": job_id},
+            extra={
+                "trace_id": tid,
+                "user_id": user_id,
+                "conv_id": conv_id,
+                "job_id": job_id,
+            },
         )
         raise _service_unavailable("upstream_error", trace_id=tid) from exc
     if not locked:
@@ -2202,9 +2248,7 @@ async def _enqueue_manual_compact_job(
         except Exception:
             logger.warning("manual compact active recheck failed", exc_info=True)
             active = None
-        active_job_id = (
-            active.get("job_id") if isinstance(active, dict) else None
-        )
+        active_job_id = active.get("job_id") if isinstance(active, dict) else None
         if isinstance(active_job_id, str) and active_job_id:
             return _compact_pending_payload(job_id=active_job_id, status="pending")
         return _compact_pending_payload(job_id=job_id, status="pending")
@@ -2220,7 +2264,9 @@ async def _enqueue_manual_compact_job(
         try:
             await redis.delete(active_key)
         except Exception:
-            logger.debug("manual compact active cleanup after cooldown failed", exc_info=True)
+            logger.debug(
+                "manual compact active cleanup after cooldown failed", exc_info=True
+            )
         raise
 
     now = datetime.now(timezone.utc).isoformat()
@@ -2234,7 +2280,9 @@ async def _enqueue_manual_compact_job(
         "updated_at": now,
     }
     try:
-        await _redis_set_json(redis, job_key, job_payload, MANUAL_COMPACT_JOB_TTL_SECONDS)
+        await _redis_set_json(
+            redis, job_key, job_payload, MANUAL_COMPACT_JOB_TTL_SECONDS
+        )
         pool = await get_arq_pool()
         await pool.enqueue_job(
             "manual_compact_conversation",
@@ -2252,7 +2300,12 @@ async def _enqueue_manual_compact_job(
         tid = _trace_id()
         logger.exception(
             "manual compact enqueue failed",
-            extra={"trace_id": tid, "user_id": user_id, "conv_id": conv_id, "job_id": job_id},
+            extra={
+                "trace_id": tid,
+                "user_id": user_id,
+                "conv_id": conv_id,
+                "job_id": job_id,
+            },
         )
         try:
             await redis.delete(active_key)
@@ -2296,11 +2349,13 @@ async def compact_conversation(
     body = body or ManualCompactIn()
     conv = (
         await db.execute(
-            select(Conversation).where(
+            select(Conversation)
+            .where(
                 Conversation.id == conv_id,
                 Conversation.user_id == user.id,
                 Conversation.deleted_at.is_(None),
-            ).with_for_update()
+            )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if conv is None:
@@ -2333,14 +2388,15 @@ async def compact_conversation(
         global_prompt = await _load_prompt_content(
             db, user_id=user.id, prompt_id=user.default_system_prompt_id
         )
-        system_prompt = _simple_structured_system_prompt(
-            global_prompt=global_prompt,
-            conversation_prompt=conversation_prompt,
-            legacy_conversation_prompt=conv.default_system,
-        ) or ""
-        safety_margin = (
-            body.safety_margin if body.safety_margin is not None else 4096
+        system_prompt = (
+            _simple_structured_system_prompt(
+                global_prompt=global_prompt,
+                conversation_prompt=conversation_prompt,
+                legacy_conversation_prompt=conv.default_system,
+            )
+            or ""
         )
+        safety_margin = body.safety_margin if body.safety_margin is not None else 4096
         used_tokens = messages_token_count(all_msgs, system_prompt=system_prompt)
         if not would_exceed_budget(
             all_msgs,
@@ -2362,7 +2418,9 @@ async def compact_conversation(
         db, "context.summary_target_tokens", SUMMARY_TARGET_DEFAULT_TOKENS
     )
     input_budget = await _setting_int(db, "context.summary_input_budget", 80_000)
-    summary_timeout_s = await _setting_float(db, "context.summary_http_timeout_s", 120.0)
+    summary_timeout_s = await _setting_float(
+        db, "context.summary_http_timeout_s", 120.0
+    )
     model = await _setting_str(db, "context.summary_model", SUMMARY_MODEL_DEFAULT)
     manual_cooldown_seconds = await _setting_int(
         db,
@@ -2439,11 +2497,20 @@ async def compact_conversation(
         tid = _trace_id(request)
         logger.exception(
             "manual context compaction failed",
-            extra={"trace_id": tid, "user_id": user.id, "conv_id": conv.id, "boundary_id": boundary.id},
+            extra={
+                "trace_id": tid,
+                "user_id": user.id,
+                "conv_id": conv.id,
+                "boundary_id": boundary.id,
+            },
         )
         raise _service_unavailable("upstream_error", trace_id=tid) from exc
 
-    if result is None or not isinstance(result, dict) or "failed" in str(result.get("status") or ""):
+    if (
+        result is None
+        or not isinstance(result, dict)
+        or "failed" in str(result.get("status") or "")
+    ):
         reason = _classify_compact_failure(result)
         tid = _trace_id(request)
         logger.warning(
@@ -2454,7 +2521,9 @@ async def compact_conversation(
                 "user_id": user.id,
                 "conv_id": conv.id,
                 "boundary_id": boundary.id,
-                "result_status": (result or {}).get("status") if isinstance(result, dict) else None,
+                "result_status": (result or {}).get("status")
+                if isinstance(result, dict)
+                else None,
             },
         )
         raise _service_unavailable(reason, trace_id=tid)
@@ -2485,7 +2554,12 @@ async def get_compact_conversation_status(
         logger.warning(
             "manual compact status unavailable",
             exc_info=True,
-            extra={"trace_id": tid, "user_id": user.id, "conv_id": conv_id, "job_id": job_id},
+            extra={
+                "trace_id": tid,
+                "user_id": user.id,
+                "conv_id": conv_id,
+                "job_id": job_id,
+            },
         )
         raise _service_unavailable("upstream_error", trace_id=tid) from exc
     payload = _compact_payload_from_job(job, job_id=job_id)
@@ -2497,7 +2571,12 @@ async def get_compact_conversation_status(
         logger.warning(
             "manual compact job reported failed reason=%s",
             reason,
-            extra={"trace_id": tid, "user_id": user.id, "conv_id": conv_id, "job_id": job_id},
+            extra={
+                "trace_id": tid,
+                "user_id": user.id,
+                "conv_id": conv_id,
+                "job_id": job_id,
+            },
         )
         raise _service_unavailable(reason, trace_id=tid)
     return payload

@@ -1,31 +1,16 @@
 import type { NextConfig } from "next";
 
 const isDev = process.env.NODE_ENV !== "production";
+const isDesktopRuntime = process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
 
 // Lumen 反代约定：
 //   - 外层 nginx 只需要把 https://domain/* → web:3000/*（一条 location 就够）
-//   - /api/* 和 /events 由 Next.js 自己 rewrites 到后端（LUMEN_BACKEND_URL）
+//   - /api/* 和 /events 由 src/proxy.ts 在请求运行时转发到后端（LUMEN_BACKEND_URL）
 //   - 这样代码就不依赖"反代层分流路径"，避免跨机部署时漏配路由导致 Mixed Content 等问题
 //
 // LUMEN_BACKEND_URL 是**服务端**变量（不带 NEXT_PUBLIC_），只在 next 进程内生效，
-// 改它不用重新 build 前端 bundle。
-
-function normalizeHttpUrl(value: string, envName: string): string {
-  const raw = value.trim();
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error(`${envName} must be an absolute http(s) URL, got: ${value}`);
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(`${envName} must use http: or https:, got: ${url.protocol}`);
-  }
-  if (url.search || url.hash) {
-    throw new Error(`${envName} must not include query or hash fragments`);
-  }
-  return url.toString().replace(/\/+$/, "");
-}
+// 改它不用重新 build 前端 bundle。不要把它放在 next.config rewrites 里；
+// standalone 构建会把 rewrites destination 固化到 routes manifest。
 
 function optionalHttpOrigin(value: string | undefined, envName: string): string | null {
   const raw = value?.trim();
@@ -58,10 +43,6 @@ function unique(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }
 
-const BACKEND_URL = normalizeHttpUrl(
-  process.env.LUMEN_BACKEND_URL ?? "http://127.0.0.1:8000",
-  "LUMEN_BACKEND_URL",
-);
 const publicApiOrigin = optionalHttpOrigin(
   process.env.NEXT_PUBLIC_API_BASE,
   "NEXT_PUBLIC_API_BASE",
@@ -71,7 +52,7 @@ const sentryOrigin = optionalSentryOrigin(
 );
 
 // connect-src 说明：
-//   - 'self' 已覆盖同源的 /api 与 /events（Next.js rewrites 转发到后端，
+//   - 'self' 已覆盖同源的 /api 与 /events（Next.js proxy 转发到后端，
 //     在浏览器视角仍是同源），因此**不要**在这里硬编码后端 IP/域名。
 //   - publicApiOrigin 仅在显式配置了跨域 NEXT_PUBLIC_API_BASE 时才有值；
 //     默认 "/api" 走相对路径，publicApiOrigin 为 null。
@@ -106,27 +87,18 @@ const hsts = unique([
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  images: {
+    unoptimized: isDesktopRuntime,
+  },
   devIndicators: false,
   // Next.js v16 experimental.proxyClientMaxBodySize：
-  // rewrites/proxy 读 body 时默认只 buffer 10MB；图片上传最大约 50MB，
+  // proxy 读 body 时默认只 buffer 10MB；图片上传最大约 50MB，
   // 这里给 60MB 留 multipart 开销。该实验 API 升级 Next 时需对照 changelog 复核。
   experimental: {
     proxyClientMaxBodySize: "60mb",
     sri: {
       algorithm: "sha256",
     },
-  },
-  async rewrites() {
-    return {
-      // beforeFiles：在 next 文件路由匹配之前处理 —— 避免 /api/share/:token 与
-      // app/share/[token] 混淆（API 前缀独占，绝不落到 app 路由）
-      beforeFiles: [
-        { source: "/api/:path*", destination: `${BACKEND_URL}/:path*` },
-        // SSE：/events 是长连接流。Next.js 会以流式 pipe 转发（实测 v16 OK）。
-        // 如果后端要带 query（channels=...），Next.js 自动透传 query。
-        { source: "/events", destination: `${BACKEND_URL}/events` },
-      ],
-    };
   },
   async headers() {
     const csp = [

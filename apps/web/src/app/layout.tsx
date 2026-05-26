@@ -16,6 +16,7 @@ import { PageTransitions } from "@/components/ui/shell/PageTransitions";
 import { CommandPalette } from "@/components/ui/CommandPalette";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import { RuntimeDefaultsBootstrap } from "@/components/RuntimeDefaultsBootstrap";
+import { DesktopBootstrapGate } from "@/components/desktop/DesktopBootstrapGate";
 
 // Self-hosted to keep `next build` offline. Google Fonts fetch fails behind
 // region-blocked / proxied production networks; switching to next/font/local
@@ -115,8 +116,13 @@ async function readRuntimeDefaults(): Promise<{
     const backendUrl = (
       process.env.LUMEN_BACKEND_URL ?? "http://127.0.0.1:8000"
     ).replace(/\/+$/, "");
+    const requestHeaders: HeadersInit = { cookie };
+    const localToken = process.env.LUMEN_LOCAL_TOKEN?.trim();
+    if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" && localToken) {
+      requestHeaders["x-lumen-local-token"] = localToken;
+    }
     const res = await fetch(`${backendUrl}/auth/me`, {
-      headers: { cookie },
+      headers: requestHeaders,
       cache: "no-store",
     });
     if (!res.ok) return { fast: true };
@@ -175,6 +181,7 @@ export default async function RootLayout({
         ) : (
           <QueryProvider>
             <RuntimeDefaultsBootstrap defaults={runtimeDefaults} />
+            <DesktopBootstrapGate />
             <SSEProvider>
               <ErrorBoundary>
                 <PageTransitions>{children}</PageTransitions>

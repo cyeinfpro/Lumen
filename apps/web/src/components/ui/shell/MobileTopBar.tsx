@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
 import { formatRmb, formatRmbCompact } from "@/lib/money";
+import { isDesktopRuntime } from "@/lib/desktop/runtime";
 
 export interface MobileTopBarProps {
   left?: ReactNode;
@@ -77,13 +78,15 @@ export function MobileTopBar({
 
 function MobileWalletPill() {
   const pathname = usePathname();
+  const desktop = isDesktopRuntime();
   const meQuery = useQuery<AuthUser>({
     queryKey: ["me"],
     queryFn: getMe,
     retry: false,
     staleTime: 60_000,
   });
-  const enabled = meQuery.data?.account_mode === "wallet" && !pathname.startsWith("/admin");
+  const enabled =
+    !desktop && meQuery.data?.account_mode === "wallet" && !pathname.startsWith("/admin");
   const walletQuery = useQuery({
     queryKey: ["me", "wallet"],
     queryFn: getMyWallet,

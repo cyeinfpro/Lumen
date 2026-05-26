@@ -13,6 +13,7 @@ import { useCallback, useMemo, useRef, type KeyboardEvent, type ReactNode } from
 
 import { IconButton } from "@/components/ui/primitives";
 import { getMe, getMyWallet, getPricing, type AuthUser } from "@/lib/apiClient";
+import { isDesktopRuntime } from "@/lib/desktop/runtime";
 import { formatRmb, formatRmbCompact } from "@/lib/money";
 import { SPRING } from "@/lib/motion";
 import {
@@ -146,13 +147,14 @@ export function DesktopTopNav({ active, right, onToggleSidebar }: DesktopTopNavP
 }
 
 function WalletBalancePill() {
+  const desktop = isDesktopRuntime();
   const meQuery = useQuery<AuthUser>({
     queryKey: ["me"],
     queryFn: getMe,
     retry: false,
     staleTime: 60_000,
   });
-  const enabled = meQuery.data?.account_mode === "wallet";
+  const enabled = !desktop && meQuery.data?.account_mode === "wallet";
   const walletQuery = useQuery({
     queryKey: ["me", "wallet"],
     queryFn: getMyWallet,

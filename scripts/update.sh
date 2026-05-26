@@ -503,6 +503,11 @@ rsync_repo_to_release() {
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/node_modules/' \
         --exclude='/apps/worker/var/' \
+        --exclude='/apps/desktop/target/' \
+        --exclude='/apps/desktop/dist/' \
+        --exclude='/apps/desktop/binaries/' \
+        --exclude='/apps/desktop/resources/' \
+        --exclude='/apps/desktop/gen/' \
         --exclude='/var/' \
         --exclude='/.lumen-script.lock/' \
         --exclude='/.update.log' \

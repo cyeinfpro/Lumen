@@ -4,11 +4,11 @@ import { isPublicPath } from "@/lib/auth/publicPaths";
 //
 // API_BASE 解析（优先级从高到低）：
 //   1. 显式 NEXT_PUBLIC_API_BASE（编译期注入，跨域 / 子域部署时用）
-//   2. 浏览器运行时 → "/api"（同源相对路径；由 next.config rewrites / 外层反代转发到后端）
+//   2. 浏览器运行时 → "/api"（同源相对路径；由 src/proxy.ts / 外层反代转发到后端）
 //   3. SSR / build fallback → http://127.0.0.1:8000（生产 SSR 极少用到 API）
 //
 // 这样生产部署只需要外层 nginx 把 https://domain/* 一律透传到 web:3000；
-// 不用再在反代层配 /api 路由 —— next.js rewrites 会把 /api/* 和 /events 内部
+// 不用再在反代层配 /api 路由 —— Next.js proxy 会把 /api/* 和 /events 内部
 // 转发到 LUMEN_BACKEND_URL（默认 http://127.0.0.1:8000）。
 //
 // 所有请求带 credentials:"include" 以携带会话 cookie；写操作附 X-CSRF-Token。
@@ -48,6 +48,7 @@ let _redirecting = false;
 // 否则 RuntimeDefaultsBootstrap 自动 getMe → 401 → assign("/login") → 重载 → 再 401，会死循环刷新。
 export function handle401() {
   if (typeof window === "undefined") return;
+  if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") return;
   if (_redirecting) return;
   if (isPublicPath(window.location.pathname)) return;
   _redirecting = true;

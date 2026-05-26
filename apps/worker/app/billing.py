@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
+from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import AuditLog, Completion, Generation, User, WalletTransaction
 from lumen_core.pricing import (
     CostBreakdown,
@@ -17,6 +18,7 @@ from lumen_core.pricing import (
 )
 
 from . import runtime_settings
+from .config import settings
 from .observability import (
     billing_cost_micro_total,
     billing_idempotency_replay_total,
@@ -36,6 +38,8 @@ async def _setting_bool(key: str, default: bool = False) -> bool:
 
 
 async def _billing_enabled() -> bool:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return False
     return await _setting_bool("billing.enabled", False)
 
 
@@ -108,6 +112,8 @@ async def held_amount_for_ref(
     ref_type: str,
     ref_id: str,
 ) -> int:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return 0
     return await billing_core._held_amount_for_ref(  # noqa: SLF001
         session, user_id, ref_type, ref_id
     )
@@ -170,6 +176,8 @@ async def _wallet_billing_applies(
     ref_type: str,
     ref_id: str,
 ) -> bool:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return False
     if await _account_mode(session, user_id) == "wallet":
         return True
     return (

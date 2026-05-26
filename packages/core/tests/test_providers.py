@@ -427,6 +427,26 @@ def test_parse_provider_json_accumulates_item_errors():
     ]
 
 
+def test_parse_provider_json_allows_disabled_provider_without_api_key():
+    raw = json.dumps(
+        [
+            {
+                "name": "disabled",
+                "base_url": "https://disabled.example",
+                "api_key": "",
+                "enabled": False,
+            }
+        ]
+    )
+
+    providers, errors = parse_provider_json(raw)
+
+    assert errors == []
+    assert len(providers) == 1
+    assert providers[0].enabled is False
+    assert providers[0].api_key == ""
+
+
 def test_parse_provider_json_reports_malformed_json():
     providers, errors = parse_provider_json("[")
 

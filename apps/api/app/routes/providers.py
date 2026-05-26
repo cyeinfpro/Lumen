@@ -14,6 +14,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
@@ -33,6 +34,12 @@ from lumen_core.providers import (
     normalize_image_edit_input_transport,
     parse_proxy_item,
     resolve_provider_proxy_url,
+)
+from lumen_core.desktop_runtime import (
+    desktop_provider_metadata_path,
+    desktop_provider_runtime_file,
+    is_desktop_runtime,
+    read_desktop_provider_runtime_json,
 )
 from lumen_core.models import SystemSetting
 from lumen_core.runtime_settings import get_spec, validate_providers
@@ -59,8 +66,7 @@ _PROVIDERS_MAX_LEN = 65536
 _PROBE_MODEL = "gpt-5.4-mini"
 _PROBE_INSTRUCTIONS = "You are a precise calculator. Return only the final integer."
 _PROBE_INPUT = (
-    "What is 99 times 99? Reply with only the integer result, "
-    "no words, no explanation."
+    "What is 99 times 99? Reply with only the integer result, no words, no explanation."
 )
 
 
@@ -117,8 +123,7 @@ def _safe_int(value: object, default: int, *, minimum: int | None = None) -> int
 def _legacy_env_providers_raw() -> str | None:
     legacy = build_legacy_provider(
         base_url=(
-            os.environ.get("UPSTREAM_BASE_URL")
-            or DEFAULT_LEGACY_PROVIDER_BASE_URL
+            os.environ.get("UPSTREAM_BASE_URL") or DEFAULT_LEGACY_PROVIDER_BASE_URL
         ),
         api_key=os.environ.get("UPSTREAM_API_KEY"),
     )
@@ -146,10 +151,78 @@ def _legacy_env_providers_raw() -> str | None:
     )
 
 
+def _is_desktop_provider_runtime() -> bool:
+    return is_desktop_runtime(os.environ.get("LUMEN_RUNTIME"))
+
+
+def _safe_read_text(path: Path) -> str | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    return raw if raw.strip() else None
+
+
+def _strip_provider_secrets(items: list[dict]) -> list[dict]:
+    stripped: list[dict] = []
+    for item in items:
+        clean = dict(item)
+        clean.pop("api_key", None)
+        stripped.append(clean)
+    return stripped
+
+
+def _strip_proxy_secrets(items: list[dict]) -> list[dict]:
+    stripped: list[dict] = []
+    for item in items:
+        clean = dict(item)
+        clean.pop("password", None)
+        stripped.append(clean)
+    return stripped
+
+
+def _write_json_file(path: Path, payload: dict[str, Any], *, private: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if private:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
+def _write_desktop_provider_config(items: list[dict], proxies: list[dict]) -> None:
+    # Metadata is durable and intentionally keyless. The runtime file is a
+    # per-launch local secret handoff consumed by API/worker sidecars.
+    _write_json_file(
+        desktop_provider_metadata_path(),
+        {
+            "providers": _strip_provider_secrets(items),
+            "proxies": _strip_proxy_secrets(proxies),
+        },
+    )
+    runtime_path = desktop_provider_runtime_file()
+    if runtime_path is not None:
+        _write_json_file(
+            runtime_path,
+            {"providers": items, "proxies": proxies},
+            private=True,
+        )
+
+
 async def _read_providers(
     db: AsyncSession,
 ) -> tuple[str | None, str]:
     """返回 (raw_json, source)。source 为 "db" | "env" | "none"。"""
+    if _is_desktop_provider_runtime():
+        runtime_raw = read_desktop_provider_runtime_json()
+        if runtime_raw:
+            return runtime_raw, "desktop"
+        metadata_raw = _safe_read_text(desktop_provider_metadata_path())
+        if metadata_raw:
+            return metadata_raw, "desktop"
     row = (
         await db.execute(
             select(SystemSetting.value).where(SystemSetting.key == "providers")
@@ -243,9 +316,7 @@ def _to_out(it: dict, idx: int) -> ProviderItemOut:
         image_edit_input_transport=normalize_image_edit_input_transport(
             it.get("image_edit_input_transport")
         ),
-        image_concurrency=_normalize_image_concurrency(
-            it.get("image_concurrency")
-        ),
+        image_concurrency=_normalize_image_concurrency(it.get("image_concurrency")),
         responses_supported=_normalize_capability(it.get("responses_supported")),
         image_generations_supported=_normalize_capability(
             it.get("image_generations_supported")
@@ -352,6 +423,9 @@ async def update_providers(
 ) -> ProvidersOut:
     # 清空场景
     if not body.items:
+        if _is_desktop_provider_runtime():
+            _write_desktop_provider_config([], [])
+            return ProvidersOut(items=[], proxies=[], source="desktop")
         existing = (
             await db.execute(
                 select(SystemSetting).where(SystemSetting.key == "providers")
@@ -441,7 +515,7 @@ async def update_providers(
         api_key = it.api_key.strip()
         if api_key == "" and provider_name in old_keys:
             api_key = old_keys[provider_name]
-        if not api_key:
+        if not api_key and it.enabled:
             raise _http(
                 "invalid_request",
                 f"provider「{provider_name}」缺少 api_key",
@@ -505,10 +579,14 @@ async def update_providers(
     except ValueError as exc:
         raise _http("invalid_request", str(exc), 422) from exc
 
+    if _is_desktop_provider_runtime():
+        _write_desktop_provider_config(arr, proxy_arr)
+        out = [_to_out(it, i) for i, it in enumerate(arr)]
+        proxies_out = [_to_proxy_out(it, i) for i, it in enumerate(proxy_arr)]
+        return ProvidersOut(items=out, proxies=proxies_out, source="desktop")
+
     existing = (
-        await db.execute(
-            select(SystemSetting).where(SystemSetting.key == "providers")
-        )
+        await db.execute(select(SystemSetting).where(SystemSetting.key == "providers"))
     ).scalar_one_or_none()
     if existing is None:
         db.add(SystemSetting(key="providers", value=raw_json))
@@ -617,10 +695,12 @@ async def patch_provider_enabled(
     except ValueError as exc:
         raise _http("invalid_request", str(exc), 422) from exc
 
+    if _is_desktop_provider_runtime():
+        _write_desktop_provider_config(items, proxies)
+        return _to_out(target, target_idx)
+
     existing = (
-        await db.execute(
-            select(SystemSetting).where(SystemSetting.key == "providers")
-        )
+        await db.execute(select(SystemSetting).where(SystemSetting.key == "providers"))
     ).scalar_one_or_none()
     if existing is None:
         db.add(SystemSetting(key="providers", value=raw_json))
@@ -645,6 +725,7 @@ async def patch_provider_enabled(
 # ---------------------------------------------------------------------------
 # 探活
 # ---------------------------------------------------------------------------
+
 
 def _extract_response_output_text(payload: object) -> str:
     """Extract text from a non-streaming Responses API payload."""
@@ -687,7 +768,7 @@ def _extract_sse_output_text(raw: str) -> str:
         for line in raw_event.splitlines():
             line = line.strip()
             if line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
+                data_lines.append(line[len("data:") :].strip())
         if not data_lines:
             continue
         data = "\n".join(data_lines)
@@ -890,14 +971,10 @@ async def probe_providers(
         api_key = it.get("api_key", "")
 
         if names_filter and name not in names_filter:
-            return ProviderProbeResult(
-                name=name, ok=False, status="skipped"
-            )
+            return ProviderProbeResult(name=name, ok=False, status="skipped")
 
         if not _normalize_bool(it.get("enabled"), default=True):
-            return ProviderProbeResult(
-                name=name, ok=False, status="disabled"
-            )
+            return ProviderProbeResult(name=name, ok=False, status="disabled")
 
         if _probe_blocked_by_endpoint_lock(it):
             return ProviderProbeResult(
@@ -932,9 +1009,7 @@ async def probe_providers(
             http_status=outcome.http_status,
         )
 
-    results = await asyncio.gather(
-        *[_do(it, i) for i, it in enumerate(items)]
-    )
+    results = await asyncio.gather(*[_do(it, i) for i, it in enumerate(items)])
     now = datetime.now(timezone.utc).isoformat()
     return ProvidersProbeOut(items=list(results), probed_at=now)
 
@@ -942,6 +1017,7 @@ async def probe_providers(
 # ---------------------------------------------------------------------------
 # 统计
 # ---------------------------------------------------------------------------
+
 
 @router.get("/stats", response_model=ProviderStatsOut)
 async def provider_stats(
@@ -958,8 +1034,7 @@ async def provider_stats(
         )
 
     provider_names = [
-        it.get("name", f"provider-{i}")
-        for i, it in enumerate(_parse_items(raw))
+        it.get("name", f"provider-{i}") for i, it in enumerate(_parse_items(raw))
     ]
 
     r = get_redis()
@@ -973,13 +1048,15 @@ async def provider_stats(
         success = int(vals.get("success", 0))
         fail = int(vals.get("fail", 0))
         grand_total += total
-        items.append(ProviderStatsItem(
-            name=name,
-            total=total,
-            success=success,
-            fail=fail,
-            success_rate=success / total if total > 0 else 0.0,
-        ))
+        items.append(
+            ProviderStatsItem(
+                name=name,
+                total=total,
+                success=success,
+                fail=fail,
+                success_rate=success / total if total > 0 else 0.0,
+            )
+        )
 
     for it in items:
         it.traffic_pct = it.total / grand_total if grand_total > 0 else 0.0
@@ -1008,9 +1085,7 @@ async def provider_stats(
             return default
 
     interval = _to_int(interval_map.get("providers.auto_probe_interval"), 120)
-    image_interval = _to_int(
-        interval_map.get("providers.auto_image_probe_interval"), 0
-    )
+    image_interval = _to_int(interval_map.get("providers.auto_image_probe_interval"), 0)
 
     return ProviderStatsOut(
         items=items,

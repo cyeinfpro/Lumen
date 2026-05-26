@@ -24,6 +24,7 @@ from lumen_core.constants import (
     GenerationStatus,
     task_channel,
 )
+from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.runtime_settings import get_spec
 from lumen_core.models import Completion, Generation, OutboxEvent, WalletTransaction
 from lumen_core.models import Conversation, Image, ImageVariant, Message
@@ -38,6 +39,7 @@ from lumen_core.schemas import (
 
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
+from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..observability import task_publish_errors_total
@@ -229,6 +231,8 @@ async def _completion_retry_hold_micro(
     completion: Completion,
     previous_retry_count: int,
 ) -> int:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return 0
     if not await _billing_enabled(db):
         return 0
     prev_ref_id = _completion_billing_ref_id(completion.id, previous_retry_count)
@@ -726,6 +730,8 @@ async def _release_queued_task_hold(
 
 
 async def _task_wallet_exists(db: AsyncSession, user_id: str) -> bool:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return False
     wallet = await billing_core.get_wallet(db, user_id, lock=False, create=False)
     return wallet is not None
 

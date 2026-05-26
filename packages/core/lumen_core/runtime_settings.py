@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from .providers import normalize_provider_purposes
+from .providers import normalize_provider_purposes, parse_provider_bool
 
 
 @dataclass(frozen=True)
@@ -972,8 +972,14 @@ def validate_providers(raw: str) -> str:
         base_url = item.get("base_url", "")
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError(f"providers[{i}].base_url is required")
+        try:
+            enabled = parse_provider_bool(item.get("enabled"), default=True)
+        except ValueError as exc:
+            raise ValueError(f"providers[{i}].enabled must be a boolean") from exc
         api_key = item.get("api_key", "")
-        if not isinstance(api_key, str) or not api_key.strip():
+        if not isinstance(api_key, str):
+            raise ValueError(f"providers[{i}].api_key must be a string")
+        if enabled and not api_key.strip():
             raise ValueError(f"providers[{i}].api_key is required")
         parts = urlsplit(base_url.strip())
         if not parts.scheme:

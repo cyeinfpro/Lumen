@@ -34,6 +34,7 @@ from lumen_core.providers import parse_provider_bool
 
 from ..db import get_db
 from ..deps import CurrentUser
+from ..config import settings
 
 
 router = APIRouter()
@@ -166,27 +167,34 @@ def _apply_filters(
         Conversation.user_id == user_id,
         Conversation.deleted_at.is_(None),
         Conversation.archived.is_(False),
-        Generation.upstream_request["workflow_run_id"].astext.is_(None),
     )
+    if settings.lumen_runtime.strip().lower() != "desktop":
+        stmt = stmt.where(
+            Generation.upstream_request["workflow_run_id"].astext.is_(None)
+        )
 
     if ratio:
         stmt = stmt.where(Generation.aspect_ratio == ratio)
 
     if has_ref:
         # 有参考图：primary_input_image_id 非空 或 input_image_ids 非空数组
-        stmt = stmt.where(
-            or_(
-                Generation.primary_input_image_id.is_not(None),
-                func.cardinality(Generation.input_image_ids) > 0,
+        if settings.lumen_runtime.strip().lower() == "desktop":
+            stmt = stmt.where(Generation.primary_input_image_id.is_not(None))
+        else:
+            stmt = stmt.where(
+                or_(
+                    Generation.primary_input_image_id.is_not(None),
+                    func.cardinality(Generation.input_image_ids) > 0,
+                )
             )
-        )
 
     if fast:
-        stmt = stmt.where(
-            func.lower(Generation.upstream_request["fast"].astext).in_(
-                ("true", "1")
+        if settings.lumen_runtime.strip().lower() != "desktop":
+            stmt = stmt.where(
+                func.lower(Generation.upstream_request["fast"].astext).in_(
+                    ("true", "1")
+                )
             )
-        )
 
     if q:
         # 简易 prompt LIKE 匹配；大小写不敏感。
@@ -236,9 +244,8 @@ async def list_generation_feed(
             fast=fast,
             q=q,
         )
-        limited_count = (
-            select(func.count())
-            .select_from(count_stmt.limit(COUNT_CAP + 1).subquery())
+        limited_count = select(func.count()).select_from(
+            count_stmt.limit(COUNT_CAP + 1).subquery()
         )
         total = int((await db.execute(limited_count)).scalar() or 0)
 
@@ -279,15 +286,19 @@ async def list_generation_feed(
     # 每个 generation 拿"最早一张 owner image"（多图场景），没有则跳过。
     # 本轮选择最旧一张（created_at, id ASC），便于 UI 稳定。
     img_rows = (
-        await db.execute(
-            select(Image)
-            .where(
-                Image.owner_generation_id.in_(gen_ids),
-                Image.deleted_at.is_(None),
+        (
+            await db.execute(
+                select(Image)
+                .where(
+                    Image.owner_generation_id.in_(gen_ids),
+                    Image.deleted_at.is_(None),
+                )
+                .order_by(Image.created_at.asc(), Image.id.asc())
             )
-            .order_by(Image.created_at.asc(), Image.id.asc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     image_by_gen: dict[str, Image] = {}
     for img in img_rows:
@@ -337,7 +348,9 @@ async def list_generation_feed(
         else:
             thumb_url = f"/api/images/{img.id}/binary"
 
-        upstream_request = g.upstream_request if isinstance(g.upstream_request, dict) else {}
+        upstream_request = (
+            g.upstream_request if isinstance(g.upstream_request, dict) else {}
+        )
         items.append(
             GenerationFeedItem(
                 id=g.id,

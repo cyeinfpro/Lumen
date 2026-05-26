@@ -28,6 +28,9 @@ PYPROJECT_FILES = [
 ]
 WEB_PACKAGE_JSON = ROOT / "apps/web/package.json"
 WEB_PACKAGE_LOCK = ROOT / "apps/web/package-lock.json"
+DESKTOP_CARGO_TOML = ROOT / "apps/desktop/Cargo.toml"
+DESKTOP_CARGO_LOCK = ROOT / "apps/desktop/Cargo.lock"
+DESKTOP_TAURI_CONFIG = ROOT / "apps/desktop/tauri.conf.json"
 CORE_INIT = ROOT / "packages/core/lumen_core/__init__.py"
 CURRENT_RELEASE_JSON_CANDIDATES = (
     ROOT / ".lumen_release.json",
@@ -59,6 +62,10 @@ def read_product_version() -> str:
 
 def targets(version: str) -> list[VersionTarget]:
     pyproject_pattern = re.compile(r'(?m)^(version\s*=\s*)"([^"]+)"')
+    tauri_config_pattern = re.compile(r'(?m)^(\s*"version"\s*:\s*)"([^"]+)"')
+    cargo_lock_pattern = re.compile(
+        r'(?m)^(\[\[package\]\]\nname = "lumen-desktop"\nversion = )"([^"]+)"'
+    )
     items = [
         VersionTarget(
             path=path,
@@ -68,6 +75,28 @@ def targets(version: str) -> list[VersionTarget]:
         )
         for path in PYPROJECT_FILES
     ]
+    items.extend(
+        [
+            VersionTarget(
+                path=DESKTOP_CARGO_TOML,
+                label=str(DESKTOP_CARGO_TOML.relative_to(ROOT)),
+                pattern=pyproject_pattern,
+                replacement=rf'\g<1>"{version}"',
+            ),
+            VersionTarget(
+                path=DESKTOP_TAURI_CONFIG,
+                label=str(DESKTOP_TAURI_CONFIG.relative_to(ROOT)),
+                pattern=tauri_config_pattern,
+                replacement=rf'\g<1>"{version}"',
+            ),
+            VersionTarget(
+                path=DESKTOP_CARGO_LOCK,
+                label=str(DESKTOP_CARGO_LOCK.relative_to(ROOT)),
+                pattern=cargo_lock_pattern,
+                replacement=rf'\g<1>"{version}"',
+            ),
+        ]
+    )
     items.append(
         VersionTarget(
             path=CORE_INIT,

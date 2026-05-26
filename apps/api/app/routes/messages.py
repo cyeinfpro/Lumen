@@ -85,6 +85,7 @@ from lumen_core.schemas import (
 )
 from lumen_core.sizing import ResolvedSize, resolve_size
 from lumen_core import billing as billing_core
+from lumen_core.desktop_runtime import is_desktop_runtime
 
 from ..arq_pool import get_arq_pool
 from ..audit import hash_email, write_audit
@@ -93,6 +94,7 @@ from ..audit import hash_email, write_audit
 # monkeypatch `messages.read_byok_settings` keep working. Production code on
 # this path uses read_byok_settings_cached (TTL ~30 s) — see review #20.
 from ..byok_service import read_byok_settings, read_byok_settings_cached  # noqa: F401
+from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..intent import resolve_intent
@@ -1198,6 +1200,8 @@ async def _resolve_task_credential_pin(
     required_purpose: str,
     account_mode: str,
 ) -> _TaskCredentialPin | None:
+    if is_desktop_runtime(settings.lumen_runtime):
+        return None
     if account_mode != "byok":
         return None
 
