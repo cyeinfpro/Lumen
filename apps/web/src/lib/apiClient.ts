@@ -2288,6 +2288,30 @@ export function getProviders(): Promise<ProvidersOut> {
   return apiFetch<ProvidersOut>(PROVIDERS_BASE);
 }
 
+async function runDesktopProviderBridgeBestEffort(
+  action: () => Promise<void>,
+  label: string,
+): Promise<void> {
+  try {
+    await action();
+  } catch (err) {
+    if (typeof window !== "undefined") {
+      try {
+        const { toast } = await import("@/components/ui/primitives/Toast");
+        toast.warning("本机密钥同步失败", {
+          description: "配置已保存，但桌面运行时暂时没有同步到系统密钥存储。",
+        });
+      } catch {
+        /* toast is best-effort here */
+      }
+    }
+    console.warn(
+      `desktop provider bridge ${label} failed; continuing with local API persistence`,
+      err,
+    );
+  }
+}
+
 export async function updateProviders(
   payload: ProviderItemIn[] | { items: ProviderItemIn[]; proxies?: ProviderProxyIn[] },
 ): Promise<ProvidersOut> {
@@ -2298,19 +2322,21 @@ export async function updateProviders(
     process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
     typeof window !== "undefined"
   ) {
-    const bridge = await import("./desktop/runtime");
-    await Promise.all([
-      ...body.items
-        .filter((item) => item.api_key?.trim())
-        .map((item) =>
-          bridge.saveProviderSecret(item.name.trim(), item.api_key?.trim() ?? ""),
-        ),
-      ...body.proxies
-        .filter((proxy) => proxy.password?.trim())
-        .map((proxy) =>
-          bridge.saveProxySecret(proxy.name.trim(), proxy.password?.trim() ?? ""),
-        ),
-    ]);
+    await runDesktopProviderBridgeBestEffort(async () => {
+      const bridge = await import("./desktop/runtime");
+      await Promise.all([
+        ...body.items
+          .filter((item) => Object.prototype.hasOwnProperty.call(item, "api_key"))
+          .map((item) =>
+            bridge.saveProviderSecret(item.name.trim(), item.api_key?.trim() ?? ""),
+          ),
+        ...body.proxies
+          .filter((proxy) => Object.prototype.hasOwnProperty.call(proxy, "password"))
+          .map((proxy) =>
+            bridge.saveProxySecret(proxy.name.trim(), proxy.password?.trim() ?? ""),
+          ),
+      ]);
+    }, "secret save");
   }
   const result = await apiFetch<ProvidersOut>(PROVIDERS_BASE, {
     method: "PUT",
@@ -2320,8 +2346,10 @@ export async function updateProviders(
     process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
     typeof window !== "undefined"
   ) {
-    const bridge = await import("./desktop/runtime");
-    await bridge.refreshProviderRuntime();
+    await runDesktopProviderBridgeBestEffort(async () => {
+      const bridge = await import("./desktop/runtime");
+      await bridge.refreshProviderRuntime();
+    }, "runtime refresh");
   }
   return result;
 }
@@ -3000,14 +3028,16 @@ export async function updateAdminProxies(
     process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
     typeof window !== "undefined"
   ) {
-    const bridge = await import("./desktop/runtime");
-    await Promise.all(
-      items
-        .filter((proxy) => proxy.password?.trim())
-        .map((proxy) =>
-          bridge.saveProxySecret(proxy.name.trim(), proxy.password?.trim() ?? ""),
-        ),
-    );
+    await runDesktopProviderBridgeBestEffort(async () => {
+      const bridge = await import("./desktop/runtime");
+      await Promise.all(
+        items
+          .filter((proxy) => Object.prototype.hasOwnProperty.call(proxy, "password"))
+          .map((proxy) =>
+            bridge.saveProxySecret(proxy.name.trim(), proxy.password?.trim() ?? ""),
+          ),
+      );
+    }, "proxy secret save");
   }
   const result = await apiFetch<import("./types").ProxyListOut>("/admin/proxies", {
     method: "PUT",
@@ -3017,8 +3047,10 @@ export async function updateAdminProxies(
     process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop" &&
     typeof window !== "undefined"
   ) {
-    const bridge = await import("./desktop/runtime");
-    await bridge.refreshProviderRuntime();
+    await runDesktopProviderBridgeBestEffort(async () => {
+      const bridge = await import("./desktop/runtime");
+      await bridge.refreshProviderRuntime();
+    }, "proxy runtime refresh");
   }
   return result;
 }

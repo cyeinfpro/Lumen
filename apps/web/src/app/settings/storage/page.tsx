@@ -18,6 +18,8 @@ import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 import { Button, Card } from "@/components/ui/primitives";
 import { apiFetch } from "@/lib/apiClient";
 import {
+  clearFailedDockerImportMarker,
+  clearFailedRestoreMarker,
   exportDesktopBackup,
   getDesktopDockerImportStatus,
   getDesktopRestoreStatus,
@@ -98,6 +100,18 @@ export default function DesktopStoragePage() {
   });
   const restartMut = useMutation({
     mutationFn: restartDesktopApp,
+  });
+  const clearRestoreFailureMut = useMutation({
+    mutationFn: clearFailedRestoreMarker,
+    onSuccess: () => {
+      void restoreQ.refetch();
+    },
+  });
+  const clearDockerFailureMut = useMutation({
+    mutationFn: clearFailedDockerImportMarker,
+    onSuccess: () => {
+      void dockerImportQ.refetch();
+    },
   });
 
   const latestManifest = backupMut.data?.manifest ?? restoreMut.data?.manifest ?? restoreQ.data?.manifest;
@@ -197,6 +211,14 @@ export default function DesktopStoragePage() {
                 </div>
               </div>
             ) : null}
+            {backupMut.isPending ? (
+              <div
+                role="status"
+                className="mt-4 rounded-[var(--radius-card)] border border-[var(--accent)]/35 bg-[var(--bg-1)] p-3 text-[13px] text-[var(--fg-2)]"
+              >
+                正在生成备份。大目录可能需要几十秒，请保持应用打开。
+              </div>
+            ) : null}
             {backupMut.error ? (
               <div
                 role="alert"
@@ -215,7 +237,7 @@ export default function DesktopStoragePage() {
                   <h2 className="type-section-title">恢复</h2>
                 </div>
                 <p className="mt-2 text-[13px] text-[var(--fg-2)]">
-                  备份包校验通过后会排队，重启时在 sidecar 启动前恢复。
+                  备份包校验通过后会排队，重启时在应用启动前恢复。
                 </p>
               </div>
               <Button
@@ -276,7 +298,17 @@ export default function DesktopStoragePage() {
                   <CircleAlert className="h-4 w-4" />
                   上次恢复失败
                 </div>
-                {restoreQ.data.last_error ?? "未知错误"}
+                <div>{restoreQ.data.last_error ?? "未知错误"}</div>
+                <div className="mt-3">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={clearRestoreFailureMut.isPending}
+                    onClick={() => clearRestoreFailureMut.mutate()}
+                  >
+                    清除记录
+                  </Button>
+                </div>
               </div>
             ) : null}
             {restoreMut.error ? (
@@ -369,7 +401,17 @@ export default function DesktopStoragePage() {
                 <CircleAlert className="h-4 w-4" />
                 上次 Docker 导入失败
               </div>
-              {dockerImportQ.data.last_error ?? "未知错误"}
+              <div>{dockerImportQ.data.last_error ?? "未知错误"}</div>
+              <div className="mt-3">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={clearDockerFailureMut.isPending}
+                  onClick={() => clearDockerFailureMut.mutate()}
+                >
+                  清除记录
+                </Button>
+              </div>
             </div>
           ) : null}
           {dockerImportMut.error ? (

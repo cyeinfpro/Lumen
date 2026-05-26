@@ -8,10 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.constants import CompletionStatus, GenerationStatus
 from lumen_core.desktop_runtime import (
     desktop_bootstrap_marker,
     desktop_data_root,
@@ -19,6 +22,7 @@ from lumen_core.desktop_runtime import (
     desktop_provider_metadata_path,
     desktop_settings_path,
 )
+from lumen_core.models import Completion, Generation
 from lumen_core.schemas import (
     ProviderItemOut,
     ProviderStatsOut,
@@ -62,6 +66,14 @@ class DesktopReadyOut(BaseModel):
     status: str
     runtime: str = "desktop"
     data_root: str
+    checked_at: datetime
+
+
+class DesktopActivityOut(BaseModel):
+    active: bool
+    active_tasks: int
+    generation_running: int
+    completion_streaming: int
     checked_at: datetime
 
 
@@ -119,6 +131,55 @@ async def desktop_ready() -> DesktopReadyOut:
     return DesktopReadyOut(
         status="ok",
         data_root=str(root),
+        checked_at=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/system/desktop-activity", response_model=DesktopActivityOut)
+async def desktop_activity(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    response: Response,
+) -> DesktopActivityOut:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        tables_ready = int(
+            await db.scalar(
+                text(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type='table' AND name IN ('generations', 'completions') "
+                )
+            )
+            or 0
+        ) == 2
+        if not tables_ready:
+            generation_running = 0
+            completion_streaming = 0
+        else:
+            generation_running = int(
+                await db.scalar(
+                    select(func.count(Generation.id)).where(
+                        Generation.status == GenerationStatus.RUNNING.value,
+                    )
+                )
+                or 0
+            )
+            completion_streaming = int(
+                await db.scalar(
+                    select(func.count(Completion.id)).where(
+                        Completion.status == CompletionStatus.STREAMING.value,
+                    )
+                )
+                or 0
+            )
+    except OperationalError:
+        generation_running = 0
+        completion_streaming = 0
+    active_tasks = generation_running + completion_streaming
+    return DesktopActivityOut(
+        active=active_tasks > 0,
+        active_tasks=active_tasks,
+        generation_running=generation_running,
+        completion_streaming=completion_streaming,
         checked_at=datetime.now(timezone.utc),
     )
 

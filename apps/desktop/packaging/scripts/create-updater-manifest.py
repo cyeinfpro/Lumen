@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +63,10 @@ def main() -> int:
         signature = sig_path.read_text(encoding="utf-8").strip()
         if not signature:
             raise SystemExit(f"empty updater signature: {sig_path}")
+        try:
+            base64.b64decode(signature, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise SystemExit(f"invalid base64 updater signature {sig_path}: {exc}") from exc
         platforms[platform] = {
             "signature": signature,
             "url": _asset_url(args.base_url, artifact_path),

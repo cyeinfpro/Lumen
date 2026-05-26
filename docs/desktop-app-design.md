@@ -162,7 +162,7 @@ apps/desktop/                     ← 唯一新增目录
 | `apps/web/src/app/assets/` | **新增**：资产图库页面（§6.5） | Next.js 路由按文件系统识别 |
 | `apps/web/src/app/onboarding/` | **新增**：首启动向导（§6.7） | 同上 |
 | `apps/web/src/lib/desktop/` | **新增**：替代旧设计的 `packages/desktop-bridge`，封装 `window.__LUMEN__`、本地 token、Tauri invoke 桥 | 体量小（< 200 行），独立 workspace 包不划算，直接挂 web 内更利于打包 |
-| `apps/tgbot/` | **不动也不打包**（桌面打包时不进 PyInstaller spec、不进 tauri externalBin） | 桌面版不需要 |
+| `apps/tgbot/` | **不动也不打包**（桌面打包时不进 PyInstaller spec、不进 Tauri resources） | 桌面版不需要 |
 | `packages/core/lumen_core/desktop_runtime.py` | **新增**：桌面运行时标识、local user 常量、provider key 引用规则、SQLite JSON 类型 helper | API/worker 共享 |
 | `.github/workflows/desktop-release.yml` | **新增** CI | GitHub Actions 强制目录 |
 | `.gitignore` | 加 `apps/desktop/target/`、`apps/desktop/dist/`、`build/`、`*.dmg`、`*.exe.unsigned` | git 排除产物 |
@@ -613,23 +613,18 @@ uv run pyinstaller --clean --noconfirm \
 Worker 同理一份 spec。
 
 ### 8.1.1 Web / Redis runtime 打包
-- `lumen-web`：使用 Next standalone 产物 + 固定版本 Node runtime。不要依赖用户机器安装 Node。
+- Web：使用 Next standalone 产物 + 固定版本 Node runtime，作为 Tauri resource 直接由 Rust supervisor 启动。不要依赖用户机器安装 Node，也不要再额外生成占位 `lumen-web` externalBin。
 - `lumen-redis`：打包 Garnet 可执行文件和 license。macOS / Windows 分别使用对应平台二进制；CI 做 Redis 命令兼容 smoke。
 - 所有 runtime binary 必须被 Tauri 签名链覆盖。Windows 下 `.exe` / `.dll` 全部签名；macOS 下 bundle 内 Mach-O 全部 codesign。
 
-### 8.2 Tauri sidecar 绑定
+### 8.2 Tauri resource 绑定
 `tauri.conf.json`：
 ```json
 {
   "bundle": {
-    "externalBin": [
-      "binaries/lumen-api",
-      "binaries/lumen-worker",
-      "binaries/lumen-web",
-      "binaries/lumen-redis"
-    ],
     "resources": [
       "resources/alembic/desktop/**/*",
+      "resources/runtime/**/*",
       "resources/web/**/*",
       "resources/licenses/**/*"
     ]
@@ -637,7 +632,7 @@ Worker 同理一份 spec。
 }
 ```
 
-Tauri 会按 target triple 自动找文件名（如 `lumen-api-x86_64-apple-darwin`），所以 PyInstaller 产物在 CI 里要按 triple 重命名。
+PyInstaller、Garnet、Node 和 Next standalone 产物统一复制进 `resources/runtime/` 与 `resources/web/`。Rust supervisor 从 bundle resource 路径解析并启动这些内置组件，避免额外的占位 sidecar 二进制和 target-triple 重命名步骤。
 
 ### 8.3 CI 矩阵
 
@@ -835,7 +830,7 @@ tar -C /opt/lumendata/storage -czf lumen-storage.tar.gz .
 ### Phase 4 — Rust Supervisor 与鲁棒性（3 周）
 - [ ] `apps/desktop/` 主体：sidecar spawn、readiness pipe、崩溃重启、退避、托盘、退出确认、诊断窗口。
 - [ ] 进程树清理：正常退出、强制退出、系统关机、崩溃后重启均无孤儿进程。
-- [ ] 睡眠保护：macOS `IOPMAssertion`，Windows `SetThreadExecutionState`，仅任务运行期间开启。
+- [x] 睡眠保护：macOS `IOPMAssertion`，Windows `SetThreadExecutionState`，桌面 supervisor 轮询 `/system/desktop-activity`，仅任务运行期间开启。
 - [ ] 诊断包：logs、schema、Redis INFO、runtime env 摘要、版本、系统信息，全部脱敏。
 
 ### Phase 5 — Packaging / CI / 安装包 E2E（2.5 周）

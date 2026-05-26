@@ -26,10 +26,12 @@ cleanup() {
     wait "$app_pid" >/dev/null 2>&1 || true
   fi
   pkill -f "$mount/Lumen.app/Contents" >/dev/null 2>&1 || true
+  pkill -f "$mount/Lumen.app/Contents/.*lumen-(api|worker|redis)" >/dev/null 2>&1 || true
+  pkill -f "$mount/Lumen.app/Contents/.*server\\.js" >/dev/null 2>&1 || true
   hdiutil detach "$mount" -quiet >/dev/null 2>&1 \
     || hdiutil detach "$mount" -force -quiet >/dev/null 2>&1 \
     || true
-  if ! mount | grep -F "$mount" >/dev/null 2>&1; then
+  if ! diskutil info -plist "$mount" >/dev/null 2>&1; then
     rm -rf "$work"
   else
     echo "cleanup_kept_mount=$mount" >&2
@@ -72,6 +74,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 home = pathlib.Path(os.environ["HOME_DIR"])
@@ -84,12 +87,12 @@ api_port = None
 web_port = None
 
 
-def read_log(name: str) -> str:
+def read_log(name):
     path = logs_root / name
     return path.read_text(errors="replace") if path.exists() else ""
 
 
-def process_alive(pid: int) -> bool:
+def process_alive(pid):
     return (
         subprocess.run(
             ["kill", "-0", str(pid)],
@@ -100,16 +103,23 @@ def process_alive(pid: int) -> bool:
     )
 
 
-def get_http(port: int, path: str) -> int:
+def get_http(port, path, headers=None):
+    request_headers = {"Connection": "close"}
+    if headers:
+        request_headers.update(headers)
     request = urllib.request.Request(
-        f"http://127.0.0.1:{port}{path}", headers={"Connection": "close"}
+        f"http://127.0.0.1:{port}{path}", headers=request_headers
     )
-    with urllib.request.urlopen(request, timeout=2) as response:
-        response.read(512)
-        return response.status
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            response.read(512)
+            return response.status
+    except urllib.error.HTTPError as exc:
+        exc.read(512)
+        return exc.code
 
 
-def listening_pids(port: int) -> list[int]:
+def listening_pids(port):
     try:
         output = subprocess.check_output(
             ["lsof", "-nP", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
@@ -118,7 +128,7 @@ def listening_pids(port: int) -> list[int]:
         )
     except subprocess.CalledProcessError:
         return []
-    pids: list[int] = []
+    pids = []
     for line in output.splitlines():
         try:
             pids.append(int(line.strip()))
@@ -127,7 +137,7 @@ def listening_pids(port: int) -> list[int]:
     return pids
 
 
-def sidecar_pids(name: str) -> list[int]:
+def sidecar_pids(name):
     if name == "lumen-web" and web_port is not None:
         pids = listening_pids(web_port)
         if pids:
@@ -135,7 +145,7 @@ def sidecar_pids(name: str) -> list[int]:
     ps_output = subprocess.check_output(
         ["ps", "ax", "-o", "pid,ppid,command"], text=True, errors="replace"
     )
-    pids: list[int] = []
+    pids = []
     for line in ps_output.splitlines():
         if not any(marker in line for marker in mount_markers):
             continue
@@ -155,7 +165,7 @@ def sidecar_pids(name: str) -> list[int]:
     return pids
 
 
-def wait_until_ready(seconds: float) -> bool:
+def wait_until_ready(seconds):
     global api_port, web_port
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -164,7 +174,7 @@ def wait_until_ready(seconds: float) -> bool:
         match = re.search(r"Uvicorn running on http://127\.0\.0\.1:(\d+)", api_err)
         if match:
             api_port = int(match.group(1))
-        match = re.search(r"Local:\s+http://localhost:(\d+)", web_log)
+        match = re.search(r"Local:\s+http://(?:localhost|127\.0\.0\.1):(\d+)", web_log)
         if match:
             web_port = int(match.group(1))
         if api_port and web_port:
@@ -262,11 +272,17 @@ for name, text in logs.items():
     print(f"--- {name} tail ---")
     print(text[-1600:])
 
-errors: list[str] = []
+errors = []
 if "--logdir" in combined or "LogDir specified without enabling tiered storage" in combined:
     errors.append("old Garnet logdir failure is present")
 if "api_key is required" in logs["worker.err.log"]:
     errors.append("worker rejects disabled desktop provider without api_key")
+if "context_window.tiktoken_unavailable" in combined:
+    errors.append("packaged Python runtime could not load tiktoken")
+if "context_window.tiktoken_loading_slow" in combined:
+    errors.append("packaged Python runtime fell back before tiktoken warmed")
+if re.search(r"Network:\s+http://(?!localhost(?::|/)|127\.0\.0\.1(?::|/))", logs["web.log"]) or "0.0.0.0" in logs["web.log"]:
+    errors.append("web runtime is listening on a non-loopback interface")
 if '"event":"heartbeat"' not in logs["supervisor.log"]:
     errors.append("supervisor heartbeat event was not logged")
 if '"event":"sidecar_restart"' not in logs["supervisor.log"]:
@@ -298,6 +314,16 @@ else:
     except Exception as exc:
         errors.append(f"api desktop-ready request failed: {exc}")
     try:
+        if get_http(api_port, "/auth/me") != 401:
+            errors.append("direct api auth/me without desktop token did not return 401")
+    except Exception as exc:
+        errors.append(f"direct api auth/me request failed: {exc}")
+    try:
+        if get_http(api_port, "/system/desktop-activity") != 401:
+            errors.append("direct api desktop-activity without desktop token did not return 401")
+    except Exception as exc:
+        errors.append(f"direct api desktop-activity request failed: {exc}")
+    try:
         if get_http(web_port, "/") != 200:
             errors.append("web root did not return 200")
     except Exception as exc:
@@ -312,6 +338,11 @@ else:
             errors.append("web proxy conversations did not return 200")
     except Exception as exc:
         errors.append(f"web proxy conversations request failed: {exc}")
+    try:
+        if get_http(web_port, "/api/system/desktop-activity") != 200:
+            errors.append("web proxy desktop-activity did not return 200")
+    except Exception as exc:
+        errors.append(f"web proxy desktop-activity request failed: {exc}")
 if not all(processes.values()):
     errors.append("not all sidecar processes are alive")
 

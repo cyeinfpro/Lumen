@@ -86,6 +86,11 @@ Next.js Web ---------------> FastAPI API
 
 不再需要在宿主机安装 Python / uv / Node / npm —— API、Worker、Web、Bot 全部以 Docker 镜像运行。开发模式下才需要这些工具，详见下方 "开发模式" 一节。
 
+桌面版打包说明：
+
+- Windows 安装器默认使用 NSIS `currentUser` 安装模式，不要求管理员权限；企业内统一分发如需 per-machine 安装，需要先调整 `apps/desktop/tauri.conf.json` 的 `windows.nsis.installMode` 并重新签名发布。
+- 自动更新包必须通过 `TAURI_UPDATER_PUBKEY` 与 `TAURI_SIGNING_PRIVATE_KEY` 生成签名工件；tag 发布缺少这些密钥时 CI 会直接失败。
+
 ## Docker 一键安装
 
 最简一行（GitHub raw）：

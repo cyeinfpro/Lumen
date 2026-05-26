@@ -103,8 +103,9 @@ const NAV_COMMANDS: Command[] = APP_NAV_ITEMS.map((item) =>
   }),
 );
 
-const COMMANDS: Command[] = [
-  ...NAV_COMMANDS,
+const IS_DESKTOP_RUNTIME = process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
+
+const SHARED_COMMANDS: Command[] = [
   command({
     id: "toggle-sidebar",
     label: "切换会话侧栏",
@@ -113,15 +114,6 @@ const COMMANDS: Command[] = [
     group: "操作",
     keywords: ["sidebar", "conversation", "侧栏", "会话", "列表", "快捷键", "cmd b", "ctrl b"],
     icon: PanelLeft,
-  }),
-  command({
-    id: "settings-usage",
-    label: "用量设置",
-    detail: "查看使用量与配额",
-    href: "/settings/usage",
-    group: "设置",
-    keywords: ["settings", "usage", "quota", "用量", "配额"],
-    icon: BarChart3,
   }),
   command({
     id: "settings-prompts",
@@ -141,6 +133,18 @@ const COMMANDS: Command[] = [
     keywords: ["settings", "memory", "记忆", "偏好", "长期记忆"],
     icon: Brain,
   }),
+];
+
+const DOCKER_ONLY_COMMANDS: Command[] = [
+  command({
+    id: "settings-usage",
+    label: "用量设置",
+    detail: "查看使用量与配额",
+    href: "/settings/usage",
+    group: "设置",
+    keywords: ["settings", "usage", "quota", "用量", "配额"],
+    icon: BarChart3,
+  }),
   command({
     id: "settings-privacy",
     label: "隐私设置",
@@ -159,6 +163,12 @@ const COMMANDS: Command[] = [
     keywords: ["admin", "manage", "后台", "管理", "邀请", "备份"],
     icon: Wrench,
   }),
+];
+
+const COMMANDS: Command[] = [
+  ...NAV_COMMANDS,
+  ...SHARED_COMMANDS,
+  ...(IS_DESKTOP_RUNTIME ? [] : DOCKER_ONLY_COMMANDS),
 ];
 
 export function CommandPalette() {
