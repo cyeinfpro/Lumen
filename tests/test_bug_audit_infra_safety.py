@@ -16,6 +16,11 @@ BLUEGREEN_COMPOSE = ROOT / "docker-compose.bluegreen.yml"
 STORAGE_MOUNT = ROOT / "deploy" / "scripts" / "lumen_storage_mount.sh"
 FIX_REDIS_PASSWORD = ROOT / "scripts" / "fix-redis-password-mismatch.sh"
 SHIFT_TRAFFIC = ROOT / "scripts" / "lumen-shift-traffic.sh"
+BUILD_MAC = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "build-mac.sh"
+SMOKE_MAC = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "smoke-mac.sh"
+DESKTOP_SIDECAR_RS = ROOT / "apps" / "desktop" / "src" / "sidecar.rs"
+DESKTOP_WEB_BIN_RS = ROOT / "apps" / "desktop" / "src" / "bin" / "lumen-web.rs"
+DESKTOP_DOCKER_IMPORT_RS = ROOT / "apps" / "desktop" / "src" / "docker_import.rs"
 
 
 def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
@@ -75,6 +80,23 @@ def test_desktop_release_allows_installer_only_artifacts() -> None:
     assert 'if [ -z "$mac_update" ] && [ -z "$win_update" ]; then' in workflow
     assert 'test -n "$mac_update"' in workflow
     assert 'test -n "$win_update"' in workflow
+
+
+def test_desktop_mac_release_requires_valid_bundle_signature() -> None:
+    build_mac = BUILD_MAC.read_text(encoding="utf-8")
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+
+    assert 'export APPLE_SIGNING_IDENTITY="-"' in build_mac
+    assert "verify_macos_bundle_signature" in build_mac
+    assert 'codesign --verify --deep --strict --verbose=2 "$app_path"' in build_mac
+    assert 'codesign --verify --deep --strict --verbose=2 "$app"' in smoke_mac
+
+
+def test_windows_desktop_sidecars_do_not_open_console_windows() -> None:
+    for path in (DESKTOP_SIDECAR_RS, DESKTOP_WEB_BIN_RS, DESKTOP_DOCKER_IMPORT_RS):
+        text = path.read_text(encoding="utf-8")
+        assert "CREATE_NO_WINDOW" in text
+        assert "creation_flags(CREATE_NO_WINDOW)" in text
 
 
 def test_bug_audit_infra_scripts_parse_with_bash_n() -> None:

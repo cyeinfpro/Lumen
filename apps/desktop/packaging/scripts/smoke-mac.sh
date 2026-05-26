@@ -47,6 +47,7 @@ fi
 
 echo "mounted_app=$app"
 echo "bundle_executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+codesign --verify --deep --strict --verbose=2 "$app"
 find "$app/Contents" -maxdepth 5 \( -name 'lumen-*' -o -name 'dotnet' -o -name 'node' -o -name 'libsqlite_vec*' \) -print | sort
 
 if strings "$app/Contents/MacOS/lumen-desktop" | grep -- '--logdir' >/dev/null; then

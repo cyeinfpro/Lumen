@@ -598,6 +598,7 @@ fn unix_epoch_ms() -> u128 {
 
 fn sidecar_command(bin: PathBuf) -> Command {
     let mut command = Command::new(bin);
+    hide_windows_console(&mut command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -605,6 +606,17 @@ fn sidecar_command(bin: PathBuf) -> Command {
     }
     command
 }
+
+#[cfg(windows)]
+fn hide_windows_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_windows_console(_command: &mut Command) {}
 
 fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
@@ -659,7 +671,9 @@ fn signal_unix_process_group(pid: u32, signal: &str) {
 #[cfg(windows)]
 fn terminate_windows_process_tree(pid: u32) {
     let pid = pid.to_string();
-    let _ = Command::new("taskkill")
+    let mut command = Command::new("taskkill");
+    hide_windows_console(&mut command);
+    let _ = command
         .arg("/PID")
         .arg(&pid)
         .arg("/T")
@@ -1035,7 +1049,9 @@ fn process_rss_bytes(pid: u32) -> Option<u64> {
 
 #[cfg(windows)]
 fn process_rss_bytes(pid: u32) -> Option<u64> {
-    let output = Command::new("powershell")
+    let mut command = Command::new("powershell");
+    hide_windows_console(&mut command);
+    let output = command
         .args([
             "-NoProfile",
             "-Command",

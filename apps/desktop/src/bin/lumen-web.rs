@@ -12,7 +12,9 @@ fn main() {
     };
     let server = web_root.join("server.js");
     let node = resolve_node_bin().unwrap_or_else(|| PathBuf::from("node"));
-    let status = Command::new(node).arg(server).status();
+    let mut command = Command::new(node);
+    hide_windows_console(&mut command);
+    let status = command.arg(server).status();
     match status {
         Ok(status) => exit(status.code().unwrap_or(1)),
         Err(err) => {
@@ -21,6 +23,17 @@ fn main() {
         }
     }
 }
+
+#[cfg(windows)]
+fn hide_windows_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_windows_console(_command: &mut Command) {}
 
 fn resolve_web_root() -> Option<PathBuf> {
     if let Ok(raw) = env::var("LUMEN_WEB_ROOT") {
