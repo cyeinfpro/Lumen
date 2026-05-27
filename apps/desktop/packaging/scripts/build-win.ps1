@@ -1,3 +1,7 @@
+param(
+  [switch]$Clean
+)
+
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "../../../..")
@@ -12,7 +16,29 @@ $HostTriple = ((rustc -Vv | Select-String "^host:").ToString() -split "\s+")[1]
 $Triple = if ($BuildTarget) { $BuildTarget } else { $HostTriple }
 $GarnetVersion = if ($env:GARNET_VERSION) { $env:GARNET_VERSION } else { "1.1.9" }
 $DotnetRuntimeVersion = if ($env:DOTNET_RUNTIME_VERSION) { $env:DOTNET_RUNTIME_VERSION } else { "8.0.27" }
-$NodeRuntimeVersion = if ($env:NODE_RUNTIME_VERSION) { $env:NODE_RUNTIME_VERSION.TrimStart("v") } else { (node -p "process.versions.node").Trim() }
+$CleanTauriOutputs = $Clean -or $env:LUMEN_CLEAN_TAURI_OUTPUTS -eq "1"
+$NodeRuntimeVersion = if ($env:NODE_RUNTIME_VERSION) {
+  $env:NODE_RUNTIME_VERSION.TrimStart("v")
+} elseif (Test-Path "NODE_VERSION") {
+  ((Get-Content "NODE_VERSION" -Raw).Trim()).TrimStart("v")
+} else {
+  (node -e "const pkg=require('./apps/web/package.json'); const raw=(pkg.engines&&pkg.engines.node)||process.versions.node; console.log(String(raw).replace(/^[^0-9]*/, '').split(/[ <>=|]/)[0]);").Trim()
+}
+
+function New-NodeRuntimeLinkOrCopy {
+  param(
+    [string]$Source,
+    [string]$Target
+  )
+  if (Test-Path $Target) {
+    Remove-Item -Recurse -Force $Target -ErrorAction SilentlyContinue
+  }
+  try {
+    New-Item -ItemType SymbolicLink -Path $Target -Target $Source -ErrorAction Stop | Out-Null
+  } catch {
+    Copy-Item $Source $Target -Force
+  }
+}
 
 function Prepare-Garnet {
   $dest = Join-Path $Root "apps/desktop/resources/runtime/lumen-redis"
@@ -80,8 +106,8 @@ function Prepare-NodeRuntime {
     Copy-Item -Recurse (Join-Path (Resolve-Path $env:NODE_RUNTIME_DIR) "*") $dest
     $binNode = Join-Path $dest "bin/node.exe"
     $rootNode = Join-Path $dest "node.exe"
-    if ((Test-Path $binNode) -and -not (Test-Path $rootNode)) {
-      Copy-Item $binNode $rootNode
+    if (Test-Path $binNode) {
+      New-NodeRuntimeLinkOrCopy -Source $binNode -Target $rootNode
     }
     return
   }
@@ -99,6 +125,12 @@ function Prepare-NodeRuntime {
     Copy-Item -Recurse (Join-Path $tmp "node-v$NodeRuntimeVersion-win-$arch/*") $dest
   } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  }
+}
+
+function Maybe-CleanTauriOutputs {
+  if ($CleanTauriOutputs) {
+    Clean-TauriOutputs
   }
 }
 
@@ -167,6 +199,20 @@ function Verify-DesktopResources {
   }
 }
 
+function Verify-GarnetCli {
+  $garnet = "apps/desktop/resources/runtime/lumen-redis/lumen-redis.exe"
+  if (-not (Test-TargetRunsOnHost)) {
+    Write-Host "Skipping executable Garnet CLI check for cross-architecture target $Triple on host $HostTriple."
+    return
+  }
+  $help = & $garnet --help 2>&1 | Out-String
+  foreach ($flag in @("--lua", "--checkpointdir", "--aof", "--recover")) {
+    if (-not $help.Contains($flag)) {
+      throw "bundled Garnet runtime does not advertise required flag $flag"
+    }
+  }
+}
+
 function Get-TauriConfigArgs {
   if (-not $env:TAURI_UPDATER_PUBKEY) {
     if ($env:GITHUB_REF_TYPE -eq "tag" -or ($env:GITHUB_REF -and $env:GITHUB_REF.StartsWith("refs/tags/"))) {
@@ -185,6 +231,14 @@ function Get-TauriConfigArgs {
     }
     plugins = @{
       updater = @{
+        active = $true
+        endpoints = @(
+          if ($env:LUMEN_UPDATER_ENDPOINT) {
+            $env:LUMEN_UPDATER_ENDPOINT.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          } else {
+            "https://github.com/cyeinfpro/Lumen/releases/latest/download/latest.json"
+          }
+        )
         pubkey = $env:TAURI_UPDATER_PUBKEY
       }
     }
@@ -219,7 +273,7 @@ Prepare-NodeRuntime
 uv sync --all-packages
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist apps/desktop/packaging/pyinstaller/lumen-api.spec
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist apps/desktop/packaging/pyinstaller/lumen-worker.spec
-Clean-TauriOutputs
+Maybe-CleanTauriOutputs
 Prepare-StaticResourcePlaceholders
 
 Remove-Item -Recurse -Force apps/desktop/resources/runtime/lumen-api -ErrorAction SilentlyContinue
@@ -231,8 +285,9 @@ Prepare-Garnet
 Prepare-DotnetRuntime
 Prepare-StaticResourcePlaceholders
 Verify-DesktopResources
+Verify-GarnetCli
 
-Clean-TauriOutputs
+Maybe-CleanTauriOutputs
 $tauriConfigArgs = Get-TauriConfigArgs
 Push-Location apps/desktop
 $cargoArgs = @("tauri", "build", "--bundles", "nsis")
@@ -242,3 +297,24 @@ if ($BuildTarget) {
 $cargoArgs += $tauriConfigArgs
 cargo @cargoArgs
 Pop-Location
+
+if ($env:WINDOWS_SIGNING_THUMBPRINT -or $env:WINDOWS_SIGNING_CERT_PATH) {
+  $bundleRoot = if ($BuildTarget) {
+    Join-Path $Root "apps/desktop/target/$BuildTarget/release/bundle/nsis"
+  } else {
+    Join-Path $Root "apps/desktop/target/release/bundle/nsis"
+  }
+  if (Test-Path $bundleRoot) {
+    $signArgs = @("-Path", $bundleRoot)
+    if ($env:WINDOWS_SIGNING_THUMBPRINT) {
+      $signArgs += @("-Thumbprint", $env:WINDOWS_SIGNING_THUMBPRINT)
+    }
+    if ($env:WINDOWS_SIGNING_CERT_PATH) {
+      $signArgs += @("-CertPath", $env:WINDOWS_SIGNING_CERT_PATH)
+    }
+    if ($env:WINDOWS_SIGNING_CERT_PASSWORD) {
+      $signArgs += @("-CertPassword", $env:WINDOWS_SIGNING_CERT_PASSWORD)
+    }
+    & (Join-Path $PSScriptRoot "sign-win.ps1") @signArgs
+  }
+}

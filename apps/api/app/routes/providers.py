@@ -88,7 +88,9 @@ def _responses_url(base_url: str) -> str:
 
 
 def _mask_key(key: str) -> str:
-    if not key or len(key) <= 8:
+    if not key:
+        return ""
+    if len(key) <= 8:
         return "****"
     return key[:4] + "..." + key[-4:]
 
@@ -835,6 +837,40 @@ def _classify_probe_status(status: int) -> tuple[str, str | None]:
     return "unsupported" if status == 501 else "", f"HTTP {status}"  # 511 等
 
 
+def _truncate_probe_error(value: str, *, limit: int = 240) -> str:
+    text = " ".join(value.strip().split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 8].rstrip() + "…\n（已截断）"
+
+
+def _probe_error_detail_from_payload(payload: object) -> str | None:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("code")
+            if isinstance(message, str) and message.strip():
+                return _truncate_probe_error(message)
+        if isinstance(error, str) and error.strip():
+            return _truncate_probe_error(error)
+        message = payload.get("message") or payload.get("detail")
+        if isinstance(message, str) and message.strip():
+            return _truncate_probe_error(message)
+    return None
+
+
+def _probe_http_error_message(resp: httpx.Response, fallback: str | None) -> str:
+    detail: str | None = None
+    try:
+        detail = _probe_error_detail_from_payload(resp.json())
+    except Exception:  # noqa: BLE001
+        detail = None
+    if not detail and resp.text:
+        detail = _truncate_probe_error(resp.text)
+    prefix = fallback or f"HTTP {resp.status_code}"
+    return f"{prefix}: {detail}" if detail else prefix
+
+
 async def _probe_one(
     base_url: str,
     api_key: str,
@@ -872,7 +908,7 @@ async def _probe_one(
             return _ProbeOutcome(
                 ok=False,
                 latency_ms=latency,
-                error=err,
+                error=_probe_http_error_message(resp, err),
                 http_status=resp.status_code,
                 capability_signal=signal or None,
             )
@@ -917,10 +953,12 @@ async def _probe_one(
         )
     except Exception as exc:
         latency = int((time.monotonic() - t0) * 1000)
+        message = _truncate_probe_error(str(exc))
+        error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
         return _ProbeOutcome(
             ok=False,
             latency_ms=latency,
-            error=type(exc).__name__,
+            error=error,
             http_status=None,
             capability_signal=None,
         )

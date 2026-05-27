@@ -16,13 +16,16 @@ use serde::Serialize;
 use serde_json::json;
 use sidecar::{RuntimeInfo, SidecarRecovery, SidecarStatus, Supervisor};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 use tauri::menu::MenuBuilder;
 use tauri::path::BaseDirectory;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, State, WindowEvent};
+use tauri::{Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -53,6 +56,20 @@ struct UpdateCheckOut {
     download_url: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum UpdateInstallStatus {
+    NoUpdate,
+    Installing { version: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UpdateProgressOut {
+    downloaded: u64,
+    total: Option<u64>,
+    percent: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DesktopStartupError {
     message: String,
@@ -78,6 +95,16 @@ struct DesktopStartupStatus {
 }
 
 fn default_data_root(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    if let Some(raw) = env::var_os("LUMEN_DATA_ROOT") {
+        let path = PathBuf::from(raw);
+        fs::create_dir_all(&path)
+            .with_context(|| format!("create LUMEN_DATA_ROOT {}", path.display()))?;
+        let probe = path.join(".lumen-write-probe");
+        fs::write(&probe, b"ok")
+            .with_context(|| format!("write LUMEN_DATA_ROOT probe {}", probe.display()))?;
+        let _ = fs::remove_file(probe);
+        return Ok(path);
+    }
     Ok(app.path().app_data_dir().context("resolve app data dir")?)
 }
 
@@ -96,17 +123,21 @@ fn desktop_startup_status(state: State<'_, DesktopState>) -> Result<DesktopStart
 }
 
 #[tauri::command]
-fn desktop_status(state: State<'_, DesktopState>) -> Result<DesktopStatus, String> {
-    let mut guard = state
-        .supervisor
-        .lock()
-        .map_err(|_| "state poisoned".to_string())?;
-    let sidecars = guard.sidecar_statuses();
-    Ok(DesktopStatus {
-        runtime: guard.runtime.clone(),
-        sidecar_count: sidecars.len(),
-        sidecars,
+async fn desktop_status(state: State<'_, DesktopState>) -> Result<DesktopStatus, String> {
+    let supervisor = state.supervisor.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = supervisor
+            .lock()
+            .map_err(|_| "state poisoned".to_string())?;
+        let sidecars = guard.sidecar_statuses();
+        Ok(DesktopStatus {
+            runtime: guard.runtime.clone(),
+            sidecar_count: sidecars.len(),
+            sidecars,
+        })
     })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
@@ -115,6 +146,10 @@ fn set_provider_key(
     api_key: String,
     state: State<'_, DesktopState>,
 ) -> Result<(), String> {
+    let provider = provider.trim().to_string();
+    if provider.is_empty() {
+        return Err("provider name is required".to_string());
+    }
     let data_root = {
         let guard = state
             .supervisor
@@ -122,8 +157,7 @@ fn set_provider_key(
             .map_err(|_| "state poisoned".to_string())?;
         guard.runtime.data_root.clone()
     };
-    secrets::set_provider_key(&data_root, provider.trim(), api_key.trim())
-        .map_err(|err| err.to_string())
+    secrets::set_provider_key(&data_root, &provider, api_key.trim()).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -132,6 +166,10 @@ fn set_proxy_secret(
     password: String,
     state: State<'_, DesktopState>,
 ) -> Result<(), String> {
+    let proxy = proxy.trim().to_string();
+    if proxy.is_empty() {
+        return Err("proxy name is required".to_string());
+    }
     let data_root = {
         let guard = state
             .supervisor
@@ -139,8 +177,7 @@ fn set_proxy_secret(
             .map_err(|_| "state poisoned".to_string())?;
         guard.runtime.data_root.clone()
     };
-    secrets::set_proxy_password(&data_root, proxy.trim(), password.trim())
-        .map_err(|err| err.to_string())
+    secrets::set_proxy_password(&data_root, &proxy, password.trim()).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -272,6 +309,15 @@ fn clear_failed_restore_marker(state: State<'_, DesktopState>) -> Result<(), Str
 }
 
 #[tauri::command]
+fn clear_pending_restore(state: State<'_, DesktopState>) -> Result<(), String> {
+    let guard = state
+        .supervisor
+        .lock()
+        .map_err(|_| "state poisoned".to_string())?;
+    backup::clear_pending_restore(&guard.runtime.data_root).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn clear_failed_docker_import_marker(state: State<'_, DesktopState>) -> Result<(), String> {
     let guard = state
         .supervisor
@@ -325,7 +371,7 @@ fn restart_desktop_app(
         .supervisor
         .lock()
         .map_err(|_| "state poisoned".to_string())?;
-    guard.shutdown();
+    guard.shutdown_with_timeout(Duration::from_secs(5));
     drop(guard);
     app.request_restart();
     Ok(())
@@ -342,14 +388,19 @@ fn retry_desktop_startup(
     state: State<'_, DesktopState>,
 ) -> Result<(), String> {
     {
-        let guard = state
+        let mut guard = state
             .startup
             .lock()
             .map_err(|_| "startup state poisoned".to_string())?;
         if guard.starting || guard.ready {
+            guard.error = None;
             return Ok(());
         }
     }
+    if let Ok(mut guard) = state.supervisor.lock() {
+        guard.reset_recovery_state();
+    }
+    set_startup_starting(&state);
     spawn_desktop_preflight_and_runtime(app, state.inner().clone());
     Ok(())
 }
@@ -384,23 +435,53 @@ async fn check_desktop_update(app: tauri::AppHandle) -> Result<UpdateCheckOut, S
 async fn install_desktop_update(
     app: tauri::AppHandle,
     state: State<'_, DesktopState>,
-) -> Result<bool, String> {
+) -> Result<UpdateInstallStatus, String> {
     let updater = app.updater().map_err(|err| err.to_string())?;
     let Some(update) = updater.check().await.map_err(|err| err.to_string())? else {
-        return Ok(false);
+        return Ok(UpdateInstallStatus::NoUpdate);
     };
-    let result = update.download_and_install(|_, _| {}, || {}).await;
+    let version = update.version.clone();
+    let finished_version = version.clone();
+    let progress_app = app.clone();
+    let result = update
+        .download_and_install(
+            move |downloaded, total| {
+                let downloaded = downloaded as u64;
+                let percent = total.map(|total| downloaded as f64 / total as f64 * 100.0);
+                let _ = progress_app.emit(
+                    "update://progress",
+                    UpdateProgressOut {
+                        downloaded,
+                        total,
+                        percent,
+                    },
+                );
+            },
+            {
+                let app = app.clone();
+                move || {
+                    let _ = app.emit("update://finished", json!({ "version": finished_version }));
+                }
+            },
+        )
+        .await;
     if let Err(err) = result {
         let message = err.to_string();
         if let Ok(guard) = state.supervisor.lock() {
             guard.note_update_failed(&message);
         }
         if let Ok(cache_dir) = app.path().app_cache_dir() {
-            let _ = fs::remove_dir_all(cache_dir);
+            let _ = fs::remove_dir_all(cache_dir.join("updater"));
         }
         return Err(message);
     }
-    app.restart();
+    let status = UpdateInstallStatus::Installing { version };
+    let restart_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        restart_app.restart();
+    });
+    Ok(status)
 }
 
 fn open_path(path: &PathBuf) -> Result<(), String> {
@@ -426,9 +507,8 @@ fn request_desktop_exit(app: &tauri::AppHandle, state: &DesktopState) -> Result<
         .supervisor
         .lock()
         .map_err(|_| "state poisoned".to_string())?;
-    guard.shutdown();
+    guard.shutdown_with_timeout(Duration::from_secs(5));
     drop(guard);
-    std::thread::sleep(Duration::from_millis(200));
     app.exit(0);
     Ok(())
 }
@@ -443,7 +523,10 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(arg) = argv.iter().skip(1).find(|arg| !arg.trim().is_empty()) {
+                handle_file_open(app, arg);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
             }
@@ -480,6 +563,7 @@ fn main() {
             export_desktop_backup,
             desktop_restore_status,
             clear_failed_restore_marker,
+            clear_pending_restore,
             select_desktop_restore_backup,
             desktop_docker_import_status,
             clear_failed_docker_import_marker,
@@ -500,6 +584,10 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run Lumen desktop");
+}
+
+fn handle_file_open(app: &tauri::AppHandle, arg: &str) {
+    let _ = app.emit("desktop://file-open", json!({ "path": arg }));
 }
 
 fn install_desktop_tray(app: &mut tauri::App) -> tauri::Result<()> {
@@ -548,7 +636,7 @@ fn run_headless_smoke() -> anyhow::Result<()> {
             env::temp_dir().join(format!("lumen-desktop-smoke-{}", unix_epoch_ms()))
         });
     let mut supervisor = Supervisor::new(data_root)?;
-    tauri::async_runtime::block_on(supervisor.spawn_all())?;
+    spawn_all_with_timeout(&mut supervisor, Duration::from_secs(90))?;
     let activity = supervisor
         .desktop_activity()?
         .ok_or_else(|| anyhow::anyhow!("desktop activity endpoint did not return 200"))?;
@@ -560,6 +648,8 @@ fn run_headless_smoke() -> anyhow::Result<()> {
     run_headless_command_smoke(&mut supervisor)?;
     let supervisor = Arc::new(Mutex::new(supervisor));
     let monitor = supervisor.clone();
+    let fatal = Arc::new(AtomicBool::new(false));
+    let monitor_fatal = fatal.clone();
     std::thread::spawn(move || {
         let mut last_heartbeat = Instant::now();
         loop {
@@ -576,12 +666,16 @@ fn run_headless_smoke() -> anyhow::Result<()> {
                 Ok(SidecarRecovery::FullRestart { reason }) => {
                     eprintln!("desktop sidecar full restart: {reason}");
                     guard.note_full_restart(&reason);
-                    if let Err(err) = tauri::async_runtime::block_on(guard.spawn_all()) {
+                    if let Err(err) = spawn_all_with_timeout(&mut guard, Duration::from_secs(90)) {
                         eprintln!("desktop sidecar full restart failed: {err:#}");
+                        monitor_fatal.store(true, Ordering::SeqCst);
+                        return;
                     }
                 }
                 Err(err) => {
                     eprintln!("desktop sidecar monitor failed: {err:#}");
+                    monitor_fatal.store(true, Ordering::SeqCst);
+                    return;
                 }
             }
             if last_heartbeat.elapsed() >= Duration::from_secs(5) {
@@ -594,12 +688,25 @@ fn run_headless_smoke() -> anyhow::Result<()> {
     });
 
     loop {
-        std::thread::sleep(Duration::from_secs(60));
+        std::thread::sleep(Duration::from_secs(2));
+        if fatal.load(Ordering::SeqCst) {
+            anyhow::bail!("desktop headless smoke monitor reported a fatal sidecar state");
+        }
         drop(
             supervisor
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state poisoned"))?,
         );
+    }
+}
+
+fn spawn_all_with_timeout(supervisor: &mut Supervisor, duration: Duration) -> anyhow::Result<()> {
+    match tauri::async_runtime::block_on(tokio::time::timeout(duration, supervisor.spawn_all())) {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "desktop sidecar spawn_all timed out after {}s",
+            duration.as_secs()
+        ),
     }
 }
 
@@ -794,7 +901,7 @@ fn spawn_desktop_preflight_and_runtime(app_handle: tauri::AppHandle, state: Desk
             let message = "同时存在待恢复备份和待导入 Docker 数据，已标记为失败记录。请重试启动后在存储设置中保留其中一个任务。".to_string();
             let _ = backup::mark_pending_restore_failed(&data_root, &message);
             let _ = docker_import::mark_pending_docker_import_failed(&data_root, &message);
-            set_startup_error(&state, message, data_root);
+            set_startup_error(&state, message, data_root, Some(&app_handle));
             return;
         }
         if restore_pending {
@@ -802,7 +909,7 @@ fn spawn_desktop_preflight_and_runtime(app_handle: tauri::AppHandle, state: Desk
             if let Err(err) = backup::apply_pending_restore(&data_root, env!("CARGO_PKG_VERSION")) {
                 let message = format!("{err:#}");
                 eprintln!("desktop pending restore failed: {message}");
-                set_startup_error(&state, message, data_root);
+                set_startup_error(&state, message, data_root, Some(&app_handle));
                 return;
             }
         }
@@ -813,7 +920,7 @@ fn spawn_desktop_preflight_and_runtime(app_handle: tauri::AppHandle, state: Desk
             {
                 let message = format!("{err:#}");
                 eprintln!("desktop pending Docker import failed: {message}");
-                set_startup_error(&state, message, data_root);
+                set_startup_error(&state, message, data_root, Some(&app_handle));
                 return;
             }
         }
@@ -838,16 +945,27 @@ fn spawn_desktop_runtime(app_handle: tauri::AppHandle, state: DesktopState) {
                     eprintln!("desktop port reassignment failed: {message}");
                     supervisor.note_startup_failure(&message);
                     let data_root = supervisor.runtime.data_root.clone();
-                    set_startup_error(&state, message, data_root);
+                    set_startup_error(&state, message, data_root, Some(&app_handle));
                     return;
                 }
             }
             match tauri::async_runtime::block_on(
                 supervisor.spawn_all_with_progress(|phase| set_startup_phase(&state, phase)),
             ) {
-                Ok(()) => supervisor.runtime.web_port,
+                Ok(()) => {
+                    supervisor.reset_recovery_state();
+                    supervisor.runtime.web_port
+                }
                 Err(err) => {
                     supervisor.shutdown();
+                    if !is_probably_port_conflict(&err) {
+                        let message = format!("{err:#}");
+                        eprintln!("desktop sidecar startup failed: {message}");
+                        supervisor.note_startup_failure(&message);
+                        let data_root = supervisor.runtime.data_root.clone();
+                        set_startup_error(&state, message, data_root, Some(&app_handle));
+                        return;
+                    }
                     set_startup_phase(&state, "重新选择本机端口");
                     if let Err(reassign_err) = supervisor.reassign_ports() {
                         let message =
@@ -855,21 +973,24 @@ fn spawn_desktop_runtime(app_handle: tauri::AppHandle, state: DesktopState) {
                         eprintln!("desktop sidecar startup failed: {message}");
                         supervisor.note_startup_failure(&message);
                         let data_root = supervisor.runtime.data_root.clone();
-                        set_startup_error(&state, message, data_root);
+                        set_startup_error(&state, message, data_root, Some(&app_handle));
                         return;
                     }
                     match tauri::async_runtime::block_on(
                         supervisor
                             .spawn_all_with_progress(|phase| set_startup_phase(&state, phase)),
                     ) {
-                        Ok(()) => supervisor.runtime.web_port,
+                        Ok(()) => {
+                            supervisor.reset_recovery_state();
+                            supervisor.runtime.web_port
+                        }
                         Err(retry_err) => {
                             let message = format!("{err:#}; retry failed: {retry_err:#}");
                             eprintln!("desktop sidecar startup failed: {message}");
                             supervisor.note_startup_failure(&message);
                             let data_root = supervisor.runtime.data_root.clone();
                             supervisor.shutdown();
-                            set_startup_error(&state, message, data_root);
+                            set_startup_error(&state, message, data_root, Some(&app_handle));
                             return;
                         }
                     }
@@ -904,7 +1025,12 @@ fn set_startup_ready(state: &DesktopState) {
     }
 }
 
-fn set_startup_error(state: &DesktopState, message: String, data_root: PathBuf) {
+fn set_startup_error(
+    state: &DesktopState,
+    message: String,
+    data_root: PathBuf,
+    app_handle: Option<&tauri::AppHandle>,
+) {
     if let Ok(mut guard) = state.startup.lock() {
         guard.starting = false;
         guard.ready = false;
@@ -916,11 +1042,14 @@ fn set_startup_error(state: &DesktopState, message: String, data_root: PathBuf) 
             at_ms: unix_epoch_ms(),
         });
     }
+    if let Some(app_handle) = app_handle {
+        navigate_startup_page(app_handle);
+    }
 }
 
-fn set_startup_phase(state: &DesktopState, phase: &str) {
+fn set_startup_phase(state: &DesktopState, phase: impl Into<String>) {
     if let Ok(mut guard) = state.startup.lock() {
-        guard.phase = phase.to_string();
+        guard.phase = phase.into();
     }
 }
 
@@ -930,6 +1059,16 @@ fn startup_has_error(state: &DesktopState) -> bool {
         .lock()
         .map(|guard| guard.error.is_some())
         .unwrap_or(false)
+}
+
+fn is_probably_port_conflict(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    text.contains("address already in use")
+        || text.contains("addrinuse")
+        || text.contains("eaddrinuse")
+        || text.contains("os error 48")
+        || text.contains("os error 98")
+        || text.contains("os error 10048")
 }
 
 fn start_sidecar_monitor(state: DesktopState, app_handle: tauri::AppHandle) {
@@ -993,20 +1132,41 @@ fn start_sidecar_monitor(state: DesktopState, app_handle: tauri::AppHandle) {
                 }
                 Ok(SidecarRecovery::FullRestart { reason }) => {
                     eprintln!("desktop sidecar full restart: {reason}");
+                    let delay = {
+                        let mut supervisor = match state.supervisor.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => return,
+                        };
+                        supervisor.note_full_restart(&reason);
+                        match supervisor.full_restart_backoff(&reason) {
+                            Ok(delay) => delay,
+                            Err(err) => {
+                                let message = format!("{err:#}");
+                                eprintln!("desktop sidecar full restart suppressed: {message}");
+                                supervisor.note_startup_failure(&message);
+                                let data_root = supervisor.runtime.data_root.clone();
+                                supervisor.shutdown();
+                                drop(supervisor);
+                                set_startup_error(&state, message, data_root, Some(&app_handle));
+                                return;
+                            }
+                        }
+                    };
+                    std::thread::sleep(delay);
                     let mut supervisor = match state.supervisor.lock() {
                         Ok(guard) => guard,
                         Err(_) => return,
                     };
-                    supervisor.note_full_restart(&reason);
-                    if let Err(err) = tauri::async_runtime::block_on(supervisor.spawn_all()) {
+                    if let Err(err) =
+                        spawn_all_with_timeout(&mut supervisor, Duration::from_secs(90))
+                    {
                         let message = format!("{err:#}");
                         eprintln!("desktop sidecar full restart failed: {message}");
                         supervisor.note_startup_failure(&message);
                         let data_root = supervisor.runtime.data_root.clone();
                         supervisor.shutdown();
                         drop(supervisor);
-                        set_startup_error(&state, message, data_root);
-                        navigate_startup_page(&app_handle);
+                        set_startup_error(&state, message, data_root, Some(&app_handle));
                         return;
                     }
                 }

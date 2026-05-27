@@ -145,6 +145,10 @@ function emptyDraft(): Draft {
   };
 }
 
+function providerHasStoredKey(provider: ProviderItemOut | null | undefined): boolean {
+  return Boolean(provider?.api_key_hint?.trim());
+}
+
 function toProxyDraft(p: ProviderProxyOut): ProxyDraft {
   return {
     _key: nextKey(),
@@ -489,8 +493,9 @@ export function ProvidersPanel() {
         setEditingIdx(i);
         return;
       }
-      const isExisting = serverItems.some((s) => s.name === d.name.trim());
-      if (!d.api_key && !isExisting && d.enabled) {
+      const existingProvider = serverItems.find((s) => s.name.trim() === d.name.trim());
+      const hasStoredKey = providerHasStoredKey(existingProvider);
+      if (!d.api_key.trim() && !hasStoredKey && d.enabled) {
         setGlobalError(`「${d.name}」缺少 API 密钥`);
         setEditingIdx(i);
         return;
@@ -519,11 +524,12 @@ export function ProvidersPanel() {
     const providerPayload: ProviderItemIn[] = drafts.map((d) => {
       const name = d.name.trim();
       const apiKey = d.api_key.trim();
-      const isExisting = serverItems.some((s) => s.name === name);
+      const existingProvider = serverItems.find((s) => s.name.trim() === name);
+      const hasStoredKey = providerHasStoredKey(existingProvider);
       return {
         name,
         base_url: d.base_url.trim(),
-        ...(apiKey || !isExisting ? { api_key: apiKey } : {}),
+        ...(apiKey || !hasStoredKey ? { api_key: apiKey } : {}),
         priority: d.priority,
         weight: Math.max(1, d.weight),
         enabled: d.enabled,
@@ -771,7 +777,7 @@ export function ProvidersPanel() {
             editingIdx={editingIdx}
             deleteConfirmIdx={deleteConfirmIdx}
             fieldErrors={draftErrors}
-            serverNames={new Set(serverItems.map((s) => s.name))}
+            serverKeyHints={new Map(serverItems.map((s) => [s.name.trim(), s.api_key_hint]))}
             newCardRef={newCardRef}
             onEdit={setEditingIdx}
             onUpdate={updateDraft}
@@ -1417,7 +1423,12 @@ function ProviderCard({
           (p.enabled ? "text-[var(--fg-1)]" : "text-[var(--fg-2)]")
         }
       >
-        <MetaItem label="密钥" value={p.api_key_hint} mono />
+        <MetaItem
+          label="密钥"
+          value={p.api_key_hint || "未保存"}
+          mono
+          color={p.api_key_hint ? undefined : "text-danger"}
+        />
         <MetaSep />
         <MetaItem label="优先级" value={String(p.priority)} mono />
         <MetaSep />
@@ -1594,11 +1605,17 @@ function ProbeStatusBadge({
   }
   return (
     <span
-      className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-danger-soft text-danger border border-danger-border"
+      role="alert"
+      className="shrink-0 inline-flex max-w-[260px] items-center gap-1.5 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-danger-soft text-danger border border-danger-border"
       title={probe.error ?? undefined}
     >
       <span className="w-1.5 h-1.5 rounded-full bg-danger shadow-[var(--shadow-2)]" />
       异常
+      {probe.error ? (
+        <span role="alert" className="truncate text-danger/85">
+          {probe.error}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -1613,7 +1630,7 @@ function DraftList({
   editingIdx,
   deleteConfirmIdx,
   fieldErrors,
-  serverNames,
+  serverKeyHints,
   newCardRef,
   onEdit,
   onUpdate,
@@ -1626,7 +1643,7 @@ function DraftList({
   editingIdx: number | null;
   deleteConfirmIdx: number | null;
   fieldErrors: Record<number, FieldErrors>;
-  serverNames: Set<string>;
+  serverKeyHints: Map<string, string>;
   newCardRef: React.RefObject<HTMLDivElement | null>;
   onEdit: (idx: number | null) => void;
   onUpdate: (idx: number, patch: Partial<Draft>) => void;
@@ -1656,7 +1673,8 @@ function DraftList({
           expanded={editingIdx === i}
           showDeleteConfirm={deleteConfirmIdx === i}
           errors={fieldErrors[i]}
-          isExisting={serverNames.has(d.name.trim())}
+          isExisting={serverKeyHints.has(d.name.trim())}
+          hasExistingKey={Boolean(serverKeyHints.get(d.name.trim())?.trim())}
           onToggle={() => onEdit(editingIdx === i ? null : i)}
           onUpdate={(patch) => onUpdate(i, patch)}
           onRemove={() => onRemove(i)}
@@ -1681,6 +1699,7 @@ const DraftCard = forwardRef<
     showDeleteConfirm: boolean;
     errors?: FieldErrors;
     isExisting: boolean;
+    hasExistingKey: boolean;
     onToggle: () => void;
     onUpdate: (patch: Partial<Draft>) => void;
     onRemove: () => void;
@@ -1697,6 +1716,7 @@ const DraftCard = forwardRef<
     showDeleteConfirm,
     errors,
     isExisting,
+    hasExistingKey,
     onToggle,
     onUpdate,
     onRemove,
@@ -1794,7 +1814,7 @@ const DraftCard = forwardRef<
           >
             <div className="px-5 pb-5 space-y-4 border-t border-[var(--border-subtle)] pt-4">
               {/* 名称 + URL */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Field
                   label="名称"
                   required
@@ -1830,16 +1850,20 @@ const DraftCard = forwardRef<
               <Field
                 label="API 密钥"
                 hint={
-                  isExisting ? "留空保持原值不变" : "新增供应商必须填写"
+                  isExisting
+                    ? hasExistingKey
+                      ? "留空保持原值不变"
+                      : "当前没有保存密钥，启用前必须填写"
+                    : "新增供应商必须填写"
                 }
-                required={!isExisting}
+                required={!isExisting || !hasExistingKey}
               >
                 <input
                   type="password"
                   value={draft.api_key}
                   onChange={(e) => onUpdate({ api_key: e.target.value })}
                   placeholder={
-                    isExisting ? "（留空保持不变）" : "sk-..."
+                    isExisting && hasExistingKey ? "（留空保持不变）" : "sk-..."
                   }
                   autoComplete="new-password"
                   className={fieldCls(false)}
@@ -1905,7 +1929,7 @@ const DraftCard = forwardRef<
               </Field>
 
               {/* 优先级 + 权重 + 并发 + 启用 + 异步生图 */}
-              <div className="grid grid-cols-1 sm:grid-cols-5 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                 <Field label="优先级" hint="越大越优先">
                   <input
                     type="number"
@@ -2001,7 +2025,7 @@ const DraftCard = forwardRef<
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 rounded-[var(--radius-panel)] bg-white/[0.02] border border-[var(--border-subtle)]">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-3 rounded-[var(--radius-panel)] bg-white/[0.02] border border-[var(--border-subtle)]">
                 <div className="flex flex-col">
                   <label className="text-xs text-[var(--fg-1)] font-medium mb-1.5">
                     接口偏好

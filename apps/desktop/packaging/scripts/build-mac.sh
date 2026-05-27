@@ -4,11 +4,32 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$ROOT"
 
+CLEAN_TAURI_OUTPUTS="${LUMEN_CLEAN_TAURI_OUTPUTS:-0}"
+for arg in "$@"; do
+  case "$arg" in
+    --clean) CLEAN_TAURI_OUTPUTS=1 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
 export NEXT_PUBLIC_LUMEN_RUNTIME=desktop
 export LUMEN_BACKEND_URL="${LUMEN_BACKEND_URL:-http://127.0.0.1:8000}"
 GARNET_VERSION="${GARNET_VERSION:-1.1.9}"
 DOTNET_RUNTIME_VERSION="${DOTNET_RUNTIME_VERSION:-8.0.27}"
-NODE_RUNTIME_VERSION="${NODE_RUNTIME_VERSION:-$(node -p 'process.versions.node')}"
+
+resolve_node_runtime_version() {
+  if [ -n "${NODE_RUNTIME_VERSION:-}" ]; then
+    printf '%s\n' "${NODE_RUNTIME_VERSION#v}"
+    return
+  fi
+  if [ -f NODE_VERSION ]; then
+    sed 's/^v//' NODE_VERSION
+    return
+  fi
+  node -e "const pkg=require('./apps/web/package.json'); const raw=(pkg.engines&&pkg.engines.node)||process.versions.node; console.log(String(raw).replace(/^[^0-9]*/, '').split(/[ <>=|]/)[0]);"
+}
+
+NODE_RUNTIME_VERSION="$(resolve_node_runtime_version)"
 
 if command -v brew >/dev/null 2>&1; then
   LIBPQ_PREFIX="$(brew --prefix libpq 2>/dev/null || true)"
@@ -97,7 +118,10 @@ prepare_node_runtime() {
   mkdir -p "$dest"
   if [ -n "${NODE_RUNTIME_DIR:-}" ]; then
     cp -R "$NODE_RUNTIME_DIR"/. "$dest"/
-    if [ -x "$dest/bin/node" ] && [ ! -e "$dest/node" ]; then
+    if [ -x "$dest/bin/node" ]; then
+      if [ -e "$dest/node" ] || [ -L "$dest/node" ]; then
+        rm -rf "$dest/node"
+      fi
       ln -s bin/node "$dest/node"
     fi
     chmod +x "$dest/node" "$dest/bin/node" 2>/dev/null || true
@@ -121,7 +145,10 @@ prepare_node_runtime() {
       -o "$tmp/node.tar.xz"
     tar -xf "$tmp/node.tar.xz" -C "$tmp"
     cp -R "$tmp/node-v${version}-darwin-${arch}"/. "$dest"/
-    ln -sf bin/node "$dest/node"
+    if [ -e "$dest/node" ] || [ -L "$dest/node" ]; then
+      rm -rf "$dest/node"
+    fi
+    ln -s bin/node "$dest/node"
     chmod +x "$dest/node" "$dest/bin/node" 2>/dev/null || true
   )
 }
@@ -142,6 +169,12 @@ clean_tauri_outputs() {
       "$profile_dir/lumen-worker" \
       "$profile_dir/lumen-redis"
   done
+}
+
+maybe_clean_tauri_outputs() {
+  if [ "$CLEAN_TAURI_OUTPUTS" = "1" ]; then
+    clean_tauri_outputs
+  fi
 }
 
 prepare_static_resource_placeholders() {
@@ -192,6 +225,18 @@ verify_desktop_resources() {
   apps/desktop/resources/runtime/node/node --version >/dev/null
 }
 
+verify_garnet_cli() {
+  local bin="apps/desktop/resources/runtime/lumen-redis/lumen-redis"
+  local help
+  help="$("$bin" --help 2>&1 || true)"
+  for flag in --lua --checkpointdir --aof --recover; do
+    if ! grep -F -- "$flag" <<<"$help" >/dev/null; then
+      echo "bundled Garnet runtime does not advertise required flag $flag" >&2
+      exit 1
+    fi
+  done
+}
+
 prepare_tauri_config_args() {
   TAURI_CONFIG_ARGS=()
   TAURI_CONFIG_ARGS_COUNT=0
@@ -216,7 +261,20 @@ from pathlib import Path
 
 config = {
     "bundle": {"createUpdaterArtifacts": True},
-    "plugins": {"updater": {"pubkey": os.environ["TAURI_UPDATER_PUBKEY"]}},
+    "plugins": {
+        "updater": {
+            "active": True,
+            "endpoints": [
+                item.strip()
+                for item in os.environ.get(
+                    "LUMEN_UPDATER_ENDPOINT",
+                    "https://github.com/cyeinfpro/Lumen/releases/latest/download/latest.json",
+                ).split(",")
+                if item.strip()
+            ],
+            "pubkey": os.environ["TAURI_UPDATER_PUBKEY"],
+        }
+    },
 }
 Path(os.environ["TAURI_UPDATER_CONFIG_PATH"]).write_text(
     json.dumps(config, ensure_ascii=False, indent=2),
@@ -268,6 +326,26 @@ verify_macos_dmg_bundle_signature() {
     set +e
     codesign --verify --deep --strict --verbose=2 "$app"
     status=$?
+    if [ "$status" -eq 0 ] && command -v spctl >/dev/null 2>&1; then
+      spctl --assess --type execute "$app" >/dev/null 2>&1
+      spctl_status=$?
+      if [ "$spctl_status" -ne 0 ]; then
+        echo "warning: Gatekeeper assessment failed for $app; notarization may be missing" >&2
+        if [ "${LUMEN_REQUIRE_MAC_NOTARIZATION:-0}" = "1" ]; then
+          status=$spctl_status
+        fi
+      fi
+    fi
+    if [ "$status" -eq 0 ] && command -v xcrun >/dev/null 2>&1; then
+      xcrun stapler validate "$app" >/dev/null 2>&1
+      stapler_status=$?
+      if [ "$stapler_status" -ne 0 ]; then
+        echo "warning: notarization staple validation failed for $app" >&2
+        if [ "${LUMEN_REQUIRE_MAC_NOTARIZATION:-0}" = "1" ]; then
+          status=$stapler_status
+        fi
+      fi
+    fi
     set -e
     hdiutil detach "$mount" -quiet >/dev/null 2>&1 || hdiutil detach "$mount" -force -quiet >/dev/null 2>&1 || true
     rm -rf "$work"
@@ -307,7 +385,7 @@ uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath app
   apps/desktop/packaging/pyinstaller/lumen-api.spec
 uv run --with "pyinstaller>=6,<7" pyinstaller --clean --noconfirm --distpath apps/desktop/dist \
   apps/desktop/packaging/pyinstaller/lumen-worker.spec
-clean_tauri_outputs
+maybe_clean_tauri_outputs
 prepare_static_resource_placeholders
 
 rm -rf apps/desktop/resources/runtime/lumen-api apps/desktop/resources/runtime/lumen-worker
@@ -318,8 +396,9 @@ prepare_garnet
 prepare_dotnet_runtime
 prepare_static_resource_placeholders
 verify_desktop_resources
+verify_garnet_cli
 
-clean_tauri_outputs
+maybe_clean_tauri_outputs
 prepare_tauri_config_args
 prepare_macos_signing_env
 (

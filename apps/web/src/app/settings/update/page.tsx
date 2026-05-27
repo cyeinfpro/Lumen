@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -15,17 +16,21 @@ import {
   checkDesktopUpdate,
   installDesktopUpdate,
   isDesktopRuntime,
+  listenDesktopEvent,
   type DesktopUpdateCheck,
+  type DesktopUpdateProgress,
 } from "@/lib/desktop/runtime";
 
 function StatusCard({
   result,
   installing,
   onInstall,
+  progress,
 }: {
   result: DesktopUpdateCheck;
   installing: boolean;
   onInstall: () => void;
+  progress: DesktopUpdateProgress | null;
 }) {
   if (result.available) {
     return (
@@ -59,6 +64,23 @@ function StatusCard({
             {result.body}
           </p>
         ) : null}
+        {installing && progress ? (
+          <div className="mt-4">
+            <div className="h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
+              <div
+                className="h-full rounded-full bg-success"
+                style={{
+                  width: `${Math.min(100, Math.max(0, progress.percent ?? 0))}%`,
+                }}
+              />
+            </div>
+            <p className="mt-2 text-[12px] text-[var(--fg-2)]">
+              {progress.percent != null
+                ? `已下载 ${progress.percent.toFixed(1)}%`
+                : `已下载 ${Math.round(progress.downloaded / 1024 / 1024)} MB`}
+            </p>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -78,12 +100,30 @@ function StatusCard({
 
 export default function DesktopUpdatePage() {
   const desktop = isDesktopRuntime();
+  const [progress, setProgress] = useState<DesktopUpdateProgress | null>(null);
   const checkMut = useMutation({
     mutationFn: checkDesktopUpdate,
   });
   const installMut = useMutation({
     mutationFn: installDesktopUpdate,
+    onMutate: () => setProgress(null),
   });
+
+  useEffect(() => {
+    if (!desktop) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listenDesktopEvent<DesktopUpdateProgress>("update://progress", (payload) => {
+      if (!disposed) setProgress(payload);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [desktop]);
 
   return (
     <SettingsShell
@@ -128,6 +168,7 @@ export default function DesktopUpdatePage() {
               <StatusCard
                 result={checkMut.data}
                 installing={installMut.isPending}
+                progress={progress}
                 onInstall={() => installMut.mutate()}
               />
             ) : null}

@@ -56,6 +56,20 @@ function Get-ListeningProcessIds {
   }
 }
 
+function Get-PortFile {
+  param([string]$Name)
+  $path = Join-Path $dataRoot "data/tmp/$Name.port"
+  if (-not (Test-Path $path)) {
+    return $null
+  }
+  $raw = (Get-Content $path -Raw -ErrorAction SilentlyContinue).Trim()
+  $port = 0
+  if ([int]::TryParse($raw, [ref]$port)) {
+    return $port
+  }
+  return $null
+}
+
 function Get-HttpStatus {
   param([string]$Uri)
   try {
@@ -254,17 +268,23 @@ try {
       }
     }
     if ($logsRoot -and (Test-Path $logsRoot)) {
+      if (-not $apiPort) {
+        $apiPort = Get-PortFile "api"
+      }
+      if (-not $webPort) {
+        $webPort = Get-PortFile "web"
+      }
       $apiErr = Join-Path $logsRoot "api.err.log"
       $webLog = Join-Path $logsRoot "web.log"
       if (Test-Path $apiErr) {
         $text = Get-Content $apiErr -Raw -ErrorAction SilentlyContinue
-        if ($text -match "Uvicorn running on http://127\.0\.0\.1:(\d+)") {
+        if (-not $apiPort -and $text -match "Uvicorn running on http://127\.0\.0\.1:(\d+)") {
           $apiPort = [int]$Matches[1]
         }
       }
       if (Test-Path $webLog) {
         $text = Get-Content $webLog -Raw -ErrorAction SilentlyContinue
-        if ($text -match "Local:\s+http://(?:localhost|127\.0\.0\.1):(\d+)") {
+        if (-not $webPort -and $text -match "Local:\s+http://(?:localhost|127\.0\.0\.1):(\d+)") {
           $webPort = [int]$Matches[1]
         }
       }
@@ -277,8 +297,8 @@ try {
             break
           }
         } catch {
-	    Start-Sleep -Milliseconds 250
-  }
+          Start-Sleep -Milliseconds 250
+        }
       }
     }
     if ($appProcess.HasExited) {

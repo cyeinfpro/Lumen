@@ -3,9 +3,7 @@
 export const DESKTOP_RUNTIME =
   process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop";
 
-type LumenDesktopBridge = {
-  invoke?: <T = unknown>(command: string, args?: Record<string, unknown>) => Promise<T>;
-};
+export type SidecarName = "redis" | "api" | "worker" | "web";
 
 export type DesktopRuntimeInfo = {
   data_root: string;
@@ -17,7 +15,7 @@ export type DesktopRuntimeInfo = {
 };
 
 export type DesktopSidecarStatus = {
-  name: "redis" | "api" | "worker" | "web" | string;
+  name: SidecarName;
   pid: number;
   running: boolean;
   exit_status: string | null;
@@ -119,15 +117,30 @@ export type DesktopUpdateCheck = {
   download_url: string | null;
 };
 
+export type DesktopUpdateInstallStatus =
+  | { status: "no_update" }
+  | { status: "installing"; version: string };
+
+export type DesktopUpdateProgress = {
+  downloaded: number;
+  total: number | null;
+  percent: number | null;
+};
+
 declare global {
   interface Window {
-    __LUMEN__?: LumenDesktopBridge;
     __TAURI__?: {
       core?: {
         invoke?: <T = unknown>(
           command: string,
           args?: Record<string, unknown>,
         ) => Promise<T>;
+      };
+      event?: {
+        listen?: <T = unknown>(
+          event: string,
+          handler: (event: { payload: T }) => void,
+        ) => Promise<() => void>;
       };
     };
   }
@@ -144,11 +157,22 @@ export async function desktopInvoke<T = unknown>(
   if (typeof window === "undefined") {
     throw new Error("desktop bridge is only available in the browser");
   }
-  const invoke = window.__LUMEN__?.invoke ?? window.__TAURI__?.core?.invoke;
+  // Tauri injects this because tauri.conf.json keeps app.withGlobalTauri=true.
+  const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke) {
     throw new Error("desktop bridge is unavailable");
   }
   return invoke<T>(command, args);
+}
+
+export async function listenDesktopEvent<T = unknown>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<() => void> {
+  if (typeof window === "undefined") return () => {};
+  const listen = window.__TAURI__?.event?.listen;
+  if (!listen) return () => {};
+  return listen<T>(event, (evt) => handler(evt.payload));
 }
 
 export async function revealDesktopDataDir(): Promise<void> {
@@ -193,6 +217,10 @@ export async function clearFailedRestoreMarker(): Promise<void> {
   await desktopInvoke("clear_failed_restore_marker");
 }
 
+export async function clearPendingRestore(): Promise<void> {
+  await desktopInvoke("clear_pending_restore");
+}
+
 export async function selectDesktopRestoreBackup(): Promise<DesktopRestorePlan | null> {
   return desktopInvoke<DesktopRestorePlan | null>("select_desktop_restore_backup");
 }
@@ -221,6 +249,6 @@ export async function checkDesktopUpdate(): Promise<DesktopUpdateCheck> {
   return desktopInvoke<DesktopUpdateCheck>("check_desktop_update");
 }
 
-export async function installDesktopUpdate(): Promise<boolean> {
-  return desktopInvoke<boolean>("install_desktop_update");
+export async function installDesktopUpdate(): Promise<DesktopUpdateInstallStatus> {
+  return desktopInvoke<DesktopUpdateInstallStatus>("install_desktop_update");
 }

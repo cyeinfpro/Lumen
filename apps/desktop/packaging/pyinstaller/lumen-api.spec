@@ -9,6 +9,7 @@ hiddenimports = [
     "aiosqlite",
     "sqlite_vec",
     "lumen_core.desktop_import",
+    "app.desktop_migrations",
     "alembic.runtime.migration",
     "uvicorn.logging",
     "uvicorn.loops.auto",
@@ -62,7 +63,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="lumen-api",
-    console=True,
+    console=False,
 )
 coll = COLLECT(
     exe,

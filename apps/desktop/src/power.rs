@@ -26,7 +26,7 @@ mod platform {
     const CFSTRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const IOPM_ASSERTION_LEVEL_ON: u32 = 255;
     const IOPM_ASSERTION_TYPE_PREVENT_IDLE_SYSTEM_SLEEP: &str = "PreventUserIdleSystemSleep";
-    const IOPM_ASSERTION_NAME: &str = "Lumen is processing local tasks";
+    const IOPM_ASSERTION_NAME: &str = "Lumen.app";
 
     type CFStringRef = *const c_void;
     type CFTypeRef = *const c_void;

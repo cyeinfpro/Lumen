@@ -13,6 +13,7 @@ const BACKUP_FORMAT_VERSION: u32 = 1;
 const PENDING_RESTORE_ZIP: &str = "pending-restore.lumen-backup.zip";
 const PENDING_RESTORE_JSON: &str = "pending-restore.json";
 const FAILED_RESTORE_JSON: &str = "pending-restore.failed.json";
+const STORAGE_RESTORE_SENTINEL: &str = "storage-restore-in-progress.json";
 const FIXED_BACKUP_ENTRIES: &[&str] = &[
     "data/db/lumen.sqlite",
     "data/settings.json",
@@ -184,6 +185,22 @@ pub fn pending_restore_status(data_root: &Path) -> PendingRestoreStatus {
         }
     }
 
+    let sentinel = storage_restore_sentinel_path(data_root);
+    if sentinel.is_file() {
+        return PendingRestoreStatus {
+            pending: false,
+            failed: true,
+            pending_path: None,
+            source_path: None,
+            scheduled_at_ms: None,
+            manifest: None,
+            last_error: Some(format!(
+                "storage restore was interrupted; inspect {} before starting",
+                sentinel.display()
+            )),
+        };
+    }
+
     PendingRestoreStatus {
         pending: false,
         failed: false,
@@ -229,10 +246,30 @@ pub fn apply_pending_restore(
 
 pub fn clear_failed_restore_marker(data_root: &Path) -> Result<()> {
     match fs::remove_file(failed_restore_json_path(data_root)) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).context("clear failed restore marker"),
+    }
+    match fs::remove_file(storage_restore_sentinel_path(data_root)) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).context("clear failed restore marker"),
     }
+}
+
+pub fn clear_pending_restore(data_root: &Path) -> Result<()> {
+    for path in [
+        pending_restore_json_path(data_root),
+        pending_restore_zip_path(data_root),
+        storage_restore_sentinel_path(data_root),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("clear {}", path.display())),
+        }
+    }
+    Ok(())
 }
 
 pub fn mark_pending_restore_failed(data_root: &Path, error: &str) -> Result<()> {
@@ -348,11 +385,8 @@ fn snapshot_database(data_root: &Path, snapshot_path: &Path) -> Result<BackupDat
     if let Some(parent) = snapshot_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("open sqlite database {}", db_path.display()))?;
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("open sqlite database {}", db_path.display()))?;
     conn.busy_timeout(Duration::from_secs(10))?;
     let quick_check = sqlite_quick_check(&conn)?;
     if quick_check != "ok" {
@@ -533,7 +567,16 @@ fn apply_pending_restore_inner(
         let safety_backup = if data_root.join("data/db/lumen.sqlite").exists()
             || data_root.join("data/storage").exists()
         {
-            Some(create_desktop_backup(data_root, app_version)?.path)
+            match create_desktop_backup(data_root, app_version) {
+                Ok(backup) => Some(backup.path),
+                Err(err) => {
+                    write_restore_log(
+                        data_root,
+                        &format!("safety backup failed before restore; continuing: {err:#}\n"),
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -611,8 +654,17 @@ fn extract_backup(zip_path: &Path, manifest: &BackupManifest, target_root: &Path
 fn restore_database(data_root: &Path, extract_root: &Path, present: bool) -> Result<()> {
     let db_dir = data_root.join("data/db");
     fs::create_dir_all(&db_dir)?;
+    let current_db = db_dir.join("lumen.sqlite");
+    if current_db.is_file() {
+        if let Ok(conn) =
+            Connection::open_with_flags(&current_db, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        {
+            let _ = conn.busy_timeout(Duration::from_secs(5));
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+    }
     for suffix in ["", "-wal", "-shm"] {
-        let _ = fs::remove_file(db_dir.join(format!("lumen.sqlite{suffix}")));
+        remove_file_retry(&db_dir.join(format!("lumen.sqlite{suffix}")))?;
     }
     if present {
         fs::copy(
@@ -648,6 +700,16 @@ fn restore_storage_dir(data_root: &Path, extract_root: &Path, now: u128) -> Resu
     let tmp = data_root
         .join("data")
         .join(format!("storage.restore-tmp-{now}"));
+    let sentinel = storage_restore_sentinel_path(data_root);
+    write_json_private(
+        &sentinel,
+        &serde_json::json!({
+            "started_at_ms": now,
+            "target": target,
+            "backup": old,
+        }),
+    )
+    .context("write storage restore sentinel")?;
     let _ = fs::remove_dir_all(&old);
     let _ = fs::remove_dir_all(&tmp);
     let stage_result = if source.is_dir() {
@@ -660,20 +722,79 @@ fn restore_storage_dir(data_root: &Path, extract_root: &Path, now: u128) -> Resu
         return Err(err);
     }
     if target.exists() {
-        if let Err(err) = fs::rename(&target, &old).context("move current storage out of the way") {
+        if let Err(err) = rename_retry(&target, &old).context("move current storage out of the way")
+        {
             let _ = fs::remove_dir_all(&tmp);
+            let _ = fs::remove_file(&sentinel);
             return Err(err);
         }
     }
-    if let Err(err) = fs::rename(&tmp, &target).context("install restored storage directory") {
+    if let Err(err) = rename_retry(&tmp, &target).context("install restored storage directory") {
         if old.exists() && !target.exists() {
-            let _ = fs::rename(&old, &target);
+            if let Err(rollback_err) = rename_retry(&old, &target) {
+                write_restore_log(
+                    data_root,
+                    &format!(
+                        "storage restore rollback failed backup={} target={} error={rollback_err:#}\n",
+                        old.display(),
+                        target.display()
+                    ),
+                );
+                let _ = fs::remove_dir_all(&tmp);
+                return Err(err).with_context(|| {
+                    format!(
+                        "storage restore failed and rollback failed; original storage remains at {}",
+                        old.display()
+                    )
+                });
+            }
         }
         let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_file(&sentinel);
         return Err(err);
     }
     let _ = fs::remove_dir_all(old);
+    let _ = fs::remove_file(sentinel);
     Ok(())
+}
+
+fn remove_file_retry(path: &Path) -> Result<()> {
+    retry_fs_op(|| match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    })
+    .with_context(|| format!("remove {}", path.display()))
+}
+
+fn rename_retry(from: &Path, to: &Path) -> Result<()> {
+    retry_fs_op(|| fs::rename(from, to))
+        .with_context(|| format!("rename {} to {}", from.display(), to.display()))
+}
+
+fn retry_fs_op<F>(mut op: F) -> Result<()>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    let delays = [
+        Duration::from_millis(0),
+        Duration::from_millis(100),
+        Duration::from_millis(500),
+        Duration::from_secs(1),
+    ];
+    let mut last_err = None;
+    for delay in delays {
+        if delay > Duration::from_millis(0) {
+            std::thread::sleep(delay);
+        }
+        match op() {
+            Ok(()) => return Ok(()),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("filesystem operation failed")))
 }
 
 fn copy_dir_all(source: &Path, target: &Path) -> Result<()> {
@@ -790,6 +911,10 @@ fn pending_restore_json_path(data_root: &Path) -> PathBuf {
 
 fn failed_restore_json_path(data_root: &Path) -> PathBuf {
     data_root.join("data/tmp").join(FAILED_RESTORE_JSON)
+}
+
+fn storage_restore_sentinel_path(data_root: &Path) -> PathBuf {
+    data_root.join("data/tmp").join(STORAGE_RESTORE_SENTINEL)
 }
 
 fn write_json_private<T: Serialize>(path: &Path, value: &T) -> Result<()> {

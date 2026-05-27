@@ -37,6 +37,25 @@ WEB_PROXY = ROOT / "apps" / "web" / "src" / "proxy.ts"
 WEB_COMMAND_PALETTE = (
     ROOT / "apps" / "web" / "src" / "components" / "ui" / "CommandPalette.tsx"
 )
+DESKTOP_BACKUP_RS = ROOT / "apps" / "desktop" / "src" / "backup.rs"
+DESKTOP_SECRETS_RS = ROOT / "apps" / "desktop" / "src" / "secrets.rs"
+DESKTOP_DIAGNOSTICS_RS = ROOT / "apps" / "desktop" / "src" / "diagnostics.rs"
+DESKTOP_ENTRY = ROOT / "apps" / "api" / "app" / "desktop_entry.py"
+DESKTOP_RUNTIME_TS = ROOT / "apps" / "web" / "src" / "lib" / "desktop" / "runtime.ts"
+API_HTTP_TS = ROOT / "apps" / "web" / "src" / "lib" / "api" / "http.ts"
+WEB_PROVIDERS_PANEL = (
+    ROOT / "apps" / "web" / "src" / "app" / "admin" / "_panels" / "ProvidersPanel.tsx"
+)
+WEB_ADMIN_UPDATE_PANEL = (
+    ROOT / "apps" / "web" / "src" / "app" / "admin" / "_panels" / "AdminUpdatePanel.tsx"
+)
+WEB_STORAGE_PAGE = ROOT / "apps" / "web" / "src" / "app" / "settings" / "storage" / "page.tsx"
+WEB_BOOTSTRAP_GATE = (
+    ROOT / "apps" / "web" / "src" / "components" / "desktop" / "DesktopBootstrapGate.tsx"
+)
+ENTITLEMENTS = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "lumen.entitlements"
+SIGN_WIN = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "sign-win.ps1"
+STARTUP_HTML = ROOT / "apps" / "desktop" / "packaging" / "startup" / "index.html"
 
 
 def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
@@ -169,7 +188,7 @@ def test_desktop_runtime_logs_are_rotated() -> None:
     assert "DESKTOP_LOG_ROTATE_KEEP" in text
     assert "open_rotated_log_file" in text
     assert "rotate_log_if_needed(&path)" in text
-    assert 'open_rotated_log_file(&self.runtime.data_root, "supervisor.log")' in text
+    assert 'open_rotated_log_file_unlocked(&self.runtime.data_root, "supervisor.log")' in text
     assert "log_sequence: Arc<AtomicU64>" in text
     assert '"sequence": sequence' in text
 
@@ -454,8 +473,119 @@ def test_desktop_close_to_tray_has_explicit_runtime_shutdown_exit() -> None:
     assert "api.prevent_close()" in text
     assert "window.hide()" in text
     assert "fn request_desktop_exit" in text
-    assert "guard.shutdown()" in text
+    assert "guard.shutdown_with_timeout(Duration::from_secs(5))" in text
     assert "app.exit(0)" in text
+
+
+def test_desktop_audit_runtime_hardening_regressions() -> None:
+    sidecar = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
+    main = DESKTOP_MAIN_RS.read_text(encoding="utf-8")
+    backup = DESKTOP_BACKUP_RS.read_text(encoding="utf-8")
+    secrets = DESKTOP_SECRETS_RS.read_text(encoding="utf-8")
+    docker_import = DESKTOP_DOCKER_IMPORT_RS.read_text(encoding="utf-8")
+    diagnostics = DESKTOP_DIAGNOSTICS_RS.read_text(encoding="utf-8")
+    desktop_entry = DESKTOP_ENTRY.read_text(encoding="utf-8")
+
+    for snippet in [
+        "enum RedisProbeError",
+        "RedisProbeError::Fatal",
+        "redis lua eval failed",
+        "redis ping returned",
+        "full_restart_suppressed",
+        "sidecar_restart_suppressed",
+        "run_desktop_migrations",
+        '"desktop-migrate"',
+        'join(format!("{name}.port"))',
+        "decode_chunked_body",
+        "read_http_head_async",
+        "cleanup_stale_runtime_workdirs",
+    ]:
+        assert snippet in sidecar
+    assert "spawn_all_with_timeout(&mut supervisor, Duration::from_secs(90))" in main
+    assert 'cache_dir.join("updater")' in main
+    assert "UpdateInstallStatus" in main
+    assert '"update://progress"' in main
+    assert "clear_pending_restore" in main
+    assert "is_probably_port_conflict" in main
+
+    assert "STORAGE_RESTORE_SENTINEL" in backup
+    assert "wal_checkpoint(TRUNCATE)" in backup
+    assert "rename_retry" in backup
+    assert "safety backup failed before restore; continuing" in backup
+    assert "OpenFlags::SQLITE_OPEN_READ_ONLY" in backup
+    assert "Value::Null" in secrets
+    assert "secrets-out-of-sync.log" in secrets
+    assert 'with_file_name(format!' in secrets
+    assert "command.process_group(0)" in docker_import
+    assert "taskkill" in docker_import
+    assert "read_tail_bytes" in docker_import
+    assert "[REDACTED sensitive line]" not in diagnostics
+    assert "redact_keyed_value" in diagnostics
+    assert "redact_prefixed_secret" in diagnostics
+    assert '"desktop-migrate"' in desktop_entry
+
+
+def test_desktop_audit_packaging_and_smoke_hardening() -> None:
+    tauri_conf = TAURI_CONF.read_text(encoding="utf-8")
+    entitlements = ENTITLEMENTS.read_text(encoding="utf-8")
+    build_mac = BUILD_MAC.read_text(encoding="utf-8")
+    build_win = BUILD_WIN.read_text(encoding="utf-8")
+    sign_win = SIGN_WIN.read_text(encoding="utf-8")
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+    smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
+    startup_html = STARTUP_HTML.read_text(encoding="utf-8")
+
+    assert '"minWidth": 880' in tauri_conf
+    assert '"csp": null' not in tauri_conf
+    assert '"publisher": "Lumen"' in tauri_conf
+    assert '"installerHooks": "windows/hooks.nsh"' in tauri_conf
+    assert '"active": false' in tauri_conf
+    assert "com.apple.security.cs.allow-jit" in entitlements
+    assert "com.apple.security.cs.allow-unsigned-executable-memory" in entitlements
+    assert "com.apple.security.cs.disable-library-validation" in entitlements
+    for path in (PYINSTALLER_API_SPEC, PYINSTALLER_WORKER_SPEC):
+        assert "console=False" in path.read_text(encoding="utf-8")
+
+    for text in (build_mac, build_win):
+        assert "LUMEN_UPDATER_ENDPOINT" in text
+        assert "active" in text
+        assert "Verify-GarnetCli" in text or "verify_garnet_cli" in text
+    assert "spctl --assess --type execute" in build_mac
+    assert "xcrun stapler validate" in build_mac
+    assert "--clean" in build_mac
+    assert "param(" in build_win and "[switch]$Clean" in build_win
+    assert "WINDOWS_SIGNING_THUMBPRINT" in build_win
+    assert "Thumbprint or CertPath is required" in sign_win
+    assert "/sha1" in sign_win
+    assert "/a" not in sign_win
+    assert "Get-PortFile" in smoke_win
+    assert "read_port_file" in smoke_mac
+    assert "find \"$ROOT/apps/desktop/target/release/bundle/dmg\"" in smoke_mac
+    assert 'aria-live="polite"' in startup_html
+
+
+def test_desktop_audit_web_bridge_and_api_hardening() -> None:
+    runtime = DESKTOP_RUNTIME_TS.read_text(encoding="utf-8")
+    http = API_HTTP_TS.read_text(encoding="utf-8")
+    providers = WEB_PROVIDERS_PANEL.read_text(encoding="utf-8")
+    admin_update = WEB_ADMIN_UPDATE_PANEL.read_text(encoding="utf-8")
+    storage = WEB_STORAGE_PAGE.read_text(encoding="utf-8")
+    bootstrap = WEB_BOOTSTRAP_GATE.read_text(encoding="utf-8")
+
+    assert "__LUMEN__" not in runtime
+    assert 'type SidecarName = "redis" | "api" | "worker" | "web"' in runtime
+    assert "listenDesktopEvent" in runtime
+    assert "DesktopUpdateInstallStatus" in runtime
+    assert "clear_pending_restore" in runtime
+    assert "body instanceof URLSearchParams" in http
+    assert "fetchWithRetryableHttp" in http
+    assert 'NEXT_PUBLIC_LUMEN_RUNTIME === "desktop"' in http
+    assert "return null as T" in http
+    assert "s.name.trim() === d.name.trim()" in providers
+    assert "new Map(serverItems.map((s) => [s.name.trim(), s.api_key_hint]))" in providers
+    assert "if (isDesktopRuntime()) return null" in admin_update
+    assert "clearPendingRestore" in storage
+    assert "取消恢复" in bootstrap
 
 
 def test_desktop_sleep_protection_tracks_running_tasks_only() -> None:

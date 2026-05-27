@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -305,6 +305,11 @@ fn apply_pending_docker_import_inner(
 
     let mut command = Command::new(resolve_sidecar("lumen-api")?);
     hide_windows_console(&mut command);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command
         .arg("desktop-import")
         .arg("--dump")
@@ -400,7 +405,7 @@ fn run_importer_with_timeout(mut command: Command) -> Result<std::process::Outpu
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            terminate_process_tree(&mut child);
             let _ = child.wait();
             let _ = fs::remove_dir_all(&capture_root);
             bail!("Docker desktop importer timed out after {timeout_secs}s");
@@ -409,14 +414,81 @@ fn run_importer_with_timeout(mut command: Command) -> Result<std::process::Outpu
     };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let _ = fs::File::open(&stdout_path).and_then(|mut file| file.read_to_end(&mut stdout));
-    let _ = fs::File::open(&stderr_path).and_then(|mut file| file.read_to_end(&mut stderr));
+    let _ = read_tail_bytes(&stdout_path, 256 * 1024).map(|data| stdout = data);
+    let _ = read_tail_bytes(&stderr_path, 256 * 1024).map(|data| stderr = data);
     let _ = fs::remove_dir_all(&capture_root);
     Ok(std::process::Output {
         status,
         stdout,
         stderr,
     })
+}
+
+fn read_tail_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > max_bytes {
+        file.seek(SeekFrom::End(-(max_bytes as i64)))?;
+    }
+    let mut out = Vec::with_capacity(max_bytes.min(len) as usize);
+    file.read_to_end(&mut out)?;
+    Ok(out)
+}
+
+fn terminate_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        signal_unix_process_tree(child.id(), "TERM");
+        thread::sleep(Duration::from_millis(500));
+        signal_unix_process_tree(child.id(), "KILL");
+    }
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let mut command = Command::new("taskkill");
+        hide_windows_console(&mut command);
+        let _ = command
+            .arg("/PID")
+            .arg(pid)
+            .arg("/T")
+            .arg("/F")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn signal_unix_process_tree(pid: u32, signal: &str) {
+    let current_pgid = unix_process_group(std::process::id());
+    let child_pgid = unix_process_group(pid);
+    let target = match (child_pgid, current_pgid) {
+        (Some(child), Some(current)) if child != current => format!("-{child}"),
+        (Some(child), None) => format!("-{child}"),
+        _ => pid.to_string(),
+    };
+    let _ = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(unix)]
+fn unix_process_group(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
 }
 
 #[cfg(windows)]
