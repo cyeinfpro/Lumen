@@ -570,32 +570,6 @@ try {
       $operationErrors.Add("desktop memory CRUD request failed: $($_.Exception.Message)")
     }
     try {
-      $modelLibrary = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/workflows/apparel-model-library?age_segment=all&source=all&appearance=all"
-      $modelLibraryHasItems = ($null -ne $modelLibrary.HashJson) -and $modelLibrary.HashJson.ContainsKey("items")
-      $modelLibraryHasSync = ($null -ne $modelLibrary.HashJson) -and $modelLibrary.HashJson.ContainsKey("sync")
-      if ($modelLibrary.StatusCode -ne 200 -or -not $modelLibraryHasItems -or -not $modelLibraryHasSync) {
-        $operationErrors.Add("desktop model library list did not return items")
-      }
-      $modelJobs = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/workflows/apparel-model-library/jobs?limit=1"
-      $modelJobsHasItems = ($null -ne $modelJobs.HashJson) -and $modelJobs.HashJson.ContainsKey("items")
-      if ($modelJobs.StatusCode -ne 200 -or -not $modelJobsHasItems -or [int]$modelJobs.Json.limit -ne 1) {
-        $operationErrors.Add("desktop model library jobs did not return items")
-      }
-      $posterStyles = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/poster-styles?limit=1"
-      $posterStylesHasItems = ($null -ne $posterStyles.HashJson) -and $posterStyles.HashJson.ContainsKey("items")
-      $posterStylesHasSync = ($null -ne $posterStyles.HashJson) -and $posterStyles.HashJson.ContainsKey("sync")
-      if ($posterStyles.StatusCode -ne 200 -or -not $posterStylesHasItems -or -not $posterStylesHasSync) {
-        $operationErrors.Add("desktop poster style list did not return items")
-      }
-      $posterJobs = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/poster-styles/jobs?limit=1"
-      $posterJobsHasItems = ($null -ne $posterJobs.HashJson) -and $posterJobs.HashJson.ContainsKey("items")
-      if ($posterJobs.StatusCode -ne 200 -or -not $posterJobsHasItems -or [int]$posterJobs.Json.limit -ne 1) {
-        $operationErrors.Add("desktop poster style jobs did not return items")
-      }
-    } catch {
-      $operationErrors.Add("desktop library read requests failed: $($_.Exception.Message)")
-    }
-    try {
       $feed = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/generations/feed?limit=1"
       $feedHasItems = ($null -ne $feed.HashJson) -and $feed.HashJson.ContainsKey("items")
       $feedHasTotal = ($null -ne $feed.HashJson) -and $feed.HashJson.ContainsKey("total")

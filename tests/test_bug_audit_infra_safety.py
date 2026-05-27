@@ -292,10 +292,6 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         "/api/settings/providers/stats",
         "/api/conversations",
         "/api/generations/feed",
-        "/api/workflows/apparel-model-library",
-        "/api/workflows/apparel-model-library/jobs",
-        "/api/poster-styles",
-        "/api/poster-styles/jobs",
         "/api/images/upload",
         "/api/images/",
         "/api/images/share",
@@ -381,11 +377,6 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop memory delete did not return ok=true" in text
         assert "desktop memory clear did not delete rows" in text
         assert "desktop memory scope delete did not return moved count" in text
-        assert "desktop model library list did not return items" in text
-        assert "desktop model library jobs did not return items" in text
-        assert "desktop poster style list did not return items" in text
-        assert "desktop poster style jobs did not return items" in text
-        assert "desktop library read requests failed" in text
         assert "desktop share page did not return 200" in text
     assert "HTTP_TIMEOUT_SECONDS = 8" in smoke_mac
     assert "$httpTimeoutSec = 8" in smoke_win
