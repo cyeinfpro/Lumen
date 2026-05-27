@@ -273,6 +273,8 @@ def test_desktop_headless_smoke_covers_command_backing_operations() -> None:
         assert snippet in main_rs
 
     for text in (smoke_mac, smoke_win):
+        assert "LUMEN_DATA_ROOT" in text
+        assert "LUMEN_DESKTOP_HEADLESS_SMOKE" in text
         assert "headless-command-smoke-ok.json" in text
         assert "desktop headless command smoke marker was not written" in text
         assert "desktop headless command smoke marker payload was invalid" in text

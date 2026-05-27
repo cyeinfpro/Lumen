@@ -12,7 +12,8 @@ fi
 work="$(mktemp -d)"
 mount="$work/mnt"
 home="$work/home"
-mkdir -p "$mount" "$home"
+data_root="$home/Library/Application Support/com.lumen.desktop"
+mkdir -p "$mount" "$home" "$data_root"
 app_pid=""
 
 cleanup() {
@@ -61,12 +62,14 @@ fi
   unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
   export HOME="$home"
   export APPLE_DISABLE_SANDBOX=1
+  export LUMEN_DATA_ROOT="$data_root"
+  export LUMEN_DESKTOP_HEADLESS_SMOKE=1
   "$app/Contents/MacOS/lumen-desktop"
 ) >"$work/app.stdout.log" 2>"$work/app.stderr.log" &
 app_pid=$!
 disown "$app_pid" 2>/dev/null || true
 
-HOME_DIR="$home" WORK_DIR="$work" MOUNT_DIR="$mount" APP_PID="$app_pid" python3 - <<'PY'
+HOME_DIR="$home" DATA_ROOT="$data_root" WORK_DIR="$work" MOUNT_DIR="$mount" APP_PID="$app_pid" python3 - <<'PY'
 import os
 import base64
 import json
@@ -81,11 +84,12 @@ import urllib.parse
 import urllib.request
 
 home = pathlib.Path(os.environ["HOME_DIR"])
+data_root = pathlib.Path(os.environ["DATA_ROOT"])
 work = pathlib.Path(os.environ["WORK_DIR"])
 mount = os.environ["MOUNT_DIR"]
 app_pid = int(os.environ["APP_PID"])
 mount_markers = {mount, os.path.realpath(mount)}
-logs_root = home / "Library/Application Support/com.lumen.desktop/data/logs"
+logs_root = data_root / "data/logs"
 api_port = None
 web_port = None
 HTTP_TIMEOUT_SECONDS = 8
