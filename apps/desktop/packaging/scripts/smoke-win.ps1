@@ -617,6 +617,9 @@ try {
   if ($combined.Contains("context_window.tiktoken_loading_slow")) {
     $errors.Add("packaged Python runtime fell back before tiktoken warmed")
   }
+  if ($combined.Contains("Lua scripting support disabled")) {
+    $errors.Add("redis lua scripting is disabled")
+  }
   if ([string]$logs["web.log"] -match "Network:\s+http://(?!(?:localhost|127\.0\.0\.1)(?::|/))|0\.0\.0\.0") {
     $errors.Add("web runtime is listening on a non-loopback interface")
   }
@@ -765,6 +768,26 @@ try {
       }
     }
     try {
+      $csrf = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/auth/csrf"
+      if ($csrf.StatusCode -ne 200 -or -not $csrf.Json -or $csrf.Json.csrf_token -ne "desktop-local-token") {
+        $errors.Add("desktop csrf did not return desktop-local-token")
+      }
+    } catch {
+      $errors.Add("desktop csrf request failed: $($_.Exception.Message)")
+    }
+    try {
+      $logout = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/auth/logout"
+      if ($logout.StatusCode -ne 204) {
+        $errors.Add("desktop logout returned $($logout.StatusCode)")
+      }
+      $authAfterLogout = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/auth/me"
+      if ($authAfterLogout -ne 200) {
+        $errors.Add("desktop auth/me failed after logout no-op")
+      }
+    } catch {
+      $errors.Add("desktop logout request failed: $($_.Exception.Message)")
+    }
+    try {
       $bootstrap = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/settings/bootstrap-complete" -Body @{
         settings = @{
           theme = "system"
@@ -788,6 +811,29 @@ try {
       $errors.Add("desktop bootstrap-status request failed: $($_.Exception.Message)")
     }
     try {
+      $diagnostics = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/settings/diagnostics"
+      $expectedDataRoot = ([System.IO.Path]::GetFullPath($dataRoot)).Replace("\", "/").TrimEnd("/")
+      $actualDataRoot = if ($diagnostics.Json) { ([string]$diagnostics.Json.data_root).Replace("\", "/").TrimEnd("/") } else { "" }
+      $logsRootValue = if ($diagnostics.Json) { ([string]$diagnostics.Json.logs_root).Replace("\", "/") } else { "" }
+      $settingsPath = if ($diagnostics.Json) { ([string]$diagnostics.Json.settings_path).Replace("\", "/") } else { "" }
+      $providerMetadataPath = if ($diagnostics.Json) { ([string]$diagnostics.Json.provider_metadata_path).Replace("\", "/") } else { "" }
+      $diskFreeBytes = if ($diagnostics.Json) { [int64]$diagnostics.Json.disk_free_bytes } else { 0 }
+      if (
+        $diagnostics.StatusCode -ne 200 -or
+        -not $diagnostics.Json -or
+        $actualDataRoot -ne $expectedDataRoot -or
+        -not $logsRootValue.EndsWith("/data/logs") -or
+        -not $settingsPath.EndsWith("/data/settings.json") -or
+        -not $providerMetadataPath.EndsWith("/data/providers.json") -or
+        $diagnostics.Json.bootstrap_complete -ne $true -or
+        $diskFreeBytes -le 0
+      ) {
+        $errors.Add("desktop diagnostics payload did not match runtime state")
+      }
+    } catch {
+      $errors.Add("desktop diagnostics request failed: $($_.Exception.Message)")
+    }
+    try {
       $settings = Invoke-JsonRequest -Method "PUT" -Uri "http://127.0.0.1:$webPort/api/settings/system" -Body @{
         items = @(
           @{ key = "providers.auto_probe_interval"; value = "0" },
@@ -799,6 +845,30 @@ try {
       }
     } catch {
       $errors.Add("desktop settings/system PUT request failed: $($_.Exception.Message)")
+    }
+    try {
+      $unsupportedSettings = Invoke-JsonRequest -Method "PUT" -Uri "http://127.0.0.1:$webPort/api/settings/system" -Body @{
+        items = @(
+          @{ key = "billing.enabled"; value = "true" }
+        )
+      }
+      if ($unsupportedSettings.StatusCode -ne 422) {
+        $errors.Add("desktop settings/system unsupported key returned $($unsupportedSettings.StatusCode)")
+      }
+    } catch {
+      $errors.Add("desktop settings/system unsupported key request failed: $($_.Exception.Message)")
+    }
+    try {
+      $invalidSettings = Invoke-JsonRequest -Method "PUT" -Uri "http://127.0.0.1:$webPort/api/settings/system" -Body @{
+        items = @(
+          @{ key = "providers.auto_probe_interval"; value = "not-an-int" }
+        )
+      }
+      if ($invalidSettings.StatusCode -ne 422) {
+        $errors.Add("desktop settings/system invalid value returned $($invalidSettings.StatusCode)")
+      }
+    } catch {
+      $errors.Add("desktop settings/system invalid value request failed: $($_.Exception.Message)")
     }
   }
   $deadProcessCount = @($processes.Values | Where-Object { -not $_ }).Count

@@ -489,6 +489,7 @@ impl Supervisor {
             .arg("Password")
             .arg("--password")
             .arg(&self.redis_password)
+            .arg("--lua")
             .arg("--checkpointdir")
             .arg(self.runtime.data_root.join("data/redis"))
             .arg("--aof")
@@ -1133,7 +1134,20 @@ async fn try_redis_ping(port: u16, password: &str) -> Result<bool> {
     }
     stream.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
     let ping_response = read_redis_response_async(&mut stream, Duration::from_millis(500)).await?;
-    Ok(ping_response.starts_with("+PONG"))
+    if !ping_response.starts_with("+PONG") {
+        return Ok(false);
+    }
+    stream
+        .write_all(b"*3\r\n$4\r\nEVAL\r\n$8\r\nreturn 1\r\n$1\r\n0\r\n")
+        .await?;
+    let eval_response = read_redis_response_async(&mut stream, Duration::from_millis(500)).await?;
+    if eval_response.starts_with('-') {
+        return Err(anyhow!(
+            "redis lua eval failed: {}",
+            eval_response.trim_end_matches("\r\n")
+        ));
+    }
+    Ok(eval_response.starts_with(":1"))
 }
 
 async fn read_redis_response_async(stream: &mut TcpStream, duration: Duration) -> Result<String> {
