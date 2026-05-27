@@ -451,8 +451,11 @@ try {
     }
     try {
       $feed = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/generations/feed?limit=1"
-      $feedItems = if ($feed.Json) { @($feed.Json.items) } else { $null }
-      if ($feed.StatusCode -ne 200 -or $null -eq $feedItems -or $null -eq $feed.Json.total) {
+      $feedItemsProp = if ($feed.Json) { $feed.Json.PSObject.Properties["items"] } else { $null }
+      $feedTotalProp = if ($feed.Json) { $feed.Json.PSObject.Properties["total"] } else { $null }
+      $feedItems = if ($feedItemsProp) { @($feedItemsProp.Value) } else { $null }
+      $feedTotal = if ($feedTotalProp) { $feedTotalProp.Value } else { $null }
+      if ($feed.StatusCode -ne 200 -or $null -eq $feedItems -or $null -eq $feedTotal) {
         $operationErrors.Add("desktop generations feed did not return an item list")
       }
       $invalidFeed = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/generations/feed?ratio=bad-ratio"
@@ -709,6 +712,9 @@ try {
   }
   if ($combined.Contains("Lua scripting support disabled")) {
     $errors.Add("redis lua scripting is disabled")
+  }
+  if ($combined.Contains("Unknown Redis command called from script") -or $combined.Contains("sse dedupe reservation has no stream id")) {
+    $errors.Add("redis lua xadd fallback did not handle Garnet")
   }
   if ([string]$logs["web.log"] -match "Network:\s+http://(?!(?:localhost|127\.0\.0\.1)(?::|/))|0\.0\.0\.0") {
     $errors.Add("web runtime is listening on a non-loopback interface")
