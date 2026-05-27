@@ -75,7 +75,7 @@ function RuntimeComponentPanel({ status }: { status: DesktopStatus | undefined }
     { name: "api", label: "业务接口", port: status?.runtime.api_port },
     { name: "worker", label: "任务引擎", port: status?.runtime.worker_metrics_port },
     { name: "web", label: "界面服务", port: status?.runtime.web_port },
-  ];
+  ] as const;
   const byName = new Map((status?.sidecars ?? []).map((item) => [item.name, item]));
 
   return (

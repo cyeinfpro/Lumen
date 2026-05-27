@@ -47,7 +47,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="lumen-worker",
-    console=True,
+    console=False,
 )
 coll = COLLECT(
     exe,

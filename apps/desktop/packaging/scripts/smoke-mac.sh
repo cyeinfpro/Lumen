@@ -2,7 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-DMG="${1:-$ROOT/apps/desktop/target/release/bundle/dmg/Lumen_$(cat "$ROOT/VERSION")_aarch64.dmg}"
+if [ "${1:-}" ]; then
+  DMG="$1"
+else
+  DMG="$(find "$ROOT/apps/desktop/target/release/bundle/dmg" -maxdepth 1 -type f -name 'Lumen_*.dmg' 2>/dev/null | sort | tail -n1)"
+fi
 
 if [ ! -f "$DMG" ]; then
   echo "missing dmg: $DMG" >&2
@@ -22,9 +26,8 @@ cleanup() {
     pkill -P "$app_pid" >/dev/null 2>&1 || true
     kill "$app_pid" >/dev/null 2>&1 || true
     sleep 1
-    pkill -P "$app_pid" >/dev/null 2>&1 || true
     kill -9 "$app_pid" >/dev/null 2>&1 || true
-    wait "$app_pid" >/dev/null 2>&1 || true
+    perl -e 'alarm 5; waitpid($ARGV[0], 0)' "$app_pid" >/dev/null 2>&1 || true
   fi
   pkill -f "$mount/Lumen.app/Contents" >/dev/null 2>&1 || true
   pkill -f "$mount/Lumen.app/Contents/.*lumen-(api|worker|redis)" >/dev/null 2>&1 || true
@@ -106,6 +109,16 @@ no_redirect_opener = urllib.request.build_opener(NoRedirect)
 def read_log(name):
     path = logs_root / name
     return path.read_text(errors="replace") if path.exists() else ""
+
+
+def read_port_file(name):
+    path = data_root / "data/tmp" / f"{name}.port"
+    if not path.exists():
+        return None
+    try:
+        return int(path.read_text(errors="replace").strip())
+    except ValueError:
+        return None
 
 
 def process_alive(pid):
@@ -263,13 +276,15 @@ def wait_until_ready(seconds):
     global api_port, web_port
     deadline = time.time() + seconds
     while time.time() < deadline:
+        api_port = api_port or read_port_file("api")
+        web_port = web_port or read_port_file("web")
         api_err = read_log("api.err.log")
         web_log = read_log("web.log")
         match = re.search(r"Uvicorn running on http://127\.0\.0\.1:(\d+)", api_err)
-        if match:
+        if match and not api_port:
             api_port = int(match.group(1))
         match = re.search(r"Local:\s+http://(?:localhost|127\.0\.0\.1):(\d+)", web_log)
-        if match:
+        if match and not web_port:
             web_port = int(match.group(1))
         if api_port and web_port:
             try:

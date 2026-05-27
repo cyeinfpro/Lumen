@@ -4,7 +4,12 @@
 <plist version="1.0">
 <dict>
   <!-- Hardened runtime without App Sandbox is intentional for the current desktop build. -->
-  <!-- Add audio-input or JIT entitlements only when a local inference runtime requires them. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
   <key>com.apple.security.network.client</key>
   <true/>
   <key>com.apple.security.files.user-selected.read-write</key>

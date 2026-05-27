@@ -20,6 +20,7 @@ import { apiFetch } from "@/lib/apiClient";
 import {
   clearFailedDockerImportMarker,
   clearFailedRestoreMarker,
+  clearPendingRestore,
   exportDesktopBackup,
   getDesktopDockerImportStatus,
   getDesktopRestoreStatus,
@@ -103,6 +104,12 @@ export default function DesktopStoragePage() {
   });
   const clearRestoreFailureMut = useMutation({
     mutationFn: clearFailedRestoreMarker,
+    onSuccess: () => {
+      void restoreQ.refetch();
+    },
+  });
+  const clearPendingRestoreMut = useMutation({
+    mutationFn: clearPendingRestore,
     onSuccess: () => {
       void restoreQ.refetch();
     },
@@ -278,7 +285,15 @@ export default function DesktopStoragePage() {
                     </div>
                   </div>
                 </div>
-                <div className="mt-3 flex justify-end">
+                <div className="mt-3 flex flex-wrap justify-end gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={clearPendingRestoreMut.isPending}
+                    onClick={() => clearPendingRestoreMut.mutate()}
+                  >
+                    取消恢复
+                  </Button>
                   <Button
                     variant="primary"
                     size="sm"

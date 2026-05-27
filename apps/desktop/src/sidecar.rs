@@ -5,7 +5,7 @@ use portpicker::pick_unused_port;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -14,12 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout};
+use tokio::time::{sleep, timeout, Instant as TokioInstant};
 
 #[cfg(not(test))]
 const DESKTOP_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
@@ -27,6 +27,13 @@ const DESKTOP_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 const DESKTOP_LOG_ROTATE_BYTES: u64 = 64;
 const DESKTOP_LOG_ROTATE_KEEP: usize = 5;
 const DESKTOP_TOKEN_HEADER: &str = "X-Lumen-Local-Token";
+const FULL_RESTART_WINDOW_MS: u128 = 5 * 60 * 1000;
+const FULL_RESTART_MAX_ATTEMPTS: usize = 3;
+const SIDECAR_RESTART_WINDOW_MS: u128 = 60 * 1000;
+const SIDECAR_RESTART_MAX_ATTEMPTS: usize = 3;
+const SIDECAR_STATUS_CACHE_MS: u128 = 750;
+const HTTP_HEAD_LIMIT_BYTES: usize = 1024;
+const STALE_WORKDIR_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeInfo {
@@ -74,7 +81,10 @@ pub struct Supervisor {
     restart_counts: BTreeMap<String, u64>,
     last_exit_statuses: BTreeMap<String, String>,
     last_restart_reasons: BTreeMap<String, String>,
+    sidecar_restart_attempts: BTreeMap<String, VecDeque<u128>>,
+    full_restart_attempts: VecDeque<u128>,
     started_at_ms: BTreeMap<String, u128>,
+    cached_statuses: Option<(u128, Vec<SidecarStatus>)>,
     provider_runtime_lock: Arc<Mutex<()>>,
     log_sequence: Arc<AtomicU64>,
 }
@@ -145,7 +155,10 @@ impl Supervisor {
             restart_counts: BTreeMap::new(),
             last_exit_statuses: BTreeMap::new(),
             last_restart_reasons: BTreeMap::new(),
+            sidecar_restart_attempts: BTreeMap::new(),
+            full_restart_attempts: VecDeque::new(),
             started_at_ms: BTreeMap::new(),
+            cached_statuses: None,
             provider_runtime_lock: Arc::new(Mutex::new(())),
             log_sequence: Arc::new(AtomicU64::new(1)),
         })
@@ -267,9 +280,10 @@ impl Supervisor {
 
     pub async fn spawn_all_with_progress<F>(&mut self, mut progress: F) -> Result<()>
     where
-        F: FnMut(&'static str),
+        F: FnMut(&str),
     {
         progress("准备本机运行时");
+        cleanup_stale_runtime_workdirs(&self.runtime.data_root);
         self.refresh_provider_runtime()?;
         progress("启动本地缓存");
         self.spawn_redis()?;
@@ -280,6 +294,9 @@ impl Supervisor {
         )
         .await?;
         progress("准备核心服务");
+        progress("升级本机数据库");
+        self.run_desktop_migrations()
+            .context("upgrade desktop SQLite database")?;
         self.spawn_api()?;
         wait_for_http_ok(
             self.runtime.api_port,
@@ -311,15 +328,38 @@ impl Supervisor {
             let _ = child.wait();
         }
         self.children.clear();
+        self.invalidate_status_cache();
+    }
+
+    pub fn shutdown_with_timeout(&mut self, duration: Duration) {
+        let _ =
+            self.log_supervisor_event("shutdown", json!({ "timeout_ms": duration.as_millis() }));
+        let deadline = StdInstant::now() + duration;
+        for (_name, child) in self.children.iter_mut().rev() {
+            let remaining = deadline
+                .checked_duration_since(StdInstant::now())
+                .unwrap_or_else(|| Duration::from_millis(0));
+            terminate_child_with_timeout(child, remaining);
+            let _ = child.wait();
+        }
+        self.children.clear();
+        self.invalidate_status_cache();
     }
 
     pub fn sidecar_statuses(&mut self) -> Vec<SidecarStatus> {
+        let now = unix_epoch_ms();
+        if let Some((cached_at, statuses)) = &self.cached_statuses {
+            if now.saturating_sub(*cached_at) <= SIDECAR_STATUS_CACHE_MS {
+                return statuses.clone();
+            }
+        }
         let runtime = self.runtime.clone();
         let restart_counts = self.restart_counts.clone();
         let last_exit_statuses = self.last_exit_statuses.clone();
         let last_restart_reasons = self.last_restart_reasons.clone();
         let started_at_ms = self.started_at_ms.clone();
-        self.children
+        let statuses = self
+            .children
             .iter_mut()
             .map(|(name, child)| {
                 let pid = child.id();
@@ -348,7 +388,9 @@ impl Supervisor {
                     stderr_log_path: sidecar_log_path(&runtime.data_root, name, true),
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        self.cached_statuses = Some((now, statuses.clone()));
+        statuses
     }
 
     pub fn write_heartbeat(&mut self) -> Result<()> {
@@ -361,6 +403,43 @@ impl Supervisor {
             self.record_restart(name, reason);
         }
         let _ = self.log_supervisor_event("full_restart", json!({ "reason": reason }));
+    }
+
+    pub fn full_restart_backoff(&mut self, reason: &str) -> Result<Duration> {
+        let now = unix_epoch_ms();
+        prune_attempts(&mut self.full_restart_attempts, now, FULL_RESTART_WINDOW_MS);
+        self.full_restart_attempts.push_back(now);
+        if self.full_restart_attempts.len() >= FULL_RESTART_MAX_ATTEMPTS {
+            let message = format!(
+                "desktop runtime entered a crash loop after {} full restarts in 5 minutes: {reason}",
+                self.full_restart_attempts.len()
+            );
+            let _ = self.log_supervisor_event(
+                "full_restart_suppressed",
+                json!({
+                    "reason": reason,
+                    "attempts": self.full_restart_attempts.len(),
+                    "window_ms": FULL_RESTART_WINDOW_MS,
+                }),
+            );
+            return Err(anyhow!(message));
+        }
+        let backoff = restart_backoff(self.full_restart_attempts.len());
+        let _ = self.log_supervisor_event(
+            "full_restart_backoff",
+            json!({
+                "reason": reason,
+                "attempts": self.full_restart_attempts.len(),
+                "backoff_ms": backoff.as_millis(),
+            }),
+        );
+        Ok(backoff)
+    }
+
+    pub fn reset_recovery_state(&mut self) {
+        self.full_restart_attempts.clear();
+        self.sidecar_restart_attempts.clear();
+        self.last_restart_reasons.clear();
     }
 
     pub fn note_startup_failure(&self, error: &str) {
@@ -414,6 +493,7 @@ impl Supervisor {
                     let status_text = status.to_string();
                     cleanup_exited_child(&mut child);
                     self.record_exit(&name, &status_text);
+                    self.invalidate_status_cache();
                     exited.push((name, status_text));
                 }
                 Ok(None) => idx += 1,
@@ -455,6 +535,12 @@ impl Supervisor {
                     .find(|(exited_name, _status)| exited_name == name)
                     .map(|(_exited_name, status)| format!("sidecar exited with {status}"))
                     .unwrap_or_else(|| "sidecar missing from supervisor state".to_string());
+                let Some(delay) = self.sidecar_restart_backoff(name, &reason) else {
+                    continue;
+                };
+                if delay > Duration::from_millis(0) {
+                    std::thread::sleep(delay);
+                }
                 self.spawn_by_name(name)?;
                 self.record_restart(name, &reason);
                 let _ = self.log_supervisor_event(
@@ -504,6 +590,7 @@ impl Supervisor {
             json!({ "name": "redis", "pid": child.id(), "port": self.runtime.redis_port }),
         );
         self.children.push(("redis".into(), child));
+        self.invalidate_status_cache();
         Ok(())
     }
 
@@ -523,6 +610,7 @@ impl Supervisor {
             json!({ "name": "api", "pid": child.id(), "port": self.runtime.api_port }),
         );
         self.children.push(("api".into(), child));
+        self.invalidate_status_cache();
         Ok(())
     }
 
@@ -545,6 +633,7 @@ impl Supervisor {
             json!({ "name": "worker", "pid": child.id(), "port": self.runtime.worker_metrics_port }),
         );
         self.children.push(("worker".into(), child));
+        self.invalidate_status_cache();
         Ok(())
     }
 
@@ -576,7 +665,28 @@ impl Supervisor {
             json!({ "name": "web", "pid": child.id(), "port": self.runtime.web_port }),
         );
         self.children.push(("web".into(), child));
+        self.invalidate_status_cache();
         Ok(())
+    }
+
+    fn run_desktop_migrations(&self) -> Result<()> {
+        let mut command = sidecar_command(resolve_sidecar("lumen-api")?);
+        self.inject_common_env(&mut command);
+        let output = command
+            .arg("desktop-migrate")
+            .output()
+            .context("spawn desktop SQLite migration runner")?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = tail_lossy(&output.stderr, 8192);
+        let stdout = tail_lossy(&output.stdout, 8192);
+        Err(anyhow!(
+            "desktop SQLite migration failed with {}: stdout={} stderr={}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        ))
     }
 
     fn spawn_by_name(&mut self, name: &str) -> Result<()> {
@@ -596,8 +706,7 @@ impl Supervisor {
             .env("LUMEN_LOCAL_TOKEN", &self.local_token)
             .env(
                 "LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC",
-                env::var("LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC")
-                    .unwrap_or_else(|_| "2.0".to_string()),
+                env::var("LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC").unwrap_or_else(|_| "2.0".to_string()),
             )
             .env("APP_ENV", "desktop")
             .env("DATABASE_URL", sqlite_url(&self.runtime.data_root))
@@ -618,6 +727,7 @@ impl Supervisor {
 
     fn record_started(&mut self, name: &str) {
         self.started_at_ms.insert(name.to_string(), unix_epoch_ms());
+        self.write_port_file(name);
     }
 
     fn record_exit(&mut self, name: &str, status: &str) {
@@ -631,8 +741,62 @@ impl Supervisor {
             .insert(name.to_string(), reason.to_string());
     }
 
+    fn sidecar_restart_backoff(&mut self, name: &str, reason: &str) -> Option<Duration> {
+        let now = unix_epoch_ms();
+        let attempts_len = {
+            let attempts = self
+                .sidecar_restart_attempts
+                .entry(name.to_string())
+                .or_default();
+            prune_attempts(attempts, now, SIDECAR_RESTART_WINDOW_MS);
+            attempts.push_back(now);
+            attempts.len()
+        };
+        if attempts_len > SIDECAR_RESTART_MAX_ATTEMPTS {
+            let message = format!(
+                "{name} restart suppressed after {} attempts in 60 seconds: {reason}",
+                attempts_len
+            );
+            self.last_restart_reasons
+                .insert(name.to_string(), message.clone());
+            let _ = self.log_supervisor_event(
+                "sidecar_restart_suppressed",
+                json!({
+                    "name": name,
+                    "reason": reason,
+                    "attempts": attempts_len,
+                    "window_ms": SIDECAR_RESTART_WINDOW_MS,
+                }),
+            );
+            return None;
+        }
+        Some(restart_backoff(attempts_len))
+    }
+
+    fn invalidate_status_cache(&mut self) {
+        self.cached_statuses = None;
+    }
+
+    fn write_port_file(&self, name: &str) {
+        let Some(port) = sidecar_port(&self.runtime, name) else {
+            return;
+        };
+        let path = self
+            .runtime
+            .data_root
+            .join("data/tmp")
+            .join(format!("{name}.port"));
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, port.to_string());
+    }
+
     fn log_supervisor_event(&self, event: &str, payload: Value) -> Result<()> {
-        let mut file = open_rotated_log_file(&self.runtime.data_root, "supervisor.log")?;
+        let _guard = desktop_log_lock()
+            .lock()
+            .map_err(|_| anyhow!("desktop log lock poisoned"))?;
+        let mut file = open_rotated_log_file_unlocked(&self.runtime.data_root, "supervisor.log")?;
         let sequence = self.log_sequence.fetch_add(1, Ordering::Relaxed);
         let line = serde_json::to_string(&json!({
             "at_ms": unix_epoch_ms(),
@@ -681,6 +845,31 @@ fn unix_epoch_ms() -> u128 {
         .unwrap_or(0)
 }
 
+fn prune_attempts(attempts: &mut VecDeque<u128>, now: u128, window_ms: u128) {
+    while attempts
+        .front()
+        .map(|started| now.saturating_sub(*started) > window_ms)
+        .unwrap_or(false)
+    {
+        attempts.pop_front();
+    }
+}
+
+fn restart_backoff(attempt_count: usize) -> Duration {
+    let millis = match attempt_count {
+        0 | 1 => 500,
+        2 => 2_000,
+        3 => 4_000,
+        _ => 8_000,
+    };
+    Duration::from_millis(millis)
+}
+
+fn tail_lossy(bytes: &[u8], max: usize) -> String {
+    let start = bytes.len().saturating_sub(max);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
+}
+
 fn sidecar_command(bin: PathBuf) -> Command {
     let mut command = Command::new(bin);
     hide_windows_console(&mut command);
@@ -704,10 +893,15 @@ fn hide_windows_console(command: &mut Command) {
 fn hide_windows_console(_command: &mut Command) {}
 
 fn terminate_child(child: &mut Child) {
+    terminate_child_with_timeout(child, Duration::from_secs(3));
+}
+
+fn terminate_child_with_timeout(child: &mut Child, duration: Duration) {
+    let term_wait = duration.min(Duration::from_secs(2));
     #[cfg(unix)]
     {
         signal_unix_process_tree(child.id(), "TERM");
-        if wait_for_child_exit(child, Duration::from_secs(2)) {
+        if wait_for_child_exit(child, term_wait) {
             return;
         }
         signal_unix_process_tree(child.id(), "KILL");
@@ -717,7 +911,11 @@ fn terminate_child(child: &mut Child) {
         terminate_windows_process_tree(child.id());
     }
     let _ = child.kill();
-    let _ = wait_for_child_exit(child, Duration::from_secs(1));
+    let kill_wait = duration
+        .checked_sub(term_wait)
+        .unwrap_or_else(|| Duration::from_millis(250))
+        .max(Duration::from_millis(250));
+    let _ = wait_for_child_exit(child, kill_wait);
 }
 
 fn cleanup_exited_child(child: &mut Child) {
@@ -923,10 +1121,30 @@ pub fn resolve_sidecar(name: &str) -> Result<PathBuf> {
     } else {
         name.to_string()
     };
-    let mut candidates = vec![
+    let triple = tauri_target_triple();
+    let mut candidates = Vec::new();
+    if cfg!(target_os = "macos") {
+        candidates.extend([
+            dir.join("../Resources")
+                .join("binaries")
+                .join(&triple)
+                .join(&executable_name),
+            dir.join("../Resources")
+                .join("binaries")
+                .join(&executable_name),
+            dir.join("../Resources")
+                .join("resources")
+                .join("runtime")
+                .join(name)
+                .join(&executable_name),
+            dir.join("../Resources").join(&executable_name),
+        ]);
+    }
+    candidates.extend([
         dir.join(name),
         dir.join(format!("{name}.exe")),
         dir.join(format!("{name}.cmd")),
+        dir.join("binaries").join(&triple).join(&executable_name),
         dir.join("binaries").join(name),
         dir.join("binaries").join(format!("{name}.exe")),
         dir.join("binaries").join(format!("{name}.cmd")),
@@ -942,22 +1160,27 @@ pub fn resolve_sidecar(name: &str) -> Result<PathBuf> {
             .join("runtime")
             .join(name)
             .join(&executable_name),
-    ];
-    if cfg!(target_os = "macos") {
-        candidates.push(dir.join("../Resources").join(name));
-        candidates.push(
-            dir.join("../Resources/resources")
-                .join("runtime")
-                .join(name)
-                .join(&executable_name),
-        );
-    }
+    ]);
     for path in candidates {
         if path.is_file() {
             return Ok(path);
         }
     }
     Err(anyhow!("missing sidecar binary: {name}"))
+}
+
+fn tauri_target_triple() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        "windows" => "pc-windows-msvc",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        other => other,
+    };
+    format!("{arch}-{os}")
 }
 
 fn resolve_runtime_dir(name: &str) -> Option<PathBuf> {
@@ -1006,6 +1229,41 @@ fn has_web_server(path: &Path) -> bool {
     path.join("server.js").is_file()
 }
 
+fn cleanup_stale_runtime_workdirs(data_root: &Path) {
+    let tmp_root = data_root.join("data/tmp");
+    let Ok(entries) = fs::read_dir(&tmp_root) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !matches!(
+            name,
+            value if value.starts_with("backup-work-")
+                || value.starts_with("restore-work-")
+                || value.starts_with("docker-import-")
+        ) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .map(|age| age >= STALE_WORKDIR_MAX_AGE)
+            .unwrap_or(false);
+        if stale {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 fn resolve_node_bin() -> Result<PathBuf> {
     if let Ok(raw) = env::var("LUMEN_NODE_BIN") {
         let path = PathBuf::from(raw);
@@ -1031,7 +1289,19 @@ fn log_file(data_root: &Path, name: &str) -> Result<Stdio> {
     Ok(Stdio::from(open_rotated_log_file(data_root, name)?))
 }
 
+fn desktop_log_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn open_rotated_log_file(data_root: &Path, name: &str) -> Result<fs::File> {
+    let _guard = desktop_log_lock()
+        .lock()
+        .map_err(|_| anyhow!("desktop log lock poisoned"))?;
+    open_rotated_log_file_unlocked(data_root, name)
+}
+
+fn open_rotated_log_file_unlocked(data_root: &Path, name: &str) -> Result<fs::File> {
     let path = data_root.join("data/logs").join(name);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1092,62 +1362,120 @@ fn rotated_log_path(path: &Path, idx: usize) -> PathBuf {
 
 async fn wait_for_redis(port: u16, password: &str, duration: Duration) -> Result<()> {
     let password = password.to_string();
-    let deadline = timeout(duration, async move {
-        let mut last_error: Option<anyhow::Error> = None;
-        loop {
-            match try_redis_ping(port, &password).await {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
-                Err(err) => last_error = Some(err),
-            }
-            sleep(Duration::from_millis(200)).await;
-            if let Some(err) = last_error.take() {
-                if err.to_string().contains("redis auth failed") {
-                    return Err(err);
+    let deadline = TokioInstant::now() + duration;
+    let mut rejected_probes = 0_u32;
+    let mut last_error = String::new();
+    loop {
+        if TokioInstant::now() >= deadline {
+            let detail = if last_error.is_empty() {
+                String::new()
+            } else {
+                format!("; last error: {last_error}")
+            };
+            return Err(anyhow!("redis sidecar {port} did not become ready{detail}"));
+        }
+        match try_redis_ping(port, &password).await {
+            Ok(()) => return Ok(()),
+            Err(RedisProbeError::Fatal(message)) => return Err(anyhow!(message)),
+            Err(RedisProbeError::Transient { message, rejected }) => {
+                if rejected {
+                    rejected_probes += 1;
+                    if rejected_probes >= 20 {
+                        return Err(anyhow!(
+                            "redis sidecar {port} rejected readiness probes: {message}"
+                        ));
+                    }
                 }
-                last_error = Some(err);
+                last_error = message;
             }
         }
-    });
-    deadline
-        .await
-        .map_err(|_| anyhow!("redis sidecar {port} did not become ready"))?
+        sleep(Duration::from_millis(200)).await;
+    }
 }
 
-async fn try_redis_ping(port: u16, password: &str) -> Result<bool> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+#[derive(Debug)]
+enum RedisProbeError {
+    Fatal(String),
+    Transient { message: String, rejected: bool },
+}
+
+impl RedisProbeError {
+    fn transient(message: impl Into<String>) -> Self {
+        Self::Transient {
+            message: message.into(),
+            rejected: false,
+        }
+    }
+
+    fn rejected(message: impl Into<String>) -> Self {
+        Self::Transient {
+            message: message.into(),
+            rejected: true,
+        }
+    }
+}
+
+async fn try_redis_ping(port: u16, password: &str) -> std::result::Result<(), RedisProbeError> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .map_err(|err| RedisProbeError::transient(format!("redis connect failed: {err}")))?;
     let auth = format!(
         "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n",
         password.len(),
         password
     );
-    stream.write_all(auth.as_bytes()).await?;
-    let auth_response = read_redis_response_async(&mut stream, Duration::from_millis(500)).await?;
+    stream
+        .write_all(auth.as_bytes())
+        .await
+        .map_err(|err| RedisProbeError::transient(format!("redis auth write failed: {err}")))?;
+    let auth_response = read_redis_response_async(&mut stream, Duration::from_millis(500))
+        .await
+        .map_err(|err| RedisProbeError::transient(format!("redis auth read failed: {err}")))?;
     if auth_response.starts_with('-') {
-        return Err(anyhow!(
+        return Err(RedisProbeError::Fatal(format!(
             "redis auth failed: {}",
             auth_response.trim_end_matches("\r\n")
-        ));
+        )));
     }
     if !auth_response.starts_with("+OK") {
-        return Ok(false);
+        return Err(RedisProbeError::rejected(format!(
+            "redis auth returned {}",
+            auth_response.trim_end_matches("\r\n")
+        )));
     }
-    stream.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
-    let ping_response = read_redis_response_async(&mut stream, Duration::from_millis(500)).await?;
+    stream
+        .write_all(b"*1\r\n$4\r\nPING\r\n")
+        .await
+        .map_err(|err| RedisProbeError::transient(format!("redis ping write failed: {err}")))?;
+    let ping_response = read_redis_response_async(&mut stream, Duration::from_millis(500))
+        .await
+        .map_err(|err| RedisProbeError::transient(format!("redis ping read failed: {err}")))?;
     if !ping_response.starts_with("+PONG") {
-        return Ok(false);
+        return Err(RedisProbeError::rejected(format!(
+            "redis ping returned {}",
+            ping_response.trim_end_matches("\r\n")
+        )));
     }
     stream
         .write_all(b"*3\r\n$4\r\nEVAL\r\n$8\r\nreturn 1\r\n$1\r\n0\r\n")
-        .await?;
-    let eval_response = read_redis_response_async(&mut stream, Duration::from_millis(500)).await?;
+        .await
+        .map_err(|err| RedisProbeError::transient(format!("redis lua write failed: {err}")))?;
+    let eval_response = read_redis_response_async(&mut stream, Duration::from_millis(500))
+        .await
+        .map_err(|err| RedisProbeError::transient(format!("redis lua read failed: {err}")))?;
     if eval_response.starts_with('-') {
-        return Err(anyhow!(
+        return Err(RedisProbeError::Fatal(format!(
             "redis lua eval failed: {}",
             eval_response.trim_end_matches("\r\n")
-        ));
+        )));
     }
-    Ok(eval_response.starts_with(":1"))
+    if !eval_response.starts_with(":1") {
+        return Err(RedisProbeError::rejected(format!(
+            "redis lua eval returned {}",
+            eval_response.trim_end_matches("\r\n")
+        )));
+    }
+    Ok(())
 }
 
 async fn read_redis_response_async(stream: &mut TcpStream, duration: Duration) -> Result<String> {
@@ -1210,10 +1538,27 @@ async fn try_http_ok(port: u16, path: &str, headers: &[(String, String)]) -> Res
     request.push_str("\r\n");
     stream.write_all(request.as_bytes()).await?;
 
-    let mut buf = [0_u8; 256];
-    let n = stream.read(&mut buf).await?;
-    let head = String::from_utf8_lossy(&buf[..n]);
+    let head_bytes = read_http_head_async(&mut stream).await?;
+    let head = String::from_utf8_lossy(&head_bytes);
     Ok(head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200"))
+}
+
+async fn read_http_head_async(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut response = Vec::with_capacity(256);
+    let mut buf = [0_u8; 256];
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        response.extend_from_slice(&buf[..n]);
+        if response.windows(2).any(|window| window == b"\r\n")
+            || response.len() >= HTTP_HEAD_LIMIT_BYTES
+        {
+            break;
+        }
+    }
+    Ok(response)
 }
 
 fn tcp_port_open(port: u16) -> bool {
@@ -1287,15 +1632,58 @@ fn http_body_sync(
         }
     }
 
-    let response = String::from_utf8_lossy(&response);
-    let Some((head, body)) = response.split_once("\r\n\r\n") else {
+    let Some(split_at) = find_http_header_end(&response) else {
         return Err(anyhow!("malformed http response"));
     };
+    let head = String::from_utf8_lossy(&response[..split_at]);
+    let body_bytes = &response[split_at + 4..];
     let status_line = head.lines().next().unwrap_or_default();
     if !(status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")) {
         return Ok(None);
     }
-    Ok(Some(body.to_string()))
+    let body = if http_has_chunked_transfer(&head) {
+        decode_chunked_body(body_bytes)?
+    } else {
+        body_bytes.to_vec()
+    };
+    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+}
+
+fn find_http_header_end(response: &[u8]) -> Option<usize> {
+    response.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn http_has_chunked_transfer(head: &str) -> bool {
+    head.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+    })
+}
+
+fn decode_chunked_body(mut body: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        let Some(line_end) = body.windows(2).position(|window| window == b"\r\n") else {
+            return Err(anyhow!("malformed chunked http body"));
+        };
+        let size_line = String::from_utf8_lossy(&body[..line_end]);
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .with_context(|| format!("parse chunk size {size_hex:?}"))?;
+        body = &body[line_end + 2..];
+        if size == 0 {
+            break;
+        }
+        if body.len() < size + 2 {
+            return Err(anyhow!("truncated chunked http body"));
+        }
+        out.extend_from_slice(&body[..size]);
+        if &body[size..size + 2] != b"\r\n" {
+            return Err(anyhow!("malformed chunk terminator"));
+        }
+        body = &body[size + 2..];
+    }
+    Ok(out)
 }
 
 fn parse_desktop_activity_body(body: &str) -> Result<DesktopActivity> {

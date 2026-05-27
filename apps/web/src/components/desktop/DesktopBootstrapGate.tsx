@@ -22,6 +22,7 @@ import {
   updateProviders,
 } from "@/lib/apiClient";
 import {
+  clearPendingRestore,
   isDesktopRuntime,
   restartDesktopApp,
   selectDockerImportBackup,
@@ -56,6 +57,30 @@ function formatBytes(value: number | null): string {
     i += 1;
   }
   return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function unknownErrorMessage(err: unknown, fallback = "操作失败"): string {
+  if (err instanceof Error && err.message.trim()) return err.message;
+  if (typeof err === "string" && err.trim()) return err;
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return fallback;
+}
+
+function providerProbeMessage(out: ProvidersProbeOut, providerName: string): string {
+  const name = providerName.trim() || "OpenAI 官方";
+  const item =
+    out.items.find((result) => result.name === name) ??
+    out.items.find((result) => result.status !== "skipped") ??
+    out.items[0];
+  if (!item) return "没有返回探活结果";
+  if (item.ok) return "连接成功";
+  if (item.error?.trim()) return item.error;
+  if (item.status === "disabled") return "供应商未启用";
+  if (item.status === "skipped") return "供应商未被探测";
+  return "连接失败";
 }
 
 export function DesktopBootstrapGate() {
@@ -143,10 +168,20 @@ export function DesktopBootstrapGate() {
   const restartMut = useMutation({
     mutationFn: restartDesktopApp,
   });
+  const clearPendingRestoreMut = useMutation({
+    mutationFn: clearPendingRestore,
+    onSuccess: () => {
+      setRestorePlan(null);
+    },
+  });
 
   const canFinish = useMemo(() => {
-    return providerSkipped || Boolean(apiKey.trim() && probeResult?.items.some((item) => item.ok));
-  }, [apiKey, probeResult, providerSkipped]);
+    const name = providerName.trim() || "OpenAI 官方";
+    return providerSkipped || Boolean(
+      apiKey.trim() &&
+        probeResult?.items.some((item) => item.name === name && item.ok),
+    );
+  }, [apiKey, probeResult, providerName, providerSkipped]);
 
   const canLeaveProviderStep = step !== 2 || canFinish;
 
@@ -262,7 +297,15 @@ export function DesktopBootstrapGate() {
                       <div className="break-all font-mono text-[12px] text-[var(--fg-0)]">
                         {restorePlan.source_path}
                       </div>
-                      <div className="mt-3 flex justify-end">
+                      <div className="mt-3 flex flex-wrap justify-end gap-2">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          loading={clearPendingRestoreMut.isPending}
+                          onClick={() => clearPendingRestoreMut.mutate()}
+                        >
+                          取消恢复
+                        </Button>
                         <Button
                           variant="primary"
                           size="sm"
@@ -386,9 +429,7 @@ export function DesktopBootstrapGate() {
                 </Button>
                 {probeResult ? (
                   <span className="text-[13px] text-[var(--fg-2)]">
-                    {probeResult.items.some((item) => item.ok)
-                      ? "连接成功"
-                      : probeResult.items[0]?.error ?? "连接失败"}
+                    {providerProbeMessage(probeResult, providerName)}
                   </span>
                 ) : null}
                 <Button
@@ -418,7 +459,7 @@ export function DesktopBootstrapGate() {
                   className="flex items-start gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-3 text-[13px] text-danger"
                 >
                   <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{providerMut.error.message}</span>
+                  <span>{unknownErrorMessage(providerMut.error, "测试连接失败")}</span>
                 </div>
               ) : null}
             </section>

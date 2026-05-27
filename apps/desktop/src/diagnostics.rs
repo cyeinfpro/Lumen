@@ -164,26 +164,139 @@ fn redact_text(raw: &str) -> String {
             if line.contains('\u{0}')
                 || line.contains("-----BEGIN ")
                 || line.contains("PRIVATE KEY-----")
-                || line.to_ascii_lowercase().contains("api_key")
-                || line.contains("Authorization")
-                || line.contains("sk-")
-                || line.contains("sess-")
             {
-                return "[REDACTED sensitive line]".to_string();
+                return "[REDACTED sensitive marker]".to_string();
             }
-            line.split(' ')
-                .map(|token| {
-                    if token.starts_with("sk-") || token.starts_with("sess-") {
-                        "[REDACTED]"
-                    } else {
-                        token
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
+            redact_sensitive_values(line)
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn redact_sensitive_values(line: &str) -> String {
+    let mut out = line.to_string();
+    for key in [
+        "authorization",
+        "api_key",
+        "api-key",
+        "x-api-key",
+        "token",
+        "access_token",
+        "refresh_token",
+        "bearer",
+    ] {
+        out = redact_keyed_value(&out, key);
+    }
+    out = redact_prefixed_secret(&out, "sk-");
+    out = redact_prefixed_secret(&out, "sess-");
+    redact_jwt_tokens(&out)
+}
+
+fn redact_keyed_value(input: &str, key: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(relative) = lower[cursor..].find(key) {
+        let key_start = cursor + relative;
+        let key_end = key_start + key.len();
+        out.push_str(&input[cursor..key_end]);
+        let mut value_start = key_end;
+        while input[value_start..]
+            .chars()
+            .next()
+            .map(|ch| ch.is_ascii_whitespace())
+            .unwrap_or(false)
+        {
+            let ch = input[value_start..].chars().next().unwrap();
+            out.push(ch);
+            value_start += ch.len_utf8();
+        }
+        let Some(sep) = input[value_start..].chars().next() else {
+            cursor = value_start;
+            continue;
+        };
+        if sep != ':' && sep != '=' {
+            cursor = key_end;
+            continue;
+        }
+        out.push(sep);
+        value_start += sep.len_utf8();
+        while input[value_start..]
+            .chars()
+            .next()
+            .map(|ch| ch.is_ascii_whitespace())
+            .unwrap_or(false)
+        {
+            let ch = input[value_start..].chars().next().unwrap();
+            out.push(ch);
+            value_start += ch.len_utf8();
+        }
+        out.push_str("[REDACTED]");
+        let mut value_end = value_start;
+        while let Some(ch) = input[value_end..].chars().next() {
+            if ch.is_ascii_whitespace() || matches!(ch, '&' | ',' | ';') {
+                break;
+            }
+            value_end += ch.len_utf8();
+        }
+        cursor = value_end;
+    }
+    out.push_str(&input[cursor..]);
+    out
+}
+
+fn redact_prefixed_secret(input: &str, prefix: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(relative) = input[cursor..].find(prefix) {
+        let start = cursor + relative;
+        out.push_str(&input[cursor..start]);
+        out.push_str("[REDACTED]");
+        let mut end = start + prefix.len();
+        while let Some(ch) = input[end..].chars().next() {
+            if ch.is_ascii_whitespace() || matches!(ch, '&' | '?' | '#' | ',' | ';' | '"' | '\'') {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        cursor = end;
+    }
+    out.push_str(&input[cursor..]);
+    out
+}
+
+fn redact_jwt_tokens(input: &str) -> String {
+    input
+        .split_ascii_whitespace()
+        .map(|token| {
+            if looks_like_jwt(token) {
+                "[REDACTED]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn looks_like_jwt(token: &str) -> bool {
+    let mut parts = token.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let Some(second) = parts.next() else {
+        return false;
+    };
+    let Some(third) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && first.len() >= 10
+        && second.len() >= 10
+        && third.len() >= 10
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn unix_epoch_ms() -> u128 {

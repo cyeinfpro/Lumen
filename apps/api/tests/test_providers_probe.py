@@ -75,6 +75,16 @@ def _admin_request() -> Request:
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_desktop_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These route tests call provider persistence helpers directly. Keep a
+    # developer shell with LUMEN_RUNTIME=desktop from writing into the real
+    # desktop app data directory.
+    monkeypatch.delenv("LUMEN_RUNTIME", raising=False)
+    monkeypatch.delenv("LUMEN_DATA_ROOT", raising=False)
+    monkeypatch.delenv("LUMEN_DESKTOP_PROVIDER_FILE", raising=False)
+
+
 def test_provider_probe_normalizes_responses_url() -> None:
     from app.routes import providers
 
@@ -115,6 +125,22 @@ def test_provider_admin_output_parses_string_booleans_without_truthy_coercion() 
     assert item.image_jobs_enabled is False
     assert item.image_jobs_endpoint_lock is False
     assert proxy.enabled is False
+
+
+def test_provider_admin_output_does_not_mask_missing_key() -> None:
+    from app.routes import providers
+
+    item = providers._to_out(
+        {
+            "name": "missing-key",
+            "base_url": "https://upstream.example",
+            "api_key": "",
+            "enabled": True,
+        },
+        0,
+    )
+
+    assert item.api_key_hint == ""
 
 
 def test_write_desktop_provider_config_strips_metadata_secrets(
@@ -428,7 +454,26 @@ async def test_manual_provider_probe_rejects_auth_4xx(
     )
 
     assert ok is False
-    assert err == "HTTP 401"
+    assert err == "HTTP 401: unauthorized"
+
+
+@pytest.mark.asyncio
+async def test_manual_provider_probe_reports_upstream_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import providers
+
+    client = _StubAsyncClient(
+        _StubResponse(400, {"error": {"message": "model gpt-x is unavailable"}})
+    )
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **_kw: client)
+
+    outcome = await providers._probe_one(
+        "https://upstream.example", "sk-test"
+    )
+
+    assert outcome.ok is False
+    assert outcome.error == "HTTP 400: model gpt-x is unavailable"
 
 
 @pytest.mark.asyncio

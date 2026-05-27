@@ -151,6 +151,36 @@ async function fetchWithNetworkRetry(
   throw lastErr;
 }
 
+async function fetchWithRetryableHttp(
+  url: string,
+  init: RequestInit,
+  retryable: boolean,
+): Promise<Response> {
+  let attempt = 0;
+  let res: Response;
+  while (true) {
+    res = await fetchWithNetworkRetry(url, init);
+    if (
+      !retryable ||
+      !RETRYABLE_HTTP_STATUSES.has(res.status) ||
+      attempt >= NETWORK_RETRY_MAX
+    ) {
+      break;
+    }
+    await new Promise((r) =>
+      setTimeout(r, NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200),
+    );
+    attempt += 1;
+  }
+  if (attempt > 0 && !res.ok && process.env.NODE_ENV !== "production") {
+    console.warn("[apiFetch] retryable HTTP request still failed", {
+      status: res.status,
+      attempts: attempt + 1,
+    });
+  }
+  return res;
+}
+
 async function refreshCsrfToken(): Promise<string | null> {
   if (typeof document === "undefined") return null;
   const url = `${API_BASE.replace(/\/$/, "")}/auth/csrf`;
@@ -193,6 +223,7 @@ export async function apiFetch<T = unknown>(
   const isBinary =
     (typeof FormData !== "undefined" && body instanceof FormData) ||
     (typeof Blob !== "undefined" && body instanceof Blob) ||
+    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) ||
     (typeof ArrayBuffer !== "undefined" &&
       (body instanceof ArrayBuffer || ArrayBuffer.isView(body as ArrayBufferView)));
   if (!isBinary && body && !headers.has("content-type")) {
@@ -223,28 +254,21 @@ export async function apiFetch<T = unknown>(
     credentials: "include" as RequestCredentials,
   };
   const retryable = canRetryHttp(method, headers);
-  let attempt = 0;
-  while (true) {
-    try {
-      res = await fetchWithNetworkRetry(url, requestInit);
-    } catch (err) {
-      throw new ApiError({
-        code: "network_error",
-        message: err instanceof Error ? err.message : "network error",
-        status: 0,
-      });
-    }
-    if (!retryable || !RETRYABLE_HTTP_STATUSES.has(res.status) || attempt >= NETWORK_RETRY_MAX) {
-      break;
-    }
-    await new Promise((r) =>
-      setTimeout(r, NETWORK_RETRY_DELAYS_MS[attempt] ?? 1200),
-    );
-    attempt += 1;
+  try {
+    res = await fetchWithRetryableHttp(url, requestInit, retryable);
+  } catch (err) {
+    throw new ApiError({
+      code: "network_error",
+      message: err instanceof Error ? err.message : "network error",
+      status: 0,
+    });
   }
 
   if (res.status === 401) {
     handle401();
+    if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") {
+      return null as T;
+    }
     throw new ApiError({
       code: "unauthorized",
       message: "未登录或会话已失效",
@@ -290,7 +314,11 @@ export async function apiFetch<T = unknown>(
         headers: retryHeaders,
       };
       try {
-        res = await fetchWithNetworkRetry(url, retryInit);
+        res = await fetchWithRetryableHttp(
+          url,
+          retryInit,
+          canRetryHttp(method, retryHeaders),
+        );
       } catch (err) {
         throw new ApiError({
           code: "network_error",
@@ -300,6 +328,9 @@ export async function apiFetch<T = unknown>(
       }
       if (res.status === 401) {
         handle401();
+        if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") {
+          return null as T;
+        }
         throw new ApiError({
           code: "unauthorized",
           message: "未登录或会话已失效",
@@ -330,6 +361,19 @@ export async function apiFetch<T = unknown>(
       const e = (data as { error: { code?: string; message?: string } }).error;
       if (e.code) code = e.code;
       if (e.message) message = e.message;
+    } else if (data && typeof data === "object" && data !== null && "detail" in data) {
+      const detail = (data as { detail?: unknown }).detail;
+      if (typeof detail === "string" && detail.trim()) {
+        message = detail;
+      } else if (Array.isArray(detail) && detail.length > 0) {
+        const first = detail[0];
+        if (first && typeof first === "object" && "msg" in first) {
+          const msg = (first as { msg?: unknown }).msg;
+          if (typeof msg === "string" && msg.trim()) message = msg;
+        }
+      }
+    } else if (typeof data === "string" && data.trim()) {
+      message = data.trim();
     }
     if (res.status === 413 && message === `HTTP ${res.status}`) {
       code = "request_too_large";

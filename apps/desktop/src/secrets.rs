@@ -2,10 +2,17 @@ use anyhow::{anyhow, Context, Result};
 use keyring::Entry;
 use serde_json::{Map, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const SERVICE: &str = "com.lumen.desktop";
 const FALLBACK_RELATIVE_PATH: &str = "data/tmp/secrets.local.json";
+
+enum FallbackSecret {
+    Missing,
+    Deleted,
+    Value(String),
+}
 
 fn set_keychain_secret(kind: &str, name: &str, value: &str) -> Result<()> {
     let entry = Entry::new(SERVICE, &format!("{kind}:{name}")).context("create keychain entry")?;
@@ -48,17 +55,33 @@ fn read_fallback_file(path: &Path) -> Result<Map<String, Value>> {
     }
 }
 
-fn read_fallback_secret(data_root: &Path, kind: &str, name: &str) -> Result<Option<String>> {
+fn read_fallback_secret_marker(data_root: &Path, kind: &str, name: &str) -> Result<FallbackSecret> {
     let path = fallback_path(data_root);
     let map = read_fallback_file(&path)?;
-    Ok(map
+    let Some(value) = map
         .get(kind)
         .and_then(Value::as_object)
         .and_then(|items| items.get(name))
-        .and_then(Value::as_str)
+    else {
+        return Ok(FallbackSecret::Missing);
+    };
+    if value.is_null() {
+        return Ok(FallbackSecret::Deleted);
+    }
+    Ok(value
+        .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string))
+        .map(|value| FallbackSecret::Value(value.to_string()))
+        .unwrap_or(FallbackSecret::Missing))
+}
+
+#[cfg(test)]
+fn read_fallback_secret(data_root: &Path, kind: &str, name: &str) -> Result<Option<String>> {
+    match read_fallback_secret_marker(data_root, kind, name)? {
+        FallbackSecret::Value(value) => Ok(Some(value)),
+        FallbackSecret::Missing | FallbackSecret::Deleted => Ok(None),
+    }
 }
 
 fn write_fallback_secret(data_root: &Path, kind: &str, name: &str, value: &str) -> Result<()> {
@@ -74,14 +97,19 @@ fn write_fallback_secret(data_root: &Path, kind: &str, name: &str, value: &str) 
         .as_object_mut()
         .context("local desktop secret fallback category is not an object")?;
     if value.trim().is_empty() {
-        items.remove(name);
+        items.insert(name.to_string(), Value::Null);
     } else {
         items.insert(name.to_string(), Value::String(value.trim().to_string()));
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension("json.tmp");
+    let tmp_path = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_else(|| "secrets.local.json".into())
+    ));
     let payload = serde_json::to_vec_pretty(&Value::Object(map))?;
     fs::write(&tmp_path, payload)
         .with_context(|| format!("write local desktop secret fallback {}", tmp_path.display()))?;
@@ -102,20 +130,22 @@ fn set_secret(data_root: &Path, kind: &str, name: &str, value: &str) -> Result<(
         return Ok(());
     }
 
-    let fallback_result = write_fallback_secret(data_root, kind, name, value);
-    let keychain_result = set_keychain_secret(kind, name, value);
+    let fallback_result = retry_secret_op(|| write_fallback_secret(data_root, kind, name, value));
+    let keychain_result = retry_secret_op(|| set_keychain_secret(kind, name, value));
     match (fallback_result, keychain_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(err)) => {
             eprintln!(
                 "desktop keychain write failed for {kind}:{name}; using local fallback: {err:#}"
             );
+            write_out_of_sync_log(data_root, kind, name, "keychain", &err);
             Ok(())
         }
         (Err(err), Ok(())) => {
             eprintln!(
                 "desktop local fallback write failed for {kind}:{name}; using keychain only: {err:#}"
             );
+            write_out_of_sync_log(data_root, kind, name, "fallback", &err);
             Ok(())
         }
         (Err(fallback_err), Err(keychain_err)) => Err(anyhow!(
@@ -124,14 +154,65 @@ fn set_secret(data_root: &Path, kind: &str, name: &str, value: &str) -> Result<(
     }
 }
 
+fn retry_secret_op<F>(mut op: F) -> Result<()>
+where
+    F: FnMut() -> Result<()>,
+{
+    let mut last_err = None;
+    for idx in 0..3 {
+        match op() {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+                if idx < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(100 * (idx + 1) as u64));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("secret operation failed")))
+}
+
+fn write_out_of_sync_log(
+    data_root: &Path,
+    kind: &str,
+    name: &str,
+    side: &str,
+    err: &anyhow::Error,
+) {
+    let path = data_root.join("data/logs/secrets-out-of-sync.log");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(
+            file,
+            "{} kind={} name={} failed_side={} error={:#}",
+            unix_epoch_ms(),
+            kind,
+            name,
+            side,
+            err
+        );
+    }
+}
+
+fn unix_epoch_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
 fn get_secret(data_root: &Path, kind: &str, name: &str) -> Result<Option<String>> {
     let name = name.trim();
     if name.is_empty() {
         return Ok(None);
     }
-    match read_fallback_secret(data_root, kind, name) {
-        Ok(Some(value)) => return Ok(Some(value)),
-        Ok(None) => {}
+    match read_fallback_secret_marker(data_root, kind, name) {
+        Ok(FallbackSecret::Value(value)) => return Ok(Some(value)),
+        Ok(FallbackSecret::Deleted) => return Ok(None),
+        Ok(FallbackSecret::Missing) => {}
         Err(err) => {
             eprintln!("desktop local fallback read failed for {kind}:{name}: {err:#}");
         }
