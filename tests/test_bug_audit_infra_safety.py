@@ -295,7 +295,10 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         "/api/system-prompts",
         "/api/me/memory-settings",
         "/api/me/memory-scopes",
+        "/api/me/onboarding-seen",
         "/api/me/memories",
+        "/api/me/memories/staging",
+        "/api/me/memories/timeline",
     ]
 
     assert "DESKTOP_UNSUPPORTED_PREFIXES" in web_proxy
@@ -340,9 +343,20 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop image binary after delete did not return 404" in text
         assert "desktop image and feed requests failed" in text
         assert "desktop memory settings patch did not persist" in text
+        assert "desktop memory onboarding flag did not persist" in text
+        assert "desktop memory scope patch did not persist" in text
+        assert "desktop conversation active memory scope did not persist" in text
+        assert "desktop conversation memory disable did not persist" in text
+        assert "desktop conversation used memories did not return 200" in text
         assert "desktop memory create did not return a pinned memory" in text
         assert "desktop memory patch did not persist" in text
+        assert "desktop memory scope assignment did not persist" in text
+        assert "desktop memory confirm did not persist" in text
+        assert "desktop memories filtered list did not include saved memory" in text
+        assert "desktop memory staging list did not return 200" in text
+        assert "desktop memory timeline did not include audit rows" in text
         assert "desktop memory delete did not return ok=true" in text
+        assert "desktop memory clear did not delete rows" in text
         assert "desktop memory scope delete did not return moved count" in text
     assert "HTTP_TIMEOUT_SECONDS = 8" in smoke_mac
     assert "$httpTimeoutSec = 8" in smoke_win
