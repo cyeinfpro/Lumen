@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import SystemSetting
+from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.runtime_settings import validate_public_base_url
 
 from .config import settings
@@ -160,12 +161,14 @@ async def resolve_public_base_url(
     if fallback and _has_public_hostname(fallback):
         return fallback
 
+    if is_desktop_runtime(settings.lumen_runtime):
+        request_origin = request_public_origin(request)
+        if request_origin:
+            return request_origin
+        return fallback or "http://localhost:3000"
+
     request_origin = request_public_origin(request) if allow_request_origin else None
-    if (
-        request_origin
-        and _is_dev_env()
-        and _allowed_request_origin(request_origin)
-    ):
+    if request_origin and _is_dev_env() and _allowed_request_origin(request_origin):
         return request_origin
 
     if not _is_dev_env():
