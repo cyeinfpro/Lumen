@@ -689,6 +689,8 @@ if "context_window.tiktoken_loading_slow" in combined:
     errors.append("packaged Python runtime fell back before tiktoken warmed")
 if "Lua scripting support disabled" in combined:
     errors.append("redis lua scripting is disabled")
+if "Unknown Redis command called from script" in combined or "sse dedupe reservation has no stream id" in combined:
+    errors.append("redis lua xadd fallback did not handle Garnet")
 if re.search(r"Network:\s+http://(?!localhost(?::|/)|127\.0\.0\.1(?::|/))", logs["web.log"]) or "0.0.0.0" in logs["web.log"]:
     errors.append("web runtime is listening on a non-loopback interface")
 if '"event":"heartbeat"' not in logs["supervisor.log"]:

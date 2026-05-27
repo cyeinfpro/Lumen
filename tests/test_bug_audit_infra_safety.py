@@ -174,7 +174,9 @@ def test_desktop_runtime_logs_are_rotated() -> None:
     assert '"sequence": sequence' in text
 
 
-def test_desktop_sidecars_allow_packaged_tiktoken_to_warm_before_estimate_mode() -> None:
+def test_desktop_sidecars_allow_packaged_tiktoken_to_warm_before_estimate_mode() -> (
+    None
+):
     text = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
 
     assert "LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC" in text
@@ -187,11 +189,12 @@ def test_desktop_redis_runtime_requires_lua_eval() -> None:
     smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
 
     assert '.arg("--lua")' in sidecar
-    assert 'EVAL\\r\\n$8\\r\\nreturn 1' in sidecar
+    assert "EVAL\\r\\n$8\\r\\nreturn 1" in sidecar
     assert "redis lua eval failed" in sidecar
     for text in (smoke_mac, smoke_win):
         assert "Lua scripting support disabled" in text
         assert "redis lua scripting is disabled" in text
+        assert "redis lua xadd fallback did not handle Garnet" in text
 
 
 def test_desktop_packaging_verifies_bundled_runtime_resources() -> None:

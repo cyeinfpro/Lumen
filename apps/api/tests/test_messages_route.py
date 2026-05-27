@@ -82,10 +82,9 @@ def _statement_has_eq_filter(statement: Any, column: Any, expected: Any) -> bool
     column_expr = getattr(column, "expression", column)
 
     def is_same_column(value: Any) -> bool:
-        return (
-            getattr(value, "name", None) == getattr(column_expr, "name", None)
-            and getattr(value, "table", None) is getattr(column_expr, "table", None)
-        )
+        return getattr(value, "name", None) == getattr(
+            column_expr, "name", None
+        ) and getattr(value, "table", None) is getattr(column_expr, "table", None)
 
     for node in visitors.iterate(whereclause):
         if getattr(node, "operator", None) is not operators.eq:
@@ -390,9 +389,7 @@ async def test_create_assistant_task_holds_chat_wallet_preauth(
         return False
 
     async def hold(_db: Any, user_id: str, amount_micro: int, **kwargs: Any) -> Any:
-        hold_calls.append(
-            {"user_id": user_id, "amount_micro": amount_micro, **kwargs}
-        )
+        hold_calls.append({"user_id": user_id, "amount_micro": amount_micro, **kwargs})
         return SimpleNamespace(balance_after=80_000, hold_after=20_000)
 
     monkeypatch.setattr(messages, "_billing_allow_negative", allow_negative)
@@ -1646,7 +1643,10 @@ async def test_post_message_persists_mask_image_id_for_image_to_image(
     assert gen.upstream_request["attachment_roles"] == [
         {"image_id": "img-att", "role": "reference"}
     ]
-    assert gen.upstream_request["attachment_roles"] is not gen.upstream_request["input_images"]
+    assert (
+        gen.upstream_request["attachment_roles"]
+        is not gen.upstream_request["input_images"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1877,6 +1877,87 @@ async def test_api_sse_publish_preserves_falsy_payload_event_id() -> None:
     assert stream_payload["data"]["event_id"] == "0"
     assert publish_payload["event_id"] == "0"
     assert publish_payload["data"]["event_id"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_api_sse_publish_falls_back_when_lua_cannot_xadd() -> None:
+    class GarnetLikeRedis:
+        def __init__(self) -> None:
+            self.kv: dict[str, str] = {}
+            self.stream_entries: list[tuple[str, dict[str, Any]]] = []
+            self.published: list[tuple[str, str]] = []
+            self.eval_calls = 0
+            self.deleted: list[str] = []
+
+        async def eval(
+            self,
+            _lua: str,
+            _num_keys: int,
+            _stream_key: str,
+            dedupe_key: str,
+            *_args: str,
+        ) -> str:
+            self.eval_calls += 1
+            self.kv[dedupe_key] = ""
+            raise RuntimeError("Unknown Redis command called from script")
+
+        async def get(self, key: str) -> str | None:
+            return self.kv.get(key)
+
+        async def set(
+            self,
+            key: str,
+            value: str,
+            *,
+            nx: bool = False,
+            xx: bool = False,
+            ex: int | None = None,
+        ) -> bool:
+            _ = ex
+            if nx and key in self.kv:
+                return False
+            if xx and key not in self.kv:
+                return False
+            self.kv[key] = value
+            return True
+
+        async def delete(self, key: str) -> int:
+            self.deleted.append(key)
+            return 1 if self.kv.pop(key, None) is not None else 0
+
+        async def xadd(
+            self,
+            key: str,
+            fields: dict[str, str],
+            **_kwargs: Any,
+        ) -> str:
+            stream_id = "1710000000000-7"
+            self.stream_entries.append((key, dict(fields)))
+            return stream_id
+
+        async def publish(self, channel: str, payload: str) -> int:
+            self.published.append((channel, payload))
+            return 1
+
+    redis = GarnetLikeRedis()
+
+    stream_id = await messages.publish_sse_event(
+        redis,  # type: ignore[arg-type]
+        user_id="user-1",
+        channel="conv:conv-1",
+        event_name="conv.message.appended",
+        data={"conversation_id": "conv-1", "message_id": "msg-1"},
+    )
+
+    dedupe_key = next(iter(redis.kv))
+    assert stream_id == "1710000000000-7"
+    assert redis.eval_calls == 1
+    assert redis.deleted == [dedupe_key]
+    assert redis.kv[dedupe_key] == "1710000000000-7"
+    assert redis.stream_entries[0][0] == "events:user:user-1"
+    assert redis.published[0][0] == "conv:conv-1"
+    published = json.loads(redis.published[0][1])
+    assert published["sse_id"] == "1710000000000-7"
 
 
 @pytest.mark.asyncio

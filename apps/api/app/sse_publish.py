@@ -87,6 +87,120 @@ def _payload_event_id(payload: dict[str, Any]) -> str:
     return str(raw)
 
 
+def _decode_redis_value(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("ascii", errors="replace")
+    return str(value)
+
+
+def _has_stream_id(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bytes):
+        return value != b""
+    return str(value) != ""
+
+
+def _is_lua_xadd_unsupported(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "unknown redis command called from script" in message
+        or "sse dedupe reservation has no stream id" in message
+        or (
+            "xadd" in message
+            and "script" in message
+            and (
+                "unknown" in message
+                or "unsupported" in message
+                or "not allowed" in message
+            )
+        )
+    )
+
+
+async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
+    get_fn = getattr(redis, "get", None)
+    if not callable(get_fn):
+        return None
+    existing = await get_fn(dedupe_key)
+    if not _has_stream_id(existing):
+        return None
+    return _decode_redis_value(existing)
+
+
+async def _reserve_dedupe_key(redis: Any, dedupe_key: str) -> bool:
+    set_fn = getattr(redis, "set", None)
+    if not callable(set_fn):
+        return True
+    return bool(
+        await set_fn(
+            dedupe_key,
+            "",
+            nx=True,
+            ex=_EVENTS_DEDUPE_TTL_SECONDS,
+        )
+    )
+
+
+async def _store_dedupe_stream_id(
+    redis: Any, *, dedupe_key: str, stream_id: str
+) -> None:
+    set_fn = getattr(redis, "set", None)
+    if not callable(set_fn):
+        return
+    try:
+        await set_fn(
+            dedupe_key,
+            stream_id,
+            xx=True,
+            ex=_EVENTS_DEDUPE_TTL_SECONDS,
+        )
+    except TypeError:
+        await set_fn(dedupe_key, stream_id)
+
+
+async def _xadd_event_without_lua(
+    redis: Any,
+    *,
+    stream_key: str,
+    event_name: str,
+    event_id: str,
+    payload_json: str,
+) -> str:
+    dedupe_key = f"{stream_key}:dedupe:{event_id}"
+    existing = await _read_dedupe_stream_id(redis, dedupe_key)
+    if existing is not None:
+        return existing
+
+    reserved = await _reserve_dedupe_key(redis, dedupe_key)
+    if not reserved:
+        existing = await _read_dedupe_stream_id(redis, dedupe_key)
+        if existing is not None:
+            return existing
+        # Garnet can leave an empty reservation when a Lua script reaches XADD
+        # and then rejects that command. Take over that empty reservation.
+        delete_fn = getattr(redis, "delete", None)
+        if callable(delete_fn):
+            await delete_fn(dedupe_key)
+            reserved = await _reserve_dedupe_key(redis, dedupe_key)
+        if not reserved:
+            raise RuntimeError("sse dedupe reservation has no stream id")
+
+    stream_id = await redis.xadd(
+        stream_key,
+        {
+            "event": event_name,
+            "data": payload_json,
+            "event_id": event_id,
+        },
+        maxlen=EVENTS_STREAM_MAXLEN,
+        approximate=True,
+    )
+    decoded = _decode_redis_value(stream_id)
+    await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=decoded)
+    return decoded
+
+
 async def _xadd_event_once(
     redis: Any,
     *,
@@ -97,27 +211,35 @@ async def _xadd_event_once(
 ) -> str:
     eval_fn = getattr(redis, "eval", None)
     if callable(eval_fn):
-        stream_id = await eval_fn(
-            _XADD_IDEMPOTENT_LUA,
-            2,
-            stream_key,
-            f"{stream_key}:dedupe:{event_id}",
-            event_id,
-            event_name,
-            payload_json,
-            str(EVENTS_STREAM_MAXLEN),
-            str(_EVENTS_DEDUPE_TTL_SECONDS),
-        )
+        try:
+            stream_id = await eval_fn(
+                _XADD_IDEMPOTENT_LUA,
+                2,
+                stream_key,
+                f"{stream_key}:dedupe:{event_id}",
+                event_id,
+                event_name,
+                payload_json,
+                str(EVENTS_STREAM_MAXLEN),
+                str(_EVENTS_DEDUPE_TTL_SECONDS),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not _is_lua_xadd_unsupported(exc):
+                raise
+            return await _xadd_event_without_lua(
+                redis,
+                stream_key=stream_key,
+                event_name=event_name,
+                event_id=event_id,
+                payload_json=payload_json,
+            )
     else:
-        stream_id = await redis.xadd(
-            stream_key,
-            {
-                "event": event_name,
-                "data": payload_json,
-                "event_id": event_id,
-            },
-            maxlen=EVENTS_STREAM_MAXLEN,
-            approximate=True,
+        return await _xadd_event_without_lua(
+            redis,
+            stream_key=stream_key,
+            event_name=event_name,
+            event_id=event_id,
+            payload_json=payload_json,
         )
     if isinstance(stream_id, bytes):
         return stream_id.decode("ascii", errors="replace")
@@ -132,17 +254,19 @@ async def publish_sse_event(
     event_name: str,
     data: dict[str, Any],
 ) -> str:
-    return (await publish_sse_events(
-        redis,
-        [
-            {
-                "user_id": user_id,
-                "channel": channel,
-                "event_name": event_name,
-                "data": data,
-            }
-        ],
-    ))[0]
+    return (
+        await publish_sse_events(
+            redis,
+            [
+                {
+                    "user_id": user_id,
+                    "channel": channel,
+                    "event_name": event_name,
+                    "data": data,
+                }
+            ],
+        )
+    )[0]
 
 
 async def publish_sse_events(
@@ -239,6 +363,22 @@ async def publish_sse_events(
             stream_ids = ids
             break
         except Exception as exc:  # noqa: BLE001
+            if _is_lua_xadd_unsupported(exc):
+                logger.warning(
+                    "api publish_sse_events xadd batch lua fallback count=%d err=%s",
+                    len(events),
+                    exc,
+                )
+                return [
+                    await _publish_sse_event_single(
+                        redis,
+                        user_id=event["user_id"],
+                        channel=event["channel"],
+                        event_name=event["event_name"],
+                        data=event["data"],
+                    )
+                    for event in events
+                ]
             logger.warning(
                 "api publish_sse_events xadd batch failed count=%d attempt=%d err=%s",
                 len(events),
@@ -252,9 +392,7 @@ async def publish_sse_events(
         raise RuntimeError(f"publish_sse_events: xadd failed for {len(events)} events")
 
     publish_pipe = pipe_fn(transaction=False)
-    for event, envelope, stream_id in zip(
-        events, envelopes, stream_ids, strict=False
-    ):
+    for event, envelope, stream_id in zip(events, envelopes, stream_ids, strict=False):
         envelope["sse_id"] = stream_id
         publish_pipe.publish(event["channel"], _json(envelope))
     await publish_pipe.execute()
