@@ -584,6 +584,83 @@ try {
         if ($variant -ne 200) {
           $operationErrors.Add("desktop image display variant did not return 200")
         }
+        $share = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/images/$escapedImageId/share" -Body @{
+          show_prompt = $false
+        }
+        $shareId = if ($share.Json) { [string]$share.Json.id } else { "" }
+        $shareToken = if ($share.Json) { [string]$share.Json.token } else { "" }
+        if ($share.StatusCode -ne 201 -or [string]::IsNullOrWhiteSpace($shareId) -or [string]::IsNullOrWhiteSpace($shareToken) -or [string]$share.Json.image_id -ne $imageId) {
+          $operationErrors.Add("desktop image share create did not return a token")
+        } else {
+          $escapedShareId = [System.Uri]::EscapeDataString($shareId)
+          $escapedShareToken = [System.Uri]::EscapeDataString($shareToken)
+          $shareList = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/shares"
+          $shareItems = if ($shareList.Json) { @($shareList.Json.items) } else { @() }
+          if (
+            $shareList.StatusCode -ne 200 -or
+            $shareItems.Count -lt 1 -or
+            -not ($shareItems | Where-Object { $_.id -eq $shareId })
+          ) {
+            $operationErrors.Add("desktop share list did not include created share")
+          }
+          $publicShare = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/share/$escapedShareToken"
+          $publicImages = if ($publicShare.Json) { @($publicShare.Json.images) } else { @() }
+          $firstPublicImage = if ($publicImages.Count -gt 0) { $publicImages[0] } else { $null }
+          if ($publicShare.StatusCode -ne 200 -or -not $publicShare.Json -or $publicShare.Json.token -ne $shareToken -or $null -eq $firstPublicImage -or [string]$firstPublicImage.id -ne $imageId) {
+            $operationErrors.Add("desktop public share metadata did not include uploaded image")
+          } else {
+            $displayUrl = [string]$firstPublicImage.display_url
+            if ([string]::IsNullOrWhiteSpace($displayUrl) -or -not $displayUrl.StartsWith("/api/share/")) {
+              $operationErrors.Add("desktop public share metadata did not include display variant")
+            } else {
+              $displayStatus = Get-HttpStatus -Uri "http://127.0.0.1:$webPort$displayUrl"
+              if ($displayStatus -ne 200) {
+                $operationErrors.Add("desktop public share display variant did not return 200")
+              }
+            }
+          }
+          $publicImage = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/share/$escapedShareToken/image"
+          if ($publicImage -ne 200) {
+            $operationErrors.Add("desktop public share image did not return 200")
+          }
+          $publicImageById = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/share/$escapedShareToken/images/$escapedImageId"
+          if ($publicImageById -ne 200) {
+            $operationErrors.Add("desktop public share image-by-id did not return 200")
+          }
+          $invalidVariant = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/share/$escapedShareToken/images/$escapedImageId/variants/bad-kind"
+          if ($invalidVariant -ne 400) {
+            $operationErrors.Add("desktop public share invalid variant did not return 400")
+          }
+          $revokedShare = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/shares/$escapedShareId"
+          if ($revokedShare.StatusCode -ne 204) {
+            $operationErrors.Add("desktop share revoke returned $($revokedShare.StatusCode)")
+          }
+          $revokedPublicShare = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/share/$escapedShareToken"
+          if ($revokedPublicShare.StatusCode -ne 404) {
+            $operationErrors.Add("desktop revoked share did not return 404")
+          }
+        }
+        $multiShare = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/images/share" -Body @{
+          image_ids = @($imageId)
+          show_prompt = $false
+        }
+        $multiShareId = if ($multiShare.Json) { [string]$multiShare.Json.id } else { "" }
+        $multiShareToken = if ($multiShare.Json) { [string]$multiShare.Json.token } else { "" }
+        $multiImageIds = if ($multiShare.Json) { @($multiShare.Json.image_ids) } else { @() }
+        if ($multiShare.StatusCode -ne 201 -or [string]::IsNullOrWhiteSpace($multiShareId) -or [string]::IsNullOrWhiteSpace($multiShareToken) -or $multiImageIds.Count -ne 1 -or [string]$multiImageIds[0] -ne $imageId) {
+          $operationErrors.Add("desktop multi-image share create did not return image_ids")
+        } else {
+          $escapedMultiShareId = [System.Uri]::EscapeDataString($multiShareId)
+          $escapedMultiShareToken = [System.Uri]::EscapeDataString($multiShareToken)
+          $multiPublicImageById = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/share/$escapedMultiShareToken/images/$escapedImageId"
+          if ($multiPublicImageById -ne 200) {
+            $operationErrors.Add("desktop multi-image public image-by-id did not return 200")
+          }
+          $revokedMultiShare = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/shares/$escapedMultiShareId"
+          if ($revokedMultiShare.StatusCode -ne 204) {
+            $operationErrors.Add("desktop multi-image share revoke returned $($revokedMultiShare.StatusCode)")
+          }
+        }
         $deletedImage = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/images/$escapedImageId"
         if ($deletedImage.StatusCode -ne 200 -or -not $deletedImage.Json -or $deletedImage.Json.ok -ne $true) {
           $operationErrors.Add("desktop image delete did not return ok=true")

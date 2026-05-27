@@ -292,6 +292,10 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         "/api/generations/feed",
         "/api/images/upload",
         "/api/images/",
+        "/api/images/share",
+        "/api/me/shares",
+        "/api/share/",
+        "/api/shares/",
         "/api/system-prompts",
         "/api/me/memory-settings",
         "/api/me/memory-scopes",
@@ -339,6 +343,19 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop image metadata did not include normalized_ref" in text
         assert "desktop image binary did not return 200" in text
         assert "desktop image display variant did not return 200" in text
+        assert "desktop image share create did not return a token" in text
+        assert "desktop share list did not include created share" in text
+        assert "desktop public share metadata did not include uploaded image" in text
+        assert "desktop public share metadata did not include display variant" in text
+        assert "desktop public share display variant did not return 200" in text
+        assert "desktop public share image did not return 200" in text
+        assert "desktop public share image-by-id did not return 200" in text
+        assert "desktop public share invalid variant did not return 400" in text
+        assert "desktop share revoke returned" in text
+        assert "desktop revoked share did not return 404" in text
+        assert "desktop multi-image share create did not return image_ids" in text
+        assert "desktop multi-image public image-by-id did not return 200" in text
+        assert "desktop multi-image share revoke returned" in text
         assert "desktop image delete did not return ok=true" in text
         assert "desktop image binary after delete did not return 404" in text
         assert "desktop image and feed requests failed" in text
