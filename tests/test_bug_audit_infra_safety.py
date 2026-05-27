@@ -285,6 +285,9 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         "/api/settings/providers/probe",
         "/api/settings/providers/stats",
         "/api/conversations",
+        "/api/generations/feed",
+        "/api/images/upload",
+        "/api/images/",
         "/api/system-prompts",
         "/api/me/memory-settings",
         "/api/me/memory-scopes",
@@ -323,6 +326,15 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop providers clear did not return empty items" in text
         assert "endpoint_locked_to_generations" in text
         assert "redis lua scripting is disabled" in text
+        assert "desktop generations feed did not return an item list" in text
+        assert "desktop generations feed invalid ratio returned" in text
+        assert "desktop image upload did not return expected metadata" in text
+        assert "desktop image metadata did not include normalized_ref" in text
+        assert "desktop image binary did not return 200" in text
+        assert "desktop image display variant did not return 200" in text
+        assert "desktop image delete did not return ok=true" in text
+        assert "desktop image binary after delete did not return 404" in text
+        assert "desktop image and feed requests failed" in text
         assert "desktop memory settings patch did not persist" in text
         assert "desktop memory create did not return a pinned memory" in text
         assert "desktop memory patch did not persist" in text
