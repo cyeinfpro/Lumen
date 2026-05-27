@@ -752,6 +752,107 @@ if baseline_ready and web_port is not None:
                 operation_errors.append("desktop image binary did not return 200")
             if get_http(web_port, f"/api/images/{escaped_image_id}/variants/display2048") != 200:
                 operation_errors.append("desktop image display variant did not return 200")
+            status, share = json_request(
+                web_port,
+                f"/api/images/{escaped_image_id}/share",
+                method="POST",
+                body={"show_prompt": False},
+            )
+            share_id = share.get("id") if isinstance(share, dict) else None
+            share_token = share.get("token") if isinstance(share, dict) else None
+            if status != 201 or not share_id or not share_token or share.get("image_id") != image_id:
+                operation_errors.append("desktop image share create did not return a token")
+            else:
+                escaped_share_id = urllib.parse.quote(str(share_id), safe="")
+                escaped_share_token = urllib.parse.quote(str(share_token), safe="")
+                status, share_list = json_request(web_port, "/api/me/shares")
+                share_items = share_list.get("items") if isinstance(share_list, dict) else None
+                if (
+                    status != 200
+                    or not isinstance(share_items, list)
+                    or not any(
+                        isinstance(item, dict) and item.get("id") == share_id
+                        for item in share_items
+                    )
+                ):
+                    operation_errors.append("desktop share list did not include created share")
+                status, public_share = json_request(web_port, f"/api/share/{escaped_share_token}")
+                public_images = (
+                    public_share.get("images") if isinstance(public_share, dict) else None
+                )
+                first_public_image = (
+                    public_images[0] if isinstance(public_images, list) and public_images else None
+                )
+                if (
+                    status != 200
+                    or not isinstance(public_share, dict)
+                    or public_share.get("token") != share_token
+                    or not isinstance(first_public_image, dict)
+                    or first_public_image.get("id") != image_id
+                ):
+                    operation_errors.append("desktop public share metadata did not include uploaded image")
+                else:
+                    display_url = first_public_image.get("display_url")
+                    if not isinstance(display_url, str) or not display_url.startswith("/api/share/"):
+                        operation_errors.append("desktop public share metadata did not include display variant")
+                    elif get_http(web_port, display_url) != 200:
+                        operation_errors.append("desktop public share display variant did not return 200")
+                if get_http(web_port, f"/api/share/{escaped_share_token}/image") != 200:
+                    operation_errors.append("desktop public share image did not return 200")
+                if get_http(web_port, f"/api/share/{escaped_share_token}/images/{escaped_image_id}") != 200:
+                    operation_errors.append("desktop public share image-by-id did not return 200")
+                if (
+                    get_http(
+                        web_port,
+                        f"/api/share/{escaped_share_token}/images/{escaped_image_id}/variants/bad-kind",
+                    )
+                    != 400
+                ):
+                    operation_errors.append("desktop public share invalid variant did not return 400")
+                status, _ = json_request(
+                    web_port,
+                    f"/api/shares/{escaped_share_id}",
+                    method="DELETE",
+                )
+                if status != 204:
+                    operation_errors.append(f"desktop share revoke returned {status}")
+                status, _ = json_request(web_port, f"/api/share/{escaped_share_token}")
+                if status != 404:
+                    operation_errors.append("desktop revoked share did not return 404")
+            status, multi_share = json_request(
+                web_port,
+                "/api/images/share",
+                method="POST",
+                body={"image_ids": [image_id], "show_prompt": False},
+            )
+            multi_share_id = multi_share.get("id") if isinstance(multi_share, dict) else None
+            multi_share_token = multi_share.get("token") if isinstance(multi_share, dict) else None
+            multi_image_ids = multi_share.get("image_ids") if isinstance(multi_share, dict) else None
+            if (
+                status != 201
+                or not multi_share_id
+                or not multi_share_token
+                or multi_image_ids != [image_id]
+            ):
+                operation_errors.append("desktop multi-image share create did not return image_ids")
+            else:
+                escaped_multi_share_id = urllib.parse.quote(str(multi_share_id), safe="")
+                escaped_multi_share_token = urllib.parse.quote(str(multi_share_token), safe="")
+                if (
+                    get_http(
+                        web_port,
+                        f"/api/share/{escaped_multi_share_token}/images/{escaped_image_id}",
+                    )
+                    != 200
+                ):
+                    operation_errors.append("desktop multi-image public image-by-id did not return 200")
+                status, _ = json_request(
+                    web_port,
+                    f"/api/shares/{escaped_multi_share_id}",
+                    method="DELETE",
+                )
+                if status != 204:
+                    operation_errors.append(f"desktop multi-image share revoke returned {status}")
             status, deleted_image = json_request(
                 web_port,
                 f"/api/images/{escaped_image_id}",
