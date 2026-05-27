@@ -162,8 +162,14 @@ def get_http(port, path, headers=None, follow_redirects=True):
     return status
 
 
-def json_request(port, path, method="GET", body=None):
-    status, text = http_request(port, path, method=method, body=body)
+def json_request(port, path, method="GET", body=None, headers=None):
+    status, text = http_request(
+        port,
+        path,
+        method=method,
+        body=body,
+        headers=headers,
+    )
     try:
         payload = json.loads(text) if text else None
     except json.JSONDecodeError:
@@ -461,6 +467,18 @@ if baseline_ready and web_port is not None:
             or settings.get("confirmation_enabled") is not True
         ):
             operation_errors.append("desktop memory settings patch did not persist")
+        status, onboarding = json_request(
+            web_port,
+            "/api/me/onboarding-seen",
+            method="PATCH",
+            body={"flag": 2},
+        )
+        if (
+            status != 200
+            or not isinstance(onboarding, dict)
+            or (int(onboarding.get("onboarding_seen") or 0) & (1 << 2)) == 0
+        ):
+            operation_errors.append("desktop memory onboarding flag did not persist")
         status, scopes = json_request(web_port, "/api/me/memory-scopes")
         if status != 200 or not isinstance(scopes, list):
             operation_errors.append("desktop memory scopes list did not return 200")
@@ -475,6 +493,70 @@ if baseline_ready and web_port is not None:
             operation_errors.append("desktop memory scope create did not return an id")
         else:
             escaped_scope_id = urllib.parse.quote(str(scope_id), safe="")
+            status, patched_scope = json_request(
+                web_port,
+                f"/api/me/memory-scopes/{escaped_scope_id}",
+                method="PATCH",
+                body={"name": "Desktop Smoke Scope Renamed", "emoji": "DR"},
+            )
+            if (
+                status != 200
+                or not isinstance(patched_scope, dict)
+                or patched_scope.get("name") != "Desktop Smoke Scope Renamed"
+                or patched_scope.get("emoji") != "DR"
+            ):
+                operation_errors.append("desktop memory scope patch did not persist")
+            status, memory_conv = json_request(
+                web_port,
+                "/api/conversations",
+                method="POST",
+                body={"title": "desktop memory smoke"},
+            )
+            memory_conv_id = (
+                memory_conv.get("id") if isinstance(memory_conv, dict) else None
+            )
+            if status != 200 or not memory_conv_id:
+                operation_errors.append("desktop memory conversation create failed")
+            else:
+                escaped_memory_conv_id = urllib.parse.quote(
+                    str(memory_conv_id), safe=""
+                )
+                status, active_scope = json_request(
+                    web_port,
+                    f"/api/conversations/{escaped_memory_conv_id}/active-scope",
+                    method="PATCH",
+                    body={"scope_id": str(scope_id)},
+                )
+                if (
+                    status != 200
+                    or not isinstance(active_scope, dict)
+                    or active_scope.get("scope_id") != scope_id
+                ):
+                    operation_errors.append(
+                        "desktop conversation active memory scope did not persist"
+                    )
+                status, memory_disabled = json_request(
+                    web_port,
+                    f"/api/conversations/{escaped_memory_conv_id}/memory-disabled",
+                    method="PATCH",
+                    body={"disabled": True},
+                )
+                if (
+                    status != 200
+                    or not isinstance(memory_disabled, dict)
+                    or memory_disabled.get("disabled") is not True
+                ):
+                    operation_errors.append(
+                        "desktop conversation memory disable did not persist"
+                    )
+                status, used_memories = json_request(
+                    web_port,
+                    f"/api/conversations/{escaped_memory_conv_id}/used-memories",
+                )
+                if status != 200 or not isinstance(used_memories, dict):
+                    operation_errors.append(
+                        "desktop conversation used memories did not return 200"
+                    )
             status, memory = json_request(
                 web_port,
                 "/api/me/memories",
@@ -507,12 +589,86 @@ if baseline_ready and web_port is not None:
                     or patched_memory.get("pinned") is not False
                 ):
                     operation_errors.append("desktop memory patch did not persist")
-                status, memories = json_request(web_port, "/api/me/memories?disabled=false")
-                if status != 200 or not isinstance(memories, dict):
-                    operation_errors.append("desktop memories list did not return 200")
+                status, scoped_memory = json_request(
+                    web_port,
+                    f"/api/me/memories/{escaped_memory_id}/scope",
+                    method="PATCH",
+                    body={"scope_id": str(scope_id)},
+                )
+                if (
+                    status != 200
+                    or not isinstance(scoped_memory, dict)
+                    or scoped_memory.get("scope_id") != scope_id
+                ):
+                    operation_errors.append(
+                        "desktop memory scope assignment did not persist"
+                    )
+                status, confirmed_memory = json_request(
+                    web_port,
+                    f"/api/me/memories/{escaped_memory_id}/confirm",
+                    method="POST",
+                    body={"decision": "yes"},
+                )
+                if (
+                    status != 200
+                    or not isinstance(confirmed_memory, dict)
+                    or confirmed_memory.get("last_confirmed_at") is None
+                ):
+                    operation_errors.append("desktop memory confirm did not persist")
+                status, memories = json_request(
+                    web_port,
+                    f"/api/me/memories?type=preference&pinned=false&disabled=false&scope_id={escaped_scope_id}",
+                )
+                memory_items = memories.get("items") if isinstance(memories, dict) else None
+                if (
+                    status != 200
+                    or not isinstance(memory_items, list)
+                    or not any(
+                        isinstance(item, dict) and item.get("id") == memory_id
+                        for item in memory_items
+                    )
+                ):
+                    operation_errors.append(
+                        "desktop memories filtered list did not include saved memory"
+                    )
+                status, staging = json_request(web_port, "/api/me/memories/staging")
+                if (
+                    status != 200
+                    or not isinstance(staging, dict)
+                    or not isinstance(staging.get("items"), list)
+                ):
+                    operation_errors.append("desktop memory staging list did not return 200")
+                status, timeline = json_request(
+                    web_port,
+                    "/api/me/memories/timeline?limit=5",
+                )
+                if (
+                    status != 200
+                    or not isinstance(timeline, dict)
+                    or not isinstance(timeline.get("items"), list)
+                    or len(timeline.get("items")) < 1
+                ):
+                    operation_errors.append("desktop memory timeline did not include audit rows")
                 status, exported = json_request(web_port, "/api/me/memories/export")
                 if status != 200 or not isinstance(exported, dict):
                     operation_errors.append("desktop memories export did not return 200")
+                status, clear_memory = json_request(
+                    web_port,
+                    "/api/me/memories",
+                    method="POST",
+                    body={
+                        "type": "avoid",
+                        "content": "Desktop smoke memory to clear",
+                        "scope_id": str(scope_id),
+                    },
+                )
+                clear_memory_id = (
+                    clear_memory.get("id") if isinstance(clear_memory, dict) else None
+                )
+                if status != 200 or not clear_memory_id:
+                    operation_errors.append(
+                        "desktop memory clear fixture create did not return an id"
+                    )
                 status, deleted_memory = json_request(
                     web_port,
                     f"/api/me/memories/{escaped_memory_id}",
@@ -520,6 +676,24 @@ if baseline_ready and web_port is not None:
                 )
                 if status != 200 or not isinstance(deleted_memory, dict) or deleted_memory.get("ok") is not True:
                     operation_errors.append("desktop memory delete did not return ok=true")
+                status, cleared_memories = json_request(
+                    web_port,
+                    "/api/me/memories",
+                    method="DELETE",
+                    headers={"X-Confirm-Clear-Memory": "yes"},
+                )
+                if (
+                    status != 200
+                    or not isinstance(cleared_memories, dict)
+                    or int(cleared_memories.get("deleted") or 0) < 1
+                ):
+                    operation_errors.append("desktop memory clear did not delete rows")
+            if memory_conv_id:
+                json_request(
+                    web_port,
+                    f"/api/conversations/{urllib.parse.quote(str(memory_conv_id), safe='')}",
+                    method="DELETE",
+                )
             status, deleted_scope = json_request(
                 web_port,
                 f"/api/me/memory-scopes/{escaped_scope_id}",

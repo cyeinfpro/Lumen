@@ -101,14 +101,19 @@ function Invoke-JsonRequest {
   param(
     [string]$Method = "GET",
     [string]$Uri,
-    [object]$Body = $null
+    [object]$Body = $null,
+    [hashtable]$Headers = @{}
   )
+  $requestHeaders = @{ Accept = "application/json" }
+  foreach ($key in $Headers.Keys) {
+    $requestHeaders[$key] = $Headers[$key]
+  }
   $params = @{
     UseBasicParsing = $true
     TimeoutSec = $httpTimeoutSec
     Uri = $Uri
     Method = $Method
-    Headers = @{ Accept = "application/json" }
+    Headers = $requestHeaders
   }
   if ($null -ne $Body) {
     $params["ContentType"] = "application/json"
@@ -402,6 +407,12 @@ try {
       if ($memorySettings.StatusCode -ne 200 -or -not $memorySettings.Json -or $memorySettings.Json.paused -ne $true -or $memorySettings.Json.confirmation_enabled -ne $true) {
         $operationErrors.Add("desktop memory settings patch did not persist")
       }
+      $onboarding = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/me/onboarding-seen" -Body @{
+        flag = 2
+      }
+      if ($onboarding.StatusCode -ne 200 -or -not $onboarding.Json -or (([int]$onboarding.Json.onboarding_seen -band (1 -shl 2)) -eq 0)) {
+        $operationErrors.Add("desktop memory onboarding flag did not persist")
+      }
       $scopes = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memory-scopes"
       if ($scopes.StatusCode -ne 200 -or -not $scopes.Json) {
         $operationErrors.Add("desktop memory scopes list did not return 200")
@@ -415,6 +426,38 @@ try {
         $operationErrors.Add("desktop memory scope create did not return an id")
       } else {
         $escapedScopeId = [System.Uri]::EscapeDataString($scopeId)
+        $patchedScope = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/me/memory-scopes/$escapedScopeId" -Body @{
+          name = "Desktop Smoke Scope Renamed"
+          emoji = "DR"
+        }
+        if ($patchedScope.StatusCode -ne 200 -or -not $patchedScope.Json -or $patchedScope.Json.name -ne "Desktop Smoke Scope Renamed" -or $patchedScope.Json.emoji -ne "DR") {
+          $operationErrors.Add("desktop memory scope patch did not persist")
+        }
+        $memoryConv = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/conversations" -Body @{
+          title = "desktop memory smoke"
+        }
+        $memoryConvId = if ($memoryConv.Json) { [string]$memoryConv.Json.id } else { "" }
+        if ($memoryConv.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($memoryConvId)) {
+          $operationErrors.Add("desktop memory conversation create failed")
+        } else {
+          $escapedMemoryConvId = [System.Uri]::EscapeDataString($memoryConvId)
+          $activeScope = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedMemoryConvId/active-scope" -Body @{
+            scope_id = $scopeId
+          }
+          if ($activeScope.StatusCode -ne 200 -or -not $activeScope.Json -or $activeScope.Json.scope_id -ne $scopeId) {
+            $operationErrors.Add("desktop conversation active memory scope did not persist")
+          }
+          $memoryDisabled = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedMemoryConvId/memory-disabled" -Body @{
+            disabled = $true
+          }
+          if ($memoryDisabled.StatusCode -ne 200 -or -not $memoryDisabled.Json -or $memoryDisabled.Json.disabled -ne $true) {
+            $operationErrors.Add("desktop conversation memory disable did not persist")
+          }
+          $usedMemories = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedMemoryConvId/used-memories"
+          if ($usedMemories.StatusCode -ne 200 -or -not $usedMemories.Json) {
+            $operationErrors.Add("desktop conversation used memories did not return 200")
+          }
+        }
         $memory = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/me/memories" -Body @{
           type = "preference"
           content = "Desktop smoke memory preference"
@@ -433,18 +476,63 @@ try {
           if ($patchedMemory.StatusCode -ne 200 -or -not $patchedMemory.Json -or $patchedMemory.Json.content -ne "Desktop smoke memory updated" -or $patchedMemory.Json.pinned -ne $false) {
             $operationErrors.Add("desktop memory patch did not persist")
           }
-          $memories = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memories?disabled=false"
-          if ($memories.StatusCode -ne 200 -or -not $memories.Json) {
-            $operationErrors.Add("desktop memories list did not return 200")
+          $scopedMemory = Invoke-JsonRequest -Method "PATCH" -Uri "http://127.0.0.1:$webPort/api/me/memories/$escapedMemoryId/scope" -Body @{
+            scope_id = $scopeId
+          }
+          if ($scopedMemory.StatusCode -ne 200 -or -not $scopedMemory.Json -or $scopedMemory.Json.scope_id -ne $scopeId) {
+            $operationErrors.Add("desktop memory scope assignment did not persist")
+          }
+          $confirmedMemory = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/me/memories/$escapedMemoryId/confirm" -Body @{
+            decision = "yes"
+          }
+          if ($confirmedMemory.StatusCode -ne 200 -or -not $confirmedMemory.Json -or $null -eq $confirmedMemory.Json.last_confirmed_at) {
+            $operationErrors.Add("desktop memory confirm did not persist")
+          }
+          $memories = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memories?type=preference&pinned=false&disabled=false&scope_id=$escapedScopeId"
+          $memoryItems = if ($memories.Json) { @($memories.Json.items) } else { @() }
+          if (
+            $memories.StatusCode -ne 200 -or
+            $memoryItems.Count -lt 1 -or
+            -not ($memoryItems | Where-Object { $_.id -eq $memoryId })
+          ) {
+            $operationErrors.Add("desktop memories filtered list did not include saved memory")
+          }
+          $staging = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memories/staging"
+          if ($staging.StatusCode -ne 200 -or -not $staging.Json -or $null -eq $staging.Json.items) {
+            $operationErrors.Add("desktop memory staging list did not return 200")
+          }
+          $timeline = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memories/timeline?limit=5"
+          $timelineItems = if ($timeline.Json) { @($timeline.Json.items) } else { @() }
+          if ($timeline.StatusCode -ne 200 -or $timelineItems.Count -lt 1) {
+            $operationErrors.Add("desktop memory timeline did not include audit rows")
           }
           $exported = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/me/memories/export"
           if ($exported.StatusCode -ne 200 -or -not $exported.Json) {
             $operationErrors.Add("desktop memories export did not return 200")
           }
+          $clearMemory = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/me/memories" -Body @{
+            type = "avoid"
+            content = "Desktop smoke memory to clear"
+            scope_id = $scopeId
+          }
+          $clearMemoryId = if ($clearMemory.Json) { [string]$clearMemory.Json.id } else { "" }
+          if ($clearMemory.StatusCode -ne 200 -or [string]::IsNullOrWhiteSpace($clearMemoryId)) {
+            $operationErrors.Add("desktop memory clear fixture create did not return an id")
+          }
           $deletedMemory = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/me/memories/$escapedMemoryId"
           if ($deletedMemory.StatusCode -ne 200 -or -not $deletedMemory.Json -or $deletedMemory.Json.ok -ne $true) {
             $operationErrors.Add("desktop memory delete did not return ok=true")
           }
+          $clearedMemories = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/me/memories" -Headers @{
+            "X-Confirm-Clear-Memory" = "yes"
+          }
+          if ($clearedMemories.StatusCode -ne 200 -or -not $clearedMemories.Json -or [int]$clearedMemories.Json.deleted -lt 1) {
+            $operationErrors.Add("desktop memory clear did not delete rows")
+          }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($memoryConvId)) {
+          $escapedMemoryConvId = [System.Uri]::EscapeDataString($memoryConvId)
+          $null = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/conversations/$escapedMemoryConvId"
         }
         $deletedScope = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/me/memory-scopes/$escapedScopeId"
         if ($deletedScope.StatusCode -ne 200 -or -not $deletedScope.Json -or $null -eq $deletedScope.Json.moved) {
