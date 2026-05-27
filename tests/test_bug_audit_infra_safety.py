@@ -181,6 +181,19 @@ def test_desktop_sidecars_allow_packaged_tiktoken_to_warm_before_estimate_mode()
     assert 'unwrap_or_else(|_| "2.0".to_string())' in text
 
 
+def test_desktop_redis_runtime_requires_lua_eval() -> None:
+    sidecar = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+    smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
+
+    assert '.arg("--lua")' in sidecar
+    assert 'EVAL\\r\\n$8\\r\\nreturn 1' in sidecar
+    assert "redis lua eval failed" in sidecar
+    for text in (smoke_mac, smoke_win):
+        assert "Lua scripting support disabled" in text
+        assert "redis lua scripting is disabled" in text
+
+
 def test_desktop_packaging_verifies_bundled_runtime_resources() -> None:
     build_mac = BUILD_MAC.read_text(encoding="utf-8")
     build_win = BUILD_WIN.read_text(encoding="utf-8")
@@ -264,6 +277,7 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
     ]
     api_routes = [
         "/api/auth/csrf",
+        "/api/auth/logout",
         "/api/settings/bootstrap-status",
         "/api/settings/diagnostics",
         "/api/settings/system",
@@ -290,7 +304,13 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
             assert route in text
         assert "desktop unsupported route" in text
         assert "desktop bootstrap-complete did not return complete=true" in text
+        assert "desktop csrf did not return desktop-local-token" in text
+        assert "desktop logout returned" in text
+        assert "desktop auth/me failed after logout no-op" in text
+        assert "desktop diagnostics payload did not match runtime state" in text
         assert "desktop settings/system PUT" in text
+        assert "desktop settings/system unsupported key returned" in text
+        assert "desktop settings/system invalid value returned" in text
         assert "desktop conversation create did not return an id" in text
         assert "desktop conversation patch did not persist title" in text
         assert "desktop conversation delete did not return ok=true" in text
@@ -302,6 +322,7 @@ def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
         assert "desktop provider enabled PATCH did not persist false" in text
         assert "desktop providers clear did not return empty items" in text
         assert "endpoint_locked_to_generations" in text
+        assert "redis lua scripting is disabled" in text
         assert "desktop memory settings patch did not persist" in text
         assert "desktop memory create did not return a pinned memory" in text
         assert "desktop memory patch did not persist" in text

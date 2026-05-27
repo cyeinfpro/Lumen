@@ -503,7 +503,7 @@ if worker_before:
 web_restarted = False
 web_before = set(sidecar_pids("lumen-web"))
 if web_before:
-    os.kill(next(iter(web_before)), signal.SIGTERM)
+    os.kill(next(iter(web_before)), signal.SIGKILL)
     restart_deadline = time.time() + 20
     while time.time() < restart_deadline:
         web_after = set(sidecar_pids("lumen-web"))
@@ -582,6 +582,8 @@ if "context_window.tiktoken_unavailable" in combined:
     errors.append("packaged Python runtime could not load tiktoken")
 if "context_window.tiktoken_loading_slow" in combined:
     errors.append("packaged Python runtime fell back before tiktoken warmed")
+if "Lua scripting support disabled" in combined:
+    errors.append("redis lua scripting is disabled")
 if re.search(r"Network:\s+http://(?!localhost(?::|/)|127\.0\.0\.1(?::|/))", logs["web.log"]) or "0.0.0.0" in logs["web.log"]:
     errors.append("web runtime is listening on a non-loopback interface")
 if '"event":"heartbeat"' not in logs["supervisor.log"]:
@@ -698,6 +700,24 @@ else:
         except Exception as exc:
             errors.append(f"desktop web proxy {path} request failed: {exc}")
     try:
+        status, payload = json_request(web_port, "/api/auth/csrf")
+        if (
+            status != 200
+            or not isinstance(payload, dict)
+            or payload.get("csrf_token") != "desktop-local-token"
+        ):
+            errors.append("desktop csrf did not return desktop-local-token")
+    except Exception as exc:
+        errors.append(f"desktop csrf request failed: {exc}")
+    try:
+        status, _ = json_request(web_port, "/api/auth/logout", method="POST")
+        if status != 204:
+            errors.append(f"desktop logout returned {status}")
+        if get_http(web_port, "/api/auth/me") != 200:
+            errors.append("desktop auth/me failed after logout no-op")
+    except Exception as exc:
+        errors.append(f"desktop logout request failed: {exc}")
+    try:
         status, payload = json_request(
             web_port,
             "/api/settings/bootstrap-complete",
@@ -722,6 +742,31 @@ else:
     except Exception as exc:
         errors.append(f"desktop bootstrap-status request failed: {exc}")
     try:
+        status, diagnostics = json_request(web_port, "/api/settings/diagnostics")
+        data_root = diagnostics.get("data_root") if isinstance(diagnostics, dict) else None
+        logs_root_value = diagnostics.get("logs_root") if isinstance(diagnostics, dict) else None
+        settings_path = diagnostics.get("settings_path") if isinstance(diagnostics, dict) else None
+        provider_metadata_path = (
+            diagnostics.get("provider_metadata_path") if isinstance(diagnostics, dict) else None
+        )
+        disk_free_bytes = diagnostics.get("disk_free_bytes") if isinstance(diagnostics, dict) else None
+        if (
+            status != 200
+            or data_root != str(home / "Library/Application Support/com.lumen.desktop")
+            or not isinstance(logs_root_value, str)
+            or not logs_root_value.endswith("/data/logs")
+            or not isinstance(settings_path, str)
+            or not settings_path.endswith("/data/settings.json")
+            or not isinstance(provider_metadata_path, str)
+            or not provider_metadata_path.endswith("/data/providers.json")
+            or diagnostics.get("bootstrap_complete") is not True
+            or not isinstance(disk_free_bytes, int)
+            or disk_free_bytes <= 0
+        ):
+            errors.append("desktop diagnostics payload did not match runtime state")
+    except Exception as exc:
+        errors.append(f"desktop diagnostics request failed: {exc}")
+    try:
         status, _ = json_request(
             web_port,
             "/api/settings/system",
@@ -737,6 +782,28 @@ else:
             errors.append(f"desktop settings/system PUT returned {status}")
     except Exception as exc:
         errors.append(f"desktop settings/system PUT request failed: {exc}")
+    try:
+        status, _ = json_request(
+            web_port,
+            "/api/settings/system",
+            method="PUT",
+            body={"items": [{"key": "billing.enabled", "value": "true"}]},
+        )
+        if status != 422:
+            errors.append(f"desktop settings/system unsupported key returned {status}")
+    except Exception as exc:
+        errors.append(f"desktop settings/system unsupported key request failed: {exc}")
+    try:
+        status, _ = json_request(
+            web_port,
+            "/api/settings/system",
+            method="PUT",
+            body={"items": [{"key": "providers.auto_probe_interval", "value": "not-an-int"}]},
+        )
+        if status != 422:
+            errors.append(f"desktop settings/system invalid value returned {status}")
+    except Exception as exc:
+        errors.append(f"desktop settings/system invalid value request failed: {exc}")
 if not all(processes.values()):
     errors.append("not all sidecar processes are alive")
 
