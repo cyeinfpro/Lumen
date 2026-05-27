@@ -71,14 +71,14 @@ class _Db:
             value.created_at = datetime.now(timezone.utc)
 
 
-def _request(method: str) -> Request:
+def _request(method: str, client_host: str = "127.0.0.1") -> Request:
     return Request(
         {
             "type": "http",
             "method": method,
             "path": "/",
             "headers": [],
-            "client": ("127.0.0.1", 12345),
+            "client": (client_host, 12345),
         }
     )
 
@@ -105,6 +105,7 @@ def test_share_image_ids_dedupes_and_falls_back_to_single_image() -> None:
 @pytest.mark.asyncio
 async def test_create_share_writes_audit_log(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_write_audit(db, **kwargs):
+        assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
         await db.flush()
 
@@ -138,6 +139,7 @@ async def test_create_share_uses_default_expiration_days_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_write_audit(db, **kwargs):
+        assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
         await db.flush()
 
@@ -163,6 +165,7 @@ async def test_create_share_uses_default_expiration_days_setting(
 @pytest.mark.asyncio
 async def test_revoke_share_writes_audit_log(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_write_audit(db, **kwargs):
+        assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
 
     monkeypatch.setattr(shares, "write_audit", fake_write_audit)
@@ -193,15 +196,18 @@ async def test_create_multi_image_share_preserves_image_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_write_audit(db, **kwargs):
+        assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
         await db.flush()
 
     monkeypatch.setattr(shares, "write_audit", fake_write_audit)
     expires_at = datetime(2026, 4, 26, tzinfo=timezone.utc)
-    db = _Db([
-        [SimpleNamespace(id="img-2"), SimpleNamespace(id="img-1")],
-        None,
-    ])
+    db = _Db(
+        [
+            [SimpleNamespace(id="img-2"), SimpleNamespace(id="img-1")],
+            None,
+        ]
+    )
 
     out = await shares.create_multi_image_share(
         shares._CreateMultiShareIn(
@@ -222,7 +228,44 @@ async def test_create_multi_image_share_preserves_image_order(
 
 
 @pytest.mark.asyncio
-async def test_delete_conversation_writes_audit_log(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_desktop_loopback_public_share_reads_skip_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_check(*_args, **_kwargs) -> None:
+        raise AssertionError("desktop loopback public reads should not be rate limited")
+
+    monkeypatch.setattr(shares.settings, "lumen_runtime", "desktop")
+    monkeypatch.setattr(shares.PUBLIC_PREVIEW_LIMITER, "check", fail_check)
+    monkeypatch.setattr(shares.PUBLIC_IMAGE_LIMITER, "check", fail_check)
+
+    await shares._check_share_preview_rate_limit(_request("GET"))
+    await shares._check_share_image_rate_limit(_request("GET"))
+
+
+@pytest.mark.asyncio
+async def test_non_loopback_public_share_reads_keep_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    async def record_check(_redis, key: str, *_args, **_kwargs) -> None:
+        seen.append(key)
+
+    monkeypatch.setattr(shares.settings, "lumen_runtime", "desktop")
+    monkeypatch.setattr(shares, "get_redis", lambda: object())
+    monkeypatch.setattr(shares.PUBLIC_PREVIEW_LIMITER, "check", record_check)
+    monkeypatch.setattr(shares.PUBLIC_IMAGE_LIMITER, "check", record_check)
+
+    await shares._check_share_preview_rate_limit(_request("GET", "198.51.100.10"))
+    await shares._check_share_image_rate_limit(_request("GET", "198.51.100.10"))
+
+    assert seen == ["rl:share_meta:198.51.100.10", "rl:share_image:198.51.100.10"]
+
+
+@pytest.mark.asyncio
+async def test_delete_conversation_writes_audit_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def fake_write_audit(db, **kwargs):
         assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
@@ -375,8 +418,7 @@ async def test_public_multi_share_returns_ordered_images(
         == "/api/share/token-1/images/img-2/variants/preview1024"
     )
     assert (
-        out.images[1].thumb_url
-        == "/api/share/token-1/images/img-1/variants/thumb256"
+        out.images[1].thumb_url == "/api/share/token-1/images/img-1/variants/thumb256"
     )
 
 

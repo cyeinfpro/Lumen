@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import secrets
 import stat
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import ImageSource
+from lumen_core.desktop_runtime import is_desktop_runtime
 from lumen_core.models import Generation, Image, ImageVariant, Share
 from lumen_core.runtime_settings import get_spec, parse_value
 from lumen_core.schemas import PublicShareImageOut, PublicShareOut, ShareOut
@@ -50,7 +52,9 @@ VARIANT_MEDIA_TYPE = {
 
 
 def _http(code: str, msg: str, http: int) -> HTTPException:
-    return HTTPException(status_code=http, detail={"error": {"code": code, "message": msg}})
+    return HTTPException(
+        status_code=http, detail={"error": {"code": code, "message": msg}}
+    )
 
 
 def _share_url(token: str, public_base_url: str) -> str:
@@ -192,11 +196,31 @@ def _image_etag(img: Image) -> str:
     return f'"{sha}"' if isinstance(sha, str) and sha else f'"{img.id}-orig"'
 
 
+def _is_desktop_loopback_client(ip: str) -> bool:
+    if not is_desktop_runtime(settings.lumen_runtime):
+        return False
+    if ip.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
+
+
+async def _check_share_preview_rate_limit(request: Request) -> None:
+    # Public unauthenticated route: refuse to share a single "unknown" bucket.
+    ip = require_client_ip(request)
+    if _is_desktop_loopback_client(ip):
+        return
+    await PUBLIC_PREVIEW_LIMITER.check(get_redis(), f"rl:share_meta:{ip}")
+
+
 async def _check_share_image_rate_limit(request: Request) -> None:
     # Public unauthenticated route: refuse to share a single "unknown" bucket.
-    await PUBLIC_IMAGE_LIMITER.check(
-        get_redis(), f"rl:share_image:{require_client_ip(request)}"
-    )
+    ip = require_client_ip(request)
+    if _is_desktop_loopback_client(ip):
+        return
+    await PUBLIC_IMAGE_LIMITER.check(get_redis(), f"rl:share_image:{ip}")
 
 
 def _is_share_visible(s: Share, now: datetime) -> bool:
@@ -295,14 +319,18 @@ async def _load_share_images(
         return [primary_img]
 
     rows = (
-        await db.execute(
-            select(Image).where(
-                Image.id.in_(image_ids),
-                Image.user_id == primary_img.user_id,
-                Image.deleted_at.is_(None),
+        (
+            await db.execute(
+                select(Image).where(
+                    Image.id.in_(image_ids),
+                    Image.user_id == primary_img.user_id,
+                    Image.deleted_at.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     by_id = {img.id: img for img in rows}
     return [by_id[image_id] for image_id in image_ids if image_id in by_id]
 
@@ -383,6 +411,7 @@ async def _prompt_map_for_images(
 
 # ---------- Authed ----------
 
+
 class _CreateShareIn(BaseModel):
     show_prompt: bool = False
     expires_at: datetime | None = None
@@ -446,6 +475,7 @@ async def create_share(
             "show_prompt": share.show_prompt,
             "expires_at": share.expires_at.isoformat() if share.expires_at else None,
         },
+        autocommit=False,
     )
     await db.commit()
     await db.refresh(share)
@@ -472,14 +502,18 @@ async def create_multi_image_share(
         raise _http("too_many_images", "too many images in share", 422)
 
     rows = (
-        await db.execute(
-            select(Image).where(
-                Image.id.in_(image_ids),
-                Image.user_id == user.id,
-                Image.deleted_at.is_(None),
+        (
+            await db.execute(
+                select(Image).where(
+                    Image.id.in_(image_ids),
+                    Image.user_id == user.id,
+                    Image.deleted_at.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     by_id = {img.id: img for img in rows}
     if len(by_id) != len(image_ids):
         raise _http("not_found", "one or more images not found", 404)
@@ -513,6 +547,7 @@ async def create_multi_image_share(
             "show_prompt": share.show_prompt,
             "expires_at": share.expires_at.isoformat() if share.expires_at else None,
         },
+        autocommit=False,
     )
     await db.commit()
     await db.refresh(share)
@@ -559,6 +594,7 @@ async def revoke_share(
                 "image_id": share.image_id,
                 "image_ids": _share_image_ids(share),
             },
+            autocommit=False,
         )
         await db.commit()
     return None
@@ -573,17 +609,21 @@ async def list_my_shares(
     public_base_url = await resolve_public_base_url(request, db)
     now = datetime.now(timezone.utc)
     rows = (
-        await db.execute(
-            select(Share)
-            .join(Image, Image.id == Share.image_id)
-            .where(
-                Image.user_id == user.id,
-                Image.deleted_at.is_(None),
-                Share.revoked_at.is_(None),
+        (
+            await db.execute(
+                select(Share)
+                .join(Image, Image.id == Share.image_id)
+                .where(
+                    Image.user_id == user.id,
+                    Image.deleted_at.is_(None),
+                    Share.revoked_at.is_(None),
+                )
+                .order_by(Share.created_at.desc())
             )
-            .order_by(Share.created_at.desc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     # Filter out expired in Python (keeps SQL simple across naive/aware tz)
     items = [
         _to_share_out(s, public_base_url) for s in rows if _is_share_visible(s, now)
@@ -593,19 +633,16 @@ async def list_my_shares(
 
 # ---------- Public ----------
 
+
 @router_public.get("/share/{token}", response_model=PublicShareOut)
 async def get_public_share(
     token: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PublicShareOut:
-    await PUBLIC_PREVIEW_LIMITER.check(
-        get_redis(), f"rl:share_meta:{require_client_ip(request)}"
-    )
+    await _check_share_preview_rate_limit(request)
     now = datetime.now(timezone.utc)
-    row = (
-        await db.execute(_select_public_share(token, now))
-    ).first()
+    row = (await db.execute(_select_public_share(token, now))).first()
     if not row:
         raise _http("not_found", "share not found", 404)
     share, img = row
@@ -648,9 +685,7 @@ async def get_public_share_image(
 ) -> StreamingResponse:
     await _check_share_image_rate_limit(request)
     now = datetime.now(timezone.utc)
-    row = (
-        await db.execute(_select_public_share(token, now))
-    ).first()
+    row = (await db.execute(_select_public_share(token, now))).first()
     if not row:
         raise _http("not_found", "share not found", 404)
     share, img = row
@@ -681,9 +716,7 @@ async def get_public_share_image_variant_by_id(
         raise _http("invalid_variant", "unsupported image variant", 400)
     await _check_share_image_rate_limit(request)
     now = datetime.now(timezone.utc)
-    row = (
-        await db.execute(_select_public_share(token, now))
-    ).first()
+    row = (await db.execute(_select_public_share(token, now))).first()
     if not row:
         raise _http("not_found", "share not found", 404)
     share, primary_img = row
@@ -724,9 +757,7 @@ async def get_public_share_image_by_id(
 ) -> StreamingResponse:
     await _check_share_image_rate_limit(request)
     now = datetime.now(timezone.utc)
-    row = (
-        await db.execute(_select_public_share(token, now))
-    ).first()
+    row = (await db.execute(_select_public_share(token, now))).first()
     if not row:
         raise _http("not_found", "share not found", 404)
     share, primary_img = row
