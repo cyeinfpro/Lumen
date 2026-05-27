@@ -68,6 +68,7 @@ disown "$app_pid" 2>/dev/null || true
 
 HOME_DIR="$home" WORK_DIR="$work" MOUNT_DIR="$mount" APP_PID="$app_pid" python3 - <<'PY'
 import os
+import base64
 import json
 import pathlib
 import re
@@ -114,13 +115,25 @@ def process_alive(pid):
     )
 
 
-def http_request(port, path, method="GET", body=None, headers=None, follow_redirects=True):
+def http_request(
+    port,
+    path,
+    method="GET",
+    body=None,
+    headers=None,
+    follow_redirects=True,
+    raw_body=None,
+):
     request_headers = {"Connection": "close"}
     data = None
+    if body is not None and raw_body is not None:
+        raise ValueError("body and raw_body are mutually exclusive")
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         request_headers["Content-Type"] = "application/json"
         request_headers["Accept"] = "application/json"
+    elif raw_body is not None:
+        data = raw_body
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(
@@ -151,6 +164,38 @@ def get_http(port, path, headers=None, follow_redirects=True):
 
 def json_request(port, path, method="GET", body=None):
     status, text = http_request(port, path, method=method, body=body)
+    try:
+        payload = json.loads(text) if text else None
+    except json.JSONDecodeError:
+        payload = None
+    return status, payload
+
+
+def multipart_file_request(port, path, field_name, filename, content_type, data):
+    boundary = f"----lumen-desktop-smoke-{int(time.time() * 1000)}"
+    raw = b"".join(
+        [
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                f'Content-Disposition: form-data; name="{field_name}"; '
+                f'filename="{filename}"\r\n'
+            ).encode("ascii"),
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
+            data,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode("ascii"),
+        ]
+    )
+    status, text = http_request(
+        port,
+        path,
+        method="POST",
+        raw_body=raw,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+        },
+    )
     try:
         payload = json.loads(text) if text else None
     except json.JSONDecodeError:
@@ -484,6 +529,66 @@ if baseline_ready and web_port is not None:
                 operation_errors.append("desktop memory scope delete did not return moved count")
     except Exception as exc:
         operation_errors.append(f"desktop memory CRUD request failed: {exc}")
+    try:
+        status, feed = json_request(web_port, "/api/generations/feed?limit=1")
+        if (
+            status != 200
+            or not isinstance(feed, dict)
+            or not isinstance(feed.get("items"), list)
+            or not isinstance(feed.get("total"), int)
+        ):
+            operation_errors.append("desktop generations feed did not return an item list")
+        status, _ = json_request(web_port, "/api/generations/feed?ratio=bad-ratio")
+        if status != 400:
+            operation_errors.append(f"desktop generations feed invalid ratio returned {status}")
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg=="
+        )
+        status, uploaded = multipart_file_request(
+            web_port,
+            "/api/images/upload",
+            "file",
+            "desktop-smoke.png",
+            "image/png",
+            png_bytes,
+        )
+        image_id = uploaded.get("id") if isinstance(uploaded, dict) else None
+        if (
+            status != 200
+            or not image_id
+            or uploaded.get("width") != 2
+            or uploaded.get("height") != 2
+            or uploaded.get("mime") != "image/png"
+            or uploaded.get("url") != f"/api/images/{image_id}/binary"
+        ):
+            operation_errors.append("desktop image upload did not return expected metadata")
+        else:
+            escaped_image_id = urllib.parse.quote(str(image_id), safe="")
+            status, meta = json_request(web_port, f"/api/images/{escaped_image_id}")
+            metadata_jsonb = meta.get("metadata_jsonb") if isinstance(meta, dict) else None
+            if (
+                status != 200
+                or not isinstance(meta, dict)
+                or meta.get("id") != image_id
+                or not isinstance(metadata_jsonb, dict)
+                or "normalized_ref" not in metadata_jsonb
+            ):
+                operation_errors.append("desktop image metadata did not include normalized_ref")
+            if get_http(web_port, f"/api/images/{escaped_image_id}/binary") != 200:
+                operation_errors.append("desktop image binary did not return 200")
+            if get_http(web_port, f"/api/images/{escaped_image_id}/variants/display2048") != 200:
+                operation_errors.append("desktop image display variant did not return 200")
+            status, deleted_image = json_request(
+                web_port,
+                f"/api/images/{escaped_image_id}",
+                method="DELETE",
+            )
+            if status != 200 or not isinstance(deleted_image, dict) or deleted_image.get("ok") is not True:
+                operation_errors.append("desktop image delete did not return ok=true")
+            if get_http(web_port, f"/api/images/{escaped_image_id}/binary") != 404:
+                operation_errors.append("desktop image binary after delete did not return 404")
+    except Exception as exc:
+        operation_errors.append(f"desktop image and feed requests failed: {exc}")
 else:
     operation_errors.append("desktop conversation CRUD skipped before baseline readiness")
 worker_restarted = False
@@ -690,6 +795,7 @@ else:
         "/api/settings/providers": 200,
         "/api/settings/providers/stats": 200,
         "/api/conversations?limit=1": 200,
+        "/api/generations/feed?limit=1": 200,
         "/api/system/desktop-activity": 200,
     }
     for path, expected in api_gets.items():

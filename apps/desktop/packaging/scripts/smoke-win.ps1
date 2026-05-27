@@ -144,6 +144,43 @@ function Invoke-JsonRequest {
   }
 }
 
+function Invoke-MultipartImageUpload {
+  param(
+    [string]$Uri,
+    [string]$FilePath
+  )
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec $httpTimeoutSec -Uri $Uri -Method POST -Form @{
+      file = Get-Item $FilePath
+    } -Headers @{ Accept = "application/json" }
+    $json = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$response.Content)) {
+      $json = $response.Content | ConvertFrom-Json
+    }
+    return [pscustomobject]@{
+      StatusCode = [int]$response.StatusCode
+      Json = $json
+      Content = [string]$response.Content
+    }
+  } catch {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+      return [pscustomobject]@{
+        StatusCode = [int]$_.Exception.Response.StatusCode
+        Json = $null
+        Content = ""
+      }
+    }
+    if ($_.Exception.StatusCode) {
+      return [pscustomobject]@{
+        StatusCode = [int]$_.Exception.StatusCode
+        Json = $null
+        Content = ""
+      }
+    }
+    throw
+  }
+}
+
 try {
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName = $Executable
@@ -411,6 +448,59 @@ try {
       }
     } catch {
       $operationErrors.Add("desktop memory CRUD request failed: $($_.Exception.Message)")
+    }
+    try {
+      $feed = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/generations/feed?limit=1"
+      $feedItems = if ($feed.Json) { @($feed.Json.items) } else { $null }
+      if ($feed.StatusCode -ne 200 -or $null -eq $feedItems -or $null -eq $feed.Json.total) {
+        $operationErrors.Add("desktop generations feed did not return an item list")
+      }
+      $invalidFeed = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/generations/feed?ratio=bad-ratio"
+      if ($invalidFeed.StatusCode -ne 400) {
+        $operationErrors.Add("desktop generations feed invalid ratio returned $($invalidFeed.StatusCode)")
+      }
+      $pngPath = Join-Path $work "desktop-smoke.png"
+      [System.IO.File]::WriteAllBytes(
+        $pngPath,
+        [System.Convert]::FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg==")
+      )
+      $uploaded = Invoke-MultipartImageUpload -Uri "http://127.0.0.1:$webPort/api/images/upload" -FilePath $pngPath
+      $imageId = if ($uploaded.Json) { [string]$uploaded.Json.id } else { "" }
+      if (
+        $uploaded.StatusCode -ne 200 -or
+        [string]::IsNullOrWhiteSpace($imageId) -or
+        [int]$uploaded.Json.width -ne 2 -or
+        [int]$uploaded.Json.height -ne 2 -or
+        [string]$uploaded.Json.mime -ne "image/png" -or
+        [string]$uploaded.Json.url -ne "/api/images/$imageId/binary"
+      ) {
+        $operationErrors.Add("desktop image upload did not return expected metadata")
+      } else {
+        $escapedImageId = [System.Uri]::EscapeDataString($imageId)
+        $meta = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/images/$escapedImageId"
+        $normalizedRef = if ($meta.Json -and $meta.Json.metadata_jsonb) { $meta.Json.metadata_jsonb.normalized_ref } else { $null }
+        if ($meta.StatusCode -ne 200 -or -not $meta.Json -or [string]$meta.Json.id -ne $imageId -or $null -eq $normalizedRef) {
+          $operationErrors.Add("desktop image metadata did not include normalized_ref")
+        }
+        $binary = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/images/$escapedImageId/binary"
+        if ($binary -ne 200) {
+          $operationErrors.Add("desktop image binary did not return 200")
+        }
+        $variant = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/images/$escapedImageId/variants/display2048"
+        if ($variant -ne 200) {
+          $operationErrors.Add("desktop image display variant did not return 200")
+        }
+        $deletedImage = Invoke-JsonRequest -Method "DELETE" -Uri "http://127.0.0.1:$webPort/api/images/$escapedImageId"
+        if ($deletedImage.StatusCode -ne 200 -or -not $deletedImage.Json -or $deletedImage.Json.ok -ne $true) {
+          $operationErrors.Add("desktop image delete did not return ok=true")
+        }
+        $binaryAfterDelete = Get-HttpStatus -Uri "http://127.0.0.1:$webPort/api/images/$escapedImageId/binary"
+        if ($binaryAfterDelete -ne 404) {
+          $operationErrors.Add("desktop image binary after delete did not return 404")
+        }
+      }
+    } catch {
+      $operationErrors.Add("desktop image and feed requests failed: $($_.Exception.Message)")
     }
   } else {
     $operationErrors.Add("desktop conversation CRUD skipped before baseline readiness")
@@ -755,6 +845,7 @@ try {
       "/api/settings/providers" = 200
       "/api/settings/providers/stats" = 200
       "/api/conversations?limit=1" = 200
+      "/api/generations/feed?limit=1" = 200
       "/api/system/desktop-activity" = 200
     }
     foreach ($path in $apiGets.Keys) {
