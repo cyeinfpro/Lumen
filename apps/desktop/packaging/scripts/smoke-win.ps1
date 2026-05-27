@@ -882,6 +882,30 @@ try {
   Write-Host "web_restarted=$($webRestarted.ToString().ToLowerInvariant())"
   Write-Host "api_restarted=$($apiRestarted.ToString().ToLowerInvariant())"
   Write-Host ("processes " + (($processes.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value.ToString().ToLowerInvariant())" }) -join " "))
+  $headlessMarkerErrors = [System.Collections.Generic.List[string]]::new()
+  $headlessMarker = Join-Path $dataRoot "data/tmp/headless-command-smoke-ok.json"
+  Write-Host "headless_command_marker=$headlessMarker exists=$((Test-Path $headlessMarker).ToString().ToLowerInvariant())"
+  if (-not (Test-Path $headlessMarker)) {
+    $headlessMarkerErrors.Add("desktop headless command smoke marker was not written")
+  } else {
+    try {
+      $marker = Get-Content $headlessMarker -Raw -ErrorAction Stop | ConvertFrom-Json
+      $diagnosticsPath = [string]$marker.diagnostics_bundle_path
+      $backupPath = [string]$marker.backup_path
+      if (
+        $marker.ok -ne $true -or
+        [int]$marker.sidecar_count -lt 4 -or
+        [int64]$marker.diagnostics_bundle_bytes -le 0 -or
+        -not (Test-Path $diagnosticsPath) -or
+        [int64]$marker.backup_bytes -le 0 -or
+        -not (Test-Path $backupPath)
+      ) {
+        $headlessMarkerErrors.Add("desktop headless command smoke marker payload was invalid")
+      }
+    } catch {
+      $headlessMarkerErrors.Add("desktop headless command smoke marker parse failed: $($_.Exception.Message)")
+    }
+  }
   foreach ($name in $logs.Keys) {
     Write-Host "--- $name tail ---"
     $text = [string]$logs[$name]
@@ -895,6 +919,9 @@ try {
   $combined = ($logs.Values -join "`n")
   $errors = [System.Collections.Generic.List[string]]::new()
   foreach ($item in $operationErrors) {
+    $errors.Add($item)
+  }
+  foreach ($item in $headlessMarkerErrors) {
     $errors.Add($item)
   }
   if ($combined.Contains("--logdir") -or $combined.Contains("LogDir specified without enabling tiered storage")) {

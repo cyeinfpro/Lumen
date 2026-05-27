@@ -557,6 +557,7 @@ fn run_headless_smoke() -> anyhow::Result<()> {
             "desktop activity endpoint reported active tasks before smoke workload"
         ));
     }
+    run_headless_command_smoke(&mut supervisor)?;
     let supervisor = Arc::new(Mutex::new(supervisor));
     let monitor = supervisor.clone();
     std::thread::spawn(move || {
@@ -600,6 +601,184 @@ fn run_headless_smoke() -> anyhow::Result<()> {
                 .map_err(|_| anyhow::anyhow!("state poisoned"))?,
         );
     }
+}
+
+fn run_headless_command_smoke(supervisor: &mut Supervisor) -> anyhow::Result<()> {
+    let runtime = supervisor.runtime.clone();
+    let statuses = supervisor.sidecar_statuses();
+    if statuses.len() < 4 {
+        anyhow::bail!(
+            "desktop command smoke expected at least 4 sidecars, got {}",
+            statuses.len()
+        );
+    }
+    let unready = statuses
+        .iter()
+        .filter(|status| status.critical && !status.ready)
+        .map(|status| status.name.clone())
+        .collect::<Vec<_>>();
+    if !unready.is_empty() {
+        anyhow::bail!(
+            "desktop command smoke critical sidecars were not ready: {}",
+            unready.join(", ")
+        );
+    }
+
+    let provider_name = "Headless Smoke Provider";
+    let provider_secret = "sk-headless-command-smoke";
+    let proxy_name = "Headless Smoke Proxy";
+    let proxy_secret = "proxy-headless-command-smoke";
+    let provider_metadata_path = runtime.data_root.join("data/providers.json");
+    if let Some(parent) = provider_metadata_path.parent() {
+        fs::create_dir_all(parent).context("create provider metadata parent")?;
+    }
+    let provider_metadata = json!({
+        "providers": [
+            {
+                "name": provider_name,
+                "base_url": "https://example.test/v1",
+                "api_key": "",
+                "priority": 100,
+                "weight": 1,
+                "enabled": true,
+                "purposes": ["chat", "image"]
+            }
+        ],
+        "proxies": [
+            {
+                "name": proxy_name,
+                "type": "http",
+                "url": "http://127.0.0.1:9",
+                "password": ""
+            }
+        ]
+    });
+    fs::write(
+        &provider_metadata_path,
+        serde_json::to_vec_pretty(&provider_metadata)?,
+    )
+    .with_context(|| {
+        format!(
+            "write provider metadata for desktop command smoke {}",
+            provider_metadata_path.display()
+        )
+    })?;
+
+    secrets::set_provider_key(&runtime.data_root, provider_name, provider_secret)
+        .context("set provider secret during desktop command smoke")?;
+    if secrets::get_provider_key(&runtime.data_root, provider_name)?.as_deref()
+        != Some(provider_secret)
+    {
+        anyhow::bail!("desktop command smoke provider secret did not round-trip");
+    }
+    secrets::set_proxy_password(&runtime.data_root, proxy_name, proxy_secret)
+        .context("set proxy secret during desktop command smoke")?;
+    if secrets::get_proxy_password(&runtime.data_root, proxy_name)?.as_deref() != Some(proxy_secret)
+    {
+        anyhow::bail!("desktop command smoke proxy secret did not round-trip");
+    }
+
+    supervisor
+        .refresh_provider_runtime()
+        .context("refresh provider runtime during desktop command smoke")?;
+    let runtime_config_raw = fs::read(&runtime.provider_runtime_file).with_context(|| {
+        format!(
+            "read provider runtime file {}",
+            runtime.provider_runtime_file.display()
+        )
+    })?;
+    let runtime_config: serde_json::Value =
+        serde_json::from_slice(&runtime_config_raw).context("parse provider runtime file")?;
+    let provider_runtime_key = runtime_config
+        .get("providers")
+        .and_then(|value| value.as_array())
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                (item.get("name").and_then(|value| value.as_str()) == Some(provider_name))
+                    .then(|| item.get("api_key").and_then(|value| value.as_str()))
+                    .flatten()
+            })
+        });
+    if provider_runtime_key != Some(provider_secret) {
+        anyhow::bail!("desktop command smoke provider runtime did not include saved key");
+    }
+    let proxy_runtime_password = runtime_config
+        .get("proxies")
+        .and_then(|value| value.as_array())
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                (item.get("name").and_then(|value| value.as_str()) == Some(proxy_name))
+                    .then(|| item.get("password").and_then(|value| value.as_str()))
+                    .flatten()
+            })
+        });
+    if proxy_runtime_password != Some(proxy_secret) {
+        anyhow::bail!("desktop command smoke provider runtime did not include proxy password");
+    }
+
+    let redis_info = supervisor.redis_info();
+    let diagnostics = diagnostics::create_diagnostic_bundle(
+        &runtime.data_root,
+        &json!({
+            "command_smoke": true,
+            "runtime": runtime,
+            "sidecars": statuses,
+        }),
+        redis_info.as_deref(),
+    )
+    .context("create diagnostics bundle during desktop command smoke")?;
+    if diagnostics.bytes == 0 || !diagnostics.path.is_file() {
+        anyhow::bail!("desktop command smoke diagnostics bundle was empty or missing");
+    }
+
+    let backup =
+        backup::create_desktop_backup(&supervisor.runtime.data_root, env!("CARGO_PKG_VERSION"))
+            .context("create desktop backup during desktop command smoke")?;
+    if backup.bytes == 0 || !backup.path.is_file() {
+        anyhow::bail!("desktop command smoke backup was empty or missing");
+    }
+    if backup.manifest.format != "lumen-desktop-backup" || !backup.manifest.database.present {
+        anyhow::bail!("desktop command smoke backup manifest did not include the SQLite database");
+    }
+
+    let restore_status = backup::pending_restore_status(&supervisor.runtime.data_root);
+    if restore_status.pending || restore_status.failed {
+        anyhow::bail!("desktop command smoke unexpectedly found a pending restore marker");
+    }
+    let docker_status = docker_import::pending_docker_import_status(&supervisor.runtime.data_root);
+    if docker_status.pending || docker_status.failed {
+        anyhow::bail!("desktop command smoke unexpectedly found a pending Docker import marker");
+    }
+
+    secrets::set_provider_key(&supervisor.runtime.data_root, provider_name, "")
+        .context("clear provider secret during desktop command smoke")?;
+    secrets::set_proxy_password(&supervisor.runtime.data_root, proxy_name, "")
+        .context("clear proxy secret during desktop command smoke")?;
+
+    let marker = supervisor
+        .runtime
+        .data_root
+        .join("data/tmp/headless-command-smoke-ok.json");
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).context("create desktop command smoke marker parent")?;
+    }
+    fs::write(
+        &marker,
+        serde_json::to_vec_pretty(&json!({
+            "ok": true,
+            "sidecar_count": statuses.len(),
+            "diagnostics_bundle_path": diagnostics.path,
+            "diagnostics_bundle_bytes": diagnostics.bytes,
+            "backup_path": backup.path,
+            "backup_bytes": backup.bytes,
+        }))?,
+    )
+    .with_context(|| format!("write desktop command smoke marker {}", marker.display()))?;
+    println!(
+        "desktop_headless_command_smoke_ok marker={}",
+        marker.display()
+    );
+    Ok(())
 }
 
 fn spawn_desktop_preflight_and_runtime(app_handle: tauri::AppHandle, state: DesktopState) {

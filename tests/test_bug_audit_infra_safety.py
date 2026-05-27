@@ -253,6 +253,31 @@ def test_desktop_smoke_verifies_local_api_token_boundary() -> None:
         assert "without desktop token did not return 401" in text
 
 
+def test_desktop_headless_smoke_covers_command_backing_operations() -> None:
+    main_rs = DESKTOP_MAIN_RS.read_text(encoding="utf-8")
+    smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")
+    smoke_win = SMOKE_WIN.read_text(encoding="utf-8")
+
+    for snippet in [
+        "run_headless_command_smoke(&mut supervisor)",
+        "secrets::set_provider_key",
+        "secrets::set_proxy_password",
+        "refresh_provider_runtime()",
+        "diagnostics::create_diagnostic_bundle",
+        "backup::create_desktop_backup",
+        "backup::pending_restore_status",
+        "docker_import::pending_docker_import_status",
+        "headless-command-smoke-ok.json",
+        "desktop_headless_command_smoke_ok",
+    ]:
+        assert snippet in main_rs
+
+    for text in (smoke_mac, smoke_win):
+        assert "headless-command-smoke-ok.json" in text
+        assert "desktop headless command smoke marker was not written" in text
+        assert "desktop headless command smoke marker payload was invalid" in text
+
+
 def test_desktop_packaged_smoke_covers_local_routes_and_crud() -> None:
     web_proxy = WEB_PROXY.read_text(encoding="utf-8")
     smoke_mac = SMOKE_MAC.read_text(encoding="utf-8")

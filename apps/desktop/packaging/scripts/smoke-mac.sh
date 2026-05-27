@@ -951,11 +951,34 @@ print(
     "processes "
     + " ".join(f"{name}={str(alive).lower()}" for name, alive in processes.items())
 )
+headless_marker_errors = []
+headless_marker = logs_root.parent / "tmp/headless-command-smoke-ok.json"
+print(f"headless_command_marker={headless_marker} exists={str(headless_marker.is_file()).lower()}")
+if not headless_marker.is_file():
+    headless_marker_errors.append("desktop headless command smoke marker was not written")
+else:
+    try:
+        marker = json.loads(headless_marker.read_text(encoding="utf-8"))
+        if (
+            marker.get("ok") is not True
+            or not isinstance(marker.get("sidecar_count"), int)
+            or marker.get("sidecar_count", 0) < 4
+            or not isinstance(marker.get("diagnostics_bundle_bytes"), int)
+            or marker.get("diagnostics_bundle_bytes", 0) <= 0
+            or not pathlib.Path(str(marker.get("diagnostics_bundle_path", ""))).is_file()
+            or not isinstance(marker.get("backup_bytes"), int)
+            or marker.get("backup_bytes", 0) <= 0
+            or not pathlib.Path(str(marker.get("backup_path", ""))).is_file()
+        ):
+            headless_marker_errors.append("desktop headless command smoke marker payload was invalid")
+    except Exception as exc:
+        headless_marker_errors.append(f"desktop headless command smoke marker parse failed: {exc}")
 for name, text in logs.items():
     print(f"--- {name} tail ---")
     print(text[-1600:])
 
 errors = list(operation_errors)
+errors.extend(headless_marker_errors)
 if "--logdir" in combined or "LogDir specified without enabling tiered storage" in combined:
     errors.append("old Garnet logdir failure is present")
 if "api_key is required" in logs["worker.err.log"]:
