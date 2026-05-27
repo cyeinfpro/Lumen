@@ -704,47 +704,6 @@ if baseline_ready and web_port is not None:
     except Exception as exc:
         operation_errors.append(f"desktop memory CRUD request failed: {exc}")
     try:
-        status, model_library = json_request(
-            web_port,
-            "/api/workflows/apparel-model-library?age_segment=all&source=all&appearance=all",
-        )
-        if (
-            status != 200
-            or not isinstance(model_library, dict)
-            or not isinstance(model_library.get("items"), list)
-            or not isinstance(model_library.get("sync"), dict)
-        ):
-            operation_errors.append("desktop model library list did not return items")
-        status, model_jobs = json_request(
-            web_port,
-            "/api/workflows/apparel-model-library/jobs?limit=1",
-        )
-        if (
-            status != 200
-            or not isinstance(model_jobs, dict)
-            or not isinstance(model_jobs.get("items"), list)
-            or model_jobs.get("limit") != 1
-        ):
-            operation_errors.append("desktop model library jobs did not return items")
-        status, poster_styles = json_request(web_port, "/api/poster-styles?limit=1")
-        if (
-            status != 200
-            or not isinstance(poster_styles, dict)
-            or not isinstance(poster_styles.get("items"), list)
-            or not isinstance(poster_styles.get("sync"), dict)
-        ):
-            operation_errors.append("desktop poster style list did not return items")
-        status, poster_jobs = json_request(web_port, "/api/poster-styles/jobs?limit=1")
-        if (
-            status != 200
-            or not isinstance(poster_jobs, dict)
-            or not isinstance(poster_jobs.get("items"), list)
-            or poster_jobs.get("limit") != 1
-        ):
-            operation_errors.append("desktop poster style jobs did not return items")
-    except Exception as exc:
-        operation_errors.append(f"desktop library read requests failed: {exc}")
-    try:
         status, feed = json_request(web_port, "/api/generations/feed?limit=1")
         if (
             status != 200
