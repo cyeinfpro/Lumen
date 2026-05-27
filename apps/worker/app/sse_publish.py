@@ -124,6 +124,21 @@ def _is_lua_xadd_unsupported(exc: Exception) -> bool:
     )
 
 
+def _is_stream_command_unsupported(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "unknown command" in message
+        or "unknown redis command" in message
+        or (
+            "xadd" in message and ("unsupported" in message or "not allowed" in message)
+        )
+    )
+
+
+def _live_only_sse_id() -> str:
+    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
+
+
 async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
     get_fn = getattr(redis, "get", None)
     if not callable(get_fn):
@@ -190,16 +205,23 @@ async def _xadd_event_without_lua(
         if not reserved:
             raise RuntimeError("sse dedupe reservation has no stream id")
 
-    stream_id = await redis.xadd(
-        stream_key,
-        {
-            "event": event_name,
-            "data": payload_json,
-            "event_id": event_id,
-        },
-        maxlen=EVENTS_STREAM_MAXLEN,
-        approximate=True,
-    )
+    try:
+        stream_id = await redis.xadd(
+            stream_key,
+            {
+                "event": event_name,
+                "data": payload_json,
+                "event_id": event_id,
+            },
+            maxlen=EVENTS_STREAM_MAXLEN,
+            approximate=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not _is_stream_command_unsupported(exc):
+            raise
+        stream_id = _live_only_sse_id()
+        await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=stream_id)
+        return stream_id
     decoded = _decode_redis_value(stream_id)
     await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=decoded)
     return decoded

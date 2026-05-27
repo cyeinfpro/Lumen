@@ -691,6 +691,12 @@ if "Lua scripting support disabled" in combined:
     errors.append("redis lua scripting is disabled")
 if "Unknown Redis command called from script" in combined or "sse dedupe reservation has no stream id" in combined:
     errors.append("redis lua xadd fallback did not handle Garnet")
+if (
+    "api publish_sse_event xadd failed" in combined
+    or "api publish_sse_events xadd batch failed" in combined
+    or "publish_event: XADD failed" in combined
+):
+    errors.append("redis stream xadd fallback did not handle Garnet")
 if re.search(r"Network:\s+http://(?!localhost(?::|/)|127\.0\.0\.1(?::|/))", logs["web.log"]) or "0.0.0.0" in logs["web.log"]:
     errors.append("web runtime is listening on a non-loopback interface")
 if '"event":"heartbeat"' not in logs["supervisor.log"]:
