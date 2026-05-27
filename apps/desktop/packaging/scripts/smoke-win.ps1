@@ -124,8 +124,8 @@ function Invoke-JsonRequest {
     $json = $null
     $hashJson = $null
     if (-not [string]::IsNullOrWhiteSpace([string]$response.Content)) {
-      $json = $response.Content | ConvertFrom-Json
-      $hashJson = $response.Content | ConvertFrom-Json -AsHashtable
+      $json = $response.Content | ConvertFrom-Json -NoEnumerate
+      $hashJson = $response.Content | ConvertFrom-Json -AsHashtable -NoEnumerate
     }
     return [pscustomobject]@{
       StatusCode = [int]$response.StatusCode
@@ -152,6 +152,33 @@ function Invoke-JsonRequest {
     }
     throw
   }
+}
+
+function Get-JsonArrayProperty {
+  param(
+    [object]$Json,
+    [object]$HashJson = $null,
+    [string]$Name
+  )
+  $value = $null
+  if ($null -ne $HashJson -and $HashJson -is [System.Collections.IDictionary] -and $HashJson.Contains($Name)) {
+    $value = $HashJson[$Name]
+  } elseif ($null -ne $Json) {
+    $property = $Json.PSObject.Properties[$Name]
+    if ($null -ne $property) {
+      $value = $property.Value
+    }
+  }
+  if ($null -eq $value) {
+    return @()
+  }
+  if ($value -is [System.Array]) {
+    return @($value)
+  }
+  if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
+    return @($value)
+  }
+  return @($value)
 }
 
 function Invoke-MultipartImageUpload {
@@ -646,9 +673,9 @@ try {
         }
         $multiShareId = if ($multiShare.Json) { [string]$multiShare.Json.id } else { "" }
         $multiShareToken = if ($multiShare.Json) { [string]$multiShare.Json.token } else { "" }
-        $multiImageIds = if ($multiShare.Json) { @($multiShare.Json.image_ids) } else { @() }
+        $multiImageIds = @(Get-JsonArrayProperty -Json $multiShare.Json -HashJson $multiShare.HashJson -Name "image_ids")
         if ($multiShare.StatusCode -ne 201 -or [string]::IsNullOrWhiteSpace($multiShareId) -or [string]::IsNullOrWhiteSpace($multiShareToken) -or $multiImageIds.Count -ne 1 -or [string]$multiImageIds[0] -ne $imageId) {
-          $operationErrors.Add("desktop multi-image share create did not return image_ids")
+          $operationErrors.Add("desktop multi-image share create did not return image_ids: status=$($multiShare.StatusCode) content=$($multiShare.Content)")
         } else {
           $escapedMultiShareId = [System.Uri]::EscapeDataString($multiShareId)
           $escapedMultiShareToken = [System.Uri]::EscapeDataString($multiShareToken)
