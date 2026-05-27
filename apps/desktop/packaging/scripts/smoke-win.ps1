@@ -117,12 +117,15 @@ function Invoke-JsonRequest {
   try {
     $response = Invoke-WebRequest @params
     $json = $null
+    $hashJson = $null
     if (-not [string]::IsNullOrWhiteSpace([string]$response.Content)) {
       $json = $response.Content | ConvertFrom-Json
+      $hashJson = $response.Content | ConvertFrom-Json -AsHashtable
     }
     return [pscustomobject]@{
       StatusCode = [int]$response.StatusCode
       Json = $json
+      HashJson = $hashJson
       Content = [string]$response.Content
     }
   } catch {
@@ -130,6 +133,7 @@ function Invoke-JsonRequest {
       return [pscustomobject]@{
         StatusCode = [int]$_.Exception.Response.StatusCode
         Json = $null
+        HashJson = $null
         Content = ""
       }
     }
@@ -137,6 +141,7 @@ function Invoke-JsonRequest {
       return [pscustomobject]@{
         StatusCode = [int]$_.Exception.StatusCode
         Json = $null
+        HashJson = $null
         Content = ""
       }
     }
@@ -451,11 +456,9 @@ try {
     }
     try {
       $feed = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/generations/feed?limit=1"
-      $feedItemsProp = if ($feed.Json) { $feed.Json.PSObject.Properties["items"] } else { $null }
-      $feedTotalProp = if ($feed.Json) { $feed.Json.PSObject.Properties["total"] } else { $null }
-      $feedItems = if ($feedItemsProp) { @($feedItemsProp.Value) } else { $null }
-      $feedTotal = if ($feedTotalProp) { $feedTotalProp.Value } else { $null }
-      if ($feed.StatusCode -ne 200 -or $null -eq $feedItems -or $null -eq $feedTotal) {
+      $feedHasItems = ($null -ne $feed.HashJson) -and $feed.HashJson.ContainsKey("items")
+      $feedHasTotal = ($null -ne $feed.HashJson) -and $feed.HashJson.ContainsKey("total")
+      if ($feed.StatusCode -ne 200 -or -not $feedHasItems -or -not $feedHasTotal) {
         $operationErrors.Add("desktop generations feed did not return an item list")
       }
       $invalidFeed = Invoke-JsonRequest -Uri "http://127.0.0.1:$webPort/api/generations/feed?ratio=bad-ratio"
@@ -715,6 +718,9 @@ try {
   }
   if ($combined.Contains("Unknown Redis command called from script") -or $combined.Contains("sse dedupe reservation has no stream id")) {
     $errors.Add("redis lua xadd fallback did not handle Garnet")
+  }
+  if ($combined.Contains("api publish_sse_event xadd failed") -or $combined.Contains("api publish_sse_events xadd batch failed") -or $combined.Contains("publish_event: XADD failed")) {
+    $errors.Add("redis stream xadd fallback did not handle Garnet")
   }
   if ([string]$logs["web.log"] -match "Network:\s+http://(?!(?:localhost|127\.0\.0\.1)(?::|/))|0\.0\.0\.0") {
     $errors.Add("web runtime is listening on a non-loopback interface")

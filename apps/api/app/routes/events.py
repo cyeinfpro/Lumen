@@ -182,6 +182,21 @@ def _normalize_event_id(raw: object) -> str | None:
     return str(raw)
 
 
+def _is_stream_command_unsupported(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "unknown command" in message
+        or "unknown redis command" in message
+        or (
+            "xadd" in message and ("unsupported" in message or "not allowed" in message)
+        )
+    )
+
+
+def _live_only_sse_id() -> str:
+    return f"live-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
+
+
 def _is_compaction_channel(channel: object, bridge_channels: dict[str, str]) -> bool:
     channel_text = _decode_pubsub_text(channel)
     return bool(channel_text and channel_text in bridge_channels)
@@ -246,7 +261,9 @@ async def _stream_id_for_pubsub_event(
             maxlen=EVENTS_STREAM_MAXLEN,
             approximate=True,
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        if _is_stream_command_unsupported(exc):
+            return _live_only_sse_id()
         logger.warning(
             "sse pubsub event missing sse_id and xadd fallback failed stream=%s event=%s",
             stream_key,

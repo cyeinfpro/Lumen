@@ -101,6 +101,33 @@ async def test_pubsub_event_without_sse_id_is_persisted_for_live_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pubsub_event_without_sse_id_uses_live_id_when_streams_are_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Redis:
+        async def xadd(
+            self,
+            _stream_key: str,
+            _fields: dict[str, str],
+            **_kwargs: Any,
+        ) -> str:
+            raise RuntimeError("unknown command")
+
+    with caplog.at_level("WARNING", logger=events.logger.name):
+        stream_id = await events._stream_id_for_pubsub_event(  # noqa: SLF001
+            Redis(),
+            stream_key="events:user:user-1",
+            event_name="generation.completed",
+            envelope_event_id="event-1",
+            payload={"generation_id": "gen-1"},
+        )
+
+    assert isinstance(stream_id, str)
+    assert stream_id.startswith("live-")
+    assert "xadd fallback failed" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_pubsub_event_envelope_id_does_not_overwrite_payload_event_id() -> None:
     class Redis:
         def __init__(self) -> None:

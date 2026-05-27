@@ -195,6 +195,7 @@ def test_desktop_redis_runtime_requires_lua_eval() -> None:
         assert "Lua scripting support disabled" in text
         assert "redis lua scripting is disabled" in text
         assert "redis lua xadd fallback did not handle Garnet" in text
+        assert "redis stream xadd fallback did not handle Garnet" in text
 
 
 def test_desktop_packaging_verifies_bundled_runtime_resources() -> None:

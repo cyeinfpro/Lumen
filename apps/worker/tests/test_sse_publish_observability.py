@@ -240,6 +240,12 @@ class GarnetLuaXaddRedis(FakeRedis):
         return 1 if self.kv.pop(key, None) is not None else 0
 
 
+class GarnetNoStreamRedis(GarnetLuaXaddRedis):
+    async def xadd(self, *_args, **_kwargs):
+        self.xadd_calls += 1
+        raise RuntimeError("unknown command")
+
+
 @pytest.mark.asyncio
 async def test_publish_event_xadd_retry_is_idempotent_after_accepted_exception(
     monkeypatch,
@@ -283,6 +289,28 @@ async def test_publish_event_falls_back_when_lua_cannot_xadd() -> None:
     assert len(redis.stream_entries) == 1
     payload = json.loads(redis.published[0][1])
     assert payload["sse_id"] == "1710000000000-0"
+
+
+@pytest.mark.asyncio
+async def test_publish_event_uses_live_id_when_stream_commands_are_missing() -> None:
+    redis = GarnetNoStreamRedis()
+
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "user:user-1",
+        "generation.progress",
+        {"generation_id": "gen-1"},
+    )
+
+    dedupe_key = next(iter(redis.kv))
+    assert redis.xadd_calls == 2
+    assert redis.deleted == [dedupe_key]
+    assert redis.kv[dedupe_key].startswith("live-")
+    assert redis.stream_entries == []
+    assert redis.dlq == []
+    payload = json.loads(redis.published[0][1])
+    assert payload["sse_id"] == redis.kv[dedupe_key]
 
 
 @pytest.mark.asyncio
