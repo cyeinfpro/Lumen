@@ -205,10 +205,27 @@ function Verify-GarnetCli {
     Write-Host "Skipping executable Garnet CLI check for cross-architecture target $Triple on host $HostTriple."
     return
   }
-  $help = & $garnet --help 2>&1 | Out-String
+  $previousDotnetRoot = $env:DOTNET_ROOT
+  $previousDotnetMultilevelLookup = $env:DOTNET_MULTILEVEL_LOOKUP
+  try {
+    $env:DOTNET_ROOT = Join-Path $Root "apps/desktop/resources/runtime/dotnet"
+    $env:DOTNET_MULTILEVEL_LOOKUP = "0"
+    $help = & $garnet --help 2>&1 | Out-String
+  } finally {
+    if ($null -eq $previousDotnetRoot) {
+      Remove-Item Env:DOTNET_ROOT -ErrorAction SilentlyContinue
+    } else {
+      $env:DOTNET_ROOT = $previousDotnetRoot
+    }
+    if ($null -eq $previousDotnetMultilevelLookup) {
+      Remove-Item Env:DOTNET_MULTILEVEL_LOOKUP -ErrorAction SilentlyContinue
+    } else {
+      $env:DOTNET_MULTILEVEL_LOOKUP = $previousDotnetMultilevelLookup
+    }
+  }
   foreach ($flag in @("--lua", "--checkpointdir", "--aof", "--recover")) {
     if (-not $help.Contains($flag)) {
-      throw "bundled Garnet runtime does not advertise required flag $flag"
+      throw "bundled Garnet runtime does not advertise required flag $flag`n$help"
     }
   }
 }
