@@ -21,6 +21,7 @@ import { apiFetch } from "@/lib/apiClient";
 import {
   getDesktopStatus,
   exportDiagnosticsBundle,
+  isDesktopBridgeAvailable,
   isDesktopRuntime,
   revealDesktopDataDir,
   type DesktopStatus,
@@ -69,7 +70,38 @@ function Row({
   );
 }
 
-function RuntimeComponentPanel({ status }: { status: DesktopStatus | undefined }) {
+function messageFromError(error: unknown): string {
+  return error instanceof Error ? error.message : "无法读取运行时状态";
+}
+
+function RuntimeComponentPanel({
+  status,
+  loading,
+  error,
+}: {
+  status: DesktopStatus | undefined;
+  loading: boolean;
+  error: unknown;
+}) {
+  if (!status) {
+    const bridgeMissing = !isDesktopBridgeAvailable();
+    const message = loading
+      ? "正在读取运行时状态..."
+      : bridgeMissing
+        ? "桌面桥接不可用。请从 Lumen 桌面应用打开此页面后再查看内置运行时状态。"
+        : error
+          ? messageFromError(error)
+          : "尚未收到运行时状态。";
+    return (
+      <div
+        role={loading ? undefined : "alert"}
+        className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-4 text-sm text-[var(--fg-2)]"
+      >
+        {message}
+      </div>
+    );
+  }
+
   const expected = [
     { name: "redis", label: "本机缓存", port: status?.runtime.redis_port },
     { name: "api", label: "业务接口", port: status?.runtime.api_port },
@@ -271,15 +303,11 @@ export default function DiagnosticsPage() {
                 应用内部组件的就绪状态、端口与最近恢复记录。
               </p>
             </div>
-            <RuntimeComponentPanel status={statusQ.data} />
-            {statusQ.error ? (
-              <div
-                role="alert"
-                className="mt-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-3 text-[13px] text-[var(--danger)]"
-              >
-                {statusQ.error.message}
-              </div>
-            ) : null}
+            <RuntimeComponentPanel
+              status={statusQ.data}
+              loading={statusQ.isLoading}
+              error={statusQ.error}
+            />
           </Card>
         ) : null}
       </div>

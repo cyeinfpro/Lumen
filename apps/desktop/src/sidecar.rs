@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpStream as StdTcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -286,6 +286,8 @@ impl Supervisor {
         cleanup_stale_runtime_workdirs(&self.runtime.data_root);
         self.refresh_provider_runtime()?;
         progress("启动本地缓存");
+        let redis_log_offset =
+            log_file_len(&sidecar_log_path(&self.runtime.data_root, "redis", false));
         self.spawn_redis()?;
         wait_for_redis(
             self.runtime.redis_port,
@@ -293,6 +295,16 @@ impl Supervisor {
             Duration::from_secs(10),
         )
         .await?;
+        if redis_aof_recovery_failed_since(&self.runtime.data_root, redis_log_offset) {
+            progress("重建本地缓存");
+            self.restart_redis_after_aof_recovery_failure()?;
+            wait_for_redis(
+                self.runtime.redis_port,
+                &self.redis_password,
+                Duration::from_secs(10),
+            )
+            .await?;
+        }
         progress("准备核心服务");
         progress("升级本机数据库");
         self.run_desktop_migrations()
@@ -592,6 +604,34 @@ impl Supervisor {
         self.children.push(("redis".into(), child));
         self.invalidate_status_cache();
         Ok(())
+    }
+
+    fn restart_redis_after_aof_recovery_failure(&mut self) -> Result<()> {
+        let mut stopped_pid = None;
+        let mut idx = 0;
+        while idx < self.children.len() {
+            if self.children[idx].0 != "redis" {
+                idx += 1;
+                continue;
+            }
+            let (_name, mut child) = self.children.remove(idx);
+            stopped_pid = Some(child.id());
+            terminate_child(&mut child);
+            let _ = child.wait();
+            self.record_exit("redis", "aof recovery failed; cache was rebuilt");
+            self.invalidate_status_cache();
+            break;
+        }
+        let quarantined = quarantine_redis_aof(&self.runtime.data_root)?;
+        let _ = self.log_supervisor_event(
+            "redis_aof_rebuilt",
+            json!({
+                "stopped_pid": stopped_pid,
+                "quarantined_path": quarantined,
+            }),
+        );
+        self.record_restart("redis", "aof recovery failed; cache was rebuilt");
+        self.spawn_redis()
     }
 
     fn spawn_api(&mut self) -> Result<()> {
@@ -1264,6 +1304,55 @@ fn cleanup_stale_runtime_workdirs(data_root: &Path) {
     }
 }
 
+fn log_file_len(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn redis_aof_recovery_failed_since(data_root: &Path, offset: u64) -> bool {
+    let path = sidecar_log_path(data_root, "redis", false);
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return false;
+    }
+    let mut text = String::new();
+    if file.take(512 * 1024).read_to_string(&mut text).is_err() {
+        return false;
+    }
+    text.contains("AofProcessor.RecoverReplay") || text.contains("TsavoriteLogRecoveryInfo")
+}
+
+fn quarantine_redis_aof(data_root: &Path) -> Result<Option<PathBuf>> {
+    let redis_root = data_root.join("data/redis");
+    let aof_root = redis_root.join("AOF");
+    if !aof_root.exists() {
+        fs::create_dir_all(&redis_root).context("create desktop redis data directory")?;
+        return Ok(None);
+    }
+    let quarantine_root = data_root.join("data/tmp");
+    fs::create_dir_all(&quarantine_root).context("create desktop temp directory")?;
+    let base_name = format!("redis-aof-corrupt-{}", unix_epoch_ms());
+    let mut dest = quarantine_root.join(&base_name);
+    for idx in 1..100 {
+        if !dest.exists() {
+            break;
+        }
+        dest = quarantine_root.join(format!("{base_name}-{idx}"));
+    }
+    fs::rename(&aof_root, &dest).with_context(|| {
+        format!(
+            "quarantine corrupt desktop redis AOF {} to {}",
+            aof_root.display(),
+            dest.display()
+        )
+    })?;
+    fs::create_dir_all(&redis_root).context("recreate desktop redis data directory")?;
+    Ok(Some(dest))
+}
+
 fn resolve_node_bin() -> Result<PathBuf> {
     if let Ok(raw) = env::var("LUMEN_NODE_BIN") {
         let path = PathBuf::from(raw);
@@ -1811,7 +1900,10 @@ fn process_rss_bytes(_pid: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{open_rotated_log_file, parse_desktop_activity_body, pick_runtime_ports};
+    use super::{
+        open_rotated_log_file, parse_desktop_activity_body, pick_runtime_ports,
+        quarantine_redis_aof, redis_aof_recovery_failed_since,
+    };
     use std::fs;
     use std::io::Write;
 
@@ -1842,6 +1934,46 @@ mod tests {
         let rotated = fs::read(logs.join("web.log.1")).expect("read rotated log");
         assert!(active.contains("fresh"));
         assert_eq!(rotated.len(), 80);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn redis_aof_failure_detection_only_reads_new_log_content() {
+        let root =
+            std::env::temp_dir().join(format!("lumen-redis-log-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let logs = root.join("data/logs");
+        fs::create_dir_all(&logs).expect("create logs dir");
+        let log = logs.join("redis.log");
+        fs::write(&log, "old AofProcessor.RecoverReplay\n").expect("seed old log");
+        let offset = fs::metadata(&log).expect("stat old log").len();
+
+        assert!(!redis_aof_recovery_failed_since(&root, offset));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("open redis log")
+            .write_all(b"new TsavoriteLogRecoveryInfo failure\n")
+            .expect("append redis log");
+        assert!(redis_aof_recovery_failed_since(&root, offset));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn quarantine_redis_aof_moves_only_aof_directory() {
+        let root =
+            std::env::temp_dir().join(format!("lumen-redis-aof-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let aof = root.join("data/redis/AOF");
+        fs::create_dir_all(&aof).expect("create aof dir");
+        fs::write(aof.join("aof.log.0"), b"bad").expect("write bad aof");
+
+        let quarantined = quarantine_redis_aof(&root)
+            .expect("quarantine aof")
+            .expect("aof should move");
+        assert!(!aof.exists());
+        assert!(quarantined.join("aof.log.0").is_file());
+        assert!(root.join("data/redis").is_dir());
         let _ = fs::remove_dir_all(root);
     }
 
