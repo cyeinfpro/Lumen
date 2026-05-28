@@ -242,8 +242,7 @@ prepare_tauri_config_args() {
   TAURI_CONFIG_ARGS_COUNT=0
   if [ -z "${TAURI_UPDATER_PUBKEY:-}" ]; then
     if [ "${GITHUB_REF_TYPE:-}" = "tag" ] || [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-      echo "TAURI_UPDATER_PUBKEY is required for tagged desktop release builds" >&2
-      exit 1
+      echo "TAURI_UPDATER_PUBKEY is not configured; building tagged desktop release without updater artifacts." >&2
     fi
     return
   fi
