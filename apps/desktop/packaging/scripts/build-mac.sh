@@ -227,11 +227,13 @@ verify_desktop_resources() {
 
 verify_garnet_cli() {
   local bin="apps/desktop/resources/runtime/lumen-redis/lumen-redis"
+  local dotnet_root="$ROOT/apps/desktop/resources/runtime/dotnet"
   local help
-  help="$("$bin" --help 2>&1 || true)"
+  help="$(DOTNET_ROOT="$dotnet_root" DOTNET_MULTILEVEL_LOOKUP=0 "$bin" --help 2>&1 || true)"
   for flag in --lua --checkpointdir --aof --recover; do
     if ! grep -F -- "$flag" <<<"$help" >/dev/null; then
       echo "bundled Garnet runtime does not advertise required flag $flag" >&2
+      echo "$help" >&2
       exit 1
     fi
   done
