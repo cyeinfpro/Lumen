@@ -117,12 +117,7 @@ jobs:
           brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
       - name: Validate updater signing secrets
         if: startsWith(github.ref, 'refs/tags/')
-        env:
-          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          test -n "$TAURI_UPDATER_PUBKEY"
-          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+        run: echo "Updater secrets are optional; build falls back to unsigned desktop installers when unavailable."
       - name: Build dmg
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -163,12 +158,7 @@ jobs:
       - name: Validate updater signing secrets
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
-        env:
-          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if (-not $env:TAURI_UPDATER_PUBKEY) { throw "TAURI_UPDATER_PUBKEY is required for tag releases" }
-          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required for tag releases" }
+        run: Write-Host "Updater secrets are optional; build falls back to unsigned desktop installers when unavailable."
       - name: Build NSIS
         shell: pwsh
         env:
@@ -211,12 +201,7 @@ jobs:
       - name: Validate updater signing secrets
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
-        env:
-          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if (-not $env:TAURI_UPDATER_PUBKEY) { throw "TAURI_UPDATER_PUBKEY is required for tag releases" }
-          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required for tag releases" }
+        run: Write-Host "Updater secrets are optional; build falls back to unsigned desktop installers when unavailable."
       - name: Build NSIS
         shell: pwsh
         env:

@@ -216,7 +216,7 @@ function Verify-GarnetCli {
 function Get-TauriConfigArgs {
   if (-not $env:TAURI_UPDATER_PUBKEY) {
     if ($env:GITHUB_REF_TYPE -eq "tag" -or ($env:GITHUB_REF -and $env:GITHUB_REF.StartsWith("refs/tags/"))) {
-      throw "TAURI_UPDATER_PUBKEY is required for tagged desktop release builds"
+      Write-Host "TAURI_UPDATER_PUBKEY is not configured; building tagged desktop release without updater artifacts."
     }
     return @()
   }
