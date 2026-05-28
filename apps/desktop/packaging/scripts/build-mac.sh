@@ -244,7 +244,8 @@ prepare_tauri_config_args() {
   TAURI_CONFIG_ARGS_COUNT=0
   if [ -z "${TAURI_UPDATER_PUBKEY:-}" ]; then
     if [ "${GITHUB_REF_TYPE:-}" = "tag" ] || [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-      echo "TAURI_UPDATER_PUBKEY is not configured; building tagged desktop release without updater artifacts." >&2
+      echo "TAURI_UPDATER_PUBKEY is required for tagged desktop releases." >&2
+      exit 1
     fi
     return
   fi
@@ -405,7 +406,7 @@ prepare_macos_signing_env
 (
   cd apps/desktop
   if [ "${TAURI_CONFIG_ARGS_COUNT:-0}" -gt 0 ]; then
-    cargo tauri build --bundles dmg "${TAURI_CONFIG_ARGS[@]}"
+    cargo tauri build --bundles app,dmg "${TAURI_CONFIG_ARGS[@]}"
   else
     cargo tauri build --bundles dmg
   fi
