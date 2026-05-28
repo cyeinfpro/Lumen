@@ -117,8 +117,8 @@ jobs:
           brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
       - name: Validate updater signing secrets
         if: startsWith(github.ref, 'refs/tags/')
-        run: echo "Updater secrets are optional; build falls back to unsigned desktop installers when unavailable."
-      - name: Build dmg
+        run: echo "Updater signing secrets are required for tagged desktop releases."
+      - name: Build mac bundles
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
@@ -174,6 +174,7 @@ jobs:
           name: Lumen-win-x64
           path: |
             apps/desktop/target/release/bundle/nsis/*.exe
+            apps/desktop/target/release/bundle/nsis/*.exe.sig
             apps/desktop/target/release/bundle/nsis/*.nsis.zip
             apps/desktop/target/release/bundle/nsis/*.nsis.zip.sig
 
@@ -215,6 +216,7 @@ jobs:
           name: Lumen-win-arm64
           path: |
             apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+            apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
             apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip
             apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip.sig
 
@@ -234,30 +236,46 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+
+          find_windows_update() {
+            local root="$1"
+            local path
+            path="$(find "$root" -type f -name '*.nsis.zip' | sort | head -n 1)"
+            if [ -z "$path" ]; then
+              path="$(find "$root" -type f -name '*.exe' | sort | head -n 1)"
+            fi
+            printf '%s\n' "$path"
+          }
+
           mac_update="$(find desktop-artifacts -type f -name '*.app.tar.gz' | sort | head -n 1)"
-          win_x64_update="$(find desktop-artifacts/Lumen-win-x64 -type f -name '*.nsis.zip' | sort | head -n 1)"
+          win_x64_update="$(find_windows_update desktop-artifacts/Lumen-win-x64)"
           win_arm64_update=""
           if [ -d desktop-artifacts/Lumen-win-arm64 ]; then
-            win_arm64_update="$(find desktop-artifacts/Lumen-win-arm64 -type f -name '*.nsis.zip' | sort | head -n 1)"
+            win_arm64_update="$(find_windows_update desktop-artifacts/Lumen-win-arm64)"
           fi
-          if [ -z "$mac_update" ] && [ -z "$win_x64_update" ] && [ -z "$win_arm64_update" ]; then
-            echo "No signed updater artifacts found; skipping latest.json."
-          else
-            test -n "$mac_update"
-            test -n "$win_x64_update"
-            args=(
-              --version "$tag" \
-              --base-url "$base_url" \
-              --notes "see https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
-              --output desktop-artifacts/latest.json \
-              --artifact "darwin-aarch64=$mac_update" \
-              --artifact "windows-x86_64=$win_x64_update"
-            )
-            if [ -n "$win_arm64_update" ]; then
-              args+=(--artifact "windows-aarch64=$win_arm64_update")
-            fi
-            python3 apps/desktop/packaging/scripts/create-updater-manifest.py "${args[@]}"
+
+          missing=()
+          [ -n "$mac_update" ] || missing+=("darwin-aarch64 .app.tar.gz")
+          [ -n "$win_x64_update" ] || missing+=("windows-x86_64 updater installer")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing signed updater artifacts:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            find desktop-artifacts -type f | sort >&2
+            exit 1
           fi
+
+          args=(
+            --version "$tag" \
+            --base-url "$base_url" \
+            --notes "see https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
+            --output desktop-artifacts/latest.json \
+            --artifact "darwin-aarch64=$mac_update" \
+            --artifact "windows-x86_64=$win_x64_update"
+          )
+          if [ -n "$win_arm64_update" ]; then
+            args+=(--artifact "windows-aarch64=$win_arm64_update")
+          fi
+          python3 apps/desktop/packaging/scripts/create-updater-manifest.py "${args[@]}"
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -268,6 +286,7 @@ jobs:
           mapfile -t assets < <(find desktop-artifacts -type f \( \
             -name '*.dmg' -o \
             -name '*.exe' -o \
+            -name '*.exe.sig' -o \
             -name '*.app.tar.gz' -o \
             -name '*.app.tar.gz.sig' -o \
             -name '*.nsis.zip' -o \
