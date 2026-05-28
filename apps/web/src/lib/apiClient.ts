@@ -2292,6 +2292,15 @@ async function runDesktopProviderBridgeBestEffort(
   action: () => Promise<void>,
   label: string,
 ): Promise<void> {
+  if (
+    typeof window !== "undefined" &&
+    typeof window.__TAURI__?.core?.invoke !== "function"
+  ) {
+    console.warn(
+      `desktop provider bridge ${label} skipped because the Tauri bridge is unavailable`,
+    );
+    return;
+  }
   try {
     await action();
   } catch (err) {

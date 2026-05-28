@@ -150,6 +150,11 @@ export function isDesktopRuntime(): boolean {
   return DESKTOP_RUNTIME;
 }
 
+export function isDesktopBridgeAvailable(): boolean {
+  if (typeof window === "undefined") return false;
+  return typeof window.__TAURI__?.core?.invoke === "function";
+}
+
 export async function desktopInvoke<T = unknown>(
   command: string,
   args?: Record<string, unknown>,
