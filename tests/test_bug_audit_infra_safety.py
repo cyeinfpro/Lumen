@@ -108,16 +108,21 @@ def test_github_workflow_actions_are_pinned_to_commit_sha() -> None:
     assert floating == []
 
 
-def test_desktop_release_allows_installer_only_artifacts() -> None:
+def test_desktop_release_requires_signed_updater_artifacts() -> None:
     workflow = DESKTOP_RELEASE.read_text(encoding="utf-8")
+    build_mac = BUILD_MAC.read_text(encoding="utf-8")
+    build_win = BUILD_WIN.read_text(encoding="utf-8")
 
-    assert "No signed updater artifacts found; skipping latest.json." in workflow
-    assert (
-        'if [ -z "$mac_update" ] && [ -z "$win_x64_update" ] && [ -z "$win_arm64_update" ]; then'
-        in workflow
-    )
-    assert 'test -n "$mac_update"' in workflow
-    assert 'test -n "$win_x64_update"' in workflow
+    assert "Updater signing secrets are required for tagged desktop releases." in workflow
+    assert "Missing signed updater artifacts:" in workflow
+    assert "exit 1" in workflow
+    assert "apps/desktop/target/release/bundle/nsis/*.exe.sig" in workflow
+    assert "apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe.sig" in workflow
+    assert 'cargo tauri build --bundles app,dmg "${TAURI_CONFIG_ARGS[@]}"' in build_mac
+    assert "TAURI_UPDATER_PUBKEY is required for tagged desktop releases." in build_mac
+    assert "TAURI_UPDATER_PUBKEY is required for tagged desktop releases." in build_win
+    assert 'missing+=("darwin-aarch64 .app.tar.gz")' in workflow
+    assert 'missing+=("windows-x86_64 updater installer")' in workflow
     assert '--artifact "windows-aarch64=$win_arm64_update"' in workflow
 
 
