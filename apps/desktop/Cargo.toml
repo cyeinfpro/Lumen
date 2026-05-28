@@ -1,6 +1,6 @@
 [package]
 name = "lumen-desktop"
-version = "1.1.67"
+version = "1.1.68"
 edition = "2021"
 description = "Lumen desktop supervisor for macOS and Windows"
 license = "PolyForm-Noncommercial-1.0.0"

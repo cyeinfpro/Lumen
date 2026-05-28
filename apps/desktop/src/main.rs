@@ -701,7 +701,11 @@ fn run_headless_smoke() -> anyhow::Result<()> {
 }
 
 fn spawn_all_with_timeout(supervisor: &mut Supervisor, duration: Duration) -> anyhow::Result<()> {
-    match tauri::async_runtime::block_on(tokio::time::timeout(duration, supervisor.spawn_all())) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("create Tokio runtime for desktop headless smoke")?;
+    match runtime.block_on(async { tokio::time::timeout(duration, supervisor.spawn_all()).await }) {
         Ok(result) => result,
         Err(_) => anyhow::bail!(
             "desktop sidecar spawn_all timed out after {}s",
