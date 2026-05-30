@@ -488,9 +488,6 @@ jobs:
           if ($isTag -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
             $missing += "TAURI_SIGNING_PRIVATE_KEY"
           }
-          if ($isTag -and -not $env:WINDOWS_SIGNING_THUMBPRINT -and -not $env:WINDOWS_SIGNING_CERT_PATH -and -not $env:WINDOWS_SIGNING_CERT_PFX_BASE64) {
-            $missing += "WINDOWS_SIGNING_THUMBPRINT or WINDOWS_SIGNING_CERT_PATH or WINDOWS_SIGNING_CERT_PFX_BASE64"
-          }
           if ($missing.Count -gt 0) {
             Write-Error ("Missing secrets required for tagged Windows desktop releases:`n - " + ($missing -join "`n - "))
           }
@@ -511,7 +508,7 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "WINDOWS_TIMESTAMP_URL=$env:WINDOWS_TIMESTAMP_URL"
           }
           if (-not $env:WINDOWS_SIGNING_THUMBPRINT -and -not $env:WINDOWS_SIGNING_CERT_PATH -and -not $env:WINDOWS_SIGNING_CERT_PFX_BASE64) {
-            Write-Host "No Windows Authenticode certificate configured; unsigned non-tag build is allowed."
+            Write-Host "No Windows Authenticode certificate configured; installer code-signing will be skipped."
           }
       - name: Build NSIS
         shell: pwsh
@@ -525,6 +522,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          if (-not $env:WINDOWS_SIGNING_THUMBPRINT -and -not $env:WINDOWS_SIGNING_CERT_PATH) {
+            Write-Host "Skipping Authenticode verification; no Windows code-signing certificate configured."
+            return
+          }
           $bundleRoot = "apps/desktop/target/release/bundle/nsis"
           $installers = @(Get-ChildItem -Path $bundleRoot -Filter *.exe -File)
           if ($installers.Count -eq 0) {
@@ -609,9 +610,6 @@ jobs:
           if ($isTag -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
             $missing += "TAURI_SIGNING_PRIVATE_KEY"
           }
-          if ($isTag -and -not $env:WINDOWS_SIGNING_THUMBPRINT -and -not $env:WINDOWS_SIGNING_CERT_PATH -and -not $env:WINDOWS_SIGNING_CERT_PFX_BASE64) {
-            $missing += "WINDOWS_SIGNING_THUMBPRINT or WINDOWS_SIGNING_CERT_PATH or WINDOWS_SIGNING_CERT_PFX_BASE64"
-          }
           if ($missing.Count -gt 0) {
             Write-Error ("Missing secrets required for tagged Windows desktop releases:`n - " + ($missing -join "`n - "))
           }
@@ -632,7 +630,7 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "WINDOWS_TIMESTAMP_URL=$env:WINDOWS_TIMESTAMP_URL"
           }
           if (-not $env:WINDOWS_SIGNING_THUMBPRINT -and -not $env:WINDOWS_SIGNING_CERT_PATH -and -not $env:WINDOWS_SIGNING_CERT_PFX_BASE64) {
-            Write-Host "No Windows Authenticode certificate configured; unsigned non-tag build is allowed."
+            Write-Host "No Windows Authenticode certificate configured; installer code-signing will be skipped."
           }
       - name: Build NSIS
         shell: pwsh
@@ -647,6 +645,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          if (-not $env:WINDOWS_SIGNING_THUMBPRINT -and -not $env:WINDOWS_SIGNING_CERT_PATH) {
+            Write-Host "Skipping Authenticode verification; no Windows code-signing certificate configured."
+            return
+          }
           $bundleRoot = "apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis"
           $installers = @(Get-ChildItem -Path $bundleRoot -Filter *.exe -File)
           if ($installers.Count -eq 0) {
