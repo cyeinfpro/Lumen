@@ -265,7 +265,9 @@ function Get-TauriConfigArgs {
   New-Item -ItemType Directory -Force (Split-Path $configPath -Parent) | Out-Null
   $bundle = @{}
   if ($env:TAURI_UPDATER_PUBKEY) {
-    $bundle.createUpdaterArtifacts = $true
+    # Keep Windows updater artifacts in the v1-compatible NSIS zip format so the
+    # release workflow can upload and publish the updater bundle it expects.
+    $bundle.createUpdaterArtifacts = "v1Compatible"
   }
   if ($signCommand) {
     $bundle.windows = @{
