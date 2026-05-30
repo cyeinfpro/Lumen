@@ -18,6 +18,7 @@ $smokeHome = Join-Path $work "home"
 $localAppData = Join-Path $work "LocalAppData"
 $roamingAppData = Join-Path $work "AppDataRoaming"
 $dataRoot = Join-Path $work "data-root"
+$headlessMarker = Join-Path $dataRoot "data/tmp/headless-command-smoke-ok.json"
 $stdoutPath = Join-Path $work "app.stdout.log"
 $stderrPath = Join-Path $work "app.stderr.log"
 New-Item -ItemType Directory -Force $smokeHome, $localAppData, $roamingAppData, $dataRoot | Out-Null
@@ -307,8 +308,23 @@ try {
     Start-Sleep -Milliseconds 250
   }
 
+  $headlessReady = $false
+  if ($baselineReady) {
+    $markerDeadline = (Get-Date).AddSeconds(120)
+    while ((Get-Date) -lt $markerDeadline) {
+      if (Test-Path $headlessMarker) {
+        $headlessReady = $true
+        break
+      }
+      if ($appProcess.HasExited) {
+        break
+      }
+      Start-Sleep -Milliseconds 250
+    }
+  }
+
   $operationErrors = [System.Collections.Generic.List[string]]::new()
-  if ($baselineReady -and $webPort) {
+  if ($baselineReady -and $webPort -and $headlessReady) {
     try {
       $created = Invoke-JsonRequest -Method "POST" -Uri "http://127.0.0.1:$webPort/api/conversations" -Body @{
         title = "desktop smoke"
@@ -724,6 +740,8 @@ try {
     } catch {
       $operationErrors.Add("desktop image and feed requests failed: $($_.Exception.Message)")
     }
+  } elseif ($baselineReady -and $webPort) {
+    $operationErrors.Add("desktop headless command smoke marker was not written before API operation smoke")
   } else {
     $operationErrors.Add("desktop conversation CRUD skipped before baseline readiness")
   }
@@ -898,12 +916,12 @@ try {
   Write-Host "logs_root=$logsRoot"
   Write-Host "api_port=$apiPort web_port=$webPort"
   Write-Host "baseline_ready=$($baselineReady.ToString().ToLowerInvariant())"
+  Write-Host "headless_ready=$($headlessReady.ToString().ToLowerInvariant())"
   Write-Host "worker_restarted=$($workerRestarted.ToString().ToLowerInvariant())"
   Write-Host "web_restarted=$($webRestarted.ToString().ToLowerInvariant())"
   Write-Host "api_restarted=$($apiRestarted.ToString().ToLowerInvariant())"
   Write-Host ("processes " + (($processes.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value.ToString().ToLowerInvariant())" }) -join " "))
   $headlessMarkerErrors = [System.Collections.Generic.List[string]]::new()
-  $headlessMarker = Join-Path $dataRoot "data/tmp/headless-command-smoke-ok.json"
   Write-Host "headless_command_marker=$headlessMarker exists=$((Test-Path $headlessMarker).ToString().ToLowerInvariant())"
   if (-not (Test-Path $headlessMarker)) {
     $headlessMarkerErrors.Add("desktop headless command smoke marker was not written")

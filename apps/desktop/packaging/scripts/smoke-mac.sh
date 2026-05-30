@@ -93,6 +93,7 @@ mount = os.environ["MOUNT_DIR"]
 app_pid = int(os.environ["APP_PID"])
 mount_markers = {mount, os.path.realpath(mount)}
 logs_root = data_root / "data/logs"
+headless_marker = data_root / "data/tmp/headless-command-smoke-ok.json"
 api_port = None
 web_port = None
 HTTP_TIMEOUT_SECONDS = 8
@@ -297,9 +298,22 @@ def wait_until_ready(seconds):
         time.sleep(0.25)
     return False
 
+
+def wait_for_headless_marker(seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if headless_marker.is_file():
+            return True
+        if not process_alive(app_pid):
+            break
+        time.sleep(0.25)
+    return headless_marker.is_file()
+
+
 baseline_ready = wait_until_ready(60)
+headless_ready = wait_for_headless_marker(120) if baseline_ready else False
 operation_errors = []
-if baseline_ready and web_port is not None:
+if baseline_ready and web_port is not None and headless_ready:
     try:
         status, conversation = json_request(
             web_port,
@@ -885,6 +899,10 @@ if baseline_ready and web_port is not None:
                 operation_errors.append("desktop image binary after delete did not return 404")
     except Exception as exc:
         operation_errors.append(f"desktop image and feed requests failed: {exc}")
+elif baseline_ready and web_port is not None:
+    operation_errors.append(
+        "desktop headless command smoke marker was not written before API operation smoke"
+    )
 else:
     operation_errors.append("desktop conversation CRUD skipped before baseline readiness")
 worker_restarted = False
@@ -963,6 +981,7 @@ processes = {
 print(f"logs_root={logs_root}")
 print(f"api_port={api_port} web_port={web_port}")
 print(f"baseline_ready={str(baseline_ready).lower()}")
+print(f"headless_ready={str(headless_ready).lower()}")
 print(f"worker_restarted={str(worker_restarted).lower()}")
 print(f"web_restarted={str(web_restarted).lower()}")
 print(f"api_restarted={str(api_restarted).lower()}")
@@ -971,7 +990,6 @@ print(
     + " ".join(f"{name}={str(alive).lower()}" for name, alive in processes.items())
 )
 headless_marker_errors = []
-headless_marker = logs_root.parent / "tmp/headless-command-smoke-ok.json"
 print(f"headless_command_marker={headless_marker} exists={str(headless_marker.is_file()).lower()}")
 if not headless_marker.is_file():
     headless_marker_errors.append("desktop headless command smoke marker was not written")
