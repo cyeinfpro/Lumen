@@ -297,14 +297,38 @@ fn set_secret(data_root: &Path, kind: &str, name: &str, value: &str) -> Result<(
     }
 
     match retry_secret_op(|| set_keychain_secret(kind, name, value)) {
-        Ok(()) => match retry_secret_op(|| remove_fallback_secret(data_root, kind, name)) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                eprintln!(
-                    "desktop keychain write succeeded for {kind}:{name}, but local fallback cleanup failed: {err:#}"
-                );
-                write_out_of_sync_log(data_root, kind, name, "fallback_cleanup", &err);
-                Ok(())
+        Ok(()) => match get_keychain_secret(kind, name) {
+            Ok(Some(stored)) if stored == value => {
+                match retry_secret_op(|| remove_fallback_secret(data_root, kind, name)) {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        eprintln!(
+                            "desktop keychain write succeeded for {kind}:{name}, but local fallback cleanup failed: {err:#}"
+                        );
+                        write_out_of_sync_log(data_root, kind, name, "fallback_cleanup", &err);
+                        Ok(())
+                    }
+                }
+            }
+            verify_result => {
+                let verify_err = match verify_result {
+                    Ok(Some(_)) => anyhow!("keychain read returned a different value after write"),
+                    Ok(None) => anyhow!("keychain read returned no value after write"),
+                    Err(err) => err.context("verify keychain write"),
+                };
+                let _ = retry_secret_op(|| set_keychain_secret(kind, name, ""));
+                match retry_secret_op(|| write_fallback_secret(data_root, kind, name, value)) {
+                    Ok(()) => {
+                        eprintln!(
+                            "desktop keychain write for {kind}:{name} did not round-trip; using protected local fallback: {verify_err:#}"
+                        );
+                        write_out_of_sync_log(data_root, kind, name, "keychain_verify", &verify_err);
+                        Ok(())
+                    }
+                    Err(fallback_err) => Err(anyhow!(
+                        "write desktop secret fallback failed after keychain verification error: {verify_err:#}; local fallback error: {fallback_err:#}"
+                    )),
+                }
             }
         },
         Err(keychain_err) => {
