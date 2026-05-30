@@ -149,25 +149,21 @@ jobs:
         run: |
           brew list libpq >/dev/null 2>&1 || brew install libpq
           brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
-      - name: Validate mac signing, notarization, and updater secrets
+      - name: Validate mac updater signing secrets
         if: startsWith(github.ref, 'refs/tags/')
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           missing=()
-          for name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD TAURI_UPDATER_PUBKEY TAURI_SIGNING_PRIVATE_KEY; do
+          for name in TAURI_UPDATER_PUBKEY TAURI_SIGNING_PRIVATE_KEY; do
             if [ -z "${!name:-}" ]; then
               missing+=("$name")
             fi
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            printf 'Missing secrets required for tagged mac desktop releases:\n' >&2
+            printf 'Missing secrets required for tagged desktop updater releases:\n' >&2
             printf ' - %s\n' "${missing[@]}" >&2
             exit 1
           fi
@@ -208,11 +204,23 @@ jobs:
       - name: Notarize mac dmgs
         if: startsWith(github.ref, 'refs/tags/')
         env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           set -euo pipefail
+          missing=()
+          for name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Skipping mac notarization; missing Apple signing/notarization secrets:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            exit 0
+          fi
           shopt -s nullglob
           dmgs=(apps/desktop/target/release/bundle/dmg/*.dmg)
           if [ "${#dmgs[@]}" -eq 0 ]; then
@@ -224,8 +232,24 @@ jobs:
           done
       - name: Verify notarized mac packages
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           set -euo pipefail
+          missing=()
+          for name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Skipping notarized mac package verification; missing Apple signing/notarization secrets:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            exit 0
+          fi
           shopt -s nullglob
           dmgs=(apps/desktop/target/release/bundle/dmg/*.dmg)
           if [ "${#dmgs[@]}" -eq 0 ]; then
@@ -289,25 +313,21 @@ jobs:
         run: |
           brew list libpq >/dev/null 2>&1 || brew install libpq
           brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
-      - name: Validate mac signing, notarization, and updater secrets
+      - name: Validate mac updater signing secrets
         if: startsWith(github.ref, 'refs/tags/')
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           missing=()
-          for name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD TAURI_UPDATER_PUBKEY TAURI_SIGNING_PRIVATE_KEY; do
+          for name in TAURI_UPDATER_PUBKEY TAURI_SIGNING_PRIVATE_KEY; do
             if [ -z "${!name:-}" ]; then
               missing+=("$name")
             fi
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            printf 'Missing secrets required for tagged mac desktop releases:\n' >&2
+            printf 'Missing secrets required for tagged desktop updater releases:\n' >&2
             printf ' - %s\n' "${missing[@]}" >&2
             exit 1
           fi
@@ -348,11 +368,23 @@ jobs:
       - name: Notarize mac dmgs
         if: startsWith(github.ref, 'refs/tags/')
         env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           set -euo pipefail
+          missing=()
+          for name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Skipping mac notarization; missing Apple signing/notarization secrets:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            exit 0
+          fi
           shopt -s nullglob
           dmgs=(apps/desktop/target/release/bundle/dmg/*.dmg)
           if [ "${#dmgs[@]}" -eq 0 ]; then
@@ -364,8 +396,24 @@ jobs:
           done
       - name: Verify notarized mac packages
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           set -euo pipefail
+          missing=()
+          for name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Skipping notarized mac package verification; missing Apple signing/notarization secrets:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            exit 0
+          fi
           shopt -s nullglob
           dmgs=(apps/desktop/target/release/bundle/dmg/*.dmg)
           if [ "${#dmgs[@]}" -eq 0 ]; then

@@ -13,7 +13,7 @@ def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
-def test_tagged_mac_release_requires_and_verifies_notarized_dmgs() -> None:
+def test_tagged_mac_release_requires_updater_signing_and_skips_optional_notarization() -> None:
     workflow = _workflow_text()
 
     for secret in (
@@ -26,7 +26,12 @@ def test_tagged_mac_release_requires_and_verifies_notarized_dmgs() -> None:
     ):
         assert secret in workflow
 
-    assert "Missing secrets required for tagged mac desktop releases:" in workflow
+    assert "Missing secrets required for tagged desktop updater releases:" in workflow
+    assert "Skipping mac notarization; missing Apple signing/notarization secrets:" in workflow
+    assert (
+        "Skipping notarized mac package verification; missing Apple signing/notarization secrets:"
+        in workflow
+    )
     assert "apps/desktop/packaging/scripts/notarize-mac.sh" in workflow
     assert 'xcrun stapler validate "$dmg"' in workflow
     assert "spctl --assess --type open --context context:primary-signature" in workflow
