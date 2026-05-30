@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +11,7 @@ import pytest
 from app import byok_runtime
 from app.upstream import UpstreamError
 from lumen_core.constants import GenerationErrorCode as EC
+from lumen_core.url_security import PublicHttpTarget
 
 
 class _Result:
@@ -136,15 +138,11 @@ def test_is_byok_provider_recognizes_user_prefix() -> None:
     assert not byok_runtime.is_byok_provider(SimpleNamespace())
 
 
-def test_base_url_validation_cache_clear_uses_shared_lock() -> None:
-    cache_key = ("https://upstream.example", False)
-    with byok_runtime._BASE_URL_VALIDATION_CACHE_LOCK:
-        byok_runtime._BASE_URL_VALIDATION_CACHE[cache_key] = (999999.0, "cached")
-
-    byok_runtime.clear_base_url_validation_cache()
-
-    assert byok_runtime._BASE_URL_VALIDATION_CACHE == {}
-    assert hasattr(byok_runtime._BASE_URL_VALIDATION_CACHE_LOCK, "acquire")
+def test_base_url_validation_has_no_dead_ttl_cache_state() -> None:
+    assert not hasattr(byok_runtime, "_BASE_URL_VALIDATION_CACHE")
+    assert not hasattr(byok_runtime, "_BASE_URL_VALIDATION_CACHE_LOCK")
+    assert not hasattr(byok_runtime, "_BASE_URL_VALIDATION_TTL_SECONDS")
+    assert not hasattr(byok_runtime, "clear_base_url_validation_cache")
 
 
 # ---------------------------------------------------------------------------
@@ -260,20 +258,21 @@ async def test_resolve_user_credential_runtime_disables_invalid_boolean_capabili
 
 
 @pytest.mark.asyncio
-async def test_supplier_base_url_validation_is_ttl_cached(
+async def test_supplier_base_url_validation_rechecks_dns_despite_ttl_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def fake_assert_public_http_target(raw: str, **kwargs: Any) -> str:
+    async def fake_resolve_public_http_target(
+        raw: str, **kwargs: Any
+    ) -> PublicHttpTarget:
         calls.append((raw, kwargs))
-        return raw.rstrip("/")
+        return PublicHttpTarget(raw.rstrip("/"), ("93.184.216.34",))
 
-    byok_runtime.clear_base_url_validation_cache()
     monkeypatch.setattr(
         byok_runtime,
-        "assert_public_http_target",
-        fake_assert_public_http_target,
+        "resolve_public_http_target",
+        fake_resolve_public_http_target,
     )
 
     first = await byok_runtime._validate_supplier_base_url(
@@ -285,8 +284,37 @@ async def test_supplier_base_url_validation_is_ttl_cached(
 
     assert first == "https://upstream.example/v1"
     assert second == first
-    assert len(calls) == 1
-    byok_runtime.clear_base_url_validation_cache()
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_supplier_base_url_validation_rejects_private_rebind_after_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(byok_runtime.settings, "app_env", "production")
+    answers = ["93.184.216.34", "127.0.0.1"]
+
+    def fake_getaddrinfo(
+        _host: str, port: int, *_args: Any, **_kwargs: Any
+    ) -> list[tuple[Any, ...]]:
+        ip = answers.pop(0)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (ip, port),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    assert await byok_runtime._validate_supplier_base_url(
+        "https://rebind.example/v1"
+    ) == "https://rebind.example/v1"
+    with pytest.raises(ValueError, match="private address"):
+        await byok_runtime._validate_supplier_base_url("https://rebind.example/v1")
 
 
 @pytest.mark.asyncio

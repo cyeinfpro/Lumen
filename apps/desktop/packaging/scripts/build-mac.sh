@@ -105,11 +105,32 @@ prepare_dotnet_runtime() {
   (
     trap 'rm -rf "$tmp"' EXIT
     curl -fsSL \
-      "https://dotnetcli.azureedge.net/dotnet/Runtime/${DOTNET_RUNTIME_VERSION}/dotnet-runtime-${DOTNET_RUNTIME_VERSION}-${rid}.tar.gz" \
+      "https://builds.dotnet.microsoft.com/dotnet/Runtime/${DOTNET_RUNTIME_VERSION}/dotnet-runtime-${DOTNET_RUNTIME_VERSION}-${rid}.tar.gz" \
       -o "$tmp/dotnet-runtime.tar.gz"
     tar -xzf "$tmp/dotnet-runtime.tar.gz" -C "$dest"
     chmod +x "$dest/dotnet" 2>/dev/null || true
   )
+}
+
+ensure_root_node_executable() {
+  local dest="$1"
+  local root_node="$dest/node"
+  local bin_node="$dest/bin/node"
+
+  if [ -L "$root_node" ]; then
+    rm -f "$root_node"
+  fi
+  if [ -x "$root_node" ]; then
+    chmod +x "$root_node" "$bin_node" 2>/dev/null || true
+    return
+  fi
+  if [ ! -x "$bin_node" ]; then
+    echo "missing bundled Node runtime executable: $root_node or $bin_node" >&2
+    exit 1
+  fi
+  rm -rf "$root_node"
+  cp "$bin_node" "$root_node"
+  chmod +x "$root_node" "$bin_node" 2>/dev/null || true
 }
 
 prepare_node_runtime() {
@@ -118,13 +139,7 @@ prepare_node_runtime() {
   mkdir -p "$dest"
   if [ -n "${NODE_RUNTIME_DIR:-}" ]; then
     cp -R "$NODE_RUNTIME_DIR"/. "$dest"/
-    if [ -x "$dest/bin/node" ]; then
-      if [ -e "$dest/node" ] || [ -L "$dest/node" ]; then
-        rm -rf "$dest/node"
-      fi
-      ln -s bin/node "$dest/node"
-    fi
-    chmod +x "$dest/node" "$dest/bin/node" 2>/dev/null || true
+    ensure_root_node_executable "$dest"
     return
   fi
 
@@ -145,11 +160,7 @@ prepare_node_runtime() {
       -o "$tmp/node.tar.xz"
     tar -xf "$tmp/node.tar.xz" -C "$tmp"
     cp -R "$tmp/node-v${version}-darwin-${arch}"/. "$dest"/
-    if [ -e "$dest/node" ] || [ -L "$dest/node" ]; then
-      rm -rf "$dest/node"
-    fi
-    ln -s bin/node "$dest/node"
-    chmod +x "$dest/node" "$dest/bin/node" 2>/dev/null || true
+    ensure_root_node_executable "$dest"
   )
 }
 
@@ -214,6 +225,10 @@ verify_desktop_resources() {
   require_file "apps/desktop/resources/web/server.js" "Next standalone server"
   require_file "apps/desktop/resources/web/package.json" "Next standalone package metadata"
   require_executable "apps/desktop/resources/runtime/node/node" "Node runtime"
+  if [ -L "apps/desktop/resources/runtime/node/node" ]; then
+    echo "bundled Node runtime must be a real executable, not a symlink: apps/desktop/resources/runtime/node/node" >&2
+    missing=1
+  fi
   require_executable "apps/desktop/resources/runtime/lumen-api/lumen-api" "API runtime"
   require_executable "apps/desktop/resources/runtime/lumen-worker/lumen-worker" "worker runtime"
   require_executable "apps/desktop/resources/runtime/lumen-redis/lumen-redis" "Redis-compatible runtime"

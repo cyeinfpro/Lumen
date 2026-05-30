@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -234,6 +235,73 @@ async def test_billing_cache_window_usage_accepts_bytes_hash_keys():
         started + 5 * 3600,
         tz=timezone.utc,
     )
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_balance_locks_self_clean_after_distinct_users():
+    class Result:
+        def scalar_one_or_none(self) -> int:
+            return 100
+
+    class Session:
+        async def execute(self, _stmt: Any) -> Result:
+            return Result()
+
+    service = BillingCacheService(redis=None)
+
+    for idx in range(100):
+        assert await service.get_balance(Session(), f"user-{idx}") == 100  # type: ignore[arg-type]
+
+    assert service._locks == {}  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_balance_lock_is_not_removed_while_waiter_exists():
+    service = BillingCacheService(redis=None)
+    holder_entered = asyncio.Event()
+    release_holder = asyncio.Event()
+    waiter_entered = asyncio.Event()
+    release_waiter = asyncio.Event()
+
+    async def hold_lock() -> None:
+        async with service._lock("user-1"):  # noqa: SLF001
+            holder_entered.set()
+            await release_holder.wait()
+
+    async def wait_for_lock() -> None:
+        async with service._lock("user-1"):  # noqa: SLF001
+            waiter_entered.set()
+            await release_waiter.wait()
+
+    holder_task = asyncio.create_task(hold_lock())
+    waiter_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(holder_entered.wait(), timeout=1)
+
+        waiter_task = asyncio.create_task(wait_for_lock())
+        await asyncio.sleep(0)
+
+        entry = service._locks["user-1"]  # noqa: SLF001
+        assert entry.users == 2
+        assert waiter_entered.is_set() is False
+
+        release_holder.set()
+        await asyncio.wait_for(waiter_entered.wait(), timeout=1)
+
+        assert service._locks.get("user-1") is entry  # noqa: SLF001
+        assert entry.users == 1
+    finally:
+        release_holder.set()
+        release_waiter.set()
+        tasks = [holder_task]
+        if waiter_task is not None:
+            tasks.append(waiter_task)
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=1,
+        )
+
+    assert "user-1" not in service._locks  # noqa: SLF001
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 
@@ -22,6 +23,12 @@ _FORBIDDEN_HOST_NETWORKS = (
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
 )
+
+
+@dataclass(frozen=True)
+class PublicHttpTarget:
+    url: str
+    resolved_ips: tuple[str, ...]
 
 
 def canonical_host(host: str) -> str:
@@ -63,6 +70,24 @@ async def assert_public_http_target(
     allow_unresolved: bool = False,
     dns_timeout_s: float = 2.0,
 ) -> str:
+    target = await resolve_public_http_target(
+        base_url,
+        allow_http=allow_http,
+        allow_private=allow_private,
+        allow_unresolved=allow_unresolved,
+        dns_timeout_s=dns_timeout_s,
+    )
+    return target.url
+
+
+async def resolve_public_http_target(
+    base_url: str,
+    *,
+    allow_http: bool = False,
+    allow_private: bool = False,
+    allow_unresolved: bool = False,
+    dns_timeout_s: float = 2.0,
+) -> PublicHttpTarget:
     value = base_url.strip().rstrip("/")
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -83,22 +108,23 @@ async def assert_public_http_target(
             loop.getaddrinfo(host, port, type=socket.SOCK_STREAM),
             timeout=dns_timeout_s,
         )
-    except socket.gaierror:
-        # DNS blips should fail at the outbound HTTP call, not at config validation.
-        return value
+    except socket.gaierror as exc:
+        if allow_unresolved:
+            return PublicHttpTarget(value, ())
+        raise ValueError("base_url host cannot be resolved") from exc
     except TimeoutError as exc:
         if allow_unresolved:
-            return value
+            return PublicHttpTarget(value, ())
         raise ValueError("base_url host cannot be resolved") from exc
 
     ips = {str(info[4][0]) for info in infos if info and info[4]}
     if not ips:
         if allow_unresolved:
-            return value
+            return PublicHttpTarget(value, ())
         raise ValueError("base_url host cannot be resolved")
     if not allow_private and any(is_forbidden_ip(ip) for ip in ips):
         raise ValueError("base_url resolves to a private address")
-    return value
+    return PublicHttpTarget(value, tuple(sorted(ips)))
 
 
 __all__ = [
@@ -106,4 +132,6 @@ __all__ = [
     "canonical_host",
     "is_forbidden_ip",
     "is_private_host",
+    "PublicHttpTarget",
+    "resolve_public_http_target",
 ]

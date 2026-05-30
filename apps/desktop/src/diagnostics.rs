@@ -266,17 +266,30 @@ fn redact_prefixed_secret(input: &str, prefix: &str) -> String {
 }
 
 fn redact_jwt_tokens(input: &str) -> String {
-    input
-        .split_ascii_whitespace()
-        .map(|token| {
-            if looks_like_jwt(token) {
-                "[REDACTED]"
-            } else {
-                token
+    let mut out = String::with_capacity(input.len());
+    let mut token_start = None;
+    for (idx, ch) in input.char_indices() {
+        if ch.is_ascii_whitespace() {
+            if let Some(start) = token_start.take() {
+                append_redacted_jwt_token(&mut out, &input[start..idx]);
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            out.push(ch);
+        } else if token_start.is_none() {
+            token_start = Some(idx);
+        }
+    }
+    if let Some(start) = token_start {
+        append_redacted_jwt_token(&mut out, &input[start..]);
+    }
+    out
+}
+
+fn append_redacted_jwt_token(out: &mut String, token: &str) {
+    if looks_like_jwt(token) {
+        out.push_str("[REDACTED]");
+    } else {
+        out.push_str(token);
+    }
 }
 
 fn looks_like_jwt(token: &str) -> bool {
@@ -338,5 +351,16 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         Ok(())
+    }
+
+    #[test]
+    fn redacts_jwts_without_collapsing_inline_whitespace() {
+        let jwt = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc";
+        let input = format!("Authorization: Bearer  {jwt}\t next");
+
+        assert_eq!(
+            redact_sensitive_values(&input),
+            "Authorization: [REDACTED]  [REDACTED]\t next"
+        );
     }
 }

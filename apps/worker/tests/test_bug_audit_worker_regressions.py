@@ -490,6 +490,7 @@ async def test_proxied_client_cache_is_lru_bounded(
     getter_name: str,
     builder_name: str,
 ) -> None:
+    await upstream.close_client()
     timeout_config = upstream._TimeoutConfig(connect=1.0, read=2.0, write=3.0)
     built: list[_FakeClosableClient] = []
     cache = getattr(upstream, cache_name)
@@ -520,8 +521,10 @@ async def test_proxied_client_cache_is_lru_bounded(
 
         assert len(cache) <= limit
         assert not any(client.closed for client in built[:5])
+        assert len(upstream._retired_client_close_tasks) == 5  # noqa: SLF001
         await asyncio.sleep(0.05)
         assert any(client.closed for client in built[:5])
+        assert not upstream._retired_client_close_tasks  # noqa: SLF001
     finally:
         await upstream.close_client()
 
@@ -548,6 +551,76 @@ async def test_delayed_client_close_waits_until_idle() -> None:
     client.idle.set()
     await asyncio.wait_for(close_task, timeout=1.0)
     assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_client_closes_retired_clients_without_delay() -> None:
+    await upstream.close_client()
+    client = _FakeClosableClient()
+    close_task = upstream._schedule_delayed_aclose(client)  # noqa: SLF001
+
+    assert close_task in upstream._retired_client_close_tasks  # noqa: SLF001
+
+    try:
+        await upstream.close_client()
+
+        assert client.closed is True
+        assert not upstream._retired_client_close_tasks  # noqa: SLF001
+        assert not upstream._retired_clients  # noqa: SLF001
+    finally:
+        await upstream.close_client()
+
+
+@pytest.mark.asyncio
+async def test_close_retired_clients_waits_out_cancelled_aclose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await upstream.close_client()
+
+    class CancelSensitiveClient:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.closed = False
+            self.closing = False
+            self.cancelled = False
+            self.calls = 0
+
+        async def aclose(self) -> None:
+            self.calls += 1
+            if self.closed:
+                return
+            if self.closing:
+                return
+            self.closing = True
+            self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            self.closed = True
+
+    monkeypatch.setattr(upstream, "_PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0)
+    client = CancelSensitiveClient()
+    upstream._schedule_delayed_aclose(client)  # noqa: SLF001
+    try:
+        await asyncio.wait_for(client.started.wait(), timeout=1.0)
+
+        closer = asyncio.create_task(upstream._close_retired_clients_now())  # noqa: SLF001
+        await asyncio.sleep(0.01)
+        assert not closer.done()
+
+        client.release.set()
+        await asyncio.wait_for(closer, timeout=1.0)
+        assert client.closed is True
+        assert client.cancelled is False
+        assert client.calls >= 1
+        assert not upstream._retired_client_close_tasks  # noqa: SLF001
+        assert not upstream._retired_clients  # noqa: SLF001
+    finally:
+        client.release.set()
+        await upstream.close_client()
 
 
 @pytest.mark.asyncio

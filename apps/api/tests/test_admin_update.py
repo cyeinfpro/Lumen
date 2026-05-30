@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -7,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.routes import admin_update
+from app.routes import admin_release, admin_update
 from app.services import update_check
 from app.services.update_check import GitHubReleasesClient, UpdateCheckService
 
@@ -541,6 +542,56 @@ async def test_cleanup_marker_when_done_uses_marker_dataclass(
     await admin_update._cleanup_marker_when_done(proc)
 
     unlinked.assert_called_once()
+
+
+@pytest.mark.parametrize("module", [admin_update, admin_release])
+@pytest.mark.asyncio
+async def test_marker_cleanup_task_registry_discards_finished_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+) -> None:
+    release_cleanup = asyncio.Event()
+
+    async def fake_cleanup(_proc: Any) -> None:
+        await release_cleanup.wait()
+
+    await module._shutdown_marker_cleanup_tasks()
+    monkeypatch.setattr(module, "_cleanup_marker_when_done", fake_cleanup)
+
+    task = module._schedule_marker_cleanup_when_done(Mock())
+    try:
+        assert task in module._marker_cleanup_tasks
+
+        release_cleanup.set()
+        await asyncio.wait_for(task, timeout=1.0)
+        await asyncio.sleep(0)
+
+        assert task not in module._marker_cleanup_tasks
+    finally:
+        release_cleanup.set()
+        await module._shutdown_marker_cleanup_tasks()
+
+
+@pytest.mark.parametrize("module", [admin_update, admin_release])
+@pytest.mark.asyncio
+async def test_marker_cleanup_shutdown_cancels_retained_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+) -> None:
+    async def fake_cleanup(_proc: Any) -> None:
+        await asyncio.Event().wait()
+
+    await module._shutdown_marker_cleanup_tasks()
+    monkeypatch.setattr(module, "_cleanup_marker_when_done", fake_cleanup)
+
+    task = module._schedule_marker_cleanup_when_done(Mock())
+
+    assert task in module._marker_cleanup_tasks
+
+    await module._shutdown_marker_cleanup_tasks()
+
+    assert task.cancelled()
+    assert task not in module._marker_cleanup_tasks
 
 
 @pytest.mark.asyncio

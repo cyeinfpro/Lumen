@@ -70,6 +70,70 @@ struct ProviderKeyEntry {
     api_key: String,
 }
 
+struct ProviderKeyTransferFile {
+    path: PathBuf,
+}
+
+impl ProviderKeyTransferFile {
+    fn prepare(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "remove stale Docker provider key transfer file {}",
+                        path.display()
+                    )
+                });
+            }
+        }
+        secrets::write_private_file(path, b"{\"provider_keys\":[]}\n").with_context(|| {
+            format!(
+                "prepare Docker provider key transfer file {}",
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn cleanup(&self) {
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                eprintln!(
+                    "remove Docker provider key transfer file failed for {}: {err}",
+                    self.path.display()
+                );
+                if self.path.exists() {
+                    if let Err(harden_err) = secrets::harden_private_file(&self.path) {
+                        eprintln!(
+                            "harden leftover Docker provider key transfer file failed for {}: {harden_err:#}",
+                            self.path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ProviderKeyTransferFile {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 pub fn schedule_docker_import(
     data_root: &Path,
     source_dump_path: &Path,
@@ -302,6 +366,7 @@ fn apply_pending_docker_import_inner(
     } else {
         None
     };
+    let provider_key_file = ProviderKeyTransferFile::prepare(&provider_key_path)?;
 
     let mut command = Command::new(resolve_sidecar("lumen-api")?);
     hide_windows_console(&mut command);
@@ -321,7 +386,7 @@ fn apply_pending_docker_import_inner(
         .arg("--report")
         .arg(&report_path)
         .arg("--provider-key-output")
-        .arg(&provider_key_path)
+        .arg(provider_key_file.path())
         .stdin(Stdio::null());
     if let Some(storage_path) = &pending.pending_storage_tar_path {
         command.arg("--storage-tar").arg(storage_path);
@@ -343,7 +408,7 @@ fn apply_pending_docker_import_inner(
     }
 
     let mut report = read_json(&report_path).unwrap_or(Value::Null);
-    match import_provider_keys(data_root, &provider_key_path) {
+    match import_provider_keys(data_root, provider_key_file.path()) {
         Ok(imported) => annotate_report(&mut report, "provider_keys_imported", json!(imported)),
         Err(err) => annotate_report(
             &mut report,
@@ -351,7 +416,7 @@ fn apply_pending_docker_import_inner(
             json!(format!("{err:#}")),
         ),
     }
-    let _ = fs::remove_file(&provider_key_path);
+    provider_key_file.cleanup();
     if let Ok(payload) = serde_json::to_vec_pretty(&report) {
         let _ = fs::write(&report_path, payload);
     }
@@ -576,12 +641,21 @@ fn write_json_private<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_vec_pretty(value)?)?;
-    #[cfg(unix)]
+    let tmp_path = secrets::private_tmp_path(path);
+    let payload = serde_json::to_vec_pretty(value)?;
+    let _ = fs::remove_file(&tmp_path);
+    secrets::write_private_file(&tmp_path, &payload)
+        .with_context(|| format!("write private JSON {}", tmp_path.display()))?;
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        let _ = fs::remove_file(path);
     }
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err).with_context(|| format!("replace private JSON {}", path.display()));
+    }
+    secrets::harden_private_file(path)
+        .with_context(|| format!("restrict private JSON {}", path.display()))?;
     Ok(())
 }
 
@@ -601,4 +675,75 @@ fn unix_epoch_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_root() -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let seq = TEST_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lumen-docker-import-test-{}-{}-{}",
+            std::process::id(),
+            now,
+            seq
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    #[test]
+    fn provider_key_transfer_file_is_removed_on_drop() -> Result<()> {
+        let root = temp_root();
+        let path = root.join("data/tmp/docker-import-provider-keys-test.json");
+        {
+            let _guard = ProviderKeyTransferFile::prepare(&path)?;
+            fs::write(
+                &path,
+                br#"{"provider_keys":[{"name":"openai","api_key":"sk-secret"}]}"#,
+            )?;
+            assert!(path.is_file());
+        }
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_key_transfer_file_is_owner_only_on_unix() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root();
+        let path = root.join("data/tmp/docker-import-provider-keys-test.json");
+        let guard = ProviderKeyTransferFile::prepare(&path)?;
+        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(guard);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_import_private_json_is_owner_only_on_unix() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root();
+        let path = root.join("data/tmp/pending-docker-import-test.json");
+        write_json_private(&path, &serde_json::json!({"provider_key": "sk-secret"}))?;
+        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
 }

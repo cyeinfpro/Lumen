@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gzip
 import os
 import re
 import shlex
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,7 @@ SCRIPT_FILES = [
 INSTALL = ROOT / "scripts" / "install.sh"
 UPDATE = ROOT / "scripts" / "update.sh"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
+RESTORE = ROOT / "scripts" / "restore.sh"
 ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
 
 
@@ -67,6 +70,148 @@ def test_operations_scripts_parse_with_bash_n() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_restore_stages_postgres_before_service_stop_and_active_swap() -> None:
+    text = RESTORE.read_text(encoding="utf-8")
+
+    validate_idx = text.index("if ! pg_validate_archive_list; then")
+    stage_idx = text.index("if ! pg_prepare_staged_restore; then")
+    stop_idx = text.index('log "stopping api + worker')
+    redis_done_idx = text.index('log "redis restored"')
+    promote_idx = text.index("if ! pg_promote_staged_restore; then")
+
+    assert validate_idx < stage_idx < stop_idx < redis_done_idx < promote_idx
+    assert "pg_restore --list" in text
+    assert 'PG_TEMP_DB="lumen_restore_${TS//-/}_$$"' in text
+    assert 'PG_ROLLBACK_DB="lumen_rollback_${TS//-/}_$$"' in text
+    assert "ALTER DATABASE $from_ident RENAME TO $to_ident;" in text
+    assert "pg_recover_active_from_rollback" in text
+    assert "pg_discard_rollback_after_success" in text
+    assert "previous active database discarded" in text
+    assert "DROP DATABASE IF EXISTS $PG_DB_IDENT" not in text
+    assert 'pg_drop_database_if_exists "$PG_DB"' not in text
+
+
+def test_restore_success_path_drops_postgres_rollback_database() -> None:
+    text = RESTORE.read_text(encoding="utf-8")
+
+    promoted_idx = text.index('if ! pg_rename_database "$PG_TEMP_DB" "$PG_DB"; then')
+    promote_success_idx = text.index('PG_SWAP_IN_PROGRESS=0', promoted_idx)
+    discard_idx = text.index("if ! pg_discard_rollback_after_success; then")
+    drop_idx = text.index('pg_drop_database_if_exists "$rollback_db"')
+    clear_idx = text.index('PG_ROLLBACK_DB=""', drop_idx)
+
+    assert promote_success_idx < discard_idx
+    assert drop_idx < clear_idx
+    assert "previous active database retained" not in text
+
+
+def test_restore_pg_restore_failure_before_stop_leaves_active_db_unmutated(
+    tmp_path: Path,
+) -> None:
+    ts = "20260529-010203"
+    backup_root = tmp_path / "backup"
+    (backup_root / "pg").mkdir(parents=True)
+    (backup_root / "redis").mkdir()
+    with gzip.open(backup_root / "pg" / f"{ts}.pg.dump.gz", "wb") as fh:
+        fh.write(b"fake pg custom archive bytes")
+
+    redis_src = tmp_path / "redis-src"
+    redis_src.mkdir()
+    (redis_src / "dump.rdb").write_bytes(b"redis")
+    with tarfile.open(backup_root / "redis" / f"{ts}.redis.tgz", "w:gz") as tf:
+        tf.add(redis_src / "dump.rdb", arcname="dump.rdb")
+
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    redis_host = tmp_path / "redis-host"
+    redis_host.mkdir()
+    fake_docker = fakebin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -u
+printf '%s\\n' "$*" >> "${TEST_DOCKER_LOG:?}"
+if [ "${1:-}" = "exec" ]; then
+  shift
+  while [ "${1:-}" = "-i" ] || [ "${1:-}" = "-e" ]; do
+    if [ "$1" = "-e" ]; then
+      shift 2
+    else
+      shift
+    fi
+  done
+  shift || true
+  cmd="${1:-}"
+  if [ "$cmd" = "pg_restore" ]; then
+    cat >/dev/null
+    if printf '%s\\n' "$*" | grep -q -- '--list'; then
+      exit 0
+    fi
+    exit "${TEST_PG_RESTORE_RC:-2}"
+  fi
+  if [ "$cmd" = "psql" ]; then
+    if printf '%s\\n' "$*" | grep -q 'SELECT 1 FROM pg_database'; then
+      printf '1\\n'
+    fi
+    exit 0
+  fi
+  if [ "$cmd" = "redis-cli" ]; then
+    printf 'PONG\\n'
+    exit 0
+  fi
+fi
+if [ "${1:-}" = "inspect" ]; then
+  printf '%s\\n' "${TEST_REDIS_HOST_DIR:?}"
+  exit 0
+fi
+if [ "${1:-}" = "stop" ] || [ "${1:-}" = "start" ]; then
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+
+    env = script_env()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "BACKUP_ROOT": str(backup_root),
+            "TMPDIR": str(tmp_path / "tmp"),
+            "LUMEN_MAINT_ROOT": str(tmp_path / "maint"),
+            "LUMEN_BACKUP_RESTORE_LOCKFILE": str(tmp_path / "backup.lock"),
+            "DB_USER": "lumen",
+            "DB_NAME": "lumen",
+            "TEST_DOCKER_LOG": str(docker_log),
+            "TEST_REDIS_HOST_DIR": str(redis_host),
+            "TEST_PG_RESTORE_RC": "2",
+        }
+    )
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "maint").mkdir()
+
+    result = subprocess.run(
+        ["bash", str(RESTORE), ts],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    log = docker_log.read_text(encoding="utf-8")
+    assert result.returncode == 7, result.stderr + result.stdout
+    assert "pg_restore --list" in log
+    assert "CREATE DATABASE \"lumen_restore_20260529010203_" in log
+    assert "DROP DATABASE IF EXISTS \"lumen_restore_20260529010203_" in log
+    assert "pg_restore -U lumen -d lumen_restore_20260529010203_" in log
+    assert "stop lumen-api lumen-worker" not in log
+    assert 'DROP DATABASE IF EXISTS "lumen";' not in log
+    assert 'ALTER DATABASE "lumen"' not in log
+    assert "active database lumen was not modified" in result.stdout
 
 
 def test_install_script_uses_docker_compose_full_stack() -> None:

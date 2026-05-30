@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -101,7 +101,9 @@ class GitHubReleasesClient:
                 tag="main",
                 name="main",
                 body_md="Rolling main image tag.",
-                published_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                published_at=datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
             )
         if channel in {"pinned", "minor", "major"}:
             raise ValueError(f"channel={channel} requires a current tag context")

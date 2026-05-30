@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -62,6 +64,12 @@ class WindowUsage:
     resets_at: datetime | None = None
 
 
+@dataclass
+class _LockEntry:
+    lock: asyncio.Lock
+    users: int = 0
+
+
 class BillingCacheService:
     def __init__(
         self,
@@ -79,15 +87,23 @@ class BillingCacheService:
         self._queue: asyncio.Queue[tuple[str, tuple[Any, ...], dict[str, Any]]] = (
             asyncio.Queue(maxsize=queue_size)
         )
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: dict[str, _LockEntry] = {}
         self._workers: list[asyncio.Task[None]] = []
 
-    def _lock(self, key: str) -> asyncio.Lock:
-        lock = self._locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[key] = lock
-        return lock
+    @asynccontextmanager
+    async def _lock(self, key: str) -> AsyncIterator[None]:
+        entry = self._locks.get(key)
+        if entry is None:
+            entry = _LockEntry(asyncio.Lock())
+            self._locks[key] = entry
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users <= 0 and self._locks.get(key) is entry:
+                self._locks.pop(key, None)
 
     def _balance_key(self, user_id: str) -> str:
         return f"lumen:billing:balance:{user_id}"
@@ -182,8 +198,7 @@ class BillingCacheService:
                     return int(raw)
             except Exception:
                 pass
-        lock = self._lock(user_id)
-        async with lock:
+        async with self._lock(user_id):
             row = (
                 await db.execute(
                     select(UserWallet.balance_micro).where(

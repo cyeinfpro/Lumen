@@ -1,0 +1,104 @@
+[[permission]]
+identifier = "allow-check-desktop-update"
+description = "Enables the check_desktop_update command."
+commands.allow = ["check_desktop_update"]
+
+[[permission]]
+identifier = "allow-clear-failed-docker-import-marker"
+description = "Enables the clear_failed_docker_import_marker command."
+commands.allow = ["clear_failed_docker_import_marker"]
+
+[[permission]]
+identifier = "allow-clear-failed-restore-marker"
+description = "Enables the clear_failed_restore_marker command."
+commands.allow = ["clear_failed_restore_marker"]
+
+[[permission]]
+identifier = "allow-clear-pending-restore"
+description = "Enables the clear_pending_restore command."
+commands.allow = ["clear_pending_restore"]
+
+[[permission]]
+identifier = "allow-desktop-docker-import-status"
+description = "Enables the desktop_docker_import_status command."
+commands.allow = ["desktop_docker_import_status"]
+
+[[permission]]
+identifier = "allow-desktop-restore-status"
+description = "Enables the desktop_restore_status command."
+commands.allow = ["desktop_restore_status"]
+
+[[permission]]
+identifier = "allow-desktop-startup-status"
+description = "Enables the desktop_startup_status command."
+commands.allow = ["desktop_startup_status"]
+
+[[permission]]
+identifier = "allow-desktop-status"
+description = "Enables the desktop_status command."
+commands.allow = ["desktop_status"]
+
+[[permission]]
+identifier = "allow-diagnostics-snapshot"
+description = "Enables the diagnostics_snapshot command."
+commands.allow = ["diagnostics_snapshot"]
+
+[[permission]]
+identifier = "allow-export-desktop-backup"
+description = "Enables the export_desktop_backup command."
+commands.allow = ["export_desktop_backup"]
+
+[[permission]]
+identifier = "allow-export-diagnostics-bundle"
+description = "Enables the export_diagnostics_bundle command."
+commands.allow = ["export_diagnostics_bundle"]
+
+[[permission]]
+identifier = "allow-install-desktop-update"
+description = "Enables the install_desktop_update command."
+commands.allow = ["install_desktop_update"]
+
+[[permission]]
+identifier = "allow-open-data-dir"
+description = "Enables the open_data_dir command."
+commands.allow = ["open_data_dir"]
+
+[[permission]]
+identifier = "allow-quit-desktop-app"
+description = "Enables the quit_desktop_app command."
+commands.allow = ["quit_desktop_app"]
+
+[[permission]]
+identifier = "allow-refresh-provider-runtime"
+description = "Enables the refresh_provider_runtime command."
+commands.allow = ["refresh_provider_runtime"]
+
+[[permission]]
+identifier = "allow-restart-desktop-app"
+description = "Enables the restart_desktop_app command."
+commands.allow = ["restart_desktop_app"]
+
+[[permission]]
+identifier = "allow-retry-desktop-startup"
+description = "Enables the retry_desktop_startup command."
+commands.allow = ["retry_desktop_startup"]
+
+[[permission]]
+identifier = "allow-select-desktop-restore-backup"
+description = "Enables the select_desktop_restore_backup command."
+commands.allow = ["select_desktop_restore_backup"]
+
+[[permission]]
+identifier = "allow-select-docker-import-backup"
+description = "Enables the select_docker_import_backup command."
+commands.allow = ["select_docker_import_backup"]
+
+[[permission]]
+identifier = "allow-set-provider-key"
+description = "Enables the set_provider_key command."
+commands.allow = ["set_provider_key"]
+
+[[permission]]
+identifier = "allow-set-proxy-secret"
+description = "Enables the set_proxy_secret command."
+commands.allow = ["set_proxy_secret"]

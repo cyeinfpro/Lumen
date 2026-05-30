@@ -18,12 +18,14 @@ FIX_REDIS_PASSWORD = ROOT / "scripts" / "fix-redis-password-mismatch.sh"
 SHIFT_TRAFFIC = ROOT / "scripts" / "lumen-shift-traffic.sh"
 BUILD_MAC = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "build-mac.sh"
 BUILD_WIN = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "build-win.ps1"
+DESKTOP_WINDOWS_HOOKS = ROOT / "apps" / "desktop" / "windows" / "hooks.nsh"
 PYINSTALLER_API_SPEC = (
     ROOT / "apps" / "desktop" / "packaging" / "pyinstaller" / "lumen-api.spec"
 )
 PYINSTALLER_WORKER_SPEC = (
     ROOT / "apps" / "desktop" / "packaging" / "pyinstaller" / "lumen-worker.spec"
 )
+PYINSTALLER_HOOKS = ROOT / "apps" / "desktop" / "packaging" / "pyinstaller" / "hooks"
 SMOKE_MAC = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "smoke-mac.sh"
 SMOKE_WIN = ROOT / "apps" / "desktop" / "packaging" / "scripts" / "smoke-win.ps1"
 TAURI_CONF = ROOT / "apps" / "desktop" / "tauri.conf.json"
@@ -116,13 +118,15 @@ def test_desktop_release_requires_signed_updater_artifacts() -> None:
     assert "Updater signing secrets are required for tagged desktop releases." in workflow
     assert "Missing signed updater artifacts:" in workflow
     assert "exit 1" in workflow
-    assert "apps/desktop/target/release/bundle/nsis/*.exe.sig" in workflow
-    assert "apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe.sig" in workflow
+    assert "apps/desktop/target/release/bundle/nsis/*.nsis.zip.sig" in workflow
+    assert "apps/desktop/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip.sig" in workflow
+    assert "*.exe.sig" not in workflow
+    assert "-name '*.exe.sig'" not in workflow
     assert 'cargo tauri build --bundles app,dmg "${TAURI_CONFIG_ARGS[@]}"' in build_mac
     assert "TAURI_UPDATER_PUBKEY is required for tagged desktop releases." in build_mac
     assert "TAURI_UPDATER_PUBKEY is required for tagged desktop releases." in build_win
     assert 'missing+=("darwin-aarch64 .app.tar.gz")' in workflow
-    assert 'missing+=("windows-x86_64 updater installer")' in workflow
+    assert 'missing+=("windows-x86_64 .nsis.zip updater")' in workflow
     assert '--artifact "windows-aarch64=$win_arm64_update"' in workflow
 
 
@@ -237,11 +241,39 @@ def test_desktop_packaging_verifies_bundled_runtime_resources() -> None:
     assert "Verify-DesktopResources" in build_win
 
 
+def test_desktop_packaging_closes_2026_05_29_audit_runtime_regressions() -> None:
+    hooks = DESKTOP_WINDOWS_HOOKS.read_text(encoding="utf-8")
+    build_mac = BUILD_MAC.read_text(encoding="utf-8")
+    build_win = BUILD_WIN.read_text(encoding="utf-8")
+
+    assert "/SD IDNO IDNO done" in hooks
+    for text in (build_mac, build_win):
+        assert "https://builds.dotnet.microsoft.com/dotnet/Runtime/" in text
+        assert "dotnetcli.azureedge.net" not in text
+    assert "ensure_root_node_executable" in build_mac
+    assert 'cp "$bin_node" "$root_node"' in build_mac
+    assert 'if [ -L "$root_node" ]; then' in build_mac
+    assert "bundled Node runtime must be a real executable, not a symlink" in build_mac
+    assert "ln -s" not in build_mac
+
+
 def test_desktop_pyinstaller_bundles_tiktoken_encoding_plugins() -> None:
+    assert PYINSTALLER_HOOKS.is_dir()
+    hook_tiktoken = PYINSTALLER_HOOKS / "hook-tiktoken.py"
+    hook_tiktoken_ext = PYINSTALLER_HOOKS / "hook-tiktoken_ext.py"
+    assert hook_tiktoken.is_file()
+    assert hook_tiktoken_ext.is_file()
+    hook_text = hook_tiktoken.read_text(encoding="utf-8")
+    hook_ext_text = hook_tiktoken_ext.read_text(encoding="utf-8")
+    assert 'collect_submodules("tiktoken_ext")' in hook_text
+    assert 'collect_data_files("tiktoken")' in hook_text
+    assert 'collect_submodules("tiktoken_ext")' in hook_ext_text
+
     for path in (PYINSTALLER_API_SPEC, PYINSTALLER_WORKER_SPEC):
         text = path.read_text(encoding="utf-8")
         assert "collect_submodules" in text
         assert 'collect_submodules("tiktoken_ext")' in text
+        assert "pyinstaller/hooks" in text
 
 
 def test_desktop_mac_uses_current_garnet_asset_names() -> None:
@@ -607,6 +639,10 @@ def test_desktop_sleep_protection_tracks_running_tasks_only() -> None:
     route_body = route.group(0)
     assert "IOPMAssertionCreateWithName" in power
     assert "SetThreadExecutionState" in power
+    assert "SleepGuardCommand::SetActive" in power
+    assert "sleep_guard_worker" in power
+    assert "JoinHandle" in power
+    assert "mpsc::channel" in power
     assert "caffeinate" not in power
     assert '"/system/desktop-activity"' in api_desktop
     assert "GenerationStatus.RUNNING.value" in route_body
