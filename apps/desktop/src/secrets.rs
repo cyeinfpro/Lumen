@@ -244,7 +244,7 @@ fn write_fallback_map(path: &Path, map: Map<String, Value>) -> Result<()> {
 
 fn write_fallback_secret(data_root: &Path, kind: &str, name: &str, value: &str) -> Result<()> {
     let path = fallback_path(data_root);
-    let mut map = read_fallback_file(&path).unwrap_or_default();
+    let mut map = read_fallback_file(&path)?;
     let entry = map
         .entry(kind.to_string())
         .or_insert_with(|| Value::Object(Map::new()));
@@ -520,6 +520,44 @@ mod tests {
                 .as_deref(),
             None
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fallback_secret_write_preserves_other_entries() {
+        let root = temp_root();
+        write_fallback_secret(&root, "provider", "openai", "sk-test")
+            .expect("write provider fallback secret");
+        write_fallback_secret(&root, "proxy", "corp", "proxy-secret")
+            .expect("write proxy fallback secret");
+
+        assert_eq!(
+            read_fallback_secret(&root, "provider", "openai")
+                .expect("read provider fallback secret")
+                .as_deref(),
+            Some("sk-test")
+        );
+        assert_eq!(
+            read_fallback_secret(&root, "proxy", "corp")
+                .expect("read proxy fallback secret")
+                .as_deref(),
+            Some("proxy-secret")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fallback_secret_write_rejects_corrupt_existing_file() {
+        let root = temp_root();
+        let path = fallback_path(&root);
+        fs::create_dir_all(path.parent().expect("fallback parent"))
+            .expect("create fallback parent");
+        fs::write(&path, b"{").expect("write corrupt fallback");
+
+        let result = write_fallback_secret(&root, "provider", "openai", "sk-test");
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).expect("read fallback"), "{");
         let _ = fs::remove_dir_all(root);
     }
 
