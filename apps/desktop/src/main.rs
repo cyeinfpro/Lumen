@@ -784,6 +784,11 @@ fn run_headless_command_smoke(supervisor: &mut Supervisor) -> anyhow::Result<()>
     }
     secrets::set_proxy_password(&runtime.data_root, proxy_name, proxy_secret)
         .context("set proxy secret during desktop command smoke")?;
+    if secrets::get_provider_key(&runtime.data_root, provider_name)?.as_deref()
+        != Some(provider_secret)
+    {
+        anyhow::bail!("desktop command smoke provider secret was lost after proxy secret write");
+    }
     if secrets::get_proxy_password(&runtime.data_root, proxy_name)?.as_deref() != Some(proxy_secret)
     {
         anyhow::bail!("desktop command smoke proxy secret did not round-trip");
