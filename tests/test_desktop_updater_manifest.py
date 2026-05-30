@@ -16,11 +16,17 @@ def test_create_updater_manifest_finds_compound_suffix_signatures(
     tmp_path: Path,
 ) -> None:
     mac_artifact = tmp_path / "Lumen_1.2.3_aarch64.app.tar.gz"
+    mac_x64_artifact = tmp_path / "Lumen_1.2.3_x64.app.tar.gz"
     win_artifact = tmp_path / "Lumen_1.2.3_x64.nsis.zip"
     mac_artifact.write_bytes(b"mac")
+    mac_x64_artifact.write_bytes(b"mac-x64")
     win_artifact.write_bytes(b"win")
     mac_artifact.with_name(f"{mac_artifact.name}.sig").write_text(
         "bWFjLXNpZ25hdHVyZQ==\n",
+        encoding="utf-8",
+    )
+    mac_x64_artifact.with_name(f"{mac_x64_artifact.name}.sig").write_text(
+        "bWFjLXg2NC1zaWduYXR1cmU=\n",
         encoding="utf-8",
     )
     win_artifact.with_name(f"{win_artifact.name}.sig").write_text(
@@ -42,6 +48,8 @@ def test_create_updater_manifest_finds_compound_suffix_signatures(
             "--artifact",
             f"darwin-aarch64={mac_artifact}",
             "--artifact",
+            f"darwin-x86_64={mac_x64_artifact}",
+            "--artifact",
             f"windows-x86_64={win_artifact}",
         ],
         cwd=ROOT,
@@ -56,6 +64,10 @@ def test_create_updater_manifest_finds_compound_suffix_signatures(
     assert manifest["platforms"]["darwin-aarch64"] == {
         "signature": "bWFjLXNpZ25hdHVyZQ==",
         "url": "https://example.test/releases/download/v1.2.3/Lumen_1.2.3_aarch64.app.tar.gz",
+    }
+    assert manifest["platforms"]["darwin-x86_64"] == {
+        "signature": "bWFjLXg2NC1zaWduYXR1cmU=",
+        "url": "https://example.test/releases/download/v1.2.3/Lumen_1.2.3_x64.app.tar.gz",
     }
     assert manifest["platforms"]["windows-x86_64"] == {
         "signature": "d2luLXNpZ25hdHVyZQ==",

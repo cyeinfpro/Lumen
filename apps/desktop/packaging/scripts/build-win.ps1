@@ -89,7 +89,7 @@ function Prepare-DotnetRuntime {
   try {
     $archive = Join-Path $tmp "dotnet-runtime.zip"
     Invoke-WebRequest `
-      -Uri "https://dotnetcli.azureedge.net/dotnet/Runtime/$DotnetRuntimeVersion/dotnet-runtime-$DotnetRuntimeVersion-$rid.zip" `
+      -Uri "https://builds.dotnet.microsoft.com/dotnet/Runtime/$DotnetRuntimeVersion/dotnet-runtime-$DotnetRuntimeVersion-$rid.zip" `
       -OutFile $archive
     Expand-Archive -Path $archive -DestinationPath $dest -Force
   } finally {
@@ -230,23 +230,54 @@ function Verify-GarnetCli {
   }
 }
 
+function Get-WindowsSignCommandConfig {
+  if (-not $env:WINDOWS_SIGNING_THUMBPRINT -and -not $env:WINDOWS_SIGNING_CERT_PATH) {
+    return $null
+  }
+
+  return @{
+    cmd = "pwsh"
+    args = @(
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      (Join-Path $PSScriptRoot "sign-win.ps1"),
+      "-Path",
+      "%1"
+    )
+  }
+}
+
 function Get-TauriConfigArgs {
-  if (-not $env:TAURI_UPDATER_PUBKEY) {
+  $signCommand = Get-WindowsSignCommandConfig
+  if (-not $env:TAURI_UPDATER_PUBKEY -and -not $signCommand) {
     if ($env:GITHUB_REF_TYPE -eq "tag" -or ($env:GITHUB_REF -and $env:GITHUB_REF.StartsWith("refs/tags/"))) {
       throw "TAURI_UPDATER_PUBKEY is required for tagged desktop releases."
     }
     return @()
   }
-  if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+  if ($env:TAURI_UPDATER_PUBKEY -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
     throw "TAURI_UPDATER_PUBKEY requires TAURI_SIGNING_PRIVATE_KEY for updater artifact signing"
   }
   $configPath = Join-Path $Root "apps/desktop/target/tauri-updater.conf.json"
   New-Item -ItemType Directory -Force (Split-Path $configPath -Parent) | Out-Null
-  @{
-    bundle = @{
-      createUpdaterArtifacts = $true
+  $bundle = @{}
+  if ($env:TAURI_UPDATER_PUBKEY) {
+    $bundle.createUpdaterArtifacts = $true
+  }
+  if ($signCommand) {
+    $bundle.windows = @{
+      signCommand = $signCommand
     }
-    plugins = @{
+  }
+
+  $config = @{
+    bundle = $bundle
+  }
+  if ($env:TAURI_UPDATER_PUBKEY) {
+    $config.plugins = @{
       updater = @{
         active = $true
         endpoints = @(
@@ -259,7 +290,8 @@ function Get-TauriConfigArgs {
         pubkey = $env:TAURI_UPDATER_PUBKEY
       }
     }
-  } | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $configPath
+  }
+  $config | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $configPath
   return @("--config", $configPath)
 }
 

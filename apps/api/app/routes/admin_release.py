@@ -22,9 +22,10 @@ import asyncio
 import os
 import shlex
 import subprocess
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
@@ -54,8 +55,31 @@ from .admin_update import (
     _write_marker,
 )
 
+_marker_cleanup_tasks: set[asyncio.Task[None]] = set()
 
-router = APIRouter(prefix="/admin/release", tags=["admin"])
+
+async def _shutdown_marker_cleanup_tasks() -> None:
+    tasks = list(_marker_cleanup_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _marker_cleanup_tasks.difference_update(tasks)
+
+
+@asynccontextmanager
+async def _marker_cleanup_lifespan(_app: object) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        await _shutdown_marker_cleanup_tasks()
+
+
+router = APIRouter(
+    prefix="/admin/release",
+    tags=["admin"],
+    lifespan=_marker_cleanup_lifespan,
+)
 update_router = APIRouter(prefix="/admin/update", tags=["admin"])
 
 
@@ -320,8 +344,17 @@ def _start_rollback_subprocess(
         close_fds=True,
     )
     _write_marker(proc.pid, started_at.isoformat())
-    asyncio.create_task(_cleanup_marker_when_done(proc))
+    _schedule_marker_cleanup_when_done(proc)
     return proc.pid
+
+
+def _schedule_marker_cleanup_when_done(
+    proc: subprocess.Popen[bytes],
+) -> asyncio.Task[None]:
+    task = asyncio.create_task(_cleanup_marker_when_done(proc))
+    _marker_cleanup_tasks.add(task)
+    task.add_done_callback(_marker_cleanup_tasks.discard)
+    return task
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:

@@ -112,10 +112,25 @@ async def test_normalize_base_url_blocks_dns_resolution_to_private_ip(
 
 
 @pytest.mark.asyncio
-async def test_normalize_base_url_allows_dns_gaierror_in_production(
+async def test_normalize_base_url_rejects_dns_gaierror_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(byok_service.settings, "app_env", "production")
+
+    def fake_getaddrinfo(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
+        raise socket.gaierror("temporary dns failure")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        await byok_service.normalize_base_url("https://upstream.example/v1")
+
+
+@pytest.mark.asyncio
+async def test_normalize_base_url_allows_dns_gaierror_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(byok_service.settings, "app_env", "local")
 
     def fake_getaddrinfo(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
         raise socket.gaierror("temporary dns failure")

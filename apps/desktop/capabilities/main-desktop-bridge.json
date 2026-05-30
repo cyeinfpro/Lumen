@@ -1,0 +1,31 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-desktop-bridge",
+  "description": "Allow the main desktop web UI served from the loopback web sidecar to call Lumen desktop runtime commands.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*"]
+  },
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-check-desktop-update",
+    "allow-clear-failed-docker-import-marker",
+    "allow-clear-failed-restore-marker",
+    "allow-clear-pending-restore",
+    "allow-desktop-docker-import-status",
+    "allow-desktop-restore-status",
+    "allow-desktop-status",
+    "allow-export-desktop-backup",
+    "allow-export-diagnostics-bundle",
+    "allow-install-desktop-update",
+    "allow-open-data-dir",
+    "allow-refresh-provider-runtime",
+    "allow-restart-desktop-app",
+    "allow-select-desktop-restore-backup",
+    "allow-select-docker-import-backup",
+    "allow-set-provider-key",
+    "allow-set-proxy-secret"
+  ]
+}

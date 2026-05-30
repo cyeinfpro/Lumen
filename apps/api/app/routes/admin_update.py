@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,8 +52,31 @@ from .admin_backups import (
     _open_private_append,
 )
 
+_marker_cleanup_tasks: set[asyncio.Task[None]] = set()
 
-router = APIRouter(prefix="/admin/update", tags=["admin"])
+
+async def _shutdown_marker_cleanup_tasks() -> None:
+    tasks = list(_marker_cleanup_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _marker_cleanup_tasks.difference_update(tasks)
+
+
+@asynccontextmanager
+async def _marker_cleanup_lifespan(_app: object) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        await _shutdown_marker_cleanup_tasks()
+
+
+router = APIRouter(
+    prefix="/admin/update",
+    tags=["admin"],
+    lifespan=_marker_cleanup_lifespan,
+)
 router_public = APIRouter(tags=["system"])
 
 _UPDATE_LOG_NAME = ".update.log"
@@ -1824,8 +1848,17 @@ async def trigger_update(
     )
 
     if proc is not None:
-        asyncio.create_task(_cleanup_marker_when_done(proc))
+        _schedule_marker_cleanup_when_done(proc)
     return response
+
+
+def _schedule_marker_cleanup_when_done(
+    proc: subprocess.Popen[bytes],
+) -> asyncio.Task[None]:
+    task = asyncio.create_task(_cleanup_marker_when_done(proc))
+    _marker_cleanup_tasks.add(task)
+    task.add_done_callback(_marker_cleanup_tasks.discard)
+    return task
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:

@@ -293,6 +293,8 @@ _proxied_images_clients: OrderedDict[
 ] = OrderedDict()
 _client_lock = asyncio.Lock()
 _images_client_lock = asyncio.Lock()
+_retired_client_close_tasks: set[asyncio.Task[None]] = set()
+_retired_clients: set[httpx.AsyncClient] = set()
 
 _TEXT_STREAM_INTERRUPTED_ERROR_CODE = EC.TEXT_STREAM_INTERRUPTED.value
 
@@ -708,9 +710,45 @@ async def _delayed_aclose(
                 await wait_until_idle(_PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 logger.warning("timed out waiting for retired upstream client to idle")
-        await client.aclose()
+        await _aclose_client_cancel_safe(client)
     except Exception:  # noqa: BLE001
         logger.warning("delayed proxied client close failed", exc_info=True)
+
+
+async def _aclose_client_cancel_safe(client: httpx.AsyncClient) -> None:
+    close_task = asyncio.create_task(client.aclose())
+    try:
+        await asyncio.shield(close_task)
+    except asyncio.CancelledError:
+        with suppress(Exception, asyncio.CancelledError):
+            await close_task
+        raise
+
+
+def _schedule_delayed_aclose(client: httpx.AsyncClient) -> asyncio.Task[None]:
+    _retired_clients.add(client)
+    task = asyncio.create_task(_delayed_aclose(client))
+    _retired_client_close_tasks.add(task)
+
+    def _discard_retired_client(done: asyncio.Task[None]) -> None:
+        _retired_client_close_tasks.discard(done)
+        _retired_clients.discard(client)
+
+    task.add_done_callback(_discard_retired_client)
+    return task
+
+
+async def _close_retired_clients_now() -> None:
+    tasks = list(_retired_client_close_tasks)
+    clients = list(_retired_clients)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _retired_client_close_tasks.difference_update(tasks)
+    _retired_clients.difference_update(clients)
+    for client in clients:
+        await _aclose_client_cancel_safe(client)
 
 
 async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
@@ -727,7 +765,7 @@ async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
             client = _build_client(timeout_config, proxy_url=proxy_url)
             evicted = _cache_proxied_client(_proxied_clients, key, client)
         for old_client in evicted:
-            asyncio.create_task(_delayed_aclose(old_client))
+            _schedule_delayed_aclose(old_client)
         return client
     if _client is None or _client_timeout_config != timeout_config:
         async with _client_lock:
@@ -736,7 +774,7 @@ async def _get_client(proxy_url: str | None = None) -> httpx.AsyncClient:
                 _client = _build_client(timeout_config)
                 _client_timeout_config = timeout_config
                 if old_client is not None:
-                    asyncio.create_task(_delayed_aclose(old_client))
+                    _schedule_delayed_aclose(old_client)
     return _client
 
 
@@ -754,7 +792,7 @@ async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
             client = _build_images_client(timeout_config, proxy_url=proxy_url)
             evicted = _cache_proxied_client(_proxied_images_clients, key, client)
         for old_client in evicted:
-            asyncio.create_task(_delayed_aclose(old_client))
+            _schedule_delayed_aclose(old_client)
         return client
     if _images_client is None or _images_client_timeout_config != timeout_config:
         async with _images_client_lock:
@@ -766,7 +804,7 @@ async def _get_images_client(proxy_url: str | None = None) -> httpx.AsyncClient:
                 _images_client = _build_images_client(timeout_config)
                 _images_client_timeout_config = timeout_config
                 if old_client is not None:
-                    asyncio.create_task(_delayed_aclose(old_client))
+                    _schedule_delayed_aclose(old_client)
     return _images_client
 
 
@@ -777,6 +815,8 @@ async def close_client() -> None:
         _images_client, \
         _client_timeout_config, \
         _images_client_timeout_config
+    await _close_retired_clients_now()
+
     async with _client_lock:
         clients: list[httpx.AsyncClient] = []
         if _client is not None:
@@ -786,7 +826,7 @@ async def close_client() -> None:
         clients.extend(_proxied_clients.values())
         _proxied_clients.clear()
     for client in clients:
-        await client.aclose()
+        await _aclose_client_cancel_safe(client)
 
     async with _images_client_lock:
         image_clients: list[httpx.AsyncClient] = []
@@ -797,7 +837,7 @@ async def close_client() -> None:
         image_clients.extend(_proxied_images_clients.values())
         _proxied_images_clients.clear()
     for client in image_clients:
-        await client.aclose()
+        await _aclose_client_cancel_safe(client)
     await close_provider_proxy_tunnels()
 
 

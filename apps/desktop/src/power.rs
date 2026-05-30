@@ -142,6 +142,8 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use anyhow::{anyhow, Result};
+    use std::sync::mpsc;
+    use std::thread::{self, JoinHandle};
 
     type ExecutionState = u32;
 
@@ -153,38 +155,104 @@ mod platform {
         fn SetThreadExecutionState(flags: ExecutionState) -> ExecutionState;
     }
 
+    enum SleepGuardCommand {
+        SetActive {
+            active: bool,
+            reply: mpsc::Sender<std::result::Result<(), String>>,
+        },
+        Shutdown,
+    }
+
     pub struct PlatformSleepGuard {
+        tx: mpsc::Sender<SleepGuardCommand>,
+        worker: Option<JoinHandle<()>>,
         active: bool,
     }
 
     impl PlatformSleepGuard {
         pub fn new() -> Self {
-            Self { active: false }
+            let (tx, rx) = mpsc::channel();
+            let worker = thread::spawn(move || sleep_guard_worker(rx));
+            Self {
+                tx,
+                worker: Some(worker),
+                active: false,
+            }
         }
 
         pub fn set_active(&mut self, active: bool) -> Result<()> {
             if self.active == active {
                 return Ok(());
             }
-            let flags = if active {
-                ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-            } else {
-                ES_CONTINUOUS
-            };
-            let previous = unsafe { SetThreadExecutionState(flags) };
-            if previous == 0 {
-                return Err(anyhow!("SetThreadExecutionState failed"));
+            let (reply_tx, reply_rx) = mpsc::channel();
+            self.tx
+                .send(SleepGuardCommand::SetActive {
+                    active,
+                    reply: reply_tx,
+                })
+                .map_err(|_| anyhow!("sleep guard worker stopped"))?;
+            match reply_rx
+                .recv()
+                .map_err(|_| anyhow!("sleep guard worker exited"))?
+            {
+                Ok(()) => {
+                    self.active = active;
+                    Ok(())
+                }
+                Err(message) => Err(anyhow!("{message}")),
             }
-            self.active = active;
-            Ok(())
         }
     }
 
     impl Drop for PlatformSleepGuard {
         fn drop(&mut self) {
-            if self.active {
-                let _ = unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+            let _ = self.tx.send(SleepGuardCommand::Shutdown);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
             }
+        }
+    }
+
+    fn sleep_guard_worker(rx: mpsc::Receiver<SleepGuardCommand>) {
+        let mut active = false;
+        while let Ok(command) = rx.recv() {
+            match command {
+                SleepGuardCommand::SetActive {
+                    active: desired,
+                    reply,
+                } => {
+                    let result = if active == desired {
+                        Ok(())
+                    } else {
+                        apply_thread_execution_state(desired).map(|()| {
+                            active = desired;
+                        })
+                    };
+                    let _ = reply.send(result);
+                }
+                SleepGuardCommand::Shutdown => break,
+            }
+        }
+        if active {
+            let _ = apply_thread_execution_state(false);
+        }
+    }
+
+    fn apply_thread_execution_state(active: bool) -> std::result::Result<(), String> {
+        let flags = if active {
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        } else {
+            ES_CONTINUOUS
+        };
+        let previous = unsafe { SetThreadExecutionState(flags) };
+        if previous == 0 {
+            if active {
+                Err("SetThreadExecutionState failed while enabling sleep protection".to_string())
+            } else {
+                Err("SetThreadExecutionState failed while disabling sleep protection".to_string())
+            }
+        } else {
+            Ok(())
         }
     }
 }

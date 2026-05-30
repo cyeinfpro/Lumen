@@ -1322,7 +1322,80 @@ fn redis_aof_recovery_failed_since(data_root: &Path, offset: u64) -> bool {
     if file.take(512 * 1024).read_to_string(&mut text).is_err() {
         return false;
     }
-    text.contains("AofProcessor.RecoverReplay") || text.contains("TsavoriteLogRecoveryInfo")
+    redis_aof_recovery_log_indicates_failure(&text)
+}
+
+fn redis_aof_recovery_log_indicates_failure(text: &str) -> bool {
+    const CONTEXT_LINES: usize = 12;
+
+    let lines = text.lines().collect::<Vec<_>>();
+    for (idx, line) in lines.iter().enumerate() {
+        if mentions_redis_aof_failure(line) {
+            return true;
+        }
+        if !mentions_redis_aof_recovery_context(line) {
+            continue;
+        }
+        let start = idx.saturating_sub(CONTEXT_LINES);
+        let end = (idx + CONTEXT_LINES + 1).min(lines.len());
+        if lines[start..end]
+            .iter()
+            .any(|candidate| mentions_redis_aof_failure_in_recovery_window(candidate))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn mentions_redis_aof_recovery_context(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    line.contains("AofProcessor.RecoverReplay")
+        || line.contains("TsavoriteLogRecoveryInfo")
+        || (lower.contains("aof") && (lower.contains("recover") || lower.contains("replay")))
+}
+
+fn mentions_redis_aof_failure(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    mentions_redis_aof_recovery_context(line) && mentions_recovery_failure_marker(&lower)
+}
+
+fn mentions_redis_aof_failure_in_recovery_window(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    mentions_redis_aof_failure(line) || mentions_strong_recovery_failure(&lower)
+}
+
+fn mentions_recovery_failure_marker(lower: &str) -> bool {
+    mentions_strong_recovery_failure(lower)
+        || lower.starts_with("error ")
+        || lower.starts_with("error:")
+        || lower.contains(" error:")
+        || lower.contains("[error]")
+        || lower.contains("level=error")
+        || ["failed", "failure", "invalid", "unable"]
+            .iter()
+            .any(|marker| contains_log_word(lower, marker))
+}
+
+fn mentions_strong_recovery_failure(lower: &str) -> bool {
+    lower.contains("unhandled exception")
+        || lower.contains("exception:")
+        || ["corrupt", "corrupted", "fatal", "panic"]
+            .iter()
+            .any(|marker| contains_log_word(lower, marker))
+}
+
+fn contains_log_word(input: &str, needle: &str) -> bool {
+    input.match_indices(needle).any(|(start, _)| {
+        let before = input[..start].chars().next_back();
+        let after = input[start + needle.len()..].chars().next();
+        before.map(is_log_word_boundary).unwrap_or(true)
+            && after.map(is_log_word_boundary).unwrap_or(true)
+    })
+}
+
+fn is_log_word_boundary(ch: char) -> bool {
+    !ch.is_ascii_alphanumeric() && ch != '_'
 }
 
 fn quarantine_redis_aof(data_root: &Path) -> Result<Option<PathBuf>> {
@@ -1903,6 +1976,7 @@ mod tests {
     use super::{
         open_rotated_log_file, parse_desktop_activity_body, pick_runtime_ports,
         quarantine_redis_aof, redis_aof_recovery_failed_since,
+        redis_aof_recovery_log_indicates_failure,
     };
     use std::fs;
     use std::io::Write;
@@ -1945,7 +2019,11 @@ mod tests {
         let logs = root.join("data/logs");
         fs::create_dir_all(&logs).expect("create logs dir");
         let log = logs.join("redis.log");
-        fs::write(&log, "old AofProcessor.RecoverReplay\n").expect("seed old log");
+        fs::write(
+            &log,
+            "old Unhandled exception while recovering AOF\n  at AofProcessor.RecoverReplay\n",
+        )
+        .expect("seed old log");
         let offset = fs::metadata(&log).expect("stat old log").len();
 
         assert!(!redis_aof_recovery_failed_since(&root, offset));
@@ -1953,10 +2031,57 @@ mod tests {
             .append(true)
             .open(&log)
             .expect("open redis log")
-            .write_all(b"new TsavoriteLogRecoveryInfo failure\n")
+            .write_all(
+                b"new Unhandled exception while recovering AOF\n  at TsavoriteLogRecoveryInfo\n",
+            )
             .expect("append redis log");
         assert!(redis_aof_recovery_failed_since(&root, offset));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn redis_aof_failure_detection_ignores_successful_recovery_type_names() {
+        let successful_recovery = "\
+TsavoriteLogRecoveryInfo: recovered checkpoint successfully
+AofProcessor.RecoverReplay completed replay for 24 records with error_count=0
+";
+        assert!(!redis_aof_recovery_log_indicates_failure(
+            successful_recovery
+        ));
+
+        let failed_recovery = "\
+Unhandled exception. System.InvalidOperationException: failed to recover AOF
+   at Garnet.server.AofProcessor.RecoverReplay()
+";
+        assert!(redis_aof_recovery_log_indicates_failure(failed_recovery));
+    }
+
+    #[test]
+    fn redis_aof_failure_detection_ignores_generic_neighbor_errors() {
+        let successful_recovery_with_unrelated_errors = "\
+[error] metrics exporter failed
+TsavoriteLogRecoveryInfo: recovered checkpoint successfully
+AofProcessor.RecoverReplay completed replay for 24 records with error_count=0
+unable to refresh unrelated dashboard stats
+";
+        assert!(!redis_aof_recovery_log_indicates_failure(
+            successful_recovery_with_unrelated_errors
+        ));
+    }
+
+    #[test]
+    fn redis_aof_failure_detection_tracks_stack_frames_beyond_short_window() {
+        let failed_recovery = "\
+Unhandled exception. System.InvalidOperationException: failed to recover replay state
+   at Garnet.server.Storage.Session.Commit()
+   at Garnet.server.Storage.Session.Flush()
+   at Garnet.server.Storage.Log.Scan()
+   at Garnet.server.Storage.Log.Read()
+   at Garnet.server.Storage.Log.Recover()
+   at Garnet.server.Storage.Store.Recover()
+   at Garnet.server.AofProcessor.RecoverReplay()
+";
+        assert!(redis_aof_recovery_log_indicates_failure(failed_recovery));
     }
 
     #[test]

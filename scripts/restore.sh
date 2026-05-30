@@ -3,10 +3,11 @@
 # 用法：restore.sh <timestamp>  （timestamp 形如 20260424-123000）
 #
 # 执行顺序：
-#   1. 停 lumen-api、lumen-worker（避免恢复期间写入）
-#   2. 恢复 Redis（需要重启 container）
-#   3. 恢复 Postgres（drop+restore 到同名 db）
-#   4. 启 lumen-api、lumen-worker
+#   1. 校验 PG 归档并恢复到临时库（不触碰活库）
+#   2. 停 lumen-api、lumen-worker（避免切换期间写入）
+#   3. 恢复 Redis（需要重启 container）
+#   4. 将 PG 临时库切换为活库
+#   5. 启 lumen-api、lumen-worker
 #
 # 失败时：API/Worker 仍会被重启起来（避免服务长时间卡停），但会 exit 非零。
 set -euo pipefail
@@ -60,6 +61,9 @@ LOCK_KIND=""
 TMP_DIR=""
 SERVICES_STOPPED=0
 REDIS_NEEDS_START=0
+PG_TEMP_DB=""
+PG_ROLLBACK_DB=""
+PG_SWAP_IN_PROGRESS=0
 
 log() { printf '[restore %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
@@ -96,6 +100,12 @@ cleanup() {
     if [ "$REDIS_NEEDS_START" -eq 1 ]; then
         log "starting redis container"
         docker start "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    if [ "${PG_SWAP_IN_PROGRESS:-0}" = "1" ] && [ -n "${PG_ROLLBACK_DB:-}" ]; then
+        pg_recover_active_from_rollback || true
+    fi
+    if [ -n "${PG_TEMP_DB:-}" ]; then
+        pg_drop_database_if_exists "$PG_TEMP_DB" >/dev/null 2>&1 || true
     fi
     if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR" 2>/dev/null || true
@@ -192,6 +202,221 @@ pg_quote_literal() {
     printf "'"
     printf '%s' "$1" | sed "s/'/''/g"
     printf "'"
+}
+
+pg_exec_postgres() {
+    local sql="$1"
+    docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres -c "$sql" >/dev/null
+}
+
+pg_database_exists() {
+    local db="$1"
+    local db_literal out
+    db_literal="$(pg_quote_literal "$db")"
+    if ! out="$(docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = $db_literal" 2>/dev/null)"; then
+        return 2
+    fi
+    out="$(printf '%s' "$out" | tr -d '[:space:]')"
+    [ "$out" = "1" ]
+}
+
+pg_terminate_db_connections() {
+    local db="$1"
+    local db_literal
+    db_literal="$(pg_quote_literal "$db")"
+    pg_exec_postgres "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $db_literal AND pid <> pg_backend_pid();"
+}
+
+pg_drop_database_if_exists() {
+    local db="$1"
+    local db_ident
+    db_ident="$(pg_quote_ident "$db")"
+    pg_terminate_db_connections "$db" || return $?
+    pg_exec_postgres "DROP DATABASE IF EXISTS $db_ident;"
+}
+
+pg_create_database() {
+    local db="$1"
+    local db_ident owner_ident
+    db_ident="$(pg_quote_ident "$db")"
+    owner_ident="$(pg_quote_ident "$PG_USER")"
+    pg_exec_postgres "CREATE DATABASE $db_ident OWNER $owner_ident;"
+}
+
+pg_rename_database() {
+    local from_db="$1"
+    local to_db="$2"
+    local from_ident to_ident
+    from_ident="$(pg_quote_ident "$from_db")"
+    to_ident="$(pg_quote_ident "$to_db")"
+    pg_terminate_db_connections "$from_db" || return $?
+    pg_exec_postgres "ALTER DATABASE $from_ident RENAME TO $to_ident;"
+}
+
+pg_validate_archive_list() {
+    local gunzip_rc pg_restore_rc
+    local -a pipe_status
+    log "validating postgres archive catalog with pg_restore --list"
+    set +e
+    gunzip -c "$PG_FILE" | docker exec -i "$PG_CONTAINER" pg_restore --list >/dev/null
+    pipe_status=("${PIPESTATUS[@]}")
+    gunzip_rc=${pipe_status[0]}
+    pg_restore_rc=${pipe_status[1]}
+    set -e
+    if [ "$gunzip_rc" -ne 0 ]; then
+        log "ERROR: failed to read pg dump during archive catalog validation (gunzip exit $gunzip_rc)"
+        return 1
+    fi
+    if [ "$pg_restore_rc" -ne 0 ]; then
+        log "ERROR: pg_restore --list failed with exit $pg_restore_rc"
+        return 1
+    fi
+}
+
+restore_pg_archive_to_db() {
+    local target_db="$1"
+    local label="$2"
+    local gunzip_rc pg_restore_rc
+    local -a pipe_status
+    set +e
+    gunzip -c "$PG_FILE" | docker exec -i "$PG_CONTAINER" pg_restore -U "$PG_USER" -d "$target_db" --no-owner --no-acl
+    pipe_status=("${PIPESTATUS[@]}")
+    gunzip_rc=${pipe_status[0]}
+    pg_restore_rc=${pipe_status[1]}
+    set -e
+    if [ "$pg_restore_rc" -ge 2 ]; then
+        log "ERROR: pg_restore into $label failed with exit $pg_restore_rc"
+        return 1
+    fi
+    if [ "$gunzip_rc" -ne 0 ]; then
+        log "ERROR: failed to read pg dump during restore into $label (gunzip exit $gunzip_rc)"
+        return 1
+    fi
+    if [ "$pg_restore_rc" -eq 1 ]; then
+        log "WARN: pg_restore into $label returned non-zero (common with FKs); continuing and letting app validate"
+    fi
+}
+
+pg_prepare_staged_restore() {
+    PG_TEMP_DB="lumen_restore_${TS//-/}_$$"
+    log "staging postgres restore into temporary database $PG_TEMP_DB"
+
+    if ! pg_drop_database_if_exists "$PG_TEMP_DB"; then
+        log "ERROR: failed to clear postgres temporary restore database $PG_TEMP_DB"
+        return 1
+    fi
+    if ! pg_create_database "$PG_TEMP_DB"; then
+        log "ERROR: failed to create postgres temporary restore database $PG_TEMP_DB"
+        return 1
+    fi
+    if ! restore_pg_archive_to_db "$PG_TEMP_DB" "temporary database $PG_TEMP_DB"; then
+        log "ERROR: staged postgres restore failed; active database $PG_DB was not modified"
+        pg_drop_database_if_exists "$PG_TEMP_DB" || log "WARN: failed to drop temporary postgres database $PG_TEMP_DB"
+        PG_TEMP_DB=""
+        return 1
+    fi
+
+    log "postgres staged restore ready: $PG_TEMP_DB"
+}
+
+pg_recover_active_from_rollback() {
+    if [ -z "${PG_ROLLBACK_DB:-}" ]; then
+        return 1
+    fi
+    local active_exists_rc
+    set +e
+    pg_database_exists "$PG_DB"
+    active_exists_rc=$?
+    set -e
+    if [ "$active_exists_rc" -eq 0 ]; then
+        PG_SWAP_IN_PROGRESS=0
+        log "postgres active database $PG_DB already exists; rollback swap recovery is not needed"
+        return 0
+    fi
+    if [ "$active_exists_rc" -ne 1 ]; then
+        log "ERROR: failed to inspect active postgres database $PG_DB before rollback recovery"
+        return 1
+    fi
+    log "attempting postgres rollback swap: $PG_ROLLBACK_DB -> $PG_DB"
+    if pg_rename_database "$PG_ROLLBACK_DB" "$PG_DB"; then
+        PG_ROLLBACK_DB=""
+        PG_SWAP_IN_PROGRESS=0
+        log "postgres active database restored from rollback"
+        return 0
+    fi
+    log "ERROR: postgres rollback database $PG_ROLLBACK_DB could not be renamed back to $PG_DB"
+    return 1
+}
+
+pg_discard_rollback_after_success() {
+    if [ -z "${PG_ROLLBACK_DB:-}" ]; then
+        return 0
+    fi
+    local rollback_db="$PG_ROLLBACK_DB"
+    log "dropping postgres rollback database after successful restore: $rollback_db"
+    if pg_drop_database_if_exists "$rollback_db"; then
+        PG_ROLLBACK_DB=""
+        log "postgres rollback database dropped: $rollback_db"
+        return 0
+    fi
+    log "WARN: failed to drop postgres rollback database $rollback_db; manual cleanup may be required"
+    return 1
+}
+
+pg_promote_staged_restore() {
+    if [ -z "${PG_TEMP_DB:-}" ]; then
+        log "ERROR: no staged postgres restore database is available"
+        return 1
+    fi
+
+    local active_exists_rc
+    set +e
+    pg_database_exists "$PG_DB"
+    active_exists_rc=$?
+    set -e
+    if [ "$active_exists_rc" -eq 1 ]; then
+        log "WARN: active postgres database $PG_DB does not exist; promoting staged restore without rollback database"
+        if ! pg_rename_database "$PG_TEMP_DB" "$PG_DB"; then
+            log "ERROR: failed to promote postgres temporary restore database $PG_TEMP_DB"
+            return 1
+        fi
+        PG_TEMP_DB=""
+        log "postgres staged database promoted"
+        return 0
+    fi
+    if [ "$active_exists_rc" -ne 0 ]; then
+        log "ERROR: failed to inspect active postgres database $PG_DB"
+        return 1
+    fi
+
+    PG_ROLLBACK_DB="lumen_rollback_${TS//-/}_$$"
+    log "swapping postgres database: active $PG_DB -> rollback $PG_ROLLBACK_DB; staged $PG_TEMP_DB -> active"
+    if ! pg_drop_database_if_exists "$PG_ROLLBACK_DB"; then
+        log "ERROR: failed to clear postgres rollback database $PG_ROLLBACK_DB"
+        return 1
+    fi
+
+    PG_SWAP_IN_PROGRESS=1
+    if ! pg_rename_database "$PG_DB" "$PG_ROLLBACK_DB"; then
+        PG_SWAP_IN_PROGRESS=0
+        PG_ROLLBACK_DB=""
+        log "ERROR: failed to move active postgres database $PG_DB to rollback database"
+        return 1
+    fi
+    if ! pg_rename_database "$PG_TEMP_DB" "$PG_DB"; then
+        log "ERROR: failed to promote postgres temporary restore database $PG_TEMP_DB"
+        if ! pg_recover_active_from_rollback; then
+            log "ERROR: active database $PG_DB is unavailable; staged=$PG_TEMP_DB rollback=$PG_ROLLBACK_DB"
+        fi
+        return 1
+    fi
+
+    PG_TEMP_DB=""
+    PG_SWAP_IN_PROGRESS=0
+    if ! pg_discard_rollback_after_success; then
+        return 1
+    fi
+    log "postgres restored; previous active database discarded"
 }
 
 redis_cli() {
@@ -294,6 +519,14 @@ fi
 # 验证文件完整性再停服，避免坏备份导致恢复空档
 gzip -t "$PG_FILE" || { log "ERROR pg file corrupt"; exit 3; }
 tar -tzf "$REDIS_FILE" >/dev/null || { log "ERROR redis file corrupt"; exit 3; }
+if ! pg_validate_archive_list; then
+    log "ERROR postgres archive catalog invalid; aborting before services are stopped"
+    exit 3
+fi
+if ! pg_prepare_staged_restore; then
+    log "ERROR postgres staged restore failed; aborting before services are stopped"
+    exit 7
+fi
 
 log "stopping api + worker（compose 优先 / 容器名 fallback）"
 SERVICES_STOPPED=1
@@ -384,39 +617,10 @@ fi
 log "redis restored"
 
 # ---- Postgres ----
-log "restoring postgres from $PG_FILE"
-# drop + recreate: 避免残留数据；--clean --if-exists 对复杂外键有时有坑，所以走 drop/create
-PG_DB_IDENT="$(pg_quote_ident "$PG_DB")"
-PG_USER_IDENT="$(pg_quote_ident "$PG_USER")"
-PG_DB_LITERAL="$(pg_quote_literal "$PG_DB")"
-if ! docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $PG_DB_LITERAL AND pid <> pg_backend_pid();" >/dev/null; then
-    log "ERROR: pg terminate connections failed"
-    exit 6
-fi
-if ! docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres -c "DROP DATABASE IF EXISTS $PG_DB_IDENT;" >/dev/null; then
-    log "ERROR: pg drop database failed"
-    exit 6
-fi
-if ! docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres -c "CREATE DATABASE $PG_DB_IDENT OWNER $PG_USER_IDENT;" >/dev/null; then
-    log "ERROR: pg drop/create failed"
-    exit 6
-fi
-
-set +e
-gunzip -c "$PG_FILE" | docker exec -i "$PG_CONTAINER" pg_restore -U "$PG_USER" -d "$PG_DB" --no-owner --no-acl
-gunzip_rc=${PIPESTATUS[0]}
-pg_restore_rc=${PIPESTATUS[1]}
-set -e
-if [ "$pg_restore_rc" -ge 2 ]; then
-    log "ERROR: pg_restore failed with exit $pg_restore_rc"
+log "promoting staged postgres restore from $PG_TEMP_DB"
+if ! pg_promote_staged_restore; then
+    log "ERROR: postgres staged restore promotion failed"
     exit 7
-fi
-if [ "$gunzip_rc" -ne 0 ]; then
-    log "ERROR: failed to read pg dump (gunzip exit $gunzip_rc)"
-    exit 7
-fi
-if [ "$pg_restore_rc" -eq 1 ]; then
-    log "WARN: pg_restore returned non-zero (common with FKs); continuing and letting app validate"
 fi
 log "postgres restored"
 
