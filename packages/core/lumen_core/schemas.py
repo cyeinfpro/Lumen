@@ -139,8 +139,7 @@ class ImageParamsIn(BaseModel):
     # Rendering quality is distinct from the UI's 1K/2K/4K resolution preset.
     render_quality: Literal["auto", "low", "medium", "high"] = "medium"
     output_format: Literal["png", "jpeg", "webp"] | None = None
-    # Only applies to jpeg/webp. None lets the API layer use the no-compression
-    # default.
+    # Only applies to jpeg/webp. None omits the provider compression option.
     output_compression: int | None = Field(default=None, ge=0, le=100)
     background: Literal["auto", "opaque", "transparent"] = "auto"
     moderation: Literal["auto", "low"] = "low"

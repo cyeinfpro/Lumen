@@ -226,7 +226,7 @@ def test_image_upstream_request_uses_explicit_render_quality_for_4k() -> None:
     )
     assert medium["render_quality"] == "medium"
     assert medium["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
-    assert medium["output_compression"] == 0
+    assert "output_compression" not in medium
 
     fast = messages._image_upstream_request(  # noqa: SLF001
         ImageParamsIn(
