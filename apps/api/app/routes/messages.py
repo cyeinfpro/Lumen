@@ -432,14 +432,6 @@ def _resolve_image_render_quality(
     return "medium"
 
 
-def _default_output_compression(
-    *,
-    render_quality: str,
-    fast: bool,
-) -> int:
-    return 0
-
-
 async def _resolve_fast_default(db: AsyncSession) -> bool:
     spec = get_spec(_GENERATION_FAST_DEFAULT_KEY)
     if spec is None:
@@ -539,15 +531,8 @@ def _image_upstream_request(
     if billing_tier is not None:
         upstream_request["billing_tier"] = billing_tier
         upstream_request["billing_tier_source"] = "request_quality"
-    if output_format in {"jpeg", "webp"}:
-        upstream_request["output_compression"] = (
-            _default_output_compression(
-                render_quality=render_quality,
-                fast=bool(image_params.fast),
-            )
-            if image_params.output_compression is None
-            else image_params.output_compression
-        )
+    if output_format in {"jpeg", "webp"} and image_params.output_compression is not None:
+        upstream_request["output_compression"] = image_params.output_compression
     return upstream_request
 
 
