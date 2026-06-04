@@ -26,7 +26,7 @@ from lumen_core.constants import (
     EVENTS_STREAM_MAXLEN,
     EVENTS_STREAM_PREFIX,
 )
-from lumen_core.models import Completion, Conversation, Generation
+from lumen_core.models import Completion, Conversation, Generation, VideoGeneration
 
 from ..db import get_db
 from ..deps import CurrentUser
@@ -149,7 +149,17 @@ async def _validate_channels(
                         )
                     )
                 ).first()
+            video_row = None
             if not gen_row and not comp_row:
+                video_row = (
+                    await db.execute(
+                        select(VideoGeneration.id).where(
+                            VideoGeneration.id == ref,
+                            VideoGeneration.user_id == user_id,
+                        )
+                    )
+                ).first()
+            if not gen_row and not comp_row and not video_row:
                 raise _http("forbidden_channel", f"task {ref} not owned", 403)
             clean.append(ch)
         else:
@@ -278,7 +288,7 @@ async def _stream_id_for_pubsub_event(
 
 def _task_ids_from_payload(payload: dict) -> set[str]:
     ids: set[str] = set()
-    for key in ("task_id", "generation_id", "completion_id"):
+    for key in ("task_id", "generation_id", "completion_id", "video_generation_id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
             ids.add(value)

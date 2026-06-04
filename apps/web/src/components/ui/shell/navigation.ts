@@ -1,4 +1,4 @@
-export type AppNavKey = "studio" | "projects" | "assets" | "me";
+export type AppNavKey = "studio" | "video" | "projects" | "assets" | "me";
 
 export interface AppNavItem {
   key: AppNavKey;
@@ -19,6 +19,14 @@ const DOCKER_NAV_ITEMS: readonly AppNavItem[] = [
     detail: "自由聊天、生图、图生图、修图",
     keywords: ["new", "studio", "home", "创作", "首页", "工作台", "聊天", "生图"],
     matchPrefixes: ["/"],
+  },
+  {
+    key: "video",
+    label: "视频",
+    route: "/video",
+    detail: "文生视频、首帧生成和视频历史",
+    keywords: ["video", "seedance", "视频", "文生视频", "图生视频", "首帧"],
+    matchPrefixes: ["/video"],
   },
   {
     key: "projects",
@@ -54,6 +62,14 @@ const DESKTOP_NAV_ITEMS: readonly AppNavItem[] = [
     detail: "本机对话、生图、图生图、修图",
     keywords: ["new", "studio", "home", "创作", "首页", "工作台", "聊天", "生图"],
     matchPrefixes: ["/"],
+  },
+  {
+    key: "video",
+    label: "视频",
+    route: "/video",
+    detail: "本机视频任务和生成历史",
+    keywords: ["video", "seedance", "视频", "文生视频", "图生视频", "首帧"],
+    matchPrefixes: ["/video"],
   },
   {
     key: "assets",

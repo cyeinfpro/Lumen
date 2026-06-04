@@ -61,6 +61,10 @@ import type {
   WalletOut,
   WalletTransactionListOut,
   WalletTransactionOut,
+  VideoCreateIn,
+  VideoGenerationOut,
+  VideoGenerationsOut,
+  VideoOptionsOut,
   RecommendedErrorAction,
 } from "./types";
 import { uuid } from "./utils";
@@ -1505,6 +1509,65 @@ export function imageVariantUrl(
   kind: "display2048" | "preview1024" | "thumb256",
 ): string {
   return `${API_BASE.replace(/\/$/, "")}/images/${imageId}/variants/${kind}`;
+}
+
+// —— 视频生成 ——
+
+export function getVideoOptions(): Promise<VideoOptionsOut> {
+  return apiFetch<VideoOptionsOut>("/videos/options");
+}
+
+export function createVideoGeneration(
+  body: Omit<VideoCreateIn, "idempotency_key"> & { idempotency_key?: string },
+): Promise<VideoGenerationOut> {
+  return apiFetch<VideoGenerationOut>("/videos/generations", {
+    method: "POST",
+    body: JSON.stringify({
+      ...body,
+      idempotency_key: body.idempotency_key ?? createIdempotencyKey(),
+    }),
+  });
+}
+
+export function listVideoGenerations(
+  opts: { status?: string | null; cursor?: string | null; limit?: number } = {},
+): Promise<VideoGenerationsOut> {
+  const qs = new URLSearchParams();
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.cursor) qs.set("cursor", opts.cursor);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetch<VideoGenerationsOut>(`/videos/generations${suffix}`);
+}
+
+export function getVideoGeneration(id: string): Promise<VideoGenerationOut> {
+  return apiFetch<VideoGenerationOut>(`/videos/generations/${encodeURIComponent(id)}`);
+}
+
+export function cancelVideoGeneration(id: string): Promise<VideoGenerationOut> {
+  return apiFetch<VideoGenerationOut>(
+    `/videos/generations/${encodeURIComponent(id)}/cancel`,
+    { method: "POST" },
+  );
+}
+
+export function retryVideoGeneration(id: string): Promise<VideoGenerationOut> {
+  return apiFetch<VideoGenerationOut>(
+    `/videos/generations/${encodeURIComponent(id)}/retry`,
+    { method: "POST" },
+  );
+}
+
+export function deleteVideo(id: string): Promise<NoContent> {
+  return apiFetchNoContent(`/videos/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function videoBinaryUrl(videoId: string): string {
+  return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/binary`;
+}
+
+export function videoPosterUrl(videoId: string): string {
+  return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/poster`;
 }
 
 // —— 任务 ——

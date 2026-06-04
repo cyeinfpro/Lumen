@@ -166,7 +166,11 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                     if payload != raw_payload:
                         row.payload = payload
                     task_id = payload.get("task_id") or payload.get("id")
-                    if not task_id or ev_kind not in {"generation", "completion"}:
+                    if not task_id or ev_kind not in {
+                        "generation",
+                        "completion",
+                        "video_generation",
+                    }:
                         logger.warning(
                             "outbox event invalid id=%s kind=%s payload=%s",
                             ev_id,
@@ -183,11 +187,11 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                         row.published_at = datetime.now(timezone.utc)
                         continue
 
-                    job_name = (
-                        "run_generation"
-                        if ev_kind == "generation"
-                        else "run_completion"
-                    )
+                    job_name = {
+                        "generation": "run_generation",
+                        "completion": "run_completion",
+                        "video_generation": "run_video_generation",
+                    }[ev_kind]
                     dedupe_key = f"{_OUTBOX_ENQUEUE_DEDUPE_PREFIX}{ev_id}"
 
                     # 多图 stagger：messages.py 给 i>=1 的 generation row 在 payload 里加 defer_s，

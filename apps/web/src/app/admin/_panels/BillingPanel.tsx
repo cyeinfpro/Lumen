@@ -97,6 +97,27 @@ function groupModelRules(items: PricingRuleOut[]) {
   return Array.from(map.values()).sort((a, b) => a.model.localeCompare(b.model));
 }
 
+function groupVideoRules(items: PricingRuleOut[]) {
+  const map = new Map<
+    string,
+    {
+      model: string;
+      t2v?: PricingRuleOut;
+      i2v?: PricingRuleOut;
+      updated_at?: string;
+    }
+  >();
+  for (const item of items) {
+    if (item.scope !== "video" || item.unit !== "per_mtoken") continue;
+    const row = map.get(item.key) ?? { model: item.key };
+    if (item.variant === "t2v") row.t2v = item;
+    if (item.variant === "i2v") row.i2v = item;
+    row.updated_at = [row.updated_at, item.updated_at].filter(Boolean).sort().at(-1);
+    map.set(item.key, row);
+  }
+  return Array.from(map.values()).sort((a, b) => a.model.localeCompare(b.model));
+}
+
 export function BillingPanel() {
   const [tab, setTab] = useState<BillingSubTab>("overview");
 
@@ -449,6 +470,11 @@ function PricingSubpanel() {
   const [lowBalanceRmbDraft, setLowBalanceRmbDraft] = useState<string | null>(null);
   const [secretConfirmed, setSecretConfirmed] = useState(false);
   const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
+  const [videoDrafts, setVideoDrafts] = useState<Record<string, string>>({});
+  const [videoNewModel, setVideoNewModel] = useState("");
+  const [videoNewT2v, setVideoNewT2v] = useState("");
+  const [videoNewI2v, setVideoNewI2v] = useState("");
+  const [videoNewNote, setVideoNewNote] = useState("需按火山最新价格复核");
   const [bulkModel, setBulkModel] = useState("");
   const [bulkChannel, setBulkChannel] = useState("");
   const [bulkRates, setBulkRates] = useState<Record<string, string>>({});
@@ -497,6 +523,10 @@ function PricingSubpanel() {
 
   const modelRows = useMemo(
     () => groupModelRules(pricingQ.data?.items ?? []),
+    [pricingQ.data?.items],
+  );
+  const videoRows = useMemo(
+    () => groupVideoRules(pricingQ.data?.items ?? []),
     [pricingQ.data?.items],
   );
 
@@ -684,6 +714,107 @@ function PricingSubpanel() {
     },
     onSuccess: async () => {
       toast.success("模型已停用");
+      await invalidateBilling();
+    },
+    onError: (err) => toast.error("停用失败", { description: err instanceof Error ? err.message : undefined }),
+  });
+
+  const saveVideoMut = useMutation({
+    mutationFn: () => {
+      const items: PricingRuleUpsertIn[] = [];
+      for (const row of videoRows) {
+        const t2vPrice = videoDrafts[`${row.model}:t2v`] ?? row.t2v?.price.rmb;
+        const i2vPrice = videoDrafts[`${row.model}:i2v`] ?? row.i2v?.price.rmb;
+        if (t2vPrice != null) {
+          items.push({
+            scope: "video",
+            key: row.model,
+            variant: "t2v",
+            unit: "per_mtoken",
+            price_rmb: t2vPrice,
+            enabled: row.t2v?.enabled ?? true,
+            note: row.t2v?.note ?? "需按火山最新价格复核",
+          });
+        }
+        if (i2vPrice != null) {
+          items.push({
+            scope: "video",
+            key: row.model,
+            variant: "i2v",
+            unit: "per_mtoken",
+            price_rmb: i2vPrice,
+            enabled: row.i2v?.enabled ?? true,
+            note: row.i2v?.note ?? "需按火山最新价格复核",
+          });
+        }
+      }
+      const model = videoNewModel.trim();
+      if (model) {
+        if (videoNewT2v.trim()) {
+          items.push({
+            scope: "video",
+            key: model,
+            variant: "t2v",
+            unit: "per_mtoken",
+            price_rmb: videoNewT2v.trim(),
+            enabled: true,
+            note: videoNewNote.trim() || "需按火山最新价格复核",
+          });
+        }
+        if (videoNewI2v.trim()) {
+          items.push({
+            scope: "video",
+            key: model,
+            variant: "i2v",
+            unit: "per_mtoken",
+            price_rmb: videoNewI2v.trim(),
+            enabled: true,
+            note: videoNewNote.trim() || "需按火山最新价格复核",
+          });
+        }
+      }
+      return updateAdminPricing(items);
+    },
+    onSuccess: async () => {
+      setVideoDrafts({});
+      setVideoNewModel("");
+      setVideoNewT2v("");
+      setVideoNewI2v("");
+      toast.success("视频定价已保存");
+      await invalidateBilling();
+    },
+    onError: (err) => toast.error("保存失败", { description: err instanceof Error ? err.message : undefined }),
+  });
+
+  const disableVideoMut = useMutation({
+    mutationFn: (row: ReturnType<typeof groupVideoRules>[number]) => {
+      const items: PricingRuleUpsertIn[] = [];
+      if (row.t2v) {
+        items.push({
+          scope: "video",
+          key: row.model,
+          variant: "t2v",
+          unit: "per_mtoken",
+          price_rmb: row.t2v.price.rmb,
+          enabled: false,
+          note: row.t2v.note,
+        });
+      }
+      if (row.i2v) {
+        items.push({
+          scope: "video",
+          key: row.model,
+          variant: "i2v",
+          unit: "per_mtoken",
+          price_rmb: row.i2v.price.rmb,
+          enabled: false,
+          note: row.i2v.note,
+        });
+      }
+      return updateAdminPricing(items);
+    },
+    onSuccess: async () => {
+      toast.success("视频模型已停用");
       await invalidateBilling();
     },
     onError: (err) => toast.error("停用失败", { description: err instanceof Error ? err.message : undefined }),
@@ -950,6 +1081,128 @@ function PricingSubpanel() {
           >
             添加档位
           </Button>
+        </div>
+      </Card>
+
+      <Card variant="subtle" padding="lg" className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="type-card-title">视频定价</p>
+            <p className="type-body-sm text-[var(--fg-2)]">
+              Seedance 按 token 结算，这里配置每百万 token 的平台售价。
+            </p>
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => saveVideoMut.mutate()}
+            loading={saveVideoMut.isPending}
+            disabled={videoRows.length === 0 && !videoNewModel.trim()}
+            leftIcon={<Save className="h-3.5 w-3.5" />}
+          >
+            保存视频定价
+          </Button>
+        </div>
+        <div className="data-stack-on-mobile md:overflow-x-auto">
+          <table className="w-full text-sm md:min-w-[820px]">
+            <thead className="text-left text-[var(--fg-2)]">
+              <tr className="border-b border-[var(--border-subtle)]">
+                <th className="px-3 py-2">模型</th>
+                <th className="px-3 py-2">T2V ¥/百万 token</th>
+                <th className="px-3 py-2">I2V ¥/百万 token</th>
+                <th className="px-3 py-2">状态</th>
+                <th className="px-3 py-2">更新于</th>
+                <th className="px-3 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {videoRows.map((row) => {
+                const enabled = Boolean(row.t2v?.enabled || row.i2v?.enabled);
+                return (
+                  <tr key={row.model} className="border-b border-[var(--border-subtle)]">
+                    <td data-label="模型" className="px-3 py-2 font-mono text-xs [overflow-wrap:anywhere]">{row.model}</td>
+                    <td data-label="T2V ¥/百万 token" className="px-3 py-2">
+                      <input
+                        value={videoDrafts[`${row.model}:t2v`] ?? row.t2v?.price.rmb ?? ""}
+                        disabled={!row.t2v}
+                        onChange={(e) =>
+                          setVideoDrafts((prev) => ({
+                            ...prev,
+                            [`${row.model}:t2v`]: e.target.value,
+                          }))
+                        }
+                        inputMode="decimal"
+                        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50 disabled:opacity-50"
+                      />
+                    </td>
+                    <td data-label="I2V ¥/百万 token" className="px-3 py-2">
+                      <input
+                        value={videoDrafts[`${row.model}:i2v`] ?? row.i2v?.price.rmb ?? ""}
+                        disabled={!row.i2v}
+                        onChange={(e) =>
+                          setVideoDrafts((prev) => ({
+                            ...prev,
+                            [`${row.model}:i2v`]: e.target.value,
+                          }))
+                        }
+                        inputMode="decimal"
+                        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50 disabled:opacity-50"
+                      />
+                    </td>
+                    <td data-label="状态" className="px-3 py-2">{enabled ? "启用" : "停用"}</td>
+                    <td data-label="更新于" className="px-3 py-2 text-[var(--fg-2)]">
+                      {row.updated_at ? new Date(row.updated_at).toLocaleString() : "-"}
+                    </td>
+                    <td data-actions="true" className="px-3 py-2 text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => disableVideoMut.mutate(row)}
+                        disabled={!enabled}
+                      >
+                        停用
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!pricingQ.isLoading && videoRows.length === 0 && (
+                <tr>
+                  <td className="px-3 py-8 text-center text-[var(--fg-2)]" colSpan={6}>
+                    暂无视频价格
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="grid gap-3 border-t border-[var(--border-subtle)] pt-4 md:grid-cols-[1fr_140px_140px_1fr]">
+          <input
+            value={videoNewModel}
+            onChange={(e) => setVideoNewModel(e.target.value)}
+            placeholder="新增模型，如 seedance-2.0"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+          />
+          <input
+            value={videoNewT2v}
+            onChange={(e) => setVideoNewT2v(e.target.value)}
+            placeholder="T2V 单价"
+            inputMode="decimal"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+          />
+          <input
+            value={videoNewI2v}
+            onChange={(e) => setVideoNewI2v(e.target.value)}
+            placeholder="I2V 单价"
+            inputMode="decimal"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+          />
+          <input
+            value={videoNewNote}
+            onChange={(e) => setVideoNewNote(e.target.value)}
+            placeholder="备注"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+          />
         </div>
       </Card>
 

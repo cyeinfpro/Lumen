@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .providers import normalize_provider_purposes, parse_provider_bool
+from .video_providers import validate_video_providers
 
 
 @dataclass(frozen=True)
@@ -400,6 +401,30 @@ SUPPORTED_SETTINGS: list[SettingSpec] = [
         min_value=0,
         max_value=1,
         allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="video.enabled",
+        description="视频生成总开关。0=关闭，1=开启。默认关闭，避免未配置 provider/价格时误提交昂贵任务。",
+        sensitive=False,
+        parser=int,
+        env_fallback="VIDEO_ENABLED",
+        min_value=0,
+        max_value=1,
+        allowed_values=("0", "1"),
+    ),
+    SettingSpec(
+        key="video.providers",
+        description="视频 provider pool（JSON）；第一期用于火山 Seedance 2 异步任务 API。",
+        sensitive=True,
+        parser=str,
+        env_fallback="VIDEO_PROVIDERS",
+    ),
+    SettingSpec(
+        key="video.token_hold_estimates",
+        description="视频 token 预扣上界表 JSON。缺项时 API 会拒绝创建任务，避免低估成本。",
+        sensitive=False,
+        parser=str,
+        env_fallback="VIDEO_TOKEN_HOLD_ESTIMATES",
     ),
     SettingSpec(
         key="billing.fingerprint_required",
@@ -1055,6 +1080,50 @@ def validate_image_size_thresholds(raw: str) -> str:
     return value
 
 
+def validate_video_token_hold_estimates(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        raise ValueError("video.token_hold_estimates must not be empty")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"video.token_hold_estimates is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError("video.token_hold_estimates must be a non-empty JSON object")
+    for model, model_value in parsed.items():
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("video.token_hold_estimates model keys must be strings")
+        if not isinstance(model_value, dict) or not model_value:
+            raise ValueError(
+                f"video.token_hold_estimates[{model!r}] must be a non-empty object"
+            )
+        for action, action_value in model_value.items():
+            if action not in {"t2v", "i2v"}:
+                raise ValueError(
+                    f"video.token_hold_estimates[{model!r}] action must be t2v or i2v"
+                )
+            if not isinstance(action_value, dict) or not action_value:
+                raise ValueError(
+                    f"video.token_hold_estimates[{model!r}][{action!r}] must be a non-empty object"
+                )
+            for key, estimate in action_value.items():
+                if not isinstance(key, str) or ":" not in key:
+                    raise ValueError(
+                        f"video.token_hold_estimates[{model!r}][{action!r}] keys must look like resolution:duration"
+                    )
+                if (
+                    not isinstance(estimate, int)
+                    or isinstance(estimate, bool)
+                    or estimate <= 0
+                ):
+                    raise ValueError(
+                        f"video.token_hold_estimates[{model!r}][{action!r}][{key!r}] must be a positive integer"
+                    )
+    return value
+
+
 def validate_redemption_code_secret(raw: str) -> str:
     value = raw.strip()
     if len(value) < 16:
@@ -1088,6 +1157,10 @@ def parse_value(spec: SettingSpec, raw: str) -> object:
     """
     if spec.key == "providers":
         return validate_providers(raw)
+    if spec.key == "video.providers":
+        return validate_video_providers(raw)
+    if spec.key == "video.token_hold_estimates":
+        return validate_video_token_hold_estimates(raw)
     if spec.key == "site.public_base_url":
         return validate_public_base_url(raw)
     if spec.key == "image.job_base_url":
@@ -1135,4 +1208,6 @@ __all__ = [
     "validate_providers",
     "validate_public_base_url",
     "validate_redemption_code_secret",
+    "validate_video_token_hold_estimates",
+    "validate_video_providers",
 ]

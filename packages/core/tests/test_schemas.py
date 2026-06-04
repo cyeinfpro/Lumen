@@ -170,3 +170,48 @@ def test_showcase_images_defaults_to_gpt55_preflight_scene_planner():
         "natural_pose",
         "detail_half_body",
     ]
+
+
+def test_video_create_schema_enforces_action_image_contract():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoCreateIn
+
+    VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0",
+        prompt="make a clip",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-t2v",
+    )
+    VideoCreateIn(
+        action="i2v",
+        model="seedance-2.0",
+        prompt="animate this",
+        input_image_id="img-1",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-i2v",
+    )
+
+    for kwargs in (
+        {"action": "t2v", "input_image_id": "img-1"},
+        {"action": "i2v", "input_image_id": None},
+    ):
+        try:
+            VideoCreateIn(
+                model="seedance-2.0",
+                prompt="make a clip",
+                duration_s=5,
+                resolution="720p",
+                aspect_ratio="16:9",
+                idempotency_key="idem-bad",
+                **kwargs,
+            )
+        except ValidationError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"expected validation error for {kwargs}")

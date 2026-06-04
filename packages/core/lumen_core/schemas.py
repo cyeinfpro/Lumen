@@ -222,7 +222,9 @@ class PostMessageIn(BaseModel):
     # Future-facing metadata used by UI actions, projects, Telegram deep links,
     # and worker diagnostics. All fields are optional so legacy clients keep
     # working with only text + attachment_image_ids.
-    input_images: list[str] = Field(default_factory=list, max_length=MAX_MESSAGE_ATTACHMENTS)
+    input_images: list[str] = Field(
+        default_factory=list, max_length=MAX_MESSAGE_ATTACHMENTS
+    )
     source: str | None = Field(default=None, max_length=48)
     action_source: str | None = Field(default=None, max_length=80)
     trace_id: str | None = Field(default=None, max_length=96)
@@ -249,7 +251,9 @@ class PostMessageIn(BaseModel):
             return left == right
 
         if structured_ids and legacy_ids and not same_ids(structured_ids, legacy_ids):
-            raise ValueError("attachments image_id values must match attachment_image_ids")
+            raise ValueError(
+                "attachments image_id values must match attachment_image_ids"
+            )
         if input_ids and legacy_ids and not same_ids(input_ids, legacy_ids):
             raise ValueError("input_images must match attachment_image_ids")
         if input_ids and structured_ids and not same_ids(input_ids, structured_ids):
@@ -443,6 +447,108 @@ class ImageOut(BaseOut):
     billing_free: bool = False
     billing_label: str | None = None
     billing_exempt_reason: str | None = None
+
+
+class VideoOut(BaseOut):
+    id: str
+    url: str
+    poster_url: str | None = None
+    width: int
+    height: int
+    duration_ms: int
+    fps: float | None = None
+    has_audio: bool
+    mime: str = "video/mp4"
+    size_bytes: int | None = None
+    faststart: bool | None = None
+    created_at: datetime | None = None
+
+
+class VideoCreateIn(BaseModel):
+    action: Literal["t2v", "i2v"]
+    model: str = Field(min_length=1, max_length=64)
+    prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
+    input_image_id: str | None = Field(default=None, max_length=36)
+    duration_s: int = Field(gt=0, le=60)
+    resolution: Literal["720p", "1080p"]
+    aspect_ratio: str = Field(min_length=1, max_length=16)
+    fps: int | None = Field(default=None, ge=1, le=120)
+    generate_audio: bool = False
+    seed: int | None = Field(default=None, ge=0)
+    watermark: bool = False
+    idempotency_key: str = Field(min_length=1, max_length=96)
+
+    @model_validator(mode="after")
+    def validate_action_image_contract(self) -> "VideoCreateIn":
+        if self.action == "t2v" and self.input_image_id:
+            raise ValueError("t2v must not include input_image_id")
+        if self.action == "i2v" and not self.input_image_id:
+            raise ValueError("i2v requires input_image_id")
+        return self
+
+
+class VideoPriceOptionOut(BaseModel):
+    model: str
+    action: Literal["t2v", "i2v"]
+    unit: Literal["per_mtoken"] = "per_mtoken"
+    price: MoneyOut
+    enabled: bool = True
+    note: str | None = None
+
+
+class VideoModelOptionOut(BaseModel):
+    model: str
+    actions: list[Literal["t2v", "i2v"]] = Field(default_factory=list)
+
+
+class VideoOptionsOut(BaseModel):
+    enabled: bool
+    models: list[VideoModelOptionOut] = Field(default_factory=list)
+    durations_s: list[int] = Field(default_factory=list)
+    resolutions: list[str] = Field(default_factory=list)
+    aspect_ratios: list[str] = Field(default_factory=list)
+    fps: list[int] = Field(default_factory=list)
+    generate_audio: bool = False
+    pricing: list[VideoPriceOptionOut] = Field(default_factory=list)
+    hold_estimates: dict[str, Any] = Field(default_factory=dict)
+    unavailable_reason: str | None = None
+
+
+class VideoGenerationOut(BaseOut):
+    id: str
+    action: str
+    model: str
+    prompt: str
+    input_image_id: str | None = None
+    duration_s: int
+    resolution: str
+    aspect_ratio: str
+    fps: int | None = None
+    generate_audio: bool = False
+    seed: int | None = None
+    status: str
+    progress_stage: str
+    progress_pct: int
+    provider_name: str | None = None
+    provider_kind: str | None = None
+    est_token_upper: int
+    est_cost: MoneyOut
+    billed_tokens: int | None = None
+    billed_cost: MoneyOut | None = None
+    video: VideoOut | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    submitted_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class VideoGenerationsOut(BaseModel):
+    items: list[VideoGenerationOut]
+    next_cursor: str | None = None
 
 
 # ---------- Workflows ----------
@@ -1111,12 +1217,13 @@ PricingUnit = Literal[
     "long_context_threshold",
     "long_context_input_multiplier",
     "long_context_output_multiplier",
+    "per_mtoken",
 ]
 
 
 class PricingRuleOut(BaseOut):
     id: str
-    scope: Literal["image_size", "chat_model"]
+    scope: Literal["image_size", "chat_model", "video"]
     key: str
     variant: str = "default"
     unit: PricingUnit
@@ -1135,7 +1242,7 @@ class PricingRulesOut(BaseModel):
 
 
 class PricingRuleUpsertIn(BaseModel):
-    scope: Literal["image_size", "chat_model"]
+    scope: Literal["image_size", "chat_model", "video"]
     key: str = Field(min_length=1, max_length=64)
     variant: str = Field(default="default", min_length=1, max_length=32)
     unit: PricingUnit
@@ -2038,6 +2145,13 @@ __all__ = [
     "TaskItemOut",
     "ActiveTasksOut",
     "ImageOut",
+    "VideoOut",
+    "VideoCreateIn",
+    "VideoPriceOptionOut",
+    "VideoModelOptionOut",
+    "VideoOptionsOut",
+    "VideoGenerationOut",
+    "VideoGenerationsOut",
     "TaskQueueItem",
     "SSEEvent",
     "ErrorBody",

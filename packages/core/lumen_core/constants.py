@@ -78,6 +78,45 @@ class GenerationStage(StrEnum):
     STORING = "storing"
 
 
+class VideoGenerationStatus(StrEnum):
+    QUEUED = "queued"
+    SUBMITTING = "submitting"
+    SUBMITTED = "submitted"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
+
+
+class VideoGenerationStage(StrEnum):
+    QUEUED = "queued"
+    SUBMITTING = "submitting"
+    RENDERING = "rendering"
+    FETCHING = "fetching"
+    STORING = "storing"
+    BILLING = "billing"
+    FINISHED = "finished"
+
+
+class VideoGenerationErrorCode(StrEnum):
+    INVALID_INPUT = "invalid_input"
+    CONTENT_POLICY = "content_policy"
+    CAPACITY = "capacity"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PROVIDER_ERROR = "provider_error"
+    UPSTREAM_AUTH_ERROR = "upstream_auth_error"
+    UPSTREAM_TIMEOUT = "upstream_timeout"
+    UPSTREAM_NETWORK_ERROR = "upstream_network_error"
+    UPSTREAM_UNKNOWN = "upstream_unknown"
+    FETCH_FAILED = "fetch_failed"
+    STORAGE_FAILED = "storage_failed"
+    BILLING_FAILED = "billing_failed"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
+    TIMEOUT = "timeout"
+
+
 # 粗 → 细的归并。前端不识别细阶段时降级到对应粗值。
 GENERATION_STAGE_FALLBACK: dict[str, str] = {
     "provider_selected": "rendering",
@@ -269,6 +308,13 @@ EV_MSG_INTENT_RESOLVED = "message.intent_resolved"
 EV_CONV_MSG_APPENDED = "conv.message.appended"
 EV_CONV_RENAMED = "conv.renamed"
 EV_USER_NOTICE = "user.notice"
+EV_VIDEO_QUEUED = "video.queued"
+EV_VIDEO_SUBMITTED = "video.submitted"
+EV_VIDEO_PROGRESS = "video.progress"
+EV_VIDEO_FETCHING = "video.fetching"
+EV_VIDEO_SUCCEEDED = "video.succeeded"
+EV_VIDEO_FAILED = "video.failed"
+EV_VIDEO_CANCELED = "video.canceled"
 
 
 # --- upstream 硬约束（DESIGN §7 + upstream guide） ---
