@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app import account_limiter, sse_publish, upstream
 from app.provider_pool import ProviderConfig, ProviderPool
-from app.tasks import completion, generation, memory_extraction
+from app.tasks import completion, generation, memory_extraction, video_generation
 
 
 def test_completion_charge_uses_same_session_before_success_commit() -> None:
@@ -216,6 +217,294 @@ def test_provider_pool_weighted_round_robin_honors_weights() -> None:
 
     assert first_choices.count("heavy") == 6
     assert first_choices.count("light") == 2
+
+
+def test_video_generation_releases_provider_slot_on_terminal_paths() -> None:
+    success_source = inspect.getsource(  # noqa: SLF001
+        video_generation._finish_success
+    )
+    failure_source = inspect.getsource(  # noqa: SLF001
+        video_generation._finish_terminal_failure
+    )
+    submit_failure_source = inspect.getsource(  # noqa: SLF001
+        video_generation._fail_before_submit
+    )
+    run_source = inspect.getsource(video_generation.run_video_generation)
+
+    release_snippet = (
+        "_release_provider_slot(redis, release_provider_name, generation.id)"
+    )
+    assert release_snippet in (success_source + failure_source)
+    assert "_release_provider_slot(redis, release_provider_name, task_id)" in (
+        submit_failure_source
+    )
+    assert "slot_provider_name = provider.name" in run_source
+    assert "provider_name=slot_provider_name" in run_source
+
+
+@pytest.mark.asyncio
+async def test_video_generation_fail_before_submit_releases_acquired_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+
+        def scalar_one_or_none(self) -> Any:
+            return self.row
+
+    class Session:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+            self.commits = 0
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.row)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class SessionCtx:
+        def __init__(self, row: Any) -> None:
+            self.session = Session(row)
+
+        async def __aenter__(self) -> Session:
+            return self.session
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    row = SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        status="queued",
+        provider_name="volcano-main",
+        progress_stage="queued",
+        progress_pct=0,
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+    )
+    released: list[tuple[str, str]] = []
+
+    async def fake_resolve(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_publish(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_release(
+        _redis: Any, provider_name: str, task_id: str
+    ) -> None:
+        released.append((provider_name, task_id))
+
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: SessionCtx(row))
+    monkeypatch.setattr(video_generation, "resolve_video_billing", fake_resolve)
+    monkeypatch.setattr(video_generation, "_publish", fake_publish)
+    monkeypatch.setattr(video_generation, "_release_provider_slot", fake_release)
+
+    await video_generation._fail_before_submit(  # noqa: SLF001
+        object(),
+        "video-1",
+        RuntimeError("boom"),
+    )
+
+    assert released == [("volcano-main", "video-1")]
+
+
+@pytest.mark.asyncio
+async def test_run_video_generation_releases_lease_on_terminal_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+
+        def scalar_one_or_none(self) -> Any:
+            return self.row
+
+    class Session:
+        async def execute(self, _statement: Any) -> Result:
+            return Result(row)
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    redis = object()
+    row = SimpleNamespace(id="video-1", status="succeeded")
+    released: list[tuple[str, str]] = []
+
+    async def fake_acquire(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fake_release(
+        _redis: Any, task_id: str, token: str
+    ) -> None:
+        released.append((task_id, token))
+
+    monkeypatch.setattr(video_generation, "_acquire_lease", fake_acquire)
+    monkeypatch.setattr(video_generation, "_release_lease", fake_release)
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: Session())
+
+    await video_generation.run_video_generation({"redis": redis}, "video-1")
+
+    assert released and released[0][0] == "video-1"
+
+
+@pytest.mark.asyncio
+async def test_run_video_poll_releases_lease_when_submit_is_requeued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+
+        def scalar_one_or_none(self) -> Any:
+            return self.row
+
+    class Session:
+        async def execute(self, _statement: Any) -> Result:
+            return Result(row)
+
+        async def commit(self) -> None:
+            return None
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    redis = object()
+    row = SimpleNamespace(id="video-1", status="queued", provider_task_id=None)
+    enqueued: list[tuple[str, dict[str, Any]]] = []
+    released: list[tuple[str, str]] = []
+
+    async def fake_acquire(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fake_enqueue(_redis: Any, task_id: str, **kwargs: Any) -> None:
+        enqueued.append((task_id, kwargs))
+
+    async def fake_release(
+        _redis: Any, task_id: str, token: str
+    ) -> None:
+        released.append((task_id, token))
+
+    monkeypatch.setattr(video_generation, "_acquire_lease", fake_acquire)
+    monkeypatch.setattr(video_generation, "_enqueue_submit", fake_enqueue)
+    monkeypatch.setattr(video_generation, "_release_lease", fake_release)
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: Session())
+
+    await video_generation.run_video_poll({"redis": redis}, "video-1")
+
+    assert enqueued and enqueued[0][0] == "video-1"
+    assert enqueued[0][1]["defer_s"] == video_generation._POLL_INTERVAL_S  # noqa: SLF001
+    assert released and released[0][0] == "video-1"
+
+
+@pytest.mark.asyncio
+async def test_run_video_generation_uses_cached_submit_result_without_resubmitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+
+        def scalar_one_or_none(self) -> Any:
+            return self.row
+
+    class Session:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+            self.commits = 0
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.row)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    redis = object()
+    row = SimpleNamespace(
+        id="video-1",
+        user_id="user-1",
+        status="queued",
+        provider_task_id=None,
+        provider_name="volcano-main",
+        provider_kind="volcano",
+        cancel_requested_at=None,
+        progress_stage="queued",
+        progress_pct=0,
+        model="seedance",
+        action="t2v",
+        prompt="hello",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        fps=None,
+        generate_audio=False,
+        seed=None,
+        watermark=False,
+        started_at=None,
+        attempt=0,
+        upstream_response=None,
+        submitted_at=None,
+        next_poll_at=None,
+    )
+    released: list[tuple[str, str]] = []
+    enqueued: list[str] = []
+
+    async def fake_acquire(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fake_release(
+        _redis: Any, task_id: str, token: str
+    ) -> None:
+        released.append((task_id, token))
+
+    async def fake_load_submit_result(_redis: Any, task_id: str) -> Any:
+        assert task_id == "video-1"
+        return SimpleNamespace(
+            provider_task_id="upstream-1",
+            raw={"id": "upstream-1"},
+        )
+
+    async def fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("unexpected upstream submit path")
+
+    async def fake_enqueue(_redis: Any, task_id: str, **_kwargs: Any) -> None:
+        enqueued.append(task_id)
+
+    async def fake_publish(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(video_generation, "_acquire_lease", fake_acquire)
+    monkeypatch.setattr(video_generation, "_release_lease", fake_release)
+    monkeypatch.setattr(video_generation, "_load_submit_result", fake_load_submit_result)
+    monkeypatch.setattr(video_generation, "_provider_for_generation", fail_if_called)
+    monkeypatch.setattr(video_generation, "_acquire_provider_slot", fail_if_called)
+    monkeypatch.setattr(video_generation, "_store_submit_result", fail_if_called)
+    monkeypatch.setattr(video_generation, "_enqueue_poll", fake_enqueue)
+    monkeypatch.setattr(video_generation, "_publish", fake_publish)
+    monkeypatch.setattr(video_generation, "adapter_for_provider", fail_if_called)
+    monkeypatch.setattr(video_generation, "SessionLocal", lambda: Session(row))
+
+    await video_generation.run_video_generation({"redis": redis}, "video-1")
+
+    assert row.provider_task_id == "upstream-1"
+    assert row.status == "submitted"
+    assert enqueued == ["video-1"]
+    assert released and released[0][0] == "video-1"
 
 
 @pytest.mark.asyncio

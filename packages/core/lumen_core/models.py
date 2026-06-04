@@ -1026,6 +1026,117 @@ class Completion(Base, TimestampMixin):
         return value if isinstance(value, int) else None
 
 
+class VideoGeneration(Base, TimestampMixin):
+    __tablename__ = "video_generations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_video_gen_user_idemp"),
+        Index("ix_video_gen_user_status_created", "user_id", "status", "created_at"),
+        Index("ix_video_gen_status_next_poll", "status", "next_poll_at"),
+        Index(
+            "uq_video_gen_provider_task",
+            "provider_kind",
+            "provider_name",
+            "provider_task_id",
+            unique=True,
+            postgresql_where=text("provider_task_id IS NOT NULL"),
+            sqlite_where=text("provider_task_id IS NOT NULL"),
+        ),
+        CheckConstraint("duration_s > 0", name="ck_video_gen_duration_positive"),
+        CheckConstraint(
+            "progress_pct >= 0 AND progress_pct <= 100",
+            name="ck_video_gen_progress_pct",
+        ),
+        CheckConstraint(
+            "est_cost_micro >= 0",
+            name="ck_video_gen_est_cost_nonnegative",
+        ),
+        CheckConstraint(
+            "est_token_upper >= 0",
+            name="ck_video_gen_est_tokens_nonnegative",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provider_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    input_image_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    input_image_storage_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_image_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    duration_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolution: Mapped[str] = mapped_column(String(16), nullable=False)
+    aspect_ratio: Mapped[str] = mapped_column(String(16), nullable=False)
+    fps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    generate_audio: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    watermark: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+    upstream_request: Mapped[dict[str, Any] | None] = mapped_column(
+        JsonType(), nullable=True
+    )
+    upstream_response: Mapped[dict[str, Any] | None] = mapped_column(
+        JsonType(), nullable=True
+    )
+    diagnostics: Mapped[dict[str, Any]] = mapped_column(
+        JsonType(), nullable=False, default=dict, server_default="{}"
+    )
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    progress_stage: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="queued"
+    )
+    progress_pct: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    poll_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    deadline_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    next_poll_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    est_token_upper: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    est_cost_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    billed_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    billed_cost_micro: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 # ---------- Images ----------
 
 
@@ -1062,6 +1173,55 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
     nsfw_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     visibility: Mapped[str] = mapped_column(
         String(16), nullable=False, default="private"
+    )
+    metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
+        JsonType(), nullable=False, default=dict, server_default="{}"
+    )
+
+
+class Video(Base, TimestampMixin, SoftDeleteMixin):
+    __tablename__ = "videos"
+    __table_args__ = (
+        UniqueConstraint("storage_key", name="uq_videos_storage_key"),
+        UniqueConstraint("poster_storage_key", name="uq_videos_poster_storage_key"),
+        Index("ix_videos_user_alive_created", "user_id", "deleted_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_generation_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("video_generations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    poster_storage_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="video/mp4", server_default="video/mp4"
+    )
+    width: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    height: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    duration_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    fps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    etag: Mapped[str] = mapped_column(String(96), nullable=False)
+    has_audio: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    faststart: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    visibility: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="private", server_default="private"
     )
     metadata_jsonb: Mapped[dict[str, Any]] = mapped_column(
         JsonType(), nullable=False, default=dict, server_default="{}"

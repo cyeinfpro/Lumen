@@ -1,7 +1,14 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Camera, FolderKanban, Images, User, type LucideIcon } from "lucide-react";
+import {
+  Camera,
+  Clapperboard,
+  FolderKanban,
+  Images,
+  User,
+  type LucideIcon,
+} from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo } from "react";
 import { useHaptic } from "@/hooks/useHaptic";
@@ -21,6 +28,7 @@ type TabDef = AppNavItem & { Icon: LucideIcon };
 
 const TAB_ICONS: Record<AppNavKey, LucideIcon> = {
   studio: Camera,
+  video: Clapperboard,
   projects: FolderKanban,
   assets: Images,
   me: User,

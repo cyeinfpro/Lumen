@@ -957,7 +957,7 @@ export interface AdminBillingUsageOut {
 
 export interface PricingRuleOut {
   id: string;
-  scope: "image_size" | "chat_model";
+  scope: "image_size" | "chat_model" | "video";
   key: string;
   variant: string;
   unit:
@@ -975,7 +975,8 @@ export interface PricingRuleOut {
     | "per_1k_tokens_cache_read_priority"
     | "long_context_threshold"
     | "long_context_input_multiplier"
-    | "long_context_output_multiplier";
+    | "long_context_output_multiplier"
+    | "per_mtoken";
   price: MoneyOut;
   enabled: boolean;
   note: string | null;
@@ -990,8 +991,121 @@ export interface PricingRulesOut {
   show_estimate_in_composer?: boolean | null;
 }
 
+export type VideoAction = "t2v" | "i2v";
+export type VideoStatus =
+  | "queued"
+  | "submitting"
+  | "submitted"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "canceled"
+  | "expired";
+export type VideoStage =
+  | "queued"
+  | "submitting"
+  | "rendering"
+  | "fetching"
+  | "storing"
+  | "billing"
+  | "finished";
+
+export interface VideoOut {
+  id: string;
+  url: string;
+  poster_url?: string | null;
+  width: number;
+  height: number;
+  duration_ms: number;
+  fps?: number | null;
+  has_audio: boolean;
+  mime: string;
+  size_bytes?: number | null;
+  faststart?: boolean | null;
+  created_at?: string | null;
+}
+
+export interface VideoCreateIn {
+  action: VideoAction;
+  model: string;
+  prompt: string;
+  input_image_id?: string | null;
+  duration_s: number;
+  resolution: "720p" | "1080p";
+  aspect_ratio: string;
+  fps?: number | null;
+  generate_audio?: boolean;
+  seed?: number | null;
+  watermark?: boolean;
+  idempotency_key: string;
+}
+
+export interface VideoPriceOptionOut {
+  model: string;
+  action: VideoAction;
+  unit: "per_mtoken";
+  price: MoneyOut;
+  enabled: boolean;
+  note?: string | null;
+}
+
+export interface VideoModelOptionOut {
+  model: string;
+  actions: VideoAction[];
+}
+
+export interface VideoOptionsOut {
+  enabled: boolean;
+  models: VideoModelOptionOut[];
+  durations_s: number[];
+  resolutions: string[];
+  aspect_ratios: string[];
+  fps: number[];
+  generate_audio: boolean;
+  pricing: VideoPriceOptionOut[];
+  hold_estimates: Record<string, unknown>;
+  unavailable_reason?: string | null;
+}
+
+export interface VideoGenerationOut {
+  id: string;
+  action: VideoAction;
+  model: string;
+  prompt: string;
+  input_image_id?: string | null;
+  duration_s: number;
+  resolution: string;
+  aspect_ratio: string;
+  fps?: number | null;
+  generate_audio: boolean;
+  seed?: number | null;
+  status: VideoStatus;
+  progress_stage: VideoStage;
+  progress_pct: number;
+  provider_name?: string | null;
+  provider_kind?: string | null;
+  est_token_upper: number;
+  est_cost: MoneyOut;
+  billed_tokens?: number | null;
+  billed_cost?: MoneyOut | null;
+  video?: VideoOut | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  diagnostics?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  submitted_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface VideoGenerationsOut {
+  items: VideoGenerationOut[];
+  next_cursor?: string | null;
+}
+
 export interface PricingRuleUpsertIn {
-  scope: "image_size" | "chat_model";
+  scope: "image_size" | "chat_model" | "video";
   key: string;
   variant?: string;
   unit:
@@ -1009,7 +1123,8 @@ export interface PricingRuleUpsertIn {
     | "per_1k_tokens_cache_read_priority"
     | "long_context_threshold"
     | "long_context_input_multiplier"
-    | "long_context_output_multiplier";
+    | "long_context_output_multiplier"
+    | "per_mtoken";
   price_rmb: string;
   enabled?: boolean;
   note?: string | null;

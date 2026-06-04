@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+import json
+
+from lumen_core.video_providers import (
+    parse_video_provider_config_json,
+    parse_video_provider_item,
+    select_video_provider,
+)
+
+
+def _provider_raw(**overrides):
+    raw = {
+        "name": "volcano-main",
+        "kind": "volcano",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3/",
+        "api_key": "ark-key",
+        "enabled": True,
+        "priority": 10,
+        "weight": 2,
+        "concurrency": 3,
+        "models": {
+            "seedance-2.0:t2v": "doubao-seedance-2-0",
+            "seedance-2.0:i2v": "doubao-seedance-2-0-i2v",
+        },
+    }
+    raw.update(overrides)
+    return raw
+
+
+def test_parse_video_provider_item_normalizes_and_maps_actions() -> None:
+    provider = parse_video_provider_item(_provider_raw(), index=0)
+
+    assert provider.name == "volcano-main"
+    assert provider.base_url == "https://ark.cn-beijing.volces.com/api/v3"
+    assert provider.priority == 10
+    assert provider.weight == 2
+    assert provider.concurrency == 3
+    assert provider.supports("seedance-2.0", "t2v")
+    assert provider.supports("seedance-2.0", "i2v")
+    assert provider.upstream_model_for("seedance-2.0", "t2v") == "doubao-seedance-2-0"
+    assert (
+        provider.upstream_model_for("seedance-2.0", "i2v") == "doubao-seedance-2-0-i2v"
+    )
+
+
+def test_video_provider_config_can_reference_shared_proxy() -> None:
+    shared = json.dumps(
+        {
+            "proxies": [
+                {
+                    "name": "sg-socks",
+                    "type": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 1080,
+                }
+            ],
+            "providers": [
+                {
+                    "name": "chat",
+                    "base_url": "https://chat.example.com",
+                    "api_key": "sk-test",
+                }
+            ],
+        }
+    )
+    raw = json.dumps({"providers": [_provider_raw(proxy="sg-socks")]})
+
+    providers, proxies, errors = parse_video_provider_config_json(
+        raw,
+        shared_provider_raw=shared,
+    )
+
+    assert errors == []
+    assert [proxy.name for proxy in proxies] == ["sg-socks"]
+    assert providers[0].proxy_name == "sg-socks"
+    assert providers[0].proxy is proxies[0]
+
+
+def test_select_video_provider_skips_disabled_and_unsupported_entries() -> None:
+    raw = json.dumps(
+        {
+            "providers": [
+                _provider_raw(name="disabled", enabled=False),
+                _provider_raw(
+                    name="i2v-only",
+                    models={"seedance-2.0:i2v": "doubao-i2v"},
+                ),
+            ]
+        }
+    )
+    providers, _proxies, errors = parse_video_provider_config_json(raw)
+
+    assert errors == []
+    assert select_video_provider(providers, model="seedance-2.0", action="t2v") is None
+    selected = select_video_provider(providers, model="seedance-2.0", action="i2v")
+    assert selected is not None
+    assert selected.name == "i2v-only"
+
+
+def test_video_provider_config_reports_missing_required_fields() -> None:
+    raw = json.dumps(
+        {
+            "providers": [
+                _provider_raw(name="missing-key", api_key=""),
+                _provider_raw(name="missing-models", models={}),
+            ]
+        }
+    )
+
+    providers, _proxies, errors = parse_video_provider_config_json(raw)
+
+    assert providers == []
+    assert any("api_key is required" in error for error in errors)
+    assert any("models must be a non-empty object" in error for error in errors)

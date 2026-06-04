@@ -31,6 +31,7 @@ from .tasks import context_summary as context_summary_tasks
 from .tasks import generation as generation_tasks
 from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
+from .tasks import video_generation as video_generation_tasks
 from .upstream import close_client
 
 _startup_logger = logging.getLogger(__name__)
@@ -88,6 +89,8 @@ class WorkerSettings:
     # 注册任务（Agent C 填充）
     functions = [
         generation_tasks.run_generation,
+        video_generation_tasks.run_video_generation,
+        video_generation_tasks.run_video_poll,
         completion_tasks.run_completion,
         outbox_tasks.publish_outbox,
         auto_title_tasks.auto_title_conversation,
@@ -98,38 +101,42 @@ class WorkerSettings:
 
     # 定时任务：每 2s publisher、每 60s reconciler、每 30s 统计刷入+条件探活、
     # 每 5 分钟巡检默认标题（auto_title 兜底）、每小时第 5 分钟做一次上游 schema 探针
-    cron_jobs = outbox_tasks.cron_jobs + [
-        # run_at_startup=False：probe 内部对 provider 没强制 timeout，某个 provider TCP
-        # 长时间无响应时会把启动钩子卡死，导致整个 worker event loop 静默——cron 心跳停、
-        # job 队列不消费。让首轮 probe 等到第一次 30s tick，至少 worker 已经在跑。
-        cron(probe_providers, second={0, 30}, run_at_startup=False),
-        cron(
-            auto_title_tasks.reconcile_default_titles,
-            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
-            run_at_startup=False,
-        ),
-        # 上游健康/schema 探针：每小时第 5 分钟一次，避开整点 reconcile_default_titles。
-        # 故意不在启动时跑——避免 dev / CI 启动顺手烧 token。
-        cron(
-            probe_upstream,
-            hour={i for i in range(24)},
-            minute={5},
-            run_at_startup=False,
-        ),
-        cron(
-            memory_tasks.cleanup_memory,
-            hour={3},
-            minute={17},
-            run_at_startup=False,
-        ),
-        # last_used_at 批量 flush: 每分钟 0/30 秒各一次, 把 redis ZSET 累积的
-        # 最近注入时间戳写回 user_memories, 避免主对话热路径每轮 N 次 UPDATE.
-        cron(
-            memory_tasks.flush_memory_last_used,
-            second={0, 30},
-            run_at_startup=False,
-        ),
-    ]
+    cron_jobs = (
+        outbox_tasks.cron_jobs
+        + video_generation_tasks.cron_jobs
+        + [
+            # run_at_startup=False：probe 内部对 provider 没强制 timeout，某个 provider TCP
+            # 长时间无响应时会把启动钩子卡死，导致整个 worker event loop 静默——cron 心跳停、
+            # job 队列不消费。让首轮 probe 等到第一次 30s tick，至少 worker 已经在跑。
+            cron(probe_providers, second={0, 30}, run_at_startup=False),
+            cron(
+                auto_title_tasks.reconcile_default_titles,
+                minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+                run_at_startup=False,
+            ),
+            # 上游健康/schema 探针：每小时第 5 分钟一次，避开整点 reconcile_default_titles。
+            # 故意不在启动时跑——避免 dev / CI 启动顺手烧 token。
+            cron(
+                probe_upstream,
+                hour={i for i in range(24)},
+                minute={5},
+                run_at_startup=False,
+            ),
+            cron(
+                memory_tasks.cleanup_memory,
+                hour={3},
+                minute={17},
+                run_at_startup=False,
+            ),
+            # last_used_at 批量 flush: 每分钟 0/30 秒各一次, 把 redis ZSET 累积的
+            # 最近注入时间戳写回 user_memories, 避免主对话热路径每轮 N 次 UPDATE.
+            cron(
+                memory_tasks.flush_memory_last_used,
+                second={0, 30},
+                run_at_startup=False,
+            ),
+        ]
+    )
 
     # Keep the arq process wide enough for the runtime image FIFO cap plus
     # cron/outbox jobs. The image queue still owns admission, so this only

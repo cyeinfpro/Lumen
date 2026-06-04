@@ -221,16 +221,18 @@ async def test_publish_outbox_processes_batch_in_one_pass(monkeypatch):
     events = [
         _event(event_id="event-1", task_id="gen-1", kind="generation"),
         _event(event_id="event-2", task_id="comp-1", kind="completion"),
+        _event(event_id="event-3", task_id="video-1", kind="video_generation"),
     ]
     _patch_session_local(monkeypatch, events)
     redis = FakeRedis()
 
     processed = await outbox.publish_outbox({"redis": redis})
 
-    assert processed == 2
+    assert processed == 3
     assert redis.enqueued == [
         ("run_generation", "gen-1"),
         ("run_completion", "comp-1"),
+        ("run_video_generation", "video-1"),
     ]
     assert all(ev.published_at is not None for ev in events)
 

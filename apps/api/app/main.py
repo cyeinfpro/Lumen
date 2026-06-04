@@ -544,7 +544,7 @@ async def readyz(
 
 
 # 路由挂载
-from .routes import conversations, events, images, messages, tasks  # noqa: E402
+from .routes import conversations, events, images, messages, tasks, videos  # noqa: E402
 from .routes import generations as generations_router  # noqa: E402
 from .routes import prompts as prompts_router  # noqa: E402
 from .routes import regenerate as regenerate_router  # noqa: E402
@@ -568,6 +568,7 @@ def _include_core_routers(target: FastAPI) -> None:
     )
     target.include_router(tasks.router, tags=["tasks"])
     target.include_router(images.router, prefix="/images", tags=["images"])
+    target.include_router(videos.router, prefix="/videos", tags=["videos"])
     target.include_router(events.router, tags=["events"])
     target.include_router(shares_router.router_authed)
     target.include_router(shares_router.router_public)
