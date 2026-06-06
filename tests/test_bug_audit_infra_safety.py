@@ -237,7 +237,7 @@ def test_desktop_sidecars_allow_packaged_tiktoken_to_warm_before_estimate_mode()
     text = DESKTOP_SIDECAR_RS.read_text(encoding="utf-8")
 
     assert "LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC" in text
-    assert 'unwrap_or_else(|_| "2.0".to_string())' in text
+    assert 'unwrap_or_else(|_| "10.0".to_string())' in text
 
 
 def test_desktop_redis_runtime_requires_lua_eval() -> None:

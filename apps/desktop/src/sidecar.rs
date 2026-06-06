@@ -746,7 +746,7 @@ impl Supervisor {
             .env("LUMEN_LOCAL_TOKEN", &self.local_token)
             .env(
                 "LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC",
-                env::var("LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC").unwrap_or_else(|_| "2.0".to_string()),
+                env::var("LUMEN_TIKTOKEN_LOAD_TIMEOUT_SEC").unwrap_or_else(|_| "10.0".to_string()),
             )
             .env("APP_ENV", "desktop")
             .env("DATABASE_URL", sqlite_url(&self.runtime.data_root))
