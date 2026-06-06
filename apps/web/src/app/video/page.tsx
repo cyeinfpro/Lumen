@@ -867,7 +867,6 @@ export default function VideoPage() {
     promptEnhanceAbortRef.current?.abort();
     promptEnhanceAbortRef.current = ctl;
     setIsEnhancingPrompt(true);
-    setPrompt("");
     let accumulated = "";
     try {
       await enhanceVideoPrompt(
@@ -900,9 +899,19 @@ export default function VideoPage() {
       toast.success("提示词已优化");
     } catch (err) {
       if (!ctl.signal.aborted) {
-        toast.error("优化失败", { description: err instanceof Error ? err.message : undefined });
+        const description = err instanceof Error ? err.message : undefined;
+        if (accumulated.trim()) {
+          setPrompt(accumulated);
+          toast.error("优化中断", {
+            description: description
+              ? `${description} 已保留已生成内容，可继续编辑或重试。`
+              : "已保留已生成内容，可继续编辑或重试。",
+          });
+        } else {
+          toast.error("优化失败", { description });
+          setPrompt(original);
+        }
       }
-      setPrompt(original);
     } finally {
       if (promptEnhanceAbortRef.current === ctl) {
         promptEnhanceAbortRef.current = null;

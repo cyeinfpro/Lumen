@@ -257,6 +257,44 @@ async def test_prompt_enhance_skips_providers_locked_to_generations(
 
 
 @pytest.mark.asyncio
+async def test_prompt_enhance_skips_image_only_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+
+    values = {
+        "providers": json.dumps(
+            [
+                {
+                    "name": "image-only",
+                    "base_url": "https://image.example",
+                    "api_key": "sk-image",
+                    "priority": 10,
+                    "purposes": ["image"],
+                },
+                {
+                    "name": "chat",
+                    "base_url": "https://chat.example",
+                    "api_key": "sk-chat",
+                    "priority": 5,
+                    "purposes": ["chat", "image"],
+                },
+            ]
+        ),
+    }
+
+    async def fake_get_setting(_db: object, spec: object) -> str | None:
+        return values.get(getattr(spec, "key", ""))
+
+    monkeypatch.setattr(prompts, "get_setting", fake_get_setting)
+    prompts._PROVIDER_RR_COUNTERS.clear()
+
+    providers = await prompts._resolve_provider_order(object())  # type: ignore[arg-type]
+
+    assert [p.name for p in providers] == ["chat"]
+
+
+@pytest.mark.asyncio
 async def test_prompt_enhance_checks_per_user_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -357,6 +395,48 @@ async def test_prompt_enhance_falls_back_to_gpt54_low(
 
 
 @pytest.mark.asyncio
+async def test_prompt_enhance_uses_bounded_upstream_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient(
+        [
+            _StubStreamResponse(
+                200,
+                [
+                    _sse({"type": "response.output_text.delta", "delta": "ok"}),
+                    _sse({"type": "response.completed"}),
+                ],
+            ),
+        ]
+    )
+    captured: dict[str, Any] = {}
+
+    def make_client(**kwargs: Any) -> _StubAsyncClient:
+        captured.update(kwargs)
+        return client
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", make_client)
+
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [chunk async for chunk in prompts._stream_enhance("cat", [provider])]
+
+    assert chunks == ['data: {"text": "ok"}\n\n', "data: [DONE]\n\n"]
+    timeout = captured["timeout"]
+    assert timeout.connect == prompts._PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS
+    assert timeout.read == prompts._PROMPT_ENHANCE_READ_TIMEOUT_SECONDS
+    assert timeout.write == prompts._PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS
+    assert timeout.pool == prompts._PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
 async def test_prompt_enhance_fallback_can_drop_priority_tier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -454,6 +534,30 @@ async def test_prompt_enhance_retries_response_failed_before_text(
         "data: [DONE]\n\n",
     ]
     assert client.calls[1]["json"]["model"] == "gpt-5.4"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_keepalive_wraps_slow_stream() -> None:
+    from app.routes import prompts
+
+    async def delayed_stream():
+        await asyncio.sleep(0.02)
+        yield 'data: {"text": "ready"}\n\n'
+
+    stream = prompts._stream_with_keepalive(  # noqa: SLF001
+        delayed_stream(),
+        interval_seconds=0.001,
+    )
+
+    assert await anext(stream) == ": keep-alive\n\n"
+    assert await anext(stream) == ": keep-alive\n\n"
+    chunks: list[str] = []
+    for _ in range(20):
+        chunk = await anext(stream)
+        if chunk.startswith("data:"):
+            chunks.append(chunk)
+            break
+    assert chunks == ['data: {"text": "ready"}\n\n']
 
 
 @pytest.mark.asyncio
@@ -776,7 +880,7 @@ async def test_prompt_enhance_releases_hold_when_stream_is_cancelled(
         yield 'data: {"text": "partial"}\n\n'
         raise asyncio.CancelledError()
 
-    async def release_hold(
+    async def release_after_cancel(
         billing: prompts._EnhanceBillingContext | None,
         *,
         reason: str,
@@ -785,7 +889,11 @@ async def test_prompt_enhance_releases_hold_when_stream_is_cancelled(
         calls["release_reason"] = reason
 
     monkeypatch.setattr(prompts, "_stream_enhance_one", cancelled_stream)
-    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+    monkeypatch.setattr(
+        prompts,
+        "_release_prompt_enhance_hold_after_cancel",
+        release_after_cancel,
+    )
 
     billing = prompts._EnhanceBillingContext(
         db=object(),  # type: ignore[arg-type]
