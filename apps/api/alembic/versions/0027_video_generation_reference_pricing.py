@@ -1,6 +1,6 @@
 """Video reference pricing and smart-duration migration.
 
-Revision ID: 0027_video_generation_reference_pricing
+Revision ID: 0027_video_ref_pricing
 Revises: 0026_video_generation
 Create Date: 2026-06-05
 """
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "0027_video_generation_reference_pricing"
+revision: str = "0027_video_ref_pricing"
 down_revision: str | None = "0026_video_generation"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

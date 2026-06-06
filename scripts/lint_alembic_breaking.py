@@ -22,6 +22,7 @@ BREAKING_METHODS = {
     "rename_column": "rename column",
     "rename_table": "rename table",
 }
+ALEMBIC_VERSION_NUM_MAX = 32
 
 
 @dataclass(frozen=True)
@@ -99,12 +100,39 @@ def _upgrade_functions(tree: ast.AST) -> list[ast.FunctionDef | ast.AsyncFunctio
     ]
 
 
+def _module_string_assignment(tree: ast.AST, name: str) -> tuple[str, int] | None:
+    for node in getattr(tree, "body", []):
+        value: ast.AST | None = None
+        lineno = getattr(node, "lineno", 1)
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == name:
+                value = node.value
+        elif isinstance(node, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+                value = node.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value, lineno
+    return None
+
+
 def lint_file(path: Path) -> list[Violation]:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except SyntaxError as exc:
         return [Violation(path, exc.lineno or 1, f"syntax error: {exc.msg}")]
     out: list[Violation] = []
+    revision = _module_string_assignment(tree, "revision")
+    if revision is not None:
+        revision_id, line = revision
+        if len(revision_id) > ALEMBIC_VERSION_NUM_MAX:
+            out.append(
+                Violation(
+                    path,
+                    line,
+                    "revision id exceeds alembic_version.version_num "
+                    f"VARCHAR({ALEMBIC_VERSION_NUM_MAX})",
+                )
+            )
     for fn in _upgrade_functions(tree):
         visitor = UpgradeVisitor(path)
         for stmt in fn.body:
