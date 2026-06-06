@@ -90,6 +90,31 @@ def test_video_media_response_rejects_invalid_range(tmp_path: Path) -> None:
     assert response.headers["content-range"] == "bytes */10"
 
 
+@pytest.mark.asyncio
+async def test_video_media_response_can_force_attachment_download(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"0123456789")
+
+    response = videos._media_response(  # noqa: SLF001
+        _request(),
+        path,
+        media_type="video/mp4",
+        etag="abc123",
+        last_modified=None,
+        immutable=True,
+        download_filename="lumen-video-video-1.mp4",
+    )
+
+    assert response.status_code == 200
+    assert (
+        response.headers["content-disposition"]
+        == 'attachment; filename="lumen-video-video-1.mp4"'
+    )
+    assert await _body(response) == b"0123456789"
+
+
 def test_video_media_response_honors_if_none_match(tmp_path: Path) -> None:
     path = tmp_path / "video.mp4"
     path.write_bytes(b"0123456789")

@@ -1,10 +1,13 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+/* eslint-disable @next/next/no-img-element -- Video posters are authenticated API media URLs. */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Clapperboard,
   Copy,
+  Download,
   Film,
   ImageIcon,
   Layers3,
@@ -13,6 +16,7 @@ import {
   RotateCcw,
   Send,
   Settings2,
+  Sparkles,
   Trash2,
   Upload,
   Video as VideoIcon,
@@ -24,6 +28,7 @@ import {
   cancelVideoGeneration,
   createVideoGeneration,
   deleteVideo,
+  enhanceVideoPrompt,
   getVideoGeneration,
   getVideoOptions,
   listVideoGenerations,
@@ -31,6 +36,7 @@ import {
   uploadImage,
   uploadVideo,
   videoBinaryUrl,
+  videoDownloadUrl,
   videoPosterUrl,
 } from "@/lib/apiClient";
 import { useSSE } from "@/lib/useSSE";
@@ -77,6 +83,12 @@ const VIDEO_RESOLUTION_VALUES = new Set<VideoCreateIn["resolution"]>([
   "1080p",
 ]);
 const ACTIVE_VIDEO_STATUSES = ["queued", "submitting", "submitted", "running"] as const;
+const TERMINAL_VIDEO_STATUSES = ["succeeded", "failed", "canceled", "expired"] as const;
+const SETTLING_VIDEO_STAGES = ["fetching", "storing", "billing"] as const;
+const VIDEO_ACTIVE_POLL_MS = 2500;
+const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
+const VIDEO_REFRESH_RETRY_BASE_MS = 1500;
+const VIDEO_REFRESH_RETRY_MAX_MS = 15000;
 
 const MODE_COPY: Record<
   VideoAction,
@@ -188,8 +200,26 @@ function formatDurationLabel(durationS: number): string {
 }
 
 function isActiveVideo(item: VideoGenerationOut): boolean {
-  return ACTIVE_VIDEO_STATUSES.includes(
+  if (ACTIVE_VIDEO_STATUSES.includes(
     item.status as (typeof ACTIVE_VIDEO_STATUSES)[number],
+  )) {
+    return true;
+  }
+  if (item.status === "succeeded" && !item.video) return true;
+  return SETTLING_VIDEO_STAGES.includes(
+    item.progress_stage as (typeof SETTLING_VIDEO_STAGES)[number],
+  );
+}
+
+function isTerminalVideo(item: VideoGenerationOut): boolean {
+  return TERMINAL_VIDEO_STATUSES.includes(
+    item.status as (typeof TERMINAL_VIDEO_STATUSES)[number],
+  );
+}
+
+function isTerminalVideoStatus(status: string | undefined): boolean {
+  return TERMINAL_VIDEO_STATUSES.includes(
+    status as (typeof TERMINAL_VIDEO_STATUSES)[number],
   );
 }
 
@@ -317,6 +347,10 @@ function videoSrc(id: string): string {
   return videoBinaryUrl(id);
 }
 
+function videoDownloadSrc(id: string): string {
+  return videoDownloadUrl(id);
+}
+
 function posterSrc(id: string, posterUrl?: string | null): string | undefined {
   return posterUrl ? videoPosterUrl(id) : undefined;
 }
@@ -325,11 +359,24 @@ function hasVideo(item: VideoGenerationOut): item is VideoGenerationWithVideo {
   return item.video != null;
 }
 
+function videoDownloadName(item: VideoGenerationWithVideo): string {
+  const ext = item.video.mime === "video/quicktime" ? "mov" : "mp4";
+  return `lumen-video-${item.id.slice(0, 8)}.${ext}`;
+}
+
 export default function VideoPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement | null>(null);
   const referenceFileRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptEnhanceAbortRef = useRef<AbortController | null>(null);
+  const terminalHistorySyncedRef = useRef<Set<string>>(new Set());
+  const refreshInFlightRef = useRef<Set<string>>(new Set());
+  const scheduledRefreshTimersRef = useRef<Map<string, number>>(new Map());
+  const pendingHistoryRefreshRef = useRef<Set<string>>(new Set());
+  const lastRefreshAtRef = useRef<Map<string, number>>(new Map());
+  const refreshBackoffUntilRef = useRef<Map<string, number>>(new Map());
+  const refreshFailureCountRef = useRef<Map<string, number>>(new Map());
   const [action, setAction] = useState<VideoAction>("t2v");
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState("");
@@ -342,6 +389,8 @@ export default function VideoPage() {
   const [uploadedLabel, setUploadedLabel] = useState("");
   const [referenceMedia, setReferenceMedia] = useState<ReferenceDraft[]>([]);
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
+  const [selectedVideoId, setSelectedVideoId] = useState("");
+  const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
 
   const optionsQ = useQuery({
     queryKey: ["video", "options"],
@@ -367,20 +416,168 @@ export default function VideoPage() {
     () => effectiveItems.filter(hasVideo),
     [effectiveItems],
   );
-  const primaryVideoItem = completedVideoItems[0] ?? null;
+  const selectedVideoItem = useMemo(
+    () =>
+      selectedVideoId
+        ? completedVideoItems.find((item) => item.video.id === selectedVideoId)
+        : undefined,
+    [completedVideoItems, selectedVideoId],
+  );
+  const primaryVideoItem = selectedVideoItem ?? completedVideoItems[0] ?? null;
   const recentVideoItems = completedVideoItems.slice(0, 4);
   const channels = useMemo(
     () => activeItems.map((item) => `task:${item.id}`),
     [activeItems],
   );
+  const activeItemIdsKey = useMemo(
+    () => activeItems.map((item) => item.id).join("|"),
+    [activeItems],
+  );
 
   const refreshGeneration = useCallback(
-    async (id: string) => {
+    async (id: string, opts: { forceHistorySync?: boolean } = {}) => {
       const next = await getVideoGeneration(id);
       setItems((prev) => mergeById(prev, [next]));
-      await qc.invalidateQueries({ queryKey: ["video", "generations"] });
+      if (next.video) setSelectedVideoId(next.video.id);
+
+      const terminal = isTerminalVideo(next);
+      if (!terminal) {
+        terminalHistorySyncedRef.current.delete(id);
+      }
+      if (
+        opts.forceHistorySync ||
+        (terminal && !terminalHistorySyncedRef.current.has(id))
+      ) {
+        if (terminal) terminalHistorySyncedRef.current.add(id);
+        await qc.invalidateQueries({ queryKey: ["video", "generations"] });
+      }
     },
     [qc],
+  );
+
+  const refreshGenerationSafe = useCallback(
+    async (id: string, opts: { forceHistorySync?: boolean } = {}) => {
+      if (opts.forceHistorySync) {
+        pendingHistoryRefreshRef.current.add(id);
+      }
+      if (refreshInFlightRef.current.has(id)) return;
+
+      refreshInFlightRef.current.add(id);
+      const forceHistorySync =
+        opts.forceHistorySync || pendingHistoryRefreshRef.current.has(id);
+      pendingHistoryRefreshRef.current.delete(id);
+
+      try {
+        await refreshGeneration(id, { forceHistorySync });
+        refreshFailureCountRef.current.delete(id);
+        refreshBackoffUntilRef.current.delete(id);
+      } catch (err) {
+        const nextFailures = (refreshFailureCountRef.current.get(id) ?? 0) + 1;
+        refreshFailureCountRef.current.set(id, nextFailures);
+        const backoffMs = Math.min(
+          VIDEO_REFRESH_RETRY_MAX_MS,
+          VIDEO_REFRESH_RETRY_BASE_MS * 2 ** Math.min(nextFailures - 1, 4),
+        );
+        refreshBackoffUntilRef.current.set(id, Date.now() + backoffMs);
+        try {
+          console.warn("[video] generation refresh failed", {
+            id,
+            failures: nextFailures,
+            retryInMs: backoffMs,
+            err,
+          });
+        } catch {
+          /* console unavailable */
+        }
+      } finally {
+        refreshInFlightRef.current.delete(id);
+      }
+    },
+    [refreshGeneration],
+  );
+
+  const scheduleGenerationRefresh = useCallback(
+    (
+      id: string,
+      opts: { forceHistorySync?: boolean; delayMs?: number } = {},
+    ) => {
+      if (!id) return;
+      if (opts.forceHistorySync) {
+        pendingHistoryRefreshRef.current.add(id);
+      }
+      if (scheduledRefreshTimersRef.current.has(id)) return;
+
+      const now = Date.now();
+      const lastRefreshAt = lastRefreshAtRef.current.get(id) ?? 0;
+      const minIntervalDelay = Math.max(
+        0,
+        VIDEO_REFRESH_MIN_INTERVAL_MS - (now - lastRefreshAt),
+      );
+      const backoffDelay = Math.max(
+        0,
+        (refreshBackoffUntilRef.current.get(id) ?? 0) - now,
+      );
+      const delayMs = Math.max(opts.delayMs ?? 0, minIntervalDelay, backoffDelay);
+
+      const timer = window.setTimeout(() => {
+        scheduledRefreshTimersRef.current.delete(id);
+        lastRefreshAtRef.current.set(id, Date.now());
+        const forceHistorySync = pendingHistoryRefreshRef.current.has(id);
+        pendingHistoryRefreshRef.current.delete(id);
+        void refreshGenerationSafe(id, { forceHistorySync });
+      }, delayMs);
+      scheduledRefreshTimersRef.current.set(id, timer);
+    },
+    [refreshGenerationSafe],
+  );
+
+  const applyVideoEventSnapshot = useCallback(
+    (data: unknown): { id: string; terminal: boolean } | null => {
+      if (typeof data !== "object" || data === null) return null;
+      const raw = data as {
+        video_generation_id?: unknown;
+        status?: unknown;
+        stage?: unknown;
+        progress_pct?: unknown;
+        error_code?: unknown;
+      };
+      const id =
+        typeof raw.video_generation_id === "string" ? raw.video_generation_id : "";
+      if (!id) return null;
+
+      const status = typeof raw.status === "string" ? raw.status : undefined;
+      const stage = typeof raw.stage === "string" ? raw.stage : undefined;
+      const progressPct =
+        typeof raw.progress_pct === "number" ? raw.progress_pct : undefined;
+      const errorCode =
+        typeof raw.error_code === "string" ? raw.error_code : undefined;
+
+      if (status || stage || progressPct !== undefined || errorCode) {
+        setItems((prev) =>
+          prev.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  ...(status
+                    ? { status: status as VideoGenerationOut["status"] }
+                    : {}),
+                  ...(stage
+                    ? {
+                        progress_stage:
+                          stage as VideoGenerationOut["progress_stage"],
+                      }
+                    : {}),
+                  ...(progressPct !== undefined ? { progress_pct: progressPct } : {}),
+                  ...(errorCode ? { error_code: errorCode } : {}),
+                }
+              : item,
+          ),
+        );
+      }
+
+      return { id, terminal: isTerminalVideoStatus(status) };
+    },
+    [],
   );
 
   const handlers = useMemo(
@@ -389,17 +586,64 @@ export default function VideoPage() {
         VIDEO_EVENTS.map((eventName) => [
           eventName,
           (data: unknown) => {
-            const id =
-              typeof data === "object" && data !== null
-                ? (data as { video_generation_id?: unknown }).video_generation_id
-                : null;
-            if (typeof id === "string" && id) void refreshGeneration(id);
+            const snapshot = applyVideoEventSnapshot(data);
+            if (snapshot) {
+              scheduleGenerationRefresh(snapshot.id, {
+                forceHistorySync: snapshot.terminal,
+              });
+            }
           },
         ]),
       ),
-    [refreshGeneration],
+    [applyVideoEventSnapshot, scheduleGenerationRefresh],
   );
   useSSE(channels, handlers);
+
+  useEffect(() => {
+    const ids = activeItemIdsKey.split("|").filter(Boolean);
+    if (ids.length === 0) return;
+
+    let alive = true;
+    const poll = () => {
+      if (!alive) return;
+      for (const id of ids) scheduleGenerationRefresh(id);
+    };
+
+    const initialTimer = window.setTimeout(poll, 800);
+    const interval = window.setInterval(poll, VIDEO_ACTIVE_POLL_MS);
+
+    return () => {
+      alive = false;
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [activeItemIdsKey, scheduleGenerationRefresh]);
+
+  useEffect(() => {
+    const refreshVisibleTasks = () => {
+      if (document.visibilityState !== "visible") return;
+      void qc.invalidateQueries({ queryKey: ["video", "generations"] });
+      const ids = activeItemIdsKey.split("|").filter(Boolean);
+      for (const id of ids) scheduleGenerationRefresh(id);
+    };
+
+    window.addEventListener("focus", refreshVisibleTasks);
+    document.addEventListener("visibilitychange", refreshVisibleTasks);
+    return () => {
+      window.removeEventListener("focus", refreshVisibleTasks);
+      document.removeEventListener("visibilitychange", refreshVisibleTasks);
+    };
+  }, [activeItemIdsKey, qc, scheduleGenerationRefresh]);
+
+  useEffect(
+    () => () => {
+      for (const timer of scheduledRefreshTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      scheduledRefreshTimersRef.current.clear();
+    },
+    [],
+  );
 
   const availableModels = useMemo(
     () => options?.models.filter((item) => item.actions.includes(action)) ?? [],
@@ -530,8 +774,10 @@ export default function VideoPage() {
         watermark: false,
       }),
     onSuccess: (gen) => {
+      terminalHistorySyncedRef.current.delete(gen.id);
       setItems((prev) => mergeById(prev, [gen]));
       toast.success("任务已提交");
+      scheduleGenerationRefresh(gen.id, { delayMs: 800 });
       void qc.invalidateQueries({ queryKey: ["video", "generations"] });
     },
     onError: (err) => toast.error("提交失败", { description: err instanceof Error ? err.message : undefined }),
@@ -542,14 +788,17 @@ export default function VideoPage() {
     onSuccess: (gen) => {
       setItems((prev) => mergeById(prev, [gen]));
       toast.success("已请求取消");
+      scheduleGenerationRefresh(gen.id, { forceHistorySync: true });
     },
     onError: (err) => toast.error("取消失败", { description: err instanceof Error ? err.message : undefined }),
   });
   const retryMut = useMutation({
     mutationFn: retryVideoGeneration,
     onSuccess: (gen) => {
+      terminalHistorySyncedRef.current.delete(gen.id);
       setItems((prev) => mergeById(prev, [gen]));
       toast.success("已重新生成");
+      scheduleGenerationRefresh(gen.id, { delayMs: 800 });
     },
     onError: (err) => toast.error("重试失败", { description: err instanceof Error ? err.message : undefined }),
   });
@@ -561,6 +810,7 @@ export default function VideoPage() {
           item.video?.id === videoId ? { ...item, video: null } : item,
         ),
       );
+      setSelectedVideoId((current) => (current === videoId ? "" : current));
       toast.success("视频已删除");
       await qc.invalidateQueries({ queryKey: ["video", "generations"] });
     },
@@ -602,6 +852,76 @@ export default function VideoPage() {
     requestAnimationFrame(() => promptRef.current?.focus());
     toast.success("已套用参数");
   }, []);
+
+  const canEnhancePrompt = Boolean(
+    prompt.trim() ||
+      (action === "i2v" && inputImageId.trim()) ||
+      (action === "reference" && referenceMedia.length > 0),
+  );
+
+  const enhancePromptAction = useCallback(async () => {
+    if (isEnhancingPrompt || !canEnhancePrompt) return;
+    const original = prompt;
+    const current = prompt.trim();
+    const ctl = new AbortController();
+    promptEnhanceAbortRef.current?.abort();
+    promptEnhanceAbortRef.current = ctl;
+    setIsEnhancingPrompt(true);
+    setPrompt("");
+    let accumulated = "";
+    try {
+      await enhanceVideoPrompt(
+        {
+          text: current,
+          action,
+          model: selectedModel,
+          duration_s: durationS,
+          resolution: effectiveResolution,
+          aspect_ratio: aspectRatio,
+          generate_audio: generateAudio,
+          input_image_id: action === "i2v" ? inputImageId.trim() || null : null,
+          reference_media:
+            action === "reference"
+              ? referenceMedia.map((item) => ({
+                  kind: item.kind,
+                  image_id: item.kind === "image" ? item.image_id ?? null : null,
+                  video_id: item.kind === "video" ? item.video_id ?? null : null,
+                  label: item.label,
+                }))
+              : [],
+        },
+        (delta) => {
+          if (ctl.signal.aborted || promptEnhanceAbortRef.current !== ctl) return;
+          accumulated += delta;
+          setPrompt(accumulated);
+        },
+        ctl.signal,
+      );
+      toast.success("提示词已优化");
+    } catch (err) {
+      if (!ctl.signal.aborted) {
+        toast.error("优化失败", { description: err instanceof Error ? err.message : undefined });
+      }
+      setPrompt(original);
+    } finally {
+      if (promptEnhanceAbortRef.current === ctl) {
+        promptEnhanceAbortRef.current = null;
+      }
+      setIsEnhancingPrompt(false);
+    }
+  }, [
+    action,
+    aspectRatio,
+    canEnhancePrompt,
+    durationS,
+    effectiveResolution,
+    generateAudio,
+    inputImageId,
+    isEnhancingPrompt,
+    prompt,
+    referenceMedia,
+    selectedModel,
+  ]);
 
   const submitDisabledReason = useMemo(() => {
     if (createMut.isPending) return "正在提交";
@@ -733,28 +1053,45 @@ export default function VideoPage() {
               </div>
 
               <div className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="type-caption text-[var(--fg-2)]">描述</span>
-                  <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                    {prompt.length.toLocaleString()} / 10,000
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs tabular-nums text-[var(--fg-2)]">
+                      {prompt.length.toLocaleString()} / 10,000
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      loading={isEnhancingPrompt}
+                      disabled={!canEnhancePrompt}
+                      onClick={() => void enhancePromptAction()}
+                      leftIcon={<Sparkles className="h-3.5 w-3.5" />}
+                    >
+                      一键优化
+                    </Button>
+                  </div>
                 </div>
                 <textarea
                   ref={promptRef}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
+                  readOnly={isEnhancingPrompt}
                   rows={8}
                   maxLength={10000}
                   placeholder="写清主体、动作、画面比例和不要出现的内容。"
-                  className="min-h-[184px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]"
+                  className={cn(
+                    "min-h-[184px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
+                    isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
+                  )}
                 />
                 <div className="flex flex-wrap gap-2">
                   {PROMPT_CHIPS.map((chip) => (
                     <button
                       key={chip}
                       type="button"
+                      disabled={isEnhancingPrompt}
                       onClick={() => insertPromptText(chip)}
-                      className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
+                      className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
                     >
                       {chip}
                     </button>
@@ -1015,6 +1352,8 @@ export default function VideoPage() {
                     <RecentVideoCard
                       key={item.id}
                       item={item}
+                      selected={primaryVideoItem?.video.id === item.video.id}
+                      onPreview={() => setSelectedVideoId(item.video.id)}
                       onUseDraft={() => loadAsDraft(item)}
                     />
                   ))}
@@ -1042,6 +1381,8 @@ export default function VideoPage() {
                     }}
                     onUseDraft={() => loadAsDraft(item)}
                     onDelete={() => item.video && deleteMut.mutate(item.video.id)}
+                    onPreview={hasVideo(item) ? () => setSelectedVideoId(item.video.id) : undefined}
+                    selected={primaryVideoItem?.video.id === item.video?.id}
                   />
                 ))}
                 {!historyQ.isLoading && effectiveItems.length === 0 && (
@@ -1304,6 +1645,75 @@ function EmptyPanel({
   );
 }
 
+function VideoDownloadLink({
+  item,
+  fullWidth = false,
+}: {
+  item: VideoGenerationWithVideo;
+  fullWidth?: boolean;
+}) {
+  return (
+    <a
+      href={videoDownloadSrc(item.video.id)}
+      download={videoDownloadName(item)}
+      className={cn(
+        "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-transparent px-3 text-xs font-medium leading-tight text-[var(--fg-0)] transition-[background-color,border-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
+        fullWidth && "w-full",
+      )}
+    >
+      <Download className="h-3.5 w-3.5 shrink-0" />
+      下载
+    </a>
+  );
+}
+
+function VideoPosterButton({
+  item,
+  onPreview,
+  selected = false,
+  compact = false,
+}: {
+  item: VideoGenerationWithVideo;
+  onPreview: () => void;
+  selected?: boolean;
+  compact?: boolean;
+}) {
+  const poster = posterSrc(item.video.id, item.video.poster_url);
+  return (
+    <button
+      type="button"
+      onClick={onPreview}
+      aria-pressed={selected}
+      className={cn(
+        "group relative w-full overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-0)] text-left transition-colors",
+        compact ? "aspect-video" : "mt-3 aspect-video",
+        selected
+          ? "border-[var(--accent)]"
+          : "border-[var(--border-subtle)] hover:border-[var(--border)]",
+      )}
+    >
+      {poster ? (
+        <img
+          src={poster}
+          alt=""
+          loading="lazy"
+          className="h-full w-full object-contain"
+        />
+      ) : (
+        <div className="grid h-full place-items-center text-[var(--fg-2)]">
+          <Film className="h-6 w-6" />
+        </div>
+      )}
+      <span className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/20">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--fg-0)]/85 px-3 py-1.5 text-xs font-medium text-[var(--bg-0)] shadow-[var(--shadow-2)]">
+          <Play className="h-3.5 w-3.5" />
+          播放预览
+        </span>
+      </span>
+    </button>
+  );
+}
+
 function PrimaryPreview({
   item,
   onUseDraft,
@@ -1337,8 +1747,10 @@ function PrimaryPreview({
     <div className="space-y-4">
       <div className="overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]">
         <video
+          key={item.video.id}
           controls
-          preload="metadata"
+          playsInline
+          preload="auto"
           poster={posterSrc(item.video.id, item.video.poster_url)}
           src={videoSrc(item.video.id)}
           className="aspect-video w-full bg-[var(--bg-0)] object-contain"
@@ -1355,6 +1767,7 @@ function PrimaryPreview({
           <p className="line-clamp-3 text-sm leading-6 text-[var(--fg-0)]">{item.prompt}</p>
         </div>
         <div className="flex flex-wrap items-start gap-2 xl:justify-end">
+          <VideoDownloadLink item={item} />
           {onUseDraft && (
             <Button
               variant="secondary"
@@ -1403,30 +1816,36 @@ function PrimaryPreview({
 
 function RecentVideoCard({
   item,
+  selected,
+  onPreview,
   onUseDraft,
 }: {
   item: VideoGenerationWithVideo;
+  selected: boolean;
+  onPreview: () => void;
   onUseDraft: () => void;
 }) {
   return (
     <article className="group space-y-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-2.5 transition-colors hover:border-[var(--border)]">
-      <video
-        controls
-        preload="metadata"
-        poster={posterSrc(item.video.id, item.video.poster_url)}
-        src={videoSrc(item.video.id)}
-        className="aspect-video w-full rounded-[var(--radius-control)] bg-[var(--bg-0)] object-contain"
+      <VideoPosterButton
+        item={item}
+        selected={selected}
+        onPreview={onPreview}
+        compact
       />
       <p className="line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">{item.prompt}</p>
-      <Button
-        variant="outline"
-        size="sm"
-        fullWidth
-        onClick={onUseDraft}
-        leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
-      >
-        套用参数
-      </Button>
+      <div className="grid grid-cols-2 gap-2">
+        <VideoDownloadLink item={item} fullWidth />
+        <Button
+          variant="outline"
+          size="sm"
+          fullWidth
+          onClick={onUseDraft}
+          leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
+        >
+          套用参数
+        </Button>
+      </div>
     </article>
   );
 }
@@ -1438,6 +1857,8 @@ function TaskRow({
   onCopy,
   onUseDraft,
   onDelete,
+  onPreview,
+  selected = false,
 }: {
   item: VideoGenerationOut;
   onCancel: () => void;
@@ -1445,10 +1866,13 @@ function TaskRow({
   onCopy: () => void;
   onUseDraft?: () => void;
   onDelete?: () => void;
+  onPreview?: () => void;
+  selected?: boolean;
 }) {
   const active = isActiveVideo(item);
   const progress = progressForItem(item);
   const copy = stageCopy(item);
+  const videoItem = hasVideo(item) ? item : null;
   return (
     <article className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3 transition-colors hover:border-[var(--border)]">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1475,13 +1899,11 @@ function TaskRow({
           transition={{ duration: 0.26, ease: [0.2, 0.8, 0.2, 1] }}
         />
       </div>
-      {item.video && (
-        <video
-          controls
-          preload="metadata"
-          poster={posterSrc(item.video.id, item.video.poster_url)}
-          src={videoSrc(item.video.id)}
-          className="mt-3 aspect-video w-full rounded-[var(--radius-card)] bg-[var(--bg-2)] object-contain"
+      {videoItem && onPreview && (
+        <VideoPosterButton
+          item={videoItem}
+          selected={selected}
+          onPreview={onPreview}
         />
       )}
       {item.error_message && (
@@ -1514,6 +1936,7 @@ function TaskRow({
         >
           复制
         </Button>
+        {videoItem && <VideoDownloadLink item={videoItem} />}
         {onUseDraft && (
           <Button
             variant="outline"
@@ -1524,7 +1947,7 @@ function TaskRow({
             套用参数
           </Button>
         )}
-        {onDelete && item.video && (
+        {onDelete && videoItem && (
           <Button
             variant="outline"
             size="sm"

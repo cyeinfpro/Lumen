@@ -1522,6 +1522,7 @@ def _media_response(
     etag: str,
     last_modified: datetime | None,
     immutable: bool,
+    download_filename: str | None = None,
 ) -> Response:
     quoted_etag = _quote_etag(etag)
     headers = {
@@ -1533,6 +1534,8 @@ def _media_response(
         ),
         "ETag": quoted_etag,
     }
+    if download_filename:
+        headers["Content-Disposition"] = f'attachment; filename="{download_filename}"'
     if last_modified is not None:
         headers["Last-Modified"] = format_datetime(last_modified, usegmt=True)
     if request.headers.get("if-none-match") == quoted_etag:
@@ -1618,8 +1621,10 @@ async def video_binary(
     request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    download: bool = Query(False),
 ) -> Response:
     video = await _owned_video(db, user.id, video_id)
+    extension = Path(video.storage_key).suffix.lower() or ".mp4"
     return _media_response(
         request,
         _fs_path(video.storage_key),
@@ -1627,6 +1632,7 @@ async def video_binary(
         etag=video.etag or video.sha256,
         last_modified=video.updated_at,
         immutable=True,
+        download_filename=f"lumen-video-{video.id}{extension}" if download else None,
     )
 
 

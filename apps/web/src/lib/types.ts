@@ -1100,6 +1100,18 @@ export interface VideoCreateIn {
   idempotency_key: string;
 }
 
+export interface VideoPromptEnhanceIn {
+  text?: string;
+  action?: VideoAction;
+  model?: string;
+  duration_s?: number | null;
+  resolution?: string | null;
+  aspect_ratio?: string | null;
+  generate_audio?: boolean | null;
+  input_image_id?: string | null;
+  reference_media?: VideoReferenceMediaIn[];
+}
+
 export interface VideoPriceOptionOut {
   model: string;
   action: VideoAction | "reference_image" | "reference_video";
