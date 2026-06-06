@@ -543,10 +543,8 @@ async def test_edit_image_wraps_prompt_when_mask_present(monkeypatch: pytest.Mon
         seen["prompt"] = kwargs["prompt"]
         seen["mask"] = kwargs["mask"]
         seen["images"] = kwargs["images"]
-        # async generator yielding nothing — caller handles empty result.
-        if False:  # pragma: no cover - dead branch keeps annotation
-            yield ("", None)
-        return
+        for result in ():
+            yield result
 
     monkeypatch.setattr(upstream, "_dispatch_image", fake_dispatch_image)
 
@@ -578,9 +576,8 @@ async def test_edit_image_does_not_wrap_prompt_when_mask_none(monkeypatch: pytes
     async def fake_dispatch_image(**kwargs: Any):
         seen["prompt"] = kwargs["prompt"]
         seen["mask"] = kwargs["mask"]
-        if False:  # pragma: no cover
-            yield ("", None)
-        return
+        for result in ():
+            yield result
 
     monkeypatch.setattr(upstream, "_dispatch_image", fake_dispatch_image)
 
@@ -625,13 +622,13 @@ def _install_run_image_once_stubs(
 
     async def fake_dual_race_image_action(**kwargs: Any):
         calls["dual_race_image_action"] = kwargs
-        if False:  # pragma: no cover - 不应被命中
-            yield ("", None)
+        for result in ():
+            yield result
 
     async def fake_dual_race_image_jobs_action(**kwargs: Any):
         calls["dual_race_image_jobs_action"] = kwargs
-        if False:  # pragma: no cover
-            yield ("", None)
+        for result in ():
+            yield result
 
     async def fake_race_responses_image(**kwargs: Any) -> tuple[str, str | None]:
         calls["race_responses_image"] = kwargs

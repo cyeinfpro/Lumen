@@ -213,6 +213,68 @@ async def test_events_rejects_too_many_channels_before_subscribing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_channels_batches_owned_task_queries() -> None:
+    class Result:
+        def __init__(self, rows: list[str]) -> None:
+            self.rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self) -> list[str]:
+            return self.rows
+
+    class Db:
+        def __init__(self) -> None:
+            self.tables: list[str] = []
+
+        async def execute(self, statement):
+            sql = str(statement)
+            if "FROM conversations" in sql:
+                self.tables.append("conversations")
+                return Result(["conv-1"])
+            if "FROM video_generations" in sql:
+                self.tables.append("video_generations")
+                return Result(["video-1"])
+            if "FROM completions" in sql:
+                self.tables.append("completions")
+                return Result(["comp-1"])
+            if "FROM generations" in sql:
+                self.tables.append("generations")
+                return Result(["gen-1"])
+            return Result([])
+
+    db = Db()
+
+    clean = await events._validate_channels(  # noqa: SLF001
+        [
+            "user:user-1",
+            "conv:conv-1",
+            "task:gen-1",
+            "task:comp-1",
+            "task:video-1",
+            "ignored:channel",
+        ],
+        "user-1",
+        db,  # type: ignore[arg-type]
+    )
+
+    assert clean == [
+        "user:user-1",
+        "conv:conv-1",
+        "task:gen-1",
+        "task:comp-1",
+        "task:video-1",
+    ]
+    assert db.tables == [
+        "conversations",
+        "generations",
+        "completions",
+        "video_generations",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_events_logs_replay_failure_and_acloses_pubsub(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -539,8 +601,8 @@ async def test_events_replay_uses_effective_subscription_channels(
 
     async def fake_iter_replay_events(*_args: Any, **kwargs: Any):
         captured.update(kwargs)
-        if False:
-            yield {}
+        for event in ():
+            yield event
 
     class PubSub:
         async def subscribe(self, *_channels: str) -> None:

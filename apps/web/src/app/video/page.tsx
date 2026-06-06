@@ -37,8 +37,8 @@ import {
   uploadVideo,
   videoBinaryUrl,
   videoDownloadUrl,
-  videoPosterUrl,
 } from "@/lib/apiClient";
+import { prewarmImage, prewarmVideoMetadata } from "@/lib/imagePreload";
 import { useSSE } from "@/lib/useSSE";
 import type {
   VideoAction,
@@ -343,16 +343,22 @@ function estimateHoldMicro(
   return { tokens, micro: Math.round((tokens * price.price.micro) / 1_000_000) };
 }
 
-function videoSrc(id: string): string {
-  return videoBinaryUrl(id);
+function videoSrc(video: VideoGenerationWithVideo["video"]): string {
+  return video.url?.trim() || videoBinaryUrl(video.id);
 }
 
 function videoDownloadSrc(id: string): string {
   return videoDownloadUrl(id);
 }
 
-function posterSrc(id: string, posterUrl?: string | null): string | undefined {
-  return posterUrl ? videoPosterUrl(id) : undefined;
+function posterSrc(video: VideoGenerationWithVideo["video"]): string | undefined {
+  return video.poster_url?.trim() || undefined;
+}
+
+function prewarmVideoItem(item: VideoGenerationWithVideo | null | undefined): void {
+  if (!item) return;
+  prewarmImage(posterSrc(item.video));
+  prewarmVideoMetadata(videoSrc(item.video));
 }
 
 function hasVideo(item: VideoGenerationOut): item is VideoGenerationWithVideo {
@@ -396,11 +402,16 @@ export default function VideoPage() {
     queryKey: ["video", "options"],
     queryFn: getVideoOptions,
     retry: false,
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
   });
   const historyQ = useQuery({
     queryKey: ["video", "generations"],
     queryFn: () => listVideoGenerations({ limit: 40 }),
     retry: false,
+    placeholderData: (previousData) => previousData,
+    staleTime: 20_000,
+    gcTime: 5 * 60_000,
   });
 
   const options = optionsQ.data;
@@ -434,11 +445,18 @@ export default function VideoPage() {
     [activeItems],
   );
 
+  useEffect(() => {
+    prewarmVideoItem(primaryVideoItem);
+  }, [primaryVideoItem]);
+
   const refreshGeneration = useCallback(
     async (id: string, opts: { forceHistorySync?: boolean } = {}) => {
       const next = await getVideoGeneration(id);
       setItems((prev) => mergeById(prev, [next]));
-      if (next.video) setSelectedVideoId(next.video.id);
+      if (next.video) {
+        setSelectedVideoId(next.video.id);
+        prewarmVideoItem(next as VideoGenerationWithVideo);
+      }
 
       const terminal = isTerminalVideo(next);
       if (!terminal) {
@@ -1687,11 +1705,34 @@ function VideoPosterButton({
   selected?: boolean;
   compact?: boolean;
 }) {
-  const poster = posterSrc(item.video.id, item.video.poster_url);
+  const [posterFailure, setPosterFailure] = useState<{
+    videoId: string;
+    failed: boolean;
+  } | null>(null);
+  const poster = posterSrc(item.video);
+  const videoUrl = videoSrc(item.video);
+  const posterFailed =
+    posterFailure?.videoId === item.video.id ? posterFailure.failed : false;
+  const prewarmPreview = useCallback(() => {
+    prewarmImage(poster);
+    prewarmVideoMetadata(videoUrl);
+  }, [poster, videoUrl]);
+  const handlePreview = useCallback(() => {
+    prewarmPreview();
+    onPreview();
+  }, [onPreview, prewarmPreview]);
+
+  useEffect(() => {
+    if (selected) prewarmPreview();
+  }, [prewarmPreview, selected]);
+
   return (
     <button
       type="button"
-      onClick={onPreview}
+      onClick={handlePreview}
+      onFocus={prewarmPreview}
+      onPointerDown={prewarmPreview}
+      onPointerEnter={prewarmPreview}
       aria-pressed={selected}
       className={cn(
         "group relative w-full overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-0)] text-left transition-colors",
@@ -1701,11 +1742,16 @@ function VideoPosterButton({
           : "border-[var(--border-subtle)] hover:border-[var(--border)]",
       )}
     >
-      {poster ? (
+      {poster && !posterFailed ? (
         <img
           src={poster}
           alt=""
-          loading="lazy"
+          loading={selected ? "eager" : "lazy"}
+          decoding="async"
+          fetchPriority={selected ? "high" : "low"}
+          onError={() =>
+            setPosterFailure({ videoId: item.video.id, failed: true })
+          }
           className="h-full w-full object-contain"
         />
       ) : (
@@ -1720,6 +1766,106 @@ function VideoPosterButton({
         </span>
       </span>
     </button>
+  );
+}
+
+type VideoPlayerStatus = "loading" | "metadata" | "ready" | "buffering" | "error";
+
+function videoPlayerStatusLabel(status: VideoPlayerStatus): string {
+  switch (status) {
+    case "loading":
+      return "读取视频";
+    case "metadata":
+      return "准备播放";
+    case "buffering":
+      return "缓冲中";
+    case "error":
+      return "载入失败";
+    default:
+      return "";
+  }
+}
+
+function PrimaryVideoPlayer({ item }: { item: VideoGenerationWithVideo }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [statusState, setStatusState] = useState<{
+    videoId: string;
+    status: VideoPlayerStatus;
+  }>(() => ({ videoId: item.video.id, status: "loading" }));
+  const poster = posterSrc(item.video);
+  const src = videoSrc(item.video);
+  const status =
+    statusState.videoId === item.video.id ? statusState.status : "loading";
+  const setVideoStatus = useCallback(
+    (next: VideoPlayerStatus) =>
+      setStatusState({ videoId: item.video.id, status: next }),
+    [item.video.id],
+  );
+
+  useEffect(() => {
+    prewarmImage(poster);
+    prewarmVideoMetadata(src);
+  }, [poster, src]);
+
+  const retryLoad = useCallback(() => {
+    setVideoStatus("loading");
+    prewarmImage(poster);
+    prewarmVideoMetadata(src);
+    videoRef.current?.load();
+  }, [poster, setVideoStatus, src]);
+
+  const showState =
+    status === "loading" || status === "buffering" || status === "error";
+
+  return (
+    <div className="relative overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]">
+      <video
+        key={item.video.id}
+        ref={videoRef}
+        controls
+        playsInline
+        preload="metadata"
+        poster={poster}
+        src={src}
+        onLoadStart={() => setVideoStatus("loading")}
+        onLoadedMetadata={() => setVideoStatus("metadata")}
+        onCanPlay={() => setVideoStatus("ready")}
+        onPlaying={() => setVideoStatus("ready")}
+        onWaiting={() => setVideoStatus("buffering")}
+        onError={() => setVideoStatus("error")}
+        className="aspect-video w-full bg-[var(--bg-0)] object-contain"
+      />
+      {showState && (
+        <div
+          className={cn(
+            "absolute inset-0 flex items-center justify-center bg-[var(--bg-0)]/55 text-[var(--fg-0)]",
+            status !== "error" && "pointer-events-none",
+          )}
+        >
+          <div
+            role={status === "error" ? "alert" : "status"}
+            aria-live={status === "error" ? "assertive" : "polite"}
+            className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-0)]/82 px-3 py-1.5 text-xs font-medium shadow-[var(--shadow-2)] backdrop-blur-md"
+          >
+            {status === "error" ? (
+              <button
+                type="button"
+                onClick={retryLoad}
+                className="inline-flex cursor-pointer items-center gap-1.5 text-[var(--fg-0)]"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                重试
+              </button>
+            ) : (
+              <>
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                {videoPlayerStatusLabel(status)}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1754,17 +1900,7 @@ function PrimaryPreview({
 
   return (
     <div className="space-y-4">
-      <div className="overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]">
-        <video
-          key={item.video.id}
-          controls
-          playsInline
-          preload="auto"
-          poster={posterSrc(item.video.id, item.video.poster_url)}
-          src={videoSrc(item.video.id)}
-          className="aspect-video w-full bg-[var(--bg-0)] object-contain"
-        />
-      </div>
+      <PrimaryVideoPlayer item={item} />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">
           <div className="mb-2 flex flex-wrap gap-2">

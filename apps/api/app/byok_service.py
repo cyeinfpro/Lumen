@@ -14,8 +14,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.byok import (
-    BYOK_DEFAULT_CHAT_MODEL,
-    BYOK_DEFAULT_FAST_MODEL,
     BYOK_DEFAULT_PENDING_TOKEN_TTL_SECONDS,
     BYOK_DEFAULT_VALIDATION_MODEL,
     BYOK_DEFAULT_VALIDATION_TIMEOUT_MS,
@@ -423,12 +421,3 @@ def hash_text_for_audit(value: str | None) -> str | None:
 
 def pending_expires_at(ttl_seconds: int) -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
-
-
-def default_supplier_values() -> dict[str, Any]:
-    return {
-        "validation_model": BYOK_DEFAULT_VALIDATION_MODEL,
-        "default_chat_model": BYOK_DEFAULT_CHAT_MODEL,
-        "fast_chat_model": BYOK_DEFAULT_FAST_MODEL,
-        "validation_timeout_ms": BYOK_DEFAULT_VALIDATION_TIMEOUT_MS,
-    }

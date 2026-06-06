@@ -1189,6 +1189,9 @@ async def _resolve_task_credential_pin(
         return None
     if account_mode != "byok":
         return None
+    byok_settings = await read_byok_settings_cached(db)
+    if not byok_settings.mode_enabled:
+        return None
 
     active_row = (
         await db.execute(

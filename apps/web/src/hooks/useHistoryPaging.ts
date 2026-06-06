@@ -1,7 +1,6 @@
 "use client";
 
-// BUG-027: 抽取共享 history paging hook，避免在 3 个 Canvas 组件中复制 ~80 行重复逻辑。
-// 被 ConversationCanvas / DesktopConversationCanvas / MobileConversationCanvas 使用。
+// BUG-027: 抽取共享 history paging hook，避免在桌面和移动 Canvas 中复制分页逻辑。
 
 import {
   type RefObject,

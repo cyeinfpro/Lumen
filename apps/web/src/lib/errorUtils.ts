@@ -1,6 +1,5 @@
 // BUG-028: 抽取共享的 isAbortLike / errorMessage 工具函数，
-// 避免在 4 个文件中重复定义（ConversationCanvas、DesktopConversationCanvas、
-// MobileConversationCanvas、MobileEmptyStudio）。
+// 避免在桌面和移动会话视图中重复定义。
 
 export function isAbortLike(err: unknown): boolean {
   if (err instanceof DOMException && err.name === "AbortError") return true;

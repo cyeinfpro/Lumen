@@ -108,63 +108,76 @@ async def _validate_channels(
 ) -> list[str]:
     """Ensure every requested channel is owned by this user. Silently drop unknown
     formats. Raise 403 if a known channel belongs to someone else."""
-    clean: list[str] = []
-    for ch in channels:
-        ch = ch.strip()
+    parsed: list[tuple[str, str, str]] = []
+    conv_refs: set[str] = set()
+    task_refs: set[str] = set()
+
+    for raw in channels:
+        ch = raw.strip()
         if not ch or ":" not in ch:
             continue
         prefix, _, ref = ch.partition(":")
         if prefix == "user":
             if ref != user_id:
                 raise _http("forbidden_channel", f"cannot subscribe to user:{ref}", 403)
-            clean.append(ch)
+            parsed.append((ch, prefix, ref))
         elif prefix == "conv":
-            row = (
-                await db.execute(
-                    select(Conversation.id).where(
-                        Conversation.id == ref,
-                        Conversation.user_id == user_id,
-                        Conversation.deleted_at.is_(None),
-                    )
-                )
-            ).first()
-            if not row:
-                raise _http("forbidden_channel", f"conv {ref} not owned", 403)
-            clean.append(ch)
+            parsed.append((ch, prefix, ref))
+            conv_refs.add(ref)
         elif prefix == "task":
-            # task_id can be either a generation or completion; check both.
-            gen_row = (
-                await db.execute(
-                    select(Generation.id).where(
-                        Generation.id == ref, Generation.user_id == user_id
-                    )
-                )
-            ).first()
-            comp_row = None
-            if not gen_row:
-                comp_row = (
-                    await db.execute(
-                        select(Completion.id).where(
-                            Completion.id == ref, Completion.user_id == user_id
-                        )
-                    )
-                ).first()
-            video_row = None
-            if not gen_row and not comp_row:
-                video_row = (
-                    await db.execute(
-                        select(VideoGeneration.id).where(
-                            VideoGeneration.id == ref,
-                            VideoGeneration.user_id == user_id,
-                        )
-                    )
-                ).first()
-            if not gen_row and not comp_row and not video_row:
-                raise _http("forbidden_channel", f"task {ref} not owned", 403)
-            clean.append(ch)
+            parsed.append((ch, prefix, ref))
+            task_refs.add(ref)
         else:
             # unknown channel prefix — drop silently
             continue
+
+    owned_convs: set[str] = set()
+    if conv_refs:
+        rows = await db.execute(
+            select(Conversation.id).where(
+                Conversation.id.in_(conv_refs),
+                Conversation.user_id == user_id,
+                Conversation.deleted_at.is_(None),
+            )
+        )
+        owned_convs = set(rows.scalars().all())
+
+    owned_tasks: set[str] = set()
+    if task_refs:
+        gen_rows = await db.execute(
+            select(Generation.id).where(
+                Generation.id.in_(task_refs), Generation.user_id == user_id
+            )
+        )
+        owned_tasks.update(gen_rows.scalars().all())
+
+        completion_rows = await db.execute(
+            select(Completion.id).where(
+                Completion.id.in_(task_refs), Completion.user_id == user_id
+            )
+        )
+        owned_tasks.update(completion_rows.scalars().all())
+
+        video_rows = await db.execute(
+            select(VideoGeneration.id).where(
+                VideoGeneration.id.in_(task_refs),
+                VideoGeneration.user_id == user_id,
+            )
+        )
+        owned_tasks.update(video_rows.scalars().all())
+
+    clean: list[str] = []
+    for ch, prefix, ref in parsed:
+        if prefix == "user":
+            clean.append(ch)
+        elif prefix == "conv":
+            if ref not in owned_convs:
+                raise _http("forbidden_channel", f"conv {ref} not owned", 403)
+            clean.append(ch)
+        elif prefix == "task":
+            if ref not in owned_tasks:
+                raise _http("forbidden_channel", f"task {ref} not owned", 403)
+            clean.append(ch)
     return clean
 
 

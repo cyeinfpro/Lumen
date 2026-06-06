@@ -38,6 +38,7 @@ export interface GenerationSummary {
     url: string;
     mime?: string;
     display_url?: string;
+    preview_url?: string | null;
     thumb_url: string;
     width: number;
     height: number;
@@ -115,6 +116,9 @@ export function useStreamFeedQuery(
     },
     initialPageParam: undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    placeholderData: (previousData) => previousData,
+    staleTime: 20_000,
+    gcTime: 5 * 60_000,
   });
 }
 

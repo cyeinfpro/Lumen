@@ -129,7 +129,7 @@ interface ChatState {
   messagesError: string | null;
 
   // Composer 层面向用户暴露的最近一次错误（如 sendMessage 失败、会话创建失败）。
-  // 由 PromptComposer 渲染到红色提示条，避免错误被静默吞掉。
+  // 由桌面/移动 composer 渲染到红色提示条，避免错误被静默吞掉。
   composerError: string | null;
   setComposerError: (e: string | null) => void;
 
@@ -231,6 +231,8 @@ const COMPLETION_STREAM_FLUSH_MS = 64;
 const COMPLETION_PENDING_DELTA_TTL_MS = 10_000;
 const COMPLETION_PENDING_DELTA_MAX_ENTRIES = 1_000;
 const CONVERSATION_INDEX_LIMIT = 5_000;
+const CONVERSATION_HISTORY_CACHE_LIMIT = 32;
+const CONVERSATION_HISTORY_CACHE_TTL_MS = 90_000;
 const OPTIMISTIC_ALIAS_TTL_MS = 120_000;
 const COMPLETION_MESSAGE_ID_TTL_MS = 60 * 60 * 1000;
 
@@ -1547,6 +1549,20 @@ const _completionMessageAliases = new Map<
   { optimisticMessageId: string; expiresAt: number }
 >();
 
+interface ConversationHistoryCacheEntry {
+  messages: Message[];
+  generations: Record<string, Generation>;
+  imagesById: Record<string, GeneratedImage>;
+  messagesCursor: string | null;
+  messagesHasMore: boolean;
+  updatedAt: number;
+}
+
+const _conversationHistoryCache = new Map<
+  string,
+  ConversationHistoryCacheEntry
+>();
+
 interface PendingCompletionStreamPatch {
   msgId?: string;
   compId?: string;
@@ -1613,6 +1629,111 @@ function setBounded<K, V>(
   if (map.has(key)) map.delete(key);
   map.set(key, value);
   pruneMapToLimit(map, limit);
+}
+
+function cloneConversationHistoryCacheEntry(
+  entry: ConversationHistoryCacheEntry,
+): ConversationHistoryCacheEntry {
+  return {
+    messages: clonePlainValue(entry.messages),
+    generations: clonePlainValue(entry.generations),
+    imagesById: clonePlainValue(entry.imagesById),
+    messagesCursor: entry.messagesCursor,
+    messagesHasMore: entry.messagesHasMore,
+    updatedAt: entry.updatedAt,
+  };
+}
+
+function pickConversationImages(
+  messages: Message[],
+  generations: Record<string, Generation>,
+  imagesById: Record<string, GeneratedImage>,
+): Record<string, GeneratedImage> {
+  const imageIds = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      for (const att of msg.attachments) {
+        if (att.id) imageIds.add(att.id);
+        if (att.source_image_id) imageIds.add(att.source_image_id);
+      }
+    } else {
+      for (const genId of generationIdsOfMessage(msg)) {
+        const imageId = generations[genId]?.image?.id;
+        if (imageId) imageIds.add(imageId);
+      }
+    }
+  }
+
+  const picked: Record<string, GeneratedImage> = {};
+  for (const imageId of imageIds) {
+    const img = imagesById[imageId];
+    if (img) picked[imageId] = img;
+  }
+  return picked;
+}
+
+function makeConversationHistoryCacheEntry(
+  messages: Message[],
+  generations: Record<string, Generation>,
+  imagesById: Record<string, GeneratedImage>,
+  messagesCursor: string | null,
+  messagesHasMore: boolean,
+): ConversationHistoryCacheEntry {
+  const generationIds = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    for (const genId of generationIdsOfMessage(msg)) generationIds.add(genId);
+  }
+
+  const pickedGenerations: Record<string, Generation> = {};
+  for (const genId of generationIds) {
+    const gen = generations[genId];
+    if (gen) pickedGenerations[genId] = gen;
+  }
+
+  return {
+    messages: clonePlainValue(messages),
+    generations: clonePlainValue(pickedGenerations),
+    imagesById: clonePlainValue(
+      pickConversationImages(messages, pickedGenerations, imagesById),
+    ),
+    messagesCursor,
+    messagesHasMore,
+    updatedAt: Date.now(),
+  };
+}
+
+function rememberConversationHistoryCache(
+  convId: string,
+  entry: ConversationHistoryCacheEntry,
+): void {
+  setBounded(
+    _conversationHistoryCache,
+    convId,
+    cloneConversationHistoryCacheEntry(entry),
+    CONVERSATION_HISTORY_CACHE_LIMIT,
+  );
+}
+
+function readConversationHistoryCache(
+  convId: string | null | undefined,
+  now = Date.now(),
+): ConversationHistoryCacheEntry | null {
+  if (!convId) return null;
+  const entry = _conversationHistoryCache.get(convId);
+  if (!entry) return null;
+  if (now - entry.updatedAt > CONVERSATION_HISTORY_CACHE_TTL_MS) {
+    _conversationHistoryCache.delete(convId);
+    return null;
+  }
+  rememberConversationHistoryCache(convId, entry);
+  return cloneConversationHistoryCacheEntry(entry);
+}
+
+function invalidateConversationHistoryCache(
+  convId: string | null | undefined,
+): void {
+  if (convId) _conversationHistoryCache.delete(convId);
 }
 
 function pruneAliases(now?: number): void {
@@ -1877,6 +1998,7 @@ function clearConversationIndexes(): void {
   _completionMessageIds.clear();
   _generationIdAliases.clear();
   _completionMessageAliases.clear();
+  _conversationHistoryCache.clear();
 }
 
 function rememberMessagesForConversation(
@@ -2290,19 +2412,24 @@ function createChatStore() {
     setCurrentConv: (id) => {
       const previousConvId = get().currentConvId;
       if (previousConvId === id) return;
+      const cached = readConversationHistoryCache(id);
 
       // 会话切换时取消旧历史拉取和发送请求，避免旧响应回写到新会话。
       abortAllHistoryRequests();
       abortAllSendRequests();
 
-      set({
+      set((s) => ({
         currentConvId: id,
-        messages: [],
-        messagesCursor: null,
-        messagesHasMore: false,
+        messages: cached?.messages ?? [],
+        generations: cached
+          ? { ...s.generations, ...cached.generations }
+          : s.generations,
+        imagesById: cached ? { ...s.imagesById, ...cached.imagesById } : s.imagesById,
+        messagesCursor: cached?.messagesCursor ?? null,
+        messagesHasMore: cached?.messagesHasMore ?? false,
         messagesLoading: false,
         messagesError: null,
-      });
+      }));
       clearCompletionStreamBuffer();
       scheduleBase64Eviction();
     },
@@ -2544,11 +2671,22 @@ function createChatStore() {
       const ctl = new AbortController();
       _historyAborts.set(convId, ctl);
       const cursor = loadMore ? snapshot.messagesCursor : null;
-      set({
+      const cached = loadMore ? null : readConversationHistoryCache(convId);
+      set((s) => ({
         messagesLoading: true,
         messagesError: null,
-        ...(loadMore ? {} : { messagesCursor: null, messagesHasMore: false }),
-      });
+        ...(loadMore
+          ? {}
+          : cached && s.currentConvId === convId
+            ? {
+                messages: cached.messages,
+                generations: { ...s.generations, ...cached.generations },
+                imagesById: { ...s.imagesById, ...cached.imagesById },
+                messagesCursor: cached.messagesCursor,
+                messagesHasMore: cached.messagesHasMore,
+              }
+            : { messagesCursor: null, messagesHasMore: false }),
+      }));
 
       try {
         let resp = await apiListMessages(convId, {
@@ -2581,6 +2719,7 @@ function createChatStore() {
           get().generations,
           get().imagesById,
         );
+        let cacheEntry: ConversationHistoryCacheEntry | null = null;
         set((s) => {
           if (s.currentConvId !== convId) {
             logWarn(
@@ -2599,16 +2738,25 @@ function createChatStore() {
           const nextCursor = resp.next_cursor ?? null;
           const gotNewMessages =
             nextMessages.length > previousCount || !loadMore;
+          const messagesHasMore = Boolean(nextCursor) && gotNewMessages;
+          cacheEntry = makeConversationHistoryCacheEntry(
+            nextMessages,
+            built.generations,
+            built.imagesById,
+            nextCursor,
+            messagesHasMore,
+          );
           return {
             messages: nextMessages,
             generations: built.generations,
             imagesById: built.imagesById,
             messagesCursor: nextCursor,
-            messagesHasMore: Boolean(nextCursor) && gotNewMessages,
+            messagesHasMore,
             messagesLoading: false,
             messagesError: null,
           };
         });
+        if (cacheEntry) rememberConversationHistoryCache(convId, cacheEntry);
       } catch (err) {
         // AbortError：被新切换覆盖，静默放弃即可。
         if (isHistoryRequestAbort(err, ctl.signal)) {
@@ -2807,6 +2955,7 @@ function createChatStore() {
       for (const id of optimisticGenIds) {
         setBounded(_generationConvIds, id, convId);
       }
+      invalidateConversationHistoryCache(convId);
 
       let optimisticGens: Record<string, Generation> = {};
       if (isImage && optimisticGenIds.length > 0) {
@@ -3275,7 +3424,7 @@ function createChatStore() {
         setBounded(_messageConvIds, out.assistant_message_id, convId);
         rememberCompletionMessage(completionId, out.assistant_message_id);
 
-        // 同时为 image intent 占位一个 queued generation，让 GenerationView 立刻显示骨架
+        // 同时为 image intent 占位一个 queued generation，让当前会话画布立刻显示骨架。
         let pendingGen: Generation | undefined;
         if (isImage && newGenId) {
           const parentUser = state.messages.find(
@@ -3668,17 +3817,20 @@ function createChatStore() {
     appendUserMessage: (msg) => {
       const convId = get().currentConvId;
       if (convId) setBounded(_messageConvIds, msg.id, convId);
+      invalidateConversationHistoryCache(convId);
       set((s) => ({ messages: [...s.messages, msg] }));
     },
     appendAssistantMessage: (msg) => {
       const convId = get().currentConvId;
       if (convId) setBounded(_messageConvIds, msg.id, convId);
       rememberCompletionMessage(msg.completion_id, msg.id);
+      invalidateConversationHistoryCache(convId);
       set((s) => ({ messages: [...s.messages, msg] }));
     },
     upsertGeneration: (gen) => {
       const convId = _messageConvIds.get(gen.message_id) ?? get().currentConvId;
       if (convId) rememberGenerationForConversation(convId, gen);
+      invalidateConversationHistoryCache(convId);
       set((s) => ({ generations: { ...s.generations, [gen.id]: gen } }));
     },
     attachImageToGeneration: (generationId, img) => {
@@ -3687,7 +3839,10 @@ function createChatStore() {
         const gen = s.generations[generationId];
         if (!gen) return s;
         const convId = generationConversationId(s, gen);
-        if (convId) setBounded(_imageConvIds, img.id, convId);
+        if (convId) {
+          setBounded(_imageConvIds, img.id, convId);
+          invalidateConversationHistoryCache(convId);
+        }
         return {
           generations: {
             ...s.generations,
@@ -3710,6 +3865,7 @@ function createChatStore() {
       const eventNow = Date.now();
       const payload = ssePayloadRecord(eventName, data);
       if (!payload) return;
+      invalidateConversationHistoryCache(get().currentConvId);
       const get_id = (key: string): string | undefined => {
         const v = payload[key];
         return typeof v === "string" ? v : undefined;

@@ -1,6 +1,6 @@
 [package]
 name = "lumen-desktop"
-version = "1.1.88"
+version = "1.1.89"
 edition = "2021"
 description = "Lumen desktop supervisor for macOS and Windows"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -27,7 +27,6 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-store = "2"
 tauri-plugin-updater = "2"
-thiserror = "2"
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
 keyring = "3"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }

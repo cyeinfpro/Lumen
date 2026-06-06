@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
+from typing import Any
 
 from pydantic import BaseModel
 
 from ..redis_client import get_redis
-
-
-T = TypeVar("T")
 
 
 def derive_idempotency_key(*parts: object) -> str:
@@ -48,21 +44,3 @@ async def cache_json(namespace: str, key: str, value: Any, ttl_sec: int) -> None
         await get_redis().set(f"{namespace}:{key}", _dump(value), ex=ttl_sec)
     except Exception:
         return
-
-
-async def with_idempotency(
-    *,
-    namespace: str,
-    key: str,
-    ttl_sec: int,
-    fn: Callable[[], Awaitable[T]],
-    model: type[BaseModel] | None = None,
-) -> tuple[T, bool]:
-    cached = await get_cached_json(namespace, key)
-    if cached is not None and model is not None:
-        return model.model_validate(cached), True  # type: ignore[return-value]
-    if cached is not None:
-        return cached, True  # type: ignore[return-value]
-    result = await fn()
-    await cache_json(namespace, key, result, ttl_sec)
-    return result, False

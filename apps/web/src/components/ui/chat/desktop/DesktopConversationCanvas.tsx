@@ -63,7 +63,7 @@ import { DesktopSceneDivider } from "./DesktopSceneDivider";
 
 const EASE_OUT_EXPO = [0.16, 1, 0.3, 1] as const;
 const STICK_TO_BOTTOM_PX = 120;
-// 与 ConversationCanvas 一致：从 80 降到 50（P2-UX）。
+// 与移动会话画布一致：从 80 降到 50（P2-UX）。
 const VIRTUALIZE_AFTER = 50;
 
 interface DesktopConversationCanvasProps {

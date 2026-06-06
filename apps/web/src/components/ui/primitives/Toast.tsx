@@ -196,7 +196,7 @@ export function ToastViewport() {
         "fixed z-[120] flex flex-col gap-2",
         // 桌面：右下角
         "sm:bottom-4 sm:right-4 sm:items-end",
-        // 移动端：底部居中，留左右 padding；safe-area 避免被 home indicator / PromptComposer 挡住
+        // 移动端：底部居中，留左右 padding；safe-area 避免被 home indicator / composer 挡住
         "max-sm:left-0 max-sm:right-0 max-sm:items-center max-sm:px-4",
         "max-sm:bottom-[calc(var(--mobile-tabbar-height)+0.75rem)]",
         "pointer-events-none",

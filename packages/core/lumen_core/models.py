@@ -1148,6 +1148,13 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_images_parent", "parent_image_id"),
         Index("ix_images_user_alive_created", "user_id", "deleted_at", "created_at"),
+        Index(
+            "ix_images_owner_alive_created",
+            "owner_generation_id",
+            "deleted_at",
+            "created_at",
+            "id",
+        ),
         UniqueConstraint("storage_key", name="uq_images_storage_key"),
     )
 
@@ -1188,6 +1195,13 @@ class Video(Base, TimestampMixin, SoftDeleteMixin):
         UniqueConstraint("storage_key", name="uq_videos_storage_key"),
         UniqueConstraint("poster_storage_key", name="uq_videos_poster_storage_key"),
         Index("ix_videos_user_alive_created", "user_id", "deleted_at", "created_at"),
+        Index(
+            "ix_videos_owner_alive_created",
+            "owner_generation_id",
+            "deleted_at",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)

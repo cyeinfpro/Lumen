@@ -1,12 +1,12 @@
 import { deepEqual, equal } from "node:assert/strict";
 import { test } from "node:test";
 
-import {
+const {
   findInvalidImageMentionLabels,
   insertImageMentionToken,
   remapPromptImageMentions,
   serializePromptImageMentionsForRequest,
-} from "./promptImageMentions";
+} = await import(new URL("./promptImageMentions.ts", import.meta.url).href);
 
 const a = { id: "img-a" };
 const b = { id: "img-b" };

@@ -9,7 +9,7 @@ mod sidecar;
 
 use anyhow::Context;
 use backup::{DesktopBackupOut, DesktopRestorePlanOut, PendingRestoreStatus};
-use diagnostics::{DiagnosticBundleOut, DiagnosticSnapshot};
+use diagnostics::DiagnosticBundleOut;
 use docker_import::{DesktopDockerImportPlanOut, PendingDockerImportStatus};
 use power::SleepGuard;
 use serde::Serialize;
@@ -201,21 +201,6 @@ fn open_data_dir(state: State<'_, DesktopState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn diagnostics_snapshot(state: State<'_, DesktopState>) -> Result<DiagnosticSnapshot, String> {
-    let mut guard = state
-        .supervisor
-        .lock()
-        .map_err(|_| "state poisoned".to_string())?;
-    let sidecar_count = guard.sidecar_statuses().len();
-    Ok(DiagnosticSnapshot {
-        data_root: guard.runtime.data_root.clone(),
-        logs_root: guard.runtime.data_root.join("data/logs"),
-        provider_runtime_file: guard.runtime.provider_runtime_file.clone(),
-        sidecar_count,
-    })
-}
-
-#[tauri::command]
 fn export_diagnostics_bundle(
     state: State<'_, DesktopState>,
 ) -> Result<DiagnosticBundleOut, String> {
@@ -375,11 +360,6 @@ fn restart_desktop_app(
     drop(guard);
     app.request_restart();
     Ok(())
-}
-
-#[tauri::command]
-fn quit_desktop_app(app: tauri::AppHandle, state: State<'_, DesktopState>) -> Result<(), String> {
-    request_desktop_exit(&app, &state)
 }
 
 #[tauri::command]
@@ -558,7 +538,6 @@ fn main() {
             set_proxy_secret,
             refresh_provider_runtime,
             open_data_dir,
-            diagnostics_snapshot,
             export_diagnostics_bundle,
             export_desktop_backup,
             desktop_restore_status,
@@ -571,8 +550,7 @@ fn main() {
             restart_desktop_app,
             retry_desktop_startup,
             check_desktop_update,
-            install_desktop_update,
-            quit_desktop_app
+            install_desktop_update
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {

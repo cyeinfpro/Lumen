@@ -39,11 +39,6 @@ description = "Enables the desktop_status command."
 commands.allow = ["desktop_status"]
 
 [[permission]]
-identifier = "allow-diagnostics-snapshot"
-description = "Enables the diagnostics_snapshot command."
-commands.allow = ["diagnostics_snapshot"]
-
-[[permission]]
 identifier = "allow-export-desktop-backup"
 description = "Enables the export_desktop_backup command."
 commands.allow = ["export_desktop_backup"]
@@ -62,11 +57,6 @@ commands.allow = ["install_desktop_update"]
 identifier = "allow-open-data-dir"
 description = "Enables the open_data_dir command."
 commands.allow = ["open_data_dir"]
-
-[[permission]]
-identifier = "allow-quit-desktop-app"
-description = "Enables the quit_desktop_app command."
-commands.allow = ["quit_desktop_app"]
 
 [[permission]]
 identifier = "allow-refresh-provider-runtime"

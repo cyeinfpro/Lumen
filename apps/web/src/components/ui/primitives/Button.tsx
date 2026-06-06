@@ -43,7 +43,7 @@ const VARIANTS: Record<Variant, string> = {
   outline:
     "bg-transparent text-[var(--fg-0)] border border-[var(--border)] " +
     "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
-  // glass: 浮层透明按钮（用于图片卡片浮动操作、AttachmentTray 等）。
+  // glass: 浮层透明按钮（用于图片卡片浮动操作、composer 附件操作等）。
   glass:
     "bg-[var(--bg-0)]/70 backdrop-blur-md text-[var(--fg-0)] hover:bg-[var(--bg-1)]/85 " +
     "border border-[var(--border-strong)] hover:border-[var(--border-strong)]",
