@@ -403,18 +403,21 @@ def test_events_task_ids_include_video_generation_id() -> None:
 @pytest.mark.asyncio
 async def test_events_validate_channels_accepts_owned_video_generation() -> None:
     class Result:
-        def __init__(self, row):
-            self.row = row
+        def __init__(self, rows):
+            self.rows = rows
 
-        def first(self):
-            return self.row
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
 
     class Db:
         async def execute(self, statement):
             sql = str(statement)
             if "FROM video_generations" in sql:
-                return Result(("video-1",))
-            return Result(None)
+                return Result(["video-1"])
+            return Result([])
 
     clean = await events._validate_channels(  # noqa: SLF001
         ["task:video-1"],
@@ -428,8 +431,11 @@ async def test_events_validate_channels_accepts_owned_video_generation() -> None
 @pytest.mark.asyncio
 async def test_events_validate_channels_rejects_unowned_video_generation() -> None:
     class Result:
-        def first(self):
-            return None
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
 
     class Db:
         async def execute(self, _statement):

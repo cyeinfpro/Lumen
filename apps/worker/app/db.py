@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -31,8 +30,3 @@ def _build_engine():
 
 engine = _build_engine()
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-
-async def session_scope() -> AsyncIterator[AsyncSession]:
-    async with SessionLocal() as s:
-        yield s

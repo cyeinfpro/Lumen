@@ -2119,7 +2119,7 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "lumen-desktop"
-version = "1.1.88"
+version = "1.1.89"
 dependencies = [
  "anyhow",
  "keyring",
@@ -2140,7 +2140,6 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-store",
  "tauri-plugin-updater",
- "thiserror 2.0.18",
  "tokio",
  "windows-sys 0.59.0",
  "zip 0.6.6",

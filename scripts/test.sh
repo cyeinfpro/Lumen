@@ -63,6 +63,10 @@ echo "==> image-job/tests"
 uv run pytest image-job/tests "$@"
 
 echo
+echo "==> tools/mock-image-upstream/tests"
+uv run pytest tools/mock-image-upstream/tests "$@"
+
+echo
 echo "==> tests (operations scripts)"
 uv run pytest tests "$@"
 

@@ -56,9 +56,8 @@ def _make_stream(events: list[dict[str, Any]]):
 
 def _make_failing_stream(exc: BaseException):
     async def _stream(_body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
-        # 必须先 yield 才能让 `async for` 触发；不 yield 就抛即可。
-        if False:
-            yield {}
+        for event in ():
+            yield event
         raise exc
 
     return _stream
@@ -256,8 +255,8 @@ async def test_probe_timeout(monkeypatch: pytest.MonkeyPatch, probe_model: str) 
 
     async def _slow_stream(_body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         await asyncio.sleep(10)  # 远超我们要 patch 的超时
-        if False:
-            yield {}
+        for event in ():
+            yield event
 
     monkeypatch.setattr(upstream_mod, "stream_completion", _slow_stream)
     # 把超时缩到很短，避免测试本身慢

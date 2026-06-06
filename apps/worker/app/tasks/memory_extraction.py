@@ -44,7 +44,6 @@ from ..sse_publish import publish_event
 _UNDO_TTL_SECONDS = 300
 _STAGING_TTL_DAYS = 7
 _MEMORY_EVENT = "memory.writes"
-_SETTINGS_EVENT = "account_settings_updated"
 _MEMORY_EXTRACTION_MODEL = "gpt-5.4-mini"
 _EMBEDDING_MODEL = "text-embedding-3-large"
 _LLM_EXTRACTION_TIMEOUT_S = 25.0
@@ -128,10 +127,6 @@ async def _default_scope(session: Any, user_id: str) -> UserMemoryScope:
     session.add(scope)
     await session.flush()
     return scope
-
-
-def _embedding(content: str) -> str:
-    return embedding_literal(deterministic_embedding(content))
 
 
 def _responses_text(payload: dict[str, Any]) -> str:
@@ -989,16 +984,6 @@ async def cleanup_memory(ctx: dict[str, Any]) -> None:
         for memory in old_deleted:
             await session.delete(memory)
         await session.commit()
-
-
-async def publish_account_settings_updated(redis: Any, user_id: str) -> None:
-    await publish_event(
-        redis,
-        user_id,
-        f"user:{user_id}",
-        _SETTINGS_EVENT,
-        {"user_id": user_id},
-    )
 
 
 async def memory_reembed(

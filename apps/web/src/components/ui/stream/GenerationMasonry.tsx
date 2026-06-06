@@ -158,6 +158,7 @@ function GenerationMasonryComponent({
                       className="stream-tile-shell animate-stream-tile-in"
                       style={{
                         animationDelay: `${Math.min(index * 26, 360)}ms`,
+                        contentVisibility: "auto",
                         containIntrinsicSize: `1px ${Math.max(240, Math.min(760, estimatedHeight / 2))}px`,
                       }}
                     >

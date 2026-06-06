@@ -239,27 +239,6 @@ async def _release_provider_slot(redis: Any, provider_name: str, task_id: str) -
         )
 
 
-async def _touch_provider_slot(redis: Any, provider_name: str, task_id: str) -> None:
-    try:
-        zkey = f"{_VIDEO_PROVIDER_SLOT_PREFIX}{provider_name}"
-        await redis.zadd(zkey, {task_id: time.time()})
-        await redis.expire(zkey, _VIDEO_PROVIDER_SLOT_TTL_S)
-    except Exception:
-        logger.debug(
-            "video provider slot touch failed provider=%s task=%s",
-            provider_name,
-            task_id,
-            exc_info=True,
-        )
-
-
-async def _release_provider_slot_for_generation(
-    redis: Any, generation: VideoGeneration
-) -> None:
-    if generation.provider_name:
-        await _release_provider_slot(redis, generation.provider_name, generation.id)
-
-
 async def _publish(
     redis: Any, generation: VideoGeneration, event_name: str, **extra: Any
 ) -> None:

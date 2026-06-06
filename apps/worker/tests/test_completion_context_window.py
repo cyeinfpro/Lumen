@@ -203,8 +203,8 @@ async def test_context_window_truncates_by_token_budget_from_oldest_side(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_compression")
 async def test_compression_injects_sticky_and_existing_summary(
-    enable_compression: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(completion, "CONTEXT_INPUT_TOKEN_BUDGET", 220)
@@ -296,8 +296,8 @@ async def test_manual_summary_is_used_even_below_auto_trigger(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_compression")
 async def test_compression_calls_summary_service_when_missing(
-    enable_compression: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(completion, "CONTEXT_INPUT_TOKEN_BUDGET", 220)
@@ -348,8 +348,8 @@ async def test_compression_calls_summary_service_when_missing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_compression")
 async def test_compression_failure_fallback_still_keeps_current_user_message(
-    enable_compression: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(completion, "CONTEXT_INPUT_TOKEN_BUDGET", 80)

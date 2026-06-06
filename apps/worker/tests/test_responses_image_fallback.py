@@ -1738,8 +1738,9 @@ async def test_responses_image_stream_uses_httpx_when_flag_set(
 ) -> None:
     # 关键断言：use_httpx=True 时必须完全跳过 _iter_sse_curl，走 httpx 路径
     async def curl_must_not_run(**_: Any):
+        for event in ():
+            yield event
         raise AssertionError("_iter_sse_curl must not be called when use_httpx=True")
-        yield  # 让它成为 async generator
 
     monkeypatch.setattr(upstream, "_iter_sse_curl", curl_must_not_run)
 

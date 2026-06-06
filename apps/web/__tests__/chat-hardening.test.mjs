@@ -71,6 +71,17 @@ test("upgrade and inpaint lazy UI keep visible recovery states", () => {
   match(lazyInpaint, /z-\[var\(--z-dialog\)\] bg-black\/60/);
 });
 
+test("image prewarm cache is bounded and concurrency-limited", () => {
+  const preload = source("src/lib/imagePreload.ts");
+
+  match(preload, /IMAGE_CACHE_LIMIT = 384/);
+  match(preload, /VIDEO_CACHE_LIMIT = 96/);
+  match(preload, /IMAGE_PREWARM_CONCURRENCY = 3/);
+  match(preload, /VIDEO_PREWARM_CONCURRENCY = 1/);
+  match(preload, /entry\.status === "fulfilled"/);
+  match(preload, /map\.delete\(victim\)/);
+});
+
 test("SSE recovery requests are coalesced instead of dropped while busy", () => {
   const provider = source("src/components/SSEProvider.tsx");
 
@@ -81,12 +92,28 @@ test("SSE recovery requests are coalesced instead of dropped while busy", () => 
   match(provider, /hydrateTasks: current\.hydrateTasks \|\| next\.hydrateTasks/);
 });
 
-test("prompt enhance ignores stale chunks after abort or replacement", () => {
-  const composer = source("src/components/ui/PromptComposer.tsx");
+test("composer pills abort prompt enhancement and guard duplicate submits", () => {
+  const desktop = source("src/components/ui/composer/desktop/DesktopComposerPill.tsx");
+  const mobile = source("src/components/ui/composer/mobile/MobileComposerPill.tsx");
 
-  match(composer, /enhanceStreamIdRef/);
-  match(composer, /enhanceStreamIdRef\.current !== streamId/);
-  match(composer, /enhanceAbortRef\.current !== ctl/);
+  for (const composer of [desktop, mobile]) {
+    match(composer, /const enhanceAbortRef = useRef<AbortController \| null>\(null\)/);
+    match(composer, /enhanceAbortRef\.current\?\.abort\(\)/);
+    match(composer, /if \(ctl\.signal\.aborted\) return;/);
+    match(composer, /const submittingRef = useRef\(false\)/);
+    match(composer, /if \(submittingRef\.current\) return;/);
+  }
+});
+
+test("desktop web build uses runtime env without unsupported config flag", () => {
+  const buildDesktop = source("scripts/build-desktop.mjs");
+  const nextConfig = source("next.config.ts");
+
+  match(buildDesktop, /NEXT_PUBLIC_LUMEN_RUNTIME = "desktop"/);
+  match(buildDesktop, /\[nextCli, "build"\]/);
+  doesNotMatch(buildDesktop, /"--config"/);
+  match(nextConfig, /isDesktopRuntime = process\.env\.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop"/);
+  match(nextConfig, /unoptimized: isDesktopRuntime/);
 });
 
 test("completion status line renders new tool terminal states", () => {

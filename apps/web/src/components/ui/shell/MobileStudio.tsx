@@ -130,7 +130,7 @@ export function MobileStudio() {
   }, [scrollTo, messages.length]);
 
   // Stick-to-bottom：切换会话 / 新消息到达时滚到底，除非用户向上滚了一段。
-  // 与 DesktopStudio 的 ConversationCanvas 行为一致（stickToBottomRef）。
+  // 与桌面会话画布行为一致（stickToBottomRef）。
   const stickToBottomRef = useRef(true);
   useEffect(() => {
     const el = scrollRef.current;

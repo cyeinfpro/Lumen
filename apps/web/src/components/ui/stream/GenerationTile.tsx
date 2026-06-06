@@ -29,7 +29,7 @@ import { useChatStore } from "@/store/useChatStore";
 import type { GeneratedImage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { imageVariantUrl } from "@/lib/apiClient";
-import { prewarmImage } from "@/lib/imagePreload";
+import { prewarmImages } from "@/lib/imagePreload";
 
 export interface GenerationTileProps {
   item: GenerationSummary;
@@ -83,7 +83,7 @@ function buildGeneratedImage(item: GenerationSummary): GeneratedImage {
     data_url: item.image.url,
     mime: imageMimeFor(item),
     display_url: item.image.display_url ?? item.image.url,
-    preview_url: item.image.display_url ?? item.image.thumb_url,
+    preview_url: item.image.preview_url ?? item.image.display_url ?? item.image.thumb_url,
     thumb_url: item.image.thumb_url,
     width: item.image.width,
     height: item.image.height,
@@ -110,6 +110,7 @@ function imageSourcesFor(item: GenerationSummary): string[] {
   const seen = new Set<string>();
   const sources = [
     item.image.thumb_url,
+    item.image.preview_url,
     item.image.display_url,
     item.image.url,
   ].filter((src): src is string => Boolean(src && src.trim()));
@@ -120,12 +121,22 @@ function imageSourcesFor(item: GenerationSummary): string[] {
   });
 }
 
-function localVariantSrcSet(imageId: string): string {
-  return [
-    `${imageVariantUrl(imageId, "thumb256")} 256w`,
-    `${imageVariantUrl(imageId, "preview1024")} 1024w`,
-    `${imageVariantUrl(imageId, "display2048")} 2048w`,
-  ].join(", ");
+function imageSrcSetFor(item: GenerationSummary): string | undefined {
+  const candidates: Array<[string | null | undefined, number]> = [
+    [item.image.thumb_url, 256],
+    [item.image.preview_url, 1024],
+  ];
+  const seen = new Set<string>();
+  const srcSet = candidates
+    .filter(([src]) => Boolean(src?.trim()))
+    .filter(([src]) => {
+      const value = src as string;
+      if (seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    })
+    .map(([src, width]) => `${src} ${width}w`);
+  return srcSet.length > 0 ? srcSet.join(", ") : undefined;
 }
 
 function GenerationTileComponent({
@@ -151,10 +162,17 @@ function GenerationTileComponent({
   const imageSources = useMemo(() => imageSourcesFor(item), [item]);
   const imageSrc = imageSources[sourceIndex] ?? null;
   const imageFailed = imageSources.length === 0 || sourceIndex >= imageSources.length;
-  const imageSrcSet = useMemo(() => localVariantSrcSet(imageId), [imageId]);
+  const imageSrcSet = useMemo(() => imageSrcSetFor(item), [item]);
   const lightboxPreview = useMemo(
-    () => item.image.display_url ?? imageVariantUrl(imageId, "display2048"),
-    [imageId, item.image.display_url],
+    () =>
+      item.image.display_url ??
+      item.image.preview_url ??
+      imageVariantUrl(imageId, "display2048"),
+    [imageId, item.image.display_url, item.image.preview_url],
+  );
+  const lightboxPrewarmSources = useMemo(
+    () => [lightboxPreview, item.image.preview_url],
+    [item.image.preview_url, lightboxPreview],
   );
 
   useEffect(() => {
@@ -167,7 +185,7 @@ function GenerationTileComponent({
   const onPointerDown = useCallback(
     () => {
       if (selectionMode) return;
-      prewarmImage(lightboxPreview);
+      prewarmImages(lightboxPrewarmSources, 2);
       longPressed.current = false;
       if (pressTimer.current) clearTimeout(pressTimer.current);
       pressTimer.current = setTimeout(() => {
@@ -180,13 +198,13 @@ function GenerationTileComponent({
         }
       }, LONG_PRESS_MS);
     },
-    [lightboxPreview, selectionMode],
+    [lightboxPrewarmSources, selectionMode],
   );
 
   const onPreviewIntent = useCallback(() => {
     if (selectionMode) return;
-    prewarmImage(lightboxPreview);
-  }, [lightboxPreview, selectionMode]);
+    prewarmImages(lightboxPrewarmSources, 2);
+  }, [lightboxPrewarmSources, selectionMode]);
 
   const clearPress = useCallback(() => {
     if (pressTimer.current) {
@@ -205,6 +223,7 @@ function GenerationTileComponent({
       return;
     }
     setTapped(true);
+    prewarmImages(lightboxPrewarmSources, 2);
     if (tapTimer.current) clearTimeout(tapTimer.current);
     tapTimer.current = setTimeout(() => setTapped(false), TAP_FEEDBACK_MS);
     const el = rootRef.current;
@@ -212,7 +231,14 @@ function GenerationTileComponent({
     const img = el.querySelector("img");
     const rect = (img ?? el).getBoundingClientRect();
     onOpen(item.id, rect);
-  }, [imageId, item.id, onOpen, onToggleSelect, selectionMode]);
+  }, [
+    imageId,
+    item.id,
+    lightboxPrewarmSources,
+    onOpen,
+    onToggleSelect,
+    selectionMode,
+  ]);
 
   const onKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "Enter" && e.key !== " ") return;

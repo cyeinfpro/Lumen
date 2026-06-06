@@ -303,8 +303,8 @@ class _NonSseJsonResponse:
 
     async def aiter_lines(self):
         # 不应被调用；JSON fallback 不会进入 SSE 解析
-        if False:
-            yield ""
+        for line in ():
+            yield line
 
 
 class _StubClient:
@@ -330,8 +330,9 @@ def _patch_image_stream_runtime(
         return upstream._TimeoutConfig(connect=10.0, read=180.0, write=30.0)
 
     async def curl_must_not_run(**_: Any):
+        for event in ():
+            yield event
         raise AssertionError("curl path must not run for httpx test")
-        yield  # pragma: no cover - 让函数成为 async generator
 
     monkeypatch.setattr(upstream, "_resolve_runtime", fake_resolve_runtime)
     monkeypatch.setattr(upstream, "_get_client", fake_get_client)

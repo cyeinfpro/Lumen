@@ -8,14 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DiagnosticSnapshot {
-    pub data_root: PathBuf,
-    pub logs_root: PathBuf,
-    pub provider_runtime_file: PathBuf,
-    pub sidecar_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct DiagnosticBundleOut {
     pub path: PathBuf,
     pub bytes: u64,

@@ -64,6 +64,7 @@ class GenerationImageOut(BaseModel):
     url: str
     mime: str
     display_url: str
+    preview_url: str | None = None
     thumb_url: str
     width: int
     height: int
@@ -340,13 +341,15 @@ async def list_generation_feed(
             continue
 
         variant_kinds = kinds_by_image.get(img.id, set())
-        # 优先 preview1024 作为 thumb；否则 thumb256；否则退回 binary。
-        if "preview1024" in variant_kinds:
-            thumb_url = f"/api/images/{img.id}/variants/preview1024"
-        elif "thumb256" in variant_kinds:
+        preview_url = (
+            f"/api/images/{img.id}/variants/preview1024"
+            if "preview1024" in variant_kinds
+            else None
+        )
+        if "thumb256" in variant_kinds:
             thumb_url = f"/api/images/{img.id}/variants/thumb256"
         else:
-            thumb_url = f"/api/images/{img.id}/binary"
+            thumb_url = preview_url or f"/api/images/{img.id}/binary"
 
         upstream_request = (
             g.upstream_request if isinstance(g.upstream_request, dict) else {}
@@ -378,6 +381,7 @@ async def list_generation_feed(
                     url=f"/api/images/{img.id}/binary",
                     mime=img.mime,
                     display_url=f"/api/images/{img.id}/variants/display2048",
+                    preview_url=preview_url,
                     thumb_url=thumb_url,
                     width=img.width,
                     height=img.height,
