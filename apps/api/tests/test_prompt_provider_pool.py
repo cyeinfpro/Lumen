@@ -65,6 +65,127 @@ def test_prompt_enhance_normalizes_responses_url() -> None:
     )
 
 
+def test_video_prompt_enhance_body_uses_media_content() -> None:
+    from app.routes import prompts
+
+    content = [
+        {"type": "input_text", "text": "视频提示词"},
+        {"type": "input_image", "image_url": "https://example.com/ref.png"},
+    ]
+
+    body = prompts._build_enhance_body(  # noqa: SLF001
+        "",
+        prompts._ENHANCE_ATTEMPTS[0],  # noqa: SLF001
+        system_prompt=prompts.VIDEO_ENHANCE_SYSTEM_PROMPT,
+        content=content,
+        metadata={"purpose": "video_prompt_enhance"},
+    )
+
+    assert "AI video generation" in body["instructions"]
+    assert body["input"][0]["content"] == content
+    assert body["metadata"] == {"purpose": "video_prompt_enhance"}
+
+
+@pytest.mark.asyncio
+async def test_video_prompt_enhance_content_accepts_reference_only_input() -> None:
+    from app.routes import prompts
+    from lumen_core.schemas import VideoReferenceMediaIn
+
+    body = prompts.VideoEnhanceIn(
+        text="",
+        action="reference",
+        reference_media=[
+            VideoReferenceMediaIn(
+                kind="image",
+                url="https://example.com/ref.png",
+                label="产品图",
+            ),
+            VideoReferenceMediaIn(
+                kind="video",
+                url="https://example.com/motion.mp4",
+                label="动作参考",
+            ),
+        ],
+    )
+
+    content, token_changed = await prompts._build_video_enhance_content(  # noqa: SLF001
+        body,
+        request=object(),  # type: ignore[arg-type]
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+    )
+
+    assert token_changed is False
+    assert {"type": "input_image", "image_url": "https://example.com/ref.png"} in content
+    assert any(
+        item.get("type") == "input_text" and "https://example.com/motion.mp4" in item.get("text", "")
+        for item in content
+    )
+
+
+def test_video_prompt_enhance_media_budget_downgrades_large_data_urls() -> None:
+    from app.routes import prompts
+
+    content: list[dict[str, Any]] = []
+    small_url = "data:image/png;base64,abc"
+    appended, used_bytes = prompts._append_input_image_with_budget(  # noqa: SLF001
+        content,
+        small_url,
+        media_payload_bytes=0,
+    )
+
+    assert appended is True
+    assert content == [{"type": "input_image", "image_url": small_url}]
+
+    huge_url = (
+        "data:image/png;base64,"
+        + "a" * (prompts._PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES + 1)  # noqa: SLF001
+    )
+    appended, next_used_bytes = prompts._append_input_image_with_budget(  # noqa: SLF001
+        content,
+        huge_url,
+        media_payload_bytes=used_bytes,
+    )
+
+    assert appended is False
+    assert next_used_bytes == used_bytes
+    assert all(item.get("image_url") != huge_url for item in content)
+
+
+@pytest.mark.asyncio
+async def test_video_prompt_enhance_content_does_not_echo_large_data_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.schemas import VideoReferenceMediaIn
+
+    monkeypatch.setattr(prompts, "_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES", 64)
+    huge_url = "data:image/png;base64," + "a" * 128
+    body = prompts.VideoEnhanceIn(
+        text="",
+        action="reference",
+        reference_media=[
+            VideoReferenceMediaIn(kind="image", url=huge_url, label="大图"),
+        ],
+    )
+
+    content, token_changed = await prompts._build_video_enhance_content(  # noqa: SLF001
+        body,
+        request=object(),  # type: ignore[arg-type]
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+    )
+
+    assert token_changed is False
+    assert all(item.get("image_url") != huge_url for item in content)
+    assert all(huge_url not in item.get("text", "") for item in content)
+    assert any(
+        item.get("type") == "input_text"
+        and "外部图片数据 URL 过大" in item.get("text", "")
+        for item in content
+    )
+
+
 @pytest.mark.asyncio
 async def test_prompt_enhance_resolves_provider_pool_without_legacy_merge(
     monkeypatch: pytest.MonkeyPatch,

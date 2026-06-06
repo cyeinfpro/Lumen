@@ -64,6 +64,7 @@ import type {
   VideoCreateIn,
   VideoGenerationOut,
   VideoGenerationsOut,
+  VideoPromptEnhanceIn,
   VideoOptionsOut,
   VideoProvidersOut,
   VideoProvidersUpdateIn,
@@ -1579,6 +1580,10 @@ export function videoBinaryUrl(videoId: string): string {
   return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/binary`;
 }
 
+export function videoDownloadUrl(videoId: string): string {
+  return `${videoBinaryUrl(videoId)}?download=1`;
+}
+
 export function videoPosterUrl(videoId: string): string {
   return `${API_BASE.replace(/\/$/, "")}/videos/${encodeURIComponent(videoId)}/poster`;
 }
@@ -1810,29 +1815,101 @@ function createSSEDataParser(onData: (data: string) => void): {
   return { feed, flush };
 }
 
-export async function enhancePrompt(
-  text: string,
+async function streamApiErrorFromResponse(
+  res: Response,
+  fallbackCode: string,
+): Promise<ApiError> {
+  const contentType = res.headers.get("content-type") ?? "";
+  const payload = contentType.includes("application/json")
+    ? await res.json().catch(() => null)
+    : await res.text().catch(() => null);
+  let code = fallbackCode;
+  let message = `HTTP ${res.status}`;
+
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "error" in payload &&
+    typeof (payload as { error: unknown }).error === "object" &&
+    (payload as { error: unknown }).error !== null
+  ) {
+    const err = (payload as { error: { code?: unknown; message?: unknown } }).error;
+    if (typeof err.code === "string" && err.code.trim()) code = err.code;
+    if (typeof err.message === "string" && err.message.trim()) {
+      message = err.message;
+    }
+  } else if (
+    payload &&
+    typeof payload === "object" &&
+    "detail" in payload
+  ) {
+    const detail = (payload as { detail?: unknown }).detail;
+    if (typeof detail === "string" && detail.trim()) {
+      message = detail;
+    } else if (
+      detail &&
+      typeof detail === "object" &&
+      "error" in detail &&
+      typeof (detail as { error?: unknown }).error === "object" &&
+      (detail as { error?: unknown }).error !== null
+    ) {
+      const err = (detail as { error: { code?: unknown; message?: unknown } }).error;
+      if (typeof err.code === "string" && err.code.trim()) code = err.code;
+      if (typeof err.message === "string" && err.message.trim()) {
+        message = err.message;
+      }
+    } else if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0];
+      if (first && typeof first === "object" && "msg" in first) {
+        const msg = (first as { msg?: unknown }).msg;
+        if (typeof msg === "string" && msg.trim()) message = msg;
+      }
+    }
+  } else if (typeof payload === "string" && payload.trim()) {
+    message = payload.trim();
+  }
+  if (res.status === 413 && message === `HTTP ${res.status}`) {
+    code = "request_too_large";
+    message = "参考素材过大，请减少素材后重试";
+  }
+
+  return new ApiError({ code, message, status: res.status, payload });
+}
+
+async function streamPromptEnhancement(
+  path: string,
+  body: unknown,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const url = `${API_BASE.replace(/\/$/, "")}/prompts/enhance`;
+  const url = `${API_BASE.replace(/\/$/, "")}${path}`;
   const csrf = readCookie("csrf");
-  const res = await fetch(url, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(csrf ? { "X-CSRF-Token": csrf } : {}),
-    },
-    body: JSON.stringify({ text }),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    throw new ApiError({
+      code: "network_error",
+      message: err instanceof Error ? err.message : "network error",
+      status: 0,
+    });
+  }
   if (res.status === 401) {
     handle401();
     throw new ApiError({ code: "unauthorized", message: "未登录", status: 401 });
   }
   if (!res.ok) {
-    throw new ApiError({ code: "enhance_failed", message: `HTTP ${res.status}`, status: res.status });
+    throw await streamApiErrorFromResponse(res, "enhance_failed");
   }
   const reader = res.body?.getReader();
   if (!reader) {
@@ -1870,31 +1947,56 @@ export async function enhancePrompt(
       });
     }
   });
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      const tail = decoder.decode();
-      if (tail) parser.feed(tail);
-      parser.flush();
-      break;
-    }
-    parser.feed(decoder.decode(value, { stream: true }));
-    if (streamDone) {
-      if (!hasText) {
-        throw new ApiError({ code: "enhance_empty_response", message: "empty response", status: 502 });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        const tail = decoder.decode();
+        if (tail) parser.feed(tail);
+        parser.flush();
+        break;
       }
-      try {
-        await reader.cancel();
-      } catch {
-        // ignore
+      parser.feed(decoder.decode(value, { stream: true }));
+      if (streamDone) {
+        if (!hasText) {
+          throw new ApiError({ code: "enhance_empty_response", message: "empty response", status: 502 });
+        }
+        try {
+          await reader.cancel();
+        } catch {
+          // ignore
+        }
+        return;
       }
-      return;
     }
+  } catch (err) {
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore
+    }
+    throw err;
   }
   if (streamDone && hasText) return;
   if (!hasText) {
     throw new ApiError({ code: "enhance_empty_response", message: "empty response", status: 502 });
   }
+}
+
+export async function enhancePrompt(
+  text: string,
+  onDelta: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamPromptEnhancement("/prompts/enhance", { text }, onDelta, signal);
+}
+
+export async function enhanceVideoPrompt(
+  body: VideoPromptEnhanceIn,
+  onDelta: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamPromptEnhancement("/prompts/video/enhance", body, onDelta, signal);
 }
 
 // ——————————————————————————————————————————————————————————————

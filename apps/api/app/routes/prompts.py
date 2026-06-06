@@ -6,20 +6,26 @@ POST /prompts/enhance — 流式返回 AI 优化后的图像生成提示词。
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 import os
+import secrets
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
+from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.models import new_uuid7
+from lumen_core.models import Image, Video, new_uuid7
 from lumen_core.pricing import UsageTokens, parse_usage
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
@@ -30,11 +36,15 @@ from lumen_core.providers import (
     weighted_priority_order,
 )
 from lumen_core.runtime_settings import get_spec
+from lumen_core.schemas import VideoReferenceMediaIn
+from lumen_core.vision_tagging import image_record_to_data_url
 
 from ..billing_cache_state import invalidate_balance_cache
+from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..audit import hash_email, write_audit
+from ..public_urls import resolve_public_base_url
 from ..ratelimit import RateLimiter
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
@@ -60,6 +70,21 @@ Rules:
 - Do NOT wrap in quotes or add any prefix/suffix like "Enhanced prompt:"
 - Output ONLY the enhanced prompt text, nothing else\
 """
+VIDEO_ENHANCE_SYSTEM_PROMPT = """\
+You are an expert prompt engineer for AI video generation.
+Your task is to enhance the user's video prompt for a text-to-video, image-to-video, or reference-guided video model.
+
+Rules:
+- Preserve the user's original intent and subject matter exactly
+- Use supplied reference images, first frames, posters, and video URLs as visual constraints
+- Add video-specific detail: subject action, camera movement, temporal progression, composition, lighting, atmosphere, motion continuity, and style
+- Respect supplied model, duration, resolution, aspect ratio, and audio intent when they are present
+- Keep the output concise — one paragraph, under 220 words
+- Write in the same language as the user's prompt; if no prompt is provided, write in Chinese
+- Do NOT add negative prompts, technical parameters, markdown, explanations, or labels
+- Do NOT wrap in quotes or add any prefix/suffix like "Enhanced prompt:"
+- Output ONLY the enhanced video prompt text, nothing else\
+"""
 
 _PROVIDER_RR_COUNTERS: dict[int, int] = {}
 _PROVIDER_RR_LOCK = asyncio.Lock()
@@ -74,6 +99,8 @@ _FALLBACK_400_MARKERS = (
     "not found",
 )
 PROMPTS_ENHANCE_LIMITER = RateLimiter(capacity=20, refill_per_sec=20 / 60)
+_PROMPT_ENHANCE_MEDIA_MAX_BYTES = 18 * 1024 * 1024
+_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES = 24 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -123,6 +150,40 @@ class EnhanceIn(BaseModel):
     text: str = Field(min_length=1, max_length=10000)
 
 
+class VideoEnhanceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(default="", max_length=10000)
+    action: str = Field(default="t2v", max_length=32)
+    model: str = Field(default="", max_length=128)
+    duration_s: int | None = Field(default=None, ge=-1, le=60)
+    resolution: str | None = Field(default=None, max_length=32)
+    aspect_ratio: str | None = Field(default=None, max_length=32)
+    generate_audio: bool | None = None
+    input_image_id: str | None = Field(default=None, max_length=36)
+    reference_media: list[VideoReferenceMediaIn] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+
+    @model_validator(mode="after")
+    def require_prompt_or_reference(self) -> "VideoEnhanceIn":
+        if (
+            not self.text.strip()
+            and not (self.input_image_id or "").strip()
+            and not self.reference_media
+        ):
+            raise ValueError("text or reference media is required")
+        return self
+
+
+def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
+    err: dict[str, Any] = {"code": code, "message": msg}
+    if details:
+        err["details"] = details
+    return HTTPException(status_code=http, detail={"error": err})
+
+
 def _responses_url(base_url: str) -> str:
     base = base_url.strip().rstrip("/")
     if base.endswith("/v1"):
@@ -154,18 +215,356 @@ class _EnhanceProviderError(Exception):
         self.retryable = retryable
 
 
-def _build_enhance_body(text: str, attempt: _EnhanceAttempt) -> dict[str, Any]:
+def _build_enhance_body(
+    text: str,
+    attempt: _EnhanceAttempt,
+    *,
+    system_prompt: str = ENHANCE_SYSTEM_PROMPT,
+    content: list[dict[str, Any]] | None = None,
+    metadata: dict[str, str] | None = None,
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": attempt.model,
-        "instructions": ENHANCE_SYSTEM_PROMPT,
-        "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}],
+        "instructions": system_prompt,
+        "input": [
+            {
+                "role": "user",
+                "content": content
+                if content is not None
+                else [{"type": "input_text", "text": text}],
+            }
+        ],
         "stream": True,
     }
+    if metadata:
+        body["metadata"] = metadata
     if attempt.reasoning_effort:
         body["reasoning"] = {"effort": attempt.reasoning_effort}
     if attempt.service_tier:
         body["service_tier"] = attempt.service_tier
     return body
+
+
+def _storage_path(storage_key: str) -> Path:
+    root = Path(settings.storage_root).resolve()
+    if not storage_key or "\x00" in storage_key:
+        raise _http("invalid_path", "invalid storage path", 400)
+    key_path = Path(storage_key)
+    if key_path.is_absolute():
+        raise _http("invalid_path", "absolute storage paths are not allowed", 400)
+    path = (root / key_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise _http("invalid_path", "storage path escapes root", 400) from None
+    return path
+
+
+async def _owned_image(db: AsyncSession, *, user_id: str, image_id: str) -> Image:
+    image = (
+        await db.execute(
+            select(Image).where(
+                Image.id == image_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if image is None:
+        raise _http("image_not_found", "image not found", 404)
+    return image
+
+
+async def _owned_video(db: AsyncSession, *, user_id: str, video_id: str) -> Video:
+    video = (
+        await db.execute(
+            select(Video).where(
+                Video.id == video_id,
+                Video.user_id == user_id,
+                Video.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if video is None:
+        raise _http("video_not_found", "video not found", 404)
+    return video
+
+
+async def _image_data_url(image: Image) -> str | None:
+    if image.size_bytes and image.size_bytes > _PROMPT_ENHANCE_MEDIA_MAX_BYTES:
+        return None
+    try:
+        raw = await asyncio.to_thread(_storage_path(image.storage_key).read_bytes)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "prompt enhance read image failed image_id=%s key=%s err=%s",
+            image.id,
+            image.storage_key,
+            exc,
+        )
+        return None
+    if len(raw) > _PROMPT_ENHANCE_MEDIA_MAX_BYTES:
+        return None
+    return image_record_to_data_url(image, raw)
+
+
+async def _video_poster_data_url(video: Video) -> str | None:
+    key = (video.poster_storage_key or "").strip()
+    if not key:
+        return None
+    try:
+        raw = await asyncio.to_thread(_storage_path(key).read_bytes)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "prompt enhance read video poster failed video_id=%s key=%s err=%s",
+            video.id,
+            key,
+            exc,
+        )
+        return None
+    if not raw or len(raw) > _PROMPT_ENHANCE_MEDIA_MAX_BYTES:
+        return None
+    mime, _encoding = mimetypes.guess_type(key)
+    if not mime or not mime.startswith("image/"):
+        mime = "image/jpeg"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _append_input_image_with_budget(
+    content: list[dict[str, Any]],
+    image_url: str,
+    *,
+    media_payload_bytes: int,
+) -> tuple[bool, int]:
+    next_payload_bytes = media_payload_bytes
+    if image_url.startswith("data:image/"):
+        payload_bytes = len(image_url.encode("utf-8"))
+        if (
+            media_payload_bytes + payload_bytes
+            > _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES
+        ):
+            return False, media_payload_bytes
+        next_payload_bytes += payload_bytes
+    content.append({"type": "input_image", "image_url": image_url})
+    return True, next_payload_bytes
+
+
+def _external_image_url_for_input(url: str | None) -> str | None:
+    value = (url or "").strip()
+    if value.startswith("data:image/"):
+        return value
+    if value.startswith(("http://", "https://")):
+        return value
+    return None
+
+
+def _append_video_context_line(lines: list[str], key: str, value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        clean = value.strip()
+        if not clean:
+            return
+        lines.append(f"{key}: {clean}")
+        return
+    lines.append(f"{key}: {value}")
+
+
+def _video_reference_public_url(video: Video, public_base_url: str) -> tuple[str, bool]:
+    metadata = dict(video.metadata_jsonb or {})
+    token = metadata.get("reference_access_token")
+    changed = False
+    if not isinstance(token, str) or not token:
+        token = secrets.token_urlsafe(32)
+        metadata["reference_access_token"] = token
+        video.metadata_jsonb = metadata
+        changed = True
+    query = urlencode({"token": token})
+    return (
+        f"{public_base_url.rstrip('/')}/api/videos/reference/{video.id}/binary?{query}",
+        changed,
+    )
+
+
+async def _resolve_optional_public_base_url(
+    request: Request,
+    db: AsyncSession,
+) -> str | None:
+    try:
+        return await resolve_public_base_url(request, db)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("prompt enhance public base unavailable: %s", exc)
+        return None
+
+
+async def _build_video_enhance_content(
+    body: VideoEnhanceIn,
+    *,
+    request: Request,
+    db: AsyncSession,
+    user_id: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lines = [
+        "任务：将下面的输入优化成可直接提交给视频生成模型的一段提示词。",
+        f"原始描述：{body.text.strip() or '（未填写，请主要根据参考素材生成）'}",
+    ]
+    _append_video_context_line(lines, "生成模式", body.action)
+    _append_video_context_line(lines, "模型", body.model)
+    _append_video_context_line(lines, "时长", body.duration_s)
+    _append_video_context_line(lines, "分辨率", body.resolution)
+    _append_video_context_line(lines, "画幅", body.aspect_ratio)
+    if body.generate_audio is not None:
+        lines.append(f"音频：{'需要' if body.generate_audio else '不需要'}")
+
+    content: list[dict[str, Any]] = [
+        {"type": "input_text", "text": "\n".join(lines)}
+    ]
+    token_changed = False
+    media_payload_bytes = 0
+
+    if body.input_image_id:
+        image = await _owned_image(db, user_id=user_id, image_id=body.input_image_id)
+        content.append({"type": "input_text", "text": "首帧参考图："})
+        image_url = await _image_data_url(image)
+        if image_url:
+            appended, media_payload_bytes = _append_input_image_with_budget(
+                content,
+                image_url,
+                media_payload_bytes=media_payload_bytes,
+            )
+            if not appended:
+                content.append(
+                    {
+                        "type": "input_text",
+                        "text": f"首帧参考图 image_id={image.id}，但参考素材总体过大，已降级为文字引用。",
+                    }
+                )
+        else:
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": f"首帧参考图 image_id={image.id}，但图片过大或暂不可读取。",
+                }
+            )
+
+    public_base_url: str | None = None
+    for index, item in enumerate(body.reference_media, start=1):
+        label = (item.label or "").strip() or (
+            f"参考图片 {index}" if item.kind == "image" else f"参考视频 {index}"
+        )
+        if item.kind == "image":
+            if item.image_id:
+                image = await _owned_image(db, user_id=user_id, image_id=item.image_id)
+                content.append({"type": "input_text", "text": f"{label}："})
+                image_url = await _image_data_url(image)
+                if image_url:
+                    appended, media_payload_bytes = _append_input_image_with_budget(
+                        content,
+                        image_url,
+                        media_payload_bytes=media_payload_bytes,
+                    )
+                    if not appended:
+                        content.append(
+                            {
+                                "type": "input_text",
+                                "text": f"{label} image_id={image.id}，但参考素材总体过大，已降级为文字引用。",
+                            }
+                        )
+                else:
+                    content.append(
+                        {
+                            "type": "input_text",
+                            "text": f"{label} image_id={image.id}，但图片过大或暂不可读取。",
+                        }
+                    )
+            elif image_url := _external_image_url_for_input(item.url):
+                is_data_image = image_url.startswith("data:image/")
+                content.append(
+                    {
+                        "type": "input_text",
+                        "text": (
+                            f"{label} 外部图片数据 URL："
+                            if is_data_image
+                            else f"{label} 外部图片 URL：{image_url}"
+                        ),
+                    }
+                )
+                appended, media_payload_bytes = _append_input_image_with_budget(
+                    content,
+                    image_url,
+                    media_payload_bytes=media_payload_bytes,
+                )
+                if not appended:
+                    content.append(
+                        {
+                            "type": "input_text",
+                            "text": (
+                                f"{label} 外部图片数据 URL 过大，已忽略图片内容，仅保留标签。"
+                                if is_data_image
+                                else f"{label} 外部图片过大，已降级为 URL 文字引用。"
+                            ),
+                        }
+                    )
+            else:
+                content.append(
+                    {
+                        "type": "input_text",
+                        "text": f"{label} 外部图片引用：{(item.url or '').strip()}",
+                    }
+                )
+            continue
+
+        if item.video_id:
+            video = await _owned_video(db, user_id=user_id, video_id=item.video_id)
+            if public_base_url is None:
+                public_base_url = await _resolve_optional_public_base_url(request, db)
+            video_url = ""
+            if public_base_url:
+                video_url, changed = _video_reference_public_url(video, public_base_url)
+                token_changed = token_changed or changed
+            details = [
+                f"{label}：参考视频",
+                f"video_id={video.id}",
+                f"mime={video.mime}",
+                f"duration_ms={video.duration_ms}",
+                f"size_bytes={video.size_bytes}",
+            ]
+            if video_url:
+                details.append(f"url={video_url}")
+            content.append({"type": "input_text", "text": "；".join(details)})
+            poster_url = await _video_poster_data_url(video)
+            if poster_url:
+                content.append(
+                    {
+                        "type": "input_text",
+                        "text": f"{label} 的 poster / 首帧视觉参考：",
+                    }
+                )
+                appended, media_payload_bytes = _append_input_image_with_budget(
+                    content,
+                    poster_url,
+                    media_payload_bytes=media_payload_bytes,
+                )
+                if not appended:
+                    content.append(
+                        {
+                            "type": "input_text",
+                            "text": f"{label} 的 poster 过大，已降级为文字引用。",
+                        }
+                    )
+        else:
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": f"{label} 外部参考视频 URL：{(item.url or '').strip()}",
+                }
+            )
+
+    return content, token_changed
 
 
 async def _setting_raw(db: AsyncSession, key: str) -> str | None:
@@ -545,10 +944,20 @@ async def _stream_enhance_one(
     provider: ProviderDefinition,
     attempt: _EnhanceAttempt,
     capture: _EnhanceUsageCapture | None = None,
+    *,
+    system_prompt: str = ENHANCE_SYSTEM_PROMPT,
+    content: list[dict[str, Any]] | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
     url = _responses_url(provider.base_url)
 
-    body = _build_enhance_body(text, attempt)
+    body = _build_enhance_body(
+        text,
+        attempt,
+        system_prompt=system_prompt,
+        content=content,
+        metadata=metadata,
+    )
 
     try:
         proxy_url = await resolve_provider_proxy_url(provider.proxy)
@@ -654,11 +1063,22 @@ async def _stream_enhance(
     text: str,
     providers: list[ProviderDefinition],
     billing: _EnhanceBillingContext | None = None,
+    *,
+    system_prompt: str = ENHANCE_SYSTEM_PROMPT,
+    content: list[dict[str, Any]] | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
     last_error = "upstream_error"
     total_attempts = len(_ENHANCE_ATTEMPTS) * len(providers)
     seen_attempts = 0
     settled = False
+    stream_kwargs: dict[str, Any] = {}
+    if system_prompt != ENHANCE_SYSTEM_PROMPT:
+        stream_kwargs["system_prompt"] = system_prompt
+    if content is not None:
+        stream_kwargs["content"] = content
+    if metadata is not None:
+        stream_kwargs["metadata"] = metadata
     try:
         for attempt in _ENHANCE_ATTEMPTS:
             for provider in providers:
@@ -671,6 +1091,7 @@ async def _stream_enhance(
                         provider,
                         attempt,
                         capture,
+                        **stream_kwargs,
                     ):
                         emitted = True
                         yield chunk
@@ -762,6 +1183,56 @@ async def enhance_prompt(
 
     return StreamingResponse(
         _stream_enhance(body.text, providers, billing),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/video/enhance")
+async def enhance_video_prompt(
+    body: VideoEnhanceIn,
+    request: Request,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    await PROMPTS_ENHANCE_LIMITER.check(get_redis(), f"rl:prompt_enhance:{user.id}")
+    providers = [p for p in await _resolve_provider_order(db) if p.api_key.strip()]
+    if not providers:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "code": "not_configured",
+                    "message": "upstream API key not set",
+                },
+            },
+        )
+
+    content, token_changed = await _build_video_enhance_content(
+        body,
+        request=request,
+        db=db,
+        user_id=user.id,
+    )
+    if token_changed:
+        await db.commit()
+    billing = await _prepare_prompt_enhance_billing(db, user)
+
+    return StreamingResponse(
+        _stream_enhance(
+            body.text,
+            providers,
+            billing,
+            system_prompt=VIDEO_ENHANCE_SYSTEM_PROMPT,
+            content=content,
+            metadata={
+                "purpose": "video_prompt_enhance",
+                "route": "prompts.video.enhance",
+            },
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
