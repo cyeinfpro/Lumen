@@ -6,6 +6,7 @@ conservative hold followed by actual-token settlement.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
@@ -16,6 +17,19 @@ from .billing import pricing_price_micro
 
 VIDEO_PRICING_SCOPE = "video"
 VIDEO_PRICING_UNIT = "per_mtoken"
+SMART_VIDEO_DURATION_S = -1
+SMART_VIDEO_HOLD_DURATION_S = 15
+SUPPORTED_VIDEO_DURATIONS_S = tuple(range(4, 16))
+VIDEO_REFERENCE_IMAGE_PRICING_VARIANT = "reference_image"
+VIDEO_REFERENCE_VIDEO_PRICING_VARIANT = "reference_video"
+VIDEO_LEGACY_REFERENCE_PRICING_VARIANT = "reference"
+VIDEO_PRICING_VARIANTS = (
+    "t2v",
+    "i2v",
+    VIDEO_LEGACY_REFERENCE_PRICING_VARIANT,
+    VIDEO_REFERENCE_IMAGE_PRICING_VARIANT,
+    VIDEO_REFERENCE_VIDEO_PRICING_VARIANT,
+)
 
 
 class VideoBillingError(ValueError):
@@ -51,6 +65,166 @@ def estimate_key(*, resolution: str, duration_s: int) -> str:
     return f"{resolution}:{int(duration_s)}"
 
 
+def hold_estimate_duration_s(duration_s: int) -> int:
+    if int(duration_s) == SMART_VIDEO_DURATION_S:
+        return SMART_VIDEO_HOLD_DURATION_S
+    return int(duration_s)
+
+
+def _reference_kind(item: Any) -> str | None:
+    if isinstance(item, Mapping):
+        raw = item.get("kind")
+    else:
+        raw = getattr(item, "kind", None)
+    return raw if isinstance(raw, str) else None
+
+
+def video_resolution_pricing_variant(variant: str, resolution: str | None) -> str:
+    resolution = (resolution or "").strip()
+    if not resolution:
+        return variant
+    return f"{variant}_{resolution}"
+
+
+def split_video_resolution_pricing_variant(
+    raw: str,
+) -> tuple[str, str | None]:
+    if "_" not in raw:
+        return raw, None
+    variant, maybe_resolution = raw.rsplit("_", 1)
+    if maybe_resolution.endswith("p") and maybe_resolution[:-1].isdigit():
+        return variant, maybe_resolution
+    return raw, None
+
+
+def video_pricing_variant(
+    action: str,
+    reference_media: Iterable[Any] | None = None,
+    *,
+    resolution: str | None = None,
+) -> str:
+    if action != VIDEO_LEGACY_REFERENCE_PRICING_VARIANT:
+        return video_resolution_pricing_variant(action, resolution)
+    if any(_reference_kind(item) == "video" for item in reference_media or ()):
+        return video_resolution_pricing_variant(
+            VIDEO_REFERENCE_VIDEO_PRICING_VARIANT, resolution
+        )
+    return video_resolution_pricing_variant(
+        VIDEO_REFERENCE_IMAGE_PRICING_VARIANT, resolution
+    )
+
+
+def _pricing_fallback_variants(
+    action: str,
+    pricing_variant: str,
+    resolution: str | None,
+) -> tuple[str, ...]:
+    base_variant, variant_resolution = split_video_resolution_pricing_variant(
+        pricing_variant
+    )
+    lookup_resolution = variant_resolution or (resolution or "").strip() or None
+    variants = [
+        video_resolution_pricing_variant(base_variant, lookup_resolution),
+        base_variant,
+    ]
+    if action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT:
+        variants.append(
+            video_resolution_pricing_variant(
+                VIDEO_LEGACY_REFERENCE_PRICING_VARIANT, lookup_resolution
+            )
+        )
+        variants.append(VIDEO_LEGACY_REFERENCE_PRICING_VARIANT)
+        if base_variant == VIDEO_REFERENCE_IMAGE_PRICING_VARIANT:
+            variants.append(video_resolution_pricing_variant("i2v", lookup_resolution))
+            variants.append("i2v")
+    return tuple(dict.fromkeys(variants))
+
+
+async def _video_unit_price_micro(
+    db: AsyncSession,
+    *,
+    model: str,
+    action: str,
+    pricing_variant: str,
+    resolution: str | None,
+) -> tuple[int | None, str]:
+    for variant in _pricing_fallback_variants(action, pricing_variant, resolution):
+        unit_price = await pricing_price_micro(
+            db,
+            scope=VIDEO_PRICING_SCOPE,
+            key=model,
+            variant=variant,
+            unit=VIDEO_PRICING_UNIT,
+        )
+        if unit_price is not None:
+            return int(unit_price), variant
+    return None, pricing_variant
+
+
+def _parse_estimate_key(key: str, value: Any) -> tuple[str, int, int] | None:
+    if not isinstance(key, str) or ":" not in key:
+        return None
+    resolution, duration = key.rsplit(":", 1)
+    try:
+        duration_s = int(duration)
+        estimate = int(value)
+    except (TypeError, ValueError):
+        return None
+    if not resolution or duration_s <= 0 or estimate <= 0 or isinstance(value, bool):
+        return None
+    return resolution, duration_s, estimate
+
+
+def _ceil_scale(value: int, numerator: int, denominator: int) -> int:
+    return (int(value) * int(numerator) + int(denominator) - 1) // int(denominator)
+
+
+def _duration_estimate(entries: dict[int, int], duration_s: int) -> int | None:
+    if duration_s in entries:
+        return entries[duration_s]
+    longer = sorted(item for item in entries.items() if item[0] >= duration_s)
+    if longer:
+        return longer[0][1]
+    if not entries:
+        return None
+    base_duration, base_estimate = max(entries.items())
+    return _ceil_scale(base_estimate, duration_s, base_duration)
+
+
+def expand_video_duration_estimates(
+    estimates: dict[str, Any],
+    *,
+    durations_s: tuple[int, ...] = SUPPORTED_VIDEO_DURATIONS_S,
+) -> dict[str, Any]:
+    """Fill missing 1-second duration buckets with conservative estimates."""
+    expanded: dict[str, Any] = {}
+    for model, model_value in estimates.items():
+        if not isinstance(model, str) or not isinstance(model_value, dict):
+            continue
+        expanded_model: dict[str, Any] = {}
+        for action, action_value in model_value.items():
+            if not isinstance(action, str) or not isinstance(action_value, dict):
+                continue
+            by_resolution: dict[str, dict[int, int]] = {}
+            for key, value in action_value.items():
+                parsed = _parse_estimate_key(key, value)
+                if parsed is None:
+                    continue
+                resolution, duration_s, estimate = parsed
+                by_resolution.setdefault(resolution, {})[duration_s] = estimate
+            expanded_action: dict[str, Any] = {}
+            for resolution, duration_map in by_resolution.items():
+                for duration_s in durations_s:
+                    estimate = _duration_estimate(duration_map, duration_s)
+                    if estimate is not None:
+                        expanded_action[
+                            estimate_key(resolution=resolution, duration_s=duration_s)
+                        ] = estimate
+            expanded_model[action] = expanded_action
+        expanded[model] = expanded_model
+    return expanded
+
+
 def token_upper_bound(
     estimates: dict[str, Any],
     *,
@@ -63,9 +237,16 @@ def token_upper_bound(
     if not isinstance(model_map, dict):
         return None
     action_map = model_map.get(action)
+    if action == "reference" and not isinstance(action_map, dict):
+        action_map = model_map.get("i2v") or model_map.get("t2v")
     if not isinstance(action_map, dict):
         return None
-    value = action_map.get(estimate_key(resolution=resolution, duration_s=duration_s))
+    value = action_map.get(
+        estimate_key(
+            resolution=resolution,
+            duration_s=hold_estimate_duration_s(duration_s),
+        )
+    )
     if isinstance(value, bool):
         return None
     try:
@@ -85,19 +266,23 @@ async def estimate_video_cost(
     fps: int | None = None,
     generate_audio: bool = False,
     estimates: dict[str, Any],
+    pricing_variant: str | None = None,
 ) -> VideoCostEstimate:
     del fps, generate_audio
-    unit_price = await pricing_price_micro(
+    effective_pricing_variant = pricing_variant or video_pricing_variant(
+        action, resolution=resolution
+    )
+    unit_price, used_pricing_variant = await _video_unit_price_micro(
         db,
-        scope=VIDEO_PRICING_SCOPE,
-        key=model,
-        variant=action,
-        unit=VIDEO_PRICING_UNIT,
+        model=model,
+        action=action,
+        pricing_variant=effective_pricing_variant,
+        resolution=resolution,
     )
     if unit_price is None:
         raise VideoBillingError(
             "video_pricing_missing",
-            f"missing enabled video pricing rule for {model}/{action}",
+            f"missing enabled video pricing rule for {model}/{effective_pricing_variant}",
             503,
         )
     tokens = token_upper_bound(
@@ -117,7 +302,7 @@ async def estimate_video_cost(
         estimated_tokens=tokens,
         hold_micro=round_micro_for_tokens(tokens, int(unit_price)),
         unit_price_micro=int(unit_price),
-        source="video.token_hold_estimates",
+        source=f"video.token_hold_estimates:{used_pricing_variant}",
     )
 
 
@@ -127,18 +312,23 @@ async def settle_video_cost(
     model: str,
     action: str,
     actual_total_tokens: int,
+    resolution: str | None = None,
+    pricing_variant: str | None = None,
 ) -> int:
-    unit_price = await pricing_price_micro(
+    effective_pricing_variant = pricing_variant or video_pricing_variant(
+        action, resolution=resolution
+    )
+    unit_price, _used_pricing_variant = await _video_unit_price_micro(
         db,
-        scope=VIDEO_PRICING_SCOPE,
-        key=model,
-        variant=action,
-        unit=VIDEO_PRICING_UNIT,
+        model=model,
+        action=action,
+        pricing_variant=effective_pricing_variant,
+        resolution=resolution,
     )
     if unit_price is None:
         raise VideoBillingError(
             "video_pricing_missing",
-            f"missing enabled video pricing rule for {model}/{action}",
+            f"missing enabled video pricing rule for {model}/{effective_pricing_variant}",
             503,
         )
     return round_micro_for_tokens(int(actual_total_tokens), int(unit_price))
@@ -147,11 +337,23 @@ async def settle_video_cost(
 __all__ = [
     "VIDEO_PRICING_SCOPE",
     "VIDEO_PRICING_UNIT",
+    "SMART_VIDEO_DURATION_S",
+    "SMART_VIDEO_HOLD_DURATION_S",
+    "SUPPORTED_VIDEO_DURATIONS_S",
+    "VIDEO_LEGACY_REFERENCE_PRICING_VARIANT",
+    "VIDEO_PRICING_VARIANTS",
+    "VIDEO_REFERENCE_IMAGE_PRICING_VARIANT",
+    "VIDEO_REFERENCE_VIDEO_PRICING_VARIANT",
     "VideoBillingError",
     "VideoCostEstimate",
     "estimate_key",
     "estimate_video_cost",
+    "expand_video_duration_estimates",
+    "hold_estimate_duration_s",
     "round_micro_for_tokens",
     "settle_video_cost",
+    "split_video_resolution_pricing_variant",
     "token_upper_bound",
+    "video_resolution_pricing_variant",
+    "video_pricing_variant",
 ]

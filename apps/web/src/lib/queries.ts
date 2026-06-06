@@ -76,6 +76,7 @@ import {
   getAdminModels,
   getProviders,
   getProviderStats,
+  getVideoProviders,
   getAdminUpdateStatus,
   getAdminUpdateVersion,
   checkAdminUpdate,
@@ -90,6 +91,7 @@ import {
   triggerAdminUpdate,
   updateAdminProxies,
   updateProviders,
+  updateVideoProviders,
   probeProviders,
   updateSystemSettings,
   syncApparelModelLibraryPresets,
@@ -167,6 +169,8 @@ import type {
   SessionOut,
   ShareOut,
   SystemSettingsOut,
+  VideoProvidersOut,
+  VideoProvidersUpdateIn,
   UsageOut,
 } from "./types";
 import {
@@ -199,6 +203,7 @@ export const qk = {
   systemSettings: () => ["admin", "settings"] as const,
   adminModels: () => ["admin", "models"] as const,
   providers: () => ["admin", "providers"] as const,
+  videoProviders: () => ["admin", "providers", "video"] as const,
   providerStats: () => ["admin", "providers", "stats"] as const,
   adminProxies: () => ["admin", "proxies"] as const,
   adminUpdateStatus: () => ["admin", "update", "status"] as const,
@@ -669,6 +674,34 @@ export function useUpdateProvidersMutation(
     ...options,
     onSuccess: (data, vars, onMutateResult, ctx) => {
       qc.invalidateQueries({ queryKey: qk.providers() });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useVideoProvidersQuery(
+  options?: Omit<UseQueryOptions<VideoProvidersOut>, "queryKey" | "queryFn">,
+) {
+  return useQuery<VideoProvidersOut>({
+    queryKey: qk.videoProviders(),
+    queryFn: getVideoProviders,
+    ...options,
+  });
+}
+
+export function useUpdateVideoProvidersMutation(
+  options?: Omit<
+    UseMutationOptions<VideoProvidersOut, Error, VideoProvidersUpdateIn>,
+    "mutationFn"
+  >,
+) {
+  const qc = useQueryClient();
+  return useMutation<VideoProvidersOut, Error, VideoProvidersUpdateIn>({
+    mutationFn: (payload) => updateVideoProviders(payload),
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.videoProviders() });
+      qc.invalidateQueries({ queryKey: qk.systemSettings() });
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });

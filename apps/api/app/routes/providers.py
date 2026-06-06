@@ -35,6 +35,7 @@ from lumen_core.providers import (
     parse_proxy_item,
     resolve_provider_proxy_url,
 )
+from lumen_core.video_providers import parse_video_provider_config_json
 from lumen_core.desktop_runtime import (
     desktop_provider_metadata_path,
     desktop_provider_runtime_file,
@@ -53,6 +54,9 @@ from lumen_core.schemas import (
     ProvidersProbeIn,
     ProvidersProbeOut,
     ProvidersUpdateIn,
+    VideoProviderItemOut,
+    VideoProvidersOut,
+    VideoProvidersUpdateIn,
 )
 
 from ..audit import hash_email, request_ip_hash, write_audit
@@ -63,6 +67,7 @@ router = APIRouter(prefix="/admin/providers", tags=["admin-providers"])
 
 _PROBE_TIMEOUT_S = 15.0
 _PROVIDERS_MAX_LEN = 65536
+_VIDEO_PROVIDERS_MAX_LEN = 65536
 _PROBE_MODEL = "gpt-5.4-mini"
 _PROBE_INSTRUCTIONS = "You are a precise calculator. Return only the final integer."
 _PROBE_INPUT = (
@@ -185,7 +190,9 @@ def _strip_proxy_secrets(items: list[dict]) -> list[dict]:
     return stripped
 
 
-def _write_json_file(path: Path, payload: dict[str, Any], *, private: bool = False) -> None:
+def _write_json_file(
+    path: Path, payload: dict[str, Any], *, private: bool = False
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if private:
@@ -396,6 +403,106 @@ def _to_proxy_out(it: dict, idx: int) -> ProviderProxyOut:
     )
 
 
+async def _read_setting_value(db: AsyncSession, key: str) -> str | None:
+    return (
+        await db.execute(select(SystemSetting.value).where(SystemSetting.key == key))
+    ).scalar_one_or_none()
+
+
+async def _upsert_setting_value(db: AsyncSession, key: str, value: str) -> None:
+    existing = (
+        await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+    ).scalar_one_or_none()
+    if existing is None:
+        db.add(SystemSetting(key=key, value=value))
+    else:
+        existing.value = value
+
+
+async def _delete_setting_value(db: AsyncSession, key: str) -> None:
+    existing = (
+        await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+    ).scalar_one_or_none()
+    if existing is not None:
+        await db.delete(existing)
+
+
+async def _read_video_providers_raw(db: AsyncSession) -> tuple[str | None, str]:
+    row = await _read_setting_value(db, "video.providers")
+    if row is not None and row != "":
+        return row, "db"
+    spec = get_spec("video.providers")
+    if spec:
+        env_val = os.environ.get(spec.env_fallback)
+        if env_val is not None and env_val != "":
+            return env_val, "env"
+    return None, "none"
+
+
+async def _read_video_enabled(db: AsyncSession) -> bool:
+    raw = await _read_setting_value(db, "video.enabled")
+    if raw is None or raw == "":
+        spec = get_spec("video.enabled")
+        raw = os.environ.get(spec.env_fallback) if spec else None
+    return _normalize_bool(raw, default=False)
+
+
+def _parse_video_raw_config(raw: str | None) -> tuple[list[dict], list[dict]]:
+    if not raw:
+        return [], []
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return [], []
+    if isinstance(value, list):
+        return [it for it in value if isinstance(it, dict)], []
+    if not isinstance(value, dict):
+        return [], []
+    providers = value.get("providers", [])
+    proxies = value.get("proxies", [])
+    if not isinstance(providers, list):
+        providers = []
+    if not isinstance(proxies, list):
+        proxies = []
+    return (
+        [it for it in providers if isinstance(it, dict)],
+        [it for it in proxies if isinstance(it, dict)],
+    )
+
+
+def _to_video_provider_out(provider: Any) -> VideoProviderItemOut:
+    return VideoProviderItemOut(
+        name=provider.name,
+        kind=provider.kind,
+        base_url=provider.base_url,
+        api_key_hint=_mask_key(provider.api_key),
+        enabled=provider.enabled,
+        priority=provider.priority,
+        weight=provider.weight,
+        concurrency=provider.concurrency,
+        proxy=provider.proxy_name,
+        models=dict(provider.models or {}),
+    )
+
+
+def _video_proxy_options(
+    raw_video: str | None,
+    raw_shared: str | None,
+) -> list[ProviderProxyOut]:
+    _shared_items, shared_proxies = _parse_config(raw_shared or "")
+    _video_items, video_proxies = _parse_video_raw_config(raw_video)
+    items = [*shared_proxies, *video_proxies]
+    out: list[ProviderProxyOut] = []
+    seen: set[str] = set()
+    for idx, item in enumerate(items):
+        proxy = _to_proxy_out(item, idx)
+        if proxy.name in seen:
+            continue
+        seen.add(proxy.name)
+        out.append(proxy)
+    return out
+
+
 @router.get("", response_model=ProvidersOut)
 async def list_providers(
     _admin: AdminUser,
@@ -410,6 +517,159 @@ async def list_providers(
         proxies=[_to_proxy_out(it, i) for i, it in enumerate(proxies)],
         source=source,
     )
+
+
+@router.get("/video", response_model=VideoProvidersOut)
+async def list_video_providers(
+    _admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VideoProvidersOut:
+    raw_video, source = await _read_video_providers_raw(db)
+    raw_shared, _shared_source = await _read_providers(db)
+    providers, _proxies, errors = parse_video_provider_config_json(
+        raw_video,
+        shared_provider_raw=raw_shared,
+    )
+    if errors:
+        raise _http("invalid_request", "; ".join(errors), 422)
+    return VideoProvidersOut(
+        enabled=await _read_video_enabled(db),
+        items=[_to_video_provider_out(provider) for provider in providers],
+        proxies=_video_proxy_options(raw_video, raw_shared),
+        source=source,
+    )
+
+
+@router.put(
+    "/video",
+    response_model=VideoProvidersOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def update_video_providers(
+    body: VideoProvidersUpdateIn,
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VideoProvidersOut:
+    if body.enabled and not body.items:
+        raise _http(
+            "invalid_request",
+            "开启视频生成前至少需要一个视频供应商",
+            422,
+        )
+
+    seen_names: set[str] = set()
+    for item in body.items:
+        name = item.name.strip()
+        if not name:
+            raise _http("invalid_request", "视频供应商名称不能为空", 422)
+        if name in seen_names:
+            raise _http("invalid_request", f"视频供应商名称重复：{name}", 422)
+        seen_names.add(name)
+
+    old_raw, _old_source = await _read_video_providers_raw(db)
+    raw_shared, _shared_source = await _read_providers(db)
+    old_items, old_video_proxies = _parse_video_raw_config(old_raw)
+    old_keys: dict[str, str] = {}
+    for item in old_items:
+        name = item.get("name")
+        api_key = item.get("api_key")
+        if isinstance(name, str) and isinstance(api_key, str) and api_key:
+            old_keys[name.strip()] = api_key
+
+    shared_proxy_names = {
+        proxy.get("name")
+        for proxy in _parse_config(raw_shared or "")[1]
+        if isinstance(proxy.get("name"), str)
+    }
+    old_video_proxy_by_name = {
+        proxy.get("name"): proxy
+        for proxy in old_video_proxies
+        if isinstance(proxy.get("name"), str)
+    }
+
+    rows: list[dict[str, Any]] = []
+    referenced_video_proxies: set[str] = set()
+    for item in body.items:
+        provider_name = item.name.strip()
+        api_key = item.api_key.strip() or old_keys.get(provider_name, "")
+        models = {
+            str(key).strip(): str(value).strip()
+            for key, value in item.models.items()
+            if str(key).strip() and str(value).strip()
+        }
+        proxy_name = (item.proxy or "").strip() or None
+        if proxy_name:
+            if (
+                proxy_name not in shared_proxy_names
+                and proxy_name not in old_video_proxy_by_name
+            ):
+                raise _http(
+                    "invalid_request",
+                    f"视频供应商「{provider_name}」引用了不存在的代理：{proxy_name}",
+                    422,
+                )
+            if proxy_name in old_video_proxy_by_name:
+                referenced_video_proxies.add(proxy_name)
+        row: dict[str, Any] = {
+            "name": provider_name,
+            "kind": item.kind,
+            "base_url": item.base_url.strip(),
+            "api_key": api_key,
+            "enabled": item.enabled,
+            "priority": item.priority,
+            "weight": max(1, item.weight),
+            "concurrency": max(1, min(32, int(item.concurrency or 1))),
+            "models": models,
+        }
+        if proxy_name:
+            row["proxy"] = proxy_name
+        rows.append(row)
+
+    kept_video_proxies = [
+        proxy
+        for name, proxy in old_video_proxy_by_name.items()
+        if name in referenced_video_proxies
+    ]
+    raw_json = json.dumps(
+        {"providers": rows, "proxies": kept_video_proxies},
+        ensure_ascii=False,
+    )
+    if rows and len(raw_json) > _VIDEO_PROVIDERS_MAX_LEN:
+        raise _http(
+            "invalid_request",
+            f"video.providers JSON 超过 {_VIDEO_PROVIDERS_MAX_LEN} 字符",
+            422,
+        )
+    if rows:
+        parsed, _proxies, errors = parse_video_provider_config_json(
+            raw_json,
+            shared_provider_raw=raw_shared,
+        )
+        if errors:
+            raise _http("invalid_request", "; ".join(errors), 422)
+        if not parsed:
+            raise _http("invalid_request", "video.providers 缺少供应商", 422)
+
+    await _upsert_setting_value(db, "video.enabled", "1" if body.enabled else "0")
+    if rows:
+        await _upsert_setting_value(db, "video.providers", raw_json)
+    else:
+        await _delete_setting_value(db, "video.providers")
+    await write_audit(
+        db,
+        event_type="admin.video_providers.update",
+        user_id=admin.id,
+        actor_email_hash=hash_email(admin.email),
+        actor_ip_hash=request_ip_hash(request),
+        details={
+            "enabled": body.enabled,
+            "count": len(rows),
+            "names": [item["name"] for item in rows],
+        },
+    )
+    await db.commit()
+    return await list_video_providers(admin, db)
 
 
 @router.put(

@@ -54,18 +54,76 @@ def test_video_token_upper_bound_rejects_invalid_values() -> None:
     )
 
 
+def test_smart_duration_uses_max_duration_hold_estimate() -> None:
+    assert video_billing.hold_estimate_duration_s(-1) == 15
+    assert (
+        video_billing.token_upper_bound(
+            {"seedance-2.0": {"t2v": {"720p:15": 180_000}}},
+            model="seedance-2.0",
+            action="t2v",
+            resolution="720p",
+            duration_s=-1,
+        )
+        == 180_000
+    )
+
+
+def test_video_pricing_variant_splits_reference_media_kind() -> None:
+    assert video_billing.video_pricing_variant("t2v") == "t2v"
+    assert video_billing.video_pricing_variant("t2v", resolution="720p") == "t2v_720p"
+    assert (
+        video_billing.video_pricing_variant(
+            "reference",
+            [{"kind": "image"}, {"kind": "image"}],
+            resolution="1080p",
+        )
+        == "reference_image_1080p"
+    )
+    assert (
+        video_billing.video_pricing_variant(
+            "reference",
+            [{"kind": "image"}, {"kind": "video"}],
+        )
+        == "reference_video"
+    )
+
+
+def test_expand_video_duration_estimates_fills_one_second_steps_conservatively() -> (
+    None
+):
+    expanded = video_billing.expand_video_duration_estimates(
+        {
+            "seedance-2.0": {
+                "t2v": {
+                    "720p:5": 60_000,
+                    "1080p:5": 130_000,
+                    "1080p:10": 280_000,
+                }
+            }
+        }
+    )
+
+    t2v = expanded["seedance-2.0"]["t2v"]
+    assert t2v["720p:4"] == 60_000
+    assert t2v["720p:6"] == 72_000
+    assert t2v["720p:15"] == 180_000
+    assert t2v["1080p:6"] == 280_000
+    assert t2v["1080p:15"] == 420_000
+    durations = sorted(
+        int(key.rsplit(":", 1)[1]) for key in t2v if key.startswith("720p:")
+    )
+    assert durations == list(range(4, 16))
+
+
 @pytest.mark.asyncio
 async def test_estimate_video_cost_uses_pricing_and_hold_estimate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_price(_db, *, scope: str, key: str, unit: str, variant: str) -> int:
-        assert (scope, key, unit, variant) == (
-            "video",
-            "seedance-2.0",
-            "per_mtoken",
-            "i2v",
-        )
-        return 12_345
+    async def fake_price(
+        _db, *, scope: str, key: str, unit: str, variant: str
+    ) -> int | None:
+        assert (scope, key, unit) == ("video", "seedance-2.0", "per_mtoken")
+        return 12_345 if variant == "i2v_720p" else None
 
     monkeypatch.setattr(video_billing, "pricing_price_micro", fake_price)
 
@@ -81,7 +139,66 @@ async def test_estimate_video_cost_uses_pricing_and_hold_estimate(
     assert estimate.estimated_tokens == 60_000
     assert estimate.unit_price_micro == 12_345
     assert estimate.hold_micro == 741
-    assert estimate.source == "video.token_hold_estimates"
+    assert estimate.source == "video.token_hold_estimates:i2v_720p"
+
+
+@pytest.mark.asyncio
+async def test_estimate_video_cost_uses_reference_video_pricing_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_price(
+        _db, *, scope: str, key: str, unit: str, variant: str
+    ) -> int | None:
+        assert (scope, key, unit) == ("video", "seedance-2.0", "per_mtoken")
+        calls.append(variant)
+        return 20_000 if variant == "reference_video_720p" else None
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", fake_price)
+
+    estimate = await video_billing.estimate_video_cost(
+        object(),  # type: ignore[arg-type]
+        model="seedance-2.0",
+        action="reference",
+        resolution="720p",
+        duration_s=5,
+        estimates={"seedance-2.0": {"reference": {"720p:5": 60_000}}},
+        pricing_variant="reference_video",
+    )
+
+    assert calls == ["reference_video_720p"]
+    assert estimate.hold_micro == 1_200
+    assert estimate.source == "video.token_hold_estimates:reference_video_720p"
+
+
+@pytest.mark.asyncio
+async def test_estimate_video_cost_falls_back_to_legacy_video_pricing_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_price(
+        _db, *, scope: str, key: str, unit: str, variant: str
+    ) -> int | None:
+        assert (scope, key, unit) == ("video", "seedance-2.0", "per_mtoken")
+        calls.append(variant)
+        return 10_000 if variant == "t2v" else None
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", fake_price)
+
+    estimate = await video_billing.estimate_video_cost(
+        object(),  # type: ignore[arg-type]
+        model="seedance-2.0",
+        action="t2v",
+        resolution="720p",
+        duration_s=5,
+        estimates={"seedance-2.0": {"t2v": {"720p:5": 60_000}}},
+    )
+
+    assert calls == ["t2v_720p", "t2v"]
+    assert estimate.hold_micro == 600
+    assert estimate.source == "video.token_hold_estimates:t2v"
 
 
 @pytest.mark.asyncio

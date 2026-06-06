@@ -5,11 +5,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Clapperboard,
   Copy,
+  ImageIcon,
   Play,
   RefreshCw,
   Send,
   Trash2,
   Upload,
+  Video as VideoIcon,
   XCircle,
 } from "lucide-react";
 
@@ -22,17 +24,29 @@ import {
   listVideoGenerations,
   retryVideoGeneration,
   uploadImage,
+  uploadVideo,
   videoBinaryUrl,
   videoPosterUrl,
 } from "@/lib/apiClient";
 import { useSSE } from "@/lib/useSSE";
-import type { VideoAction, VideoGenerationOut, VideoOptionsOut } from "@/lib/types";
+import type {
+  VideoAction,
+  VideoGenerationOut,
+  VideoOptionsOut,
+  VideoReferenceMediaIn,
+} from "@/lib/types";
 import { Button, Card, toast } from "@/components/ui/primitives";
 import { DesktopTopNav, MobileTabBar } from "@/components/ui/shell";
 import { formatRmb } from "@/lib/money";
 
 type VideoGenerationWithVideo = VideoGenerationOut & {
   video: NonNullable<VideoGenerationOut["video"]>;
+};
+
+type ReferenceDraft = VideoReferenceMediaIn & {
+  _key: string;
+  label: string;
+  display: string;
 };
 
 const VIDEO_EVENTS = [
@@ -44,6 +58,20 @@ const VIDEO_EVENTS = [
   "video.failed",
   "video.canceled",
 ];
+const SMART_VIDEO_DURATION = -1;
+const SMART_VIDEO_HOLD_DURATION = 15;
+const VIDEO_DURATION_OPTIONS = [
+  SMART_VIDEO_DURATION,
+  ...Array.from({ length: 12 }, (_, index) => index + 4),
+];
+
+function holdEstimateDurationS(durationS: number): number {
+  return durationS === SMART_VIDEO_DURATION ? SMART_VIDEO_HOLD_DURATION : durationS;
+}
+
+function formatDurationLabel(durationS: number): string {
+  return durationS === SMART_VIDEO_DURATION ? "智能时长" : `${durationS}s`;
+}
 
 function firstModelForAction(options: VideoOptionsOut | undefined, action: VideoAction): string {
   return options?.models.find((item) => item.actions.includes(action))?.model ?? "";
@@ -67,23 +95,52 @@ function estimateHoldMicro(
     action,
     resolution,
     durationS,
+    referenceHasVideo,
   }: {
     model: string;
     action: VideoAction;
     resolution: string;
     durationS: number;
+    referenceHasVideo?: boolean;
   },
 ): { tokens: number; micro: number } | null {
   const tokenMap = options?.hold_estimates?.[model];
   if (!tokenMap || typeof tokenMap !== "object") return null;
-  const actionMap = (tokenMap as Record<string, unknown>)[action];
+  const tokenRecord = tokenMap as Record<string, unknown>;
+  const actionMap =
+    tokenRecord[action] ??
+    (action === "reference" ? tokenRecord.i2v ?? tokenRecord.t2v : undefined);
   if (!actionMap || typeof actionMap !== "object") return null;
-  const tokensRaw = (actionMap as Record<string, unknown>)[`${resolution}:${durationS}`];
+  const tokensRaw = (actionMap as Record<string, unknown>)[
+    `${resolution}:${holdEstimateDurationS(durationS)}`
+  ];
   const tokens = Number(tokensRaw);
   if (!Number.isFinite(tokens) || tokens <= 0) return null;
-  const price = options?.pricing.find(
-    (item) => item.model === model && item.action === action && item.enabled,
-  );
+  const pricingAction =
+    action === "reference"
+      ? referenceHasVideo
+        ? "reference_video"
+        : "reference_image"
+      : action;
+  const findPrice = (priceAction: VideoAction | "reference_image" | "reference_video") =>
+    options?.pricing.find(
+      (item) =>
+        item.model === model &&
+        item.action === priceAction &&
+        item.resolution === resolution &&
+        item.enabled,
+    ) ??
+    options?.pricing.find(
+      (item) =>
+        item.model === model &&
+        item.action === priceAction &&
+        (item.resolution == null || item.resolution === "") &&
+        item.enabled,
+    );
+  const price =
+    findPrice(pricingAction) ??
+    (action === "reference" ? findPrice("reference") : undefined) ??
+    (action === "reference" && !referenceHasVideo ? findPrice("i2v") : undefined);
   if (!price) return { tokens, micro: 0 };
   return { tokens, micro: Math.round((tokens * price.price.micro) / 1_000_000) };
 }
@@ -103,17 +160,19 @@ function hasVideo(item: VideoGenerationOut): item is VideoGenerationWithVideo {
 export default function VideoPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const referenceFileRef = useRef<HTMLInputElement | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const [action, setAction] = useState<VideoAction>("t2v");
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState("");
   const [durationS, setDurationS] = useState(5);
   const [resolution, setResolution] = useState("720p");
-  const [aspectRatio, setAspectRatio] = useState("16:9");
-  const [fps, setFps] = useState<number | "">("");
-  const [generateAudio, setGenerateAudio] = useState(false);
+  const [aspectRatio, setAspectRatio] = useState("adaptive");
+  const [generateAudio, setGenerateAudio] = useState(true);
   const [seed, setSeed] = useState("");
   const [inputImageId, setInputImageId] = useState("");
   const [uploadedLabel, setUploadedLabel] = useState("");
+  const [referenceMedia, setReferenceMedia] = useState<ReferenceDraft[]>([]);
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
 
   const optionsQ = useQuery({
@@ -185,7 +244,37 @@ export default function VideoPage() {
     action,
     resolution,
     durationS,
+    referenceHasVideo: referenceMedia.some((item) => item.kind === "video"),
   });
+
+  const nextReferenceLabel = useCallback(
+    (kind: "image" | "video") => {
+      const count = referenceMedia.filter((item) => item.kind === kind).length + 1;
+      return `${kind === "image" ? "Image" : "Video"} ${count}`;
+    },
+    [referenceMedia],
+  );
+
+  const insertReferenceTag = useCallback((label: string) => {
+    const tag = `[${label}]`;
+    const target = promptRef.current;
+    if (!target) {
+      setPrompt((prev) => `${prev}${prev.endsWith(" ") || !prev ? "" : " "}${tag}`);
+      return;
+    }
+    const start = target.selectionStart ?? prompt.length;
+    const end = target.selectionEnd ?? prompt.length;
+    const before = prompt.slice(0, start);
+    const after = prompt.slice(end);
+    const spacer = before && !before.endsWith(" ") ? " " : "";
+    const next = `${before}${spacer}${tag}${after.startsWith(" ") || !after ? "" : " "}${after}`;
+    setPrompt(next);
+    requestAnimationFrame(() => {
+      const pos = (before + spacer + tag).length;
+      target.focus();
+      target.setSelectionRange(pos, pos);
+    });
+  }, [prompt]);
 
   const uploadMut = useMutation({
     mutationFn: (file: File) => uploadImage(file),
@@ -197,6 +286,50 @@ export default function VideoPage() {
     onError: (err) => toast.error("上传失败", { description: err instanceof Error ? err.message : undefined }),
   });
 
+  const referenceUploadMut = useMutation({
+    mutationFn: async (file: File) => {
+      if (file.type.startsWith("image/")) {
+        if (referenceMedia.filter((item) => item.kind === "image").length >= 9) {
+          throw new Error("参考图片最多 9 张");
+        }
+        const img = await uploadImage(file);
+        return {
+          kind: "image" as const,
+          image_id: img.id,
+          display: `${img.width}x${img.height}`,
+        };
+      }
+      if (file.type.startsWith("video/")) {
+        if (referenceMedia.filter((item) => item.kind === "video").length >= 3) {
+          throw new Error("参考视频最多 3 个");
+        }
+        const video = await uploadVideo(file);
+        return {
+          kind: "video" as const,
+          video_id: video.id,
+          display: video.size_bytes ? `${Math.round(video.size_bytes / 1024 / 1024)}MB` : "video",
+        };
+      }
+      throw new Error("只支持图片或视频");
+    },
+    onSuccess: (ref) => {
+      const label = nextReferenceLabel(ref.kind);
+      setReferenceMedia((prev) => [
+        ...prev,
+        {
+          _key: crypto.randomUUID(),
+          kind: ref.kind,
+          image_id: ref.kind === "image" ? ref.image_id : null,
+          video_id: ref.kind === "video" ? ref.video_id : null,
+          label,
+          display: ref.display,
+        },
+      ]);
+      toast.success("参考素材已上传");
+    },
+    onError: (err) => toast.error("上传失败", { description: err instanceof Error ? err.message : undefined }),
+  });
+
   const createMut = useMutation({
     mutationFn: () =>
       createVideoGeneration({
@@ -204,10 +337,18 @@ export default function VideoPage() {
         model: selectedModel,
         prompt: prompt.trim(),
         input_image_id: action === "i2v" ? inputImageId.trim() : null,
+        reference_media:
+          action === "reference"
+            ? referenceMedia.map((item) => ({
+                kind: item.kind,
+                image_id: item.kind === "image" ? item.image_id ?? null : null,
+                video_id: item.kind === "video" ? item.video_id ?? null : null,
+                label: item.label,
+              }))
+            : [],
         duration_s: durationS,
-        resolution: resolution as "720p" | "1080p",
+        resolution: resolution as "480p" | "720p" | "1080p",
         aspect_ratio: aspectRatio,
-        fps: fps === "" ? null : Number(fps),
         generate_audio: generateAudio,
         seed: seed.trim() ? Number(seed) : null,
         watermark: false,
@@ -254,7 +395,9 @@ export default function VideoPage() {
     Boolean(options?.enabled) &&
     Boolean(selectedModel) &&
     prompt.trim().length > 0 &&
-    (action === "t2v" || inputImageId.trim().length > 0) &&
+    (action === "t2v" ||
+      (action === "i2v" && inputImageId.trim().length > 0) ||
+      (action === "reference" && referenceMedia.length > 0)) &&
     estimate !== null &&
     !createMut.isPending;
 
@@ -283,10 +426,11 @@ export default function VideoPage() {
               </Button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               {[
                 ["t2v", "文字生成"],
                 ["i2v", "首帧生成"],
+                ["reference", "参考生成"],
               ].map(([key, label]) => (
                 <button
                   key={key}
@@ -311,6 +455,7 @@ export default function VideoPage() {
             <label className="space-y-1.5">
               <span className="type-caption text-[var(--fg-2)]">Prompt</span>
               <textarea
+                ref={promptRef}
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 rows={7}
@@ -362,6 +507,74 @@ export default function VideoPage() {
               </div>
             )}
 
+            {action === "reference" && (
+              <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
+                <input
+                  ref={referenceFileRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) referenceUploadMut.mutate(file);
+                    event.target.value = "";
+                  }}
+                />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="type-caption text-[var(--fg-2)]">
+                    参考素材 · {referenceMedia.length}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    loading={referenceUploadMut.isPending}
+                    onClick={() => referenceFileRef.current?.click()}
+                    leftIcon={<Upload className="h-3.5 w-3.5" />}
+                  >
+                    上传图片/视频
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {referenceMedia.map((item) => (
+                    <div
+                      key={item._key}
+                      className="inline-flex min-h-9 items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-2 text-xs text-[var(--fg-1)]"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => insertReferenceTag(item.label)}
+                        className="inline-flex items-center gap-2 rounded-[var(--radius-control)] px-1 py-1 hover:bg-[var(--bg-2)]"
+                      >
+                        {item.kind === "image" ? (
+                          <ImageIcon className="h-3.5 w-3.5" />
+                        ) : (
+                          <VideoIcon className="h-3.5 w-3.5" />
+                        )}
+                        <span>[{item.label}]</span>
+                        <span className="text-[var(--fg-2)]">{item.display}</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="移除参考素材"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setReferenceMedia((prev) =>
+                            prev.filter((ref) => ref._key !== item._key),
+                          );
+                        }}
+                        className="rounded-full p-0.5 hover:bg-[var(--bg-3)]"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  {referenceMedia.length === 0 && (
+                    <span className="text-xs text-[var(--fg-2)]">未添加参考素材</span>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="grid gap-3 sm:grid-cols-2">
               <SelectField
                 label="模型"
@@ -373,25 +586,20 @@ export default function VideoPage() {
                 label="时长"
                 value={String(durationS)}
                 onChange={(value) => setDurationS(Number(value))}
-                options={(options?.durations_s ?? [5, 10]).map(String)}
+                options={(options?.durations_s ?? VIDEO_DURATION_OPTIONS).map(String)}
+                renderOption={(value) => formatDurationLabel(Number(value))}
               />
               <SelectField
                 label="分辨率"
                 value={resolution}
                 onChange={setResolution}
-                options={options?.resolutions ?? ["720p", "1080p"]}
+                options={options?.resolutions ?? ["480p", "720p", "1080p"]}
               />
               <SelectField
                 label="比例"
                 value={aspectRatio}
                 onChange={setAspectRatio}
-                options={options?.aspect_ratios ?? ["16:9", "9:16", "1:1"]}
-              />
-              <SelectField
-                label="FPS"
-                value={fps === "" ? "" : String(fps)}
-                onChange={(value) => setFps(value ? Number(value) : "")}
-                options={["", ...(options?.fps ?? [24, 30]).map(String)]}
+                options={options?.aspect_ratios ?? ["adaptive", "16:9", "9:16", "1:1"]}
               />
               <label className="space-y-1.5">
                 <span className="type-caption text-[var(--fg-2)]">Seed</span>
@@ -544,11 +752,13 @@ function SelectField({
   value,
   onChange,
   options,
+  renderOption,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   options: string[];
+  renderOption?: (value: string) => string;
 }) {
   return (
     <label className="space-y-1.5">
@@ -560,7 +770,7 @@ function SelectField({
       >
         {options.map((item) => (
           <option key={item || "auto"} value={item}>
-            {item || "自动"}
+            {renderOption ? renderOption(item) : item || "自动"}
           </option>
         ))}
       </select>
@@ -590,7 +800,7 @@ function TaskRow({
             <span>{item.model}</span>
             <span>{item.action.toUpperCase()}</span>
             <span>{item.resolution}</span>
-            <span>{item.duration_s}s</span>
+            <span>{formatDurationLabel(item.duration_s)}</span>
           </div>
           <p className="mt-1 line-clamp-2 text-sm text-[var(--fg-0)]">{item.prompt}</p>
         </div>

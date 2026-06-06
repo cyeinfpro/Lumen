@@ -18,6 +18,7 @@ import {
   AlertCircle,
   ArrowLeft,
   Archive,
+  Clapperboard,
   CreditCard,
   HardDrive,
   Inbox,
@@ -55,6 +56,7 @@ import { RequestEventsPanel } from "./_panels/RequestEventsPanel";
 import { SettingsPanel } from "./_panels/SettingsPanel";
 import { StoragePanel } from "./_panels/StoragePanel";
 import { TelegramPanel } from "./_panels/TelegramPanel";
+import { VideoProvidersPanel } from "./_panels/VideoProvidersPanel";
 
 type MaybeAdminUser = AuthUser & { role?: "admin" | "member" };
 
@@ -67,6 +69,7 @@ type Tab =
   | "byok"
   | "billing"
   | "providers"
+  | "video_providers"
   | "proxies"
   | "telegram"
   | "settings"
@@ -175,6 +178,14 @@ const TABS: TabMeta[] = [
     title: "供应商路由",
     description: "配置模型供应商、探活、优先级和图片任务能力。",
     icon: Server,
+  },
+  {
+    key: "video_providers",
+    group: "operations",
+    label: "视频供应商",
+    title: "AI 视频供应商",
+    description: "配置 Seedance/Veo 视频任务供应商、模型映射、代理和并发。",
+    icon: Clapperboard,
   },
   {
     key: "proxies",
@@ -387,6 +398,8 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
                   <BillingPanel />
                 ) : tab === "providers" ? (
                   <ProvidersPanel />
+                ) : tab === "video_providers" ? (
+                  <VideoProvidersPanel />
                 ) : tab === "proxies" ? (
                   <ProxiesPanel />
                 ) : tab === "telegram" ? (

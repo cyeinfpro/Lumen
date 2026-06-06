@@ -464,32 +464,111 @@ class VideoOut(BaseOut):
     created_at: datetime | None = None
 
 
+VideoAction = Literal["t2v", "i2v", "reference"]
+VideoPricingVariant = Literal[
+    "t2v",
+    "i2v",
+    "reference",
+    "reference_image",
+    "reference_video",
+]
+VideoResolution = Literal["480p", "720p", "1080p"]
+VideoAspectRatio = Literal["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
+
+
+class VideoReferenceMediaIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["image", "video"]
+    image_id: str | None = Field(default=None, max_length=36)
+    video_id: str | None = Field(default=None, max_length=36)
+    url: str | None = Field(default=None, max_length=2048)
+    label: str | None = Field(default=None, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_reference_source(self) -> "VideoReferenceMediaIn":
+        sources = [
+            bool((self.image_id or "").strip()),
+            bool((self.video_id or "").strip()),
+            bool((self.url or "").strip()),
+        ]
+        if sum(1 for item in sources if item) != 1:
+            raise ValueError("reference media must include exactly one source")
+        if self.kind == "image" and not (
+            (self.image_id or "").strip() or (self.url or "").strip()
+        ):
+            raise ValueError("image reference requires image_id or url")
+        if self.kind == "video" and not (
+            (self.video_id or "").strip() or (self.url or "").strip()
+        ):
+            raise ValueError("video reference requires video_id or url")
+        if self.kind == "image" and (self.video_id or "").strip():
+            raise ValueError("image reference must not include video_id")
+        if self.kind == "video" and (self.image_id or "").strip():
+            raise ValueError("video reference must not include image_id")
+        return self
+
+
+class VideoReferenceMediaOut(BaseModel):
+    kind: Literal["image", "video"]
+    image_id: str | None = None
+    video_id: str | None = None
+    url: str | None = None
+    label: str | None = None
+    mime: str | None = None
+
+
 class VideoCreateIn(BaseModel):
-    action: Literal["t2v", "i2v"]
+    model_config = ConfigDict(extra="forbid")
+
+    action: VideoAction
     model: str = Field(min_length=1, max_length=64)
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     input_image_id: str | None = Field(default=None, max_length=36)
-    duration_s: int = Field(gt=0, le=60)
-    resolution: Literal["720p", "1080p"]
-    aspect_ratio: str = Field(min_length=1, max_length=16)
-    fps: int | None = Field(default=None, ge=1, le=120)
-    generate_audio: bool = False
-    seed: int | None = Field(default=None, ge=0)
+    reference_media: list[VideoReferenceMediaIn] = Field(default_factory=list)
+    duration_s: int = Field(ge=-1, le=15)
+    resolution: VideoResolution
+    aspect_ratio: VideoAspectRatio
+    generate_audio: bool = True
+    seed: int | None = Field(default=None, ge=-1, le=4_294_967_295)
     watermark: bool = False
     idempotency_key: str = Field(min_length=1, max_length=96)
 
     @model_validator(mode="after")
     def validate_action_image_contract(self) -> "VideoCreateIn":
+        if self.duration_s != -1 and self.duration_s < 4:
+            raise ValueError("duration_s must be -1 or between 4 and 15")
         if self.action == "t2v" and self.input_image_id:
             raise ValueError("t2v must not include input_image_id")
+        if self.action == "t2v" and self.reference_media:
+            raise ValueError("t2v must not include reference_media")
         if self.action == "i2v" and not self.input_image_id:
             raise ValueError("i2v requires input_image_id")
+        if self.action == "i2v" and self.reference_media:
+            raise ValueError("i2v must not include reference_media")
+        if self.action == "reference" and self.input_image_id:
+            raise ValueError("reference must not include input_image_id")
+        if self.action == "reference":
+            if not self.reference_media:
+                raise ValueError("reference requires at least one image or video")
+            image_count = sum(
+                1 for item in self.reference_media if item.kind == "image"
+            )
+            video_count = sum(
+                1 for item in self.reference_media if item.kind == "video"
+            )
+            if image_count > 9:
+                raise ValueError("reference supports at most 9 images")
+            if video_count > 3:
+                raise ValueError("reference supports at most 3 videos")
         return self
 
 
 class VideoPriceOptionOut(BaseModel):
     model: str
-    action: Literal["t2v", "i2v"]
+    action: VideoPricingVariant
+    resolution: str | None = None
+    variant: str | None = None
     unit: Literal["per_mtoken"] = "per_mtoken"
     price: MoneyOut
     enabled: bool = True
@@ -498,7 +577,7 @@ class VideoPriceOptionOut(BaseModel):
 
 class VideoModelOptionOut(BaseModel):
     model: str
-    actions: list[Literal["t2v", "i2v"]] = Field(default_factory=list)
+    actions: list[VideoAction] = Field(default_factory=list)
 
 
 class VideoOptionsOut(BaseModel):
@@ -507,8 +586,7 @@ class VideoOptionsOut(BaseModel):
     durations_s: list[int] = Field(default_factory=list)
     resolutions: list[str] = Field(default_factory=list)
     aspect_ratios: list[str] = Field(default_factory=list)
-    fps: list[int] = Field(default_factory=list)
-    generate_audio: bool = False
+    generate_audio: bool = True
     pricing: list[VideoPriceOptionOut] = Field(default_factory=list)
     hold_estimates: dict[str, Any] = Field(default_factory=dict)
     unavailable_reason: str | None = None
@@ -520,11 +598,12 @@ class VideoGenerationOut(BaseOut):
     model: str
     prompt: str
     input_image_id: str | None = None
+    reference_media: list[VideoReferenceMediaOut] = Field(default_factory=list)
     duration_s: int
     resolution: str
     aspect_ratio: str
     fps: int | None = None
-    generate_audio: bool = False
+    generate_audio: bool = True
     seed: int | None = None
     status: str
     progress_stage: str
@@ -1728,6 +1807,47 @@ class ProvidersUpdateIn(BaseModel):
     proxies: list[ProviderProxyIn] = []
 
 
+VideoProviderKind = Literal["volcano", "veo", "fake"]
+
+
+class VideoProviderItemOut(BaseModel):
+    name: str
+    kind: VideoProviderKind = "volcano"
+    base_url: str
+    api_key_hint: str
+    enabled: bool = True
+    priority: int = 0
+    weight: int = 1
+    concurrency: int = 1
+    proxy: str | None = None
+    models: dict[str, str] = Field(default_factory=dict)
+
+
+class VideoProvidersOut(BaseModel):
+    enabled: bool = False
+    items: list[VideoProviderItemOut]
+    proxies: list[ProviderProxyOut] = Field(default_factory=list)
+    source: str  # "db" | "env" | "none"
+
+
+class VideoProviderItemIn(BaseModel):
+    name: str
+    kind: VideoProviderKind = "volcano"
+    base_url: str
+    api_key: str = ""
+    enabled: bool = True
+    priority: int = 0
+    weight: int = 1
+    concurrency: int = 1
+    proxy: str | None = None
+    models: dict[str, str] = Field(default_factory=dict)
+
+
+class VideoProvidersUpdateIn(BaseModel):
+    enabled: bool = False
+    items: list[VideoProviderItemIn]
+
+
 class ProvidersProbeIn(BaseModel):
     names: list[str] | None = None
 
@@ -2146,7 +2266,10 @@ __all__ = [
     "ActiveTasksOut",
     "ImageOut",
     "VideoOut",
+    "VideoAction",
     "VideoCreateIn",
+    "VideoReferenceMediaIn",
+    "VideoReferenceMediaOut",
     "VideoPriceOptionOut",
     "VideoModelOptionOut",
     "VideoOptionsOut",
@@ -2168,6 +2291,11 @@ __all__ = [
     "SystemSettingsOut",
     "SystemSettingsUpdateItem",
     "SystemSettingsUpdateIn",
+    "VideoProviderKind",
+    "VideoProviderItemOut",
+    "VideoProvidersOut",
+    "VideoProviderItemIn",
+    "VideoProvidersUpdateIn",
     "MoneyOut",
     "WalletOut",
     "WalletTransactionOut",

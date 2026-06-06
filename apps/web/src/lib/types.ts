@@ -586,7 +586,10 @@ export type SystemSettingKey =
   | "billing.low_balance_warn_micro"
   | "billing.bootstrap_completed"
   | "billing.show_estimate_in_composer"
-  | "providers";
+  | "providers"
+  | "video.enabled"
+  | "video.providers"
+  | "video.token_hold_estimates";
 
 export interface SystemSettingItem {
   key: SystemSettingKey | string;
@@ -696,6 +699,46 @@ export interface ProviderProxyIn {
   password?: string;
   private_key_path?: string | null;
   enabled: boolean;
+}
+
+export type VideoProviderKind = "volcano" | "veo" | "fake";
+
+export interface VideoProviderItemOut {
+  name: string;
+  kind: VideoProviderKind;
+  base_url: string;
+  api_key_hint: string;
+  enabled: boolean;
+  priority: number;
+  weight: number;
+  concurrency: number;
+  proxy: string | null;
+  models: Record<string, string>;
+}
+
+export interface VideoProvidersOut {
+  enabled: boolean;
+  items: VideoProviderItemOut[];
+  proxies: ProviderProxyOut[];
+  source: "db" | "env" | "none" | "desktop";
+}
+
+export interface VideoProviderItemIn {
+  name: string;
+  kind: VideoProviderKind;
+  base_url: string;
+  api_key?: string;
+  enabled: boolean;
+  priority: number;
+  weight: number;
+  concurrency: number;
+  proxy?: string | null;
+  models: Record<string, string>;
+}
+
+export interface VideoProvidersUpdateIn {
+  enabled: boolean;
+  items: VideoProviderItemIn[];
 }
 
 // ——— 代理池 ———
@@ -991,7 +1034,7 @@ export interface PricingRulesOut {
   show_estimate_in_composer?: boolean | null;
 }
 
-export type VideoAction = "t2v" | "i2v";
+export type VideoAction = "t2v" | "i2v" | "reference";
 export type VideoStatus =
   | "queued"
   | "submitting"
@@ -1025,15 +1068,32 @@ export interface VideoOut {
   created_at?: string | null;
 }
 
+export interface VideoReferenceMediaIn {
+  kind: "image" | "video";
+  image_id?: string | null;
+  video_id?: string | null;
+  url?: string | null;
+  label?: string | null;
+}
+
+export interface VideoReferenceMediaOut {
+  kind: "image" | "video";
+  image_id?: string | null;
+  video_id?: string | null;
+  url?: string | null;
+  label?: string | null;
+  mime?: string | null;
+}
+
 export interface VideoCreateIn {
   action: VideoAction;
   model: string;
   prompt: string;
   input_image_id?: string | null;
+  reference_media?: VideoReferenceMediaIn[];
   duration_s: number;
-  resolution: "720p" | "1080p";
+  resolution: "480p" | "720p" | "1080p";
   aspect_ratio: string;
-  fps?: number | null;
   generate_audio?: boolean;
   seed?: number | null;
   watermark?: boolean;
@@ -1042,7 +1102,9 @@ export interface VideoCreateIn {
 
 export interface VideoPriceOptionOut {
   model: string;
-  action: VideoAction;
+  action: VideoAction | "reference_image" | "reference_video";
+  resolution?: string | null;
+  variant?: string | null;
   unit: "per_mtoken";
   price: MoneyOut;
   enabled: boolean;
@@ -1060,7 +1122,6 @@ export interface VideoOptionsOut {
   durations_s: number[];
   resolutions: string[];
   aspect_ratios: string[];
-  fps: number[];
   generate_audio: boolean;
   pricing: VideoPriceOptionOut[];
   hold_estimates: Record<string, unknown>;
@@ -1073,6 +1134,7 @@ export interface VideoGenerationOut {
   model: string;
   prompt: string;
   input_image_id?: string | null;
+  reference_media: VideoReferenceMediaOut[];
   duration_s: number;
   resolution: string;
   aspect_ratio: string;
