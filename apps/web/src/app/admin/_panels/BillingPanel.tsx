@@ -74,7 +74,7 @@ type VideoRuleRow = {
 
 const VIDEO_OFFICIAL_PRICE_PRESETS: {
   model: string;
-  prices: Record<VideoPricingVariant, Record<VideoResolution, number>>;
+  prices: Record<VideoPricingVariant, Partial<Record<VideoResolution, number>>>;
   note: string;
 }[] = [
   {
@@ -91,13 +91,13 @@ const VIDEO_OFFICIAL_PRICE_PRESETS: {
   {
     model: "seedance-2.0-fast",
     prices: {
-      t2v: { "480p": 37, "720p": 37, "1080p": 37 },
-      i2v: { "480p": 37, "720p": 37, "1080p": 37 },
-      reference_image: { "480p": 37, "720p": 37, "1080p": 37 },
-      reference_video: { "480p": 22, "720p": 22, "1080p": 22 },
-      reference: { "480p": 37, "720p": 37, "1080p": 37 },
+      t2v: { "480p": 37, "720p": 37 },
+      i2v: { "480p": 37, "720p": 37 },
+      reference_image: { "480p": 37, "720p": 37 },
+      reference_video: { "480p": 22, "720p": 22 },
+      reference: { "480p": 37, "720p": 37 },
     },
-    note: "火山官方价：无视频 37、含视频 22 元/百万 token",
+    note: "火山官方价：480/720P 无视频 37、含视频 22 元/百万 token；Fast 不支持 1080P",
   },
 ];
 
@@ -859,8 +859,10 @@ function PricingSubpanel() {
     for (const preset of VIDEO_OFFICIAL_PRICE_PRESETS) {
       for (const variant of VIDEO_PRICING_VARIANTS) {
         for (const resolution of VIDEO_RESOLUTIONS) {
+          const price = preset.prices[variant][resolution];
+          if (price == null) continue;
           nextDrafts[videoDraftKey(preset.model, variant, resolution)] =
-            formatVideoPrice(preset.prices[variant][resolution] * multiplier);
+            formatVideoPrice(price * multiplier);
         }
       }
     }

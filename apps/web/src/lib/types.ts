@@ -1114,6 +1114,7 @@ export interface VideoPriceOptionOut {
 export interface VideoModelOptionOut {
   model: string;
   actions: VideoAction[];
+  resolutions?: Array<VideoCreateIn["resolution"]>;
 }
 
 export interface VideoOptionsOut {

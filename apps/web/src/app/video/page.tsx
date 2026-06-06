@@ -232,6 +232,19 @@ function firstModelForAction(options: VideoOptionsOut | undefined, action: Video
   return options?.models.find((item) => item.actions.includes(action))?.model ?? "";
 }
 
+function resolutionOptionsForModel(
+  options: VideoOptionsOut | undefined,
+  model: string,
+): string[] {
+  const modelOptions = options?.models.find((item) => item.model === model);
+  if (modelOptions?.resolutions?.length) return modelOptions.resolutions;
+  return options?.resolutions?.length ? options.resolutions : ["480p", "720p", "1080p"];
+}
+
+function preferredResolution(options: string[]): string {
+  return options.includes("720p") ? "720p" : options[0] ?? "720p";
+}
+
 function mergeById(
   current: VideoGenerationOut[],
   updates: VideoGenerationOut[],
@@ -393,10 +406,17 @@ export default function VideoPage() {
     [action, options?.models],
   );
   const selectedModel = model || firstModelForAction(options, action);
+  const availableResolutions = useMemo(
+    () => resolutionOptionsForModel(options, selectedModel),
+    [options, selectedModel],
+  );
+  const effectiveResolution = availableResolutions.includes(resolution)
+    ? resolution
+    : preferredResolution(availableResolutions);
   const estimate = estimateHoldMicro(options, {
     model: selectedModel,
     action,
-    resolution,
+    resolution: effectiveResolution,
     durationS,
     referenceHasVideo: referenceMedia.some((item) => item.kind === "video"),
   });
@@ -503,7 +523,7 @@ export default function VideoPage() {
               }))
             : [],
         duration_s: durationS,
-        resolution: toVideoResolution(resolution),
+        resolution: toVideoResolution(effectiveResolution),
         aspect_ratio: aspectRatio,
         generate_audio: generateAudio,
         seed: parseSeed(seed),
@@ -588,6 +608,7 @@ export default function VideoPage() {
     if (optionsQ.isLoading) return "正在读取配置";
     if (!options?.enabled) return options?.unavailable_reason ?? "视频生成未启用";
     if (!selectedModel) return "没有可用模型";
+    if (!availableResolutions.includes(effectiveResolution)) return "当前模型不支持该分辨率";
     if (!prompt.trim()) return "先填写描述";
     if (action === "i2v" && !inputImageId.trim()) return "需要上传首帧或填写图片 ID";
     if (action === "reference" && referenceMedia.length === 0) {
@@ -597,6 +618,7 @@ export default function VideoPage() {
     return "可以提交";
   }, [
     action,
+    availableResolutions,
     createMut.isPending,
     estimate,
     inputImageId,
@@ -605,6 +627,7 @@ export default function VideoPage() {
     optionsQ.isLoading,
     prompt,
     referenceMedia.length,
+    effectiveResolution,
     selectedModel,
   ]);
 
@@ -612,6 +635,7 @@ export default function VideoPage() {
     Boolean(options?.enabled) &&
     Boolean(selectedModel) &&
     prompt.trim().length > 0 &&
+    availableResolutions.includes(effectiveResolution) &&
     (action === "t2v" ||
       (action === "i2v" && inputImageId.trim().length > 0) ||
       (action === "reference" && referenceMedia.length > 0)) &&
@@ -739,7 +763,7 @@ export default function VideoPage() {
                 <div className="grid gap-2 text-xs text-[var(--fg-2)] sm:grid-cols-3">
                   <PromptMeta icon={<Film className="h-3.5 w-3.5" />} label={actionLabel(action)} />
                   <PromptMeta icon={<Layers3 className="h-3.5 w-3.5" />} label={`${referenceMedia.length} 个参考素材`} />
-                  <PromptMeta icon={<Settings2 className="h-3.5 w-3.5" />} label={`${resolution} · ${formatDurationLabel(durationS)}`} />
+                  <PromptMeta icon={<Settings2 className="h-3.5 w-3.5" />} label={`${effectiveResolution} · ${formatDurationLabel(durationS)}`} />
                 </div>
               </div>
 
@@ -857,9 +881,9 @@ export default function VideoPage() {
                   />
                   <SelectField
                     label="分辨率"
-                    value={resolution}
+                    value={effectiveResolution}
                     onChange={setResolution}
-                    options={options?.resolutions ?? ["480p", "720p", "1080p"]}
+                    options={availableResolutions}
                   />
                   <SelectField
                     label="比例"

@@ -47,10 +47,43 @@ type Draft = {
   models: ModelDraft[];
 };
 
+const VOLCANO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const VOLCANO_MODEL_PRESETS = [
+  {
+    model: "seedance-2.0",
+    upstream: "doubao-seedance-2-0-260128",
+  },
+  {
+    model: "seedance-2.0-fast",
+    upstream: "doubao-seedance-2-0-fast-260128",
+  },
+] as const;
+
 let seq = 0;
 function nextKey() {
   seq += 1;
   return seq;
+}
+
+function modelDraft(
+  model = "",
+  t2v = "",
+  i2v = "",
+  reference = "",
+): ModelDraft {
+  return {
+    _key: nextKey(),
+    model,
+    t2v,
+    i2v,
+    reference,
+  };
+}
+
+function volcanoModelDrafts(): ModelDraft[] {
+  return VOLCANO_MODEL_PRESETS.map((preset) =>
+    modelDraft(preset.model, preset.upstream, preset.upstream, preset.upstream),
+  );
 }
 
 function modelsToRows(models: Record<string, string>): ModelDraft[] {
@@ -102,13 +135,7 @@ function rowsToModels(rows: ModelDraft[]): Record<string, string> {
 }
 
 function emptyModelDraft(): ModelDraft {
-  return {
-    _key: nextKey(),
-    model: "seedance-2.0",
-    t2v: "doubao-seedance-2-0-260128",
-    i2v: "doubao-seedance-2-0-260128",
-    reference: "doubao-seedance-2-0-260128",
-  };
+  return modelDraft();
 }
 
 function toDraft(item: VideoProviderItemOut): Draft {
@@ -132,14 +159,27 @@ function emptyDraft(): Draft {
     _key: nextKey(),
     name: "volcano-main",
     kind: "volcano",
-    base_url: "https://ark.cn-beijing.volces.com/api/v3",
+    base_url: VOLCANO_BASE_URL,
     api_key: "",
     enabled: true,
     priority: 100,
     weight: 1,
-    concurrency: 1,
+    concurrency: 10,
     proxy: "",
-    models: [emptyModelDraft()],
+    models: volcanoModelDrafts(),
+  };
+}
+
+function volcanoPresetPatch(draft: Draft): Partial<Draft> {
+  return {
+    name: draft.name.trim() || "volcano-main",
+    kind: "volcano",
+    base_url: VOLCANO_BASE_URL,
+    enabled: draft.enabled,
+    priority: draft.priority || 100,
+    weight: Math.max(1, Number(draft.weight) || 1),
+    concurrency: 10,
+    models: volcanoModelDrafts(),
   };
 }
 
@@ -412,6 +452,7 @@ export function VideoProvidersPanel() {
               onAddModel={() =>
                 updateDraft(idx, { models: [...draft.models, emptyModelDraft()] })
               }
+              onApplyPreset={() => updateDraft(idx, volcanoPresetPatch(draft))}
               onPatchModel={(modelIdx, patch) => updateModel(idx, modelIdx, patch)}
               onDeleteModel={(modelIdx) =>
                 updateDraft(idx, {
@@ -467,6 +508,7 @@ function ProviderEditor({
   onPatch,
   onDelete,
   onAddModel,
+  onApplyPreset,
   onPatchModel,
   onDeleteModel,
 }: {
@@ -475,6 +517,7 @@ function ProviderEditor({
   onPatch: (patch: Partial<Draft>) => void;
   onDelete: () => void;
   onAddModel: () => void;
+  onApplyPreset: () => void;
   onPatchModel: (idx: number, patch: Partial<ModelDraft>) => void;
   onDeleteModel: (idx: number) => void;
 }) {
@@ -492,7 +535,14 @@ function ProviderEditor({
           <span className="type-caption text-[var(--fg-2)]">类型</span>
           <select
             value={draft.kind}
-            onChange={(event) => onPatch({ kind: event.target.value as VideoProviderKind })}
+            onChange={(event) => {
+              const kind = event.target.value as VideoProviderKind;
+              if (kind === "volcano") {
+                onPatch(volcanoPresetPatch(draft));
+              } else {
+                onPatch({ kind });
+              }
+            }}
             className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
           >
             <option value="volcano">火山方舟</option>
@@ -557,14 +607,26 @@ function ProviderEditor({
       <div className="mt-4 space-y-3">
         <div className="flex items-center justify-between gap-2">
           <p className="type-caption text-[var(--fg-2)]">模型映射</p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onAddModel}
-            leftIcon={<Plus className="h-3.5 w-3.5" />}
-          >
-            添加模型
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {draft.kind === "volcano" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onApplyPreset}
+                leftIcon={<Check className="h-3.5 w-3.5" />}
+              >
+                火山官方
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onAddModel}
+              leftIcon={<Plus className="h-3.5 w-3.5" />}
+            >
+              添加模型
+            </Button>
+          </div>
         </div>
         {draft.models.map((model, idx) => (
           <div
