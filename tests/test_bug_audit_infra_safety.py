@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
@@ -13,6 +14,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 DESKTOP_RELEASE = WORKFLOWS / "desktop-release.yml"
 COMPOSE = ROOT / "docker-compose.yml"
 BLUEGREEN_COMPOSE = ROOT / "docker-compose.bluegreen.yml"
+ALEMBIC_VERSIONS = ROOT / "apps" / "api" / "alembic" / "versions"
 STORAGE_MOUNT = ROOT / "deploy" / "scripts" / "lumen_storage_mount.sh"
 FIX_REDIS_PASSWORD = ROOT / "scripts" / "fix-redis-password-mismatch.sh"
 SHIFT_TRAFFIC = ROOT / "scripts" / "lumen-shift-traffic.sh"
@@ -71,6 +73,33 @@ def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
         env=env,
         check=False,
     )
+
+
+def _module_string_assignment(path: Path, name: str) -> str | None:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        value: ast.AST | None = None
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == name:
+                value = node.value
+        elif isinstance(node, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+                value = node.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
+    return None
+
+
+def test_alembic_revision_ids_fit_default_version_column() -> None:
+    too_long: list[str] = []
+    for path in sorted(ALEMBIC_VERSIONS.glob("*.py")):
+        revision = _module_string_assignment(path, "revision")
+        if revision is None:
+            continue
+        if len(revision) > 32:
+            too_long.append(f"{path.relative_to(ROOT)}: {revision}")
+
+    assert too_long == []
 
 
 def test_safe_rm_rejects_system_and_home_directories(tmp_path: Path) -> None:
