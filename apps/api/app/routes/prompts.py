@@ -12,7 +12,8 @@ import logging
 import mimetypes
 import os
 import secrets
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
 from urllib.parse import urlencode
@@ -32,6 +33,7 @@ from lumen_core.providers import (
     ProviderDefinition,
     build_effective_provider_config,
     endpoint_kind_allowed,
+    provider_supports_route,
     resolve_provider_proxy_url,
     weighted_priority_order,
 )
@@ -41,7 +43,7 @@ from lumen_core.vision_tagging import image_record_to_data_url
 
 from ..billing_cache_state import invalidate_balance_cache
 from ..config import settings
-from ..db import get_db
+from ..db import SessionLocal, get_db
 from ..deps import CurrentUser, verify_csrf
 from ..audit import hash_email, write_audit
 from ..public_urls import resolve_public_base_url
@@ -101,6 +103,13 @@ _FALLBACK_400_MARKERS = (
 PROMPTS_ENHANCE_LIMITER = RateLimiter(capacity=20, refill_per_sec=20 / 60)
 _PROMPT_ENHANCE_MEDIA_MAX_BYTES = 18 * 1024 * 1024
 _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES = 24 * 1024 * 1024
+_PROMPT_ENHANCE_KEEPALIVE_SECONDS = 10.0
+_PROMPT_ENHANCE_KEEPALIVE_CHUNK = ": keep-alive\n\n"
+_PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS = 10.0
+_PROMPT_ENHANCE_READ_TIMEOUT_SECONDS = 25.0
+_PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS = 10.0
+_PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS = 10.0
+_PROMPT_ENHANCE_RELEASE_TASKS: set[asyncio.Task[None]] = set()
 
 
 @dataclass(frozen=True)
@@ -191,6 +200,18 @@ def _responses_url(base_url: str) -> str:
     return f"{base}/v1/responses"
 
 
+def _provider_allows_prompt_enhance(provider: ProviderDefinition) -> bool:
+    return (
+        "chat" in provider.purposes
+        and endpoint_kind_allowed(provider, "responses")
+        and provider_supports_route(
+            provider,
+            route="text",
+            endpoint_kind="responses",
+        )
+    )
+
+
 async def _resolve_provider_order(db: AsyncSession) -> list[ProviderDefinition]:
     """Read Provider Pool, with legacy UPSTREAM_* env fallback only if absent."""
     spec_providers = get_spec("providers")
@@ -204,7 +225,7 @@ async def _resolve_provider_order(db: AsyncSession) -> list[ProviderDefinition]:
     )
     for err in errors:
         logger.warning("%s", err)
-    providers = [p for p in providers if endpoint_kind_allowed(p, "responses")]
+    providers = [p for p in providers if _provider_allows_prompt_enhance(p)]
     async with _PROVIDER_RR_LOCK:
         return weighted_priority_order(providers, _PROVIDER_RR_COUNTERS)
 
@@ -879,6 +900,68 @@ async def _release_prompt_enhance_hold(
         logger.exception("prompt enhance billing hold release failed")
 
 
+def _track_prompt_enhance_release_task(task: asyncio.Task[None]) -> None:
+    _PROMPT_ENHANCE_RELEASE_TASKS.add(task)
+
+    def _done(completed: asyncio.Task[None]) -> None:
+        _PROMPT_ENHANCE_RELEASE_TASKS.discard(completed)
+        with suppress(asyncio.CancelledError):
+            exc = completed.exception()
+            if exc is not None:
+                logger.error(
+                    "prompt enhance detached hold release failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+    task.add_done_callback(_done)
+
+
+async def _release_prompt_enhance_hold_detached(
+    billing: _EnhanceBillingContext | None,
+    *,
+    reason: str,
+) -> None:
+    if billing is None or billing.hold_amount_micro <= 0:
+        return
+    async with SessionLocal() as db:
+        detached = replace(billing, db=db)
+        await _release_prompt_enhance_hold(detached, reason=reason)
+
+
+def _schedule_prompt_enhance_hold_release(
+    billing: _EnhanceBillingContext | None,
+    *,
+    reason: str,
+) -> asyncio.Task[None] | None:
+    if billing is None or billing.hold_amount_micro <= 0:
+        return None
+    task = asyncio.create_task(
+        _release_prompt_enhance_hold_detached(billing, reason=reason)
+    )
+    _track_prompt_enhance_release_task(task)
+    return task
+
+
+async def _release_prompt_enhance_hold_after_cancel(
+    billing: _EnhanceBillingContext | None,
+    *,
+    reason: str,
+) -> None:
+    task = _schedule_prompt_enhance_hold_release(billing, reason=reason)
+    if task is None:
+        return
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        logger.info(
+            "prompt enhance hold release continues after stream cancellation "
+            "request_id=%s reason=%s",
+            billing.request_id if billing is not None else None,
+            reason,
+        )
+        raise
+
+
 def _is_retryable_upstream_error(status_code: int, raw: bytes) -> bool:
     if status_code in _RETRYABLE_HTTP_STATUS or status_code >= 500:
         return True
@@ -962,7 +1045,12 @@ async def _stream_enhance_one(
     try:
         proxy_url = await resolve_provider_proxy_url(provider.proxy)
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0),
+            timeout=httpx.Timeout(
+                connect=_PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS,
+                read=_PROMPT_ENHANCE_READ_TIMEOUT_SECONDS,
+                write=_PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS,
+                pool=_PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS,
+            ),
             proxy=proxy_url,
         ) as client:
             async with client.stream(
@@ -1054,6 +1142,12 @@ async def _stream_enhance_one(
     except _EnhanceProviderError:
         raise
     except httpx.TimeoutException:
+        logger.warning(
+            "enhance upstream timeout provider=%s attempt=%s read_timeout_s=%s",
+            provider.name,
+            attempt.name,
+            _PROMPT_ENHANCE_READ_TIMEOUT_SECONDS,
+        )
         raise _EnhanceProviderError("timeout", retryable=True) from None
     except httpx.HTTPError as exc:
         raise _EnhanceProviderError(type(exc).__name__, retryable=True) from exc
@@ -1155,10 +1249,73 @@ async def _stream_enhance(
         await _release_prompt_enhance_hold(billing, reason="no_success")
         settled = True
         yield f"data: {json.dumps({'error': last_error})}\n\n"
-    except (asyncio.CancelledError, GeneratorExit):
+    except asyncio.CancelledError:
+        if not settled:
+            await _release_prompt_enhance_hold_after_cancel(
+                billing,
+                reason="stream_cancelled",
+            )
+        raise
+    except GeneratorExit:
         if not settled:
             await _release_prompt_enhance_hold(billing, reason="stream_cancelled")
         raise
+
+
+async def _stream_with_keepalive(
+    source: AsyncIterator[str],
+    *,
+    interval_seconds: float = _PROMPT_ENHANCE_KEEPALIVE_SECONDS,
+) -> AsyncIterator[str]:
+    queue: asyncio.Queue[tuple[str, str | BaseException | None]] = asyncio.Queue()
+
+    async def _pump() -> None:
+        try:
+            async for chunk in source:
+                await queue.put(("chunk", chunk))
+            await queue.put(("done", None))
+        except BaseException as exc:  # noqa: BLE001
+            await queue.put(("error", exc))
+
+    pump_task = asyncio.create_task(_pump())
+
+    async def _cancel_pump() -> None:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("prompt enhance keepalive pump failed during cancellation")
+
+    try:
+        yield _PROMPT_ENHANCE_KEEPALIVE_CHUNK
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                yield _PROMPT_ENHANCE_KEEPALIVE_CHUNK
+                continue
+
+            if kind == "chunk":
+                if not isinstance(payload, str):
+                    raise RuntimeError("prompt enhance stream emitted non-text chunk")
+                yield payload
+                continue
+            if kind == "done":
+                return
+            if isinstance(payload, BaseException):
+                raise payload
+            return
+    except (asyncio.CancelledError, GeneratorExit):
+        await _cancel_pump()
+        raise
+    finally:
+        if not pump_task.done():
+            await _cancel_pump()
 
 
 @router.post("/enhance")
@@ -1182,7 +1339,7 @@ async def enhance_prompt(
     billing = await _prepare_prompt_enhance_billing(db, user)
 
     return StreamingResponse(
-        _stream_enhance(body.text, providers, billing),
+        _stream_with_keepalive(_stream_enhance(body.text, providers, billing)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1222,16 +1379,18 @@ async def enhance_video_prompt(
     billing = await _prepare_prompt_enhance_billing(db, user)
 
     return StreamingResponse(
-        _stream_enhance(
-            body.text,
-            providers,
-            billing,
-            system_prompt=VIDEO_ENHANCE_SYSTEM_PROMPT,
-            content=content,
-            metadata={
-                "purpose": "video_prompt_enhance",
-                "route": "prompts.video.enhance",
-            },
+        _stream_with_keepalive(
+            _stream_enhance(
+                body.text,
+                providers,
+                billing,
+                system_prompt=VIDEO_ENHANCE_SYSTEM_PROMPT,
+                content=content,
+                metadata={
+                    "purpose": "video_prompt_enhance",
+                    "route": "prompts.video.enhance",
+                },
+            )
         ),
         media_type="text/event-stream",
         headers={

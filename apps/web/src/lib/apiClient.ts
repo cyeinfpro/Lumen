@@ -1876,6 +1876,21 @@ async function streamApiErrorFromResponse(
   return new ApiError({ code, message, status: res.status, payload });
 }
 
+function promptEnhanceStreamErrorMessage(code: string): string {
+  switch (code) {
+    case "timeout":
+      return "上游长时间没有返回内容，已自动停止。请稍后重试或减少参考素材。";
+    case "upstream_error":
+      return "上游暂时不可用，请稍后重试。";
+    case "billing_failed":
+      return "扣费结算失败，已停止本次优化。";
+    case "internal":
+      return "服务内部错误，请稍后重试。";
+    default:
+      return code;
+  }
+}
+
 async function streamPromptEnhancement(
   path: string,
   body: unknown,
@@ -1926,7 +1941,13 @@ async function streamPromptEnhancement(
     }
     try {
       const evt = JSON.parse(data) as { text?: string; error?: string };
-      if (evt.error) throw new ApiError({ code: evt.error, message: evt.error, status: 502 });
+      if (evt.error) {
+        throw new ApiError({
+          code: evt.error,
+          message: promptEnhanceStreamErrorMessage(evt.error),
+          status: 502,
+        });
+      }
       if (evt.text) {
         hasText = true;
         onDelta(evt.text);
