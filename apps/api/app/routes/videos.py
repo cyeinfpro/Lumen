@@ -8,12 +8,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import stat
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Iterator
+from typing import Annotated, Any, BinaryIO, Iterable, Iterator
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import (
@@ -91,6 +92,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_VIDEO_DURATIONS = list(SUPPORTED_VIDEO_DURATIONS_S)
 _DEFAULT_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"]
+_VIDEO_RESOLUTION_ORDER = {
+    value: index for index, value in enumerate(_DEFAULT_VIDEO_RESOLUTIONS)
+}
+_SEEDANCE_20_FAST_RE = re.compile(r"seedance[-.]2[-.]0[-.]fast")
+_SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
 _DEFAULT_VIDEO_ASPECT_RATIOS = [
     "adaptive",
     "16:9",
@@ -443,7 +449,7 @@ def _estimate_pairs(estimates: dict[str, Any]) -> tuple[list[int], list[str]]:
                     durations.add(duration_s)
     return (
         sorted(durations) or list(_DEFAULT_VIDEO_DURATIONS),
-        sorted(resolutions) or list(_DEFAULT_VIDEO_RESOLUTIONS),
+        _ordered_video_resolutions(resolutions) or list(_DEFAULT_VIDEO_RESOLUTIONS),
     )
 
 
@@ -453,6 +459,38 @@ def _duration_options(estimates: dict[str, Any]) -> list[int]:
         SMART_VIDEO_DURATION_S,
         *[item for item in durations if item != SMART_VIDEO_DURATION_S],
     ]
+
+
+def _ordered_video_resolutions(values: Iterable[str]) -> list[str]:
+    return sorted(
+        set(values),
+        key=lambda value: (_VIDEO_RESOLUTION_ORDER.get(value, 999), value),
+    )
+
+
+def _is_seedance_20_fast_model(*identifiers: str | None) -> bool:
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        value = identifier.strip().lower().replace("_", "-")
+        if _SEEDANCE_20_FAST_RE.search(value):
+            return True
+    return False
+
+
+def _video_resolution_options_for_model(
+    model: str,
+    *,
+    upstream_model: str | None = None,
+    available_resolutions: Iterable[str] | None = None,
+) -> list[str]:
+    available = _ordered_video_resolutions(
+        available_resolutions or _DEFAULT_VIDEO_RESOLUTIONS
+    )
+    if not _is_seedance_20_fast_model(model, upstream_model):
+        return available
+    allowed = set(_SEEDANCE_20_FAST_RESOLUTIONS)
+    return [resolution for resolution in available if resolution in allowed]
 
 
 def _request_fingerprint(body: VideoCreateIn) -> str:
@@ -607,37 +645,70 @@ async def video_options(
     _, resolutions = _estimate_pairs(estimates)
 
     model_actions: dict[str, set[str]] = {}
+    model_resolutions: dict[str, set[str]] = {}
     for provider in providers:
         mapping = provider.models or {}
         for key in mapping:
             if ":" not in key:
                 for action in VIDEO_ACTIONS:
-                    if provider.supports(key, action) and _has_video_price(
-                        price_pairs,
-                        model=key,
-                        action=action,
-                        resolutions=resolutions,
-                    ):
+                    if not provider.supports(key, action):
+                        continue
+                    upstream_model = provider.upstream_model_for(key, action)
+                    allowed_resolutions = _video_resolution_options_for_model(
+                        key,
+                        upstream_model=upstream_model,
+                        available_resolutions=resolutions,
+                    )
+                    action_resolutions = [
+                        resolution
+                        for resolution in allowed_resolutions
+                        if _has_video_price(
+                            price_pairs,
+                            model=key,
+                            action=action,
+                            resolutions=[resolution],
+                        )
+                    ]
+                    if action_resolutions:
                         model_actions.setdefault(key, set()).add(action)
+                        model_resolutions.setdefault(key, set()).update(
+                            action_resolutions
+                        )
                 continue
             model, action = key.rsplit(":", 1)
-            if (
-                action in VIDEO_ACTIONS
-                and provider.supports(model, action)
-                and _has_video_price(
+            if action not in VIDEO_ACTIONS or not provider.supports(model, action):
+                continue
+            upstream_model = provider.upstream_model_for(model, action)
+            allowed_resolutions = _video_resolution_options_for_model(
+                model,
+                upstream_model=upstream_model,
+                available_resolutions=resolutions,
+            )
+            action_resolutions = [
+                resolution
+                for resolution in allowed_resolutions
+                if _has_video_price(
                     price_pairs,
                     model=model,
                     action=action,
-                    resolutions=resolutions,
+                    resolutions=[resolution],
                 )
-            ):
+            ]
+            if action_resolutions:
                 model_actions.setdefault(model, set()).add(action)
+                model_resolutions.setdefault(model, set()).update(action_resolutions)
     if enabled and not model_actions and unavailable_reason is None:
         unavailable_reason = "video_provider_or_pricing_missing"
     return VideoOptionsOut(
         enabled=enabled and unavailable_reason is None,
         models=[
-            VideoModelOptionOut(model=model, actions=sorted(actions))  # type: ignore[arg-type]
+            VideoModelOptionOut(
+                model=model,
+                actions=sorted(actions),  # type: ignore[arg-type]
+                resolutions=_ordered_video_resolutions(
+                    model_resolutions.get(model, set())
+                ),  # type: ignore[arg-type]
+            )
             for model, actions in sorted(model_actions.items())
         ],
         durations_s=_duration_options(estimates),
@@ -678,6 +749,21 @@ async def _require_video_create_ready(
             "video_provider_missing",
             "no enabled video provider supports this model/action",
             503,
+        )
+    upstream_model = provider.upstream_model_for(body.model, body.action)
+    model_resolutions = _video_resolution_options_for_model(
+        body.model,
+        upstream_model=upstream_model,
+        available_resolutions=resolutions,
+    )
+    if body.resolution not in model_resolutions:
+        raise _http(
+            "invalid_resolution",
+            "resolution is not available for this model",
+            422,
+            model=body.model,
+            resolution=body.resolution,
+            available_resolutions=model_resolutions,
         )
     return provider, estimates
 

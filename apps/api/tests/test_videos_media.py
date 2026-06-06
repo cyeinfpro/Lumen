@@ -5,8 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import Request
-from lumen_core.schemas import VideoReferenceMediaIn
+from fastapi import HTTPException, Request
+from lumen_core.schemas import VideoCreateIn, VideoReferenceMediaIn
+from lumen_core.video_providers import VideoProviderDefinition
 
 from app.routes import events, videos
 
@@ -142,6 +143,74 @@ def test_reference_video_action_requires_image_and_video_pricing_paths() -> None
         action="reference",
         resolutions=["720p"],
     )
+
+
+def test_seedance_20_fast_resolution_options_exclude_1080p() -> None:
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "seedance-2.0-fast",
+        available_resolutions=["480p", "720p", "1080p"],
+    ) == ["480p", "720p"]
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "seedance-2.0",
+        upstream_model="doubao-seedance-2-0-fast-260128",
+        available_resolutions=["480p", "720p", "1080p"],
+    ) == ["480p", "720p"]
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "seedance-2.0",
+        available_resolutions=["480p", "720p", "1080p"],
+    ) == ["480p", "720p", "1080p"]
+
+
+@pytest.mark.asyncio
+async def test_video_create_rejects_seedance_20_fast_1080p(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0-fast",
+        prompt="make a clip",
+        duration_s=5,
+        resolution="1080p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-fast-1080p",
+    )
+    provider = VideoProviderDefinition(
+        name="volcano-main",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={
+            "seedance-2.0-fast:t2v": "doubao-seedance-2-0-fast-260128",
+        },
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "seedance-2.0-fast": {
+                "t2v": {"480p:5": 60_000, "720p:5": 60_000, "1080p:5": 130_000}
+            }
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_billing_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await videos._require_video_create_ready(object(), body)  # noqa: SLF001
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_resolution"
+    assert excinfo.value.detail["error"]["details"]["available_resolutions"] == [
+        "480p",
+        "720p",
+    ]
 
 
 @pytest.mark.asyncio

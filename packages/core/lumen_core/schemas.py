@@ -578,6 +578,7 @@ class VideoPriceOptionOut(BaseModel):
 class VideoModelOptionOut(BaseModel):
     model: str
     actions: list[VideoAction] = Field(default_factory=list)
+    resolutions: list[VideoResolution] = Field(default_factory=list)
 
 
 class VideoOptionsOut(BaseModel):

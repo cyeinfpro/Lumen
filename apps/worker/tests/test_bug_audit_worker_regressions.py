@@ -242,6 +242,78 @@ def test_video_generation_releases_provider_slot_on_terminal_paths() -> None:
     assert "provider_name=slot_provider_name" in run_source
 
 
+def test_video_postprocess_returns_processed_and_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(video_generation.shutil, "which", lambda _name: None)
+
+    processed, diagnostics = video_generation._postprocess_video_bytes(  # noqa: SLF001
+        b"raw-video"
+    )
+
+    assert processed["video_bytes"] == b"raw-video"
+    assert processed["poster_bytes"] is None
+    assert processed["faststart"] is False
+    assert diagnostics["faststart"] is False
+    assert diagnostics["ffmpeg_missing"] is True
+    assert "video_bytes" not in diagnostics
+    assert "poster_bytes" not in diagnostics
+
+
+@pytest.mark.asyncio
+async def test_store_video_asset_consumes_postprocess_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored_bytes: dict[str, bytes] = {}
+
+    def fake_postprocess(data: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
+        assert data == b"upstream-video"
+        return (
+            {
+                "video_bytes": b"mp4-bytes",
+                "poster_bytes": b"poster-bytes",
+                "width": 640,
+                "height": 360,
+                "duration_ms": 5000,
+                "fps": 24.0,
+                "has_audio": True,
+                "faststart": True,
+            },
+            {"faststart": True, "probe": {"streams": []}},
+        )
+
+    async def fake_put(key: str, data: bytes) -> int:
+        stored_bytes[key] = data
+        return len(data)
+
+    generation = SimpleNamespace(id="video-1", user_id="user-1")
+
+    monkeypatch.setattr(
+        video_generation,
+        "_postprocess_video_bytes",
+        fake_postprocess,
+    )
+    monkeypatch.setattr(video_generation.storage, "aput_bytes", fake_put)
+
+    stored = await video_generation._store_video_asset(  # noqa: SLF001
+        generation,
+        b"upstream-video",
+    )
+
+    assert stored.video.storage_key == "u/user-1/v/video-1/output.mp4"
+    assert stored.video.poster_storage_key == "u/user-1/v/video-1/poster.jpg"
+    assert stored.video.width == 640
+    assert stored.video.height == 360
+    assert stored.video.duration_ms == 5000
+    assert stored.video.has_audio is True
+    assert stored.video.faststart is True
+    assert stored.diagnostics == {"faststart": True, "probe": {"streams": []}}
+    assert stored_bytes == {
+        "u/user-1/v/video-1/output.mp4": b"mp4-bytes",
+        "u/user-1/v/video-1/poster.jpg": b"poster-bytes",
+    }
+
+
 @pytest.mark.asyncio
 async def test_video_generation_fail_before_submit_releases_acquired_slot(
     monkeypatch: pytest.MonkeyPatch,

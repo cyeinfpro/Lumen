@@ -878,7 +878,7 @@ async def _store_video_asset(generation: VideoGeneration, data: bytes) -> _Store
     return _StoredVideo(video=video, diagnostics=diagnostics)
 
 
-def _postprocess_video_bytes(data: bytes) -> dict[str, Any]:
+def _postprocess_video_bytes(data: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
     diagnostics: dict[str, Any] = {}
     video_bytes = data
     faststart = _looks_faststart(data)
@@ -948,13 +948,13 @@ def _postprocess_video_bytes(data: bytes) -> dict[str, Any]:
     else:
         diagnostics["ffmpeg_missing"] = True
     diagnostics["faststart"] = faststart
+    diagnostics.update(metadata)
     return {
         "video_bytes": video_bytes,
         "poster_bytes": poster_bytes,
         "faststart": faststart,
         **metadata,
-        **diagnostics,
-    }
+    }, diagnostics
 
 
 def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
