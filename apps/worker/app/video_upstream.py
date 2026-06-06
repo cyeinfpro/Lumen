@@ -26,22 +26,30 @@ VideoProviderStatus = Literal[
 
 
 @dataclass(frozen=True)
+class VideoReferenceMedia:
+    kind: Literal["image", "video"]
+    data: bytes | None = None
+    mime: str | None = None
+    url: str | None = None
+
+
+@dataclass(frozen=True)
 class VideoSubmitRequest:
     task_id: str
     user_id: str
-    action: Literal["t2v", "i2v"]
+    action: Literal["t2v", "i2v", "reference"]
     model: str
     upstream_model: str
     prompt: str
     duration_s: int
     resolution: str
     aspect_ratio: str
-    fps: int | None = None
-    generate_audio: bool = False
+    generate_audio: bool = True
     seed: int | None = None
     watermark: bool = False
     input_image_bytes: bytes | None = None
     input_image_mime: str | None = None
+    reference_media: list[VideoReferenceMedia] = field(default_factory=list)
     callback_url: str | None = None
 
 
@@ -206,8 +214,8 @@ def _usage_total_tokens(payload: dict[str, Any]) -> int | None:
     return _int_or_none(
         _nested_get(
             payload,
-            ("usage", "total_tokens"),
             ("usage", "completion_tokens"),
+            ("usage", "total_tokens"),
             ("usage_total_tokens",),
             ("total_tokens",),
         )
@@ -224,6 +232,10 @@ def _provider_task_id(payload: dict[str, Any]) -> str | None:
 def _image_data_url(data: bytes, mime: str | None) -> str:
     mime_value = (mime or "image/png").strip() or "image/png"
     return f"data:{mime_value};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _safety_identifier(user_id: str) -> str:
+    return hashlib.sha256(f"lumen:{user_id}".encode("utf-8")).hexdigest()
 
 
 class VolcanoSeedanceAdapter:
@@ -259,11 +271,10 @@ class VolcanoSeedanceAdapter:
             "duration": req.duration_s,
             "generate_audio": req.generate_audio,
             "watermark": req.watermark,
+            "safety_identifier": _safety_identifier(req.user_id),
         }
         if req.seed is not None:
             body["seed"] = req.seed
-        if req.fps is not None:
-            body["fps"] = req.fps
         if req.callback_url:
             body["callback_url"] = req.callback_url
         if req.action == "i2v":
@@ -285,6 +296,54 @@ class VolcanoSeedanceAdapter:
                     },
                 }
             )
+        if req.action == "reference":
+            image_refs = [item for item in req.reference_media if item.kind == "image"]
+            video_refs = [item for item in req.reference_media if item.kind == "video"]
+            if not image_refs and not video_refs:
+                raise VideoUpstreamError(
+                    "reference generation requires reference image or video",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            if len(image_refs) > 9 or len(video_refs) > 3:
+                raise VideoUpstreamError(
+                    "too many reference media items",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            for item in req.reference_media:
+                if item.kind == "image":
+                    url = item.url
+                    if not url:
+                        if not item.data:
+                            raise VideoUpstreamError(
+                                "missing reference image data",
+                                error_code="invalid_input",
+                                status_code=422,
+                            )
+                        url = _image_data_url(item.data, item.mime)
+                    body["content"].append(
+                        {
+                            "type": "image_url",
+                            "role": "reference_image",
+                            "image_url": {"url": url},
+                        }
+                    )
+                elif item.kind == "video":
+                    url = item.url
+                    if not url:
+                        raise VideoUpstreamError(
+                            "reference video requires a public URL or asset ID",
+                            error_code="invalid_input",
+                            status_code=422,
+                        )
+                    body["content"].append(
+                        {
+                            "type": "video_url",
+                            "role": "reference_video",
+                            "video_url": {"url": url},
+                        }
+                    )
         async with self._client() as client:
             response = await client.post("/contents/generations/tasks", json=body)
         raw = _response_json(response)
@@ -439,6 +498,7 @@ __all__ = [
     "PollResult",
     "SubmitResult",
     "VideoProviderAdapter",
+    "VideoReferenceMedia",
     "VideoSubmitRequest",
     "VideoUpstreamError",
     "VolcanoSeedanceAdapter",

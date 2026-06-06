@@ -33,11 +33,13 @@ from lumen_core.schemas import (
     SystemSettingsOut,
     SystemSettingsUpdateIn,
     UserOut,
+    VideoProvidersOut,
+    VideoProvidersUpdateIn,
 )
 from lumen_core.runtime_settings import get_spec, parse_value
 
 from ..db import get_db
-from ..deps import CurrentUser
+from ..deps import CurrentUser, verify_csrf
 from ..runtime_settings import get_settings_view, update_settings
 from . import auth as auth_routes
 from . import providers as providers_routes
@@ -142,15 +144,18 @@ async def desktop_activity(
 ) -> DesktopActivityOut:
     response.headers["Cache-Control"] = "no-store"
     try:
-        tables_ready = int(
-            await db.scalar(
-                text(
-                    "SELECT COUNT(*) FROM sqlite_master "
-                    "WHERE type='table' AND name IN ('generations', 'completions') "
+        tables_ready = (
+            int(
+                await db.scalar(
+                    text(
+                        "SELECT COUNT(*) FROM sqlite_master "
+                        "WHERE type='table' AND name IN ('generations', 'completions') "
+                    )
                 )
+                or 0
             )
-            or 0
-        ) == 2
+            == 2
+        )
         if not tables_ready:
             generation_running = 0
             completion_streaming = 0
@@ -346,3 +351,25 @@ async def desktop_provider_stats(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProviderStatsOut:
     return await providers_routes.provider_stats(user, db)
+
+
+@router.get("/settings/providers/video", response_model=VideoProvidersOut)
+async def list_desktop_video_providers(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VideoProvidersOut:
+    return await providers_routes.list_video_providers(user, db)
+
+
+@router.put(
+    "/settings/providers/video",
+    response_model=VideoProvidersOut,
+    dependencies=[Depends(verify_csrf)],
+)
+async def update_desktop_video_providers(
+    body: VideoProvidersUpdateIn,
+    request: Request,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VideoProvidersOut:
+    return await providers_routes.update_video_providers(body, request, user, db)

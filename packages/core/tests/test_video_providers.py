@@ -22,6 +22,7 @@ def _provider_raw(**overrides):
         "models": {
             "seedance-2.0:t2v": "doubao-seedance-2-0",
             "seedance-2.0:i2v": "doubao-seedance-2-0-i2v",
+            "seedance-2.0:reference": "doubao-seedance-2-0-ref",
         },
     }
     raw.update(overrides)
@@ -38,9 +39,14 @@ def test_parse_video_provider_item_normalizes_and_maps_actions() -> None:
     assert provider.concurrency == 3
     assert provider.supports("seedance-2.0", "t2v")
     assert provider.supports("seedance-2.0", "i2v")
+    assert provider.supports("seedance-2.0", "reference")
     assert provider.upstream_model_for("seedance-2.0", "t2v") == "doubao-seedance-2-0"
     assert (
         provider.upstream_model_for("seedance-2.0", "i2v") == "doubao-seedance-2-0-i2v"
+    )
+    assert (
+        provider.upstream_model_for("seedance-2.0", "reference")
+        == "doubao-seedance-2-0-ref"
     )
 
 

@@ -65,6 +65,8 @@ import type {
   VideoGenerationOut,
   VideoGenerationsOut,
   VideoOptionsOut,
+  VideoProvidersOut,
+  VideoProvidersUpdateIn,
   RecommendedErrorAction,
 } from "./types";
 import { uuid } from "./utils";
@@ -1517,6 +1519,17 @@ export function getVideoOptions(): Promise<VideoOptionsOut> {
   return apiFetch<VideoOptionsOut>("/videos/options");
 }
 
+export function uploadVideo(
+  file: File,
+): Promise<NonNullable<VideoGenerationOut["video"]>> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return apiFetch<NonNullable<VideoGenerationOut["video"]>>("/videos/upload", {
+    method: "POST",
+    body: fd,
+  });
+}
+
 export function createVideoGeneration(
   body: Omit<VideoCreateIn, "idempotency_key"> & { idempotency_key?: string },
 ): Promise<VideoGenerationOut> {
@@ -2450,6 +2463,19 @@ export function probeProviders(
 
 export function getProviderStats(): Promise<ProviderStatsOut> {
   return apiFetch<ProviderStatsOut>(`${PROVIDERS_BASE}/stats`);
+}
+
+export function getVideoProviders(): Promise<VideoProvidersOut> {
+  return apiFetch<VideoProvidersOut>(`${PROVIDERS_BASE}/video`);
+}
+
+export function updateVideoProviders(
+  body: VideoProvidersUpdateIn,
+): Promise<VideoProvidersOut> {
+  return apiFetch<VideoProvidersOut>(`${PROVIDERS_BASE}/video`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 }
 
 // ——— BYOK ———

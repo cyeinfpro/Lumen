@@ -1041,7 +1041,10 @@ class VideoGeneration(Base, TimestampMixin):
             postgresql_where=text("provider_task_id IS NOT NULL"),
             sqlite_where=text("provider_task_id IS NOT NULL"),
         ),
-        CheckConstraint("duration_s > 0", name="ck_video_gen_duration_positive"),
+        CheckConstraint(
+            "duration_s = -1 OR (duration_s >= 4 AND duration_s <= 15)",
+            name="ck_video_gen_duration_positive",
+        ),
         CheckConstraint(
             "progress_pct >= 0 AND progress_pct <= 100",
             name="ck_video_gen_progress_pct",
@@ -1078,9 +1081,9 @@ class VideoGeneration(Base, TimestampMixin):
     aspect_ratio: Mapped[str] = mapped_column(String(16), nullable=False)
     fps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     generate_audio: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=text("false")
+        Boolean, nullable=False, default=True, server_default=text("true")
     )
-    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     watermark: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )

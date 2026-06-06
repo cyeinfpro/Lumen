@@ -63,9 +63,17 @@ async def test_resolve_video_billing_settles_success_with_actual_usage(
         return False
 
     async def settle_cost(
-        _session, *, model: str, action: str, actual_total_tokens: int
+        _session,
+        *,
+        model: str,
+        action: str,
+        actual_total_tokens: int,
+        resolution: str | None = None,
+        pricing_variant: str | None = None,
     ) -> int:
         assert (model, action, actual_total_tokens) == ("seedance-2.0", "t2v", 42_000)
+        assert resolution == "720p"
+        assert pricing_variant == "t2v_720p"
         return 420
 
     async def settle(_session, user_id: str, **kwargs):
@@ -105,6 +113,71 @@ async def test_resolve_video_billing_settles_success_with_actual_usage(
     assert calls[0][1]["meta"]["billing_decision"] == "actual_usage_settle"
     assert session.info["lumen_post_commit_balance_cache"] == {"user-1": 9_580}
     assert len(session.added) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_video_billing_uses_reference_video_pricing_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+    generation = _generation()
+    generation.action = "reference"
+    generation.upstream_request = {
+        "reference_media": [{"kind": "image"}, {"kind": "video"}]
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_000
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle_cost(
+        _session,
+        *,
+        model: str,
+        action: str,
+        actual_total_tokens: int,
+        resolution: str | None = None,
+        pricing_variant: str | None = None,
+    ) -> int:
+        assert (model, action, actual_total_tokens) == (
+            "seedance-2.0",
+            "reference",
+            42_000,
+        )
+        assert resolution == "720p"
+        assert pricing_variant == "reference_video_720p"
+        return 840
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-840, balance_after=9_160, hold_after=0)
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing, "settle_video_cost", settle_cost)
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        generation,
+        poll_result={"status": "succeeded", "usage_total_tokens": 42_000},
+        reason="succeeded",
+    )
+
+    assert resolution.actual_micro == 840
+    assert calls[0][1]["meta"]["pricing_variant"] == "reference_video_720p"
+    assert session.added[0].details["pricing_variant"] == "reference_video_720p"
 
 
 @pytest.mark.asyncio

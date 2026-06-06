@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Request
+from lumen_core.schemas import VideoReferenceMediaIn
 
 from app.routes import events, videos
 
@@ -104,6 +106,44 @@ def test_video_media_response_honors_if_none_match(tmp_path: Path) -> None:
     assert response.headers["etag"] == '"abc123"'
 
 
+def test_video_duration_options_include_smart_duration() -> None:
+    assert (
+        videos._duration_options(  # noqa: SLF001
+            {"seedance-2.0": {"t2v": {"720p:5": 60_000, "720p:15": 180_000}}}
+        )[0]
+        == -1
+    )
+
+
+def test_reference_video_action_requires_image_and_video_pricing_paths() -> None:
+    model = "seedance-2.0"
+
+    assert not videos._has_video_price(  # noqa: SLF001
+        {(model, "reference_image", "720p")},
+        model=model,
+        action="reference",
+        resolutions=["720p"],
+    )
+    assert videos._has_video_price(  # noqa: SLF001
+        {(model, "reference_image", "720p"), (model, "reference_video", "720p")},
+        model=model,
+        action="reference",
+        resolutions=["720p"],
+    )
+    assert videos._has_video_price(  # noqa: SLF001
+        {(model, "reference", None)},
+        model=model,
+        action="reference",
+        resolutions=["1080p"],
+    )
+    assert not videos._has_video_price(  # noqa: SLF001
+        {(model, "reference_image", "480p"), (model, "reference_video", "480p")},
+        model=model,
+        action="reference",
+        resolutions=["720p"],
+    )
+
+
 @pytest.mark.asyncio
 async def test_input_image_snapshot_prefers_retry_snapshot_when_available() -> None:
     class Db:
@@ -112,12 +152,15 @@ async def test_input_image_snapshot_prefers_retry_snapshot_when_available() -> N
 
     snapshot = ("u/user-1/v/video-1/first-frame.png", "sha256")
 
-    assert await videos._input_image_snapshot(  # noqa: SLF001
-        Db(),  # type: ignore[arg-type]
-        user_id="user-1",
-        image_id="image-1",
-        fallback_snapshot=snapshot,
-    ) == snapshot
+    assert (
+        await videos._input_image_snapshot(  # noqa: SLF001
+            Db(),  # type: ignore[arg-type]
+            user_id="user-1",
+            image_id="image-1",
+            fallback_snapshot=snapshot,
+        )
+        == snapshot
+    )
 
 
 def test_create_video_generation_maps_billing_error() -> None:
@@ -130,17 +173,124 @@ def test_create_video_generation_reuses_request_fingerprint() -> None:
     source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
 
     assert "request_fingerprint = _request_fingerprint(body)" in source
-    assert 'diagnostics={"request_fingerprint": request_fingerprint}' in source
+    assert '"request_fingerprint": request_fingerprint' in source
+    assert '"reference_media_count": len(reference_snapshots)' in source
     assert "request_fingerprint=request_fingerprint" in source
+
+
+def test_idempotent_replay_rejects_mismatched_fingerprint() -> None:
+    row = SimpleNamespace(request_fingerprint="old", diagnostics={})
+
+    with pytest.raises(Exception) as excinfo:
+        videos._ensure_idempotent_replay_matches(row, "new")  # noqa: SLF001
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "idempotency_request_mismatch"
+
+
+def test_idempotent_replay_allows_legacy_rows_without_fingerprint() -> None:
+    row = SimpleNamespace(request_fingerprint=None, diagnostics={})
+
+    videos._ensure_idempotent_replay_matches(row, "new")  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_reference_media_snapshots_default_labels_are_per_kind() -> None:
+    class Db:
+        async def execute(self, _statement):
+            raise AssertionError("url reference should not query db")
+
+    snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        items=[
+            VideoReferenceMediaIn(kind="video", url="https://example.com/ref.mp4"),
+            VideoReferenceMediaIn(kind="image", url="https://example.com/ref.png"),
+        ],
+    )
+
+    assert [(item["kind"], item["label"]) for item in snapshots] == [
+        ("video", "Video 1"),
+        ("image", "Image 1"),
+    ]
+
+
+def test_reference_upload_ext_only_accepts_official_seedance_video_formats() -> None:
+    assert videos._reference_upload_ext(  # noqa: SLF001
+        SimpleNamespace(content_type="video/mp4", filename="ref.mp4")
+    ) == ("video/mp4", "mp4")
+    assert videos._reference_upload_ext(  # noqa: SLF001
+        SimpleNamespace(content_type="", filename="ref.mov")
+    ) == ("video/quicktime", "mov")
+
+    for file in (
+        SimpleNamespace(content_type="video/webm", filename="ref.webm"),
+        SimpleNamespace(content_type="video/x-m4v", filename="ref.m4v"),
+    ):
+        with pytest.raises(Exception) as excinfo:
+            videos._reference_upload_ext(file)  # noqa: SLF001
+        assert getattr(excinfo.value, "status_code", None) == 415
+
+
+def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
+    assert (
+        videos._validate_reference_url("https://example.com/ref.mp4")  # noqa: SLF001
+        == "https://example.com/ref.mp4"
+    )
+    assert (
+        videos._validate_reference_url("asset://asset-1")  # noqa: SLF001
+        == "asset://asset-1"
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        videos._validate_reference_url("ftp://example.com/ref.mp4")  # noqa: SLF001
+    assert getattr(excinfo.value, "status_code", None) == 422
+
+
+@pytest.mark.asyncio
+async def test_reference_media_snapshots_adds_public_url_for_uploaded_video() -> None:
+    class Result:
+        def scalar_one_or_none(self):
+            return SimpleNamespace(
+                id="video-1",
+                storage_key="u/user-1/vref/video-1/original.mp4",
+                sha256="sha",
+                mime="video/mp4",
+                metadata_jsonb={},
+                deleted_at=None,
+            )
+
+    class Db:
+        async def execute(self, _statement):
+            return Result()
+
+    snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        items=[VideoReferenceMediaIn(kind="video", video_id="video-1")],
+        reference_public_base_url="https://lumen.example",
+    )
+
+    assert snapshots[0]["url"].startswith(
+        "https://lumen.example/api/videos/reference/video-1/binary?token="
+    )
 
 
 def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:
     source = inspect.getsource(videos.cancel_video_generation)
+    compact_source = " ".join(source.split())
 
     assert (
         "row.status == VideoGenerationStatus.QUEUED.value and not row.provider_task_id"
-        in source
+        in compact_source
     )
+
+
+def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:
+    source = inspect.getsource(videos.retry_video_generation)
+
+    assert "valid_reference_snapshots.append(item)" in source
+    assert "reference_media_snapshot=valid_reference_snapshots" in source
 
 
 def test_list_video_generations_batches_video_lookup() -> None:

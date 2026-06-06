@@ -1100,9 +1100,9 @@ def validate_video_token_hold_estimates(raw: str) -> str:
                 f"video.token_hold_estimates[{model!r}] must be a non-empty object"
             )
         for action, action_value in model_value.items():
-            if action not in {"t2v", "i2v"}:
+            if action not in {"t2v", "i2v", "reference"}:
                 raise ValueError(
-                    f"video.token_hold_estimates[{model!r}] action must be t2v or i2v"
+                    f"video.token_hold_estimates[{model!r}] action must be t2v, i2v or reference"
                 )
             if not isinstance(action_value, dict) or not action_value:
                 raise ValueError(

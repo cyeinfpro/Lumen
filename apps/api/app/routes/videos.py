@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import errno
+import hashlib
 import json
 import logging
 import os
+import secrets
 import stat
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Iterator
+from urllib.parse import urlencode, urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -40,12 +52,21 @@ from lumen_core.schemas import (
     VideoOptionsOut,
     VideoOut,
     VideoPriceOptionOut,
+    VideoReferenceMediaIn,
+    VideoReferenceMediaOut,
 )
 from lumen_core.video_billing import (
+    SMART_VIDEO_DURATION_S,
+    SUPPORTED_VIDEO_DURATIONS_S,
+    VIDEO_LEGACY_REFERENCE_PRICING_VARIANT,
     VIDEO_PRICING_SCOPE,
     VIDEO_PRICING_UNIT,
+    VIDEO_PRICING_VARIANTS,
     VideoBillingError,
     estimate_video_cost,
+    expand_video_duration_estimates,
+    split_video_resolution_pricing_variant,
+    video_pricing_variant,
 )
 from lumen_core.video_providers import (
     VIDEO_ACTIONS,
@@ -59,6 +80,7 @@ from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
 from ..observability import task_publish_errors_total
+from ..public_urls import resolve_public_base_url
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ..sse_publish import publish_sse_event
@@ -67,12 +89,24 @@ from ..sse_publish import publish_sse_event
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_DEFAULT_VIDEO_DURATIONS = [5, 10]
-_DEFAULT_VIDEO_RESOLUTIONS = ["720p", "1080p"]
-_DEFAULT_VIDEO_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:5", "3:4", "4:3"]
-_DEFAULT_VIDEO_FPS = [24, 30]
+_DEFAULT_VIDEO_DURATIONS = list(SUPPORTED_VIDEO_DURATIONS_S)
+_DEFAULT_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"]
+_DEFAULT_VIDEO_ASPECT_RATIOS = [
+    "adaptive",
+    "16:9",
+    "9:16",
+    "1:1",
+    "4:3",
+    "3:4",
+    "21:9",
+]
 _VIDEO_DEADLINE = timedelta(minutes=10)
 _VIDEO_LIST_LIMIT_MAX = 100
+_VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
+_VIDEO_REFERENCE_MIME_EXT = {
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+}
 _VIDEO_TERMINAL_STATUSES = {
     VideoGenerationStatus.SUCCEEDED.value,
     VideoGenerationStatus.FAILED.value,
@@ -117,6 +151,101 @@ def _video_out(video: Video) -> VideoOut:
     )
 
 
+def _reference_upload_ext(file: UploadFile) -> tuple[str, str]:
+    mime = (file.content_type or "").strip().lower()
+    if mime not in _VIDEO_REFERENCE_MIME_EXT:
+        suffix = Path(file.filename or "").suffix.lower().lstrip(".")
+        by_suffix = {
+            "mp4": "video/mp4",
+            "mov": "video/quicktime",
+        }
+        mime = by_suffix.get(suffix, mime)
+    ext = _VIDEO_REFERENCE_MIME_EXT.get(mime)
+    if ext is None:
+        raise _http(
+            "unsupported_video_type",
+            "reference video must be mp4 or mov",
+            415,
+        )
+    return mime, ext
+
+
+def _reference_video_upload_key(user_id: str, video_id: str, ext: str) -> str:
+    return f"u/{user_id}/vref/{video_id}/original.{ext}"
+
+
+def _ensure_reference_video_access_token(video: Video) -> str:
+    metadata = dict(video.metadata_jsonb or {})
+    token = metadata.get("reference_access_token")
+    if not isinstance(token, str) or not token:
+        token = secrets.token_urlsafe(32)
+        metadata["reference_access_token"] = token
+        video.metadata_jsonb = metadata
+    return token
+
+
+def _reference_video_public_url(video: Video, public_base_url: str) -> str:
+    token = _ensure_reference_video_access_token(video)
+    query = urlencode({"token": token})
+    return (
+        f"{public_base_url.rstrip('/')}/api/videos/reference/{video.id}/binary?{query}"
+    )
+
+
+def _write_new_file_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _unlink_file_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _reference_media_out(snapshot: dict[str, Any]) -> VideoReferenceMediaOut | None:
+    kind = snapshot.get("kind")
+    if kind not in {"image", "video"}:
+        return None
+    return VideoReferenceMediaOut(
+        kind=kind,
+        image_id=snapshot.get("image_id")
+        if isinstance(snapshot.get("image_id"), str)
+        else None,
+        video_id=snapshot.get("video_id")
+        if isinstance(snapshot.get("video_id"), str)
+        else None,
+        url=snapshot.get("url") if isinstance(snapshot.get("url"), str) else None,
+        label=snapshot.get("label") if isinstance(snapshot.get("label"), str) else None,
+        mime=snapshot.get("mime") if isinstance(snapshot.get("mime"), str) else None,
+    )
+
+
+def _generation_reference_media(row: VideoGeneration) -> list[VideoReferenceMediaOut]:
+    raw = (row.upstream_request or {}).get("reference_media")
+    if not isinstance(raw, list):
+        return []
+    out: list[VideoReferenceMediaOut] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        ref = _reference_media_out(item)
+        if ref is not None:
+            out.append(ref)
+    return out
+
+
 async def _video_for_generation(
     db: AsyncSession,
     video_generation_id: str,
@@ -142,6 +271,7 @@ async def _generation_out(
         model=row.model,
         prompt=row.prompt,
         input_image_id=row.input_image_id,
+        reference_media=_generation_reference_media(row),
         duration_s=row.duration_s,
         resolution=row.resolution,
         aspect_ratio=row.aspect_ratio,
@@ -226,7 +356,68 @@ async def _video_hold_estimates(db: AsyncSession) -> dict[str, Any]:
             "video token hold estimates must be an object",
             503,
         )
-    return parsed
+    return expand_video_duration_estimates(parsed)
+
+
+@router.post("/upload", response_model=VideoOut, dependencies=[Depends(verify_csrf)])
+async def upload_reference_video(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    file: UploadFile = File(...),
+) -> VideoOut:
+    mime, ext = _reference_upload_ext(file)
+    buf = bytearray()
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > _VIDEO_REFERENCE_UPLOAD_MAX_BYTES:
+            raise _http(
+                "too_large",
+                f"file exceeds {_VIDEO_REFERENCE_UPLOAD_MAX_BYTES // (1024 * 1024)}MB",
+                413,
+            )
+    if not buf:
+        raise _http("empty_file", "empty file", 400)
+    data = bytes(buf)
+    sha = hashlib.sha256(data).hexdigest()
+    video = Video(
+        user_id=user.id,
+        owner_generation_id=None,
+        storage_key="",
+        poster_storage_key=None,
+        mime=mime,
+        width=0,
+        height=0,
+        duration_ms=0,
+        fps=None,
+        size_bytes=len(data),
+        sha256=sha,
+        etag=sha,
+        has_audio=False,
+        faststart=False,
+        visibility="private",
+        metadata_jsonb={
+            "source": "uploaded_reference",
+            "filename": file.filename or "",
+            "reference_access_token": secrets.token_urlsafe(32),
+        },
+    )
+    db.add(video)
+    await db.flush()
+    key = _reference_video_upload_key(user.id, video.id, ext)
+    video.storage_key = key
+    path = _fs_path(key)
+    try:
+        await asyncio.to_thread(_write_new_file_atomic, path, data)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await asyncio.to_thread(_unlink_file_if_exists, path)
+        raise
+    await db.refresh(video)
+    return _video_out(video)
 
 
 def _estimate_pairs(estimates: dict[str, Any]) -> tuple[list[int], list[str]]:
@@ -256,10 +447,76 @@ def _estimate_pairs(estimates: dict[str, Any]) -> tuple[list[int], list[str]]:
     )
 
 
+def _duration_options(estimates: dict[str, Any]) -> list[int]:
+    durations, _resolutions = _estimate_pairs(estimates)
+    return [
+        SMART_VIDEO_DURATION_S,
+        *[item for item in durations if item != SMART_VIDEO_DURATION_S],
+    ]
+
+
 def _request_fingerprint(body: VideoCreateIn) -> str:
     payload = body.model_dump(mode="json", exclude={"idempotency_key"})
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _generation_request_fingerprint(row: VideoGeneration) -> str | None:
+    if isinstance(row.request_fingerprint, str) and row.request_fingerprint:
+        return row.request_fingerprint
+    diagnostics = row.diagnostics or {}
+    value = diagnostics.get("request_fingerprint")
+    return value if isinstance(value, str) and value else None
+
+
+def _needs_reference_public_base_url(
+    body: VideoCreateIn,
+    fallback_snapshots: list[dict[str, Any]] | None,
+) -> bool:
+    if any(item.kind == "video" and item.video_id for item in body.reference_media):
+        return True
+    if fallback_snapshots is None:
+        return False
+    return any(
+        item.get("kind") == "video"
+        and isinstance(item.get("video_id"), str)
+        and not isinstance(item.get("url"), str)
+        for item in fallback_snapshots
+        if isinstance(item, dict)
+    )
+
+
+async def _reference_public_base_url(
+    request: Request | None,
+    db: AsyncSession,
+    body: VideoCreateIn,
+    fallback_snapshots: list[dict[str, Any]] | None,
+) -> str | None:
+    if not _needs_reference_public_base_url(body, fallback_snapshots):
+        return None
+    if request is None:
+        return None
+    try:
+        return await resolve_public_base_url(request, db)
+    except Exception as exc:
+        raise _http(
+            "video_reference_public_url_missing",
+            "PUBLIC_BASE_URL or site.public_base_url is required for uploaded reference videos",
+            503,
+        ) from exc
+
+
+def _ensure_idempotent_replay_matches(
+    row: VideoGeneration,
+    request_fingerprint: str,
+) -> None:
+    existing_fingerprint = _generation_request_fingerprint(row)
+    if existing_fingerprint and existing_fingerprint != request_fingerprint:
+        raise _http(
+            "idempotency_request_mismatch",
+            "idempotency_key was already used with a different video request",
+            409,
+        )
 
 
 async def _video_price_options(db: AsyncSession) -> list[VideoPriceOptionOut]:
@@ -278,18 +535,51 @@ async def _video_price_options(db: AsyncSession) -> list[VideoPriceOptionOut]:
     )
     out: list[VideoPriceOptionOut] = []
     for row in rows:
-        if row.variant not in VIDEO_ACTIONS:
+        action, resolution = split_video_resolution_pricing_variant(row.variant)
+        if action not in VIDEO_PRICING_VARIANTS:
             continue
         out.append(
             VideoPriceOptionOut(
                 model=row.key,
-                action=row.variant,  # type: ignore[arg-type]
+                action=action,  # type: ignore[arg-type]
+                resolution=resolution,  # type: ignore[arg-type]
+                variant=row.variant,
                 price=_money(row.price_micro),
                 enabled=row.enabled,
                 note=row.note,
             )
         )
     return out
+
+
+def _has_video_price(
+    price_pairs: set[tuple[str, str, str | None]],
+    *,
+    model: str,
+    action: str,
+    resolutions: list[str] | tuple[str, ...] | None = None,
+) -> bool:
+    def has(action_name: str, resolution: str | None) -> bool:
+        return (model, action_name, resolution) in price_pairs or (
+            model,
+            action_name,
+            None,
+        ) in price_pairs
+
+    resolution_options = list(resolutions or [None])
+    if action != VIDEO_LEGACY_REFERENCE_PRICING_VARIANT:
+        return any(has(action, resolution) for resolution in resolution_options)
+    for resolution in resolution_options:
+        legacy_priced = has(VIDEO_LEGACY_REFERENCE_PRICING_VARIANT, resolution)
+        image_priced = (
+            legacy_priced
+            or has("reference_image", resolution)
+            or has("i2v", resolution)
+        )
+        video_priced = legacy_priced or has("reference_video", resolution)
+        if image_priced and video_priced:
+            return True
+    return False
 
 
 @router.get("/options", response_model=VideoOptionsOut)
@@ -313,36 +603,46 @@ async def video_options(
     if provider_errors:
         unavailable_reason = "video_provider_config_invalid"
     prices = await _video_price_options(db)
-    price_pairs = {(item.model, item.action) for item in prices}
+    price_pairs = {(item.model, item.action, item.resolution) for item in prices}
+    _, resolutions = _estimate_pairs(estimates)
+
     model_actions: dict[str, set[str]] = {}
     for provider in providers:
         mapping = provider.models or {}
         for key in mapping:
             if ":" not in key:
                 for action in VIDEO_ACTIONS:
-                    if provider.supports(key, action) and (key, action) in price_pairs:
+                    if provider.supports(key, action) and _has_video_price(
+                        price_pairs,
+                        model=key,
+                        action=action,
+                        resolutions=resolutions,
+                    ):
                         model_actions.setdefault(key, set()).add(action)
                 continue
             model, action = key.rsplit(":", 1)
             if (
                 action in VIDEO_ACTIONS
                 and provider.supports(model, action)
-                and (model, action) in price_pairs
+                and _has_video_price(
+                    price_pairs,
+                    model=model,
+                    action=action,
+                    resolutions=resolutions,
+                )
             ):
                 model_actions.setdefault(model, set()).add(action)
     if enabled and not model_actions and unavailable_reason is None:
         unavailable_reason = "video_provider_or_pricing_missing"
-    durations, resolutions = _estimate_pairs(estimates)
     return VideoOptionsOut(
         enabled=enabled and unavailable_reason is None,
         models=[
             VideoModelOptionOut(model=model, actions=sorted(actions))  # type: ignore[arg-type]
             for model, actions in sorted(model_actions.items())
         ],
-        durations_s=durations,
+        durations_s=_duration_options(estimates),
         resolutions=resolutions,
         aspect_ratios=list(_DEFAULT_VIDEO_ASPECT_RATIOS),
-        fps=list(_DEFAULT_VIDEO_FPS),
         generate_audio=True,
         pricing=prices,
         hold_estimates=estimates,
@@ -361,15 +661,14 @@ async def _require_video_create_ready(
     if not await _billing_enabled(db):
         raise _http("billing_disabled", "video generation requires wallet billing", 503)
     estimates = await _video_hold_estimates(db)
-    durations, resolutions = _estimate_pairs(estimates)
+    _, resolutions = _estimate_pairs(estimates)
+    durations = _duration_options(estimates)
     if body.duration_s not in durations:
         raise _http("invalid_duration", "duration_s is not available", 422)
     if body.resolution not in resolutions:
         raise _http("invalid_resolution", "resolution is not available", 422)
     if body.aspect_ratio not in _DEFAULT_VIDEO_ASPECT_RATIOS:
         raise _http("invalid_aspect_ratio", "aspect_ratio is not available", 422)
-    if body.fps is not None and body.fps not in _DEFAULT_VIDEO_FPS:
-        raise _http("invalid_fps", "fps is not available", 422)
     providers, provider_errors = await _video_provider_state(db)
     if provider_errors:
         raise _http("video_provider_config_invalid", "; ".join(provider_errors), 503)
@@ -412,12 +711,147 @@ async def _input_image_snapshot(
     return img.storage_key, img.sha256
 
 
+def _validate_reference_url(raw_url: str) -> str:
+    value = raw_url.strip()
+    parts = urlsplit(value)
+    if parts.scheme.lower() == "asset":
+        if not (parts.netloc or parts.path.strip("/")):
+            raise _http("invalid_reference_url", "asset reference is empty", 422)
+        return value
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise _http(
+            "invalid_reference_url",
+            "reference URL must be http, https, or asset://",
+            422,
+        )
+    if parts.username or parts.password:
+        raise _http(
+            "invalid_reference_url",
+            "reference URL must not include credentials",
+            422,
+        )
+    return value
+
+
+async def _reference_media_snapshots(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    items: list[VideoReferenceMediaIn],
+    fallback_snapshots: list[dict[str, Any]] | None = None,
+    reference_public_base_url: str | None = None,
+) -> list[dict[str, Any]]:
+    if fallback_snapshots is not None:
+        snapshots = [dict(item) for item in fallback_snapshots]
+        if reference_public_base_url is not None:
+            for snapshot in snapshots:
+                if (
+                    snapshot.get("kind") == "video"
+                    and not isinstance(snapshot.get("url"), str)
+                    and isinstance(snapshot.get("video_id"), str)
+                ):
+                    video = (
+                        await db.execute(
+                            select(Video).where(
+                                Video.id == snapshot["video_id"],
+                                Video.user_id == user_id,
+                                Video.deleted_at.is_(None),
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if video is not None:
+                        snapshot["url"] = _reference_video_public_url(
+                            video, reference_public_base_url
+                        )
+        return snapshots
+    snapshots: list[dict[str, Any]] = []
+    image_index = 0
+    video_index = 0
+    for item in items:
+        if item.kind == "image":
+            image_index += 1
+            default_label = f"Image {image_index}"
+        else:
+            video_index += 1
+            default_label = f"Video {video_index}"
+        label = (item.label or "").strip() or default_label
+        if item.url:
+            snapshots.append(
+                {
+                    "kind": item.kind,
+                    "url": _validate_reference_url(item.url),
+                    "label": label,
+                    "source": "url",
+                }
+            )
+            continue
+        if item.kind == "image" and item.image_id:
+            image = (
+                await db.execute(
+                    select(Image).where(
+                        Image.id == item.image_id,
+                        Image.user_id == user_id,
+                        Image.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if image is None:
+                raise _http(
+                    "reference_image_not_found", "reference image not found", 404
+                )
+            snapshots.append(
+                {
+                    "kind": "image",
+                    "image_id": image.id,
+                    "label": label,
+                    "storage_key": image.storage_key,
+                    "sha256": image.sha256,
+                    "mime": image.mime,
+                    "source": "image",
+                }
+            )
+            continue
+        if item.kind == "video" and item.video_id:
+            video = (
+                await db.execute(
+                    select(Video).where(
+                        Video.id == item.video_id,
+                        Video.user_id == user_id,
+                        Video.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if video is None:
+                raise _http(
+                    "reference_video_not_found", "reference video not found", 404
+                )
+            snapshots.append(
+                {
+                    "kind": "video",
+                    "video_id": video.id,
+                    "label": label,
+                    "storage_key": video.storage_key,
+                    "sha256": video.sha256,
+                    "mime": video.mime,
+                    "url": _reference_video_public_url(video, reference_public_base_url)
+                    if reference_public_base_url is not None
+                    else None,
+                    "source": "video",
+                }
+            )
+            continue
+        raise _http("invalid_reference_media", "reference media is invalid", 422)
+    return snapshots
+
+
 async def _create_video_generation_record(
     db: AsyncSession,
     body: VideoCreateIn,
     user: CurrentUser,
     *,
+    request: Request | None = None,
     input_image_snapshot: tuple[str | None, str | None] | None = None,
+    reference_media_snapshot: list[dict[str, Any]] | None = None,
 ) -> VideoGenerationOut:
     provider, estimates = await _require_video_create_ready(db, body)
     input_storage_key, input_sha256 = await _input_image_snapshot(
@@ -426,6 +860,21 @@ async def _create_video_generation_record(
         image_id=body.input_image_id,
         fallback_snapshot=input_image_snapshot,
     )
+    reference_public_base = await _reference_public_base_url(
+        request, db, body, reference_media_snapshot
+    )
+    reference_snapshots = await _reference_media_snapshots(
+        db,
+        user_id=user.id,
+        items=body.reference_media,
+        fallback_snapshots=reference_media_snapshot,
+        reference_public_base_url=reference_public_base,
+    )
+    pricing_variant = video_pricing_variant(
+        body.action,
+        reference_snapshots,
+        resolution=body.resolution,
+    )
     try:
         cost = await estimate_video_cost(
             db,
@@ -433,9 +882,9 @@ async def _create_video_generation_record(
             action=body.action,
             resolution=body.resolution,
             duration_s=body.duration_s,
-            fps=body.fps,
             generate_audio=body.generate_audio,
             estimates=estimates,
+            pricing_variant=pricing_variant,
         )
     except VideoBillingError as exc:
         raise _http(exc.code, exc.message, exc.status_code) from exc
@@ -458,7 +907,7 @@ async def _create_video_generation_record(
         duration_s=body.duration_s,
         resolution=body.resolution,
         aspect_ratio=body.aspect_ratio,
-        fps=body.fps,
+        fps=None,
         generate_audio=body.generate_audio,
         seed=body.seed,
         watermark=body.watermark,
@@ -467,8 +916,14 @@ async def _create_video_generation_record(
             "provider_name": provider.name,
             "provider_kind": provider.kind,
             "upstream_model": provider.upstream_model_for(body.model, body.action),
+            "reference_media": reference_snapshots,
+            "pricing_variant": pricing_variant,
         },
-        diagnostics={"request_fingerprint": request_fingerprint},
+        diagnostics={
+            "request_fingerprint": request_fingerprint,
+            "reference_media_count": len(reference_snapshots),
+            "pricing_variant": pricing_variant,
+        },
         status=VideoGenerationStatus.QUEUED.value,
         progress_stage=VideoGenerationStage.QUEUED.value,
         progress_pct=0,
@@ -496,6 +951,8 @@ async def _create_video_generation_record(
                 "estimated_tokens": cost.estimated_tokens,
                 "unit_price_micro": cost.unit_price_micro,
                 "provider_name": provider.name,
+                "reference_media_count": len(reference_snapshots),
+                "pricing_variant": pricing_variant,
             },
         )
     except billing_core.BillingError as exc:
@@ -524,6 +981,7 @@ async def _create_video_generation_record(
             )
         ).scalar_one_or_none()
         if winner is not None:
+            _ensure_idempotent_replay_matches(winner, request_fingerprint)
             return await _generation_out(db, winner)
         raise _http("idempotency_conflict", "idempotency_key conflict", 409) from exc
     await db.refresh(vg)
@@ -576,6 +1034,7 @@ async def _publish_video_queued(payload: dict[str, Any]) -> None:
 )
 async def create_video_generation(
     body: VideoCreateIn,
+    request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoGenerationOut:
@@ -592,8 +1051,9 @@ async def create_video_generation(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        _ensure_idempotent_replay_matches(existing, _request_fingerprint(body))
         return await _generation_out(db, existing)
-    return await _create_video_generation_record(db, body, user)
+    return await _create_video_generation_record(db, body, user, request=request)
 
 
 def _decode_cursor(cursor: str | None) -> tuple[datetime, str] | None:
@@ -661,9 +1121,7 @@ async def list_video_generations(
             .scalars()
             .all()
         )
-        videos_by_generation_id = {
-            video.owner_generation_id: video for video in videos
-        }
+        videos_by_generation_id = {video.owner_generation_id: video for video in videos}
     return VideoGenerationsOut(
         items=[
             await _generation_out(db, row, videos_by_generation_id.get(row.id))
@@ -716,7 +1174,10 @@ async def cancel_video_generation(
     now = datetime.now(timezone.utc)
     if row.status not in _VIDEO_TERMINAL_STATUSES:
         row.cancel_requested_at = row.cancel_requested_at or now
-        if row.status == VideoGenerationStatus.QUEUED.value and not row.provider_task_id:
+        if (
+            row.status == VideoGenerationStatus.QUEUED.value
+            and not row.provider_task_id
+        ):
             row.status = VideoGenerationStatus.CANCELED.value
             row.progress_stage = VideoGenerationStage.FINISHED.value
             row.progress_pct = 100
@@ -767,6 +1228,7 @@ async def cancel_video_generation(
 )
 async def retry_video_generation(
     generation_id: str,
+    request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoGenerationOut:
@@ -780,25 +1242,71 @@ async def retry_video_generation(
     ).scalar_one_or_none()
     if row is None:
         raise _http("not_found", "video generation not found", 404)
-    body = VideoCreateIn(
-        action=row.action,  # type: ignore[arg-type]
-        model=row.model,
-        prompt=row.prompt,
-        input_image_id=row.input_image_id,
-        duration_s=row.duration_s,
-        resolution=row.resolution,  # type: ignore[arg-type]
-        aspect_ratio=row.aspect_ratio,
-        fps=row.fps,
-        generate_audio=row.generate_audio,
-        seed=row.seed,
-        watermark=row.watermark,
-        idempotency_key=f"retry:{row.id}:{new_uuid7()}",
-    )
+    reference_snapshots = []
+    raw_reference_media = (row.upstream_request or {}).get("reference_media")
+    if isinstance(raw_reference_media, list):
+        reference_snapshots = [
+            item for item in raw_reference_media if isinstance(item, dict)
+        ]
+    reference_inputs: list[VideoReferenceMediaIn] = []
+    valid_reference_snapshots: list[dict[str, Any]] = []
+    for item in reference_snapshots:
+        if item.get("kind") not in {"image", "video"}:
+            continue
+        try:
+            reference_input = VideoReferenceMediaIn(
+                kind=str(item.get("kind")),
+                image_id=item.get("image_id")
+                if isinstance(item.get("image_id"), str)
+                else None,
+                video_id=item.get("video_id")
+                if isinstance(item.get("video_id"), str)
+                else None,
+                url=item.get("url") if isinstance(item.get("url"), str) else None,
+                label=item.get("label") if isinstance(item.get("label"), str) else None,
+            )
+            reference_inputs.append(reference_input)
+            valid_reference_snapshots.append(item)
+        except ValueError:
+            logger.warning(
+                "video retry skipped invalid reference snapshot id=%s snapshot=%r",
+                row.id,
+                item,
+            )
+    if row.action == "reference" and not reference_inputs:
+        raise _http(
+            "reference_media_missing",
+            "original reference media snapshot is missing; create a new video task",
+            409,
+        )
+    try:
+        body = VideoCreateIn(
+            action=row.action,  # type: ignore[arg-type]
+            model=row.model,
+            prompt=row.prompt,
+            input_image_id=row.input_image_id,
+            reference_media=reference_inputs,
+            duration_s=row.duration_s,
+            resolution=row.resolution,  # type: ignore[arg-type]
+            aspect_ratio=row.aspect_ratio,
+            generate_audio=row.generate_audio,
+            seed=row.seed,
+            watermark=row.watermark,
+            idempotency_key=f"retry:{row.id}:{new_uuid7()}",
+        )
+    except ValueError as exc:
+        raise _http(
+            "invalid_retry_request",
+            "original video generation request is no longer valid",
+            422,
+        ) from exc
     return await _create_video_generation_record(
         db,
         body,
         user,
+        request=request,
         input_image_snapshot=(row.input_image_storage_key, row.input_image_sha256),
+        reference_media_snapshot=valid_reference_snapshots,
     )
 
 
@@ -985,6 +1493,37 @@ async def _owned_video(db: AsyncSession, user_id: str, video_id: str) -> Video:
     if video is None:
         raise _http("not_found", "video not found", 404)
     return video
+
+
+@router.get("/reference/{video_id}/binary")
+async def reference_video_binary(
+    video_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    token: str = Query(min_length=16, max_length=256),
+) -> Response:
+    video = (
+        await db.execute(
+            select(Video).where(
+                Video.id == video_id,
+                Video.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if video is None:
+        raise _http("not_found", "video not found", 404)
+    metadata = video.metadata_jsonb or {}
+    expected = metadata.get("reference_access_token")
+    if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
+        raise _http("not_found", "video not found", 404)
+    return _media_response(
+        request,
+        _fs_path(video.storage_key),
+        media_type=video.mime,
+        etag=video.etag or video.sha256,
+        last_modified=video.updated_at,
+        immutable=True,
+    )
 
 
 @router.get("/{video_id}/binary")

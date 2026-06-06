@@ -43,6 +43,7 @@ from ..video_billing import resolve_video_billing
 from ..video_upstream import (
     PollResult,
     SubmitResult,
+    VideoReferenceMedia,
     VideoSubmitRequest,
     VideoUpstreamError,
     adapter_for_provider,
@@ -103,9 +104,7 @@ def _submit_result_cache_key(task_id: str) -> str:
     return f"{_SUBMIT_RESULT_CACHE_PREFIX}{task_id}"
 
 
-async def _store_submit_result(
-    redis: Any, task_id: str, result: SubmitResult
-) -> None:
+async def _store_submit_result(redis: Any, task_id: str, result: SubmitResult) -> None:
     await redis.set(
         _submit_result_cache_key(task_id),
         json.dumps(
@@ -304,6 +303,45 @@ async def _input_image_bytes(
     return await storage.aget_bytes(key), mime
 
 
+async def _reference_media_bytes(
+    generation: VideoGeneration,
+) -> list[VideoReferenceMedia]:
+    raw = (generation.upstream_request or {}).get("reference_media")
+    if generation.action != "reference":
+        return []
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError("reference media snapshot missing")
+    result: list[VideoReferenceMedia] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind not in {"image", "video"}:
+            continue
+        url = item.get("url")
+        if isinstance(url, str) and url.strip():
+            result.append(
+                VideoReferenceMedia(kind=kind, url=url.strip())  # type: ignore[arg-type]
+            )
+            continue
+        if kind == "video":
+            raise RuntimeError("reference video snapshot missing public URL")
+        storage_key = item.get("storage_key")
+        if not isinstance(storage_key, str) or not storage_key.strip():
+            raise RuntimeError("reference media storage key missing")
+        mime = item.get("mime") if isinstance(item.get("mime"), str) else None
+        result.append(
+            VideoReferenceMedia(
+                kind=kind,  # type: ignore[arg-type]
+                data=await storage.aget_bytes(storage_key),
+                mime=mime,
+            )
+        )
+    if not result:
+        raise RuntimeError("reference media snapshot has no usable entries")
+    return result
+
+
 async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
     redis = ctx["redis"]
     token = f"video-submit:{new_uuid7()}"
@@ -331,7 +369,7 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                         "video poll enqueue failed task=%s",
                         generation.id,
                         exc_info=True,
-                )
+                    )
                 await _release_lease(redis, task_id, token)
                 return
             cached_submit = await _load_submit_result(redis, generation.id)
@@ -372,6 +410,7 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                     return
                 slot_provider_name = provider.name
                 input_bytes, input_mime = await _input_image_bytes(session, generation)
+                reference_media = await _reference_media_bytes(generation)
                 generation.provider_name = provider.name
                 generation.provider_kind = provider.kind
                 generation.status = VideoGenerationStatus.SUBMITTING.value
@@ -399,19 +438,21 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                         duration_s=generation.duration_s,
                         resolution=generation.resolution,
                         aspect_ratio=generation.aspect_ratio,
-                        fps=generation.fps,
                         generate_audio=generation.generate_audio,
                         seed=generation.seed,
                         watermark=generation.watermark,
                         input_image_bytes=input_bytes,
                         input_image_mime=input_mime,
+                        reference_media=reference_media,
                     )
                 )
                 try:
                     await _store_submit_result(redis, task_id, result)
                 except Exception:
                     logger.warning(
-                        "video submit cache store failed task=%s", task_id, exc_info=True
+                        "video submit cache store failed task=%s",
+                        task_id,
+                        exc_info=True,
                     )
     except Exception as exc:  # noqa: BLE001
         try:

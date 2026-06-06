@@ -20,7 +20,7 @@ from .providers import (
 )
 
 VIDEO_PROVIDER_KINDS = ("volcano", "veo", "fake")
-VIDEO_ACTIONS = ("t2v", "i2v")
+VIDEO_ACTIONS = ("t2v", "i2v", "reference")
 
 
 @dataclass(frozen=True)
@@ -97,7 +97,7 @@ def _parse_models(raw: Any, *, provider_name: str) -> dict[str, str]:
             model, action = key.rsplit(":", 1)
             if action not in VIDEO_ACTIONS:
                 raise ValueError(
-                    f"provider {provider_name}: model action must be t2v or i2v"
+                    f"provider {provider_name}: model action must be one of {', '.join(VIDEO_ACTIONS)}"
                 )
             if not model.strip():
                 raise ValueError(f"provider {provider_name}: model key is invalid")

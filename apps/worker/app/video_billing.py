@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.models import AuditLog, VideoGeneration, WalletTransaction
-from lumen_core.video_billing import VideoBillingError, settle_video_cost
+from lumen_core.video_billing import (
+    VideoBillingError,
+    settle_video_cost,
+    video_pricing_variant,
+)
 
 from . import billing as worker_billing
 
@@ -27,6 +31,24 @@ def _poll_attr(poll_result: Any, name: str, default: Any = None) -> Any:
     if isinstance(poll_result, dict):
         return poll_result.get(name, default)
     return getattr(poll_result, name, default)
+
+
+def _generation_reference_media(generation: VideoGeneration) -> list[Any]:
+    request = (
+        generation.upstream_request
+        if isinstance(generation.upstream_request, dict)
+        else {}
+    )
+    raw = request.get("reference_media")
+    return raw if isinstance(raw, list) else []
+
+
+def _generation_pricing_variant(generation: VideoGeneration) -> str:
+    return video_pricing_variant(
+        generation.action,
+        _generation_reference_media(generation),
+        resolution=generation.resolution,
+    )
 
 
 async def resolve_video_billing(
@@ -52,6 +74,7 @@ async def resolve_video_billing(
             usage_tokens = None
     upstream_billable = _poll_attr(poll_result, "upstream_billable")
     status = str(_poll_attr(poll_result, "status", "") or "")
+    pricing_variant = _generation_pricing_variant(generation)
 
     if status == "succeeded" and usage_tokens is not None:
         try:
@@ -60,6 +83,8 @@ async def resolve_video_billing(
                 model=generation.model,
                 action=generation.action,
                 actual_total_tokens=usage_tokens,
+                resolution=generation.resolution,
+                pricing_variant=pricing_variant,
             )
             decision = "actual_usage_settle"
         except VideoBillingError:
@@ -80,6 +105,7 @@ async def resolve_video_billing(
                 decision="upstream_not_billable_release",
                 reason=reason,
                 actual_tokens=usage_tokens,
+                pricing_variant=pricing_variant,
             ),
         )
         if tx is not None:
@@ -99,6 +125,7 @@ async def resolve_video_billing(
                         "amount_micro": tx.amount_micro,
                         "balance_after": tx.balance_after,
                         "hold_after": tx.hold_after,
+                        "pricing_variant": pricing_variant,
                     },
                 )
             )
@@ -116,6 +143,8 @@ async def resolve_video_billing(
                 model=generation.model,
                 action=generation.action,
                 actual_total_tokens=usage_tokens,
+                resolution=generation.resolution,
+                pricing_variant=pricing_variant,
             )
             decision = "failure_usage_settle"
         except VideoBillingError:
@@ -142,6 +171,7 @@ async def resolve_video_billing(
             reason=reason,
             actual_tokens=usage_tokens,
             actual_micro=actual_micro,
+            pricing_variant=pricing_variant,
         ),
     )
     if tx is not None:
@@ -165,6 +195,7 @@ async def resolve_video_billing(
                     "hold_after": tx.hold_after,
                     "provider_name": generation.provider_name,
                     "provider_task_id": generation.provider_task_id,
+                    "pricing_variant": pricing_variant,
                 },
             )
         )
@@ -184,6 +215,7 @@ def _billing_meta(
     reason: str,
     actual_tokens: int | None,
     actual_micro: int | None = None,
+    pricing_variant: str | None = None,
 ) -> dict[str, Any]:
     meta: dict[str, Any] = {
         "model": generation.model,
@@ -193,6 +225,7 @@ def _billing_meta(
         "estimated_tokens": generation.est_token_upper,
         "provider_name": generation.provider_name,
         "provider_task_id": generation.provider_task_id,
+        "pricing_variant": pricing_variant or _generation_pricing_variant(generation),
         "billing_decision": decision,
         "reason": reason,
     }

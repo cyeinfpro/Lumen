@@ -196,21 +196,86 @@ def test_video_create_schema_enforces_action_image_contract():
         aspect_ratio="16:9",
         idempotency_key="idem-i2v",
     )
+    VideoCreateIn(
+        action="reference",
+        model="seedance-2.0",
+        prompt="[Image 1] and [Video 1] keep the character consistent",
+        reference_media=[
+            {"kind": "image", "image_id": "img-1", "label": "Image 1"},
+            {"kind": "video", "video_id": "vid-1", "label": "Video 1"},
+        ],
+        duration_s=5,
+        resolution="480p",
+        aspect_ratio="adaptive",
+        idempotency_key="idem-reference",
+    )
+    VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0",
+        prompt="make a clip with smart duration",
+        duration_s=-1,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-t2v-smart-duration",
+    )
 
     for kwargs in (
         {"action": "t2v", "input_image_id": "img-1"},
+        {"action": "t2v", "reference_media": [{"kind": "image", "image_id": "img-1"}]},
         {"action": "i2v", "input_image_id": None},
+        {
+            "action": "i2v",
+            "input_image_id": "img-1",
+            "reference_media": [{"kind": "image", "image_id": "img-2"}],
+        },
+        {"action": "reference", "reference_media": []},
+        {"action": "t2v", "duration_s": 3},
+        {"action": "t2v", "resolution": "4k"},
+        {"action": "t2v", "aspect_ratio": "4:5"},
+        {"action": "t2v", "fps": 24},
+        {
+            "action": "reference",
+            "input_image_id": "img-1",
+            "reference_media": [{"kind": "image", "image_id": "img-2"}],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "image_id": "img-2",
+                    "url": "https://example.com/a.png",
+                }
+            ],
+        },
+        {
+            "action": "reference",
+            "reference_media": [{"kind": "image", "video_id": "vid-1"}],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
+                {"kind": "image", "image_id": f"img-{idx}"} for idx in range(10)
+            ],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
+                {"kind": "video", "video_id": f"vid-{idx}"} for idx in range(4)
+            ],
+        },
     ):
+        payload = {
+            "model": "seedance-2.0",
+            "prompt": "make a clip",
+            "duration_s": 5,
+            "resolution": "720p",
+            "aspect_ratio": "16:9",
+            "idempotency_key": "idem-bad",
+            **kwargs,
+        }
         try:
-            VideoCreateIn(
-                model="seedance-2.0",
-                prompt="make a clip",
-                duration_s=5,
-                resolution="720p",
-                aspect_ratio="16:9",
-                idempotency_key="idem-bad",
-                **kwargs,
-            )
+            VideoCreateIn(**payload)
         except ValidationError:
             pass
         else:  # pragma: no cover
