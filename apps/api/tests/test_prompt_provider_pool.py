@@ -212,11 +212,15 @@ async def test_video_prompt_enhance_content_does_not_echo_large_data_urls(
 
     monkeypatch.setattr(prompts, "_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES", 64)
     huge_url = "data:image/png;base64," + "a" * 128
-    body = prompts.VideoEnhanceIn(
+    body = prompts.VideoEnhanceIn.model_construct(
         text="",
         action="reference",
         reference_media=[
-            VideoReferenceMediaIn(kind="image", url=huge_url, label="大图"),
+            VideoReferenceMediaIn.model_construct(
+                kind="image",
+                url=huge_url,
+                label="大图",
+            ),
         ],
     )
 

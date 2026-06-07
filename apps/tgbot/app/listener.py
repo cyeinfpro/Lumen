@@ -241,6 +241,10 @@ _DISPATCH_MAX_ATTEMPTS = 5
 _DISPATCH_ATTEMPT_TTL_SEC = 30 * 60
 
 
+class _TerminalDeliveryBusy(RuntimeError):
+    """A sibling listener owns this terminal event's short delivery lock."""
+
+
 def _dispatch_attempt_key(user_id: str, entry_id: str) -> str:
     return f"tg:bot:replay:{user_id}:{entry_id}"
 
@@ -384,6 +388,15 @@ async def _user_worker(
                         await _dispatch(bot, api, envelope)
                 except asyncio.CancelledError:
                     raise
+                except _TerminalDeliveryBusy as exc:
+                    logger.info(
+                        "terminal delivery busy uid=%s id=%s err=%s; cursor not advanced",
+                        user_id,
+                        entry_id,
+                        exc,
+                    )
+                    await asyncio.sleep(1.0)
+                    continue
                 except Exception as exc:  # noqa: BLE001
                     # 终态 _dispatch 把异常重抛上来 → cursor 不前进，下轮
                     # XREAD 会重新读到这条 entry 再走一次。如果是确定性失败
@@ -508,6 +521,8 @@ async def _dispatch(bot: Bot, api: LumenApi, envelope: dict[str, Any]) -> None:
             await _on_succeeded(bot, api, gen_id, track, data)
         elif event == "generation.failed":
             await _on_failed(bot, gen_id, track, data)
+    except _TerminalDeliveryBusy:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "listener dispatch error gen=%s event=%s err=%r", gen_id, event, exc
@@ -569,18 +584,12 @@ async def _on_progress(bot: Bot, track, data: dict[str, Any]) -> None:
 
 async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[str, Any]) -> None:
     if not await tracker.begin_delivery(gen_id):
-        # 两种 begin_delivery=False:
-        # 1) is_notified=True → 上一轮已成功投递，幂等跳过；
-        # 2) is_notified=False → 兄弟 worker 持锁中。raise 会让 cursor 不前进，
-        #    下轮 XREAD 重读这条仍然撞同一个锁，再 raise 形成死循环（dispatch
-        #    attempt counter 兜底也会让用户最终丢消息）。这里改成静默 continue —
-        #    兄弟 worker 完成后会 mark_notified；若它崩溃，5min 短锁过期后下一
-        #    条同 gen 的事件（极少见）会自然接管。
-        if not await tracker.is_notified(gen_id):
-            logger.info(
-                "succeeded delivery lock held by sibling, skip gen=%s", gen_id
-            )
-        return
+        # Already notified is an idempotent replay. A held delivery lock without
+        # notified means a sibling may still crash before mark_notified, so keep
+        # the Redis cursor on this terminal event and retry after lock expiry.
+        if await tracker.is_notified(gen_id):
+            return
+        raise _TerminalDeliveryBusy(f"succeeded delivery lock held gen={gen_id}")
     delivered = False
     downloads: list[tuple[Path, str, int, str]] = []  # (path, mime, size, filename)
     heartbeat = asyncio.create_task(
@@ -715,12 +724,9 @@ async def _on_succeeded(bot: Bot, api: LumenApi, gen_id: str, track, data: dict[
 
 async def _on_failed(bot: Bot, gen_id: str, track, data: dict[str, Any]) -> None:
     if not await tracker.begin_delivery(gen_id):
-        # 同 _on_succeeded：兄弟 worker 持锁时静默跳过，不 raise。
-        if not await tracker.is_notified(gen_id):
-            logger.info(
-                "failed delivery lock held by sibling, skip gen=%s", gen_id
-            )
-        return
+        if await tracker.is_notified(gen_id):
+            return
+        raise _TerminalDeliveryBusy(f"failed delivery lock held gen={gen_id}")
     code = str(data.get("code") or "unknown_error")
     msg = str(data.get("message") or "未知错误")
     text = (

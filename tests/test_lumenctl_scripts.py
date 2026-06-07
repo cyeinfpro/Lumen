@@ -786,12 +786,23 @@ def test_release_shared_env_fails_when_no_env_source(tmp_path: Path) -> None:
 def test_rollback_script_validates_compose_env_before_compose_up() -> None:
     text = ADMIN_RELEASE.read_text(encoding="utf-8")
     assert '. "$ROOT/current/scripts/lib.sh"' in text
+    assert 'SHARED_ENV="$ROOT/shared/.env"' in text
+    assert 'TARGET_IMAGE_TAG="$(head -n1 "$ROOT/current/.image-tag"' in text
+    assert 'lumen_set_image_tag_in_env "$SHARED_ENV" "$TARGET_IMAGE_TAG"' in text
+    assert (
+        'lumen_set_env_value_in_file "$SHARED_ENV" LUMEN_VERSION "$TARGET_VERSION"'
+        in text
+    )
     assert 'lumen_ensure_compose_db_env_vars "$ROOT/current/.env"' in text
     assert (
         "compose env validation failed; rollback continues but containers may be stale"
         in text
     )
     assert 'cd "$ROOT/current" && docker compose up -d --wait' in text
+    assert "SystemOperationLockService(" in text
+    assert "_maintenance_marker_busy()" in text
+    assert "await asyncio.to_thread(_start_rollback_subprocess" not in text
+    assert "asyncio.to_thread(_list_releases, limit=None)" in text
 
 
 def _strip_shell_comments(text: str) -> str:
@@ -872,6 +883,23 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "uv sync" not in code
     assert "npm ci" not in code
     assert "npm run build" not in code
+
+
+def test_update_script_checks_storage_before_mutating_running_release() -> None:
+    text = UPDATE.read_text(encoding="utf-8")
+
+    pull_done_idx = text.index("emit_done pull_images 0")
+    check_idx = text.index("emit_start check_storage")
+    start_infra_idx = text.index("emit_start start_infra")
+    migrate_idx = text.index("emit_start migrate_db")
+    switch_idx = text.index("emit_start switch")
+    stop_idx = text.index('stop -t "${LUMEN_UPDATE_STOP_TIMEOUT:-30}"')
+
+    assert pull_done_idx < check_idx < start_infra_idx < migrate_idx < stop_idx
+    assert check_idx < switch_idx
+    assert '_storage_target="${LUMEN_DATA_ROOT:-/opt/lumendata}"' in text
+    assert 'findmnt -T "${_storage_target}"' in text
+    assert "findmnt -T /opt/lumendata" not in _strip_shell_comments(text)
 
 
 def test_update_script_cleanup_prunes_images_buildx_and_releases() -> None:
@@ -2055,7 +2083,7 @@ def test_image_tag_resolve_supports_main_minor_and_major_channels(
     assert "literal=v9.8.7" in result.stdout
 
 
-def test_image_tag_resolve_stable_falls_back_to_main_not_current_when_latest_unavailable(
+def test_image_tag_resolve_stable_fails_closed_when_latest_unavailable(
     tmp_path: Path,
 ) -> None:
     env_file = tmp_path / ".env"
@@ -2066,7 +2094,7 @@ def test_image_tag_resolve_stable_falls_back_to_main_not_current_when_latest_una
     curl.write_text("#!/usr/bin/env bash\nexit 28\n", encoding="utf-8")
     curl.chmod(0o755)
 
-    result = assert_bash_ok(
+    result = run_bash(
         f"""
         . {LIB}
         PATH={shlex.quote(str(fakebin))}:$PATH
@@ -2075,8 +2103,10 @@ def test_image_tag_resolve_stable_falls_back_to_main_not_current_when_latest_una
         """
     )
 
-    assert result.stdout.strip() == "main"
-    assert "不能沿用旧 LUMEN_IMAGE_TAG=v1.1.17" in result.stderr
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""
+    assert "stable/latest 无法解析" in result.stderr
+    assert "显式设置 LUMEN_UPDATE_CHANNEL=main" in result.stderr
 
 
 def test_image_tag_resolve_pinned_is_only_channel_that_keeps_current_tag(

@@ -266,9 +266,6 @@ export async function apiFetch<T = unknown>(
 
   if (res.status === 401) {
     handle401();
-    if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") {
-      return null as T;
-    }
     throw new ApiError({
       code: "unauthorized",
       message: "未登录或会话已失效",
@@ -328,9 +325,6 @@ export async function apiFetch<T = unknown>(
       }
       if (res.status === 401) {
         handle401();
-        if (process.env.NEXT_PUBLIC_LUMEN_RUNTIME === "desktop") {
-          return null as T;
-        }
         throw new ApiError({
           code: "unauthorized",
           message: "未登录或会话已失效",

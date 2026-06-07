@@ -269,6 +269,64 @@ async def test_estimate_video_cost_uses_reference_video_pricing_variant(
 
 
 @pytest.mark.asyncio
+async def test_estimate_video_cost_derives_reference_video_variant_without_explicit_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_price(
+        _db, *, scope: str, key: str, unit: str, variant: str
+    ) -> int | None:
+        assert (scope, key, unit) == ("video", "seedance-2.0", "per_mtoken")
+        calls.append(variant)
+        return 20_000 if variant == "reference_video_720p" else None
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", fake_price)
+
+    estimate = await video_billing.estimate_video_cost(
+        object(),  # type: ignore[arg-type]
+        model="seedance-2.0",
+        action="reference",
+        resolution="720p",
+        duration_s=5,
+        estimates={"seedance-2.0": {"reference_video": {"720p:5": 194_286}}},
+        reference_media=[{"kind": "video"}],
+    )
+
+    assert calls == ["reference_video_720p"]
+    assert estimate.hold_micro == 3_886
+    assert estimate.source == "video.token_hold_estimates:reference_video_720p"
+
+
+@pytest.mark.asyncio
+async def test_settle_video_cost_derives_reference_video_variant_without_explicit_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_price(
+        _db, *, scope: str, key: str, unit: str, variant: str
+    ) -> int | None:
+        assert (scope, key, unit) == ("video", "seedance-2.0", "per_mtoken")
+        calls.append(variant)
+        return 20_000 if variant == "reference_video_720p" else None
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", fake_price)
+
+    charged = await video_billing.settle_video_cost(
+        object(),  # type: ignore[arg-type]
+        model="seedance-2.0",
+        action="reference",
+        actual_total_tokens=194_286,
+        resolution="720p",
+        reference_media=[{"kind": "video"}],
+    )
+
+    assert calls == ["reference_video_720p"]
+    assert charged == 3_886
+
+
+@pytest.mark.asyncio
 async def test_estimate_video_cost_falls_back_to_legacy_video_pricing_variant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

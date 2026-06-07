@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.routes import admin_release, admin_update
+from app.routes import admin_backups, admin_release, admin_update
 from app.services import update_check
 from app.services.update_check import GitHubReleasesClient, UpdateCheckService
 
@@ -542,6 +542,31 @@ async def test_cleanup_marker_when_done_uses_marker_dataclass(
     await admin_update._cleanup_marker_when_done(proc)
 
     unlinked.assert_called_once()
+
+
+def test_backup_pid_marker_keeps_live_systemd_unit_without_pid(tmp_path: Path) -> None:
+    marker = tmp_path / ".backup.running"
+    marker.write_text(
+        "pid=0\n"
+        f"started_at={datetime.now(timezone.utc).isoformat()}\n"
+        "unit=lumen-backup-20260607.service\n",
+        encoding="utf-8",
+    )
+
+    assert admin_backups._read_pid_marker(marker) is True
+    assert marker.exists()
+
+
+def test_list_releases_limit_none_returns_all_release_dirs(tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    releases.mkdir()
+    for idx in range(admin_update._RELEASE_LIST_LIMIT + 2):
+        (releases / f"20260607-{idx:02d}").mkdir()
+
+    assert len(admin_update._list_releases(tmp_path)) == admin_update._RELEASE_LIST_LIMIT
+    assert len(admin_update._list_releases(tmp_path, limit=None)) == (
+        admin_update._RELEASE_LIST_LIMIT + 2
+    )
 
 
 @pytest.mark.parametrize("module", [admin_update, admin_release])

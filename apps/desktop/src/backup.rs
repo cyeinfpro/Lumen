@@ -572,16 +572,18 @@ fn apply_pending_restore_inner(
                 Err(err) => {
                     write_restore_log(
                         data_root,
-                        &format!("safety backup failed before restore; continuing: {err:#}\n"),
+                        &format!("safety backup failed before restore; restore aborted: {err:#}\n"),
                     );
-                    None
+                    return Err(err).context("safety backup failed before restore; restore aborted");
                 }
             }
         } else {
             None
         };
 
-        restore_database(data_root, &extract_root, manifest.database.present)?;
+        // Restore storage before DB so a storage swap failure cannot leave the
+        // restored database pointing at missing old media files.
+        restore_storage_dir(data_root, &extract_root, now)?;
         restore_optional_top_file(data_root, &extract_root, "data/settings.json")?;
         restore_optional_top_file(data_root, &extract_root, "data/providers.json")?;
         if should_restore_bootstrap_marker(&manifest.app_version, app_version) {
@@ -596,7 +598,7 @@ fn apply_pending_restore_inner(
                 ),
             );
         }
-        restore_storage_dir(data_root, &extract_root, now)?;
+        restore_database(data_root, &extract_root, manifest.database.present)?;
         write_restore_log(
             data_root,
             &format!(
@@ -1003,6 +1005,42 @@ mod tests {
         );
         assert!(!pending_restore_status(&root).pending);
 
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn restore_aborts_when_safety_backup_fails() -> Result<()> {
+        let source_root = std::env::temp_dir()
+            .join(format!("lumen-backup-source-test-{}", unix_epoch_ms()));
+        fs::create_dir_all(source_root.join("data/db"))?;
+        fs::create_dir_all(source_root.join("data/storage"))?;
+        fs::write(source_root.join("data/storage/restored.txt"), "restored")?;
+        let source_db = source_root.join("data/db/lumen.sqlite");
+        let conn = Connection::open(&source_db)?;
+        conn.execute("CREATE TABLE example (id TEXT PRIMARY KEY)", [])?;
+        drop(conn);
+        let backup = create_desktop_backup(&source_root, "test")?;
+
+        let root = std::env::temp_dir()
+            .join(format!("lumen-backup-safety-test-{}", unix_epoch_ms()));
+        fs::create_dir_all(root.join("data/db"))?;
+        fs::create_dir_all(root.join("data/storage"))?;
+        fs::write(root.join("data/db/lumen.sqlite"), "not a sqlite database")?;
+        fs::write(root.join("data/storage/current.txt"), "current")?;
+
+        let _plan = schedule_restore_backup(&root, &backup.path)?;
+        let err = apply_pending_restore(&root, "test").expect_err("restore must abort");
+
+        assert!(format!("{err:#}").contains("safety backup failed before restore"));
+        assert_eq!(
+            fs::read_to_string(root.join("data/storage/current.txt"))?,
+            "current"
+        );
+        assert!(!root.join("data/storage/restored.txt").exists());
+        assert!(failed_restore_json_path(&root).is_file());
+
+        let _ = fs::remove_dir_all(source_root);
         let _ = fs::remove_dir_all(root);
         Ok(())
     }

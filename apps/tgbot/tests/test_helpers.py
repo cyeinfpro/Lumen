@@ -15,6 +15,7 @@ for module_name in list(sys.modules):
 from aiogram.types import Message  # noqa: E402
 
 from app.handlers._helpers import (  # noqa: E402
+    is_slash_command,
     mime_extension,
     require_message,
     resolution_from_size,
@@ -81,3 +82,10 @@ def test_truncate_text_handles_tiny_limits() -> None:
     assert truncate_text("abc", 0) == ""
     assert truncate_text("abc", 1) == "…"
     assert truncate_text("abc", 2) == "a…"
+
+
+def test_is_slash_command_only_matches_leading_single_slash() -> None:
+    assert is_slash_command("/new")
+    assert is_slash_command(" /cancel ")
+    assert not is_slash_command("make /new poster")
+    assert not is_slash_command("//not-a-command prompt")

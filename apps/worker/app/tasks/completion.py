@@ -4166,6 +4166,76 @@ async def run_completion(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 )
             except Exception as enq_exc:  # noqa: BLE001
                 logger.error("re-enqueue failed task=%s err=%s", task_id, enq_exc)
+                enqueue_err = "retry_enqueue_failed"
+                enqueue_msg = f"failed to enqueue retry: {enq_exc}"[:2000]
+                await _publish_completion_tool_updates(
+                    redis=redis,
+                    user_id=user_id,
+                    channel=channel,
+                    task_id=task_id,
+                    message_id=message_id,
+                    attempt=attempt,
+                    attempt_epoch=attempt_epoch,
+                    tool_tracker=tool_tracker,
+                    updates=tool_tracker.finalize_active(
+                        ToolStatus.FAILED.value,
+                        error=enqueue_msg,
+                    ),
+                )
+                async with SessionLocal() as session:
+                    res = await session.execute(
+                        update(Completion)
+                        .where(
+                            Completion.id == task_id,
+                            Completion.attempt == attempt_epoch,
+                            Completion.status == CompletionStatus.QUEUED.value,
+                        )
+                        .values(
+                            status=CompletionStatus.FAILED.value,
+                            progress_stage=CompletionStage.FINALIZING,
+                            finished_at=datetime.now(timezone.utc),
+                            error_code=enqueue_err,
+                            error_message=enqueue_msg,
+                        )
+                    )
+                    if (res.rowcount or 0) == 0:
+                        await session.commit()
+                        logger.info(
+                            "completion retry enqueue failure skipped by newer epoch task=%s "
+                            "attempt_epoch=%s",
+                            task_id,
+                            attempt_epoch,
+                        )
+                        _task_outcome = "superseded"
+                        return
+                    msg = await session.get(Message, message_id)
+                    if msg is not None:
+                        msg.status = MessageStatus.FAILED
+                    comp_failed = await session.get(Completion, task_id)
+                    if comp_failed is not None:
+                        await worker_billing.release_completion(
+                            session,
+                            comp_failed,
+                            reason=enqueue_err,
+                        )
+                    await session.commit()
+                    await worker_billing.flush_balance_cache_refreshes(session)
+                await publish_event(
+                    redis,
+                    user_id,
+                    channel,
+                    EV_COMP_FAILED,
+                    {
+                        "completion_id": task_id,
+                        "message_id": message_id,
+                        "attempt": attempt,
+                        "attempt_epoch": attempt_epoch,
+                        "code": enqueue_err,
+                        "message": enqueue_msg,
+                        "retriable": False,
+                    },
+                )
+                _task_outcome = "failed"
             return
 
         # terminal

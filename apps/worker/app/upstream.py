@@ -69,6 +69,7 @@ from lumen_core.providers import (
     provider_supports_route,
     resolve_provider_proxy_url,
 )
+from lumen_core.url_security import resolve_public_http_target
 
 from .config import settings
 from .runtime_settings import resolve, resolve_db
@@ -1267,6 +1268,51 @@ def _with_error_context(
     return exc
 
 
+def _is_dev_network_env() -> bool:
+    return (settings.app_env or "").strip().lower() not in {"prod", "production"}
+
+
+def _same_origin(left: str, right: str) -> bool:
+    try:
+        left_parts = urlsplit(left)
+        right_parts = urlsplit(right)
+        left_port = left_parts.port or (443 if left_parts.scheme == "https" else 80)
+        right_port = right_parts.port or (443 if right_parts.scheme == "https" else 80)
+    except ValueError:
+        return False
+    if left_parts.scheme.lower() != right_parts.scheme.lower():
+        return False
+    if (left_parts.hostname or "").lower() != (right_parts.hostname or "").lower():
+        return False
+    return left_port == right_port
+
+
+async def _ensure_result_download_url(
+    image_url: str,
+    *,
+    path: str,
+    allowed_base_url: str | None = None,
+) -> None:
+    if allowed_base_url and _same_origin(image_url, allowed_base_url):
+        return
+    dev_env = _is_dev_network_env()
+    try:
+        await resolve_public_http_target(
+            image_url,
+            allow_http=dev_env,
+            allow_private=False,
+            allow_unresolved=dev_env,
+            dns_timeout_s=2.0,
+        )
+    except ValueError as exc:
+        raise UpstreamError(
+            f"unsafe image result URL: {exc}",
+            status_code=400,
+            error_code=EC.INVALID_VALUE.value,
+            payload={"url": image_url, "path": path, "method": "GET"},
+        ) from exc
+
+
 async def _fetch_image_url_as_bytes(
     image_url: str,
     *,
@@ -1278,6 +1324,7 @@ async def _fetch_image_url_as_bytes(
     第三方网关行为）时，图片以 CDN 链接返回而非 b64_json。沿用 provider 的
     proxy（同一 images_client）以便穿透同样的网关链路。
     """
+    await _ensure_result_download_url(image_url, path="images/result")
     client = await (
         _get_images_client(proxy_url) if proxy_url else _get_images_client()
     )
@@ -1997,8 +2044,14 @@ async def _download_image_job_result(
     client: httpx.AsyncClient,
     image_url: str,
     proxy_url: str | None,
+    allowed_base_url: str | None = None,
 ) -> bytes:
     _ = proxy_url  # client is already constructed with the provider proxy.
+    await _ensure_result_download_url(
+        image_url,
+        path="image-jobs/result",
+        allowed_base_url=allowed_base_url,
+    )
     started = time.monotonic()
     trace_id = _generate_trace_id()
     try:
@@ -2241,6 +2294,7 @@ async def _submit_and_wait_image_job(
             client=client,
             image_url=image_url,
             proxy_url=proxy_url,
+            allowed_base_url=base_url,
         )
         return base64.b64encode(raw).decode("ascii"), None
 

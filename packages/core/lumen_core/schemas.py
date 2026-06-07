@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -25,6 +26,7 @@ from .constants import (
     MAX_PROMPT_CHARS,
 )
 from .sizing import AspectRatio as AspectRatioLiteral
+from .url_security import is_private_host
 
 
 class BaseOut(BaseModel):
@@ -506,6 +508,14 @@ class VideoReferenceMediaIn(BaseModel):
             raise ValueError("image reference must not include video_id")
         if self.kind == "video" and (self.image_id or "").strip():
             raise ValueError("video reference must not include image_id")
+        if self.url:
+            parsed = urlsplit(self.url.strip())
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("reference media url must be an http(s) URL")
+            if parsed.username or parsed.password:
+                raise ValueError("reference media url must not include credentials")
+            if is_private_host(parsed.hostname):
+                raise ValueError("reference media url host is not allowed")
         return self
 
 
