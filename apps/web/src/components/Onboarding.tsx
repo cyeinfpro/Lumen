@@ -3,11 +3,10 @@
 import { motion } from "framer-motion";
 import {
   Aperture,
+  ArrowRight,
   ImageDown,
-  Keyboard,
   Layers3,
   Sparkles,
-  Upload,
   Wand2,
 } from "lucide-react";
 
@@ -63,7 +62,7 @@ export function Onboarding({
 }) {
   return (
     <motion.div
-      className="relative flex flex-1 flex-col items-center px-3 pt-6 pb-[calc(2rem+env(safe-area-inset-bottom))] text-center sm:px-4 md:pt-12 md:pb-16"
+      className="relative flex min-h-[calc(100dvh-13rem)] w-full flex-col items-center justify-center px-3 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-6 text-center sm:px-4 md:pb-16 md:pt-10"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, ease: "easeOut" }}
@@ -72,17 +71,17 @@ export function Onboarding({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.08 }}
-        className="mb-3 inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-white/[0.04] px-3 py-1 text-[11px] font-medium text-[var(--fg-1)] backdrop-blur-md"
+        className="mb-3 inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 py-1 text-[11px] font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)] backdrop-blur-md"
       >
         <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" strokeWidth={2.2} />
-        Lumen Studio
+        Lumen 工作室
       </motion.p>
 
       <motion.h1
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.12 }}
-        className="type-page-title max-w-[20rem] break-words text-balance sm:max-w-2xl md:text-[28px]"
+        className="type-page-title mx-auto max-w-[22rem] break-words text-balance sm:max-w-2xl md:text-[30px]"
       >
         从一句话开始，
         <span className="text-[var(--accent)]">慢慢把画面定下来。</span>
@@ -92,12 +91,12 @@ export function Onboarding({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.16 }}
-        className="type-body mt-3 max-w-lg text-pretty px-1 text-[var(--fg-2)]"
+        className="type-body mx-auto mt-3 max-w-lg text-pretty px-1 text-[var(--fg-2)]"
       >
         选一个起点，或直接写下你想要的画面。
       </motion.p>
 
-      <div className="mt-5 sm:mt-7 grid w-full max-w-4xl grid-cols-1 gap-2.5 sm:gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-5 grid w-full max-w-4xl grid-cols-1 gap-2.5 sm:mt-7 sm:grid-cols-2 sm:gap-3 lg:grid-cols-4">
         {PRESETS.map((preset, index) => (
           <motion.button
             key={preset.title}
@@ -113,18 +112,18 @@ export function Onboarding({
             transition={{ duration: 0.35, delay: 0.18 + index * 0.04 }}
             whileHover={loading ? undefined : { y: -1 }}
             className={cn(
-              "group relative min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] p-4 text-left",
-              "transition-[border-color,background-color,transform] duration-200 hover:border-[var(--border-amber)]/35 hover:bg-white/[0.04]",
+              "group relative min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/86 p-4 text-left shadow-[var(--shadow-1)] backdrop-blur-sm",
+              "transition-[border-color,background-color,transform,box-shadow] duration-200 hover:border-[var(--border-amber)]/35 hover:bg-[var(--bg-2)]/72 hover:shadow-[var(--shadow-2)]",
               "cursor-pointer",
               "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 active:scale-[0.99] disabled:cursor-wait disabled:opacity-60",
               loading && "pointer-events-none",
             )}
           >
-            <div className="flex items-start gap-3">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-white/[0.04] text-[var(--fg-1)] transition-colors group-hover:text-[var(--accent)]">
+            <div className="flex items-start gap-3 lg:block">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-1)] transition-colors group-hover:text-[var(--accent)]">
                 {preset.icon}
               </span>
-              <span className="min-w-0 flex-1">
+              <span className="min-w-0 flex-1 lg:mt-3 lg:block">
                 <span className="block text-[13px] font-medium leading-tight text-[var(--fg-0)]">
                   {loading ? "处理中…" : preset.title}
                 </span>
@@ -133,27 +132,13 @@ export function Onboarding({
                 </span>
               </span>
             </div>
+            <ArrowRight
+              className="absolute bottom-3 right-3 h-3.5 w-3.5 text-[var(--fg-3)] opacity-0 transition-[opacity,transform,color] duration-200 group-hover:translate-x-0.5 group-hover:text-[var(--accent)] group-hover:opacity-100"
+              strokeWidth={2.2}
+            />
           </motion.button>
         ))}
       </div>
-
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.4, delay: 0.4 }}
-        className="mt-6 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-[11px] text-[var(--fg-2)]"
-      >
-        <span className="inline-flex items-center gap-1.5">
-          <Upload className="h-3 w-3" />
-          拖拽或粘贴图片
-        </span>
-        <span className="inline-flex items-center gap-1.5">
-          <Keyboard className="h-3 w-3" />
-          <Kbd>⌘</Kbd>
-          <Kbd>Enter</Kbd>
-          <span className="ml-0.5">发送</span>
-        </span>
-      </motion.div>
 
       {loading && (
         <div
@@ -168,13 +153,5 @@ export function Onboarding({
         </div>
       )}
     </motion.div>
-  );
-}
-
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="rounded border border-[var(--border)] bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-1)]">
-      {children}
-    </kbd>
   );
 }

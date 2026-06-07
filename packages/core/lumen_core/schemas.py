@@ -536,8 +536,8 @@ class VideoCreateIn(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_image_contract(self) -> "VideoCreateIn":
-        if self.duration_s != -1 and self.duration_s < 4:
-            raise ValueError("duration_s must be -1 or between 4 and 15")
+        if self.duration_s != -1 and self.duration_s < 3:
+            raise ValueError("duration_s must be -1 or between 3 and 15")
         if self.action == "t2v" and self.input_image_id:
             raise ValueError("t2v must not include input_image_id")
         if self.action == "t2v" and self.reference_media:
@@ -1810,7 +1810,7 @@ class ProvidersUpdateIn(BaseModel):
     proxies: list[ProviderProxyIn] = []
 
 
-VideoProviderKind = Literal["volcano", "veo", "fake"]
+VideoProviderKind = Literal["volcano", "dashscope", "veo", "fake"]
 
 
 class VideoProviderItemOut(BaseModel):

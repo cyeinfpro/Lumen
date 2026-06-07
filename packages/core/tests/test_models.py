@@ -40,7 +40,7 @@ def test_video_generation_has_idempotency_and_provider_task_guards():
     assert "ix_video_gen_user_status_created" in index_names
     assert "ix_video_gen_status_next_poll" in index_names
     assert "duration_s = -1" in checks["ck_video_gen_duration_positive"]
-    assert "duration_s >= 4" in checks["ck_video_gen_duration_positive"]
+    assert "duration_s >= 3" in checks["ck_video_gen_duration_positive"]
     assert "duration_s <= 15" in checks["ck_video_gen_duration_positive"]
     assert "progress_pct >= 0" in checks["ck_video_gen_progress_pct"]
     assert "progress_pct <= 100" in checks["ck_video_gen_progress_pct"]

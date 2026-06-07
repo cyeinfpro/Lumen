@@ -186,6 +186,18 @@ def test_seedance_20_fast_resolution_options_exclude_1080p() -> None:
     ) == ["480p", "720p", "1080p"]
 
 
+def test_happyhorse_resolution_options_exclude_480p() -> None:
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "happyhorse-1.0",
+        available_resolutions=["480p", "720p", "1080p"],
+    ) == ["720p", "1080p"]
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "hh",
+        upstream_model="happyhorse-1.0-t2v",
+        available_resolutions=["480p", "720p", "1080p"],
+    ) == ["720p", "1080p"]
+
+
 @pytest.mark.asyncio
 async def test_video_options_exposes_billing_model_for_provider_alias(
     monkeypatch: pytest.MonkeyPatch,
@@ -234,6 +246,82 @@ async def test_video_options_exposes_billing_model_for_provider_alias(
     assert options.models[0].model == "seedance-2.0"
     assert options.models[0].billing_model == "seedance-2.0-fast"
     assert options.models[0].billing_models == {"t2v": "seedance-2.0-fast"}
+
+
+@pytest.mark.asyncio
+async def test_video_options_exposes_happyhorse_reference_with_image_pricing_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="dashscope",
+        kind="dashscope",
+        base_url="https://dashscope-intl.aliyuncs.com",
+        api_key="sk-test",
+        models={
+            "happyhorse-1.0:t2v": "happyhorse-1.0-t2v",
+            "happyhorse-1.0:i2v": "happyhorse-1.0-i2v",
+            "happyhorse-1.0:reference": "happyhorse-1.0-r2v",
+        },
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "happyhorse-1.0": {
+                "t2v": {"720p:3": 3_000_000},
+                "i2v": {"720p:3": 3_000_000},
+                "reference_image": {"720p:3": 3_000_000},
+            }
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    async def price_options(_db):
+        return [
+            VideoPriceOptionOut(
+                model="happyhorse-1.0",
+                action="t2v",
+                resolution="720p",
+                variant="t2v_720p",
+                price=videos._money(1_008_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="happyhorse-1.0",
+                action="i2v",
+                resolution="720p",
+                variant="i2v_720p",
+                price=videos._money(1_008_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="happyhorse-1.0",
+                action="reference_image",
+                resolution="720p",
+                variant="reference_image_720p",
+                price=videos._money(1_008_000),  # noqa: SLF001
+                enabled=True,
+            ),
+        ]
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+    monkeypatch.setattr(videos, "_video_price_options", price_options)
+
+    options = await videos.video_options(  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),
+        object(),
+    )
+
+    assert options.enabled is True
+    assert len(options.models) == 1
+    assert options.models[0].model == "happyhorse-1.0"
+    assert set(options.models[0].actions) == {"t2v", "i2v", "reference"}
+    assert options.models[0].resolutions == ["720p"]
 
 
 @pytest.mark.asyncio
@@ -294,7 +382,11 @@ async def test_input_image_snapshot_prefers_retry_snapshot_when_available() -> N
         async def execute(self, _statement):
             raise AssertionError("db lookup should not happen when snapshot exists")
 
-    snapshot = ("u/user-1/v/video-1/first-frame.png", "sha256")
+    snapshot = (
+        "u/user-1/v/video-1/first-frame.png",
+        "sha256",
+        "https://example.com/i.png",
+    )
 
     assert (
         await videos._input_image_snapshot(  # noqa: SLF001
@@ -305,6 +397,19 @@ async def test_input_image_snapshot_prefers_retry_snapshot_when_available() -> N
         )
         == snapshot
     )
+
+
+def test_reference_image_public_url_sets_video_reference_token() -> None:
+    image = SimpleNamespace(id="image-1", metadata_jsonb={})
+
+    url = videos._reference_image_public_url(  # noqa: SLF001
+        image,  # type: ignore[arg-type]
+        "https://lumen.example",
+    )
+
+    assert url.startswith("https://lumen.example/api/images/reference/image-1/binary?")
+    assert "token=" in url
+    assert isinstance(image.metadata_jsonb["video_reference_access_token"], str)
 
 
 def test_create_video_generation_maps_billing_error() -> None:

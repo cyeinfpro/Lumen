@@ -204,6 +204,42 @@ class PollResult:
 - 对 `(model, action)` 做映射；i2v/t2v 可能是不同 doubao model id。
 - 对 Seedance 1.x/2.x 的参数编码差异做 adapter 内封装：2.0 用顶层 `ratio/resolution/duration/generate_audio`；1.x 用 text 内联参数。Worker 引擎不感知。
 
+### HappyHorse / DashScope
+
+Alibaba Cloud Model Studio 的 HappyHorse-1.0 接入使用独立 `dashscope` provider kind，不走火山 `contents/generations/tasks` 接口：
+
+```json
+{
+  "providers": [
+    {
+      "name": "dashscope-happyhorse",
+      "kind": "dashscope",
+      "base_url": "https://dashscope-intl.aliyuncs.com",
+      "api_key": "...",
+      "enabled": true,
+      "concurrency": 2,
+      "models": {
+        "happyhorse-1.0:t2v": "happyhorse-1.0-t2v",
+        "happyhorse-1.0:i2v": "happyhorse-1.0-i2v",
+        "happyhorse-1.0:reference": "happyhorse-1.0-r2v"
+      }
+    }
+  ]
+}
+```
+
+请求差异：
+- 提交路径：`POST /api/v1/services/aigc/video-generation/video-synthesis`，Header 需要 `Authorization: Bearer ...` 和 `X-DashScope-Async: enable`。
+- 轮询路径：`GET /api/v1/tasks/{task_id}`。
+- I2V/R2V 输入图片必须是上游可访问的 HTTP(S) URL，不能发送 data URL；API 会为私有图片生成 `/api/images/reference/{image_id}/binary?token=...`。
+- `happyhorse-1.0-r2v` 只支持图片参考；当前 Lumen 的 `reference` 动作如果带视频参考会在 API 层拒绝。
+- 官方还有 `happyhorse-1.0-video-edit`；当前 Lumen 没有 video-edit 动作和 UI，不在本次接入范围内。
+
+计费差异：
+- 官方价格按输出视频秒计费，720P 原价 $0.14/s，1080P 原价 $0.24/s。
+- Lumen 复用视频账本的 `per_mtoken` 单位：内部规定 `1 秒 = 1,000,000` 视频计费 token，`price_micro` 表示每秒人民币微元。
+- 默认迁移按仓库 fallback 汇率 USD/CNY=7.2 写入：720p `1_008_000` micro/s，1080p `1_728_000` micro/s；运营手动改价不被覆盖。
+
 ### 功能闸门
 
 API 创建任务前必须同时满足：

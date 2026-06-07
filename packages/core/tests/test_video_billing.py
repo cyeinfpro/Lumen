@@ -92,6 +92,27 @@ def test_smart_duration_uses_max_duration_hold_estimate() -> None:
     )
 
 
+def test_video_duration_estimates_include_official_three_second_bucket() -> None:
+    expanded = video_billing.expand_video_duration_estimates(
+        {"happyhorse-1.0": {"t2v": {"720p:3": 3_000_000, "720p:15": 15_000_000}}}
+    )
+
+    t2v = expanded["happyhorse-1.0"]["t2v"]
+    assert t2v["720p:3"] == 3_000_000
+    assert sorted(int(key.rsplit(":", 1)[1]) for key in t2v) == list(range(3, 16))
+
+
+def test_happyhorse_seconds_map_to_internal_video_tokens() -> None:
+    assert video_billing.VIDEO_BILLING_TOKENS_PER_SECOND == 1_000_000
+    assert (
+        video_billing.round_micro_for_tokens(
+            3 * video_billing.VIDEO_BILLING_TOKENS_PER_SECOND,
+            1_008_000,
+        )
+        == 3_024_000
+    )
+
+
 def test_video_token_upper_bound_uses_pricing_variant_specific_reference_video() -> (
     None
 ):
@@ -187,7 +208,7 @@ def test_expand_video_duration_estimates_fills_one_second_steps_conservatively()
     durations = sorted(
         int(key.rsplit(":", 1)[1]) for key in t2v if key.startswith("720p:")
     )
-    assert durations == list(range(4, 16))
+    assert durations == list(range(3, 16))
 
 
 @pytest.mark.asyncio

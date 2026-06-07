@@ -25,6 +25,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -919,6 +920,37 @@ async def get_image_signed(
         etag=etag,
         cache_control="private, max-age=300",
         storage_key=storage_key,
+        request=request,
+    )
+
+
+@router.get("/reference/{image_id}/binary")
+async def reference_image_binary(
+    image_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    token: str = Query(min_length=16, max_length=256),
+) -> Response:
+    img = (
+        await db.execute(
+            select(Image).where(
+                Image.id == image_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if img is None:
+        raise _http("not_found", "image not found", 404)
+    metadata = img.metadata_jsonb or {}
+    expected = metadata.get("video_reference_access_token")
+    if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
+        raise _http("not_found", "image not found", 404)
+    return _storage_streaming_response(
+        _fs_path(img.storage_key),
+        media_type=img.mime,
+        etag=f'"{img.sha256}"',
+        cache_control="private, max-age=3600",
+        storage_key=img.storage_key,
         request=request,
     )
 

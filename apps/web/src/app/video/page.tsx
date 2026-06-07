@@ -5,10 +5,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertCircle,
   Clapperboard,
+  CircleCheck,
   Copy,
   Download,
   Film,
+  Gauge,
   ImageIcon,
   Layers3,
   PencilLine,
@@ -17,6 +20,7 @@ import {
   RotateCcw,
   Send,
   Settings2,
+  Sparkles,
   Trash2,
   Upload,
   Video as VideoIcon,
@@ -75,7 +79,7 @@ const SMART_VIDEO_DURATION = -1;
 const SMART_VIDEO_HOLD_DURATION = 15;
 const VIDEO_DURATION_OPTIONS = [
   SMART_VIDEO_DURATION,
-  ...Array.from({ length: 12 }, (_, index) => index + 4),
+  ...Array.from({ length: 13 }, (_, index) => index + 3),
 ];
 const VIDEO_RESOLUTION_VALUES = new Set<VideoCreateIn["resolution"]>([
   "480p",
@@ -1027,38 +1031,29 @@ export default function VideoPage() {
       (action === "reference" && referenceMedia.length > 0)) &&
     estimate !== null &&
     !createMut.isPending;
+  const serviceEnabled = Boolean(options?.enabled);
+  const serviceSummary = optionsQ.isLoading
+    ? "读取视频服务配置"
+    : serviceEnabled
+      ? `${availableModels.length} 个模型可用`
+      : options?.unavailable_reason ?? "需要先配置可用的视频供应商";
 
   return (
     <div className="min-h-[100dvh] bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="mx-auto flex w-full max-w-[1440px] flex-col gap-4 px-4 pb-36 pt-3 md:px-6 md:pb-10">
-        <section className="hidden min-w-0 border-b border-[var(--border)] pb-3 md:block">
-          <div className="min-w-0">
-            <h1 className="type-page-title">视频</h1>
-            <p className="type-page-subtitle mt-1 truncate">
-              写描述，选参数，生成视频。
-            </p>
-          </div>
-        </section>
-        <section className="grid gap-2 border-b border-[var(--border)] pb-3 md:hidden">
-          <div className="flex items-end justify-between gap-3">
-            <h1 className="type-page-title">视频</h1>
-          </div>
-          <p className="text-[13px] leading-[1.6] text-[var(--fg-1)]">
-            写描述，选参数，生成视频。
-          </p>
-        </section>
-
-        <VideoStatusStrip
+      <main className="lumen-studio-bg mx-auto flex w-full max-w-[1440px] flex-col gap-4 px-4 pb-36 pt-3 md:px-6 md:pb-10">
+        <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
           audio={generateAudio}
-          enabled={Boolean(options?.enabled)}
+          enabled={serviceEnabled}
           loading={optionsQ.isLoading}
           activeCount={activeItems.length}
           completedCount={completedVideoItems.length}
+          serviceSummary={serviceSummary}
+          submitState={submitDisabledReason}
         />
 
         <div className="grid gap-4 xl:grid-cols-[minmax(340px,420px)_minmax(0,1fr)] xl:items-start">
@@ -1069,9 +1064,9 @@ export default function VideoPage() {
                 <div>
                   <p className="type-card-title">新建视频</p>
                   <p className="mt-1 text-sm text-[var(--fg-2)]">
-                    {options?.enabled
+                    {serviceEnabled
                       ? `${availableModels.length} 个模型 · ${actionLabel(action)}`
-                      : options?.unavailable_reason ?? "功能未启用"}
+                      : serviceSummary}
                   </p>
                 </div>
                 <Button
@@ -1088,6 +1083,13 @@ export default function VideoPage() {
               </div>
 
               <div className="space-y-5 p-4 sm:p-5">
+                <ReadinessBanner
+                  enabled={serviceEnabled}
+                  loading={optionsQ.isLoading}
+                  reason={submitDisabledReason}
+                  model={selectedModel}
+                  profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
+                />
                 <WorkflowRail
                   action={action}
                   hasPrompt={prompt.trim().length > 0}
@@ -1146,7 +1148,7 @@ export default function VideoPage() {
                     maxLength={10000}
                     placeholder="写清主体、动作、画面比例和不要出现的内容。"
                     className={cn(
-                      "min-h-[160px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
+                      "min-h-[176px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
                       isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
                     )}
                   />
@@ -1606,7 +1608,7 @@ function WorkflowStep({
   );
 }
 
-function VideoStatusStrip({
+function VideoWorkbenchHeader({
   mode,
   profile,
   audio,
@@ -1614,6 +1616,8 @@ function VideoStatusStrip({
   loading,
   activeCount,
   completedCount,
+  serviceSummary,
+  submitState,
 }: {
   mode: string;
   profile: string;
@@ -1622,36 +1626,116 @@ function VideoStatusStrip({
   loading: boolean;
   activeCount: number;
   completedCount: number;
+  serviceSummary: string;
+  submitState: string;
 }) {
   const serviceValue = loading ? "读取中" : enabled ? "在线" : "离线";
-  const serviceDetail = loading ? "读取配置" : enabled ? "配置可用" : "功能未启用";
+  const serviceDetail = loading ? "读取配置" : serviceSummary;
   const queueValue = activeCount > 0 ? `${activeCount} 进行中` : `${completedCount} 已完成`;
   const queueDetail = activeCount > 0 ? "任务队列" : "最近结果";
 
   return (
-    <section className="grid gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-2 shadow-[var(--shadow-1)] sm:grid-cols-3">
-      <StatusStripItem
-        label="状态"
-        value={serviceValue}
-        detail={serviceDetail}
-        icon={<Clapperboard className="h-3.5 w-3.5" />}
-        active={enabled}
-      />
-      <StatusStripItem
-        label="模式"
-        value={mode}
-        detail={audio ? "含音频" : "无音频"}
-        icon={<Film className="h-3.5 w-3.5" />}
-        active
-      />
-      <StatusStripItem
-        label="规格"
-        value={profile}
-        detail={`${queueValue} · ${queueDetail}`}
-        icon={<Settings2 className="h-3.5 w-3.5" />}
-        active={activeCount > 0}
-      />
+    <section className="grid gap-4 border-b border-[var(--border)] pb-4 lg:grid-cols-[minmax(0,1fr)_minmax(560px,0.9fr)] lg:items-end">
+      <div className="min-w-0">
+        <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 py-1.5 text-xs font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
+          <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+          <span className="truncate">Lumen 视频工作台</span>
+        </div>
+        <div className="mt-3 flex flex-wrap items-end gap-x-3 gap-y-2">
+          <h1 className="type-page-title">视频工作台</h1>
+          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-2.5 py-1 text-xs text-[var(--fg-2)]">
+            {submitState}
+          </span>
+        </div>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
+          用同一个工作台完成文字生成、首帧生成和多参考生成；左侧控制描述与参数，右侧保留预览、队列和历史。
+        </p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        <StatusStripItem
+          label="服务"
+          value={serviceValue}
+          detail={serviceDetail}
+          icon={<Clapperboard className="h-3.5 w-3.5" />}
+          active={enabled}
+        />
+        <StatusStripItem
+          label="模式"
+          value={mode}
+          detail={audio ? "含音频" : "无音频"}
+          icon={<Film className="h-3.5 w-3.5" />}
+          active
+        />
+        <StatusStripItem
+          label="规格"
+          value={profile}
+          detail={`${queueValue} · ${queueDetail}`}
+          icon={<Gauge className="h-3.5 w-3.5" />}
+          active={activeCount > 0}
+        />
+      </div>
     </section>
+  );
+}
+
+function ReadinessBanner({
+  enabled,
+  loading,
+  reason,
+  model,
+  profile,
+}: {
+  enabled: boolean;
+  loading: boolean;
+  reason: string;
+  model: string;
+  profile: string;
+}) {
+  const ready = enabled && reason === "可以提交";
+  const icon = loading ? (
+    <RefreshCw className="h-4 w-4 animate-spin" />
+  ) : ready ? (
+    <CircleCheck className="h-4 w-4" />
+  ) : (
+    <AlertCircle className="h-4 w-4" />
+  );
+  return (
+    <div
+      className={cn(
+        "grid gap-3 rounded-[var(--radius-card)] border p-3 shadow-[var(--shadow-1)] sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center",
+        ready
+          ? "border-success-border bg-success-soft"
+          : enabled
+            ? "border-[var(--border)] bg-[var(--bg-1)]/78"
+            : "border-warning-border bg-warning-soft",
+      )}
+    >
+      <span
+        className={cn(
+          "flex h-9 w-9 items-center justify-center rounded-[var(--radius-control)] border bg-[var(--bg-0)]",
+          ready
+            ? "border-success-border text-[var(--success-fg)]"
+            : enabled
+              ? "border-[var(--border)] text-[var(--fg-1)]"
+              : "border-warning-border text-[var(--warning-fg)]",
+        )}
+      >
+        {icon}
+      </span>
+      <div className="min-w-0">
+        <p className="text-sm font-semibold text-[var(--fg-0)]">
+          {loading ? "正在读取配置" : ready ? "任务已准备好" : reason}
+        </p>
+        <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
+          {enabled
+            ? `${model || "未选择模型"} · ${profile}`
+            : "配置视频供应商后，提交按钮会自动进入可用状态。"}
+        </p>
+      </div>
+      <span className="hidden rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)] sm:inline-flex">
+        {ready ? "就绪" : enabled ? "草稿" : "配置"}
+      </span>
+    </div>
   );
 }
 
@@ -2119,16 +2203,35 @@ function PrimaryPreview({
           </div>
           <span className="text-[11px] tabular-nums text-[var(--fg-2)]">16:9</span>
         </div>
-        <div className="relative grid min-h-[360px] place-items-center overflow-hidden bg-[var(--bg-2)]/60 p-6 text-[var(--fg-0)]">
+        <div className="relative grid min-h-[380px] place-items-center overflow-hidden bg-[var(--bg-2)]/60 p-4 text-[var(--fg-0)] sm:p-6">
           <div aria-hidden="true" className="absolute inset-4 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/32" />
-          <div className="relative max-w-sm text-center">
+          <div aria-hidden="true" className="absolute inset-x-8 top-8 h-px bg-[var(--border-subtle)]" />
+          <div aria-hidden="true" className="absolute inset-x-8 bottom-8 h-px bg-[var(--border-subtle)]" />
+          <div className="relative w-full max-w-xl text-center">
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)] shadow-[var(--shadow-1)]">
-              <Film className="h-6 w-6" />
+              <Clapperboard className="h-6 w-6" />
             </div>
-            <p className="text-base font-semibold">暂无视频</p>
-            <p className="mt-2 text-sm leading-6 text-[var(--fg-2)]">
-              生成完成后会显示在这里。
+            <p className="text-base font-semibold">等待第一条视频任务</p>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[var(--fg-2)]">
+              填写描述并提交后，这里会先显示任务状态，再切换为可播放预览，历史记录会保留同一组参数。
             </p>
+            <div className="mt-5 grid gap-2 text-left sm:grid-cols-3">
+              <PreviewStep
+                label="描述"
+                detail="主体、镜头、运动"
+                icon={<PencilLine className="h-3.5 w-3.5" />}
+              />
+              <PreviewStep
+                label="提交"
+                detail="预扣与队列状态"
+                icon={<Send className="h-3.5 w-3.5" />}
+              />
+              <PreviewStep
+                label="复用"
+                detail="下载或套用参数"
+                icon={<RotateCcw className="h-3.5 w-3.5" />}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -2192,6 +2295,28 @@ function PrimaryPreview({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function PreviewStep({
+  label,
+  detail,
+  icon,
+}: {
+  label: string;
+  detail: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+      <div className="flex items-center gap-2 text-[var(--fg-1)]">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--accent)]">
+          {icon}
+        </span>
+        <span className="text-sm font-semibold text-[var(--fg-0)]">{label}</span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-[var(--fg-2)]">{detail}</p>
     </div>
   );
 }

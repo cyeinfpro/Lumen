@@ -50,6 +50,32 @@ def test_parse_video_provider_item_normalizes_and_maps_actions() -> None:
     )
 
 
+def test_parse_dashscope_happyhorse_provider() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            name="dashscope-happyhorse",
+            kind="dashscope",
+            base_url="https://dashscope-intl.aliyuncs.com",
+            api_key="dashscope-key",
+            models={
+                "happyhorse-1.0:t2v": "happyhorse-1.0-t2v",
+                "happyhorse-1.0:i2v": "happyhorse-1.0-i2v",
+                "happyhorse-1.0:reference": "happyhorse-1.0-r2v",
+            },
+        ),
+        index=0,
+    )
+
+    assert provider.kind == "dashscope"
+    assert provider.supports("happyhorse-1.0", "t2v")
+    assert provider.supports("happyhorse-1.0", "i2v")
+    assert provider.supports("happyhorse-1.0", "reference")
+    assert (
+        provider.upstream_model_for("happyhorse-1.0", "reference")
+        == "happyhorse-1.0-r2v"
+    )
+
+
 def test_video_provider_config_can_reference_shared_proxy() -> None:
     shared = json.dumps(
         {

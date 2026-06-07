@@ -7,11 +7,13 @@ import pytest
 
 from app.tasks.video_generation import _reference_media_bytes
 from app.video_upstream import (
+    DashScopeHappyHorseAdapter,
     VideoReferenceMedia,
     VideoSubmitRequest,
     VideoUpstreamError,
     VolcanoSeedanceAdapter,
     _billable,
+    _duration_usage_total_tokens,
     _usage_total_tokens,
 )
 from lumen_core.video_providers import VideoProviderDefinition
@@ -61,7 +63,9 @@ async def test_reference_media_bytes_rejects_local_video_snapshots() -> None:
         },
     )
 
-    with pytest.raises(RuntimeError, match="reference video snapshot missing public URL"):
+    with pytest.raises(
+        RuntimeError, match="reference video snapshot missing public URL"
+    ):
         await _reference_media_bytes(generation)
 
 
@@ -80,6 +84,21 @@ class CaptureClient:
         self.path = path
         self.body = json
         return httpx.Response(200, json={"id": "seedance-task-1"})
+
+
+class DashScopeCaptureClient(CaptureClient):
+    def __init__(self, get_json: dict | None = None) -> None:
+        super().__init__()
+        self.get_json = get_json or {}
+
+    async def post(self, path: str, *, json):
+        self.path = path
+        self.body = json
+        return httpx.Response(200, json={"output": {"task_id": "hh-task-1"}})
+
+    async def get(self, path: str):
+        self.path = path
+        return httpx.Response(200, json=self.get_json)
 
 
 @pytest.mark.asyncio
@@ -140,9 +159,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
         "type": "video_url",
         "role": "reference_video",
         "video_url": {
-            "url": (
-                "https://lumen.example/api/videos/reference/video-1/binary?token=t"
-            )
+            "url": ("https://lumen.example/api/videos/reference/video-1/binary?token=t")
         },
     }
 
@@ -215,12 +232,193 @@ def test_seedance_usage_reads_nested_task_response_usage() -> None:
 
 
 def test_seedance_usage_falls_back_to_nested_total_tokens() -> None:
-    assert _usage_total_tokens({"data": {"usage": {"total_tokens": 108_144}}}) == 108_144
+    assert (
+        _usage_total_tokens({"data": {"usage": {"total_tokens": 108_144}}}) == 108_144
+    )
 
 
 def test_seedance_billable_reads_nested_usage_flag() -> None:
     assert _billable({"data": {"usage": {"billable": False}}}) is False
     assert _billable({"result": {"billing": {"billable": "true"}}}) is True
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_i2v_submit_uses_dashscope_media_payload() -> None:
+    provider = VideoProviderDefinition(
+        name="dashscope",
+        kind="dashscope",
+        base_url="https://dashscope-intl.aliyuncs.com",
+        api_key="sk-test",
+        models={"happyhorse-1.0:i2v": "happyhorse-1.0-i2v"},
+    )
+    adapter = DashScopeHappyHorseAdapter(provider)
+    client = DashScopeCaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="i2v",
+            model="happyhorse-1.0",
+            upstream_model="happyhorse-1.0-i2v",
+            prompt="make it move",
+            duration_s=3,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            input_image_url=(
+                "https://lumen.example/api/images/reference/image-1/binary?token=t"
+            ),
+        )
+    )
+
+    assert result.provider_task_id == "hh-task-1"
+    assert client.path == "/api/v1/services/aigc/video-generation/video-synthesis"
+    assert client.body == {
+        "model": "happyhorse-1.0-i2v",
+        "input": {
+            "prompt": "make it move",
+            "media": [
+                {
+                    "type": "first_frame",
+                    "url": (
+                        "https://lumen.example/api/images/reference/image-1/binary?token=t"
+                    ),
+                }
+            ],
+        },
+        "parameters": {
+            "duration": 3,
+            "resolution": "720P",
+            "watermark": False,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_reference_submit_uses_reference_image_media_payload() -> None:
+    provider = VideoProviderDefinition(
+        name="dashscope",
+        kind="dashscope",
+        base_url="https://dashscope-intl.aliyuncs.com",
+        api_key="sk-test",
+        models={"happyhorse-1.0:reference": "happyhorse-1.0-r2v"},
+    )
+    adapter = DashScopeHappyHorseAdapter(provider)
+    client = DashScopeCaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="happyhorse-1.0",
+            upstream_model="happyhorse-1.0-r2v",
+            prompt="match this product",
+            duration_s=-1,
+            resolution="1080p",
+            aspect_ratio="9:16",
+            seed=123,
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="image",
+                    url=(
+                        "https://lumen.example/api/images/reference/image-1/binary?token=t"
+                    ),
+                )
+            ],
+        )
+    )
+
+    assert client.body["input"]["media"] == [
+        {
+            "type": "reference_image",
+            "url": (
+                "https://lumen.example/api/images/reference/image-1/binary?token=t"
+            ),
+        }
+    ]
+    assert client.body["parameters"] == {
+        "resolution": "1080P",
+        "watermark": False,
+        "ratio": "9:16",
+        "seed": 123,
+    }
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_reference_rejects_reference_video() -> None:
+    provider = VideoProviderDefinition(
+        name="dashscope",
+        kind="dashscope",
+        base_url="https://dashscope-intl.aliyuncs.com",
+        api_key="sk-test",
+        models={"happyhorse-1.0:reference": "happyhorse-1.0-r2v"},
+    )
+    adapter = DashScopeHappyHorseAdapter(provider)
+
+    with pytest.raises(VideoUpstreamError, match="does not support reference videos"):
+        await adapter.submit(
+            VideoSubmitRequest(
+                task_id="video-gen-1",
+                user_id="user-1",
+                action="reference",
+                model="happyhorse-1.0",
+                upstream_model="happyhorse-1.0-r2v",
+                prompt="match this product",
+                duration_s=5,
+                resolution="720p",
+                aspect_ratio="adaptive",
+                reference_media=[
+                    VideoReferenceMedia(
+                        kind="video",
+                        url="https://lumen.example/reference.mp4",
+                    )
+                ],
+            )
+        )
+
+
+def test_happyhorse_usage_duration_maps_seconds_to_internal_tokens() -> None:
+    assert (
+        _duration_usage_total_tokens({"output": {"usage": {"duration": 3}}})
+        == 3_000_000
+    )
+    assert (
+        _duration_usage_total_tokens({"usage": {"output_video_duration": "5.5"}})
+        == 5_500_000
+    )
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_poll_reads_result_url_and_billable_duration() -> None:
+    provider = VideoProviderDefinition(
+        name="dashscope",
+        kind="dashscope",
+        base_url="https://dashscope-intl.aliyuncs.com",
+        api_key="sk-test",
+        models={"happyhorse-1.0:t2v": "happyhorse-1.0-t2v"},
+    )
+    adapter = DashScopeHappyHorseAdapter(provider)
+    client = DashScopeCaptureClient(
+        {
+            "output": {
+                "task_status": "SUCCEEDED",
+                "results": [{"url": "https://cdn.example/output.mp4"}],
+                "usage": {"duration": "3.5"},
+            }
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("hh-task-1")
+
+    assert client.path == "/api/v1/tasks/hh-task-1"
+    assert result.status == "succeeded"
+    assert result.video_url == "https://cdn.example/output.mp4"
+    assert result.usage_total_tokens == 3_500_000
+    assert result.upstream_billable is True
 
 
 @pytest.mark.asyncio
