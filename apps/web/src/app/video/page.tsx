@@ -66,6 +66,12 @@ type ReferenceDraft = VideoReferenceMediaIn & {
   display: string;
 };
 
+type PromptEnhanceCandidate = {
+  id: string;
+  title: string;
+  prompt: string;
+};
+
 const VIDEO_EVENTS = [
   "video.queued",
   "video.submitted",
@@ -93,6 +99,12 @@ const VIDEO_ACTIVE_POLL_MS = 2500;
 const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
 const VIDEO_REFRESH_RETRY_BASE_MS = 1500;
 const VIDEO_REFRESH_RETRY_MAX_MS = 15000;
+const VIDEO_PROMPT_VARIANT_COUNT = 3;
+const VIDEO_PROMPT_VARIANT_TITLES = [
+  "推荐镜头版",
+  "动作节奏版",
+  "参考一致版",
+];
 
 const MODE_COPY: Record<
   VideoAction,
@@ -407,6 +419,41 @@ function videoDownloadName(item: VideoGenerationWithVideo): string {
   return `lumen-video-${item.id.slice(0, 8)}.${ext}`;
 }
 
+function cleanPromptEnhanceText(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/^```(?:json|text)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .replace(/^(?:提示词|prompt)\s*[:：]\s*/i, "")
+    .trim()
+    .replace(/^["“]|["”]$/g, "")
+    .trim();
+}
+
+function parsePromptEnhanceCandidates(raw: string): PromptEnhanceCandidate[] {
+  const normalized = raw.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+  const candidates: PromptEnhanceCandidate[] = [];
+  const variantPattern =
+    /<variant(?:\s+title=(?:"([^"]+)"|'([^']+)'))?\s*>([\s\S]*?)<\/variant>/gi;
+  for (const match of normalized.matchAll(variantPattern)) {
+    const promptText = cleanPromptEnhanceText(match[3] ?? "");
+    if (!promptText) continue;
+    const title =
+      cleanPromptEnhanceText(match[1] ?? match[2] ?? "") ||
+      VIDEO_PROMPT_VARIANT_TITLES[candidates.length] ||
+      `方案 ${candidates.length + 1}`;
+    candidates.push({
+      id: `variant-${candidates.length + 1}`,
+      title,
+      prompt: promptText,
+    });
+  }
+  if (candidates.length > 0) return candidates.slice(0, VIDEO_PROMPT_VARIANT_COUNT);
+  const fallback = cleanPromptEnhanceText(normalized);
+  return fallback ? [{ id: "variant-1", title: "优化结果", prompt: fallback }] : [];
+}
+
 export default function VideoPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -434,6 +481,12 @@ export default function VideoPage() {
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState("");
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
+  const [promptEnhancePreview, setPromptEnhancePreview] = useState("");
+  const [promptEnhanceCandidates, setPromptEnhanceCandidates] = useState<
+    PromptEnhanceCandidate[]
+  >([]);
+  const [selectedPromptEnhanceCandidateId, setSelectedPromptEnhanceCandidateId] =
+    useState("");
 
   const optionsQ = useQuery({
     queryKey: ["video", "options"],
@@ -732,8 +785,14 @@ export default function VideoPage() {
     },
     [referenceMedia],
   );
+  const clearPromptEnhanceChoices = useCallback(() => {
+    setPromptEnhancePreview("");
+    setPromptEnhanceCandidates([]);
+    setSelectedPromptEnhanceCandidateId("");
+  }, []);
 
   const insertPromptText = useCallback((text: string) => {
+    clearPromptEnhanceChoices();
     const target = promptRef.current;
     if (!target) {
       setPrompt((prev) => `${prev}${prev.endsWith(" ") || !prev ? "" : " "}${text}`);
@@ -751,7 +810,7 @@ export default function VideoPage() {
       target.focus();
       target.setSelectionRange(pos, pos);
     });
-  }, [prompt]);
+  }, [clearPromptEnhanceChoices, prompt]);
 
   const insertReferenceTag = useCallback((label: string) => {
     insertPromptText(`[${label}]`);
@@ -760,6 +819,7 @@ export default function VideoPage() {
   const uploadMut = useMutation({
     mutationFn: (file: File) => uploadImage(file),
     onSuccess: (img) => {
+      clearPromptEnhanceChoices();
       setInputImageId(img.id);
       setUploadedLabel(`${img.width}x${img.height}`);
       toast.success("首帧已上传");
@@ -794,6 +854,7 @@ export default function VideoPage() {
       throw new Error("只支持图片或视频");
     },
     onSuccess: (ref) => {
+      clearPromptEnhanceChoices();
       const label = nextReferenceLabel(ref.kind);
       setReferenceMedia((prev) => [
         ...prev,
@@ -879,6 +940,7 @@ export default function VideoPage() {
   });
 
   const loadAsDraft = useCallback((item: VideoGenerationOut) => {
+    clearPromptEnhanceChoices();
     setAction(item.action);
     setPrompt(item.prompt);
     setModel(item.model);
@@ -912,7 +974,7 @@ export default function VideoPage() {
     );
     requestAnimationFrame(() => promptRef.current?.focus());
     toast.success("已套用参数");
-  }, []);
+  }, [clearPromptEnhanceChoices]);
 
   const canEnhancePrompt = Boolean(
     prompt.trim() ||
@@ -927,6 +989,7 @@ export default function VideoPage() {
     const ctl = new AbortController();
     promptEnhanceAbortRef.current?.abort();
     promptEnhanceAbortRef.current = ctl;
+    clearPromptEnhanceChoices();
     setIsEnhancingPrompt(true);
     let accumulated = "";
     try {
@@ -940,6 +1003,7 @@ export default function VideoPage() {
           aspect_ratio: aspectRatio,
           generate_audio: generateAudio,
           input_image_id: action === "i2v" ? inputImageId.trim() || null : null,
+          variant_count: VIDEO_PROMPT_VARIANT_COUNT,
           reference_media:
             action === "reference"
               ? referenceMedia.map((item) => ({
@@ -953,16 +1017,41 @@ export default function VideoPage() {
         (delta) => {
           if (ctl.signal.aborted || promptEnhanceAbortRef.current !== ctl) return;
           accumulated += delta;
-          setPrompt(accumulated);
+          setPromptEnhancePreview(accumulated);
         },
         ctl.signal,
       );
-      toast.success("提示词已优化");
+      const candidates = parsePromptEnhanceCandidates(accumulated);
+      const recommended = candidates[0];
+      if (recommended) {
+        setPrompt(recommended.prompt);
+        setPromptEnhanceCandidates(candidates);
+        setSelectedPromptEnhanceCandidateId(recommended.id);
+        setPromptEnhancePreview("");
+        toast.success(
+          candidates.length > 1
+            ? `已生成 ${candidates.length} 个优化方案`
+            : "提示词已优化",
+        );
+      } else {
+        setPromptEnhancePreview("");
+        toast.error("优化失败", { description: "没有收到有效提示词" });
+        setPrompt(original);
+      }
     } catch (err) {
       if (!ctl.signal.aborted) {
         const description = err instanceof Error ? err.message : undefined;
         if (accumulated.trim()) {
-          setPrompt(accumulated);
+          const candidates = parsePromptEnhanceCandidates(accumulated);
+          const recommended = candidates[0];
+          if (recommended) {
+            setPrompt(recommended.prompt);
+            setPromptEnhanceCandidates(candidates);
+            setSelectedPromptEnhanceCandidateId(recommended.id);
+          } else {
+            setPrompt(cleanPromptEnhanceText(accumulated));
+          }
+          setPromptEnhancePreview("");
           toast.error("优化中断", {
             description: description
               ? `${description} 已保留已生成内容，可继续编辑或重试。`
@@ -983,6 +1072,7 @@ export default function VideoPage() {
     action,
     aspectRatio,
     canEnhancePrompt,
+    clearPromptEnhanceChoices,
     durationS,
     effectiveResolution,
     generateAudio,
@@ -992,6 +1082,23 @@ export default function VideoPage() {
     referenceMedia,
     selectedModel,
   ]);
+
+  const applyPromptEnhanceCandidate = useCallback(
+    (candidate: PromptEnhanceCandidate) => {
+      setPrompt(candidate.prompt);
+      setSelectedPromptEnhanceCandidateId(candidate.id);
+      requestAnimationFrame(() => promptRef.current?.focus());
+    },
+    [],
+  );
+
+  const handlePromptChange = useCallback(
+    (value: string) => {
+      clearPromptEnhanceChoices();
+      setPrompt(value);
+    },
+    [clearPromptEnhanceChoices],
+  );
 
   const submitDisabledReason = useMemo(() => {
     if (createMut.isPending) return "正在提交";
@@ -1108,6 +1215,7 @@ export default function VideoPage() {
                         actionKey={key}
                         selected={action === key}
                         onSelect={() => {
+                          clearPromptEnhanceChoices();
                           setAction(key);
                           setModel(firstModelForAction(options, key));
                         }}
@@ -1142,7 +1250,7 @@ export default function VideoPage() {
                   <textarea
                     ref={promptRef}
                     value={prompt}
-                    onChange={(event) => setPrompt(event.target.value)}
+                    onChange={(event) => handlePromptChange(event.target.value)}
                     readOnly={isEnhancingPrompt}
                     rows={7}
                     maxLength={10000}
@@ -1152,6 +1260,18 @@ export default function VideoPage() {
                       isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
                     )}
                   />
+                  {(isEnhancingPrompt ||
+                    promptEnhancePreview.trim() ||
+                    promptEnhanceCandidates.length > 0) && (
+                    <PromptEnhanceChooser
+                      loading={isEnhancingPrompt}
+                      preview={promptEnhancePreview}
+                      candidates={promptEnhanceCandidates}
+                      selectedId={selectedPromptEnhanceCandidateId}
+                      onSelect={applyPromptEnhanceCandidate}
+                      onDismiss={clearPromptEnhanceChoices}
+                    />
+                  )}
                   <div className="flex flex-wrap gap-2">
                     {PROMPT_CHIPS.map((chip) => (
                       <button
@@ -1203,6 +1323,7 @@ export default function VideoPage() {
                     <input
                       value={inputImageId}
                       onChange={(event) => {
+                        clearPromptEnhanceChoices();
                         setInputImageId(event.target.value);
                         setUploadedLabel("");
                       }}
@@ -1249,11 +1370,12 @@ export default function VideoPage() {
                           key={item._key}
                           item={item}
                           onInsert={() => insertReferenceTag(item.label)}
-                          onRemove={() =>
+                          onRemove={() => {
+                            clearPromptEnhanceChoices();
                             setReferenceMedia((prev) =>
                               prev.filter((ref) => ref._key !== item._key),
-                            )
-                          }
+                            );
+                          }}
                         />
                       ))}
                       {referenceMedia.length === 0 && (
@@ -1274,26 +1396,38 @@ export default function VideoPage() {
                     <SelectField
                       label="模型"
                       value={selectedModel}
-                      onChange={setModel}
+                      onChange={(value) => {
+                        clearPromptEnhanceChoices();
+                        setModel(value);
+                      }}
                       options={availableModels.map((item) => item.model)}
                     />
                     <SelectField
                       label="时长"
                       value={String(durationS)}
-                      onChange={(value) => setDurationS(Number(value))}
+                      onChange={(value) => {
+                        clearPromptEnhanceChoices();
+                        setDurationS(Number(value));
+                      }}
                       options={(options?.durations_s ?? VIDEO_DURATION_OPTIONS).map(String)}
                       renderOption={(value) => formatDurationLabel(Number(value))}
                     />
                     <SelectField
                       label="分辨率"
                       value={effectiveResolution}
-                      onChange={setResolution}
+                      onChange={(value) => {
+                        clearPromptEnhanceChoices();
+                        setResolution(value);
+                      }}
                       options={availableResolutions}
                     />
                     <SelectField
                       label="比例"
                       value={aspectRatio}
-                      onChange={setAspectRatio}
+                      onChange={(value) => {
+                        clearPromptEnhanceChoices();
+                        setAspectRatio(value);
+                      }}
                       options={options?.aspect_ratios ?? ["adaptive", "16:9", "9:16", "1:1"]}
                     />
                   </div>
@@ -1313,7 +1447,10 @@ export default function VideoPage() {
                       <input
                         type="checkbox"
                         checked={generateAudio}
-                        onChange={(event) => setGenerateAudio(event.target.checked)}
+                        onChange={(event) => {
+                          clearPromptEnhanceChoices();
+                          setGenerateAudio(event.target.checked);
+                        }}
                       />
                     </label>
                   </div>
@@ -1864,6 +2001,143 @@ function PromptMeta({ icon, label }: { icon: React.ReactNode; label: string }) {
       <span className="text-[var(--fg-2)]">{icon}</span>
       <span className="truncate">{label}</span>
     </span>
+  );
+}
+
+function PromptEnhanceChooser({
+  loading,
+  preview,
+  candidates,
+  selectedId,
+  onSelect,
+  onDismiss,
+}: {
+  loading: boolean;
+  preview: string;
+  candidates: PromptEnhanceCandidate[];
+  selectedId: string;
+  onSelect: (candidate: PromptEnhanceCandidate) => void;
+  onDismiss: () => void;
+}) {
+  const cleanPreview = cleanPromptEnhanceText(preview);
+  const visibleCandidates = candidates.length > 0 ? candidates : [];
+
+  const copyCandidate = async (candidate: PromptEnhanceCandidate) => {
+    try {
+      await navigator.clipboard.writeText(candidate.prompt);
+      toast.success("已复制提示词");
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  return (
+    <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]">
+            {loading ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5" />
+            )}
+          </span>
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold text-[var(--fg-0)]">
+              {loading ? "正在优化提示词" : "优化方案"}
+            </span>
+            <span className="block truncate text-xs text-[var(--fg-2)]">
+              {visibleCandidates.length > 1
+                ? `${visibleCandidates.length} 个候选，已应用推荐版`
+                : loading
+                  ? "优先补运动、运镜和时间推进"
+                  : "已应用到描述"}
+            </span>
+          </span>
+        </div>
+        {!loading && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onDismiss}
+            leftIcon={<XCircle className="h-3.5 w-3.5" />}
+          >
+            清除
+          </Button>
+        )}
+      </div>
+
+      {loading && (
+        <div className="min-h-20 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3 text-sm leading-6 text-[var(--fg-1)]">
+          {cleanPreview || "等待上游返回..."}
+        </div>
+      )}
+
+      {visibleCandidates.length > 0 && (
+        <div className="grid gap-2">
+          {visibleCandidates.map((candidate) => {
+            const selected = candidate.id === selectedId;
+            return (
+              <div
+                key={candidate.id}
+                className={cn(
+                  "rounded-[var(--radius-control)] border bg-[var(--bg-0)] p-3 transition-colors",
+                  selected
+                    ? "border-[var(--accent-border)] shadow-[var(--shadow-1)]"
+                    : "border-[var(--border-subtle)]",
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span
+                        className={cn(
+                          "flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
+                          selected
+                            ? "border-[var(--accent-border)] text-[var(--accent)]"
+                            : "border-[var(--border)] text-[var(--fg-2)]",
+                        )}
+                      >
+                        {selected ? (
+                          <CircleCheck className="h-3.5 w-3.5" />
+                        ) : (
+                          <PencilLine className="h-3 w-3" />
+                        )}
+                      </span>
+                      <p className="truncate text-sm font-semibold text-[var(--fg-0)]">
+                        {candidate.title}
+                      </p>
+                    </div>
+                    <p className="mt-2 max-h-28 overflow-y-auto text-sm leading-6 text-[var(--fg-1)]">
+                      {candidate.prompt}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      variant={selected ? "secondary" : "outline"}
+                      size="sm"
+                      disabled={selected}
+                      onClick={() => onSelect(candidate)}
+                    >
+                      {selected ? "已用" : "使用"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-9 w-9 px-0"
+                      onClick={() => void copyCandidate(candidate)}
+                      aria-label="复制优化提示词"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 

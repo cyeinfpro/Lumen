@@ -1,7 +1,17 @@
 "use client";
 
-import { AlertTriangle, RefreshCw, SearchX, WandSparkles } from "lucide-react";
+import {
+  AlertTriangle,
+  FilterX,
+  ImagePlus,
+  Images,
+  RefreshCw,
+  SearchX,
+  WandSparkles,
+} from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { ReactNode } from "react";
 
 const SKELETON_RATIOS = [
   "3/4", "4/3", "1/1", "3/4", "4/5", "16/9",
@@ -68,26 +78,44 @@ export function StreamErrorState({
   message?: string;
   onRetry: () => void;
 }) {
+  const detail = normalizeStreamError(message);
   return (
-    <div className="flex flex-col items-center justify-center px-6 py-20 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border-amber)] bg-[rgba(242,169,58,0.1)] text-[var(--amber-300)]">
-        <AlertTriangle className="h-5 w-5" />
+    <StreamStatePanel
+      icon={<AlertTriangle className="h-5 w-5" />}
+      tone="warning"
+      eyebrow="资产库暂不可用"
+      title="图库没有成功载入"
+      description="当前资产列表请求失败。筛选、搜索和已加载内容不会被清空，可以先重试，也可以回到创作页继续生成。"
+      primaryAction={
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+        >
+          <RefreshCw className="h-4 w-4" />
+          重新加载
+        </button>
+      }
+      secondaryAction={
+        <Link
+          href="/"
+          className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+        >
+          回到创作
+        </Link>
+      }
+    >
+      <div className="grid gap-2 text-left text-xs leading-5 text-[var(--fg-2)] sm:grid-cols-3">
+        <StateFact label="状态" value={detail.label} />
+        <StateFact label="筛选" value="保留当前条件" />
+        <StateFact label="建议" value="重试后再刷新页面" />
       </div>
-      <div className="mt-4 text-[15px] font-medium text-[var(--fg-0)]">
-        图库暂时没有载入
-      </div>
-      <div className="mt-2 max-w-[30rem] text-[13px] leading-relaxed text-[var(--fg-2)]">
-        {message || "可能是网络或登录状态过期，刷新后会保留当前筛选。"}
-      </div>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="mt-6 inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full bg-[var(--amber-400)] px-4 text-[13px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none"
-      >
-        <RefreshCw className="h-4 w-4" />
-        重新加载
-      </button>
-    </div>
+      {detail.diagnostic ? (
+        <p className="mt-3 truncate rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/58 px-3 py-2 text-left font-mono text-[11px] text-[var(--fg-2)]">
+          诊断信息：{detail.diagnostic}
+        </p>
+      ) : null}
+    </StreamStatePanel>
   );
 }
 
@@ -103,48 +131,150 @@ export function StreamNoResultsState({
     : "当前筛选下暂无作品";
 
   return (
-    <div className="flex flex-col items-center justify-center px-6 py-20 text-center animate-fade-in">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]">
-        <SearchX className="h-5 w-5" />
+    <StreamStatePanel
+      icon={<SearchX className="h-5 w-5" />}
+      tone="neutral"
+      eyebrow="没有匹配结果"
+      title={label}
+      description="当前搜索或筛选条件太窄。清除条件后会回到完整资产流，也可以换一个提示词关键词继续搜索。"
+      primaryAction={
+        <button
+          type="button"
+          onClick={onClear}
+          className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 text-sm font-medium text-[var(--warning-fg)] transition-colors hover:bg-warning-soft focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+        >
+          <FilterX className="h-4 w-4" />
+          清除条件
+        </button>
+      }
+    >
+      <div className="grid gap-2 text-left text-xs leading-5 text-[var(--fg-2)] sm:grid-cols-3">
+        <StateFact label="搜索" value={searchValue?.trim() || "未输入关键词"} />
+        <StateFact label="操作" value="清除筛选" />
+        <StateFact label="结果" value="恢复全部作品" />
       </div>
-      <div className="mt-4 text-[15px] font-medium text-[var(--fg-0)]">
-        {label}
-      </div>
-      <div className="mt-2 max-w-[28rem] text-[13px] leading-relaxed text-[var(--fg-2)]">
-        清除条件查看全部作品，或继续下滑加载更早内容。
-      </div>
-      <button
-        type="button"
-        onClick={onClear}
-        className="mt-6 inline-flex min-h-11 cursor-pointer items-center rounded-full border border-[var(--border-amber)] bg-[rgba(242,169,58,0.08)] px-4 text-[13px] text-[var(--amber-300)] transition-colors hover:bg-[rgba(242,169,58,0.14)] focus-visible:outline-none"
-      >
-        清除条件
-      </button>
-    </div>
+    </StreamStatePanel>
   );
 }
 
 export function StreamNeverState() {
   const router = useRouter();
   return (
-    <div className="flex flex-col items-center justify-center px-6 py-24 text-center animate-fade-in">
-      <div className="flex h-14 w-14 items-center justify-center rounded-full border border-[var(--border-amber)] bg-[rgba(242,169,58,0.1)] text-[var(--amber-300)] shadow-amber">
-        <WandSparkles className="h-6 w-6" />
+    <StreamStatePanel
+      icon={<Images className="h-5 w-5" />}
+      tone="accent"
+      eyebrow="资产流为空"
+      title="还没有作品进入资产库"
+      description="生成完成后的图片会自动沉淀到这里。之后可以按比例、参考图、Fast 模式筛选，也可以批量选择并创建分享链接。"
+      primaryAction={
+        <button
+          type="button"
+          onClick={() => router.push("/")}
+          className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+        >
+          <WandSparkles className="h-4 w-4" />
+          去创作
+        </button>
+      }
+      secondaryAction={
+        <Link
+          href="/projects"
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+        >
+          <ImagePlus className="h-4 w-4" />
+          看项目
+        </Link>
+      }
+    >
+      <div className="grid gap-2 text-left text-xs leading-5 text-[var(--fg-2)] sm:grid-cols-3">
+        <StateFact label="生成" value="创作页出图" />
+        <StateFact label="管理" value="资产页筛选" />
+        <StateFact label="复用" value="批量分享与定位" />
       </div>
-      <div className="type-page-title mt-6">
-        还没有作品
+    </StreamStatePanel>
+  );
+}
+
+function StreamStatePanel({
+  icon,
+  tone,
+  eyebrow,
+  title,
+  description,
+  primaryAction,
+  secondaryAction,
+  children,
+}: {
+  icon: ReactNode;
+  tone: "accent" | "neutral" | "warning";
+  eyebrow: string;
+  title: string;
+  description: string;
+  primaryAction: ReactNode;
+  secondaryAction?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <section className="grid min-h-[420px] place-items-center px-3 py-10 text-center animate-fade-in md:min-h-[520px] md:px-0">
+      <div className="w-full max-w-3xl rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/84 p-4 text-[var(--fg-0)] shadow-[var(--shadow-2)] backdrop-blur-sm sm:p-5 md:p-6">
+        <div className="mx-auto flex max-w-2xl flex-col items-center">
+          <span className={stateIconClass(tone)}>
+            {icon}
+          </span>
+          <p className="mt-4 type-page-kicker">{eyebrow}</p>
+          <h2 className="mt-2 text-[22px] font-semibold leading-tight tracking-tight text-[var(--fg-0)] md:text-[26px]">
+            {title}
+          </h2>
+          <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--fg-1)]">
+            {description}
+          </p>
+          <div className="mt-5 flex w-full flex-col justify-center gap-2 sm:w-auto sm:flex-row">
+            {primaryAction}
+            {secondaryAction}
+          </div>
+        </div>
+        {children ? (
+          <div className="mt-5 border-t border-[var(--border-subtle)] pt-4">
+            {children}
+          </div>
+        ) : null}
       </div>
-      <div className="type-body-sm mt-3 max-w-[26rem]">
-        生成后的图片会放在这里。
-      </div>
-      <button
-        type="button"
-        onClick={() => router.push("/")}
-        className="mt-8 inline-flex h-11 cursor-pointer items-center gap-2 rounded-full bg-[var(--amber-400)] px-5 text-[14px] font-medium text-[var(--bg-0)] shadow-amber transition-opacity hover:opacity-90 focus-visible:outline-none"
-      >
-        <WandSparkles className="h-4 w-4" />
-        去工作台
-      </button>
+    </section>
+  );
+}
+
+function StateFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/48 px-3 py-2">
+      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+        {label}
+      </p>
+      <p className="mt-1 truncate text-[12px] text-[var(--fg-1)]">{value}</p>
     </div>
   );
+}
+
+function stateIconClass(tone: "accent" | "neutral" | "warning") {
+  if (tone === "warning") {
+    return "flex h-12 w-12 items-center justify-center rounded-[var(--radius-card)] border border-warning-border bg-warning-soft text-[var(--warning-fg)] shadow-[var(--shadow-1)]";
+  }
+  if (tone === "accent") {
+    return "flex h-12 w-12 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)] shadow-[var(--shadow-1)]";
+  }
+  return "flex h-12 w-12 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-1)] shadow-[var(--shadow-1)]";
+}
+
+function normalizeStreamError(message?: string): { label: string; diagnostic?: string } {
+  const raw = message?.trim();
+  if (!raw) return { label: "请求失败" };
+  if (/internal server error/i.test(raw)) {
+    return { label: "服务端错误", diagnostic: "服务端返回 500 错误" };
+  }
+  if (/unauthori[sz]ed|forbidden|401|403/i.test(raw)) {
+    return { label: "登录状态异常", diagnostic: "需要重新确认登录状态或访问权限" };
+  }
+  if (/network|fetch|timeout/i.test(raw)) {
+    return { label: "网络连接异常", diagnostic: "请求超时或网络连接失败" };
+  }
+  return { label: "请求失败", diagnostic: raw };
 }
