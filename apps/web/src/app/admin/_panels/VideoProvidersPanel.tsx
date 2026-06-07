@@ -4,7 +4,6 @@ import { useMemo, useState } from "react";
 import {
   AlertCircle,
   Check,
-  CheckCircle2,
   Clapperboard,
   Gauge,
   KeyRound,
@@ -74,13 +73,6 @@ type ProviderSummary = {
   modelNames: string[];
   concurrency: number;
   issues: Issue[];
-};
-
-type CapabilityRow = {
-  model: string;
-  t2v: string[];
-  i2v: string[];
-  reference: string[];
 };
 
 const VOLCANO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
@@ -617,32 +609,6 @@ function analyzeDrafts(
   });
 }
 
-function buildCapabilityRows(items: VideoProviderItemOut[]): CapabilityRow[] {
-  const rows = new Map<string, CapabilityRow>();
-  const rowFor = (model: string) => {
-    const existing = rows.get(model);
-    if (existing) return existing;
-    const next: CapabilityRow = { model, t2v: [], i2v: [], reference: [] };
-    rows.set(model, next);
-    return next;
-  };
-  for (const provider of items) {
-    if (!provider.enabled) continue;
-    for (const [key, value] of Object.entries(provider.models)) {
-      if (!value.trim()) continue;
-      const model = baseModelName(key);
-      const row = rowFor(model);
-      const action = actionFromModelKey(key);
-      if (action) {
-        row[action].push(provider.name);
-      } else {
-        VIDEO_ACTIONS.forEach((item) => row[item].push(provider.name));
-      }
-    }
-  }
-  return Array.from(rows.values()).sort((a, b) => a.model.localeCompare(b.model));
-}
-
 function actionCoverageLabel(capabilities: Set<VideoAction>): string {
   if (capabilities.size === 0) return "无动作";
   return VIDEO_ACTIONS.filter((action) => capabilities.has(action))
@@ -669,10 +635,6 @@ export function VideoProvidersPanel() {
     () => serverItems.map(analyzeProvider),
     [serverItems],
   );
-  const capabilityRows = useMemo(
-    () => buildCapabilityRows(serverItems),
-    [serverItems],
-  );
   const draftSummaries = useMemo(
     () =>
       drafts
@@ -692,6 +654,12 @@ export function VideoProvidersPanel() {
   providerSummaries
     .filter((item) => item.enabled && item.hasKey)
     .forEach((item) => item.capabilities.forEach((action) => coveredActions.add(action)));
+  const providerIssues = providerSummaries.flatMap((summary) =>
+    summary.issues.map((issue) => ({
+      ...issue,
+      message: `${summary.name}：${issue.message}`,
+    })),
+  );
 
   const draftErrorCount = draftSummaries.reduce(
     (sum, summary) =>
@@ -714,6 +682,13 @@ export function VideoProvidersPanel() {
     enabledDraft && draftUsableCount === 0
       ? "启用视频生成前至少需要一个启用且可用的供应商"
       : null;
+  const draftStatusText = globalDraftIssue
+    ? globalDraftIssue
+    : draftErrorCount > 0
+      ? `还有 ${draftErrorCount} 个错误需要处理`
+      : draftWarningCount > 0
+        ? `${draftWarningCount} 个提示不会阻止保存`
+        : "配置可以保存";
 
   const startEdit = () => {
     setDrafts(serverItems.map(toDraft));
@@ -825,28 +800,48 @@ export function VideoProvidersPanel() {
   }
 
   return (
-    <section className="space-y-5 pb-24">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-panel)] border border-accent-border bg-accent-soft">
-            <Clapperboard className="h-4 w-4 text-accent" />
+    <section className="space-y-5 pb-28">
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-panel)] border border-accent-border bg-accent-soft">
+                <Clapperboard className="h-4 w-4 text-accent" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-medium text-[var(--fg-0)]">
+                  AI 视频供应商
+                </h3>
+                <p className="mt-0.5 type-caption text-[var(--fg-2)]">
+                  Seedance / HappyHorse / Veo · 模型映射与并发路由
+                </p>
+              </div>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h3 className="text-sm font-medium text-[var(--fg-0)]">AI 视频供应商</h3>
-            <p className="type-caption text-[var(--fg-2)]">
-              Seedance / HappyHorse 任务 API · 文字 / 首帧 / 参考生成
-            </p>
-          </div>
+          {!editing && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={startEdit}
+                leftIcon={<Pencil className="h-3.5 w-3.5" />}
+              >
+                编辑
+              </Button>
+            </div>
+          )}
         </div>
-        {!editing && (
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={startEdit}
-            leftIcon={<Pencil className="h-3.5 w-3.5" />}
-          >
-            编辑
-          </Button>
+
+        {serverItems.length > 0 && !editing && (
+          <VideoStatsRow
+            enabled={Boolean(query.data?.enabled)}
+            source={query.data?.source}
+            providerCount={serverItems.length}
+            enabledCount={enabledCount}
+            usableCount={usableCount}
+            totalConcurrency={totalConcurrency}
+            coveredActions={coveredActions}
+          />
         )}
       </div>
 
@@ -879,32 +874,14 @@ export function VideoProvidersPanel() {
 
       {!editing ? (
         <>
-          <OverviewGrid
-            enabled={Boolean(query.data?.enabled)}
-            source={query.data?.source}
-            providerCount={serverItems.length}
-            enabledCount={enabledCount}
-            usableCount={usableCount}
-            totalConcurrency={totalConcurrency}
-            coveredActions={coveredActions}
-          />
-
-          <ReadinessPanel
+          <ReadinessNotice
             enabled={Boolean(query.data?.enabled)}
             usableCount={usableCount}
             coveredActions={coveredActions}
-            totalConcurrency={totalConcurrency}
-            providerIssues={providerSummaries.flatMap((summary) =>
-              summary.issues.map((issue) => ({
-                ...issue,
-                message: `${summary.name}：${issue.message}`,
-              })),
-            )}
+            providerIssues={providerIssues}
           />
 
-          <CapabilityMatrix rows={capabilityRows} />
-
-          <div className="space-y-3">
+          <div className="space-y-5">
             {serverItems.map((item) => (
               <ProviderCard
                 key={item.name}
@@ -984,26 +961,21 @@ export function VideoProvidersPanel() {
             )}
           </div>
 
-          <div className="sticky bottom-4 z-10 flex flex-col gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/95 p-3 shadow-[var(--shadow-3)] backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
-            <div className="type-caption text-[var(--fg-2)]">
-              {globalDraftIssue
-                ? globalDraftIssue
-                : draftErrorCount > 0
-                  ? `还有 ${draftErrorCount} 个错误需要处理`
-                : draftWarningCount > 0
-                  ? `${draftWarningCount} 个提示不会阻止保存`
-                  : "配置可以保存"}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={save}
-                loading={updateMut.isPending}
-                leftIcon={<Save className="h-3.5 w-3.5" />}
-              >
-                保存配置
-              </Button>
+          <div className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[env(safe-area-inset-bottom)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4">
+            <div className="flex items-center gap-2 rounded-[var(--radius-dialog)] border border-[var(--color-lumen-amber)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:gap-3 sm:px-4">
+              <span className="min-w-0 type-caption text-[var(--fg-1)]">
+                <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-lumen-amber)] shadow-[var(--shadow-amber)]" />
+                  编辑中
+                  <span className="text-[var(--fg-2)]">·</span>
+                  <span className="font-mono tabular-nums">{drafts.length}</span>
+                  <span>个供应商</span>
+                </span>
+                <span className="ml-2 hidden text-[var(--fg-2)] sm:inline">
+                  {draftStatusText}
+                </span>
+              </span>
+              <div className="flex-1 sm:flex-none" />
               <Button
                 variant="secondary"
                 size="sm"
@@ -1011,8 +983,19 @@ export function VideoProvidersPanel() {
                   setDrafts(null);
                   setError(null);
                 }}
+                disabled={updateMut.isPending}
               >
-                取消
+                放弃
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={save}
+                disabled={updateMut.isPending}
+                loading={updateMut.isPending}
+                leftIcon={!updateMut.isPending ? <Save className="h-3.5 w-3.5" /> : undefined}
+              >
+                {updateMut.isPending ? "保存中" : "保存"}
               </Button>
             </div>
           </div>
@@ -1022,7 +1005,7 @@ export function VideoProvidersPanel() {
   );
 }
 
-function OverviewGrid({
+function VideoStatsRow({
   enabled,
   source,
   providerCount,
@@ -1040,211 +1023,118 @@ function OverviewGrid({
   coveredActions: Set<VideoAction>;
 }) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <MetricCard
-        icon={<Power className="h-4 w-4" />}
+    <div className="grid grid-cols-3 gap-3">
+      <VideoStatCard
         label="上线状态"
         value={enabled ? "已开启" : "已关闭"}
-        detail={`来源：${sourceLabel(source)}`}
-        tone={enabled ? "success" : "muted"}
+        sub={
+          <span className="inline-flex items-center gap-1 text-[var(--fg-2)]">
+            <Power className="h-3 w-3" />
+            {sourceLabel(source)}
+          </span>
+        }
+        accent={enabled ? "green" : undefined}
       />
-      <MetricCard
-        icon={<Server className="h-4 w-4" />}
-        label="可用供应商"
+      <VideoStatCard
+        label="供应商"
         value={`${usableCount} / ${providerCount}`}
-        detail={`${enabledCount} 个启用`}
-        tone={usableCount > 0 ? "success" : "warning"}
+        sub={
+          <span className="text-[var(--fg-2)]">
+            {enabledCount} 个启用
+          </span>
+        }
+        accent={usableCount > 0 ? "green" : "amber"}
       />
-      <MetricCard
-        icon={<Layers3 className="h-4 w-4" />}
+      <VideoStatCard
         label="动作覆盖"
         value={`${coveredActions.size} / ${VIDEO_ACTIONS.length}`}
-        detail={actionCoverageLabel(coveredActions)}
-        tone={coveredActions.size === VIDEO_ACTIONS.length ? "success" : "warning"}
-      />
-      <MetricCard
-        icon={<Gauge className="h-4 w-4" />}
-        label="并发容量"
-        value={`${totalConcurrency}`}
-        detail="启用供应商合计"
-        tone={totalConcurrency > 0 ? "success" : "muted"}
+        sub={
+          <span className="text-[var(--fg-2)]">
+            {actionCoverageLabel(coveredActions)} · 并发 {totalConcurrency}
+          </span>
+        }
+        accent={coveredActions.size === VIDEO_ACTIONS.length ? "green" : "amber"}
       />
     </div>
   );
 }
 
-function MetricCard({
-  icon,
+function VideoStatCard({
   label,
   value,
-  detail,
-  tone,
+  sub,
+  accent,
 }: {
-  icon: React.ReactNode;
   label: string;
   value: string;
-  detail: string;
-  tone: "success" | "warning" | "muted";
+  sub?: React.ReactNode;
+  accent?: "green" | "amber";
 }) {
-  const toneClass =
-    tone === "success"
-      ? "border-success-border bg-success-soft text-success"
-      : tone === "warning"
-        ? "border-warning-border bg-warning-soft text-warning"
-        : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]";
+  const ring =
+    accent === "green"
+      ? "border-success-border"
+      : accent === "amber"
+        ? "border-[var(--color-lumen-amber)]/20"
+        : "border-[var(--border)]";
+
   return (
-    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="type-caption text-[var(--fg-2)]">{label}</p>
-        <span className={`inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border ${toneClass}`}>
-          {icon}
-        </span>
+    <div className={`rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-4 py-3 backdrop-blur-sm ${ring}`}>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
+        {label}
       </div>
-      <p className="mt-3 text-xl font-semibold text-[var(--fg-0)]">{value}</p>
-      <p className="mt-1 type-caption text-[var(--fg-2)]">{detail}</p>
+      <div className="text-lg font-semibold leading-tight text-[var(--fg-0)] tabular-nums">
+        {value}
+      </div>
+      {sub && <div className="mt-1 truncate text-[11px]">{sub}</div>}
     </div>
   );
 }
 
-function ReadinessPanel({
+function ReadinessNotice({
   enabled,
   usableCount,
   coveredActions,
-  totalConcurrency,
   providerIssues,
 }: {
   enabled: boolean;
   usableCount: number;
   coveredActions: Set<VideoAction>;
-  totalConcurrency: number;
   providerIssues: Issue[];
 }) {
-  const checks = [
-    {
-      label: "视频生成总开关",
-      ok: enabled,
-      detail: enabled ? "已开启" : "未开启",
-    },
-    {
-      label: "可用供应商",
-      ok: usableCount > 0,
-      detail: usableCount > 0 ? `${usableCount} 个可用` : "没有可用供应商",
-    },
-    {
-      label: "动作覆盖",
-      ok: coveredActions.size === VIDEO_ACTIONS.length,
-      detail: actionCoverageLabel(coveredActions),
-    },
-    {
-      label: "并发容量",
-      ok: totalConcurrency > 0,
-      detail: `${totalConcurrency} 路`,
-    },
-  ];
-  const topIssues = providerIssues.slice(0, 4);
+  const topIssues = providerIssues.slice(0, 3);
+  const ready =
+    enabled &&
+    usableCount > 0 &&
+    coveredActions.size === VIDEO_ACTIONS.length &&
+    providerIssues.length === 0;
+  if (ready) return null;
+
+  const title = enabled ? "视频供应商需要处理" : "视频生成未开启";
+  const detail = !enabled
+    ? "打开编辑后启用总开关，再确认至少一个供应商可用。"
+    : usableCount === 0
+      ? "至少需要一个启用、已保存 Key 且有模型映射的供应商。"
+      : coveredActions.size < VIDEO_ACTIONS.length
+        ? `当前只覆盖 ${actionCoverageLabel(coveredActions)}。`
+        : "部分供应商存在配置提示。";
+
   return (
-    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
-          <p className="text-sm font-medium text-[var(--fg-0)]">上线检查</p>
-          <p className="mt-1 type-caption text-[var(--fg-2)]">
-            当前配置保存后，任务创建会按这些条件决定是否可提交。
-          </p>
-        </div>
-        <StatusPill
-          tone={checks.every((item) => item.ok) && providerIssues.length === 0 ? "success" : "warning"}
-          label={checks.every((item) => item.ok) ? "基本就绪" : "需要处理"}
-        />
-      </div>
-      <div className="mt-4 grid gap-2 md:grid-cols-4">
-        {checks.map((check) => (
-          <div
-            key={check.label}
-            className="flex min-w-0 items-start gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-2"
-          >
-            {check.ok ? (
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
-            ) : (
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-            )}
-            <div className="min-w-0">
-              <p className="text-xs font-medium text-[var(--fg-0)]">{check.label}</p>
-              <p className="type-caption text-[var(--fg-2)]">{check.detail}</p>
-            </div>
+    <div className="rounded-[var(--radius-panel)] border border-warning-border bg-warning-soft px-4 py-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex min-w-0 items-start gap-2">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-[var(--fg-0)]">{title}</p>
+            <p className="mt-1 type-caption text-warning">{detail}</p>
           </div>
-        ))}
-      </div>
-      {topIssues.length > 0 && (
-        <IssueList className="mt-4" issues={topIssues} />
-      )}
-    </div>
-  );
-}
-
-function CapabilityMatrix({ rows }: { rows: CapabilityRow[] }) {
-  return (
-    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-[var(--fg-0)]">模型能力覆盖</p>
-          <p className="mt-1 type-caption text-[var(--fg-2)]">
-            只统计已启用供应商。
-          </p>
         </div>
-        <Layers3 className="h-4 w-4 text-[var(--fg-2)]" />
-      </div>
-      {rows.length === 0 ? (
-        <p className="mt-4 rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-2 type-caption text-[var(--fg-2)]">
-          暂无启用模型映射。
-        </p>
-      ) : (
-        <div className="mt-4 overflow-x-auto">
-          <table className="min-w-[640px] w-full border-separate border-spacing-0 text-left text-xs">
-            <thead>
-              <tr className="text-[var(--fg-2)]">
-                <th className="border-b border-[var(--border-subtle)] pb-2 pr-3 font-medium">业务模型</th>
-                {VIDEO_ACTIONS.map((action) => (
-                  <th key={action} className="border-b border-[var(--border-subtle)] px-3 pb-2 font-medium">
-                    {ACTION_LABELS[action]}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.model}>
-                  <td className="border-b border-[var(--border-subtle)] py-3 pr-3 font-mono text-[var(--fg-0)]">
-                    {row.model}
-                  </td>
-                  {VIDEO_ACTIONS.map((action) => (
-                    <td key={action} className="border-b border-[var(--border-subtle)] px-3 py-3">
-                      <ProviderNames names={row[action]} />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="flex shrink-0 flex-wrap gap-1.5">
+          <StatusPill tone={enabled ? "success" : "warning"} label={enabled ? "总开关已开" : "总开关关闭"} />
+          <StatusPill tone={usableCount > 0 ? "success" : "warning"} label={`${usableCount} 个可用`} />
+          <StatusPill tone={coveredActions.size === VIDEO_ACTIONS.length ? "success" : "warning"} label={`${coveredActions.size}/${VIDEO_ACTIONS.length} 动作`} />
         </div>
-      )}
-    </div>
-  );
-}
-
-function ProviderNames({ names }: { names: string[] }) {
-  if (names.length === 0) {
-    return <span className="text-[var(--fg-3)]">未覆盖</span>;
-  }
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {names.map((name) => (
-        <span
-          key={name}
-          className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 font-mono text-[11px] text-[var(--fg-1)]"
-        >
-          {name}
-        </span>
-      ))}
+      </div>
+      {topIssues.length > 0 && <IssueList className="mt-3" issues={topIssues} />}
     </div>
   );
 }
@@ -1257,29 +1147,38 @@ function ProviderCard({
   summary: ProviderSummary | undefined;
 }) {
   const issues = summary?.issues ?? [];
-  const models = Object.entries(item.models);
+  const models = summary?.modelNames ?? modelNamesFromModels(item.models);
+  const visibleModels = models.slice(0, 6);
   return (
-    <article className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 shadow-[var(--shadow-1)]">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0">
+    <article
+      className={
+        "rounded-[var(--radius-dialog)] border p-5 shadow-[var(--shadow-1)] backdrop-blur-sm transition-colors " +
+        (item.enabled
+          ? "border-[var(--border)] bg-[var(--bg-1)]/60"
+          : "border-[var(--border-subtle)] bg-[var(--bg-1)]/30")
+      }
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-medium text-[var(--fg-0)]">{item.name}</p>
+            <span
+              className={
+                "text-sm font-medium " +
+                (item.enabled ? "text-[var(--fg-0)]" : "text-[var(--fg-1)]")
+              }
+            >
+              {item.name}
+            </span>
             <StatusPill tone={issueTone(issues)} label={item.enabled ? "启用" : "停用"} />
             <StatusPill tone="neutral" label={KIND_LABELS[item.kind]} />
           </div>
-          <p className="mt-1 font-mono text-xs text-[var(--fg-2)] [overflow-wrap:anywhere]">
+          <code className="mt-1 block break-all text-xs text-[var(--fg-2)]">
             {item.base_url}
-          </p>
-        </div>
-        <div className="grid grid-cols-2 gap-2 text-xs text-[var(--fg-2)] sm:grid-cols-4 md:min-w-[360px]">
-          <MiniStat label="Key" value={item.api_key_hint || "未保存"} />
-          <MiniStat label="代理" value={item.proxy || "直连"} />
-          <MiniStat label="优先级" value={String(item.priority)} />
-          <MiniStat label="并发" value={String(item.concurrency)} />
+          </code>
         </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
         {VIDEO_ACTIONS.map((action) => (
           <StatusPill
             key={action}
@@ -1287,42 +1186,104 @@ function ProviderCard({
             label={ACTION_LABELS[action]}
           />
         ))}
+        {visibleModels.map((model) => (
+          <span
+            key={model}
+            className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 py-1 font-mono text-[11px] text-[var(--fg-1)]"
+          >
+            {model}
+          </span>
+        ))}
+        {models.length > visibleModels.length && (
+          <span className="rounded-[var(--radius-card)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
+            +{models.length - visibleModels.length}
+          </span>
+        )}
+        {models.length === 0 && (
+          <span className="rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-2 py-1 text-[11px] text-warning">
+            未配置模型
+          </span>
+        )}
       </div>
 
       {issues.length > 0 && <IssueList className="mt-4" issues={issues} />}
 
-      <div className="mt-4 overflow-x-auto">
-        <table className="min-w-[560px] w-full border-separate border-spacing-0 text-left text-xs">
-          <thead>
-            <tr className="text-[var(--fg-2)]">
-              <th className="border-b border-[var(--border-subtle)] pb-2 pr-3 font-medium">模型键</th>
-              <th className="border-b border-[var(--border-subtle)] px-3 pb-2 font-medium">上游模型</th>
-            </tr>
-          </thead>
-          <tbody>
-            {models.map(([key, value]) => (
-              <tr key={key}>
-                <td className="border-b border-[var(--border-subtle)] py-2 pr-3 font-mono text-[11px] text-[var(--fg-1)] [overflow-wrap:anywhere]">
-                  {key}
-                </td>
-                <td className="border-b border-[var(--border-subtle)] px-3 py-2 font-mono text-[11px] text-[var(--fg-2)] [overflow-wrap:anywhere]">
-                  {value}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div
+        className={
+          "mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs " +
+          (item.enabled ? "text-[var(--fg-1)]" : "text-[var(--fg-2)]")
+        }
+      >
+        <ProviderMetaItem
+          label="密钥"
+          value={item.api_key_hint || "未保存"}
+          mono
+          color={item.api_key_hint ? undefined : "text-danger"}
+        />
+        <MetaSep />
+        <ProviderMetaItem label="优先级" value={String(item.priority)} mono />
+        <MetaSep />
+        <ProviderMetaItem label="权重" value={String(item.weight)} mono />
+        <MetaSep />
+        <ProviderMetaItem label="并发" value={String(item.concurrency)} mono />
+        <MetaSep />
+        <ProviderMetaItem label="代理" value={item.proxy || "直连"} mono />
       </div>
     </article>
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string }) {
+function ProviderMetaItem({
+  label,
+  value,
+  mono,
+  color,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  color?: string;
+}) {
   return (
-    <div className="min-w-0 rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-2">
-      <p className="type-caption text-[var(--fg-2)]">{label}</p>
-      <p className="mt-0.5 truncate text-xs font-medium text-[var(--fg-0)]">{value}</p>
-    </div>
+    <span>
+      {label}:{" "}
+      <code className={`${mono ? "tabular-nums" : ""} ${color ?? "text-[var(--fg-1)]"}`}>
+        {value}
+      </code>
+    </span>
+  );
+}
+
+function MetaSep() {
+  return <span className="text-[var(--fg-3)]">·</span>;
+}
+
+function ModelSummary({ models }: { models: ModelDraft[] }) {
+  const names = models
+    .map((model) => model.model.trim())
+    .filter((model, idx, arr) => model && arr.indexOf(model) === idx);
+  const visible = names.slice(0, 4);
+
+  if (visible.length === 0) {
+    return <span className="text-[var(--fg-2)]">暂无模型</span>;
+  }
+
+  return (
+    <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
+      {visible.map((model) => (
+        <span
+          key={model}
+          className="rounded-[var(--radius-card)] border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-1)]"
+        >
+          {model}
+        </span>
+      ))}
+      {names.length > visible.length && (
+        <span className="text-[10px] text-[var(--fg-2)]">
+          +{names.length - visible.length}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -1377,73 +1338,69 @@ function EditCommandCenter({
   onAddFake: () => void;
 }) {
   return (
-    <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4">
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(340px,0.75fr)]">
-        <div className="space-y-3">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <p className="text-sm font-medium text-[var(--fg-0)]">配置中心</p>
-              <p className="mt-1 type-caption text-[var(--fg-2)]">
-                当前来源：{sourceLabel(source)} · {draftCount} 个供应商
-              </p>
-            </div>
-            <label className="flex items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 text-sm text-[var(--fg-0)] md:min-w-[220px]">
-              <span>启用视频生成</span>
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={(event) => onToggle(event.target.checked)}
-              />
-            </label>
+    <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-medium text-[var(--fg-0)]">编辑视频供应商</p>
+            <StatusPill tone="neutral" label={`${draftCount} 个供应商`} />
+            <StatusPill tone={errorCount > 0 ? "danger" : "neutral"} label={`${errorCount} 错误`} />
+            <StatusPill tone={warningCount > 0 ? "warning" : "neutral"} label={`${warningCount} 提示`} />
           </div>
-          {source === "env" && (
-            <div className="rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-3 py-2 type-caption text-warning">
-              保存后将写入数据库配置，后续优先读取数据库。
-            </div>
-          )}
-          {globalIssue && (
-            <div role="alert" className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
-              {globalIssue}
-            </div>
-          )}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
-            <PresetButton
-              icon={<Zap className="h-4 w-4" />}
-              title="火山 Seedance"
-              detail="Seedance 2.0 / fast"
-              onClick={onAddVolcano}
-            />
-            <PresetButton
-              icon={<Server className="h-4 w-4" />}
-              title="火山第三方"
-              detail="MOYU / 中转网关"
-              onClick={onAddVolcanoThirdParty}
-            />
-            <PresetButton
-              icon={<Clapperboard className="h-4 w-4" />}
-              title="HappyHorse"
-              detail="DashScope 国际站"
-              onClick={onAddDashscope}
-            />
-            <PresetButton
-              icon={<Layers3 className="h-4 w-4" />}
-              title="Google Veo"
-              detail="Veo 3.1 / fast / lite"
-              onClick={onAddVeo}
-            />
-            <PresetButton
-              icon={<ShieldCheck className="h-4 w-4" />}
-              title="测试供应商"
-              detail="本地假任务"
-              onClick={onAddFake}
-            />
-          </div>
+          <p className="mt-1 type-caption text-[var(--fg-2)]">
+            当前来源：{sourceLabel(source)}
+          </p>
         </div>
-        <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-1">
-          <CompactStatus icon={<Server className="h-4 w-4" />} label="供应商" value={String(draftCount)} />
-          <CompactStatus icon={<AlertCircle className="h-4 w-4" />} label="错误" value={String(errorCount)} tone={errorCount > 0 ? "danger" : "neutral"} />
-          <CompactStatus icon={<CheckCircle2 className="h-4 w-4" />} label="提示" value={String(warningCount)} tone={warningCount > 0 ? "warning" : "neutral"} />
+        <label className="flex min-h-9 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 text-sm text-[var(--fg-0)] lg:min-w-[220px]">
+          <span>启用视频生成</span>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => onToggle(event.target.checked)}
+          />
+        </label>
+      </div>
+      {source === "env" && (
+        <div className="mt-3 rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-3 py-2 type-caption text-warning">
+          保存后将写入数据库配置，后续优先读取数据库。
         </div>
+      )}
+      {globalIssue && (
+        <div role="alert" className="mt-3 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-3 py-2 type-caption text-danger">
+          {globalIssue}
+        </div>
+      )}
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        <PresetButton
+          icon={<Zap className="h-4 w-4" />}
+          title="火山 Seedance"
+          detail="Seedance 2.0 / fast"
+          onClick={onAddVolcano}
+        />
+        <PresetButton
+          icon={<Server className="h-4 w-4" />}
+          title="火山第三方"
+          detail="MOYU / 中转网关"
+          onClick={onAddVolcanoThirdParty}
+        />
+        <PresetButton
+          icon={<Clapperboard className="h-4 w-4" />}
+          title="HappyHorse"
+          detail="DashScope 国际站"
+          onClick={onAddDashscope}
+        />
+        <PresetButton
+          icon={<Layers3 className="h-4 w-4" />}
+          title="Google Veo"
+          detail="Veo 3.1 / fast / lite"
+          onClick={onAddVeo}
+        />
+        <PresetButton
+          icon={<ShieldCheck className="h-4 w-4" />}
+          title="测试供应商"
+          detail="本地假任务"
+          onClick={onAddFake}
+        />
       </div>
     </div>
   );
@@ -1464,44 +1421,16 @@ function PresetButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex min-h-20 items-start gap-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-left transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+      className="flex min-h-14 items-center gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 text-left transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
     >
-      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-accent-border bg-accent-soft text-accent">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-accent-border bg-accent-soft text-accent">
         {icon}
       </span>
       <span className="min-w-0">
-        <span className="block text-sm font-medium text-[var(--fg-0)]">{title}</span>
-        <span className="mt-1 block type-caption text-[var(--fg-2)]">{detail}</span>
+        <span className="block truncate text-xs font-medium text-[var(--fg-0)]">{title}</span>
+        <span className="mt-0.5 block truncate text-[11px] text-[var(--fg-2)]">{detail}</span>
       </span>
     </button>
-  );
-}
-
-function CompactStatus({
-  icon,
-  label,
-  value,
-  tone = "neutral",
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  tone?: "neutral" | "danger" | "warning";
-}) {
-  const toneClass =
-    tone === "danger"
-      ? "text-danger"
-      : tone === "warning"
-        ? "text-warning"
-        : "text-[var(--fg-1)]";
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-2">
-      <span className={`inline-flex items-center gap-2 text-xs ${toneClass}`}>
-        {icon}
-        {label}
-      </span>
-      <span className="text-sm font-semibold text-[var(--fg-0)]">{value}</span>
-    </div>
   );
 }
 
@@ -1543,9 +1472,11 @@ function ProviderEditor({
             <StatusPill tone={tone} label={tone === "success" ? "可保存" : tone === "danger" ? "需修复" : "有提示"} />
             <StatusPill tone="neutral" label={KIND_LABELS[draft.kind]} />
           </div>
-          <p className="mt-1 type-caption text-[var(--fg-2)]">
-            {summary ? actionCoverageLabel(summary.capabilities) : "未配置动作"}
-          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 type-caption text-[var(--fg-2)]">
+            <span>{summary ? actionCoverageLabel(summary.capabilities) : "未配置动作"}</span>
+            <span className="text-[var(--fg-3)]">·</span>
+            <ModelSummary models={draft.models} />
+          </div>
         </div>
         <IconButton variant="ghost" size="sm" aria-label="删除供应商" onClick={onDelete}>
           <Trash2 className="h-4 w-4" />

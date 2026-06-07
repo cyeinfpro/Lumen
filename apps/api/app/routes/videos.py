@@ -86,6 +86,11 @@ from ..public_urls import resolve_public_base_url
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ..sse_publish import publish_sse_event
+from ..video_reference_images import (
+    VIDEO_REFERENCE_IMAGE_KIND,
+    VideoReferenceImageError,
+    ensure_video_reference_image_variant,
+)
 
 
 router = APIRouter()
@@ -211,11 +216,85 @@ def _ensure_reference_image_access_token(image: Image) -> str:
     return token
 
 
-def _reference_image_public_url(image: Image, public_base_url: str) -> str:
+def _reference_image_public_url(
+    image: Image,
+    public_base_url: str,
+    *,
+    variant: str | None = None,
+) -> str:
     token = _ensure_reference_image_access_token(image)
-    query = urlencode({"token": token})
+    query_args = {"token": token}
+    if variant:
+        query_args["variant"] = variant
+    query = urlencode(query_args)
     return (
         f"{public_base_url.rstrip('/')}/api/images/reference/{image.id}/binary?{query}"
+    )
+
+
+async def _reference_image_upstream_public_url(
+    db: AsyncSession,
+    image: Image,
+    public_base_url: str,
+    *,
+    required: bool = False,
+) -> tuple[str | None, dict[str, Any]]:
+    try:
+        variant = await ensure_video_reference_image_variant(
+            db,
+            image,
+            storage_root=settings.storage_root,
+        )
+    except VideoReferenceImageError as exc:
+        if required:
+            raise _http(exc.code, exc.message, exc.status_code) from exc
+        logger.warning(
+            "video reference image variant unavailable; falling back to inline "
+            "media image_id=%s code=%s",
+            image.id,
+            exc.code,
+            exc_info=True,
+        )
+        return None, {
+            "upstream_reference_variant": None,
+            "upstream_reference_variant_error": {
+                "code": exc.code,
+                "message": exc.message[:300],
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        if required:
+            raise _http(
+                "video_reference_variant_failed",
+                "video reference image variant failed",
+                503,
+            ) from exc
+        logger.warning(
+            "video reference image variant failed; falling back to inline media "
+            "image_id=%s",
+            image.id,
+            exc_info=True,
+        )
+        return None, {
+            "upstream_reference_variant": None,
+            "upstream_reference_variant_error": {
+                "code": "video_reference_variant_failed",
+                "message": str(exc)[:300],
+            },
+        }
+    return (
+        _reference_image_public_url(
+            image,
+            public_base_url,
+            variant=VIDEO_REFERENCE_IMAGE_KIND,
+        ),
+        {
+            "upstream_reference_variant": VIDEO_REFERENCE_IMAGE_KIND,
+            "upstream_reference_storage_key": variant.storage_key,
+            "upstream_reference_mime": "image/jpeg",
+            "upstream_reference_width": variant.width,
+            "upstream_reference_height": variant.height,
+        },
     )
 
 
@@ -886,6 +965,7 @@ async def _input_image_snapshot(
     image_id: str | None,
     fallback_snapshot: tuple[str | None, str | None, str | None] | None = None,
     reference_public_base_url: str | None = None,
+    required_public_media: bool = False,
 ) -> tuple[str | None, str | None, str | None]:
     if image_id is None:
         if fallback_snapshot is not None:
@@ -894,7 +974,7 @@ async def _input_image_snapshot(
     if (
         fallback_snapshot is not None
         and fallback_snapshot[0]
-        and (reference_public_base_url is None or isinstance(fallback_snapshot[2], str))
+        and reference_public_base_url is None
     ):
         return fallback_snapshot
     img = (
@@ -910,11 +990,14 @@ async def _input_image_snapshot(
         if fallback_snapshot is not None:
             return fallback_snapshot
         raise _http("input_image_not_found", "input image not found", 404)
-    url = (
-        _reference_image_public_url(img, reference_public_base_url)
-        if reference_public_base_url is not None
-        else None
-    )
+    url = None
+    if reference_public_base_url is not None:
+        url, _meta = await _reference_image_upstream_public_url(
+            db,
+            img,
+            reference_public_base_url,
+            required=required_public_media,
+        )
     return img.storage_key, img.sha256, url
 
 
@@ -947,6 +1030,7 @@ async def _reference_media_snapshots(
     items: list[VideoReferenceMediaIn],
     fallback_snapshots: list[dict[str, Any]] | None = None,
     reference_public_base_url: str | None = None,
+    required_public_media: bool = False,
 ) -> list[dict[str, Any]]:
     if fallback_snapshots is not None:
         snapshots = [dict(item) for item in fallback_snapshots]
@@ -954,7 +1038,6 @@ async def _reference_media_snapshots(
             for snapshot in snapshots:
                 if (
                     snapshot.get("kind") == "image"
-                    and not isinstance(snapshot.get("url"), str)
                     and isinstance(snapshot.get("image_id"), str)
                 ):
                     image = (
@@ -967,9 +1050,14 @@ async def _reference_media_snapshots(
                         )
                     ).scalar_one_or_none()
                     if image is not None:
-                        snapshot["url"] = _reference_image_public_url(
-                            image, reference_public_base_url
+                        url, meta = await _reference_image_upstream_public_url(
+                            db,
+                            image,
+                            reference_public_base_url,
+                            required=required_public_media,
                         )
+                        snapshot["url"] = url
+                        snapshot.update(meta)
                 if (
                     snapshot.get("kind") == "video"
                     and not isinstance(snapshot.get("url"), str)
@@ -1024,6 +1112,15 @@ async def _reference_media_snapshots(
                 raise _http(
                     "reference_image_not_found", "reference image not found", 404
                 )
+            url = None
+            upstream_meta: dict[str, Any] = {}
+            if reference_public_base_url is not None:
+                url, upstream_meta = await _reference_image_upstream_public_url(
+                    db,
+                    image,
+                    reference_public_base_url,
+                    required=required_public_media,
+                )
             snapshots.append(
                 {
                     "kind": "image",
@@ -1032,10 +1129,9 @@ async def _reference_media_snapshots(
                     "storage_key": image.storage_key,
                     "sha256": image.sha256,
                     "mime": image.mime,
-                    "url": _reference_image_public_url(image, reference_public_base_url)
-                    if reference_public_base_url is not None
-                    else None,
+                    "url": url,
                     "source": "image",
+                    **upstream_meta,
                 }
             )
             continue
@@ -1100,6 +1196,7 @@ async def _create_video_generation_record(
         reference_public_base_url=reference_public_base
         if prefers_public_media_url
         else None,
+        required_public_media=requires_public_media,
     )
     reference_snapshots = await _reference_media_snapshots(
         db,
@@ -1107,6 +1204,7 @@ async def _create_video_generation_record(
         items=body.reference_media,
         fallback_snapshots=reference_media_snapshot,
         reference_public_base_url=reference_public_base,
+        required_public_media=requires_public_media,
     )
     if provider.kind == "dashscope" and any(
         item.get("kind") == "video"
@@ -1138,6 +1236,25 @@ async def _create_video_generation_record(
         body.action,
         reference_snapshots,
         resolution=body.resolution,
+    )
+    used_reference_image_public_variant = (
+        isinstance(input_image_url, str)
+        and f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in input_image_url
+    ) or any(
+        item.get("upstream_reference_variant") == VIDEO_REFERENCE_IMAGE_KIND
+        or (
+            isinstance(item.get("url"), str)
+            and f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in item["url"]
+        )
+        for item in reference_snapshots
+        if isinstance(item, dict) and item.get("kind") == "image"
+    )
+    reference_image_variant_error_count = sum(
+        1
+        for item in reference_snapshots
+        if isinstance(item, dict)
+        and item.get("kind") == "image"
+        and isinstance(item.get("upstream_reference_variant_error"), dict)
     )
     try:
         cost = await estimate_video_cost(
@@ -1195,6 +1312,14 @@ async def _create_video_generation_record(
             "requires_public_media": requires_public_media,
             "prefers_public_media_url": prefers_public_media_url,
             "reference_public_media_url_enabled": reference_public_base is not None,
+            "reference_image_public_variant": (
+                VIDEO_REFERENCE_IMAGE_KIND
+                if used_reference_image_public_variant
+                else None
+            ),
+            "reference_image_public_variant_error_count": (
+                reference_image_variant_error_count
+            ),
         },
         status=VideoGenerationStatus.QUEUED.value,
         progress_stage=VideoGenerationStage.QUEUED.value,

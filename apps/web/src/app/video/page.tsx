@@ -3,7 +3,12 @@
 /* eslint-disable @next/next/no-img-element -- Video posters are authenticated API media URLs. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   AlertCircle,
   Clapperboard,
@@ -100,11 +105,14 @@ const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
 const VIDEO_REFRESH_RETRY_BASE_MS = 1500;
 const VIDEO_REFRESH_RETRY_MAX_MS = 15000;
 const VIDEO_PROMPT_VARIANT_COUNT = 3;
+const VIDEO_HISTORY_PAGE_SIZE = 12;
 const VIDEO_PROMPT_VARIANT_TITLES = [
   "推荐镜头版",
   "动作节奏版",
   "参考一致版",
 ];
+
+type VideoHistoryFilter = "all" | "succeeded" | "failed";
 
 const MODE_COPY: Record<
   VideoAction,
@@ -237,6 +245,16 @@ function isTerminalVideoStatus(status: string | undefined): boolean {
   return TERMINAL_VIDEO_STATUSES.includes(
     status as (typeof TERMINAL_VIDEO_STATUSES)[number],
   );
+}
+
+function isFailedHistoryVideo(item: VideoGenerationOut): boolean {
+  return ["failed", "canceled", "expired"].includes(item.status);
+}
+
+function videoHistoryFilterLabel(filter: VideoHistoryFilter): string {
+  if (filter === "succeeded") return "成功";
+  if (filter === "failed") return "失败";
+  return "全部";
 }
 
 function actionLabel(action: VideoAction): string {
@@ -487,6 +505,7 @@ export default function VideoPage() {
   >([]);
   const [selectedPromptEnhanceCandidateId, setSelectedPromptEnhanceCandidateId] =
     useState("");
+  const [historyFilter, setHistoryFilter] = useState<VideoHistoryFilter>("all");
 
   const optionsQ = useQuery({
     queryKey: ["video", "options"],
@@ -495,19 +514,28 @@ export default function VideoPage() {
     staleTime: 60_000,
     gcTime: 5 * 60_000,
   });
-  const historyQ = useQuery({
+  const historyQ = useInfiniteQuery({
     queryKey: ["video", "generations"],
-    queryFn: () => listVideoGenerations({ limit: 40 }),
+    queryFn: ({ pageParam }) =>
+      listVideoGenerations({
+        cursor: pageParam,
+        limit: VIDEO_HISTORY_PAGE_SIZE,
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     retry: false,
-    placeholderData: (previousData) => previousData,
     staleTime: 20_000,
     gcTime: 5 * 60_000,
   });
+  const historyItems = useMemo(
+    () => historyQ.data?.pages.flatMap((page) => page.items) ?? [],
+    [historyQ.data?.pages],
+  );
 
   const options = optionsQ.data;
   const effectiveItems = useMemo(
-    () => mergeById(historyQ.data?.items ?? [], items),
-    [historyQ.data?.items, items],
+    () => mergeById(historyItems, items),
+    [historyItems, items],
   );
   const activeItems = useMemo(
     () => effectiveItems.filter(isActiveVideo),
@@ -528,6 +556,19 @@ export default function VideoPage() {
     () => effectiveItems.filter((item) => !isActiveVideo(item)),
     [effectiveItems],
   );
+  const succeededHistoryItems = useMemo(
+    () => settledHistoryItems.filter((item) => item.status === "succeeded"),
+    [settledHistoryItems],
+  );
+  const failedHistoryItems = useMemo(
+    () => settledHistoryItems.filter(isFailedHistoryVideo),
+    [settledHistoryItems],
+  );
+  const filteredHistoryItems = useMemo(() => {
+    if (historyFilter === "succeeded") return succeededHistoryItems;
+    if (historyFilter === "failed") return failedHistoryItems;
+    return settledHistoryItems;
+  }, [failedHistoryItems, historyFilter, settledHistoryItems, succeededHistoryItems]);
   const channels = useMemo(
     () => activeItems.map((item) => `task:${item.id}`),
     [activeItems],
@@ -1533,7 +1574,12 @@ export default function VideoPage() {
           </section>
 
           <section className="min-w-0 space-y-4 xl:sticky xl:top-20">
-            <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
+            <Card
+              variant="subtle"
+              elevation={2}
+              padding="none"
+              className="flex max-h-[720px] min-h-[520px] flex-col overflow-hidden border-[var(--border)] xl:max-h-[calc(100dvh-6rem)]"
+            >
               <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
                 <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
                 <div>
@@ -1550,7 +1596,9 @@ export default function VideoPage() {
                     {activeItems.length} 活跃
                   </span>
                   <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 tabular-nums">
-                    {historyQ.isLoading ? "读取中" : `${settledHistoryItems.length} 历史`}
+                    {historyQ.isLoading
+                      ? "读取中"
+                      : `${settledHistoryItems.length}${historyQ.hasNextPage ? "+" : ""} 历史`}
                   </span>
                   <Button
                     variant="outline"
@@ -1562,7 +1610,7 @@ export default function VideoPage() {
                   </Button>
                 </div>
               </div>
-              <div className="space-y-5 p-4 sm:p-5">
+              <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain p-4 pr-3 sm:p-5 sm:pr-4">
                 {activeItems.length > 0 && (
                   <section className="space-y-3">
                     <div className="flex items-center justify-between gap-3">
@@ -1594,11 +1642,23 @@ export default function VideoPage() {
                   <div className="flex items-center justify-between gap-3">
                     <p className="type-caption text-[var(--fg-2)]">历史记录</p>
                     <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                      {historyQ.isLoading ? "读取中" : `${settledHistoryItems.length} 条`}
+                      {historyQ.isLoading
+                        ? "读取中"
+                        : `${filteredHistoryItems.length}${historyQ.hasNextPage ? "+" : ""} 条`}
                     </span>
                   </div>
+                  <HistoryFilterTabs
+                    value={historyFilter}
+                    counts={{
+                      all: settledHistoryItems.length,
+                      succeeded: succeededHistoryItems.length,
+                      failed: failedHistoryItems.length,
+                    }}
+                    loading={historyQ.isLoading}
+                    onChange={setHistoryFilter}
+                  />
                   <div className="grid gap-3">
-                    {settledHistoryItems.map((item) => (
+                    {filteredHistoryItems.map((item) => (
                       <TaskRow
                         key={item.id}
                         item={item}
@@ -1615,16 +1675,34 @@ export default function VideoPage() {
                         showPreview={false}
                       />
                     ))}
-                    {settledHistoryItems.length === 0 && (
+                    {filteredHistoryItems.length === 0 && (
                       <EmptyPanel
                         icon={<Film className="h-5 w-5" />}
-                        title={historyQ.isLoading ? "读取中" : "暂无历史"}
+                        title={
+                          historyQ.isLoading
+                            ? "读取中"
+                            : `暂无${videoHistoryFilterLabel(historyFilter)}记录`
+                        }
                         description={
                           activeItems.length > 0
                             ? "当前任务完成后会进入历史。"
-                            : "提交记录会保留状态、参数和结果。"
+                            : historyFilter === "all"
+                              ? "提交记录会保留状态、参数和结果。"
+                              : "切换标签可查看其他状态的记录。"
                         }
                       />
+                    )}
+                    {historyQ.hasNextPage && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        loading={historyQ.isFetchingNextPage}
+                        onClick={() => void historyQ.fetchNextPage()}
+                        leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+                      >
+                        {historyQ.isFetchingNextPage ? "加载中" : "加载更早记录"}
+                      </Button>
                     )}
                   </div>
                 </section>
@@ -2395,7 +2473,13 @@ function videoPlayerStatusLabel(status: VideoPlayerStatus): string {
   }
 }
 
-function PrimaryVideoPlayer({ item }: { item: VideoGenerationWithVideo }) {
+function PrimaryVideoPlayer({
+  item,
+  className,
+}: {
+  item: VideoGenerationWithVideo;
+  className?: string;
+}) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [statusState, setStatusState] = useState<{
     videoId: string;
@@ -2427,7 +2511,12 @@ function PrimaryVideoPlayer({ item }: { item: VideoGenerationWithVideo }) {
     status === "loading" || status === "buffering" || status === "error";
 
   return (
-    <div className="relative overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-2)] shadow-[var(--shadow-2)]">
+    <div
+      className={cn(
+        "relative flex min-h-0 overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-2)] shadow-[var(--shadow-2)]",
+        className,
+      )}
+    >
       <video
         key={item.video.id}
         ref={videoRef}
@@ -2442,7 +2531,7 @@ function PrimaryVideoPlayer({ item }: { item: VideoGenerationWithVideo }) {
         onPlaying={() => setVideoStatus("ready")}
         onWaiting={() => setVideoStatus("buffering")}
         onError={() => setVideoStatus("error")}
-        className="aspect-video w-full bg-[var(--bg-2)] object-contain"
+        className="h-full min-h-0 w-full bg-[var(--bg-2)] object-contain"
       />
       {showState && (
         <div
@@ -2512,7 +2601,7 @@ function VideoPreviewDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={`video-preview-${item.id}`}
-        className="mobile-dialog-panel flex w-full max-w-6xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:rounded-[var(--radius-panel)] sm:border-b"
+        className="mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] w-full max-w-6xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:h-[min(900px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b"
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
           <div className="min-w-0">
@@ -2539,18 +2628,33 @@ function VideoPreviewDialog({
             <XCircle className="h-4 w-4" />
           </Button>
         </header>
-        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
-          <PrimaryVideoPlayer item={item} />
-          <div className="mt-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)]">
-            <p className="type-caption text-[var(--fg-2)]">提示词</p>
-            <p className="mt-2 max-h-28 overflow-y-auto text-sm leading-6 text-[var(--fg-0)]">
-              {item.prompt}
-            </p>
+        <div className="min-h-0 flex-1 overflow-hidden p-3 sm:p-5">
+          <div className="flex h-full min-h-0 flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(280px,340px)]">
+            <div className="min-h-0 flex-1 lg:h-full">
+              <PrimaryVideoPlayer item={item} className="h-full" />
+            </div>
+            <aside className="max-h-[34%] shrink-0 overflow-y-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)] lg:h-full lg:max-h-none">
+              <p className="type-caption text-[var(--fg-2)]">提示词</p>
+              <p className="mt-2 text-sm leading-6 text-[var(--fg-0)]">
+                {item.prompt}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-1.5 text-xs text-[var(--fg-2)]">
+                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
+                  {item.video.width}x{item.video.height}
+                </span>
+                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
+                  {formatDurationLabel(item.duration_s)}
+                </span>
+                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
+                  {item.video.has_audio ? "含音频" : "无音频"}
+                </span>
+              </div>
+            </aside>
           </div>
         </div>
-        <footer className="mobile-dialog-footer flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:px-5">
+        <footer className="mobile-dialog-footer flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:flex-wrap sm:justify-between sm:overflow-visible sm:px-5">
           <VideoDownloadLink item={item} />
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex shrink-0 flex-nowrap items-center gap-2 sm:flex-wrap">
             <Button
               variant="secondary"
               size="sm"
@@ -2586,6 +2690,53 @@ function VideoPreviewDialog({
           </div>
         </footer>
       </section>
+    </div>
+  );
+}
+
+function HistoryFilterTabs({
+  value,
+  counts,
+  loading,
+  onChange,
+}: {
+  value: VideoHistoryFilter;
+  counts: Record<VideoHistoryFilter, number>;
+  loading: boolean;
+  onChange: (value: VideoHistoryFilter) => void;
+}) {
+  const filters: Array<{ value: VideoHistoryFilter; label: string }> = [
+    { value: "all", label: "全部" },
+    { value: "succeeded", label: "成功" },
+    { value: "failed", label: "失败" },
+  ];
+
+  return (
+    <div className="grid grid-cols-3 gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
+      {filters.map((filter) => {
+        const active = filter.value === value;
+        return (
+          <button
+            key={filter.value}
+            type="button"
+            onClick={() => onChange(filter.value)}
+            className={cn(
+              "min-h-8 rounded-[var(--radius-control)] px-2 text-xs transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]",
+              active
+                ? "bg-[var(--bg-2)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
+                : "text-[var(--fg-2)] hover:bg-[var(--bg-1)] hover:text-[var(--fg-1)]",
+            )}
+          >
+            <span className="inline-flex min-w-0 items-center justify-center gap-1.5">
+              <span>{filter.label}</span>
+              <span className="rounded-full border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
+                {loading ? "..." : counts[filter.value]}
+              </span>
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }

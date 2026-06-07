@@ -69,6 +69,12 @@ from ..ratelimit import (
     require_client_ip,
 )
 from ..redis_client import get_redis
+from ..video_reference_images import (
+    VIDEO_REFERENCE_IMAGE_KIND,
+    VIDEO_REFERENCE_IMAGE_MIME,
+    VideoReferenceImageError,
+    ensure_video_reference_image_variant,
+)
 
 
 router = APIRouter()
@@ -930,6 +936,7 @@ async def reference_image_binary(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     token: str = Query(min_length=16, max_length=256),
+    variant: str | None = Query(default=None, max_length=32),
 ) -> Response:
     img = (
         await db.execute(
@@ -945,6 +952,26 @@ async def reference_image_binary(
     expected = metadata.get("video_reference_access_token")
     if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
         raise _http("not_found", "image not found", 404)
+    if variant:
+        if variant != VIDEO_REFERENCE_IMAGE_KIND:
+            raise _http("invalid_variant", "unsupported image reference variant", 400)
+        try:
+            ref_variant = await ensure_video_reference_image_variant(
+                db,
+                img,
+                storage_root=settings.storage_root,
+            )
+            await db.commit()
+        except VideoReferenceImageError as exc:
+            raise _http(exc.code, exc.message, exc.status_code) from exc
+        return _storage_streaming_response(
+            _fs_path(ref_variant.storage_key),
+            media_type=VIDEO_REFERENCE_IMAGE_MIME,
+            etag=f'"{ref_variant.image_id}-{ref_variant.kind}"',
+            cache_control="private, max-age=3600",
+            storage_key=ref_variant.storage_key,
+            request=request,
+        )
     return _storage_streaming_response(
         _fs_path(img.storage_key),
         media_type=img.mime,

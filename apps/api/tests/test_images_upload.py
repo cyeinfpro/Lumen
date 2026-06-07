@@ -12,6 +12,7 @@ from PIL import Image as PILImage
 
 from app.config import settings
 from app.routes import images
+from app.video_reference_images import VIDEO_REFERENCE_IMAGE_KIND
 from lumen_core.models import AuditLog, Image
 
 
@@ -281,6 +282,51 @@ def test_make_display_variant_downsizes_and_encodes_webp(tmp_path: Path) -> None
     assert size == (2048, 1024)
     assert data.startswith(b"RIFF")
     assert b"WEBP" in data[:16]
+
+
+@pytest.mark.asyncio
+async def test_reference_image_binary_serves_video_reference_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = settings.storage_root
+    settings.storage_root = str(tmp_path)
+    ref_key = "u/user-1/uploads/image-1.video_ref_2048_jpg.jpg"
+    ref_path = tmp_path / ref_key
+    ref_path.parent.mkdir(parents=True)
+    ref_path.write_bytes(b"jpeg-bytes")
+
+    async def fake_ensure(_db, image_arg, *, storage_root: str):
+        assert storage_root == str(tmp_path)
+        return SimpleNamespace(
+            image_id=image_arg.id,
+            kind=VIDEO_REFERENCE_IMAGE_KIND,
+            storage_key=ref_key,
+        )
+
+    monkeypatch.setattr(images, "ensure_video_reference_image_variant", fake_ensure)
+    img = SimpleNamespace(
+        id="image-1",
+        metadata_jsonb={"video_reference_access_token": "x" * 16},
+        storage_key="u/user-1/uploads/image-1.png",
+        mime="image/png",
+        sha256="orig-sha",
+        deleted_at=None,
+    )
+    try:
+        response = await images.reference_image_binary(
+            "image-1",
+            _request("GET"),
+            _Db(img),  # type: ignore[arg-type]
+            token="x" * 16,
+            variant=VIDEO_REFERENCE_IMAGE_KIND,
+        )
+    finally:
+        settings.storage_root = old
+
+    assert response.headers["content-type"].startswith("image/jpeg")
+    assert response.headers["content-length"] == str(len(b"jpeg-bytes"))
+    assert response.headers["etag"] == f'"image-1-{VIDEO_REFERENCE_IMAGE_KIND}"'
 
 
 @pytest.mark.asyncio
