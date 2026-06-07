@@ -24,7 +24,7 @@ from ..api_client import ApiError, LumenApi, make_idempotency_key
 from ..keyboards import DEFAULT_PARAMS, enhance_choice_keyboard, render_params_summary
 from ..states import GenFlow
 from ..tracker import TaskTrack, tracker
-from ._helpers import message_prompt, require_message
+from ._helpers import is_slash_command, message_prompt, require_message
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -126,6 +126,13 @@ async def _submit_generation(
 @router.message(GenFlow.awaiting_prompt)
 async def on_prompt(message: Message, state: FSMContext, api: LumenApi) -> None:
     prompt = message_prompt(message)
+    if prompt == "/cancel":
+        await state.clear()
+        await message.answer("已取消。/new 重新开始。")
+        return
+    if is_slash_command(prompt):
+        await message.answer("当前正在等待提示词。请发送普通文本，或先 /cancel 再执行命令。")
+        return
     if not prompt:
         await message.answer("提示词不能为空，请重新发送。")
         return
@@ -251,6 +258,9 @@ async def on_edited_prompt(message: Message, state: FSMContext, api: LumenApi) -
     if text == "/cancel":
         await state.clear()
         await message.answer("已放弃。/new 重新开始。")
+        return
+    if is_slash_command(text):
+        await message.answer("当前正在等待改好的提示词。请发送普通文本，或 /cancel 放弃。")
         return
     if not text:
         await message.answer("提示词不能为空，重新发送一条；/cancel 放弃。")

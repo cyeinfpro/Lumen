@@ -577,11 +577,23 @@ def test_desktop_audit_runtime_hardening_regressions() -> None:
     assert "STORAGE_RESTORE_SENTINEL" in backup
     assert "wal_checkpoint(TRUNCATE)" in backup
     assert "rename_retry" in backup
-    assert "safety backup failed before restore; continuing" in backup
+    assert "safety backup failed before restore; restore aborted" in backup
+    assert "safety backup failed before restore; continuing" not in backup
+    assert backup.index("restore_storage_dir(data_root") < backup.index(
+        "restore_database(data_root"
+    )
     assert "OpenFlags::SQLITE_OPEN_READ_ONLY" in backup
     assert "Value::Null" in secrets
     assert "secrets-out-of-sync.log" in secrets
     assert 'with_file_name(format!' in secrets
+    assert "harden_private_file_windows" in secrets
+    assert "icacls" in secrets
+    assert 'arg("/inheritance:r")' in secrets
+    assert 'arg("/grant:r")' in secrets
+    assert 'arg("/remove:g")' in secrets
+    assert 'arg("*S-1-1-0")' in secrets
+    assert 'arg("*S-1-5-11")' in secrets
+    assert 'arg("*S-1-5-32-545")' in secrets
     assert "command.process_group(0)" in docker_import
     assert "taskkill" in docker_import
     assert "read_tail_bytes" in docker_import
@@ -646,7 +658,8 @@ def test_desktop_audit_web_bridge_and_api_hardening() -> None:
     assert "body instanceof URLSearchParams" in http
     assert "fetchWithRetryableHttp" in http
     assert 'NEXT_PUBLIC_LUMEN_RUNTIME === "desktop"' in http
-    assert "return null as T" in http
+    assert "return null as T" not in http
+    assert 'code: "unauthorized"' in http
     assert "s.name.trim() === d.name.trim()" in providers
     assert "new Map(serverItems.map((s) => [s.name.trim(), s.api_key_hint]))" in providers
     assert "if (isDesktopRuntime()) return null" in admin_update
@@ -746,6 +759,36 @@ def test_storage_mount_cleans_smb_credentials_on_hard_failures() -> None:
     assert "if mount -t cifs" in text
     assert 'rm -f "$cred"' in text
     assert "trap - EXIT" in text
+
+
+def test_storage_mount_config_parser_does_not_execute_conf_shell(tmp_path: Path) -> (
+    None
+):
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    pwned = tmp_path / "pwned"
+    state_dir.mkdir()
+    target.mkdir()
+    (state_dir / "storage.conf").write_text(
+        f"MODE=$(touch {shlex.quote(str(pwned))})\n"
+        "LOCAL_ROOT='/tmp/lumen local root'\n"
+        "SMB_PASSWORD='$(id >/tmp/lumen-owned)'\n",
+        encoding="utf-8",
+    )
+
+    result = _run_bash(
+        f"""
+        LUMEN_STORAGE_STATE_DIR={shlex.quote(str(state_dir))} \
+        LUMEN_STORAGE_TARGET={shlex.quote(str(target))} \
+          bash {shlex.quote(str(STORAGE_MOUNT))} status >/dev/null
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert not pwned.exists()
+    text = STORAGE_MOUNT.read_text(encoding="utf-8")
+    assert '. "$CONF_FILE"' not in text
+    assert '. "$TEST_CONF_FILE"' not in text
 
 
 def test_fix_redis_password_parses_quoted_env_values(tmp_path: Path) -> None:

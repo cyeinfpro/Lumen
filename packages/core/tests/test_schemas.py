@@ -350,3 +350,25 @@ def test_video_create_schema_enforces_action_image_contract():
             pass
         else:  # pragma: no cover
             raise AssertionError(f"expected validation error for {kwargs}")
+
+
+def test_video_reference_media_rejects_unsafe_url_sources():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoReferenceMediaIn
+
+    VideoReferenceMediaIn(kind="image", url="https://cdn.example.com/ref.png")
+
+    for url in (
+        "file:///etc/passwd",
+        "http://169.254.169.254/latest/meta-data",
+        "https://127.0.0.1/ref.png",
+        "https://localhost/ref.png",
+        "https://user:pass@example.com/ref.png",
+    ):
+        try:
+            VideoReferenceMediaIn(kind="image", url=url)
+        except ValidationError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"expected validation error for {url}")

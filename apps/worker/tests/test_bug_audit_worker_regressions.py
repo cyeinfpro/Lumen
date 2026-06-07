@@ -778,6 +778,20 @@ def test_completion_max_attempts_failure_releases_hold() -> None:
     assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
 
 
+def test_completion_retry_enqueue_failure_marks_terminal_failed() -> None:
+    source = inspect.getsource(completion.run_completion)
+    start = source.index('logger.error("re-enqueue failed task=%s err=%s"')
+    end = source.index("# terminal", start)
+    branch = source[start:end]
+
+    assert 'enqueue_err = "retry_enqueue_failed"' in branch
+    assert "Completion.status == CompletionStatus.QUEUED.value" in branch
+    assert "status=CompletionStatus.FAILED.value" in branch
+    assert "worker_billing.release_completion(" in branch
+    assert "EV_COMP_FAILED" in branch
+    assert '"retriable": False' in branch
+
+
 def test_completion_cancel_branch_checks_rowcount_before_message_update() -> None:
     source = inspect.getsource(completion.run_completion)
     start = source.index("except _TaskCancelled as exc:")

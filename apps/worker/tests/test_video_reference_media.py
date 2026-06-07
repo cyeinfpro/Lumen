@@ -328,6 +328,54 @@ async def test_volcano_third_party_poll_reads_moyu_result_shape() -> None:
 
 
 @pytest.mark.asyncio
+async def test_volcano_third_party_poll_reads_live_moyu_wrapped_result_shape() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0-fast:reference": "doubao-seedance-2-0-fast-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "code": "success",
+            "data": {
+                "action": "generate",
+                "status": "SUCCESS",
+                "task_id": "cgt-20260607183443-jmltj",
+                "progress": "100%",
+                "data": {
+                    "code": "success",
+                    "data": {
+                        "id": "cgt-20260607183443-jmltj",
+                        "status": "succeeded",
+                        "content": {
+                            "video_url": "https://cdn.example/live-output.mp4"
+                        },
+                        "usage": {
+                            "completion_tokens": 130500,
+                            "total_tokens": 130500,
+                        },
+                    },
+                    "message": "",
+                },
+            },
+            "message": "",
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("cgt-20260607183443-jmltj")
+
+    assert result.status == "succeeded"
+    assert result.progress == 100
+    assert result.video_url == "https://cdn.example/live-output.mp4"
+    assert result.usage_total_tokens == 130500
+    assert result.upstream_billable is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("payload", "expected_url"),
     [

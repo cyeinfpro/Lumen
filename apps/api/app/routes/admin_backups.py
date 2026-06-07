@@ -138,6 +138,7 @@ def _read_pid_marker(path: Path) -> bool:
     except (FileNotFoundError, OSError):
         return False
     pid = 0
+    unit: str | None = None
     started_at: str | None = None
     for line in raw.splitlines():
         key, sep, value = line.partition("=")
@@ -150,6 +151,10 @@ def _read_pid_marker(path: Path) -> bool:
                 pid = 0
         elif key == "started_at":
             started_at = value.strip() or None
+        elif key == "unit":
+            unit = value.strip() or None
+    if unit and not _marker_is_stale(started_at):
+        return True
     if pid and _pid_is_running(pid) and not _marker_is_stale(started_at):
         return True
     try:

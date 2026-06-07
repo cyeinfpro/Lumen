@@ -33,9 +33,6 @@ DEFAULT_LOCAL_ROOT="${LUMEN_STORAGE_DEFAULT_LOCAL_ROOT:-/var/lib/lumen-data}"
 # mfsymlinks / mapposix — symlinks + reserved-char filenames work transparently.
 CIFS_OPTS_BASE="vers=3.0,soft,rsize=4194304,wsize=4194304,actimeo=60,cache=strict,echo_interval=60,noperm,mfsymlinks,mapposix,nounix,serverino,_netdev"
 
-LUMEN_UID="${LUMEN_APP_UID:-995}"
-LUMEN_GID="${LUMEN_APP_GID:-994}"
-
 LUMEN_DOCKER_COMPOSE_DIR="${LUMEN_DOCKER_COMPOSE_DIR:-/opt/lumen/current}"
 LUMEN_DOCKER_SERVICES="${LUMEN_DOCKER_SERVICES:-api worker tgbot web}"
 
@@ -45,6 +42,55 @@ chmod 0775 "$STATE_DIR" 2>/dev/null || true
 log() {
   printf '[lumen-storage] %s\n' "$*" >&2
 }
+
+kv_value() {
+  local file="$1" key="$2"
+  python3 - "$file" "$key" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+target = sys.argv[2]
+try:
+    lines = path.read_text(encoding="utf-8").splitlines()
+except OSError:
+    sys.exit(1)
+for raw in lines:
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() != target:
+        continue
+    lexer = shlex.shlex(value.strip(), posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        parts = list(lexer)
+    except ValueError:
+        sys.exit(2)
+    print(parts[0] if parts else "")
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+deploy_env_value() {
+  local key="$1" value="" file
+  for file in "${LUMEN_DEPLOY_ENV_FILE:-}" /opt/lumen/.env /opt/lumen/shared/.env /opt/lumen/current/.env; do
+    [[ -n "$file" && -f "$file" ]] || continue
+    value="$(kv_value "$file" "$key" 2>/dev/null || true)"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+LUMEN_UID="${LUMEN_APP_UID:-$(deploy_env_value LUMEN_APP_UID 2>/dev/null || printf '10001')}"
+LUMEN_GID="${LUMEN_APP_GID:-$(deploy_env_value LUMEN_APP_GID 2>/dev/null || printf '10001')}"
 
 json_str() {
   # Robust JSON string escaping. Prefer jq if available; fall back to python.
@@ -63,7 +109,7 @@ write_status() {
   source="$(findmnt -T "$TARGET" -no SOURCE 2>/dev/null || true)"
   fstype="$(findmnt -T "$TARGET" -no FSTYPE 2>/dev/null || true)"
   if [[ -f "$CONF_FILE" ]]; then
-    mode="$( . "$CONF_FILE"; printf '%s' "${MODE:-}" )"
+    mode="$(kv_value "$CONF_FILE" MODE 2>/dev/null || true)"
   fi
   [[ -f "$DISABLED_FILE" ]] && disabled=true
   local now
@@ -132,17 +178,18 @@ load_conf() {
     SMB_HOST=""; SMB_PORT=""; SMB_SHARE=""; SMB_SUBPATH="/"; SMB_USERNAME=""; SMB_PASSWORD=""
     return 0
   fi
-  # shellcheck disable=SC1090
-  . "$CONF_FILE"
+  MODE="$(kv_value "$CONF_FILE" MODE 2>/dev/null || true)"
   MODE="${MODE:-local}"
+  LOCAL_ROOT="$(kv_value "$CONF_FILE" LOCAL_ROOT 2>/dev/null || true)"
   LOCAL_ROOT="${LOCAL_ROOT:-$DEFAULT_LOCAL_ROOT}"
-  SMB_HOST="${SMB_HOST:-}"
+  SMB_HOST="$(kv_value "$CONF_FILE" SMB_HOST 2>/dev/null || true)"
   # 空 → 走 mount.cifs 默认 445；其他值（数字字符串）拼到 -o port=
-  SMB_PORT="${SMB_PORT:-}"
-  SMB_SHARE="${SMB_SHARE:-}"
+  SMB_PORT="$(kv_value "$CONF_FILE" SMB_PORT 2>/dev/null || true)"
+  SMB_SHARE="$(kv_value "$CONF_FILE" SMB_SHARE 2>/dev/null || true)"
+  SMB_SUBPATH="$(kv_value "$CONF_FILE" SMB_SUBPATH 2>/dev/null || true)"
   SMB_SUBPATH="${SMB_SUBPATH:-/}"
-  SMB_USERNAME="${SMB_USERNAME:-}"
-  SMB_PASSWORD="${SMB_PASSWORD:-}"
+  SMB_USERNAME="$(kv_value "$CONF_FILE" SMB_USERNAME 2>/dev/null || true)"
+  SMB_PASSWORD="$(kv_value "$CONF_FILE" SMB_PASSWORD 2>/dev/null || true)"
 }
 
 build_smb_source() {
@@ -300,8 +347,12 @@ cmd_test() {
     write_test_result "$call_id" "fail" "test conf not found at $TEST_CONF_FILE"
     return 1
   fi
-  # shellcheck disable=SC1090
-  . "$TEST_CONF_FILE"
+  SMB_HOST="$(kv_value "$TEST_CONF_FILE" SMB_HOST 2>/dev/null || true)"
+  SMB_PORT="$(kv_value "$TEST_CONF_FILE" SMB_PORT 2>/dev/null || true)"
+  SMB_SHARE="$(kv_value "$TEST_CONF_FILE" SMB_SHARE 2>/dev/null || true)"
+  SMB_SUBPATH="$(kv_value "$TEST_CONF_FILE" SMB_SUBPATH 2>/dev/null || true)"
+  SMB_USERNAME="$(kv_value "$TEST_CONF_FILE" SMB_USERNAME 2>/dev/null || true)"
+  SMB_PASSWORD="$(kv_value "$TEST_CONF_FILE" SMB_PASSWORD 2>/dev/null || true)"
   if [[ -z "${SMB_HOST:-}" || -z "${SMB_SHARE:-}" || -z "${SMB_USERNAME:-}" || -z "${SMB_PASSWORD:-}" ]]; then
     write_test_result "$call_id" "fail" "test config incomplete (host/share/username/password)"
     rm -f "$TEST_CONF_FILE"

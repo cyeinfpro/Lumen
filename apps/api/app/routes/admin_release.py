@@ -34,11 +34,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
+from ..services.system_lock import LockBusy, SystemOperationLockService
 from ._admin_common import (
     admin_http as _http,
     cleanup_marker_when_done,
     write_admin_audit_isolated,
 )
+from .admin_backups import _maintenance_marker_busy
 from .admin_update import (
     ReleaseInfo,
     _list_releases,
@@ -204,6 +206,31 @@ if [ -f "$ROOT/current/docker-compose.yml" ] && command -v docker >/dev/null 2>&
     # shellcheck source=/dev/null
     . "$ROOT/current/scripts/lib.sh"
   fi
+  SHARED_ENV="$ROOT/shared/.env"
+  TARGET_IMAGE_TAG=""
+  TARGET_VERSION=""
+  if [ -f "$ROOT/current/.image-tag" ]; then
+    TARGET_IMAGE_TAG="$(head -n1 "$ROOT/current/.image-tag" | tr -d '[:space:]')"
+  fi
+  if [ -f "$ROOT/current/VERSION" ]; then
+    TARGET_VERSION="$(head -n1 "$ROOT/current/VERSION" | tr -d '[:space:]')"
+  fi
+  if [ -n "$TARGET_IMAGE_TAG" ] && declare -F lumen_set_image_tag_in_env >/dev/null 2>&1; then
+    if ! lumen_set_image_tag_in_env "$SHARED_ENV" "$TARGET_IMAGE_TAG"; then
+      compose_rc=1
+      echo "failed to restore shared LUMEN_IMAGE_TAG=$TARGET_IMAGE_TAG" >&2
+    else
+      echo "::lumen-info:: phase=containers key=image_tag value=$TARGET_IMAGE_TAG"
+    fi
+  fi
+  if [ -n "$TARGET_VERSION" ] && declare -F lumen_set_env_value_in_file >/dev/null 2>&1; then
+    if ! lumen_set_env_value_in_file "$SHARED_ENV" LUMEN_VERSION "$TARGET_VERSION"; then
+      compose_rc=1
+      echo "failed to restore shared LUMEN_VERSION=$TARGET_VERSION" >&2
+    else
+      echo "::lumen-info:: phase=containers key=version value=$TARGET_VERSION"
+    fi
+  fi
   if declare -F lumen_ensure_compose_db_env_vars >/dev/null 2>&1 \
     && ! lumen_ensure_compose_db_env_vars "$ROOT/current/.env"; then
     compose_rc=1
@@ -323,31 +350,6 @@ def _start_rollback_systemd_unit(
     return None, attempted
 
 
-def _start_rollback_subprocess(
-    *,
-    inline_script: str,
-    started_at: datetime,
-    log_fh,  # type: ignore[no-untyped-def]
-) -> int:
-    """Last-resort fallback: detached bash subprocess.
-
-    Used when systemd-run is unavailable (dev / containers). ``log_fh`` is
-    inherited so all stdout still feeds ``.update.log``.
-    """
-    proc = subprocess.Popen(
-        ["/usr/bin/env", "bash", "-lc", inline_script],
-        cwd=str(_lumen_root()),
-        stdin=subprocess.DEVNULL,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-    )
-    _write_marker(proc.pid, started_at.isoformat())
-    _schedule_marker_cleanup_when_done(proc)
-    return proc.pid
-
-
 def _schedule_marker_cleanup_when_done(
     proc: subprocess.Popen[bytes],
 ) -> asyncio.Task[None]:
@@ -380,117 +382,146 @@ async def rollback_release(
     if not target_id:
         raise _http("invalid_request", "release_id is required", 422)
 
-    # Reject if an update is already in flight — concurrent symlink swaps
-    # would race the marker file and leave conflicting log streams.
-    if _read_marker() is not None:
+    lock_service = SystemOperationLockService(
+        fallback_busy=lambda: _read_marker() is not None or _maintenance_marker_busy()
+    )
+    lock = None
+    try:
+        lock = await lock_service.acquire(
+            operation="rollback", owner=str(admin.id), ttl_sec=1800
+        )
+    except LockBusy:
         raise _http(
             "update_running",
-            "Lumen update or rollback already running; wait for it to finish first",
+            "Lumen update, rollback, backup, or restore is already running; wait for it to finish first",
             409,
         )
 
     lumen_root = _lumen_root()
-    release_dir = await asyncio.to_thread(_resolve_release, lumen_root, target_id)
-    if release_dir is None:
-        raise _http("release_not_found", f"release '{target_id}' not found", 404)
-
-    releases = await asyncio.to_thread(_list_releases)
-    target = next((r for r in releases if r.id == target_id), None)
-    if target is None:
-        # _resolve_release succeeded but the release lacks .lumen_release.json;
-        # fall through with a synthetic entry so the operator at least sees
-        # the swap happen, but flag schema_unknown so they know we couldn't
-        # validate the alembic head.
-        target = ReleaseInfo(id=target_id)
-
-    if target.is_current:
-        raise _http("already_current", f"release '{target_id}' is already current", 409)
-
-    # Schema gate. A release whose expected head differs from the live DB
-    # head means rolling back without first running ``alembic downgrade``
-    # would either crash on missing tables or run user code against a
-    # newer-than-expected schema. Either way: refuse and tell the operator.
-    expected_head = (target.alembic_head_expected or "").strip()
-    db_head = await _read_db_alembic_head(db)
-    if expected_head and db_head and expected_head != db_head:
-        raise _http(
-            "schema_mismatch",
-            (
-                f"DB head {db_head} != release expected {expected_head}; "
-                "rollback would cross schema boundary, manual intervention required"
-            ),
-            409,
-            details={"db_head": db_head, "release_head": expected_head},
-        )
-
-    started_at = datetime.now(timezone.utc)
-    inline_script = _build_rollback_script(target_id=target_id, lumen_root=lumen_root)
-
-    log_fh = _open_update_log()
-    unit: str | None = None
-    pid: int | None = None
+    launched = False
+    release_reason = "launch_failed"
     try:
-        log_fh.write(
-            "\n=== update trigger "  # use the same delimiter the parser expects
-            f"at={started_at.isoformat()} user={admin.id} mode=rollback target={target_id} ===\n"
-        )
-        log_fh.flush()
+        release_dir = await asyncio.to_thread(_resolve_release, lumen_root, target_id)
+        if release_dir is None:
+            release_reason = "release_not_found"
+            raise _http("release_not_found", f"release '{target_id}' not found", 404)
 
-        if _systemd_run_available():
-            unit, _attempts = await asyncio.to_thread(
-                _start_rollback_systemd_unit,
-                inline_script=inline_script,
-                started_at=started_at,
-                log_fh=log_fh,
+        releases = await asyncio.to_thread(_list_releases, limit=None)
+        target = next((r for r in releases if r.id == target_id), None)
+        if target is None:
+            # _resolve_release succeeded but the release lacks .lumen_release.json;
+            # fall through with a synthetic entry so the operator at least sees
+            # the swap happen, but flag schema_unknown so they know we couldn't
+            # validate the alembic head.
+            target = ReleaseInfo(id=target_id)
+
+        if target.is_current:
+            release_reason = "already_current"
+            raise _http("already_current", f"release '{target_id}' is already current", 409)
+
+        # Schema gate. A release whose expected head differs from the live DB
+        # head means rolling back without first running ``alembic downgrade``
+        # would either crash on missing tables or run user code against a
+        # newer-than-expected schema. Either way: refuse and tell the operator.
+        expected_head = (target.alembic_head_expected or "").strip()
+        db_head = await _read_db_alembic_head(db)
+        if expected_head and db_head and expected_head != db_head:
+            release_reason = "schema_mismatch"
+            raise _http(
+                "schema_mismatch",
+                (
+                    f"DB head {db_head} != release expected {expected_head}; "
+                    "rollback would cross schema boundary, manual intervention required"
+                ),
+                409,
+                details={"db_head": db_head, "release_head": expected_head},
             )
-        if unit is None:
+
+        started_at = datetime.now(timezone.utc)
+        inline_script = _build_rollback_script(target_id=target_id, lumen_root=lumen_root)
+
+        log_fh = _open_update_log()
+        unit: str | None = None
+        pid: int | None = None
+        proc: subprocess.Popen[bytes] | None = None
+        try:
             log_fh.write(
-                "\n[fallback] launching rollback as a detached subprocess; "
-                "lumen-api restart will be the last step.\n"
+                "\n=== update trigger "  # use the same delimiter the parser expects
+                f"at={started_at.isoformat()} user={admin.id} mode=rollback target={target_id} ===\n"
             )
             log_fh.flush()
-            pid = await asyncio.to_thread(
-                _start_rollback_subprocess,
-                inline_script=inline_script,
-                started_at=started_at,
-                log_fh=log_fh,
-            )
+
+            if _systemd_run_available():
+                unit, _attempts = await asyncio.to_thread(
+                    _start_rollback_systemd_unit,
+                    inline_script=inline_script,
+                    started_at=started_at,
+                    log_fh=log_fh,
+                )
+            if unit is None:
+                log_fh.write(
+                    "\n[fallback] launching rollback as a detached subprocess; "
+                    "lumen-api restart will be the last step.\n"
+                )
+                log_fh.flush()
+                proc = subprocess.Popen(
+                    ["/usr/bin/env", "bash", "-lc", inline_script],
+                    cwd=str(_lumen_root()),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                pid = proc.pid
+                _write_marker(proc.pid, started_at.isoformat())
+        finally:
+            log_fh.close()
+
+        if proc is not None:
+            _schedule_marker_cleanup_when_done(proc)
+        if unit is not None or pid:
+            launched = True
+            release_reason = "launched"
+
+        previous_id = next(
+            (r.id for r in releases if r.is_current),
+            None,
+        )
+        await write_admin_audit_isolated(
+            request,
+            admin,
+            event_type="admin.release.rollback",
+            details={
+                "release_id": target_id,
+                "previous_id": previous_id,
+                "unit": unit,
+                "pid": pid,
+                "alembic_head_expected": expected_head or None,
+                "alembic_head_db": db_head,
+            },
+        )
+
+        if unit is None and pid is None:
+            # Both systemd-run and subprocess failed (e.g. exec missing). Surface
+            # 500 instead of returning accepted=True for an aborted rollback.
+            raise _http("rollback_launch_failed", "could not launch rollback runner", 500)
+
+        return RollbackOut(
+            accepted=True,
+            target=target,
+            started_at=started_at,
+            unit=unit,
+            note=(
+                "回滚已在后台启动；可通过 GET /admin/update/stream 监听进度，"
+                "或轮询 GET /admin/update/status。完成后服务会逐个重启，期间可能短暂不可用。"
+            ),
+        )
     finally:
-        log_fh.close()
-
-    previous_id = next(
-        (r.id for r in releases if r.is_current),
-        None,
-    )
-    await write_admin_audit_isolated(
-        request,
-        admin,
-        event_type="admin.release.rollback",
-        details={
-            "release_id": target_id,
-            "previous_id": previous_id,
-            "unit": unit,
-            "pid": pid,
-            "alembic_head_expected": expected_head or None,
-            "alembic_head_db": db_head,
-        },
-    )
-
-    if unit is None and pid is None:
-        # Both systemd-run and subprocess failed (e.g. exec missing). Surface
-        # 500 instead of returning accepted=True for an aborted rollback.
-        raise _http("rollback_launch_failed", "could not launch rollback runner", 500)
-
-    return RollbackOut(
-        accepted=True,
-        target=target,
-        started_at=started_at,
-        unit=unit,
-        note=(
-            "回滚已在后台启动；可通过 GET /admin/update/stream 监听进度，"
-            "或轮询 GET /admin/update/status。完成后服务会逐个重启，期间可能短暂不可用。"
-        ),
-    )
+        if lock is not None:
+            await lock_service.release(
+                lock, succeeded=launched, reason=release_reason
+            )
 
 
 @update_router.post(
@@ -503,7 +534,7 @@ async def rollback_previous_release(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RollbackOut:
-    releases = await asyncio.to_thread(_list_releases)
+    releases = await asyncio.to_thread(_list_releases, limit=None)
     previous = next((r for r in releases if r.is_previous), None)
     if previous is None:
         raise _http("no_previous", "no previous release is available", 409)

@@ -314,10 +314,11 @@ async def estimate_video_cost(
     generate_audio: bool = False,
     estimates: dict[str, Any],
     pricing_variant: str | None = None,
+    reference_media: Iterable[Any] | None = None,
 ) -> VideoCostEstimate:
     del fps, generate_audio
     effective_pricing_variant = pricing_variant or video_pricing_variant(
-        action, resolution=resolution
+        action, reference_media, resolution=resolution
     )
     unit_price, used_pricing_variant = await _video_unit_price_micro(
         db,
@@ -362,9 +363,10 @@ async def settle_video_cost(
     actual_total_tokens: int,
     resolution: str | None = None,
     pricing_variant: str | None = None,
+    reference_media: Iterable[Any] | None = None,
 ) -> int:
     effective_pricing_variant = pricing_variant or video_pricing_variant(
-        action, resolution=resolution
+        action, reference_media, resolution=resolution
     )
     unit_price, _used_pricing_variant = await _video_unit_price_micro(
         db,

@@ -31,6 +31,11 @@ def message_prompt(message: Message) -> str:
     return (message.text or message.caption or "").strip()
 
 
+def is_slash_command(text: str) -> bool:
+    value = (text or "").strip()
+    return value.startswith("/") and not value.startswith("//")
+
+
 def resolution_from_size(size_requested: str) -> str:
     try:
         w, h = (int(x) for x in size_requested.lower().split("x", 1))

@@ -1100,7 +1100,11 @@ def _release_info_from_dir(release_dir: Path) -> ReleaseInfo | None:
     )
 
 
-def _list_releases(lumen_root: Path | None = None) -> list[ReleaseInfo]:
+def _list_releases(
+    lumen_root: Path | None = None,
+    *,
+    limit: int | None = _RELEASE_LIST_LIMIT,
+) -> list[ReleaseInfo]:
     """Scan ``<root>/releases/<id>/`` and return ReleaseInfo for each, newest first.
 
     ``current`` and ``previous`` are flagged via readlink. Releases without a
@@ -1141,7 +1145,10 @@ def _list_releases(lumen_root: Path | None = None) -> list[ReleaseInfo]:
     typed_items.sort(key=lambda r: (r.created_at or "", r.id), reverse=True)
     untyped_items = [r for r in items if not r.created_at]
     untyped_items.sort(key=lambda r: r.id, reverse=True)
-    return (typed_items + untyped_items)[:_RELEASE_LIST_LIMIT]
+    all_items = typed_items + untyped_items
+    if limit is None:
+        return all_items
+    return all_items[:limit]
 
 
 def _resolve_release(lumen_root: Path, release_id: str) -> Path | None:
