@@ -76,6 +76,21 @@ def test_parse_dashscope_happyhorse_provider() -> None:
     )
 
 
+def test_parse_volcano_third_party_provider() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            name="moyu",
+            kind="volcano_third_party",
+            base_url="https://www.moyu.info",
+        ),
+        index=0,
+    )
+
+    assert provider.kind == "volcano_third_party"
+    assert provider.base_url == "https://www.moyu.info"
+    assert provider.supports("seedance-2.0", "reference")
+
+
 def test_video_provider_config_can_reference_shared_proxy() -> None:
     shared = json.dumps(
         {

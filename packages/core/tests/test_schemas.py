@@ -37,6 +37,36 @@ def test_video_provider_schema_accepts_dashscope_happyhorse():
     assert item.models["happyhorse-1.0:reference"] == "happyhorse-1.0-r2v"
 
 
+def test_video_provider_schema_accepts_volcano_third_party():
+    from lumen_core.schemas import VideoProvidersUpdateIn
+
+    body = VideoProvidersUpdateIn(
+        enabled=True,
+        items=[
+            {
+                "name": "moyu",
+                "kind": "volcano_third_party",
+                "base_url": "https://www.moyu.info",
+                "api_key": "sk-test",
+                "enabled": True,
+                "priority": 100,
+                "weight": 1,
+                "concurrency": 10,
+                "models": {
+                    "seedance-2.0-fast:reference": "doubao-seedance-2-0-fast-260128",
+                },
+            }
+        ],
+    )
+
+    item = body.items[0]
+    assert item.kind == "volcano_third_party"
+    assert (
+        item.models["seedance-2.0-fast:reference"]
+        == "doubao-seedance-2-0-fast-260128"
+    )
+
+
 def test_image_params_support_render_and_output_options():
     from pydantic import ValidationError
 

@@ -5,16 +5,19 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.tasks.video_generation import _reference_media_bytes
+from app.tasks.video_generation import _reference_media_bytes, _try_provider_cancel
 from app.video_upstream import (
+    CancelResult,
     DashScopeHappyHorseAdapter,
     VideoReferenceMedia,
     VideoSubmitRequest,
     VideoUpstreamError,
     VolcanoSeedanceAdapter,
+    VolcanoThirdPartySeedanceAdapter,
     _billable,
     _duration_usage_total_tokens,
     _usage_total_tokens,
+    adapter_for_provider,
 )
 from lumen_core.video_providers import VideoProviderDefinition
 
@@ -101,6 +104,33 @@ class DashScopeCaptureClient(CaptureClient):
         return httpx.Response(200, json=self.get_json)
 
 
+class ThirdPartyCaptureClient(CaptureClient):
+    def __init__(
+        self,
+        *,
+        post_json: dict | None = None,
+        get_json: dict | None = None,
+        delete_json: dict | None = None,
+    ) -> None:
+        super().__init__()
+        self.post_json = post_json or {"task_id": "moyu-task-1"}
+        self.get_json = get_json or {}
+        self.delete_json = delete_json or {"code": "success"}
+
+    async def post(self, path: str, *, json):
+        self.path = path
+        self.body = json
+        return httpx.Response(200, json=self.post_json)
+
+    async def get(self, path: str):
+        self.path = path
+        return httpx.Response(200, json=self.get_json)
+
+    async def delete(self, path: str):
+        self.path = path
+        return httpx.Response(200, json=self.delete_json)
+
+
 @pytest.mark.asyncio
 async def test_seedance_submit_uses_official_reference_payload_without_fps() -> None:
     provider = VideoProviderDefinition(
@@ -162,6 +192,309 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
             "url": ("https://lumen.example/api/videos/reference/video-1/binary?token=t")
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_submit_uses_moyu_video_generation_payload() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0-fast:reference": "doubao-seedance-2-0-fast-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="seedance-2.0-fast",
+            upstream_model="doubao-seedance-2-0-fast-260128",
+            prompt="make it cinematic",
+            duration_s=6,
+            resolution="720p",
+            aspect_ratio="16:9",
+            generate_audio=True,
+            reference_media=[
+                VideoReferenceMedia(kind="image", data=b"image", mime="image/jpeg"),
+            ],
+        )
+    )
+
+    assert result.provider_task_id == "moyu-task-1"
+    assert client.path == "v1/video/generations"
+    assert client.body["model"] == "doubao-seedance-2-0-fast-260128"
+    assert client.body["prompt"] == "make it cinematic"
+    assert set(client.body) == {"model", "prompt", "metadata"}
+    assert client.body["metadata"]["duration"] == 6
+    assert client.body["metadata"]["resolution"] == "720p"
+    assert client.body["metadata"]["ratio"] == "16:9"
+    assert client.body["metadata"]["generate_audio"] is True
+    assert client.body["metadata"]["content"][0] == {
+        "type": "text",
+        "text": "make it cinematic",
+    }
+    assert client.body["metadata"]["content"][1]["role"] == "reference_image"
+    assert client.body["metadata"]["content"][1]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_base_url_can_include_v1_path() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info/v1",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="t2v",
+            model="seedance-2.0",
+            upstream_model="doubao-seedance-2-0-260128",
+            prompt="a cat",
+            duration_s=5,
+            resolution="480p",
+            aspect_ratio="adaptive",
+        )
+    )
+
+    assert client.path == "video/generations"
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_base_url_collapses_duplicate_v1_slashes() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info//v1",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+
+    assert adapter._path("video/generations") == "video/generations"
+    async with adapter._client() as client:
+        request = client.build_request("POST", adapter._path("video/generations"))
+    assert str(request.url) == "https://www.moyu.info/v1/video/generations"
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_poll_reads_moyu_result_shape() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "code": "success",
+            "data": {
+                "task_id": "moyu-task-1",
+                "status": "SUCCESS",
+                "progress": "100%",
+                "data": {
+                    "content": {"video_url": "https://cdn.example/output.mp4"},
+                    "usage": {"completion_tokens": 80770, "total_tokens": 90000},
+                },
+            },
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("moyu-task-1")
+
+    assert client.path == "v1/video/generations/moyu-task-1"
+    assert result.status == "succeeded"
+    assert result.progress == 100
+    assert result.video_url == "https://cdn.example/output.mp4"
+    assert result.usage_total_tokens == 80770
+    assert result.upstream_billable is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "expected_url"),
+    [
+        (
+            {"metadata": {"url": "https://cdn.example/metadata.mp4"}},
+            "https://cdn.example/metadata.mp4",
+        ),
+        (
+            {"data": {"result_url": "https://cdn.example/result.mp4"}},
+            "https://cdn.example/result.mp4",
+        ),
+        (
+            {"metadata": {"fetch_url": "/v1/videos/moyu-task-1/content"}},
+            "https://www.moyu.info/v1/videos/moyu-task-1/content",
+        ),
+        (
+            {"results": [{"url": "https://cdn.example/results.mp4"}]},
+            "https://cdn.example/results.mp4",
+        ),
+    ],
+)
+async def test_volcano_third_party_poll_reads_common_result_url_shapes(
+    payload: dict,
+    expected_url: str,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "code": "success",
+            "data": {"task_id": "moyu-task-1", "status": "SUCCESS", **payload},
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("moyu-task-1")
+
+    assert result.status == "succeeded"
+    assert result.video_url == expected_url
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_poll_respects_explicit_billable_false() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "code": "success",
+            "data": {
+                "task_id": "moyu-task-1",
+                "status": "SUCCESS",
+                "data": {
+                    "content": {"video_url": "https://cdn.example/output.mp4"},
+                    "usage": {"billable": False, "completion_tokens": 80770},
+                },
+            },
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("moyu-task-1")
+
+    assert result.status == "succeeded"
+    assert result.upstream_billable is False
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_poll_prefers_specific_failure_code() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "code": "success",
+            "data": {
+                "task_id": "moyu-task-1",
+                "status": "FAILURE",
+                "fail_reason": "task failed",
+                "data": {
+                    "error": {
+                        "code": "OutputVideoSensitiveContentDetected",
+                        "message": "output video may contain sensitive information",
+                    }
+                },
+            },
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("moyu-task-1")
+
+    assert result.status == "failed"
+    assert result.failure_class == "content_policy"
+
+
+@pytest.mark.asyncio
+async def test_provider_cancel_retries_after_rejected_result() -> None:
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def cancel(self, _provider_task_id: str) -> CancelResult:
+            self.calls += 1
+            return CancelResult(accepted=False, raw={"error": "not found"})
+
+    adapter = Adapter()
+    generation = SimpleNamespace(
+        provider_task_id="moyu-task-1",
+        diagnostics={},
+    )
+
+    await _try_provider_cancel(adapter, generation)
+    await _try_provider_cancel(adapter, generation)
+
+    assert adapter.calls == 2
+    assert "cancel_sent_at" not in generation.diagnostics
+    assert generation.diagnostics["cancel_rejected_at"]
+    assert generation.diagnostics["cancel_result"] == {"error": "not found"}
+
+
+@pytest.mark.asyncio
+async def test_volcano_third_party_cancel_uses_moyu_cancel_path() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+    adapter = VolcanoThirdPartySeedanceAdapter(provider)
+    client = ThirdPartyCaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.cancel("moyu-task-1")
+
+    assert result is not None
+    assert result.accepted is True
+    assert client.path == "v1/videos/moyu-task-1"
+
+
+def test_adapter_for_provider_selects_volcano_third_party_adapter() -> None:
+    provider = VideoProviderDefinition(
+        name="moyu",
+        kind="volcano_third_party",
+        base_url="https://www.moyu.info",
+        api_key="sk-test",
+        models={"seedance-2.0:t2v": "doubao-seedance-2-0-260128"},
+    )
+
+    assert isinstance(adapter_for_provider(provider), VolcanoThirdPartySeedanceAdapter)
 
 
 @pytest.mark.asyncio

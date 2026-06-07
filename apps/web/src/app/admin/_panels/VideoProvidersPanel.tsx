@@ -84,6 +84,7 @@ type CapabilityRow = {
 };
 
 const VOLCANO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const VOLCANO_THIRD_PARTY_BASE_URL = "https://www.moyu.info";
 const DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com";
 const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const VOLCANO_MODEL_PRESETS = [
@@ -125,6 +126,7 @@ const ACTION_LABELS: Record<VideoAction, string> = {
 
 const KIND_LABELS: Record<VideoProviderKind, string> = {
   volcano: "火山方舟",
+  volcano_third_party: "火山第三方",
   dashscope: "DashScope",
   veo: "Google Veo",
   fake: "测试",
@@ -306,6 +308,22 @@ function emptyVolcanoDraft(): Draft {
   };
 }
 
+function emptyVolcanoThirdPartyDraft(): Draft {
+  return {
+    _key: nextKey(),
+    name: "volcano-third-party",
+    kind: "volcano_third_party",
+    base_url: VOLCANO_THIRD_PARTY_BASE_URL,
+    api_key: "",
+    enabled: true,
+    priority: 100,
+    weight: 1,
+    concurrency: 10,
+    proxy: "",
+    models: volcanoModelDrafts(),
+  };
+}
+
 function emptyDashScopeDraft(): Draft {
   return {
     _key: nextKey(),
@@ -359,6 +377,7 @@ function presetName(draft: Draft, fallback: string): string {
   if (
     !name ||
     name === "volcano-main" ||
+    name === "volcano-third-party" ||
     name === "dashscope-happyhorse" ||
     name === "google-veo" ||
     name === "video-test"
@@ -373,6 +392,19 @@ function volcanoPresetPatch(draft: Draft): Partial<Draft> {
     name: presetName(draft, "volcano-main"),
     kind: "volcano",
     base_url: VOLCANO_BASE_URL,
+    enabled: draft.enabled,
+    priority: draft.priority || 100,
+    weight: Math.max(1, Number(draft.weight) || 1),
+    concurrency: 10,
+    models: volcanoModelDrafts(),
+  };
+}
+
+function volcanoThirdPartyPresetPatch(draft: Draft): Partial<Draft> {
+  return {
+    name: presetName(draft, "volcano-third-party"),
+    kind: "volcano_third_party",
+    base_url: VOLCANO_THIRD_PARTY_BASE_URL,
     enabled: draft.enabled,
     priority: draft.priority || 100,
     weight: Math.max(1, Number(draft.weight) || 1),
@@ -421,6 +453,7 @@ function fakePresetPatch(draft: Draft): Partial<Draft> {
 }
 
 function presetPatchForKind(draft: Draft): Partial<Draft> {
+  if (draft.kind === "volcano_third_party") return volcanoThirdPartyPresetPatch(draft);
   if (draft.kind === "dashscope") return dashscopePresetPatch(draft);
   if (draft.kind === "veo") return veoPresetPatch(draft);
   if (draft.kind === "fake") return fakePresetPatch(draft);
@@ -525,6 +558,12 @@ function analyzeDraft(
       const url = new URL(draft.base_url.trim());
       if (!["http:", "https:"].includes(url.protocol)) {
         issues.push({ severity: "error", message: "Base URL 只能使用 HTTP 或 HTTPS" });
+      }
+      if (!url.hostname) {
+        issues.push({ severity: "error", message: "Base URL 必须包含主机名" });
+      }
+      if (url.username || url.password) {
+        issues.push({ severity: "error", message: "Base URL 不能包含用户名或密码" });
       }
     } catch {
       issues.push({ severity: "error", message: "Base URL 格式不合法" });
@@ -889,6 +928,7 @@ export function VideoProvidersPanel() {
             globalIssue={globalDraftIssue}
             onToggle={setEnabledDraft}
             onAddVolcano={() => addDraft(emptyVolcanoDraft())}
+            onAddVolcanoThirdParty={() => addDraft(emptyVolcanoThirdPartyDraft())}
             onAddDashscope={() => addDraft(emptyDashScopeDraft())}
             onAddVeo={() => addDraft(emptyVeoDraft())}
             onAddFake={() => addDraft(emptyFakeDraft())}
@@ -901,7 +941,9 @@ export function VideoProvidersPanel() {
                 draft={draft}
                 summary={draftSummaries[idx]}
                 storedKeyHint={
-                  draft.original_name ? storedKeyHint(serverItems, draft.original_name) : ""
+                  draft.original_name && draft.original_name === draft.name.trim()
+                    ? storedKeyHint(serverItems, draft.original_name)
+                    : ""
                 }
                 proxies={proxyOptions.map((item) => item.name)}
                 onPatch={(patch) => updateDraft(idx, patch)}
@@ -1316,6 +1358,7 @@ function EditCommandCenter({
   globalIssue,
   onToggle,
   onAddVolcano,
+  onAddVolcanoThirdParty,
   onAddDashscope,
   onAddVeo,
   onAddFake,
@@ -1328,6 +1371,7 @@ function EditCommandCenter({
   globalIssue: string | null;
   onToggle: (value: boolean) => void;
   onAddVolcano: () => void;
+  onAddVolcanoThirdParty: () => void;
   onAddDashscope: () => void;
   onAddVeo: () => void;
   onAddFake: () => void;
@@ -1362,12 +1406,18 @@ function EditCommandCenter({
               {globalIssue}
             </div>
           )}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
             <PresetButton
               icon={<Zap className="h-4 w-4" />}
               title="火山 Seedance"
               detail="Seedance 2.0 / fast"
               onClick={onAddVolcano}
+            />
+            <PresetButton
+              icon={<Server className="h-4 w-4" />}
+              title="火山第三方"
+              detail="MOYU / 中转网关"
+              onClick={onAddVolcanoThirdParty}
             />
             <PresetButton
               icon={<Clapperboard className="h-4 w-4" />}
@@ -1517,6 +1567,8 @@ function ProviderEditor({
                   const kind = event.target.value as VideoProviderKind;
                   if (kind === "volcano") {
                     onPatch(volcanoPresetPatch(draft));
+                  } else if (kind === "volcano_third_party") {
+                    onPatch(volcanoThirdPartyPresetPatch(draft));
                   } else if (kind === "dashscope") {
                     onPatch(dashscopePresetPatch(draft));
                   } else if (kind === "veo") {
@@ -1530,6 +1582,7 @@ function ProviderEditor({
                 className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
               >
                 <option value="volcano">火山方舟</option>
+                <option value="volcano_third_party">火山第三方 / MOYU</option>
                 <option value="dashscope">DashScope / HappyHorse</option>
                 <option value="veo">Google Veo</option>
                 <option value="fake">测试</option>
@@ -1606,6 +1659,8 @@ function ProviderEditor({
                 ? "测试供应商不需要 Key"
                 : draft.api_key.trim()
                   ? "将更新为新 Key"
+                  : draft.original_name && draft.original_name !== draft.name.trim()
+                    ? "重命名后需重新填写 Key"
                   : storedKeyHint
                     ? `保留已保存 Key：${storedKeyHint}`
                     : "未保存 Key"}
@@ -1639,7 +1694,7 @@ function ProviderEditor({
               onClick={onApplyPreset}
               leftIcon={<Check className="h-3.5 w-3.5" />}
             >
-              套用官方预设
+              套用当前类型预设
             </Button>
             <Button
               variant="outline"
