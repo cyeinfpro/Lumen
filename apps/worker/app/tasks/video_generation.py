@@ -282,6 +282,16 @@ async def _input_image_bytes(
     return await storage.aget_bytes(key), mime
 
 
+def _input_image_url(generation: VideoGeneration) -> str | None:
+    request = (
+        generation.upstream_request
+        if isinstance(generation.upstream_request, dict)
+        else {}
+    )
+    raw = request.get("input_image_url")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
 async def _reference_media_bytes(
     generation: VideoGeneration,
 ) -> list[VideoReferenceMedia]:
@@ -420,6 +430,7 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                         generate_audio=generation.generate_audio,
                         seed=generation.seed,
                         watermark=generation.watermark,
+                        input_image_url=_input_image_url(generation),
                         input_image_bytes=input_bytes,
                         input_image_mime=input_mime,
                         reference_media=reference_media,

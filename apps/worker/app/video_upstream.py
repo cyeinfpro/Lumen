@@ -5,11 +5,14 @@ from __future__ import annotations
 import base64
 import hashlib
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
 from lumen_core.providers import socks_proxy_url
+from lumen_core.video_billing import VIDEO_BILLING_TOKENS_PER_SECOND
 from lumen_core.video_providers import VideoProviderDefinition
 
 from .config import settings
@@ -47,6 +50,7 @@ class VideoSubmitRequest:
     generate_audio: bool = True
     seed: int | None = None
     watermark: bool = False
+    input_image_url: str | None = None
     input_image_bytes: bytes | None = None
     input_image_mime: str | None = None
     reference_media: list[VideoReferenceMedia] = field(default_factory=list)
@@ -211,6 +215,16 @@ def _video_url(payload: dict[str, Any]) -> str | None:
     )
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
+    output = payload.get("output")
+    if isinstance(output, dict):
+        results = output.get("results")
+        if isinstance(results, list):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                value = _nested_get(item, ("video_url",), ("url",))
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
     content = payload.get("content")
     if isinstance(content, list):
         for item in content:
@@ -246,9 +260,48 @@ def _usage_total_tokens(payload: dict[str, Any]) -> int | None:
     )
 
 
+def _duration_usage_total_tokens(payload: dict[str, Any]) -> int | None:
+    raw = _nested_get(
+        payload,
+        ("usage", "duration"),
+        ("data", "usage", "duration"),
+        ("result", "usage", "duration"),
+        ("output", "usage", "duration"),
+        ("usage", "output_video_duration"),
+        ("data", "usage", "output_video_duration"),
+        ("result", "usage", "output_video_duration"),
+        ("output", "usage", "output_video_duration"),
+        ("output_video_duration",),
+        ("data", "output_video_duration"),
+        ("result", "output_video_duration"),
+        ("output", "output_video_duration"),
+        ("duration",),
+        ("data", "duration"),
+        ("result", "duration"),
+        ("output", "duration"),
+    )
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        duration = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return None
+    if duration < 0:
+        return None
+    tokens = (duration * Decimal(VIDEO_BILLING_TOKENS_PER_SECOND)).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    )
+    return int(tokens)
+
+
 def _provider_task_id(payload: dict[str, Any]) -> str | None:
     raw = _nested_get(
-        payload, ("id",), ("task_id",), ("data", "id"), ("data", "task_id")
+        payload,
+        ("id",),
+        ("task_id",),
+        ("data", "id"),
+        ("data", "task_id"),
+        ("output", "task_id"),
     )
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
@@ -260,6 +313,24 @@ def _image_data_url(data: bytes, mime: str | None) -> str:
 
 def _safety_identifier(user_id: str) -> str:
     return hashlib.sha256(f"lumen:{user_id}".encode("utf-8")).hexdigest()
+
+
+def _require_http_url(raw: str | None, *, field: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise VideoUpstreamError(
+            f"{field} is required",
+            error_code="invalid_input",
+            status_code=422,
+        )
+    value = raw.strip()
+    parts = urlsplit(value)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise VideoUpstreamError(
+            f"{field} must be an HTTP(S) URL",
+            error_code="invalid_input",
+            status_code=422,
+        )
+    return value
 
 
 class VolcanoSeedanceAdapter:
@@ -437,6 +508,168 @@ class VolcanoSeedanceAdapter:
         return CancelResult(accepted=True, raw=raw)
 
 
+class DashScopeHappyHorseAdapter:
+    def __init__(self, provider: VideoProviderDefinition) -> None:
+        self.provider = provider
+
+    def _client(self) -> httpx.AsyncClient:
+        proxy_url = (
+            socks_proxy_url(self.provider.proxy) if self.provider.proxy else None
+        )
+        timeout = httpx.Timeout(
+            connect=settings.upstream_connect_timeout_s,
+            read=min(settings.upstream_read_timeout_s, 120.0),
+            write=settings.upstream_write_timeout_s,
+            pool=30.0,
+        )
+        kwargs: dict[str, Any] = {
+            "base_url": self.provider.base_url,
+            "timeout": timeout,
+            "follow_redirects": True,
+            "headers": {
+                "Authorization": f"Bearer {self.provider.api_key}",
+                "X-DashScope-Async": "enable",
+            },
+        }
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        return httpx.AsyncClient(**kwargs)
+
+    async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        input_payload: dict[str, Any] = {"prompt": req.prompt}
+        if req.action == "i2v":
+            input_payload["media"] = [
+                {
+                    "type": "first_frame",
+                    "url": _require_http_url(
+                        req.input_image_url,
+                        field="HappyHorse image-to-video input image URL",
+                    ),
+                }
+            ]
+        elif req.action == "reference":
+            if not req.reference_media:
+                raise VideoUpstreamError(
+                    "HappyHorse reference-to-video requires reference images",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            urls: list[str] = []
+            for item in req.reference_media:
+                if item.kind != "image":
+                    raise VideoUpstreamError(
+                        "HappyHorse reference-to-video does not support reference videos",
+                        error_code="invalid_input",
+                        status_code=422,
+                    )
+                urls.append(
+                    _require_http_url(
+                        item.url,
+                        field="HappyHorse reference image URL",
+                    )
+                )
+            if len(urls) > 9:
+                raise VideoUpstreamError(
+                    "HappyHorse reference-to-video supports at most 9 reference images",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            input_payload["media"] = [
+                {"type": "reference_image", "url": url} for url in urls
+            ]
+
+        parameters: dict[str, Any] = {
+            "resolution": req.resolution.upper(),
+            "watermark": req.watermark,
+        }
+        if req.duration_s != -1:
+            parameters["duration"] = req.duration_s
+        if req.action in {"t2v", "reference"} and req.aspect_ratio != "adaptive":
+            parameters["ratio"] = req.aspect_ratio
+        if req.seed is not None:
+            if req.seed == -1:
+                pass
+            elif 0 <= req.seed <= 2_147_483_647:
+                parameters["seed"] = req.seed
+            else:
+                raise VideoUpstreamError(
+                    "HappyHorse seed must be between 0 and 2147483647",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+        body = {
+            "model": req.upstream_model,
+            "input": input_payload,
+            "parameters": parameters,
+        }
+        async with self._client() as client:
+            response = await client.post(
+                "/api/v1/services/aigc/video-generation/video-synthesis",
+                json=body,
+            )
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("submit", response.status_code, raw)
+        provider_task_id = _provider_task_id(raw)
+        if provider_task_id is None:
+            raise VideoUpstreamError(
+                "HappyHorse submit response did not include task id",
+                error_code="bad_response",
+                status_code=response.status_code,
+                raw=raw,
+            )
+        return SubmitResult(provider_task_id=provider_task_id, raw=raw)
+
+    async def poll(self, provider_task_id: str) -> PollResult:
+        async with self._client() as client:
+            response = await client.get(f"/api/v1/tasks/{provider_task_id}")
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("poll", response.status_code, raw)
+        status = _status(
+            _nested_get(raw, ("output", "task_status"), ("task_status",), ("status",))
+        )
+        progress = _int_or_none(
+            _nested_get(raw, ("output", "progress"), ("progress",), ("percent",))
+        )
+        usage_tokens = _duration_usage_total_tokens(raw)
+        return PollResult(
+            status=status,
+            progress=progress,
+            video_url=_video_url(raw),
+            failure_class=_failure_class(raw),
+            usage_total_tokens=usage_tokens,
+            upstream_billable=True if status == "succeeded" else _billable(raw),
+            raw=raw,
+        )
+
+    async def fetch_result(self, video_url: str) -> bytes:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=settings.upstream_connect_timeout_s,
+                read=settings.upstream_read_timeout_s,
+                write=settings.upstream_write_timeout_s,
+                pool=30.0,
+            ),
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(video_url)
+        if response.status_code >= 400:
+            raise VideoUpstreamError(
+                f"video fetch failed status={response.status_code}",
+                error_code="fetch_failed",
+                status_code=response.status_code,
+            )
+        return bytes(response.content)
+
+    async def cancel(self, provider_task_id: str) -> CancelResult | None:
+        # DashScope's documented async task API does not expose a portable
+        # cancellation endpoint for HappyHorse. Lumen still marks local cancel
+        # requests and settles by the terminal poll result.
+        del provider_task_id
+        return None
+
+
 class FakeVideoAdapter:
     """Deterministic local adapter for tests and development."""
 
@@ -476,6 +709,8 @@ def adapter_for_provider(provider: VideoProviderDefinition) -> VideoProviderAdap
         return FakeVideoAdapter(provider)
     if provider.kind == "volcano":
         return VolcanoSeedanceAdapter(provider)
+    if provider.kind == "dashscope":
+        return DashScopeHappyHorseAdapter(provider)
     raise VideoUpstreamError(
         f"unsupported video provider kind: {provider.kind}",
         error_code="provider_unavailable",
@@ -518,6 +753,7 @@ def _http_error(
 
 __all__ = [
     "CancelResult",
+    "DashScopeHappyHorseAdapter",
     "FakeVideoAdapter",
     "PollResult",
     "SubmitResult",

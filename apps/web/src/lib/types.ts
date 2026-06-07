@@ -701,7 +701,7 @@ export interface ProviderProxyIn {
   enabled: boolean;
 }
 
-export type VideoProviderKind = "volcano" | "veo" | "fake";
+export type VideoProviderKind = "volcano" | "dashscope" | "veo" | "fake";
 
 export interface VideoProviderItemOut {
   name: string;

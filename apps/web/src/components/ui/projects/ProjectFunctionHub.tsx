@@ -4,12 +4,15 @@
 
 import {
   ArrowRight,
-  ArrowUpRight,
+  CheckCircle2,
+  Clock3,
   Film,
+  FolderKanban,
   Image as ImageIcon,
   Loader2,
   Palette,
   Shirt,
+  Sparkles,
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
@@ -25,7 +28,7 @@ import { formatRelativeTime } from "./utils";
 const FEATURES = [
   {
     title: "服饰模特图",
-    en: "Apparel Studio",
+    en: "服饰工作流",
     description: "商品图换成可交付的模特展示图，适合电商主图、上新图和内容种草。",
     flow: "上传商品图 → 选择模特 → 生成展示图 → QC → 交付",
     input: "商品图 1-3 张",
@@ -37,12 +40,12 @@ const FEATURES = [
     secondaryLabel: "查看历史",
     icon: Shirt,
     available: true,
-    badge: "Production",
+    badge: "正式",
     workflowType: "apparel_model_showcase",
   },
   {
     title: "海报制作",
-    en: "Poster",
+    en: "海报工作流",
     description: "从商品素材、风格和营销文案生成主视觉，再导出多尺寸成品。",
     flow: "上传商品/素材 → 选择风格 → 生成母版 → 多尺寸导出",
     input: "文案 + 风格 + 可选品牌资产",
@@ -52,12 +55,12 @@ const FEATURES = [
     primaryLabel: "开始海报项目",
     icon: ImageIcon,
     available: true,
-    badge: "Beta",
+    badge: "测试",
     workflowType: "poster_design",
   },
   {
     title: "风格库",
-    en: "Style Library",
+    en: "风格资产",
     description: "管理海报视觉风格预设，为海报项目准备可复用的视觉方向。",
     flow: "选择预设 → 生成样图 → 保存风格 → 用于海报",
     input: "风格描述或参考方向",
@@ -67,11 +70,11 @@ const FEATURES = [
     primaryLabel: "打开风格库",
     icon: Palette,
     available: true,
-    badge: "Asset",
+    badge: "资产",
   },
   {
     title: "分镜制作",
-    en: "Storyboard",
+    en: "分镜工作流",
     description: "将商品卖点拆成镜头脚本与画面分镜。",
     flow: "脚本 → 镜头规划 → 分镜图 → 导出",
     input: "脚本或卖点",
@@ -79,7 +82,7 @@ const FEATURES = [
     eta: "规划中",
     icon: Film,
     available: false,
-    badge: "Soon",
+    badge: "规划",
   },
 ] as const;
 
@@ -88,6 +91,18 @@ export function ProjectFunctionHub() {
   const recentProjects = useMemo(
     () => workflowsQuery.data?.items ?? [],
     [workflowsQuery.data?.items],
+  );
+  const activeCount = useMemo(
+    () => recentProjects.filter((item) => item.status !== "completed").length,
+    [recentProjects],
+  );
+  const completedCount = useMemo(
+    () => recentProjects.filter((item) => item.status === "completed").length,
+    [recentProjects],
+  );
+  const outputCount = useMemo(
+    () => recentProjects.reduce((sum, item) => sum + item.output_count, 0),
+    [recentProjects],
   );
   const recentByType = useMemo(() => {
     const map = new Map<string, WorkflowRunListItem>();
@@ -101,60 +116,85 @@ export function ProjectFunctionHub() {
     <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
-      <ProjectMobileTopBar title="项目" subtitle="TEMPLATES · RECENT" />
+      <ProjectMobileTopBar title="项目" subtitle="工作流 · 最近" />
       <ProjectTopBar />
 
       <main className="lumen-studio-bg project-mobile-scroll mb-[calc(56px+env(safe-area-inset-bottom,0px))] min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-2 md:mb-0 md:px-6 md:pb-6 md:pt-3">
-        <div className="mx-auto grid w-full max-w-[1440px] gap-3">
-          <header className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
-            <div className="flex min-w-0 items-baseline gap-2.5">
-              <p className="type-page-kicker shrink-0">
-                Project Hub
+        <div className="mx-auto grid w-full max-w-[1440px] gap-4">
+          <header className="hidden min-w-0 gap-4 border-b border-[var(--border)] pb-4 md:grid lg:grid-cols-[minmax(0,1fr)_minmax(520px,0.76fr)] lg:items-end">
+            <div className="min-w-0">
+              <p className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/78 px-3 py-1.5 text-xs font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
+                <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" />
+                项目工作台
               </p>
-              <h1 className="type-page-title shrink-0">
-                项目
+              <h1 className="type-page-title mt-3">
+                从模板开始，交付一个完整项目
               </h1>
-              <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
-                选择有步骤、有交付物的创作任务；也可以从最近项目继续 poster 或服饰流程。
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
+                选择有步骤、有交付物的创作任务；服饰、海报和风格资产会沉淀为可继续、可交付、可复用的项目记录。
               </p>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              <span className="inline-flex min-h-9 items-baseline gap-1.5 border border-[var(--border-subtle)] px-3">
-                <span className="text-[13px] font-semibold tabular-nums leading-[1.9] text-[var(--fg-0)]">
-                  {String(FEATURES.filter((feature) => feature.available).length).padStart(2, "0")}
-                </span>
-                <span className="text-[10px] text-[var(--fg-2)]">可用</span>
-              </span>
-              <span className="inline-flex min-h-9 items-baseline gap-1.5 border border-[var(--border-subtle)] px-3">
-                <span className="text-[13px] font-semibold tabular-nums leading-[1.9] text-[var(--fg-0)]">
-                  {String(FEATURES.length).padStart(2, "0")}
-                </span>
-                <span className="text-[10px] text-[var(--fg-2)]">全部</span>
-              </span>
+            <div className="grid gap-2 sm:grid-cols-4">
+              <ProjectMetric
+                label="可用模板"
+                value={FEATURES.filter((feature) => feature.available).length}
+                detail={`${FEATURES.length} 个入口`}
+              />
+              <ProjectMetric
+                label="进行中"
+                value={activeCount}
+                detail="最近任务"
+              />
+              <ProjectMetric
+                label="已完成"
+                value={completedCount}
+                detail="可查看交付"
+              />
+              <ProjectMetric
+                label="产出"
+                value={outputCount}
+                detail="最近成品"
+              />
             </div>
           </header>
 
           <section className="grid gap-2 border-b border-[var(--border)] pb-3 md:hidden">
-            <p className="type-page-kicker">Project Hub</p>
-            <h1 className="type-page-title">任务模板中心</h1>
+            <p className="type-page-kicker">项目中心</p>
+            <h1 className="type-page-title">项目工作台</h1>
             <p className="text-[13px] leading-[1.6] text-[var(--fg-1)]">
               从服饰模特图、海报制作或风格资产开始；已有项目可在下方继续。
             </p>
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              <MobileMetric label="模板" value={FEATURES.filter((feature) => feature.available).length} />
+              <MobileMetric label="进行中" value={activeCount} />
+              <MobileMetric label="产出" value={outputCount} />
+            </div>
           </section>
 
-          <section className="grid gap-x-5 gap-y-6 sm:grid-cols-2 md:grid-cols-3 md:gap-x-5 md:gap-y-7">
-            {FEATURES.map((feature, index) => (
-              <FeatureCard
-                key={feature.title}
-                feature={feature}
-                index={index}
-                recentProject={
-                  "workflowType" in feature && feature.workflowType
-                    ? recentByType.get(feature.workflowType)
-                    : undefined
-                }
-              />
-            ))}
+          <section className="grid gap-3">
+            <div className="flex min-w-0 items-end justify-between gap-3">
+              <div className="min-w-0">
+                <p className="type-page-kicker">工作流模板</p>
+                <h2 className="type-section-title mt-1">选择工作流</h2>
+              </div>
+              <p className="hidden text-xs text-[var(--fg-2)] md:block">
+                每张卡片都可以直接新建，或接回对应的最近项目。
+              </p>
+            </div>
+            <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
+              {FEATURES.map((feature, index) => (
+                <FeatureCard
+                  key={feature.title}
+                  feature={feature}
+                  index={index}
+                  recentProject={
+                    "workflowType" in feature && feature.workflowType
+                      ? recentByType.get(feature.workflowType)
+                      : undefined
+                  }
+                />
+              ))}
+            </div>
           </section>
 
           <RecentProjects
@@ -182,6 +222,10 @@ function FeatureCard({
 }) {
   const Icon = feature.icon;
   const num = `N°${String(index + 1).padStart(2, "0")}`;
+  const steps = feature.flow.split("→").map((step) => step.trim()).filter(Boolean);
+  const recentStatus = recentProject
+    ? STATUS_LABEL[recentProject.status] ?? recentProject.status
+    : null;
   const secondaryHref =
     "secondaryHref" in feature && feature.secondaryHref
       ? feature.secondaryHref
@@ -198,110 +242,115 @@ function FeatureCard({
   return (
     <article
       className={cn(
-        "group grid min-w-0 gap-3 focus-within:outline-none",
-        feature.available ? "" : "opacity-70",
+        "group flex min-w-0 flex-col rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/82 p-4 shadow-[var(--shadow-1)] transition-[border-color,box-shadow,background-color] duration-[var(--dur-base)] focus-within:shadow-[var(--ring)]",
+        feature.available
+          ? "border-[var(--border)] hover:border-[var(--border-amber)] hover:bg-[var(--bg-1)] hover:shadow-[var(--shadow-2)]"
+          : "border-[var(--border-subtle)] opacity-72",
       )}
       aria-disabled={feature.available ? undefined : "true"}
     >
-      <div
-        className={cn(
-          "relative h-24 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] transition-all duration-[var(--dur-base)] sm:h-36 md:h-40",
-          feature.available
-            ? "group-hover:border-[var(--border-amber)]/60"
-            : "opacity-60",
-        )}
-      >
-        <div className="absolute inset-0 flex items-center justify-center">
-          <Icon
-            className={cn(
-              "h-10 w-10 transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] sm:h-14 sm:w-14",
-              feature.available
-                ? "text-[var(--fg-1)] group-hover:scale-[1.08] group-hover:text-[var(--amber-300)]"
-                : "text-[var(--fg-3)]",
-            )}
-            strokeWidth={1.25}
-          />
-        </div>
-        <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
-          {num}
-        </span>
-        {feature.available ? (
-          <span
-            aria-hidden
-            className="absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-pill)] border border-[var(--border)] bg-[var(--bg-0)]/40 backdrop-blur transition-all duration-[var(--dur-base)] group-hover:border-[var(--border-amber)] group-hover:bg-[var(--accent)] group-hover:text-black"
-          >
-            <ArrowUpRight className="h-3.5 w-3.5" />
-          </span>
-        ) : (
-          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-[var(--radius-pill)] border border-[var(--border)] bg-[var(--bg-0)]/40 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] backdrop-blur">
-            {feature.badge}
-          </span>
-        )}
-      </div>
-      <div>
-        <div className="flex items-baseline gap-2">
-          <h2
-            className={cn(
-              "type-card-title transition-colors duration-[var(--dur-base)] sm:text-[18px] md:text-[19px]",
-              feature.available
-                ? "text-[var(--fg-0)] group-hover:text-[var(--amber-300)]"
-                : "text-[var(--fg-2)]",
-            )}
-          >
-            {feature.title}
-          </h2>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 gap-3">
           <span
             className={cn(
-              "font-mono text-[10px] uppercase tracking-[0.18em]",
-              feature.available ? "text-[var(--fg-2)]" : "text-[var(--fg-3)]",
+              "flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
+              feature.available
+                ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-3)]",
             )}
           >
-            {feature.en}
+            <Icon className="h-5 w-5" strokeWidth={1.7} />
           </span>
-          {feature.available ? (
-            <span className="ml-auto shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-              {feature.badge}
-            </span>
-          ) : null}
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">
+              {num} · {feature.en}
+            </p>
+            <h2
+              className={cn(
+                "mt-1 text-[18px] font-semibold leading-tight tracking-tight transition-colors duration-[var(--dur-base)]",
+                feature.available
+                  ? "text-[var(--fg-0)] group-hover:text-[var(--accent)]"
+                  : "text-[var(--fg-2)]",
+              )}
+            >
+              {feature.title}
+            </h2>
+          </div>
         </div>
-        <p
+        <span
           className={cn(
-            "mt-1.5 max-w-md text-[12.5px] leading-[1.6]",
-            feature.available ? "text-[var(--fg-2)]" : "text-[var(--fg-3)]",
+            "shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium",
+            feature.available
+              ? "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-1)]"
+              : "border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-3)]",
           )}
         >
-          {feature.description}
-        </p>
+          {feature.badge}
+        </span>
       </div>
-      <div className="grid gap-1.5 border-t border-[var(--border)] pt-3 text-[12px] leading-[1.55] text-[var(--fg-1)]">
-        <MetaLine label="流程" value={feature.flow} />
-        <MetaLine label="输入" value={feature.input} />
-        <MetaLine label="输出" value={feature.output} />
-        <MetaLine label="耗时" value={feature.eta} />
+
+      <p
+        className={cn(
+          "mt-3 min-h-[3rem] text-[13px] leading-6",
+          feature.available ? "text-[var(--fg-1)]" : "text-[var(--fg-3)]",
+        )}
+      >
+        {feature.description}
+      </p>
+
+      <div className="mt-4 grid gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/58 p-3">
+        <div className="grid grid-cols-3 gap-2">
+          <FeatureDatum label="输入" value={feature.input} />
+          <FeatureDatum label="输出" value={feature.output} />
+          <FeatureDatum label="耗时" value={feature.eta} />
+        </div>
+        <WorkflowSteps steps={steps} disabled={!feature.available} />
       </div>
-      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
+
+      <div className="mt-3 min-h-8 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/44 px-3 py-2 text-xs text-[var(--fg-2)]">
+        {recentProject ? (
+          <span className="flex min-w-0 items-center gap-2">
+            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--success-fg)]" />
+            <span className="truncate">
+              最近：{recentProject.title || feature.title} · {recentStatus}
+            </span>
+          </span>
+        ) : feature.available ? (
+          <span className="flex min-w-0 items-center gap-2">
+            <FolderKanban className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+            <span className="truncate">可直接新建，也会自动进入最近项目。</span>
+          </span>
+        ) : (
+          <span className="flex min-w-0 items-center gap-2">
+            <Clock3 className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)]" />
+            <span className="truncate">暂未开放，保留为未来视频/脚本流程入口。</span>
+          </span>
+        )}
+      </div>
+
+      <div className="mt-auto grid grid-cols-1 gap-2 pt-4 min-[420px]:grid-cols-2">
         {feature.available && "primaryHref" in feature ? (
           <Link
             href={feature.primaryHref}
-            className="inline-flex min-h-9 items-center justify-center gap-1.5 bg-[var(--accent)] px-3 text-[12px] font-medium text-black transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.01] active:scale-[0.98]"
+            className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] duration-[var(--dur-base)] hover:shadow-[var(--shadow-amber)] active:scale-[0.98]"
           >
             {feature.primaryLabel}
             <ArrowRight className="h-3.5 w-3.5" />
           </Link>
         ) : (
-          <span className="inline-flex min-h-9 items-center justify-center border border-[var(--border)] px-3 text-[12px] text-[var(--fg-2)]">
+          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-[13px] text-[var(--fg-2)]">
             暂未开放
           </span>
         )}
         {feature.available ? (
           <Link
             href={secondaryHref}
-            className="inline-flex min-h-9 items-center justify-center gap-1.5 border border-[var(--border)] px-3 text-[12px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)]"
+            className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/58 px-3 text-[13px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]"
           >
             {secondaryLabel}
           </Link>
         ) : (
-          <span className="inline-flex min-h-9 items-center justify-center border border-[var(--border-subtle)] px-3 text-[12px] text-[var(--fg-3)]">
+          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] px-3 text-[13px] text-[var(--fg-3)]">
             规划中
           </span>
         )}
@@ -310,14 +359,70 @@ function FeatureCard({
   );
 }
 
-function MetaLine({ label, value }: { label: string; value: string }) {
+function ProjectMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: number;
+  detail: string;
+}) {
   return (
-    <p className="grid grid-cols-[3.5em_minmax(0,1fr)] gap-2">
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+    <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+      <p className="text-[11px] text-[var(--fg-2)]">{label}</p>
+      <p className="mt-1 text-[20px] font-semibold tabular-nums text-[var(--fg-0)]">
+        {value}
+      </p>
+      <p className="mt-0.5 truncate text-[11px] text-[var(--fg-3)]">{detail}</p>
+    </div>
+  );
+}
+
+function MobileMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 py-2">
+      <p className="text-[10px] text-[var(--fg-2)]">{label}</p>
+      <p className="mt-0.5 text-base font-semibold tabular-nums text-[var(--fg-0)]">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function FeatureDatum({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
         {label}
-      </span>
-      <span className="min-w-0">{value}</span>
-    </p>
+      </p>
+      <p className="mt-1 line-clamp-2 min-h-8 text-[12px] leading-4 text-[var(--fg-1)]">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function WorkflowSteps({ steps, disabled }: { steps: string[]; disabled: boolean }) {
+  return (
+    <div className="flex min-w-0 flex-wrap gap-1.5 border-t border-[var(--border-subtle)] pt-3">
+      {steps.map((step, stepIndex) => (
+        <span
+          key={`${step}-${stepIndex}`}
+          className={cn(
+            "inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-full border px-2.5 text-[11px]",
+            disabled
+              ? "border-[var(--border-subtle)] text-[var(--fg-3)]"
+              : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]",
+          )}
+        >
+          <span className="font-mono text-[10px] tabular-nums text-[var(--fg-3)]">
+            {stepIndex + 1}
+          </span>
+          <span className="truncate">{step}</span>
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -336,7 +441,7 @@ function RecentProjects({
     <section id="recent-projects" className="mt-2 border-t border-[var(--border)] pt-4">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="min-w-0">
-          <p className="type-page-kicker">Recent Projects</p>
+          <p className="type-page-kicker">最近项目</p>
           <h2 className="type-section-title mt-1">最近项目</h2>
         </div>
         <Link
@@ -352,7 +457,7 @@ function RecentProjects({
           <div className="flex min-h-24 items-center justify-center gap-2 text-[var(--fg-2)]">
             <Loader2 className="h-4 w-4 animate-spin" />
             <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
-              Loading
+              读取中
             </span>
           </div>
         ) : error ? (
@@ -429,10 +534,10 @@ function workflowTypeInfo(type: string): {
   Icon: typeof Shirt;
 } {
   if (type === "poster_design") {
-    return { label: "Poster", fallbackTitle: "海报项目", Icon: ImageIcon };
+    return { label: "海报", fallbackTitle: "海报项目", Icon: ImageIcon };
   }
   if (type === "apparel_model_showcase") {
-    return { label: "Apparel", fallbackTitle: "服饰模特图", Icon: Shirt };
+    return { label: "服饰", fallbackTitle: "服饰模特图", Icon: Shirt };
   }
-  return { label: "Project", fallbackTitle: "项目", Icon: Palette };
+  return { label: "项目", fallbackTitle: "项目", Icon: Palette };
 }

@@ -97,6 +97,9 @@ _VIDEO_RESOLUTION_ORDER = {
     value: index for index, value in enumerate(_DEFAULT_VIDEO_RESOLUTIONS)
 }
 _SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
+_HAPPYHORSE_RESOLUTIONS = ("720p", "1080p")
+_HAPPYHORSE_ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
+_HAPPYHORSE_MODEL_PREFIX = "happyhorse-1.0"
 _DEFAULT_VIDEO_ASPECT_RATIOS = [
     "adaptive",
     "16:9",
@@ -196,6 +199,28 @@ def _reference_video_public_url(video: Video, public_base_url: str) -> str:
     return (
         f"{public_base_url.rstrip('/')}/api/videos/reference/{video.id}/binary?{query}"
     )
+
+
+def _ensure_reference_image_access_token(image: Image) -> str:
+    metadata = dict(image.metadata_jsonb or {})
+    token = metadata.get("video_reference_access_token")
+    if not isinstance(token, str) or not token:
+        token = secrets.token_urlsafe(32)
+        metadata["video_reference_access_token"] = token
+        image.metadata_jsonb = metadata
+    return token
+
+
+def _reference_image_public_url(image: Image, public_base_url: str) -> str:
+    token = _ensure_reference_image_access_token(image)
+    query = urlencode({"token": token})
+    return (
+        f"{public_base_url.rstrip('/')}/api/images/reference/{image.id}/binary?{query}"
+    )
+
+
+def _provider_requires_public_media(provider: Any) -> bool:
+    return getattr(provider, "kind", None) == "dashscope"
 
 
 def _write_new_file_atomic(path: Path, data: bytes) -> None:
@@ -472,6 +497,15 @@ def _is_seedance_20_fast_model(*identifiers: str | None) -> bool:
     return is_seedance_20_fast_identifier(*identifiers)
 
 
+def _is_happyhorse_model(*identifiers: str | None) -> bool:
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        if identifier.strip().lower().startswith(_HAPPYHORSE_MODEL_PREFIX):
+            return True
+    return False
+
+
 def _video_resolution_options_for_model(
     model: str,
     *,
@@ -481,6 +515,9 @@ def _video_resolution_options_for_model(
     available = _ordered_video_resolutions(
         available_resolutions or _DEFAULT_VIDEO_RESOLUTIONS
     )
+    if _is_happyhorse_model(model, upstream_model):
+        allowed = set(_HAPPYHORSE_RESOLUTIONS)
+        return [resolution for resolution in available if resolution in allowed]
     if not _is_seedance_20_fast_model(model, upstream_model):
         return available
     allowed = set(_SEEDANCE_20_FAST_RESOLUTIONS)
@@ -504,15 +541,31 @@ def _generation_request_fingerprint(row: VideoGeneration) -> str | None:
 def _needs_reference_public_base_url(
     body: VideoCreateIn,
     fallback_snapshots: list[dict[str, Any]] | None,
+    *,
+    requires_public_media: bool = False,
 ) -> bool:
+    if requires_public_media and body.action == "i2v" and body.input_image_id:
+        return True
+    if requires_public_media and any(
+        item.kind == "image" and item.image_id for item in body.reference_media
+    ):
+        return True
     if any(item.kind == "video" and item.video_id for item in body.reference_media):
         return True
     if fallback_snapshots is None:
         return False
     return any(
-        item.get("kind") == "video"
-        and isinstance(item.get("video_id"), str)
-        and not isinstance(item.get("url"), str)
+        (
+            item.get("kind") == "video"
+            and isinstance(item.get("video_id"), str)
+            and not isinstance(item.get("url"), str)
+        )
+        or (
+            requires_public_media
+            and item.get("kind") == "image"
+            and isinstance(item.get("image_id"), str)
+            and not isinstance(item.get("url"), str)
+        )
         for item in fallback_snapshots
         if isinstance(item, dict)
     )
@@ -523,8 +576,14 @@ async def _reference_public_base_url(
     db: AsyncSession,
     body: VideoCreateIn,
     fallback_snapshots: list[dict[str, Any]] | None,
+    *,
+    requires_public_media: bool = False,
 ) -> str | None:
-    if not _needs_reference_public_base_url(body, fallback_snapshots):
+    if not _needs_reference_public_base_url(
+        body,
+        fallback_snapshots,
+        requires_public_media=requires_public_media,
+    ):
         return None
     if request is None:
         return None
@@ -533,7 +592,7 @@ async def _reference_public_base_url(
     except Exception as exc:
         raise _http(
             "video_reference_public_url_missing",
-            "PUBLIC_BASE_URL or site.public_base_url is required for uploaded reference videos",
+            "PUBLIC_BASE_URL or site.public_base_url is required for upstream-readable video media",
             503,
         ) from exc
 
@@ -655,13 +714,19 @@ async def video_options(
                         upstream_model=upstream_model,
                         available_resolutions=resolutions,
                     )
+                    price_action = (
+                        "reference_image"
+                        if provider.kind == "dashscope"
+                        and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
+                        else action
+                    )
                     action_resolutions = [
                         resolution
                         for resolution in allowed_resolutions
                         if _has_video_price(
                             price_pairs,
                             model=billing_model,
-                            action=action,
+                            action=price_action,
                             resolutions=[resolution],
                         )
                     ]
@@ -670,9 +735,7 @@ async def video_options(
                         model_resolutions.setdefault(key, set()).update(
                             action_resolutions
                         )
-                        model_billing_models.setdefault(key, {})[
-                            action
-                        ] = billing_model
+                        model_billing_models.setdefault(key, {})[action] = billing_model
                 continue
             model, action = key.rsplit(":", 1)
             if action not in VIDEO_ACTIONS or not provider.supports(model, action):
@@ -684,13 +747,19 @@ async def video_options(
                 upstream_model=upstream_model,
                 available_resolutions=resolutions,
             )
+            price_action = (
+                "reference_image"
+                if provider.kind == "dashscope"
+                and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
+                else action
+            )
             action_resolutions = [
                 resolution
                 for resolution in allowed_resolutions
                 if _has_video_price(
                     price_pairs,
                     model=billing_model,
-                    action=action,
+                    action=price_action,
                     resolutions=[resolution],
                 )
             ]
@@ -788,13 +857,18 @@ async def _input_image_snapshot(
     *,
     user_id: str,
     image_id: str | None,
-    fallback_snapshot: tuple[str | None, str | None] | None = None,
-) -> tuple[str | None, str | None]:
+    fallback_snapshot: tuple[str | None, str | None, str | None] | None = None,
+    reference_public_base_url: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
     if image_id is None:
         if fallback_snapshot is not None:
             return fallback_snapshot
-        return None, None
-    if fallback_snapshot is not None and fallback_snapshot[0]:
+        return None, None, None
+    if (
+        fallback_snapshot is not None
+        and fallback_snapshot[0]
+        and (reference_public_base_url is None or isinstance(fallback_snapshot[2], str))
+    ):
         return fallback_snapshot
     img = (
         await db.execute(
@@ -809,7 +883,12 @@ async def _input_image_snapshot(
         if fallback_snapshot is not None:
             return fallback_snapshot
         raise _http("input_image_not_found", "input image not found", 404)
-    return img.storage_key, img.sha256
+    url = (
+        _reference_image_public_url(img, reference_public_base_url)
+        if reference_public_base_url is not None
+        else None
+    )
+    return img.storage_key, img.sha256, url
 
 
 def _validate_reference_url(raw_url: str) -> str:
@@ -846,6 +925,24 @@ async def _reference_media_snapshots(
         snapshots = [dict(item) for item in fallback_snapshots]
         if reference_public_base_url is not None:
             for snapshot in snapshots:
+                if (
+                    snapshot.get("kind") == "image"
+                    and not isinstance(snapshot.get("url"), str)
+                    and isinstance(snapshot.get("image_id"), str)
+                ):
+                    image = (
+                        await db.execute(
+                            select(Image).where(
+                                Image.id == snapshot["image_id"],
+                                Image.user_id == user_id,
+                                Image.deleted_at.is_(None),
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if image is not None:
+                        snapshot["url"] = _reference_image_public_url(
+                            image, reference_public_base_url
+                        )
                 if (
                     snapshot.get("kind") == "video"
                     and not isinstance(snapshot.get("url"), str)
@@ -908,6 +1005,9 @@ async def _reference_media_snapshots(
                     "storage_key": image.storage_key,
                     "sha256": image.sha256,
                     "mime": image.mime,
+                    "url": _reference_image_public_url(image, reference_public_base_url)
+                    if reference_public_base_url is not None
+                    else None,
                     "source": "image",
                 }
             )
@@ -951,18 +1051,26 @@ async def _create_video_generation_record(
     user: CurrentUser,
     *,
     request: Request | None = None,
-    input_image_snapshot: tuple[str | None, str | None] | None = None,
+    input_image_snapshot: tuple[str | None, str | None, str | None] | None = None,
     reference_media_snapshot: list[dict[str, Any]] | None = None,
 ) -> VideoGenerationOut:
     provider, estimates = await _require_video_create_ready(db, body)
-    input_storage_key, input_sha256 = await _input_image_snapshot(
+    requires_public_media = _provider_requires_public_media(provider)
+    reference_public_base = await _reference_public_base_url(
+        request,
+        db,
+        body,
+        reference_media_snapshot,
+        requires_public_media=requires_public_media,
+    )
+    input_storage_key, input_sha256, input_image_url = await _input_image_snapshot(
         db,
         user_id=user.id,
         image_id=body.input_image_id,
         fallback_snapshot=input_image_snapshot,
-    )
-    reference_public_base = await _reference_public_base_url(
-        request, db, body, reference_media_snapshot
+        reference_public_base_url=reference_public_base
+        if requires_public_media
+        else None,
     )
     reference_snapshots = await _reference_media_snapshots(
         db,
@@ -971,6 +1079,30 @@ async def _create_video_generation_record(
         fallback_snapshots=reference_media_snapshot,
         reference_public_base_url=reference_public_base,
     )
+    if provider.kind == "dashscope" and any(
+        item.get("kind") == "video"
+        for item in reference_snapshots
+        if isinstance(item, dict)
+    ):
+        raise _http(
+            "unsupported_reference_media",
+            "HappyHorse reference-to-video supports image references only",
+            422,
+        )
+    if (
+        provider.kind == "dashscope"
+        and body.action in {"t2v", "reference"}
+        and body.aspect_ratio != "adaptive"
+        and body.aspect_ratio not in _HAPPYHORSE_ASPECT_RATIOS
+    ):
+        raise _http(
+            "invalid_aspect_ratio",
+            "aspect_ratio is not available for HappyHorse",
+            422,
+            model=body.model,
+            aspect_ratio=body.aspect_ratio,
+            available_aspect_ratios=list(_HAPPYHORSE_ASPECT_RATIOS),
+        )
     upstream_model = provider.upstream_model_for(body.model, body.action)
     billing_model = video_billing_model(body.model, upstream_model)
     pricing_variant = video_pricing_variant(
@@ -1021,6 +1153,7 @@ async def _create_video_generation_record(
             "provider_name": provider.name,
             "provider_kind": provider.kind,
             "upstream_model": upstream_model,
+            "input_image_url": input_image_url,
             "reference_media": reference_snapshots,
             "pricing_variant": pricing_variant,
         },
@@ -1030,6 +1163,7 @@ async def _create_video_generation_record(
             "pricing_variant": pricing_variant,
             "billing_model": billing_model,
             "requested_model": body.model,
+            "requires_public_media": requires_public_media,
         },
         status=VideoGenerationStatus.QUEUED.value,
         progress_stage=VideoGenerationStage.QUEUED.value,
@@ -1415,7 +1549,13 @@ async def retry_video_generation(
         body,
         user,
         request=request,
-        input_image_snapshot=(row.input_image_storage_key, row.input_image_sha256),
+        input_image_snapshot=(
+            row.input_image_storage_key,
+            row.input_image_sha256,
+            (row.upstream_request or {}).get("input_image_url")
+            if isinstance((row.upstream_request or {}).get("input_image_url"), str)
+            else None,
+        ),
         reference_media_snapshot=valid_reference_snapshots,
     )
 

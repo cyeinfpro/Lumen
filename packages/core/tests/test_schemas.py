@@ -6,6 +6,37 @@ def test_provider_stats_schemas_are_exported():
     assert "ProviderStatsOut" in namespace
 
 
+def test_video_provider_schema_accepts_dashscope_happyhorse():
+    from lumen_core.schemas import VideoProvidersUpdateIn
+
+    body = VideoProvidersUpdateIn(
+        enabled=True,
+        items=[
+            {
+                "name": "dashscope-happyhorse",
+                "kind": "dashscope",
+                "base_url": "https://dashscope-intl.aliyuncs.com",
+                "api_key": "sk-test",
+                "enabled": True,
+                "priority": 100,
+                "weight": 1,
+                "concurrency": 2,
+                "models": {
+                    "happyhorse-1.0:t2v": "happyhorse-1.0-t2v",
+                    "happyhorse-1.0:i2v": "happyhorse-1.0-i2v",
+                    "happyhorse-1.0:reference": "happyhorse-1.0-r2v",
+                },
+            }
+        ],
+    )
+
+    item = body.items[0]
+    assert item.kind == "dashscope"
+    assert item.models["happyhorse-1.0:t2v"] == "happyhorse-1.0-t2v"
+    assert item.models["happyhorse-1.0:i2v"] == "happyhorse-1.0-i2v"
+    assert item.models["happyhorse-1.0:reference"] == "happyhorse-1.0-r2v"
+
+
 def test_image_params_support_render_and_output_options():
     from pydantic import ValidationError
 
@@ -218,6 +249,15 @@ def test_video_create_schema_enforces_action_image_contract():
         aspect_ratio="16:9",
         idempotency_key="idem-t2v-smart-duration",
     )
+    VideoCreateIn(
+        action="t2v",
+        model="happyhorse-1.0",
+        prompt="make a short clip",
+        duration_s=3,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-t2v-three-seconds",
+    )
 
     for kwargs in (
         {"action": "t2v", "input_image_id": "img-1"},
@@ -229,7 +269,7 @@ def test_video_create_schema_enforces_action_image_contract():
             "reference_media": [{"kind": "image", "image_id": "img-2"}],
         },
         {"action": "reference", "reference_media": []},
-        {"action": "t2v", "duration_s": 3},
+        {"action": "t2v", "duration_s": 2},
         {"action": "t2v", "resolution": "4k"},
         {"action": "t2v", "aspect_ratio": "4:5"},
         {"action": "t2v", "fps": 24},
