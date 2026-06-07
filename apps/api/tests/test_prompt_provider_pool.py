@@ -332,6 +332,61 @@ async def test_prompt_enhance_checks_per_user_rate_limit(
 
 
 @pytest.mark.asyncio
+async def test_video_prompt_enhance_does_not_forward_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    captured: dict[str, Any] = {}
+
+    async def fake_check(_redis: object, _key: str) -> None:
+        return None
+
+    async def fake_resolve_provider_order(_db: object) -> list[ProviderDefinition]:
+        return [
+            ProviderDefinition(
+                name="primary",
+                base_url="https://primary.example",
+                api_key="sk-primary",
+            )
+        ]
+
+    async def fake_prepare_billing(_db: object, _user: object) -> None:
+        return None
+
+    async def fake_stream_enhance(*args: Any, **kwargs: Any):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        yield "data: [DONE]\n\n"
+
+    def passthrough_stream(source, **_kwargs: Any):
+        return source
+
+    monkeypatch.setattr(prompts.PROMPTS_ENHANCE_LIMITER, "check", fake_check)
+    monkeypatch.setattr(prompts, "get_redis", lambda: object())
+    monkeypatch.setattr(prompts, "_resolve_provider_order", fake_resolve_provider_order)
+    monkeypatch.setattr(prompts, "_prepare_prompt_enhance_billing", fake_prepare_billing)
+    monkeypatch.setattr(prompts, "_stream_enhance", fake_stream_enhance)
+    monkeypatch.setattr(prompts, "_stream_with_keepalive", passthrough_stream)
+
+    response = await prompts.enhance_video_prompt(
+        prompts.VideoEnhanceIn(text="一个女孩在城市街头奔跑"),
+        object(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1", account_mode="byok"),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert chunks == ["data: [DONE]\n\n"]
+    assert "metadata" not in captured["kwargs"]
+    assert captured["kwargs"]["system_prompt"] == prompts.VIDEO_ENHANCE_SYSTEM_PROMPT
+    assert captured["kwargs"]["content"][0]["type"] == "input_text"
+
+
+@pytest.mark.asyncio
 async def test_prompt_enhance_uses_legacy_env_when_providers_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1386,10 +1386,6 @@ async def enhance_video_prompt(
                 billing,
                 system_prompt=VIDEO_ENHANCE_SYSTEM_PROMPT,
                 content=content,
-                metadata={
-                    "purpose": "video_prompt_enhance",
-                    "route": "prompts.video.enhance",
-                },
             )
         ),
         media_type="text/event-stream",
