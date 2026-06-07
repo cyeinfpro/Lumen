@@ -629,13 +629,21 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
 
 async def _try_provider_cancel(adapter: Any, generation: VideoGeneration) -> None:
     diagnostics = dict(generation.diagnostics or {})
-    if diagnostics.get("cancel_sent_at"):
+    if diagnostics.get("cancel_sent_at") or diagnostics.get("cancel_unsupported_at"):
         return
     try:
         result = await adapter.cancel(generation.provider_task_id)
-        diagnostics["cancel_sent_at"] = _now().isoformat()
+        attempted_at = _now().isoformat()
+        diagnostics["cancel_attempted_at"] = attempted_at
         diagnostics["cancel_result"] = result.raw if result else None
+        if result is None:
+            diagnostics["cancel_unsupported_at"] = attempted_at
+        elif result.accepted:
+            diagnostics["cancel_sent_at"] = attempted_at
+        else:
+            diagnostics["cancel_rejected_at"] = attempted_at
     except Exception as exc:  # noqa: BLE001
+        diagnostics["cancel_error_at"] = _now().isoformat()
         diagnostics["cancel_error"] = str(exc)[:500]
     generation.diagnostics = diagnostics
 

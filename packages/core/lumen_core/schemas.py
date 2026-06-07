@@ -1810,7 +1810,13 @@ class ProvidersUpdateIn(BaseModel):
     proxies: list[ProviderProxyIn] = []
 
 
-VideoProviderKind = Literal["volcano", "dashscope", "veo", "fake"]
+VideoProviderKind = Literal[
+    "volcano",
+    "volcano_third_party",
+    "dashscope",
+    "veo",
+    "fake",
+]
 
 
 class VideoProviderItemOut(BaseModel):

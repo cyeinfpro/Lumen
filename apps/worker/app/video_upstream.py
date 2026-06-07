@@ -7,7 +7,7 @@ import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Literal, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -121,8 +121,12 @@ def _nested_get(payload: dict[str, Any], *paths: tuple[str, ...]) -> Any:
 def _int_or_none(value: Any) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value.endswith("%"):
+            value = value[:-1].strip()
     try:
-        parsed = int(value)
+        parsed = int(float(value)) if isinstance(value, str) else int(value)
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
@@ -136,10 +140,12 @@ def _status(raw: Any) -> VideoProviderStatus:
         "created": "queued",
         "running": "running",
         "processing": "running",
+        "in_progress": "running",
         "succeeded": "succeeded",
         "success": "succeeded",
         "completed": "succeeded",
         "failed": "failed",
+        "failure": "failed",
         "error": "failed",
         "cancelled": "cancelled",
         "canceled": "cancelled",
@@ -153,6 +159,9 @@ def _failure_class(payload: dict[str, Any]) -> str | None:
         payload,
         ("error", "type"),
         ("error", "code"),
+        ("data", "data", "error", "type"),
+        ("data", "data", "error", "code"),
+        ("data", "fail_reason"),
         ("failure_class",),
         ("status_detail",),
     )
@@ -161,7 +170,12 @@ def _failure_class(payload: dict[str, Any]) -> str | None:
     value = raw.strip().lower()
     if not value:
         return None
-    if "policy" in value or "moderation" in value or "safety" in value:
+    if (
+        "policy" in value
+        or "moderation" in value
+        or "safety" in value
+        or "sensitive" in value
+    ):
         return "content_policy"
     if "timeout" in value:
         return "timeout"
@@ -181,14 +195,17 @@ def _billable(payload: dict[str, Any]) -> bool | None:
         ("output", "billable"),
         ("upstream_billable",),
         ("data", "upstream_billable"),
+        ("data", "data", "upstream_billable"),
         ("result", "upstream_billable"),
         ("output", "upstream_billable"),
         ("billing", "billable"),
         ("data", "billing", "billable"),
+        ("data", "data", "billing", "billable"),
         ("result", "billing", "billable"),
         ("output", "billing", "billable"),
         ("usage", "billable"),
         ("data", "usage", "billable"),
+        ("data", "data", "usage", "billable"),
         ("result", "usage", "billable"),
         ("output", "usage", "billable"),
     )
@@ -212,12 +229,34 @@ def _video_url(payload: dict[str, Any]) -> str | None:
         ("video_url",),
         ("data", "video_url"),
         ("data", "content", "video_url"),
+        ("data", "data", "video_url"),
+        ("data", "data", "content", "video_url"),
+        ("data", "data", "url"),
+        ("data", "data", "result_url"),
+        ("data", "result_url"),
+        ("metadata", "url"),
+        ("metadata", "fetch_url"),
+        ("data", "metadata", "url"),
+        ("data", "metadata", "fetch_url"),
+        ("data", "data", "metadata", "url"),
+        ("data", "data", "metadata", "fetch_url"),
     )
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     output = payload.get("output")
     if isinstance(output, dict):
         results = output.get("results")
+        if isinstance(results, list):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                value = _nested_get(item, ("video_url",), ("url",))
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    for results in (
+        payload.get("results"),
+        _nested_get(payload, ("data", "results"), ("data", "data", "results")),
+    ):
         if isinstance(results, list):
             for item in results:
                 if not isinstance(item, dict):
@@ -236,16 +275,36 @@ def _video_url(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _absolute_url(raw_url: str | None, base_url: str) -> str | None:
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        return None
+    value = raw_url.strip()
+    parts = urlsplit(value)
+    if parts.scheme.lower() in {"http", "https"} and parts.hostname:
+        return value
+    return urljoin(f"{_collapse_url_path_slashes(base_url).rstrip('/')}/", value)
+
+
+def _collapse_url_path_slashes(raw_url: str) -> str:
+    parts = urlsplit(raw_url)
+    path = parts.path
+    while "//" in path:
+        path = path.replace("//", "/")
+    return parts._replace(path=path.rstrip("/")).geturl()
+
+
 def _usage_total_tokens(payload: dict[str, Any]) -> int | None:
     return _int_or_none(
         _nested_get(
             payload,
             ("usage", "completion_tokens"),
             ("data", "usage", "completion_tokens"),
+            ("data", "data", "usage", "completion_tokens"),
             ("result", "usage", "completion_tokens"),
             ("output", "usage", "completion_tokens"),
             ("usage", "total_tokens"),
             ("data", "usage", "total_tokens"),
+            ("data", "data", "usage", "total_tokens"),
             ("result", "usage", "total_tokens"),
             ("output", "usage", "total_tokens"),
             ("usage_total_tokens",),
@@ -333,9 +392,86 @@ def _require_http_url(raw: str | None, *, field: str) -> str:
     return value
 
 
+def _seedance_content(
+    req: VideoSubmitRequest,
+    *,
+    allow_input_image_url: bool = False,
+) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
+    if req.action == "i2v":
+        image_url = req.input_image_url if allow_input_image_url else None
+        if not image_url:
+            if not req.input_image_bytes:
+                raise VideoUpstreamError(
+                    "missing input image bytes",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            image_url = _image_data_url(req.input_image_bytes, req.input_image_mime)
+        content.append(
+            {
+                "type": "image_url",
+                "role": "first_frame",
+                "image_url": {"url": image_url},
+            }
+        )
+    if req.action == "reference":
+        image_refs = [item for item in req.reference_media if item.kind == "image"]
+        video_refs = [item for item in req.reference_media if item.kind == "video"]
+        if not image_refs and not video_refs:
+            raise VideoUpstreamError(
+                "reference generation requires reference image or video",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if len(image_refs) > 9 or len(video_refs) > 3:
+            raise VideoUpstreamError(
+                "too many reference media items",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        for item in req.reference_media:
+            if item.kind == "image":
+                url = item.url
+                if not url:
+                    if not item.data:
+                        raise VideoUpstreamError(
+                            "missing reference image data",
+                            error_code="invalid_input",
+                            status_code=422,
+                        )
+                    url = _image_data_url(item.data, item.mime)
+                content.append(
+                    {
+                        "type": "image_url",
+                        "role": "reference_image",
+                        "image_url": {"url": url},
+                    }
+                )
+            elif item.kind == "video":
+                url = item.url
+                if not url:
+                    raise VideoUpstreamError(
+                        "reference video requires a public URL or asset ID",
+                        error_code="invalid_input",
+                        status_code=422,
+                    )
+                content.append(
+                    {
+                        "type": "video_url",
+                        "role": "reference_video",
+                        "video_url": {"url": url},
+                    }
+                )
+    return content
+
+
 class VolcanoSeedanceAdapter:
     def __init__(self, provider: VideoProviderDefinition) -> None:
         self.provider = provider
+
+    def _client_base_url(self) -> str:
+        return self.provider.base_url
 
     def _client(self) -> httpx.AsyncClient:
         proxy_url = (
@@ -348,7 +484,7 @@ class VolcanoSeedanceAdapter:
             pool=30.0,
         )
         kwargs: dict[str, Any] = {
-            "base_url": self.provider.base_url,
+            "base_url": self._client_base_url(),
             "timeout": timeout,
             "follow_redirects": True,
             "headers": {"Authorization": f"Bearer {self.provider.api_key}"},
@@ -360,7 +496,7 @@ class VolcanoSeedanceAdapter:
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
         body: dict[str, Any] = {
             "model": req.upstream_model,
-            "content": [{"type": "text", "text": req.prompt}],
+            "content": _seedance_content(req),
             "ratio": req.aspect_ratio,
             "resolution": req.resolution,
             "duration": req.duration_s,
@@ -372,73 +508,6 @@ class VolcanoSeedanceAdapter:
             body["seed"] = req.seed
         if req.callback_url:
             body["callback_url"] = req.callback_url
-        if req.action == "i2v":
-            if not req.input_image_bytes:
-                raise VideoUpstreamError(
-                    "missing input image bytes",
-                    error_code="invalid_input",
-                    status_code=422,
-                )
-            body["content"].append(
-                {
-                    "type": "image_url",
-                    "role": "first_frame",
-                    "image_url": {
-                        "url": _image_data_url(
-                            req.input_image_bytes,
-                            req.input_image_mime,
-                        )
-                    },
-                }
-            )
-        if req.action == "reference":
-            image_refs = [item for item in req.reference_media if item.kind == "image"]
-            video_refs = [item for item in req.reference_media if item.kind == "video"]
-            if not image_refs and not video_refs:
-                raise VideoUpstreamError(
-                    "reference generation requires reference image or video",
-                    error_code="invalid_input",
-                    status_code=422,
-                )
-            if len(image_refs) > 9 or len(video_refs) > 3:
-                raise VideoUpstreamError(
-                    "too many reference media items",
-                    error_code="invalid_input",
-                    status_code=422,
-                )
-            for item in req.reference_media:
-                if item.kind == "image":
-                    url = item.url
-                    if not url:
-                        if not item.data:
-                            raise VideoUpstreamError(
-                                "missing reference image data",
-                                error_code="invalid_input",
-                                status_code=422,
-                            )
-                        url = _image_data_url(item.data, item.mime)
-                    body["content"].append(
-                        {
-                            "type": "image_url",
-                            "role": "reference_image",
-                            "image_url": {"url": url},
-                        }
-                    )
-                elif item.kind == "video":
-                    url = item.url
-                    if not url:
-                        raise VideoUpstreamError(
-                            "reference video requires a public URL or asset ID",
-                            error_code="invalid_input",
-                            status_code=422,
-                        )
-                    body["content"].append(
-                        {
-                            "type": "video_url",
-                            "role": "reference_video",
-                            "video_url": {"url": url},
-                        }
-                    )
         async with self._client() as client:
             response = await client.post("/contents/generations/tasks", json=body)
         raw = _response_json(response)
@@ -500,6 +569,86 @@ class VolcanoSeedanceAdapter:
             response = await client.delete(
                 f"/contents/generations/tasks/{provider_task_id}"
             )
+        raw = _response_json(response)
+        if response.status_code in {404, 410}:
+            return CancelResult(accepted=False, raw=raw)
+        if response.status_code >= 400:
+            raise _http_error("cancel", response.status_code, raw)
+        return CancelResult(accepted=True, raw=raw)
+
+
+class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
+    """Seedance-compatible third-party gateways such as MOYU."""
+
+    def _client_base_url(self) -> str:
+        return _collapse_url_path_slashes(self.provider.base_url)
+
+    def _path(self, suffix: str) -> str:
+        base_path = urlsplit(self._client_base_url()).path.rstrip("/")
+        if base_path.endswith("/v1"):
+            return suffix
+        return f"v1/{suffix}"
+
+    async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        metadata: dict[str, Any] = {
+            "content": _seedance_content(req, allow_input_image_url=True),
+            "resolution": req.resolution,
+            "ratio": req.aspect_ratio,
+            "generate_audio": req.generate_audio,
+        }
+        if req.duration_s != -1:
+            metadata["duration"] = req.duration_s
+        if req.seed is not None:
+            metadata["seed"] = req.seed
+        if req.watermark:
+            metadata["watermark"] = req.watermark
+        body = {
+            "model": req.upstream_model,
+            "prompt": req.prompt or "video generation",
+            "metadata": metadata,
+        }
+        async with self._client() as client:
+            response = await client.post(self._path("video/generations"), json=body)
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("submit", response.status_code, raw)
+        provider_task_id = _provider_task_id(raw)
+        if provider_task_id is None:
+            raise VideoUpstreamError(
+                "video submit response did not include task id",
+                error_code="bad_response",
+                status_code=response.status_code,
+                raw=raw,
+            )
+        return SubmitResult(provider_task_id=provider_task_id, raw=raw)
+
+    async def poll(self, provider_task_id: str) -> PollResult:
+        async with self._client() as client:
+            response = await client.get(
+                self._path(f"video/generations/{provider_task_id}")
+            )
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("poll", response.status_code, raw)
+        status = _status(_nested_get(raw, ("data", "status"), ("status",)))
+        upstream_billable = _billable(raw)
+        return PollResult(
+            status=status,
+            progress=_int_or_none(
+                _nested_get(raw, ("data", "progress"), ("progress",))
+            ),
+            video_url=_absolute_url(_video_url(raw), self._client_base_url()),
+            failure_class=_failure_class(raw),
+            usage_total_tokens=_usage_total_tokens(raw),
+            upstream_billable=upstream_billable
+            if upstream_billable is not None
+            else (True if status == "succeeded" else None),
+            raw=raw,
+        )
+
+    async def cancel(self, provider_task_id: str) -> CancelResult | None:
+        async with self._client() as client:
+            response = await client.delete(self._path(f"videos/{provider_task_id}"))
         raw = _response_json(response)
         if response.status_code in {404, 410}:
             return CancelResult(accepted=False, raw=raw)
@@ -709,6 +858,8 @@ def adapter_for_provider(provider: VideoProviderDefinition) -> VideoProviderAdap
         return FakeVideoAdapter(provider)
     if provider.kind == "volcano":
         return VolcanoSeedanceAdapter(provider)
+    if provider.kind == "volcano_third_party":
+        return VolcanoThirdPartySeedanceAdapter(provider)
     if provider.kind == "dashscope":
         return DashScopeHappyHorseAdapter(provider)
     raise VideoUpstreamError(
@@ -762,5 +913,6 @@ __all__ = [
     "VideoSubmitRequest",
     "VideoUpstreamError",
     "VolcanoSeedanceAdapter",
+    "VolcanoThirdPartySeedanceAdapter",
     "adapter_for_provider",
 ]

@@ -19,7 +19,7 @@ from .providers import (
     weighted_priority_order,
 )
 
-VIDEO_PROVIDER_KINDS = ("volcano", "dashscope", "veo", "fake")
+VIDEO_PROVIDER_KINDS = ("volcano", "volcano_third_party", "dashscope", "veo", "fake")
 VIDEO_ACTIONS = ("t2v", "i2v", "reference")
 
 
