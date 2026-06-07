@@ -1110,6 +1110,7 @@ export interface VideoPromptEnhanceIn {
   generate_audio?: boolean | null;
   input_image_id?: string | null;
   reference_media?: VideoReferenceMediaIn[];
+  variant_count?: number;
 }
 
 export interface VideoPriceOptionOut {

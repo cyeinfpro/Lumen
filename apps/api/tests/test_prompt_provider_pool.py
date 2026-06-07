@@ -86,6 +86,57 @@ def test_video_prompt_enhance_body_uses_media_content() -> None:
     assert body["metadata"] == {"purpose": "video_prompt_enhance"}
 
 
+def test_video_prompt_enhance_defaults_to_single_motion_first_prompt() -> None:
+    from app.routes import prompts
+
+    body = prompts.VideoEnhanceIn(text="一个女孩站在城市街头")
+    system_prompt = prompts._video_enhance_system_prompt(  # noqa: SLF001
+        body.variant_count
+    )
+
+    assert body.variant_count == 1
+    assert system_prompt == prompts.VIDEO_ENHANCE_SYSTEM_PROMPT
+    assert "<variant" not in system_prompt
+    assert "motion/camera-first" in system_prompt
+    assert "Do NOT repeat or inventory existing subjects" in system_prompt
+    assert "motion trajectory" in system_prompt
+    assert "camera movement" in system_prompt
+    assert "Output ONLY the enhanced video prompt text" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_video_prompt_enhance_variant_count_three_requires_parseable_variants() -> None:
+    from app.routes import prompts
+
+    body = prompts.VideoEnhanceIn(
+        text="一个女孩站在城市街头",
+        variant_count=3,
+    )
+
+    system_prompt = prompts._video_enhance_system_prompt(  # noqa: SLF001
+        body.variant_count
+    )
+    content, token_changed = await prompts._build_video_enhance_content(  # noqa: SLF001
+        body,
+        request=object(),  # type: ignore[arg-type]
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+    )
+    content_text = content[0]["text"]
+
+    assert token_changed is False
+    assert "Output exactly 3 variants" in system_prompt
+    assert '<variant title="short unique title">' in system_prompt
+    assert "</variant>" in system_prompt
+    assert "The first <variant> must be the recommended best option" in system_prompt
+    assert "distinct motion/camera strategy" in system_prompt
+    assert "候选方案数量：3" in content_text
+    assert '<variant title="...">...</variant>' in content_text
+    assert "第一项为推荐最佳" in content_text
+    assert "动作轨迹" in content_text
+    assert "运镜/镜头语言" in content_text
+
+
 @pytest.mark.asyncio
 async def test_video_prompt_enhance_content_accepts_reference_only_input() -> None:
     from app.routes import prompts

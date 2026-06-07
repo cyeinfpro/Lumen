@@ -75,17 +75,39 @@ Rules:
 VIDEO_ENHANCE_SYSTEM_PROMPT = """\
 You are an expert prompt engineer for AI video generation.
 Your task is to enhance the user's video prompt for a text-to-video, image-to-video, or reference-guided video model.
+The result must be motion/camera-first: improve what moves, how it moves, how the camera moves with it, and how the shot evolves over time.
 
 Rules:
 - Preserve the user's original intent and subject matter exactly
-- Use supplied reference images, first frames, posters, and video URLs as visual constraints
-- Add video-specific detail: subject action, camera movement, temporal progression, composition, lighting, atmosphere, motion continuity, and style
+- Use supplied reference images, first frames, posters, and video URLs as visual constraints for identity, styling, and composition continuity
+- Do NOT repeat or inventory existing subjects, clothing, props, backgrounds, or other static elements already present unless a detail is needed for continuity
+- Prioritize video-specific additions: subject action, motion trajectory, pose changes, camera movement, lens/framing, shot language, temporal progression, rhythm, cuts/transitions, motion continuity, and reference-material consistency
 - Respect supplied model, duration, resolution, aspect ratio, and audio intent when they are present
-- Keep the output concise — one paragraph, under 220 words
+- Keep the output concise - one paragraph, under 220 words
 - Write in the same language as the user's prompt; if no prompt is provided, write in Chinese
 - Do NOT add negative prompts, technical parameters, markdown, explanations, or labels
 - Do NOT wrap in quotes or add any prefix/suffix like "Enhanced prompt:"
 - Output ONLY the enhanced video prompt text, nothing else\
+"""
+VIDEO_ENHANCE_VARIANT_SYSTEM_PROMPT_TEMPLATE = """\
+You are an expert prompt engineer for AI video generation.
+Your task is to enhance the user's video prompt for a text-to-video, image-to-video, or reference-guided video model.
+The result must be motion/camera-first: improve what moves, how it moves, how the camera moves with it, and how the shot evolves over time.
+
+Rules:
+- Preserve the user's original intent and subject matter exactly
+- Use supplied reference images, first frames, posters, and video URLs as visual constraints for identity, styling, and composition continuity
+- Do NOT repeat or inventory existing subjects, clothing, props, backgrounds, or other static elements already present unless a detail is needed for continuity
+- Prioritize video-specific additions: subject action, motion trajectory, pose changes, camera movement, lens/framing, shot language, temporal progression, rhythm, cuts/transitions, motion continuity, and reference-material consistency
+- Respect supplied model, duration, resolution, aspect ratio, and audio intent when they are present
+- Keep each variant concise - one paragraph, under 220 words
+- Write in the same language as the user's prompt; if no prompt is provided, write in Chinese
+- Do NOT add negative prompts, technical parameters, markdown, explanations, or commentary
+- Output exactly {variant_count} variants and nothing else
+- Use this strict XML-like format for every candidate: <variant title="short unique title">enhanced video prompt text</variant>
+- The first <variant> must be the recommended best option
+- Each variant must emphasize a distinct motion/camera strategy, such as action trajectory, camera movement/framing, or rhythm/continuity/reference consistency
+- Do NOT add numbering, markdown fences, bullet lists, labels, or any text before, between, or after the variant blocks\
 """
 
 _PROVIDER_RR_COUNTERS: dict[int, int] = {}
@@ -170,6 +192,7 @@ class VideoEnhanceIn(BaseModel):
     aspect_ratio: str | None = Field(default=None, max_length=32)
     generate_audio: bool | None = None
     input_image_id: str | None = Field(default=None, max_length=36)
+    variant_count: int = Field(default=1, ge=1, le=3)
     reference_media: list[VideoReferenceMediaIn] = Field(
         default_factory=list,
         max_length=12,
@@ -198,6 +221,14 @@ def _responses_url(base_url: str) -> str:
     if base.endswith("/v1"):
         return f"{base}/responses"
     return f"{base}/v1/responses"
+
+
+def _video_enhance_system_prompt(variant_count: int) -> str:
+    if variant_count <= 1:
+        return VIDEO_ENHANCE_SYSTEM_PROMPT
+    return VIDEO_ENHANCE_VARIANT_SYSTEM_PROMPT_TEMPLATE.format(
+        variant_count=variant_count
+    )
 
 
 def _provider_allows_prompt_enhance(provider: ProviderDefinition) -> bool:
@@ -440,6 +471,13 @@ async def _build_video_enhance_content(
     _append_video_context_line(lines, "画幅", body.aspect_ratio)
     if body.generate_audio is not None:
         lines.append(f"音频：{'需要' if body.generate_audio else '不需要'}")
+    if body.variant_count > 1:
+        lines.append(
+            f"候选方案数量：{body.variant_count}；必须按 "
+            '<variant title="...">...</variant> 输出，第一项为推荐最佳；'
+            "每个方案应有不同侧重，分别强化动作轨迹、运镜/镜头语言、"
+            "时间推进/节奏/连续性/参考素材一致性。"
+        )
 
     content: list[dict[str, Any]] = [
         {"type": "input_text", "text": "\n".join(lines)}
@@ -1384,7 +1422,7 @@ async def enhance_video_prompt(
                 body.text,
                 providers,
                 billing,
-                system_prompt=VIDEO_ENHANCE_SYSTEM_PROMPT,
+                system_prompt=_video_enhance_system_prompt(body.variant_count),
                 content=content,
             )
         ),

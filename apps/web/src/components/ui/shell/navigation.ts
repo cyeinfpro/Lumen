@@ -39,10 +39,10 @@ const DOCKER_NAV_ITEMS: readonly AppNavItem[] = [
   {
     key: "assets",
     label: "资产",
-    route: "/stream",
+    route: "/assets",
     detail: "生成图、上传图、模型库、风格库和分享记录",
     keywords: ["assets", "stream", "library", "feed", "资产", "图库", "图片", "模型库", "风格库"],
-    matchPrefixes: ["/stream", "/library"],
+    matchPrefixes: ["/assets", "/stream", "/library"],
   },
   {
     key: "me",
