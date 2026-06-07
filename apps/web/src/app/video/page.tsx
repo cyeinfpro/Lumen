@@ -517,15 +517,13 @@ export default function VideoPage() {
     () => effectiveItems.filter(hasVideo),
     [effectiveItems],
   );
-  const selectedVideoItem = useMemo(
+  const playbackVideoItem = useMemo(
     () =>
       selectedVideoId
         ? completedVideoItems.find((item) => item.video.id === selectedVideoId)
         : undefined,
     [completedVideoItems, selectedVideoId],
   );
-  const primaryVideoItem = selectedVideoItem ?? completedVideoItems[0] ?? null;
-  const previewStripItems = completedVideoItems.slice(0, 6);
   const settledHistoryItems = useMemo(
     () => effectiveItems.filter((item) => !isActiveVideo(item)),
     [effectiveItems],
@@ -540,15 +538,14 @@ export default function VideoPage() {
   );
 
   useEffect(() => {
-    prewarmVideoItem(primaryVideoItem);
-  }, [primaryVideoItem]);
+    prewarmVideoItem(playbackVideoItem);
+  }, [playbackVideoItem]);
 
   const refreshGeneration = useCallback(
     async (id: string, opts: { forceHistorySync?: boolean } = {}) => {
       const next = await getVideoGeneration(id);
       setItems((prev) => mergeById(prev, [next]));
       if (next.video) {
-        setSelectedVideoId(next.video.id);
         prewarmVideoItem(next as VideoGenerationWithVideo);
       }
 
@@ -1150,7 +1147,7 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex w-full max-w-[1440px] flex-col gap-4 px-4 pb-36 pt-3 md:px-6 md:pb-10">
+      <main className="lumen-studio-bg mx-auto flex w-full max-w-[1520px] flex-col gap-4 px-4 pb-36 pt-3 md:px-6 md:pb-10">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
@@ -1163,16 +1160,16 @@ export default function VideoPage() {
           submitState={submitDisabledReason}
         />
 
-        <div className="grid gap-4 xl:grid-cols-[minmax(340px,420px)_minmax(0,1fr)] xl:items-start">
-          <section className="min-w-0 space-y-4 xl:sticky xl:top-20">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(350px,430px)] xl:items-start">
+          <section className="min-w-0 space-y-4">
             <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
               <div className="relative flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
                 <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
                 <div>
-                  <p className="type-card-title">新建视频</p>
+                  <p className="type-card-title">创作区</p>
                   <p className="mt-1 text-sm text-[var(--fg-2)]">
                     {serviceEnabled
-                      ? `${availableModels.length} 个模型 · ${actionLabel(action)}`
+                      ? `${actionLabel(action)} · 提示词、参考素材和参数都在这里完成`
                       : serviceSummary}
                   </p>
                 </div>
@@ -1189,7 +1186,7 @@ export default function VideoPage() {
                 </Button>
               </div>
 
-              <div className="space-y-5 p-4 sm:p-5">
+              <div className="space-y-6 p-4 sm:p-5 lg:p-6">
                 <ReadinessBanner
                   enabled={serviceEnabled}
                   loading={optionsQ.isLoading}
@@ -1230,7 +1227,7 @@ export default function VideoPage() {
 
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="type-caption text-[var(--fg-2)]">描述</span>
+                    <span className="type-caption text-[var(--fg-2)]">提示词</span>
                     <div className="flex items-center gap-2">
                       <span className="text-xs tabular-nums text-[var(--fg-2)]">
                         {prompt.length.toLocaleString()} / 10,000
@@ -1252,11 +1249,11 @@ export default function VideoPage() {
                     value={prompt}
                     onChange={(event) => handlePromptChange(event.target.value)}
                     readOnly={isEnhancingPrompt}
-                    rows={7}
+                    rows={9}
                     maxLength={10000}
-                    placeholder="写清主体、动作、画面比例和不要出现的内容。"
+                    placeholder="写清主体、动作、镜头运动、节奏、参考素材怎么使用，以及不要出现的内容。"
                     className={cn(
-                      "min-h-[176px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
+                      "min-h-[248px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-4 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
                       isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
                     )}
                   />
@@ -1285,7 +1282,7 @@ export default function VideoPage() {
                       </button>
                     ))}
                   </div>
-                  <div className="grid gap-2 text-xs text-[var(--fg-2)] sm:grid-cols-3 xl:grid-cols-1 2xl:grid-cols-3">
+                  <div className="grid gap-2 text-xs text-[var(--fg-2)] sm:grid-cols-3">
                     <PromptMeta icon={<Film className="h-3.5 w-3.5" />} label={actionLabel(action)} />
                     <PromptMeta icon={<Layers3 className="h-3.5 w-3.5" />} label={`${referenceMedia.length} 个参考素材`} />
                     <PromptMeta icon={<Settings2 className="h-3.5 w-3.5" />} label={`${effectiveResolution} · ${formatDurationLabel(durationS)}`} />
@@ -1293,7 +1290,7 @@ export default function VideoPage() {
                 </div>
 
                 {action === "i2v" && (
-                  <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+                  <div className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)]">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <p className="text-sm font-medium text-[var(--fg-0)]">首帧图片</p>
@@ -1310,34 +1307,55 @@ export default function VideoPage() {
                           event.target.value = "";
                         }}
                       />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        loading={uploadMut.isPending}
-                        onClick={() => fileRef.current?.click()}
-                        leftIcon={<Upload className="h-3.5 w-3.5" />}
-                      >
-                        上传
-                      </Button>
                     </div>
-                    <input
-                      value={inputImageId}
-                      onChange={(event) => {
-                        clearPromptEnhanceChoices();
-                        setInputImageId(event.target.value);
-                        setUploadedLabel("");
-                      }}
-                      placeholder="image_id"
-                      className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-                    />
-                    <div className="rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
-                      {uploadedLabel || inputImageId ? uploadedLabel || "已填写图片 ID" : "用于确定第一帧构图。"}
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.35fr)]">
+                      <button
+                        type="button"
+                        onClick={() => fileRef.current?.click()}
+                        disabled={uploadMut.isPending}
+                        className="group flex min-h-[116px] items-center gap-4 rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 p-4 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
+                      >
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+                          {uploadMut.isPending ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Upload className="h-4 w-4" />
+                          )}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-[var(--fg-0)]">
+                            {inputImageId ? "替换首帧" : "上传首帧图片"}
+                          </span>
+                          <span className="mt-1 block text-xs leading-5 text-[var(--fg-2)]">
+                            用图片锁定开场构图、人物和产品位置；支持 PNG、JPG、WebP。
+                          </span>
+                          <span className="mt-2 block text-xs font-medium text-[var(--fg-1)]">
+                            {uploadedLabel || inputImageId ? uploadedLabel || "已填写图片 ID" : "尚未选择首帧"}
+                          </span>
+                        </span>
+                      </button>
+                      <label className="space-y-1.5">
+                        <span className="type-caption text-[var(--fg-2)]">已有图片 ID</span>
+                        <input
+                          value={inputImageId}
+                          onChange={(event) => {
+                            clearPromptEnhanceChoices();
+                            setInputImageId(event.target.value);
+                            setUploadedLabel("");
+                          }}
+                          placeholder="image_id"
+                          className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                        />
+                        <span className="block text-xs leading-5 text-[var(--fg-2)]">
+                          从历史或接口复制 ID 时可直接粘贴。
+                        </span>
+                      </label>
                     </div>
                   </div>
                 )}
 
                 {action === "reference" && (
-                  <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+                  <div className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)]">
                     <input
                       ref={referenceFileRef}
                       type="file"
@@ -1354,15 +1372,50 @@ export default function VideoPage() {
                         <p className="text-sm font-medium text-[var(--fg-0)]">参考素材</p>
                         <p className="text-xs text-[var(--fg-2)]">点击素材标签可插入描述。</p>
                       </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        loading={referenceUploadMut.isPending}
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.28fr)]">
+                      <button
+                        type="button"
                         onClick={() => referenceFileRef.current?.click()}
-                        leftIcon={<Upload className="h-3.5 w-3.5" />}
+                        disabled={referenceUploadMut.isPending}
+                        className="group flex min-h-[124px] items-center gap-4 rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 p-4 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
                       >
-                        上传
-                      </Button>
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+                          {referenceUploadMut.isPending ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Upload className="h-4 w-4" />
+                          )}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-[var(--fg-0)]">
+                            上传参考图片或视频
+                          </span>
+                          <span className="mt-1 block text-xs leading-5 text-[var(--fg-2)]">
+                            用参考素材约束人物、产品、风格或动作；上传后可点击标签插入到提示词。
+                          </span>
+                          <span className="mt-2 block text-xs font-medium text-[var(--fg-1)]">
+                            最多 9 张图片、3 个视频
+                          </span>
+                        </span>
+                      </button>
+                      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/64 p-3">
+                        <p className="type-caption text-[var(--fg-2)]">已添加</p>
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2">
+                            <span className="block text-xs text-[var(--fg-2)]">图片</span>
+                            <span className="font-semibold tabular-nums text-[var(--fg-0)]">
+                              {referenceMedia.filter((item) => item.kind === "image").length}
+                            </span>
+                          </span>
+                          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2">
+                            <span className="block text-xs text-[var(--fg-2)]">视频</span>
+                            <span className="font-semibold tabular-nums text-[var(--fg-0)]">
+                              {referenceMedia.filter((item) => item.kind === "video").length}
+                            </span>
+                          </span>
+                        </div>
+                      </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {referenceMedia.map((item) => (
@@ -1387,12 +1440,12 @@ export default function VideoPage() {
                   </div>
                 )}
 
-                <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+                <div className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)]">
                   <div className="flex items-center gap-2">
                     <Settings2 className="h-4 w-4 text-[var(--fg-2)]" />
-                    <p className="text-sm font-medium text-[var(--fg-0)]">参数</p>
+                    <p className="text-sm font-medium text-[var(--fg-0)]">生成参数</p>
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <SelectField
                       label="模型"
                       value={selectedModel}
@@ -1431,7 +1484,7 @@ export default function VideoPage() {
                       options={options?.aspect_ratios ?? ["adaptive", "16:9", "9:16", "1:1"]}
                     />
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-[1fr_auto] xl:grid-cols-1 2xl:grid-cols-[1fr_auto]">
+                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
                     <label className="space-y-1.5">
                       <span className="type-caption text-[var(--fg-2)]">种子</span>
                       <input
@@ -1479,68 +1532,18 @@ export default function VideoPage() {
             </Card>
           </section>
 
-          <section className="min-w-0 space-y-4">
+          <section className="min-w-0 space-y-4 xl:sticky xl:top-20">
             <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
               <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
                 <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
                 <div>
-                  <p className="type-card-title">预览</p>
-                  <p className="mt-1 text-sm text-[var(--fg-2)]">
-                    {primaryVideoItem
-                      ? `${actionLabel(primaryVideoItem.action)} · ${primaryVideoItem.resolution} · ${formatDurationLabel(primaryVideoItem.duration_s)}`
-                      : "等待结果"}
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void historyQ.refetch()}
-                  leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
-                >
-                  刷新
-                </Button>
-              </div>
-              <div className="space-y-4 p-4 sm:p-5 lg:p-6">
-                <PrimaryPreview
-                  item={primaryVideoItem}
-                  onUseDraft={primaryVideoItem ? () => loadAsDraft(primaryVideoItem) : undefined}
-                  onRetry={primaryVideoItem ? () => retryMut.mutate(primaryVideoItem.id) : undefined}
-                  onCopy={primaryVideoItem ? () => {
-                    void navigator.clipboard?.writeText(primaryVideoItem.prompt);
-                    toast.success("描述已复制");
-                  } : undefined}
-                  onDelete={primaryVideoItem?.video ? () => deleteMut.mutate(primaryVideoItem.video.id) : undefined}
-                />
-                {previewStripItems.length > 1 && (
-                  <div className="space-y-2 border-t border-[var(--border-subtle)] pt-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="type-caption text-[var(--fg-2)]">最近</p>
-                      <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                        {completedVideoItems.length} 个
-                      </span>
-                    </div>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-                      {previewStripItems.map((item) => (
-                        <VideoStripItem
-                          key={item.id}
-                          item={item}
-                          selected={primaryVideoItem?.video.id === item.video.id}
-                          onPreview={() => setSelectedVideoId(item.video.id)}
-                          onUseDraft={() => loadAsDraft(item)}
-                        />
-                      ))}
-                    </div>
+                  <div className="flex items-center gap-2">
+                    <Clapperboard className="h-4 w-4 text-[var(--fg-2)]" />
+                    <p className="type-card-title">记录</p>
                   </div>
-                )}
-              </div>
-            </Card>
-
-            <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
-              <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
-                <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
-                <div className="flex items-center gap-2">
-                  <Clapperboard className="h-4 w-4 text-[var(--fg-2)]" />
-                  <p className="type-card-title">记录</p>
+                  <p className="mt-1 text-sm text-[var(--fg-2)]">
+                    结果不常驻占位；点击播放后大屏查看。
+                  </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-2)]">
                   <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 tabular-nums">
@@ -1549,6 +1552,14 @@ export default function VideoPage() {
                   <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 tabular-nums">
                     {historyQ.isLoading ? "读取中" : `${settledHistoryItems.length} 历史`}
                   </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void historyQ.refetch()}
+                    leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+                  >
+                    刷新
+                  </Button>
                 </div>
               </div>
               <div className="space-y-5 p-4 sm:p-5">
@@ -1600,7 +1611,7 @@ export default function VideoPage() {
                         onUseDraft={() => loadAsDraft(item)}
                         onDelete={() => item.video && deleteMut.mutate(item.video.id)}
                         onPreview={hasVideo(item) ? () => setSelectedVideoId(item.video.id) : undefined}
-                        selected={primaryVideoItem?.video.id === item.video?.id}
+                        selected={selectedVideoId === item.video?.id}
                         showPreview={false}
                       />
                     ))}
@@ -1622,6 +1633,19 @@ export default function VideoPage() {
           </section>
         </div>
       </main>
+      {playbackVideoItem && (
+        <VideoPreviewDialog
+          item={playbackVideoItem}
+          onClose={() => setSelectedVideoId("")}
+          onUseDraft={() => loadAsDraft(playbackVideoItem)}
+          onRetry={() => retryMut.mutate(playbackVideoItem.id)}
+          onCopy={() => {
+            void navigator.clipboard?.writeText(playbackVideoItem.prompt);
+            toast.success("描述已复制");
+          }}
+          onDelete={() => deleteMut.mutate(playbackVideoItem.video.id)}
+        />
+      )}
       <div className="md:hidden">
         <MobileTabBar />
       </div>
@@ -1672,7 +1696,7 @@ function WorkflowRail({
   profile: string;
 }) {
   return (
-    <div className="grid grid-cols-3 gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-2 shadow-[var(--shadow-1)] xl:grid-cols-1 2xl:grid-cols-3">
+    <div className="grid gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-2 shadow-[var(--shadow-1)] sm:grid-cols-3">
       <WorkflowStep
         label="描述"
         value={hasPrompt ? "已填写" : "待输入"}
@@ -1785,7 +1809,7 @@ function VideoWorkbenchHeader({
           </span>
         </div>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-          用同一个工作台完成文字生成、首帧生成和多参考生成；左侧控制描述与参数，右侧保留预览、队列和历史。
+          创作区优先承载提示词、参考素材和参数选择；结果进入右侧记录，点击播放后再弹窗大屏查看。
         </p>
       </div>
       <div className="grid gap-2 sm:grid-cols-3">
@@ -2454,80 +2478,79 @@ function PrimaryVideoPlayer({ item }: { item: VideoGenerationWithVideo }) {
   );
 }
 
-function PrimaryPreview({
+function VideoPreviewDialog({
   item,
+  onClose,
   onUseDraft,
   onRetry,
   onCopy,
   onDelete,
 }: {
-  item: VideoGenerationWithVideo | null;
-  onUseDraft?: () => void;
-  onRetry?: () => void;
-  onCopy?: () => void;
-  onDelete?: () => void;
+  item: VideoGenerationWithVideo;
+  onClose: () => void;
+  onUseDraft: () => void;
+  onRetry: () => void;
+  onCopy: () => void;
+  onDelete: () => void;
 }) {
-  if (!item) {
-    return (
-      <div className="overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-1)] shadow-[var(--shadow-2)]">
-        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 py-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
-            <span className="truncate text-xs font-medium text-[var(--fg-1)]">预览</span>
-          </div>
-          <span className="text-[11px] tabular-nums text-[var(--fg-2)]">16:9</span>
-        </div>
-        <div className="relative grid min-h-[380px] place-items-center overflow-hidden bg-[var(--bg-2)]/60 p-4 text-[var(--fg-0)] sm:p-6">
-          <div aria-hidden="true" className="absolute inset-4 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/32" />
-          <div aria-hidden="true" className="absolute inset-x-8 top-8 h-px bg-[var(--border-subtle)]" />
-          <div aria-hidden="true" className="absolute inset-x-8 bottom-8 h-px bg-[var(--border-subtle)]" />
-          <div className="relative w-full max-w-xl text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)] shadow-[var(--shadow-1)]">
-              <Clapperboard className="h-6 w-6" />
-            </div>
-            <p className="text-base font-semibold">等待第一条视频任务</p>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[var(--fg-2)]">
-              填写描述并提交后，这里会先显示任务状态，再切换为可播放预览，历史记录会保留同一组参数。
-            </p>
-            <div className="mt-5 grid gap-2 text-left sm:grid-cols-3">
-              <PreviewStep
-                label="描述"
-                detail="主体、镜头、运动"
-                icon={<PencilLine className="h-3.5 w-3.5" />}
-              />
-              <PreviewStep
-                label="提交"
-                detail="预扣与队列状态"
-                icon={<Send className="h-3.5 w-3.5" />}
-              />
-              <PreviewStep
-                label="复用"
-                detail="下载或套用参数"
-                icon={<RotateCcw className="h-3.5 w-3.5" />}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
 
   return (
-    <div className="space-y-4">
-      <PrimaryVideoPlayer item={item} />
-      <div className="grid gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)] xl:grid-cols-[minmax(0,1fr)_auto]">
-        <div className="min-w-0">
-          <div className="mb-2 flex flex-wrap gap-2">
-            <StatusPill item={item} />
-            <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
-              {actionLabel(item.action)} · {item.resolution} · {formatDurationLabel(item.duration_s)}
-            </span>
+    <div
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`video-preview-${item.id}`}
+        className="mobile-dialog-panel flex w-full max-w-6xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:rounded-[var(--radius-panel)] sm:border-b"
+      >
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
+          <div className="min-w-0">
+            <div className="mb-2 flex flex-wrap gap-2">
+              <StatusPill item={item} />
+              <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
+                {actionLabel(item.action)} · {item.resolution} · {formatDurationLabel(item.duration_s)}
+              </span>
+            </div>
+            <h2
+              id={`video-preview-${item.id}`}
+              className="truncate text-base font-semibold text-[var(--fg-0)]"
+            >
+              视频播放
+            </h2>
           </div>
-          <p className="line-clamp-3 text-sm leading-6 text-[var(--fg-0)]">{item.prompt}</p>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-9 w-9 px-0"
+            onClick={onClose}
+            aria-label="关闭视频播放"
+          >
+            <XCircle className="h-4 w-4" />
+          </Button>
+        </header>
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
+          <PrimaryVideoPlayer item={item} />
+          <div className="mt-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)]">
+            <p className="type-caption text-[var(--fg-2)]">提示词</p>
+            <p className="mt-2 max-h-28 overflow-y-auto text-sm leading-6 text-[var(--fg-0)]">
+              {item.prompt}
+            </p>
+          </div>
         </div>
-        <div className="flex flex-wrap items-start gap-2 xl:justify-end">
+        <footer className="mobile-dialog-footer flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:px-5">
           <VideoDownloadLink item={item} />
-          {onUseDraft && (
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="secondary"
               size="sm"
@@ -2536,8 +2559,6 @@ function PrimaryPreview({
             >
               套用参数
             </Button>
-          )}
-          {onRetry && (
             <Button
               variant="outline"
               size="sm"
@@ -2546,8 +2567,6 @@ function PrimaryPreview({
             >
               重新生成
             </Button>
-          )}
-          {onCopy && (
             <Button
               variant="outline"
               size="sm"
@@ -2556,8 +2575,6 @@ function PrimaryPreview({
             >
               复制
             </Button>
-          )}
-          {onDelete && (
             <Button
               variant="outline"
               size="sm"
@@ -2566,85 +2583,10 @@ function PrimaryPreview({
             >
               删除
             </Button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PreviewStep({
-  label,
-  detail,
-  icon,
-}: {
-  label: string;
-  detail: string;
-  icon: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
-      <div className="flex items-center gap-2 text-[var(--fg-1)]">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--accent)]">
-          {icon}
-        </span>
-        <span className="text-sm font-semibold text-[var(--fg-0)]">{label}</span>
-      </div>
-      <p className="mt-2 text-xs leading-5 text-[var(--fg-2)]">{detail}</p>
-    </div>
-  );
-}
-
-function VideoStripItem({
-  item,
-  selected,
-  onPreview,
-  onUseDraft,
-}: {
-  item: VideoGenerationWithVideo;
-  selected: boolean;
-  onPreview: () => void;
-  onUseDraft: () => void;
-}) {
-  return (
-    <article
-      className={cn(
-        "relative grid grid-cols-[112px_minmax(0,1fr)] gap-3 overflow-hidden rounded-[var(--radius-card)] border p-2 transition-colors hover:border-[var(--border)] max-sm:grid-cols-[96px_minmax(0,1fr)]",
-        selected
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
-          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/60",
-      )}
-    >
-      {selected && (
-        <span aria-hidden="true" className="absolute inset-y-3 left-0 w-1 rounded-r-full bg-[var(--accent)]" />
-      )}
-      <VideoPosterButton
-        item={item}
-        selected={selected}
-        onPreview={onPreview}
-        compact
-      />
-      <div className="flex min-w-0 flex-col justify-between gap-2 py-0.5">
-        <div className="min-w-0">
-          <div className="mb-1 flex flex-wrap items-center gap-1.5">
-            <StatusPill item={item} />
-            <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
-              {formatDurationLabel(item.duration_s)}
-            </span>
           </div>
-          <p className="line-clamp-2 text-xs leading-5 text-[var(--fg-1)]">{item.prompt}</p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onUseDraft}
-          leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
-          className="self-start"
-        >
-          套用
-        </Button>
-      </div>
-    </article>
+        </footer>
+      </section>
+    </div>
   );
 }
 
