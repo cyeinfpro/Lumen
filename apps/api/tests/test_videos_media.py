@@ -412,6 +412,127 @@ def test_reference_image_public_url_sets_video_reference_token() -> None:
     assert isinstance(image.metadata_jsonb["video_reference_access_token"], str)
 
 
+def _video_provider(kind: str) -> VideoProviderDefinition:
+    return VideoProviderDefinition(
+        name=f"{kind}-provider",
+        kind=kind,
+        base_url="https://provider.example",
+        api_key="key",
+        models={"seedance-2.0-fast:reference": "upstream-model"},
+    )
+
+
+def test_volcano_third_party_prefers_reference_public_urls() -> None:
+    third_party = _video_provider("volcano_third_party")
+    official = _video_provider("volcano")
+    dashscope = _video_provider("dashscope")
+
+    assert videos._provider_prefers_public_media_url(third_party) is True  # noqa: SLF001
+    assert videos._provider_requires_public_media(third_party) is False  # noqa: SLF001
+    assert videos._provider_prefers_public_media_url(official) is False  # noqa: SLF001
+    assert videos._provider_prefers_public_media_url(dashscope) is True  # noqa: SLF001
+    assert videos._provider_requires_public_media(dashscope) is True  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_reference_public_base_url_falls_back_for_preferred_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_public_base_url(*_args, **_kwargs):
+        raise RuntimeError("missing public base")
+
+    monkeypatch.setattr(videos, "resolve_public_base_url", fail_public_base_url)
+    body = VideoCreateIn(
+        action="reference",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        reference_media=[VideoReferenceMediaIn(kind="image", image_id="image-1")],
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idempotency-1",
+    )
+
+    public_base = await videos._reference_public_base_url(  # noqa: SLF001
+        _request(),
+        SimpleNamespace(),  # type: ignore[arg-type]
+        body,
+        None,
+        prefers_public_media_url=True,
+    )
+
+    assert public_base is None
+
+
+@pytest.mark.asyncio
+async def test_reference_public_base_url_still_fails_for_required_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_public_base_url(*_args, **_kwargs):
+        raise RuntimeError("missing public base")
+
+    monkeypatch.setattr(videos, "resolve_public_base_url", fail_public_base_url)
+    body = VideoCreateIn(
+        action="reference",
+        model="happyhorse-1.0",
+        prompt="make a video",
+        reference_media=[VideoReferenceMediaIn(kind="image", image_id="image-1")],
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idempotency-1",
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await videos._reference_public_base_url(  # noqa: SLF001
+            _request(),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            body,
+            None,
+            requires_public_media=True,
+            prefers_public_media_url=True,
+        )
+
+    assert excinfo.value.status_code == 503
+    assert (
+        excinfo.value.detail["error"]["code"] == "video_reference_public_url_missing"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reference_public_base_url_still_fails_for_video_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_public_base_url(*_args, **_kwargs):
+        raise RuntimeError("missing public base")
+
+    monkeypatch.setattr(videos, "resolve_public_base_url", fail_public_base_url)
+    body = VideoCreateIn(
+        action="reference",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        reference_media=[VideoReferenceMediaIn(kind="video", video_id="video-1")],
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idempotency-1",
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await videos._reference_public_base_url(  # noqa: SLF001
+            _request(),
+            SimpleNamespace(),  # type: ignore[arg-type]
+            body,
+            None,
+            prefers_public_media_url=True,
+        )
+
+    assert excinfo.value.status_code == 503
+    assert (
+        excinfo.value.detail["error"]["code"] == "video_reference_public_url_missing"
+    )
+
+
 def test_create_video_generation_maps_billing_error() -> None:
     source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
 
@@ -523,6 +644,38 @@ async def test_reference_media_snapshots_adds_public_url_for_uploaded_video() ->
     assert snapshots[0]["url"].startswith(
         "https://lumen.example/api/videos/reference/video-1/binary?token="
     )
+
+
+@pytest.mark.asyncio
+async def test_reference_media_snapshots_adds_public_url_for_image() -> None:
+    image = SimpleNamespace(
+        id="image-1",
+        storage_key="u/user-1/uploads/image-1.jpg",
+        sha256="sha",
+        mime="image/jpeg",
+        metadata_jsonb={},
+        deleted_at=None,
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return image
+
+    class Db:
+        async def execute(self, _statement):
+            return Result()
+
+    snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        items=[VideoReferenceMediaIn(kind="image", image_id="image-1")],
+        reference_public_base_url="https://lumen.example",
+    )
+
+    assert snapshots[0]["url"].startswith(
+        "https://lumen.example/api/images/reference/image-1/binary?token="
+    )
+    assert "video_reference_access_token" in image.metadata_jsonb
 
 
 def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:

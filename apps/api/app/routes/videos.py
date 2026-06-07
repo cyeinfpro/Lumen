@@ -223,6 +223,12 @@ def _provider_requires_public_media(provider: Any) -> bool:
     return getattr(provider, "kind", None) == "dashscope"
 
 
+def _provider_prefers_public_media_url(provider: Any) -> bool:
+    return _provider_requires_public_media(provider) or getattr(
+        provider, "kind", None
+    ) in {"volcano_third_party"}
+
+
 def _write_new_file_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -543,10 +549,12 @@ def _needs_reference_public_base_url(
     fallback_snapshots: list[dict[str, Any]] | None,
     *,
     requires_public_media: bool = False,
+    prefers_public_media_url: bool = False,
 ) -> bool:
-    if requires_public_media and body.action == "i2v" and body.input_image_id:
+    use_public_media = requires_public_media or prefers_public_media_url
+    if use_public_media and body.action == "i2v" and body.input_image_id:
         return True
-    if requires_public_media and any(
+    if use_public_media and any(
         item.kind == "image" and item.image_id for item in body.reference_media
     ):
         return True
@@ -561,7 +569,7 @@ def _needs_reference_public_base_url(
             and not isinstance(item.get("url"), str)
         )
         or (
-            requires_public_media
+            use_public_media
             and item.get("kind") == "image"
             and isinstance(item.get("image_id"), str)
             and not isinstance(item.get("url"), str)
@@ -578,18 +586,37 @@ async def _reference_public_base_url(
     fallback_snapshots: list[dict[str, Any]] | None,
     *,
     requires_public_media: bool = False,
+    prefers_public_media_url: bool = False,
 ) -> str | None:
+    hard_requires_public_base = _needs_reference_public_base_url(
+        body,
+        fallback_snapshots,
+        requires_public_media=requires_public_media,
+    )
     if not _needs_reference_public_base_url(
         body,
         fallback_snapshots,
         requires_public_media=requires_public_media,
+        prefers_public_media_url=prefers_public_media_url,
     ):
         return None
     if request is None:
+        if hard_requires_public_base:
+            raise _http(
+                "video_reference_public_url_missing",
+                "PUBLIC_BASE_URL or site.public_base_url is required for upstream-readable video media",
+                503,
+            )
         return None
     try:
         return await resolve_public_base_url(request, db)
     except Exception as exc:
+        if not hard_requires_public_base:
+            logger.info(
+                "video reference public URL unavailable; falling back to inline media",
+                exc_info=True,
+            )
+            return None
         raise _http(
             "video_reference_public_url_missing",
             "PUBLIC_BASE_URL or site.public_base_url is required for upstream-readable video media",
@@ -1056,12 +1083,14 @@ async def _create_video_generation_record(
 ) -> VideoGenerationOut:
     provider, estimates = await _require_video_create_ready(db, body)
     requires_public_media = _provider_requires_public_media(provider)
+    prefers_public_media_url = _provider_prefers_public_media_url(provider)
     reference_public_base = await _reference_public_base_url(
         request,
         db,
         body,
         reference_media_snapshot,
         requires_public_media=requires_public_media,
+        prefers_public_media_url=prefers_public_media_url,
     )
     input_storage_key, input_sha256, input_image_url = await _input_image_snapshot(
         db,
@@ -1069,7 +1098,7 @@ async def _create_video_generation_record(
         image_id=body.input_image_id,
         fallback_snapshot=input_image_snapshot,
         reference_public_base_url=reference_public_base
-        if requires_public_media
+        if prefers_public_media_url
         else None,
     )
     reference_snapshots = await _reference_media_snapshots(
@@ -1164,6 +1193,8 @@ async def _create_video_generation_record(
             "billing_model": billing_model,
             "requested_model": body.model,
             "requires_public_media": requires_public_media,
+            "prefers_public_media_url": prefers_public_media_url,
+            "reference_public_media_url_enabled": reference_public_base is not None,
         },
         status=VideoGenerationStatus.QUEUED.value,
         progress_stage=VideoGenerationStage.QUEUED.value,
