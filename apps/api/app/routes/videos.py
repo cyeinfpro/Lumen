@@ -8,7 +8,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 import stat
 from datetime import datetime, timedelta, timezone
@@ -66,7 +65,9 @@ from lumen_core.video_billing import (
     VideoBillingError,
     estimate_video_cost,
     expand_video_duration_estimates,
+    is_seedance_20_fast_identifier,
     split_video_resolution_pricing_variant,
+    video_billing_model,
     video_pricing_variant,
 )
 from lumen_core.video_providers import (
@@ -95,7 +96,6 @@ _DEFAULT_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"]
 _VIDEO_RESOLUTION_ORDER = {
     value: index for index, value in enumerate(_DEFAULT_VIDEO_RESOLUTIONS)
 }
-_SEEDANCE_20_FAST_RE = re.compile(r"seedance[-.]2[-.]0[-.]fast")
 _SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
 _DEFAULT_VIDEO_ASPECT_RATIOS = [
     "adaptive",
@@ -469,13 +469,7 @@ def _ordered_video_resolutions(values: Iterable[str]) -> list[str]:
 
 
 def _is_seedance_20_fast_model(*identifiers: str | None) -> bool:
-    for identifier in identifiers:
-        if not isinstance(identifier, str):
-            continue
-        value = identifier.strip().lower().replace("_", "-")
-        if _SEEDANCE_20_FAST_RE.search(value):
-            return True
-    return False
+    return is_seedance_20_fast_identifier(*identifiers)
 
 
 def _video_resolution_options_for_model(
@@ -646,6 +640,7 @@ async def video_options(
 
     model_actions: dict[str, set[str]] = {}
     model_resolutions: dict[str, set[str]] = {}
+    model_billing_models: dict[str, dict[str, str]] = {}
     for provider in providers:
         mapping = provider.models or {}
         for key in mapping:
@@ -654,6 +649,7 @@ async def video_options(
                     if not provider.supports(key, action):
                         continue
                     upstream_model = provider.upstream_model_for(key, action)
+                    billing_model = video_billing_model(key, upstream_model)
                     allowed_resolutions = _video_resolution_options_for_model(
                         key,
                         upstream_model=upstream_model,
@@ -664,7 +660,7 @@ async def video_options(
                         for resolution in allowed_resolutions
                         if _has_video_price(
                             price_pairs,
-                            model=key,
+                            model=billing_model,
                             action=action,
                             resolutions=[resolution],
                         )
@@ -674,11 +670,15 @@ async def video_options(
                         model_resolutions.setdefault(key, set()).update(
                             action_resolutions
                         )
+                        model_billing_models.setdefault(key, {})[
+                            action
+                        ] = billing_model
                 continue
             model, action = key.rsplit(":", 1)
             if action not in VIDEO_ACTIONS or not provider.supports(model, action):
                 continue
             upstream_model = provider.upstream_model_for(model, action)
+            billing_model = video_billing_model(model, upstream_model)
             allowed_resolutions = _video_resolution_options_for_model(
                 model,
                 upstream_model=upstream_model,
@@ -689,7 +689,7 @@ async def video_options(
                 for resolution in allowed_resolutions
                 if _has_video_price(
                     price_pairs,
-                    model=model,
+                    model=billing_model,
                     action=action,
                     resolutions=[resolution],
                 )
@@ -697,20 +697,35 @@ async def video_options(
             if action_resolutions:
                 model_actions.setdefault(model, set()).add(action)
                 model_resolutions.setdefault(model, set()).update(action_resolutions)
+                model_billing_models.setdefault(model, {})[action] = billing_model
     if enabled and not model_actions and unavailable_reason is None:
         unavailable_reason = "video_provider_or_pricing_missing"
-    return VideoOptionsOut(
-        enabled=enabled and unavailable_reason is None,
-        models=[
+    model_options: list[VideoModelOptionOut] = []
+    for model, actions in sorted(model_actions.items()):
+        sorted_actions = sorted(actions)
+        billing_models = {
+            action: model_billing_models.get(model, {}).get(action, model)
+            for action in sorted_actions
+        }
+        unique_billing_models = set(billing_models.values())
+        model_options.append(
             VideoModelOptionOut(
                 model=model,
-                actions=sorted(actions),  # type: ignore[arg-type]
+                billing_model=(
+                    next(iter(unique_billing_models))
+                    if len(unique_billing_models) == 1
+                    else None
+                ),
+                billing_models=billing_models,
+                actions=sorted_actions,  # type: ignore[arg-type]
                 resolutions=_ordered_video_resolutions(
                     model_resolutions.get(model, set())
                 ),  # type: ignore[arg-type]
             )
-            for model, actions in sorted(model_actions.items())
-        ],
+        )
+    return VideoOptionsOut(
+        enabled=enabled and unavailable_reason is None,
+        models=model_options,
         durations_s=_duration_options(estimates),
         resolutions=resolutions,
         aspect_ratios=list(_DEFAULT_VIDEO_ASPECT_RATIOS),
@@ -956,6 +971,8 @@ async def _create_video_generation_record(
         fallback_snapshots=reference_media_snapshot,
         reference_public_base_url=reference_public_base,
     )
+    upstream_model = provider.upstream_model_for(body.model, body.action)
+    billing_model = video_billing_model(body.model, upstream_model)
     pricing_variant = video_pricing_variant(
         body.action,
         reference_snapshots,
@@ -964,7 +981,7 @@ async def _create_video_generation_record(
     try:
         cost = await estimate_video_cost(
             db,
-            model=body.model,
+            model=billing_model,
             action=body.action,
             resolution=body.resolution,
             duration_s=body.duration_s,
@@ -999,9 +1016,11 @@ async def _create_video_generation_record(
         watermark=body.watermark,
         upstream_request={
             "model": body.model,
+            "requested_model": body.model,
+            "billing_model": billing_model,
             "provider_name": provider.name,
             "provider_kind": provider.kind,
-            "upstream_model": provider.upstream_model_for(body.model, body.action),
+            "upstream_model": upstream_model,
             "reference_media": reference_snapshots,
             "pricing_variant": pricing_variant,
         },
@@ -1009,6 +1028,8 @@ async def _create_video_generation_record(
             "request_fingerprint": request_fingerprint,
             "reference_media_count": len(reference_snapshots),
             "pricing_variant": pricing_variant,
+            "billing_model": billing_model,
+            "requested_model": body.model,
         },
         status=VideoGenerationStatus.QUEUED.value,
         progress_stage=VideoGenerationStage.QUEUED.value,
@@ -1031,12 +1052,15 @@ async def _create_video_generation_record(
             allow_negative=await _allow_negative_balance(db),
             meta={
                 "model": body.model,
+                "billing_model": billing_model,
+                "requested_model": body.model,
                 "action": body.action,
                 "resolution": body.resolution,
                 "duration_s": body.duration_s,
                 "estimated_tokens": cost.estimated_tokens,
                 "unit_price_micro": cost.unit_price_micro,
                 "provider_name": provider.name,
+                "upstream_model": upstream_model,
                 "reference_media_count": len(reference_snapshots),
                 "pricing_variant": pricing_variant,
             },

@@ -86,7 +86,7 @@ const VIDEO_OFFICIAL_PRICE_PRESETS: {
       reference_video: { "480p": 28, "720p": 28, "1080p": 31 },
       reference: { "480p": 46, "720p": 46, "1080p": 51 },
     },
-    note: "火山官方价：480/720P 无视频 46、含视频 28；1080P 无视频 51、含视频 31",
+    note: "火山官方 token 单价：480/720P 无视频 46、含视频 28；1080P 无视频 51、含视频 31。实际视频费用还取决于分辨率最低 token 用量，480P 与 720P 不同价。",
   },
   {
     model: "seedance-2.0-fast",
@@ -97,7 +97,7 @@ const VIDEO_OFFICIAL_PRICE_PRESETS: {
       reference_video: { "480p": 22, "720p": 22 },
       reference: { "480p": 37, "720p": 37 },
     },
-    note: "火山官方价：480/720P 无视频 37、含视频 22 元/百万 token；Fast 不支持 1080P",
+    note: "火山官方 token 单价：480/720P 无视频 37、含视频 22 元/百万 token；Fast 不支持 1080P。实际视频费用按分辨率最低 token 用量计算，480P 与 720P 不同价。",
   },
 ];
 
@@ -1272,7 +1272,8 @@ function PricingSubpanel() {
           <div>
             <p className="type-card-title">视频定价</p>
             <p className="type-body-sm text-[var(--fg-2)]">
-              Seedance 按 token 结算，这里配置每百万 token 的平台售价。
+              Seedance 按 token 结算，这里配置每百万 token 的平台售价；预扣上界另由
+              video.token_hold_estimates 按分辨率控制。
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">

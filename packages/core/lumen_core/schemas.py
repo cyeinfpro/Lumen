@@ -577,6 +577,8 @@ class VideoPriceOptionOut(BaseModel):
 
 class VideoModelOptionOut(BaseModel):
     model: str
+    billing_model: str | None = None
+    billing_models: dict[str, str] = Field(default_factory=dict)
     actions: list[VideoAction] = Field(default_factory=list)
     resolutions: list[VideoResolution] = Field(default_factory=list)
 

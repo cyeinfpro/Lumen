@@ -172,9 +172,21 @@ def _billable(payload: dict[str, Any]) -> bool | None:
     raw = _nested_get(
         payload,
         ("billable",),
+        ("data", "billable"),
+        ("result", "billable"),
+        ("output", "billable"),
         ("upstream_billable",),
+        ("data", "upstream_billable"),
+        ("result", "upstream_billable"),
+        ("output", "upstream_billable"),
         ("billing", "billable"),
+        ("data", "billing", "billable"),
+        ("result", "billing", "billable"),
+        ("output", "billing", "billable"),
         ("usage", "billable"),
+        ("data", "usage", "billable"),
+        ("result", "usage", "billable"),
+        ("output", "usage", "billable"),
     )
     if isinstance(raw, bool):
         return raw
@@ -215,9 +227,21 @@ def _usage_total_tokens(payload: dict[str, Any]) -> int | None:
         _nested_get(
             payload,
             ("usage", "completion_tokens"),
+            ("data", "usage", "completion_tokens"),
+            ("result", "usage", "completion_tokens"),
+            ("output", "usage", "completion_tokens"),
             ("usage", "total_tokens"),
+            ("data", "usage", "total_tokens"),
+            ("result", "usage", "total_tokens"),
+            ("output", "usage", "total_tokens"),
             ("usage_total_tokens",),
+            ("data", "usage_total_tokens"),
+            ("result", "usage_total_tokens"),
+            ("output", "usage_total_tokens"),
             ("total_tokens",),
+            ("data", "total_tokens"),
+            ("result", "total_tokens"),
+            ("output", "total_tokens"),
         )
     )
 

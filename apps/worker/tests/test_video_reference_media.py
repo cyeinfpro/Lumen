@@ -11,6 +11,7 @@ from app.video_upstream import (
     VideoSubmitRequest,
     VideoUpstreamError,
     VolcanoSeedanceAdapter,
+    _billable,
     _usage_total_tokens,
 )
 from lumen_core.video_providers import VideoProviderDefinition
@@ -193,6 +194,33 @@ def test_seedance_usage_prefers_official_completion_tokens() -> None:
         )
         == 42_000
     )
+
+
+def test_seedance_usage_reads_nested_task_response_usage() -> None:
+    assert (
+        _usage_total_tokens(
+            {
+                "data": {
+                    "status": "succeeded",
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 108_044,
+                        "total_tokens": 108_144,
+                    },
+                }
+            }
+        )
+        == 108_044
+    )
+
+
+def test_seedance_usage_falls_back_to_nested_total_tokens() -> None:
+    assert _usage_total_tokens({"data": {"usage": {"total_tokens": 108_144}}}) == 108_144
+
+
+def test_seedance_billable_reads_nested_usage_flag() -> None:
+    assert _billable({"data": {"usage": {"billable": False}}}) is False
+    assert _billable({"result": {"billing": {"billable": "true"}}}) is True
 
 
 @pytest.mark.asyncio
