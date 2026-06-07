@@ -11,12 +11,12 @@ import {
   Film,
   ImageIcon,
   Layers3,
+  PencilLine,
   Play,
   RefreshCw,
   RotateCcw,
   Send,
   Settings2,
-  Sparkles,
   Trash2,
   Upload,
   Video as VideoIcon,
@@ -196,7 +196,7 @@ function holdEstimateDurationS(durationS: number): number {
 }
 
 function formatDurationLabel(durationS: number): string {
-  return durationS === SMART_VIDEO_DURATION ? "智能时长" : `${durationS}s`;
+  return durationS === SMART_VIDEO_DURATION ? "自动时长" : `${durationS}s`;
 }
 
 function isActiveVideo(item: VideoGenerationOut): boolean {
@@ -271,6 +271,18 @@ function resolutionOptionsForModel(
   return options?.resolutions?.length ? options.resolutions : ["480p", "720p", "1080p"];
 }
 
+function billingModelForAction(
+  options: VideoOptionsOut | undefined,
+  model: string,
+  action: VideoAction,
+): string {
+  const modelOptions = options?.models.find((item) => item.model === model);
+  const actionBillingModel = modelOptions?.billing_models?.[action]?.trim();
+  if (actionBillingModel) return actionBillingModel;
+  const billingModel = modelOptions?.billing_model?.trim();
+  return billingModel || model;
+}
+
 function preferredResolution(options: string[]): string {
   return options.includes("720p") ? "720p" : options[0] ?? "720p";
 }
@@ -290,28 +302,43 @@ function estimateHoldMicro(
   options: VideoOptionsOut | undefined,
   {
     model,
+    billingModel,
     action,
     resolution,
     durationS,
     referenceHasVideo,
   }: {
     model: string;
+    billingModel?: string;
     action: VideoAction;
     resolution: string;
     durationS: number;
     referenceHasVideo?: boolean;
   },
 ): { tokens: number; micro: number } | null {
-  const tokenMap = options?.hold_estimates?.[model];
-  if (!tokenMap || typeof tokenMap !== "object") return null;
-  const tokenRecord = tokenMap as Record<string, unknown>;
-  const actionMap =
-    tokenRecord[action] ??
-    (action === "reference" ? tokenRecord.i2v ?? tokenRecord.t2v : undefined);
-  if (!actionMap || typeof actionMap !== "object") return null;
-  const tokensRaw = (actionMap as Record<string, unknown>)[
-    `${resolution}:${holdEstimateDurationS(durationS)}`
-  ];
+  const modelCandidates = Array.from(
+    new Set([billingModel, model].filter(Boolean) as string[]),
+  );
+  const estimateActions =
+    action === "reference"
+      ? referenceHasVideo
+        ? ["reference_video"]
+        : ["reference_image", "reference", "i2v", "t2v"]
+      : [action];
+  const estimateKey = `${resolution}:${holdEstimateDurationS(durationS)}`;
+  let tokensRaw: unknown;
+  for (const modelCandidate of modelCandidates) {
+    const tokenMap = options?.hold_estimates?.[modelCandidate];
+    if (!tokenMap || typeof tokenMap !== "object") continue;
+    const tokenRecord = tokenMap as Record<string, unknown>;
+    for (const estimateAction of estimateActions) {
+      const actionMap = tokenRecord[estimateAction];
+      if (!actionMap || typeof actionMap !== "object") continue;
+      tokensRaw = (actionMap as Record<string, unknown>)[estimateKey];
+      if (tokensRaw != null) break;
+    }
+    if (tokensRaw != null) break;
+  }
   const tokens = Number(tokensRaw);
   if (!Number.isFinite(tokens) || tokens <= 0) return null;
   const pricingAction =
@@ -320,21 +347,27 @@ function estimateHoldMicro(
         ? "reference_video"
         : "reference_image"
       : action;
-  const findPrice = (priceAction: VideoAction | "reference_image" | "reference_video") =>
-    options?.pricing.find(
-      (item) =>
-        item.model === model &&
-        item.action === priceAction &&
-        item.resolution === resolution &&
-        item.enabled,
-    ) ??
-    options?.pricing.find(
-      (item) =>
-        item.model === model &&
-        item.action === priceAction &&
-        (item.resolution == null || item.resolution === "") &&
-        item.enabled,
-    );
+  const findPrice = (priceAction: VideoAction | "reference_image" | "reference_video") => {
+    for (const modelCandidate of modelCandidates) {
+      const price =
+        options?.pricing.find(
+          (item) =>
+            item.model === modelCandidate &&
+            item.action === priceAction &&
+            item.resolution === resolution &&
+            item.enabled,
+        ) ??
+        options?.pricing.find(
+          (item) =>
+            item.model === modelCandidate &&
+            item.action === priceAction &&
+            (item.resolution == null || item.resolution === "") &&
+            item.enabled,
+        );
+      if (price) return price;
+    }
+    return undefined;
+  };
   const price =
     findPrice(pricingAction) ??
     (action === "reference" ? findPrice("reference") : undefined) ??
@@ -435,7 +468,11 @@ export default function VideoPage() {
     [completedVideoItems, selectedVideoId],
   );
   const primaryVideoItem = selectedVideoItem ?? completedVideoItems[0] ?? null;
-  const recentVideoItems = completedVideoItems.slice(0, 4);
+  const previewStripItems = completedVideoItems.slice(0, 6);
+  const settledHistoryItems = useMemo(
+    () => effectiveItems.filter((item) => !isActiveVideo(item)),
+    [effectiveItems],
+  );
   const channels = useMemo(
     () => activeItems.map((item) => `task:${item.id}`),
     [activeItems],
@@ -668,6 +705,7 @@ export default function VideoPage() {
     [action, options?.models],
   );
   const selectedModel = model || firstModelForAction(options, action);
+  const selectedBillingModel = billingModelForAction(options, selectedModel, action);
   const availableResolutions = useMemo(
     () => resolutionOptionsForModel(options, selectedModel),
     [options, selectedModel],
@@ -677,6 +715,7 @@ export default function VideoPage() {
     : preferredResolution(availableResolutions);
   const estimate = estimateHoldMicro(options, {
     model: selectedModel,
+    billingModel: selectedBillingModel,
     action,
     resolution: effectiveResolution,
     durationS,
@@ -953,7 +992,7 @@ export default function VideoPage() {
   const submitDisabledReason = useMemo(() => {
     if (createMut.isPending) return "正在提交";
     if (optionsQ.isLoading) return "正在读取配置";
-    if (!options?.enabled) return options?.unavailable_reason ?? "视频生成未启用";
+    if (!options?.enabled) return options?.unavailable_reason ?? "功能未启用";
     if (!selectedModel) return "没有可用模型";
     if (!availableResolutions.includes(effectiveResolution)) return "当前模型不支持该分辨率";
     if (!prompt.trim()) return "先填写描述";
@@ -994,56 +1033,45 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="mx-auto flex w-full max-w-[1440px] flex-col gap-3 px-4 pb-36 pt-3 md:px-6 md:pb-10">
-        <section className="hidden min-w-0 items-center justify-between gap-3 border-b border-[var(--border)] pb-1.5 md:flex">
-          <div className="flex min-w-0 items-baseline gap-2.5">
-            <p className="type-page-kicker shrink-0">Video</p>
-            <h1 className="type-page-title shrink-0">视频</h1>
-            <p className="type-page-subtitle hidden min-w-0 truncate lg:block">
-              文字、首帧和参考素材三种入口。
+      <main className="mx-auto flex w-full max-w-[1440px] flex-col gap-4 px-4 pb-36 pt-3 md:px-6 md:pb-10">
+        <section className="hidden min-w-0 border-b border-[var(--border)] pb-3 md:block">
+          <div className="min-w-0">
+            <h1 className="type-page-title">视频</h1>
+            <p className="type-page-subtitle mt-1 truncate">
+              写描述，选参数，生成视频。
             </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <HeaderStat
-              label={options?.enabled ? "已启用" : "未启用"}
-              value={optionsQ.isLoading ? "读取中" : options?.enabled ? "在线" : "离线"}
-              tone={options?.enabled ? "success" : "muted"}
-            />
-            <HeaderStat
-              label="活跃"
-              value={String(activeItems.length)}
-              tone={activeItems.length > 0 ? "accent" : "muted"}
-            />
-            <HeaderStat
-              label="完成"
-              value={String(completedVideoItems.length)}
-              tone="muted"
-            />
           </div>
         </section>
         <section className="grid gap-2 border-b border-[var(--border)] pb-3 md:hidden">
-          <p className="type-page-kicker">Video</p>
           <div className="flex items-end justify-between gap-3">
             <h1 className="type-page-title">视频</h1>
-            <span className="type-caption text-[var(--fg-2)]">
-              {activeItems.length} 活跃 · {completedVideoItems.length} 完成
-            </span>
           </div>
           <p className="text-[13px] leading-[1.6] text-[var(--fg-1)]">
-            文字、首帧和参考素材三种入口。
+            写描述，选参数，生成视频。
           </p>
         </section>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(360px,480px)_1fr]">
-          <section className="space-y-4">
-            <Card variant="subtle" padding="lg" className="space-y-4">
-              <div className="flex items-start justify-between gap-3">
+        <VideoStatusStrip
+          mode={actionLabel(action)}
+          profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
+          audio={generateAudio}
+          enabled={Boolean(options?.enabled)}
+          loading={optionsQ.isLoading}
+          activeCount={activeItems.length}
+          completedCount={completedVideoItems.length}
+        />
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(340px,420px)_minmax(0,1fr)] xl:items-start">
+          <section className="min-w-0 space-y-4 xl:sticky xl:top-20">
+            <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
+              <div className="relative flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
+                <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
                 <div>
                   <p className="type-card-title">新建视频</p>
                   <p className="mt-1 text-sm text-[var(--fg-2)]">
                     {options?.enabled
-                      ? `${availableModels.length} 个模型可用于${actionLabel(action)}`
-                      : options?.unavailable_reason ?? "视频生成未启用"}
+                      ? `${availableModels.length} 个模型 · ${actionLabel(action)}`
+                      : options?.unavailable_reason ?? "功能未启用"}
                   </p>
                 </div>
                 <Button
@@ -1059,254 +1087,269 @@ export default function VideoPage() {
                 </Button>
               </div>
 
-              <div className="space-y-2">
-                <div className="grid grid-cols-3 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
-                  {(Object.keys(MODE_COPY) as VideoAction[]).map((key) => (
-                    <ModeCard
-                      key={key}
-                      actionKey={key}
-                      selected={action === key}
-                      onSelect={() => {
-                        setAction(key);
-                        setModel(firstModelForAction(options, key));
-                      }}
-                    />
-                  ))}
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-2 text-xs text-[var(--fg-2)]">
-                  <span>{MODE_COPY[action].description}</span>
-                  <span className="font-medium text-[var(--fg-1)]">{MODE_COPY[action].requirement}</span>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="type-caption text-[var(--fg-2)]">描述</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs tabular-nums text-[var(--fg-2)]">
-                      {prompt.length.toLocaleString()} / 10,000
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      loading={isEnhancingPrompt}
-                      disabled={!canEnhancePrompt}
-                      onClick={() => void enhancePromptAction()}
-                      leftIcon={<Sparkles className="h-3.5 w-3.5" />}
-                    >
-                      一键优化
-                    </Button>
+              <div className="space-y-5 p-4 sm:p-5">
+                <WorkflowRail
+                  action={action}
+                  hasPrompt={prompt.trim().length > 0}
+                  hasSource={
+                    action === "t2v" ||
+                    (action === "i2v" && inputImageId.trim().length > 0) ||
+                    (action === "reference" && referenceMedia.length > 0)
+                  }
+                  profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
+                />
+                <div className="space-y-2">
+                  <div className="grid grid-cols-3 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
+                    {(Object.keys(MODE_COPY) as VideoAction[]).map((key) => (
+                      <ModeCard
+                        key={key}
+                        actionKey={key}
+                        selected={action === key}
+                        onSelect={() => {
+                          setAction(key);
+                          setModel(firstModelForAction(options, key));
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--fg-2)]">
+                    <span>{MODE_COPY[action].description}</span>
+                    <span className="font-medium text-[var(--fg-1)]">{MODE_COPY[action].requirement}</span>
                   </div>
                 </div>
-                <textarea
-                  ref={promptRef}
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  readOnly={isEnhancingPrompt}
-                  rows={8}
-                  maxLength={10000}
-                  placeholder="写清主体、动作、画面比例和不要出现的内容。"
-                  className={cn(
-                    "min-h-[184px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
-                    isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
-                  )}
-                />
-                <div className="flex flex-wrap gap-2">
-                  {PROMPT_CHIPS.map((chip) => (
-                    <button
-                      key={chip}
-                      type="button"
-                      disabled={isEnhancingPrompt}
-                      onClick={() => insertPromptText(chip)}
-                      className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
-                    >
-                      {chip}
-                    </button>
-                  ))}
-                </div>
-                <div className="grid gap-2 text-xs text-[var(--fg-2)] sm:grid-cols-3">
-                  <PromptMeta icon={<Film className="h-3.5 w-3.5" />} label={actionLabel(action)} />
-                  <PromptMeta icon={<Layers3 className="h-3.5 w-3.5" />} label={`${referenceMedia.length} 个参考素材`} />
-                  <PromptMeta icon={<Settings2 className="h-3.5 w-3.5" />} label={`${effectiveResolution} · ${formatDurationLabel(durationS)}`} />
-                </div>
-              </div>
 
-              {action === "i2v" && (
-                <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
+                <div className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-medium text-[var(--fg-0)]">首帧图片</p>
-                      <p className="text-xs text-[var(--fg-2)]">上传首帧，或粘贴已有图片 ID。</p>
+                    <span className="type-caption text-[var(--fg-2)]">描述</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs tabular-nums text-[var(--fg-2)]">
+                        {prompt.length.toLocaleString()} / 10,000
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        loading={isEnhancingPrompt}
+                        disabled={!canEnhancePrompt}
+                        onClick={() => void enhancePromptAction()}
+                        leftIcon={<PencilLine className="h-3.5 w-3.5" />}
+                      >
+                        优化
+                      </Button>
+                    </div>
+                  </div>
+                  <textarea
+                    ref={promptRef}
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    readOnly={isEnhancingPrompt}
+                    rows={7}
+                    maxLength={10000}
+                    placeholder="写清主体、动作、画面比例和不要出现的内容。"
+                    className={cn(
+                      "min-h-[160px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
+                      isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
+                    )}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    {PROMPT_CHIPS.map((chip) => (
+                      <button
+                        key={chip}
+                        type="button"
+                        disabled={isEnhancingPrompt}
+                        onClick={() => insertPromptText(chip)}
+                        className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
+                      >
+                        {chip}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid gap-2 text-xs text-[var(--fg-2)] sm:grid-cols-3 xl:grid-cols-1 2xl:grid-cols-3">
+                    <PromptMeta icon={<Film className="h-3.5 w-3.5" />} label={actionLabel(action)} />
+                    <PromptMeta icon={<Layers3 className="h-3.5 w-3.5" />} label={`${referenceMedia.length} 个参考素材`} />
+                    <PromptMeta icon={<Settings2 className="h-3.5 w-3.5" />} label={`${effectiveResolution} · ${formatDurationLabel(durationS)}`} />
+                  </div>
+                </div>
+
+                {action === "i2v" && (
+                  <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium text-[var(--fg-0)]">首帧图片</p>
+                        <p className="text-xs text-[var(--fg-2)]">上传首帧，或粘贴已有图片 ID。</p>
+                      </div>
+                      <input
+                        ref={fileRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        className="hidden"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) uploadMut.mutate(file);
+                          event.target.value = "";
+                        }}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        loading={uploadMut.isPending}
+                        onClick={() => fileRef.current?.click()}
+                        leftIcon={<Upload className="h-3.5 w-3.5" />}
+                      >
+                        上传
+                      </Button>
                     </div>
                     <input
-                      ref={fileRef}
+                      value={inputImageId}
+                      onChange={(event) => {
+                        setInputImageId(event.target.value);
+                        setUploadedLabel("");
+                      }}
+                      placeholder="image_id"
+                      className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                    />
+                    <div className="rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
+                      {uploadedLabel || inputImageId ? uploadedLabel || "已填写图片 ID" : "用于确定第一帧构图。"}
+                    </div>
+                  </div>
+                )}
+
+                {action === "reference" && (
+                  <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+                    <input
+                      ref={referenceFileRef}
                       type="file"
-                      accept="image/png,image/jpeg,image/webp"
+                      accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime"
                       className="hidden"
                       onChange={(event) => {
                         const file = event.target.files?.[0];
-                        if (file) uploadMut.mutate(file);
+                        if (file) referenceUploadMut.mutate(file);
                         event.target.value = "";
                       }}
                     />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      loading={uploadMut.isPending}
-                      onClick={() => fileRef.current?.click()}
-                      leftIcon={<Upload className="h-3.5 w-3.5" />}
-                    >
-                      上传首帧
-                    </Button>
-                  </div>
-                  <input
-                    value={inputImageId}
-                    onChange={(event) => {
-                      setInputImageId(event.target.value);
-                      setUploadedLabel("");
-                    }}
-                    placeholder="image_id"
-                    className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-                  />
-                  <div className="rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
-                    {uploadedLabel || inputImageId ? uploadedLabel || "已填写图片 ID" : "用于确定第一帧构图。"}
-                  </div>
-                </div>
-              )}
-
-              {action === "reference" && (
-                <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
-                  <input
-                    ref={referenceFileRef}
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime"
-                    className="hidden"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) referenceUploadMut.mutate(file);
-                      event.target.value = "";
-                    }}
-                  />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-medium text-[var(--fg-0)]">参考素材</p>
-                      <p className="text-xs text-[var(--fg-2)]">点击素材标签可插入描述。</p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium text-[var(--fg-0)]">参考素材</p>
+                        <p className="text-xs text-[var(--fg-2)]">点击素材标签可插入描述。</p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        loading={referenceUploadMut.isPending}
+                        onClick={() => referenceFileRef.current?.click()}
+                        leftIcon={<Upload className="h-3.5 w-3.5" />}
+                      >
+                        上传
+                      </Button>
                     </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      loading={referenceUploadMut.isPending}
-                      onClick={() => referenceFileRef.current?.click()}
-                      leftIcon={<Upload className="h-3.5 w-3.5" />}
-                    >
-                      上传图片/视频
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      {referenceMedia.map((item) => (
+                        <ReferenceChip
+                          key={item._key}
+                          item={item}
+                          onInsert={() => insertReferenceTag(item.label)}
+                          onRemove={() =>
+                            setReferenceMedia((prev) =>
+                              prev.filter((ref) => ref._key !== item._key),
+                            )
+                          }
+                        />
+                      ))}
+                      {referenceMedia.length === 0 && (
+                        <span className="rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
+                          未添加参考素材
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    {referenceMedia.map((item) => (
-                      <ReferenceChip
-                        key={item._key}
-                        item={item}
-                        onInsert={() => insertReferenceTag(item.label)}
-                        onRemove={() =>
-                          setReferenceMedia((prev) =>
-                            prev.filter((ref) => ref._key !== item._key),
-                          )
-                        }
+                )}
+
+                <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+                  <div className="flex items-center gap-2">
+                    <Settings2 className="h-4 w-4 text-[var(--fg-2)]" />
+                    <p className="text-sm font-medium text-[var(--fg-0)]">参数</p>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                    <SelectField
+                      label="模型"
+                      value={selectedModel}
+                      onChange={setModel}
+                      options={availableModels.map((item) => item.model)}
+                    />
+                    <SelectField
+                      label="时长"
+                      value={String(durationS)}
+                      onChange={(value) => setDurationS(Number(value))}
+                      options={(options?.durations_s ?? VIDEO_DURATION_OPTIONS).map(String)}
+                      renderOption={(value) => formatDurationLabel(Number(value))}
+                    />
+                    <SelectField
+                      label="分辨率"
+                      value={effectiveResolution}
+                      onChange={setResolution}
+                      options={availableResolutions}
+                    />
+                    <SelectField
+                      label="比例"
+                      value={aspectRatio}
+                      onChange={setAspectRatio}
+                      options={options?.aspect_ratios ?? ["adaptive", "16:9", "9:16", "1:1"]}
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-[1fr_auto] xl:grid-cols-1 2xl:grid-cols-[1fr_auto]">
+                    <label className="space-y-1.5">
+                      <span className="type-caption text-[var(--fg-2)]">种子</span>
+                      <input
+                        value={seed}
+                        onChange={(event) => setSeed(event.target.value)}
+                        inputMode="numeric"
+                        placeholder="随机"
+                        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
                       />
-                    ))}
-                    {referenceMedia.length === 0 && (
-                      <span className="rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
-                        未添加参考素材
-                      </span>
-                    )}
+                    </label>
+                    <label className="flex min-h-10 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm">
+                      <span>生成音频</span>
+                      <input
+                        type="checkbox"
+                        checked={generateAudio}
+                        onChange={(event) => setGenerateAudio(event.target.checked)}
+                      />
+                    </label>
                   </div>
                 </div>
-              )}
 
-              <div className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
-                <div className="flex items-center gap-2">
-                  <Settings2 className="h-4 w-4 text-[var(--fg-2)]" />
-                  <p className="text-sm font-medium text-[var(--fg-0)]">参数</p>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <SelectField
-                    label="模型"
-                    value={selectedModel}
-                    onChange={setModel}
-                    options={availableModels.map((item) => item.model)}
-                  />
-                  <SelectField
-                    label="时长"
-                    value={String(durationS)}
-                    onChange={(value) => setDurationS(Number(value))}
-                    options={(options?.durations_s ?? VIDEO_DURATION_OPTIONS).map(String)}
-                    renderOption={(value) => formatDurationLabel(Number(value))}
-                  />
-                  <SelectField
-                    label="分辨率"
-                    value={effectiveResolution}
-                    onChange={setResolution}
-                    options={availableResolutions}
-                  />
-                  <SelectField
-                    label="比例"
-                    value={aspectRatio}
-                    onChange={setAspectRatio}
-                    options={options?.aspect_ratios ?? ["adaptive", "16:9", "9:16", "1:1"]}
+                <div className="hidden md:block">
+                  <SubmitPanel
+                    estimate={estimate}
+                    canSubmit={canSubmit}
+                    reason={submitDisabledReason}
+                    loading={createMut.isPending}
+                    onSubmit={() => createMut.mutate()}
                   />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                  <label className="space-y-1.5">
-                    <span className="type-caption text-[var(--fg-2)]">种子</span>
-                    <input
-                      value={seed}
-                      onChange={(event) => setSeed(event.target.value)}
-                      inputMode="numeric"
-                      placeholder="随机"
-                      className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-                    />
-                  </label>
-                  <label className="flex min-h-10 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm">
-                    <span>生成音频</span>
-                    <input
-                      type="checkbox"
-                      checked={generateAudio}
-                      onChange={(event) => setGenerateAudio(event.target.checked)}
-                    />
-                  </label>
+                <div className="sticky bottom-16 z-20 md:hidden">
+                  <SubmitPanel
+                    estimate={estimate}
+                    canSubmit={canSubmit}
+                    reason={submitDisabledReason}
+                    loading={createMut.isPending}
+                    onSubmit={() => createMut.mutate()}
+                    compact
+                  />
                 </div>
-              </div>
-
-              <div className="hidden md:block">
-                <SubmitPanel
-                  estimate={estimate}
-                  canSubmit={canSubmit}
-                  reason={submitDisabledReason}
-                  loading={createMut.isPending}
-                  onSubmit={() => createMut.mutate()}
-                />
-              </div>
-              <div className="sticky bottom-16 z-20 md:hidden">
-                <SubmitPanel
-                  estimate={estimate}
-                  canSubmit={canSubmit}
-                  reason={submitDisabledReason}
-                  loading={createMut.isPending}
-                  onSubmit={() => createMut.mutate()}
-                  compact
-                />
               </div>
             </Card>
           </section>
 
-          <section className="space-y-4">
-            <Card variant="subtle" padding="lg" className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+          <section className="min-w-0 space-y-4">
+            <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
+              <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
+                <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
                 <div>
                   <p className="type-card-title">预览</p>
                   <p className="mt-1 text-sm text-[var(--fg-2)]">
-                    最近完成的视频。
+                    {primaryVideoItem
+                      ? `${actionLabel(primaryVideoItem.action)} · ${primaryVideoItem.resolution} · ${formatDurationLabel(primaryVideoItem.duration_s)}`
+                      : "等待结果"}
                   </p>
                 </div>
                 <Button
@@ -1315,110 +1358,126 @@ export default function VideoPage() {
                   onClick={() => void historyQ.refetch()}
                   leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
                 >
-                  刷新队列
+                  刷新
                 </Button>
               </div>
-              <PrimaryPreview
-                item={primaryVideoItem}
-                onUseDraft={primaryVideoItem ? () => loadAsDraft(primaryVideoItem) : undefined}
-                onRetry={primaryVideoItem ? () => retryMut.mutate(primaryVideoItem.id) : undefined}
-                onCopy={primaryVideoItem ? () => {
-                  void navigator.clipboard?.writeText(primaryVideoItem.prompt);
-                  toast.success("描述已复制");
-                } : undefined}
-                onDelete={primaryVideoItem?.video ? () => deleteMut.mutate(primaryVideoItem.video.id) : undefined}
-              />
+              <div className="space-y-4 p-4 sm:p-5 lg:p-6">
+                <PrimaryPreview
+                  item={primaryVideoItem}
+                  onUseDraft={primaryVideoItem ? () => loadAsDraft(primaryVideoItem) : undefined}
+                  onRetry={primaryVideoItem ? () => retryMut.mutate(primaryVideoItem.id) : undefined}
+                  onCopy={primaryVideoItem ? () => {
+                    void navigator.clipboard?.writeText(primaryVideoItem.prompt);
+                    toast.success("描述已复制");
+                  } : undefined}
+                  onDelete={primaryVideoItem?.video ? () => deleteMut.mutate(primaryVideoItem.video.id) : undefined}
+                />
+                {previewStripItems.length > 1 && (
+                  <div className="space-y-2 border-t border-[var(--border-subtle)] pt-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="type-caption text-[var(--fg-2)]">最近</p>
+                      <span className="text-xs tabular-nums text-[var(--fg-2)]">
+                        {completedVideoItems.length} 个
+                      </span>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+                      {previewStripItems.map((item) => (
+                        <VideoStripItem
+                          key={item.id}
+                          item={item}
+                          selected={primaryVideoItem?.video.id === item.video.id}
+                          onPreview={() => setSelectedVideoId(item.video.id)}
+                          onUseDraft={() => loadAsDraft(item)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </Card>
 
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-              <Card variant="subtle" padding="lg" className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <Clapperboard className="h-4 w-4 text-[var(--fg-2)]" />
-                    <p className="type-card-title">任务</p>
-                  </div>
-                  <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs tabular-nums text-[var(--fg-2)]">
-                    {activeItems.length}
+            <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
+              <div className="relative flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
+                <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
+                <div className="flex items-center gap-2">
+                  <Clapperboard className="h-4 w-4 text-[var(--fg-2)]" />
+                  <p className="type-card-title">记录</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-2)]">
+                  <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 tabular-nums">
+                    {activeItems.length} 活跃
+                  </span>
+                  <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 tabular-nums">
+                    {historyQ.isLoading ? "读取中" : `${settledHistoryItems.length} 历史`}
                   </span>
                 </div>
-                <div className="space-y-3">
-                  {activeItems.length === 0 && (
-                    <EmptyPanel
-                      icon={<Clapperboard className="h-5 w-5" />}
-                      title="暂无任务"
-                      description="提交后会显示排队、生成和取回状态。"
-                    />
-                  )}
-                  {activeItems.map((item) => (
-                    <TaskRow
-                      key={item.id}
-                      item={item}
-                      onCancel={() => cancelMut.mutate(item.id)}
-                      onRetry={() => retryMut.mutate(item.id)}
-                      onCopy={() => {
-                        void navigator.clipboard?.writeText(item.prompt);
-                        toast.success("描述已复制");
-                      }}
-                      onUseDraft={() => loadAsDraft(item)}
-                    />
-                  ))}
-                </div>
-              </Card>
-
-              <Card variant="subtle" padding="lg" className="space-y-4">
-                <p className="type-card-title">最近</p>
-                <div className="space-y-3">
-                  {recentVideoItems.length === 0 && (
-                    <EmptyPanel
-                      icon={<Film className="h-5 w-5" />}
-                      title="暂无视频"
-                      description="完成后会出现在这里。"
-                    />
-                  )}
-                  {recentVideoItems.map((item) => (
-                    <RecentVideoCard
-                      key={item.id}
-                      item={item}
-                      selected={primaryVideoItem?.video.id === item.video.id}
-                      onPreview={() => setSelectedVideoId(item.video.id)}
-                      onUseDraft={() => loadAsDraft(item)}
-                    />
-                  ))}
-                </div>
-              </Card>
-            </div>
-
-            <Card variant="subtle" padding="lg" className="space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <p className="type-card-title">历史</p>
-                <span className="text-xs text-[var(--fg-2)]">
-                  {historyQ.isLoading ? "读取中" : `${effectiveItems.length} 条`}
-                </span>
               </div>
-              <div className="grid gap-3">
-                {effectiveItems.map((item) => (
-                  <TaskRow
-                    key={item.id}
-                    item={item}
-                    onCancel={() => cancelMut.mutate(item.id)}
-                    onRetry={() => retryMut.mutate(item.id)}
-                    onCopy={() => {
-                      void navigator.clipboard?.writeText(item.prompt);
-                      toast.success("描述已复制");
-                    }}
-                    onUseDraft={() => loadAsDraft(item)}
-                    onDelete={() => item.video && deleteMut.mutate(item.video.id)}
-                    onPreview={hasVideo(item) ? () => setSelectedVideoId(item.video.id) : undefined}
-                    selected={primaryVideoItem?.video.id === item.video?.id}
-                  />
-                ))}
-                {!historyQ.isLoading && effectiveItems.length === 0 && (
-                  <EmptyPanel
-                    icon={<Film className="h-5 w-5" />}
-                    title="暂无历史"
-                    description="提交记录会保留状态、参数和结果。"
-                  />
+              <div className="space-y-5 p-4 sm:p-5">
+                {activeItems.length > 0 && (
+                  <section className="space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="type-caption text-[var(--fg-2)]">正在进行</p>
+                      <span className="text-xs tabular-nums text-[var(--fg-2)]">
+                        {activeItems.length} 条
+                      </span>
+                    </div>
+                    <div className="grid gap-3">
+                      {activeItems.map((item) => (
+                        <TaskRow
+                          key={item.id}
+                          item={item}
+                          onCancel={() => cancelMut.mutate(item.id)}
+                          onRetry={() => retryMut.mutate(item.id)}
+                          onCopy={() => {
+                            void navigator.clipboard?.writeText(item.prompt);
+                            toast.success("描述已复制");
+                          }}
+                          onUseDraft={() => loadAsDraft(item)}
+                          showPreview={false}
+                        />
+                      ))}
+                    </div>
+                  </section>
                 )}
+
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="type-caption text-[var(--fg-2)]">历史记录</p>
+                    <span className="text-xs tabular-nums text-[var(--fg-2)]">
+                      {historyQ.isLoading ? "读取中" : `${settledHistoryItems.length} 条`}
+                    </span>
+                  </div>
+                  <div className="grid gap-3">
+                    {settledHistoryItems.map((item) => (
+                      <TaskRow
+                        key={item.id}
+                        item={item}
+                        onCancel={() => cancelMut.mutate(item.id)}
+                        onRetry={() => retryMut.mutate(item.id)}
+                        onCopy={() => {
+                          void navigator.clipboard?.writeText(item.prompt);
+                          toast.success("描述已复制");
+                        }}
+                        onUseDraft={() => loadAsDraft(item)}
+                        onDelete={() => item.video && deleteMut.mutate(item.video.id)}
+                        onPreview={hasVideo(item) ? () => setSelectedVideoId(item.video.id) : undefined}
+                        selected={primaryVideoItem?.video.id === item.video?.id}
+                        showPreview={false}
+                      />
+                    ))}
+                    {settledHistoryItems.length === 0 && (
+                      <EmptyPanel
+                        icon={<Film className="h-5 w-5" />}
+                        title={historyQ.isLoading ? "读取中" : "暂无历史"}
+                        description={
+                          activeItems.length > 0
+                            ? "当前任务完成后会进入历史。"
+                            : "提交记录会保留状态、参数和结果。"
+                        }
+                      />
+                    )}
+                  </div>
+                </section>
               </div>
             </Card>
           </section>
@@ -1462,40 +1521,191 @@ function SelectField({
   );
 }
 
-function HeaderStat({
+function WorkflowRail({
+  action,
+  hasPrompt,
+  hasSource,
+  profile,
+}: {
+  action: VideoAction;
+  hasPrompt: boolean;
+  hasSource: boolean;
+  profile: string;
+}) {
+  return (
+    <div className="grid grid-cols-3 gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-2 shadow-[var(--shadow-1)] xl:grid-cols-1 2xl:grid-cols-3">
+      <WorkflowStep
+        label="描述"
+        value={hasPrompt ? "已填写" : "待输入"}
+        active={!hasPrompt}
+        done={hasPrompt}
+        icon={<PencilLine className="h-3.5 w-3.5" />}
+      />
+      <WorkflowStep
+        label="素材"
+        value={action === "t2v" ? "纯文本" : hasSource ? "已连接素材" : MODE_COPY[action].requirement}
+        active={hasPrompt && !hasSource}
+        done={hasSource}
+        icon={<Layers3 className="h-3.5 w-3.5" />}
+      />
+      <WorkflowStep
+        label="参数"
+        value={profile}
+        active={hasPrompt && hasSource}
+        done={hasPrompt && hasSource}
+        icon={<Settings2 className="h-3.5 w-3.5" />}
+      />
+    </div>
+  );
+}
+
+function WorkflowStep({
   label,
   value,
-  tone = "muted",
+  icon,
+  active,
+  done,
 }: {
   label: string;
   value: string;
-  tone?: "muted" | "accent" | "success";
+  icon: React.ReactNode;
+  active: boolean;
+  done: boolean;
 }) {
   return (
-    <span
+    <div
       className={cn(
-        "inline-flex min-h-9 items-baseline gap-1.5 border px-3",
-        tone === "success"
-          ? "border-success-border bg-success-soft"
-          : tone === "accent"
-            ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
-            : "border-[var(--border-subtle)] bg-[var(--bg-0)]/70",
+        "relative min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2 py-2 transition-colors sm:px-3",
+        done || active
+          ? "border-[var(--border-strong)] bg-[var(--bg-0)] shadow-[var(--shadow-1)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-1)]/70",
+      )}
+    >
+      {(done || active) && (
+        <span
+          aria-hidden="true"
+          className={cn(
+            "absolute inset-y-2 left-0 w-0.5 rounded-r-full",
+            active ? "bg-[var(--accent)]" : "bg-[var(--border-strong)]",
+          )}
+        />
+      )}
+      <div className="flex min-w-0 items-center gap-2">
+        <span
+          className={cn(
+            "shrink-0",
+            active ? "text-[var(--accent)]" : done ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
+          )}
+        >
+          {icon}
+        </span>
+        <span className="type-caption truncate text-[var(--fg-2)]">{label}</span>
+      </div>
+      <p className="mt-1 truncate text-xs font-medium text-[var(--fg-0)]">{value}</p>
+    </div>
+  );
+}
+
+function VideoStatusStrip({
+  mode,
+  profile,
+  audio,
+  enabled,
+  loading,
+  activeCount,
+  completedCount,
+}: {
+  mode: string;
+  profile: string;
+  audio: boolean;
+  enabled: boolean;
+  loading: boolean;
+  activeCount: number;
+  completedCount: number;
+}) {
+  const serviceValue = loading ? "读取中" : enabled ? "在线" : "离线";
+  const serviceDetail = loading ? "读取配置" : enabled ? "配置可用" : "功能未启用";
+  const queueValue = activeCount > 0 ? `${activeCount} 进行中` : `${completedCount} 已完成`;
+  const queueDetail = activeCount > 0 ? "任务队列" : "最近结果";
+
+  return (
+    <section className="grid gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-2 shadow-[var(--shadow-1)] sm:grid-cols-3">
+      <StatusStripItem
+        label="状态"
+        value={serviceValue}
+        detail={serviceDetail}
+        icon={<Clapperboard className="h-3.5 w-3.5" />}
+        active={enabled}
+      />
+      <StatusStripItem
+        label="模式"
+        value={mode}
+        detail={audio ? "含音频" : "无音频"}
+        icon={<Film className="h-3.5 w-3.5" />}
+        active
+      />
+      <StatusStripItem
+        label="规格"
+        value={profile}
+        detail={`${queueValue} · ${queueDetail}`}
+        icon={<Settings2 className="h-3.5 w-3.5" />}
+        active={activeCount > 0}
+      />
+    </section>
+  );
+}
+
+function StatusStripItem({
+  label,
+  value,
+  detail,
+  icon,
+  active = false,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  icon: React.ReactNode;
+  active?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "relative min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-3 py-2.5",
+        active
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/64",
       )}
     >
       <span
+        aria-hidden="true"
         className={cn(
-          "text-[13px] font-semibold tabular-nums leading-[1.9]",
-          tone === "success"
-            ? "text-success"
-            : tone === "accent"
-              ? "text-[var(--accent)]"
-              : "text-[var(--fg-0)]",
+          "absolute inset-y-2 left-0 w-0.5 rounded-r-full",
+          active ? "bg-[var(--accent)]" : "bg-[var(--border-strong)]",
         )}
-      >
-        {value}
-      </span>
-      <span className="text-[10px] text-[var(--fg-2)]">{label}</span>
-    </span>
+      />
+      <div className="flex min-w-0 items-start gap-2.5">
+        <span
+          className={cn(
+            "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
+            active
+              ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
+              : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
+          )}
+        >
+          {icon}
+        </span>
+        <span className="min-w-0">
+          <span className="type-caption block text-[var(--fg-2)]">{label}</span>
+          <span className="mt-0.5 block truncate text-sm font-semibold text-[var(--fg-0)]">
+            {value}
+          </span>
+          <span className="mt-0.5 block truncate text-xs text-[var(--fg-2)]">
+            {detail}
+          </span>
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -1509,39 +1719,56 @@ function ModeCard({
   onSelect: () => void;
 }) {
   const copy = MODE_COPY[actionKey];
+  const icon =
+    actionKey === "t2v" ? (
+      <Film className="h-4 w-4" />
+    ) : actionKey === "i2v" ? (
+      <ImageIcon className="h-4 w-4" />
+    ) : (
+      <VideoIcon className="h-4 w-4" />
+    );
   return (
     <button
       type="button"
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        "group min-h-[74px] rounded-[var(--radius-control)] px-2 py-2 text-left transition-[background-color,color,transform] duration-200 sm:px-3",
+        "group relative min-h-[88px] overflow-hidden rounded-[var(--radius-control)] border px-3 py-2.5 text-left transition-[background-color,border-color,color,transform] duration-200",
         selected
-          ? "bg-[var(--accent)] text-black shadow-[var(--shadow-amber)]"
-          : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
+          : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
       )}
     >
-      <div className="flex items-center justify-between gap-2">
+      <span
+        aria-hidden="true"
+        className={cn(
+          "absolute inset-x-3 bottom-0 h-0.5 rounded-t-full transition-colors",
+          selected ? "bg-[var(--accent)]" : "bg-transparent",
+        )}
+      />
+      <div className="flex items-start justify-between gap-2">
         <span
           className={cn(
-            "truncate text-[10px] font-medium",
-            selected ? "text-black/60" : "text-[var(--fg-2)]",
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
+            selected
+              ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
+              : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
           )}
         >
-          {copy.eyebrow}
+          {icon}
         </span>
         <span
           className={cn(
-            "h-2 w-2 rounded-full",
-            selected ? "bg-[var(--fg-0)]" : "bg-[var(--fg-3)]",
+            "mt-0.5 h-2 w-2 shrink-0 rounded-full",
+            selected ? "bg-[var(--accent)]" : "bg-[var(--fg-3)]",
           )}
         />
       </div>
-      <p className={cn("mt-2 text-sm font-semibold", selected ? "text-black" : "text-[var(--fg-0)]")}>
+      <p className="mt-3 text-sm font-semibold text-[var(--fg-0)]">
         {copy.title}
       </p>
-      <p className={cn("mt-1 text-[11px] font-medium", selected ? "text-black/70" : "text-[var(--fg-2)]")}>
-        {copy.requirement}
+      <p className="mt-1 truncate text-[11px] font-medium text-[var(--fg-2)]">
+        {copy.eyebrow}
       </p>
     </button>
   );
@@ -1738,7 +1965,7 @@ function VideoPosterButton({
         "group relative w-full overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-0)] text-left transition-colors",
         compact ? "aspect-video" : "mt-3 aspect-video",
         selected
-          ? "border-[var(--accent)]"
+          ? "border-[var(--accent-border)] shadow-[var(--shadow-1)]"
           : "border-[var(--border-subtle)] hover:border-[var(--border)]",
       )}
     >
@@ -1818,7 +2045,7 @@ function PrimaryVideoPlayer({ item }: { item: VideoGenerationWithVideo }) {
     status === "loading" || status === "buffering" || status === "error";
 
   return (
-    <div className="relative overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] shadow-[var(--shadow-2)]">
+    <div className="relative overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-2)] shadow-[var(--shadow-2)]">
       <video
         key={item.video.id}
         ref={videoRef}
@@ -1833,19 +2060,19 @@ function PrimaryVideoPlayer({ item }: { item: VideoGenerationWithVideo }) {
         onPlaying={() => setVideoStatus("ready")}
         onWaiting={() => setVideoStatus("buffering")}
         onError={() => setVideoStatus("error")}
-        className="aspect-video w-full bg-[var(--bg-0)] object-contain"
+        className="aspect-video w-full bg-[var(--bg-2)] object-contain"
       />
       {showState && (
         <div
           className={cn(
-            "absolute inset-0 flex items-center justify-center bg-[var(--bg-0)]/55 text-[var(--fg-0)]",
+            "absolute inset-0 flex items-center justify-center bg-[var(--bg-1)]/70 text-[var(--fg-0)]",
             status !== "error" && "pointer-events-none",
           )}
         >
           <div
             role={status === "error" ? "alert" : "status"}
             aria-live={status === "error" ? "assertive" : "polite"}
-            className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-0)]/82 px-3 py-1.5 text-xs font-medium shadow-[var(--shadow-2)] backdrop-blur-md"
+            className="inline-flex items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--bg-0)]/90 px-3 py-1.5 text-xs font-medium text-[var(--fg-0)] shadow-[var(--shadow-2)] backdrop-blur-md"
           >
             {status === "error" ? (
               <button
@@ -1884,15 +2111,25 @@ function PrimaryPreview({
 }) {
   if (!item) {
     return (
-      <div className="grid min-h-[360px] place-items-center rounded-[var(--radius-panel)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/60 p-6">
-        <div className="max-w-sm text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]">
-            <Film className="h-6 w-6" />
+      <div className="overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border-strong)] bg-[var(--bg-1)] shadow-[var(--shadow-2)]">
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 py-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
+            <span className="truncate text-xs font-medium text-[var(--fg-1)]">预览</span>
           </div>
-          <p className="text-base font-semibold text-[var(--fg-0)]">暂无视频</p>
-          <p className="mt-2 text-sm leading-6 text-[var(--fg-2)]">
-            生成完成后会显示在这里。
-          </p>
+          <span className="text-[11px] tabular-nums text-[var(--fg-2)]">16:9</span>
+        </div>
+        <div className="relative grid min-h-[360px] place-items-center overflow-hidden bg-[var(--bg-2)]/60 p-6 text-[var(--fg-0)]">
+          <div aria-hidden="true" className="absolute inset-4 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/32" />
+          <div className="relative max-w-sm text-center">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)] shadow-[var(--shadow-1)]">
+              <Film className="h-6 w-6" />
+            </div>
+            <p className="text-base font-semibold">暂无视频</p>
+            <p className="mt-2 text-sm leading-6 text-[var(--fg-2)]">
+              生成完成后会显示在这里。
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -1901,7 +2138,7 @@ function PrimaryPreview({
   return (
     <div className="space-y-4">
       <PrimaryVideoPlayer item={item} />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="grid gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)] xl:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">
           <div className="mb-2 flex flex-wrap gap-2">
             <StatusPill item={item} />
@@ -1959,7 +2196,7 @@ function PrimaryPreview({
   );
 }
 
-function RecentVideoCard({
+function VideoStripItem({
   item,
   selected,
   onPreview,
@@ -1971,24 +2208,41 @@ function RecentVideoCard({
   onUseDraft: () => void;
 }) {
   return (
-    <article className="group space-y-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-2.5 transition-colors hover:border-[var(--border)]">
+    <article
+      className={cn(
+        "relative grid grid-cols-[112px_minmax(0,1fr)] gap-3 overflow-hidden rounded-[var(--radius-card)] border p-2 transition-colors hover:border-[var(--border)] max-sm:grid-cols-[96px_minmax(0,1fr)]",
+        selected
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/60",
+      )}
+    >
+      {selected && (
+        <span aria-hidden="true" className="absolute inset-y-3 left-0 w-1 rounded-r-full bg-[var(--accent)]" />
+      )}
       <VideoPosterButton
         item={item}
         selected={selected}
         onPreview={onPreview}
         compact
       />
-      <p className="line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">{item.prompt}</p>
-      <div className="grid grid-cols-2 gap-2">
-        <VideoDownloadLink item={item} fullWidth />
+      <div className="flex min-w-0 flex-col justify-between gap-2 py-0.5">
+        <div className="min-w-0">
+          <div className="mb-1 flex flex-wrap items-center gap-1.5">
+            <StatusPill item={item} />
+            <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
+              {formatDurationLabel(item.duration_s)}
+            </span>
+          </div>
+          <p className="line-clamp-2 text-xs leading-5 text-[var(--fg-1)]">{item.prompt}</p>
+        </div>
         <Button
           variant="outline"
           size="sm"
-          fullWidth
           onClick={onUseDraft}
           leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
+          className="self-start"
         >
-          套用参数
+          套用
         </Button>
       </div>
     </article>
@@ -2004,6 +2258,7 @@ function TaskRow({
   onDelete,
   onPreview,
   selected = false,
+  showPreview = true,
 }: {
   item: VideoGenerationOut;
   onCancel: () => void;
@@ -2013,13 +2268,24 @@ function TaskRow({
   onDelete?: () => void;
   onPreview?: () => void;
   selected?: boolean;
+  showPreview?: boolean;
 }) {
   const active = isActiveVideo(item);
   const progress = progressForItem(item);
   const copy = stageCopy(item);
   const videoItem = hasVideo(item) ? item : null;
   return (
-    <article className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3 transition-colors hover:border-[var(--border)]">
+    <article
+      className={cn(
+        "relative overflow-hidden rounded-[var(--radius-card)] border p-3 transition-colors hover:border-[var(--border)]",
+        active || selected
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/60",
+      )}
+    >
+      {(active || selected) && (
+        <span aria-hidden="true" className="absolute inset-y-3 left-0 w-1 rounded-r-full bg-[var(--accent)]" />
+      )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-2)]">
@@ -2044,7 +2310,7 @@ function TaskRow({
           transition={{ duration: 0.26, ease: [0.2, 0.8, 0.2, 1] }}
         />
       </div>
-      {videoItem && onPreview && (
+      {showPreview && videoItem && onPreview && (
         <VideoPosterButton
           item={videoItem}
           selected={selected}
@@ -2081,6 +2347,16 @@ function TaskRow({
         >
           复制
         </Button>
+        {!showPreview && videoItem && onPreview && (
+          <Button
+            variant={selected ? "secondary" : "outline"}
+            size="sm"
+            onClick={onPreview}
+            leftIcon={<Play className="h-3.5 w-3.5" />}
+          >
+            预览
+          </Button>
+        )}
         {videoItem && <VideoDownloadLink item={videoItem} />}
         {onUseDraft && (
           <Button

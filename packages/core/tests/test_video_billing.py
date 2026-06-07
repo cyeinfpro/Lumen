@@ -11,6 +11,30 @@ def test_video_rounding_uses_round_half_up() -> None:
     assert video_billing.round_micro_for_tokens(1_500_000, 1) == 2
 
 
+def test_video_billing_model_uses_fast_when_upstream_is_fast() -> None:
+    assert (
+        video_billing.video_billing_model(
+            "seedance-2.0",
+            "doubao-seedance-2-0-fast-260128",
+        )
+        == "seedance-2.0-fast"
+    )
+    assert (
+        video_billing.video_billing_model(
+            "seedance-2.0-fast",
+            "doubao-seedance-2-0-fast-260128",
+        )
+        == "seedance-2.0-fast"
+    )
+    assert (
+        video_billing.video_billing_model(
+            "seedance-2.0",
+            "doubao-seedance-2-0-260128",
+        )
+        == "seedance-2.0"
+    )
+
+
 def test_video_token_upper_bound_rejects_invalid_values() -> None:
     estimates = {
         "seedance-2.0": {
@@ -66,6 +90,57 @@ def test_smart_duration_uses_max_duration_hold_estimate() -> None:
         )
         == 180_000
     )
+
+
+def test_video_token_upper_bound_uses_pricing_variant_specific_reference_video() -> (
+    None
+):
+    estimates = {
+        "seedance-2.0": {
+            "reference": {"720p:5": 108_044},
+            "reference_video": {"720p:5": 432_143},
+        }
+    }
+
+    assert (
+        video_billing.token_upper_bound(
+            estimates,
+            model="seedance-2.0",
+            action="reference",
+            resolution="720p",
+            duration_s=5,
+            pricing_variant="reference_video_720p",
+        )
+        == 432_143
+    )
+
+
+def test_video_token_upper_bound_fails_closed_for_missing_reference_video_estimate() -> (
+    None
+):
+    assert (
+        video_billing.token_upper_bound(
+            {"seedance-2.0": {"reference": {"720p:5": 108_044}}},
+            model="seedance-2.0",
+            action="reference",
+            resolution="720p",
+            duration_s=5,
+            pricing_variant="reference_video_720p",
+        )
+        is None
+    )
+
+
+def test_official_seedance_480p_and_720p_hold_estimates_are_not_equal() -> None:
+    price_per_mtoken_micro = 46_000_000
+
+    assert video_billing.round_micro_for_tokens(50_218, price_per_mtoken_micro) >= (
+        2_310_000
+    )
+    assert video_billing.round_micro_for_tokens(108_900, price_per_mtoken_micro) >= (
+        4_970_000
+    )
+    assert 108_900 > 50_218
 
 
 def test_video_pricing_variant_splits_reference_media_kind() -> None:
@@ -163,12 +238,12 @@ async def test_estimate_video_cost_uses_reference_video_pricing_variant(
         action="reference",
         resolution="720p",
         duration_s=5,
-        estimates={"seedance-2.0": {"reference": {"720p:5": 60_000}}},
+        estimates={"seedance-2.0": {"reference_video": {"720p:5": 194_286}}},
         pricing_variant="reference_video",
     )
 
     assert calls == ["reference_video_720p"]
-    assert estimate.hold_micro == 1_200
+    assert estimate.hold_micro == 3_886
     assert estimate.source == "video.token_hold_estimates:reference_video_720p"
 
 

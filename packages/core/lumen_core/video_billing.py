@@ -6,6 +6,7 @@ conservative hold followed by actual-token settlement.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
@@ -23,6 +24,8 @@ SUPPORTED_VIDEO_DURATIONS_S = tuple(range(4, 16))
 VIDEO_REFERENCE_IMAGE_PRICING_VARIANT = "reference_image"
 VIDEO_REFERENCE_VIDEO_PRICING_VARIANT = "reference_video"
 VIDEO_LEGACY_REFERENCE_PRICING_VARIANT = "reference"
+SEEDANCE_20_FAST_MODEL = "seedance-2.0-fast"
+_SEEDANCE_20_FAST_RE = re.compile(r"seedance[-.]2[-.]0[-.]fast")
 VIDEO_PRICING_VARIANTS = (
     "t2v",
     "i2v",
@@ -95,6 +98,22 @@ def split_video_resolution_pricing_variant(
     if maybe_resolution.endswith("p") and maybe_resolution[:-1].isdigit():
         return variant, maybe_resolution
     return raw, None
+
+
+def is_seedance_20_fast_identifier(*identifiers: str | None) -> bool:
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        value = identifier.strip().lower().replace("_", "-")
+        if _SEEDANCE_20_FAST_RE.search(value):
+            return True
+    return False
+
+
+def video_billing_model(model: str, upstream_model: str | None = None) -> str:
+    if is_seedance_20_fast_identifier(model, upstream_model):
+        return SEEDANCE_20_FAST_MODEL
+    return model
 
 
 def video_pricing_variant(
@@ -232,21 +251,48 @@ def token_upper_bound(
     action: str,
     resolution: str,
     duration_s: int,
+    pricing_variant: str | None = None,
 ) -> int | None:
     model_map = estimates.get(model)
     if not isinstance(model_map, dict):
         return None
-    action_map = model_map.get(action)
-    if action == "reference" and not isinstance(action_map, dict):
-        action_map = model_map.get("i2v") or model_map.get("t2v")
-    if not isinstance(action_map, dict):
-        return None
-    value = action_map.get(
-        estimate_key(
-            resolution=resolution,
-            duration_s=hold_estimate_duration_s(duration_s),
+
+    action_names: list[str] = []
+    if pricing_variant:
+        variant_action, _variant_resolution = split_video_resolution_pricing_variant(
+            pricing_variant
         )
+        action_names.append(variant_action)
+    action_names.append(action)
+    if action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT:
+        if action_names[0] == VIDEO_REFERENCE_VIDEO_PRICING_VARIANT:
+            # A video reference has a separate official minimum-token schedule.
+            # Falling back to image/reference estimates under-reserves 720p+ jobs.
+            action_names = [VIDEO_REFERENCE_VIDEO_PRICING_VARIANT]
+        else:
+            action_names.extend(
+                (
+                    VIDEO_REFERENCE_IMAGE_PRICING_VARIANT,
+                    "i2v",
+                    "t2v",
+                )
+            )
+
+    value = None
+    key = estimate_key(
+        resolution=resolution,
+        duration_s=hold_estimate_duration_s(duration_s),
     )
+    for action_name in tuple(dict.fromkeys(action_names)):
+        action_map = model_map.get(action_name)
+        if not isinstance(action_map, dict):
+            continue
+        value = action_map.get(key)
+        if value is not None:
+            break
+    else:
+        return None
+
     if isinstance(value, bool):
         return None
     try:
@@ -291,6 +337,7 @@ async def estimate_video_cost(
         action=action,
         resolution=resolution,
         duration_s=duration_s,
+        pricing_variant=effective_pricing_variant,
     )
     if tokens is None:
         raise VideoBillingError(
@@ -339,6 +386,7 @@ __all__ = [
     "VIDEO_PRICING_UNIT",
     "SMART_VIDEO_DURATION_S",
     "SMART_VIDEO_HOLD_DURATION_S",
+    "SEEDANCE_20_FAST_MODEL",
     "SUPPORTED_VIDEO_DURATIONS_S",
     "VIDEO_LEGACY_REFERENCE_PRICING_VARIANT",
     "VIDEO_PRICING_VARIANTS",
@@ -350,10 +398,12 @@ __all__ = [
     "estimate_video_cost",
     "expand_video_duration_estimates",
     "hold_estimate_duration_s",
+    "is_seedance_20_fast_identifier",
     "round_micro_for_tokens",
     "settle_video_cost",
     "split_video_resolution_pricing_variant",
     "token_upper_bound",
+    "video_billing_model",
     "video_resolution_pricing_variant",
     "video_pricing_variant",
 ]
