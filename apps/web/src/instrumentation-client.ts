@@ -3,10 +3,18 @@
 // 仅在配置了 NEXT_PUBLIC_SENTRY_DSN 时初始化 Sentry，否则完全静默（CI/本地/预览环境不需要）。
 // V1 不启用 Session Replay（replaysSessionSampleRate = 0 / replaysOnErrorSampleRate = 0）。
 
-import * as Sentry from "@sentry/nextjs";
 import type { Breadcrumb, ErrorEvent as SentryErrorEvent } from "@sentry/nextjs";
 
+type SentryModule = typeof import("@sentry/nextjs");
+
 const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
+let sentryPromise: Promise<SentryModule> | null = null;
+
+function loadSentry(): Promise<SentryModule> | null {
+  if (!dsn) return null;
+  sentryPromise ??= import("@sentry/nextjs");
+  return sentryPromise;
+}
 
 // 邮箱 / 长 prompt 等可能进 breadcrumb data。脱敏放在 init 处统一管。
 const EMAIL_RE = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}\p{N}.-]+/giu;
@@ -48,7 +56,7 @@ function redactObject<T>(obj: T, depth = 0): T {
 }
 
 if (dsn) {
-  try {
+  void loadSentry()?.then((Sentry) => {
     Sentry.init({
       dsn,
       tracesSampleRate: 0.1,
@@ -77,9 +85,9 @@ if (dsn) {
         }
       },
     });
-  } catch {
+  }).catch(() => {
     // Sentry 初始化失败绝不连累页面交互
-  }
+  });
 }
 
 // Router 过渡事件转发到 Sentry（无 DSN 时走 no-op）
@@ -88,9 +96,9 @@ export function onRouterTransitionStart(
   navigationType: "push" | "replace" | "traverse",
 ): void {
   if (!dsn) return;
-  try {
+  void loadSentry()?.then((Sentry) => {
     Sentry.captureRouterTransitionStart?.(href, navigationType);
-  } catch {
+  }).catch(() => {
     // swallow
-  }
+  });
 }

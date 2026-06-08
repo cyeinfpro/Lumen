@@ -6,8 +6,19 @@
 
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { ShellSkeleton } from "@/components/ui/shell/ShellSkeleton";
-import { MobileStream } from "@/components/ui/shell/MobileStream";
-import { DesktopStream } from "@/components/ui/shell/DesktopStream";
+import dynamic from "next/dynamic";
+
+const MobileStream = dynamic(
+  () =>
+    import("@/components/ui/shell/MobileStream").then((mod) => mod.MobileStream),
+  { ssr: false, loading: () => <ShellSkeleton /> },
+);
+
+const DesktopStream = dynamic(
+  () =>
+    import("@/components/ui/shell/DesktopStream").then((mod) => mod.DesktopStream),
+  { ssr: false, loading: () => <ShellSkeleton /> },
+);
 
 export default function StreamPage() {
   const isMobile = useIsMobile();

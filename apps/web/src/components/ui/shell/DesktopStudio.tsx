@@ -158,14 +158,14 @@ export function DesktopStudio() {
 
   const handleRetryGen = useCallback(
     (generationId: string) => {
-      const gen = generations[generationId];
+      const gen = useChatStore.getState().generations[generationId];
       if (gen?.status === "succeeded" && gen.image) {
         void rerollImage(gen.image.id);
         return;
       }
       void retryGeneration(generationId);
     },
-    [generations, rerollImage, retryGeneration],
+    [rerollImage, retryGeneration],
   );
 
   const scrollRef = useRef<HTMLDivElement | null>(null);

@@ -5,8 +5,21 @@
 
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { ShellSkeleton } from "@/components/ui/shell/ShellSkeleton";
-import { MobileStudio } from "@/components/ui/shell/MobileStudio";
-import { DesktopStudio } from "@/components/ui/shell/DesktopStudio";
+import dynamic from "next/dynamic";
+
+const MobileStudio = dynamic(
+  () =>
+    import("@/components/ui/shell/MobileStudio").then((mod) => mod.MobileStudio),
+  { ssr: false, loading: () => <ShellSkeleton /> },
+);
+
+const DesktopStudio = dynamic(
+  () =>
+    import("@/components/ui/shell/DesktopStudio").then(
+      (mod) => mod.DesktopStudio,
+    ),
+  { ssr: false, loading: () => <ShellSkeleton /> },
+);
 
 export default function Page() {
   const isMobile = useIsMobile();

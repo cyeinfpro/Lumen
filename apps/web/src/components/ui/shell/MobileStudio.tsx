@@ -120,15 +120,6 @@ export function MobileStudio() {
     urlConversationId,
   ]);
 
-  // 若来自图库 "在对话中定位"，滚到目标 message
-  useEffect(() => {
-    if (!scrollTo) return;
-    const el = document.getElementById(`msg-${scrollTo}`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }, [scrollTo, messages.length]);
-
   // Stick-to-bottom：切换会话 / 新消息到达时滚到底，除非用户向上滚了一段。
   // 与桌面会话画布行为一致（stickToBottomRef）。
   const stickToBottomRef = useRef(true);
@@ -210,6 +201,7 @@ export function MobileStudio() {
               messages={messages}
               generations={generations}
               scrollRef={scrollRef}
+              scrollToMessageId={scrollTo}
               onEditImage={promoteImageToReference}
               onRetryGen={(gid) => void retryGeneration(gid)}
               onRetryText={(id) => void retryAssistant(id)}

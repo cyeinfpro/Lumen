@@ -1877,6 +1877,21 @@ def _model_image_metadata_from_request(
     }
 
 
+def _compact_image_payload_meta(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Small metadata copy for message/SSE payloads; Image.metadata_jsonb is canonical."""
+    out: dict[str, Any] = {}
+    for key in (
+        "is_dual_race_bonus",
+        "billing_free",
+        "billing_label",
+        "billing_exempt_reason",
+    ):
+        value = metadata.get(key)
+        if value is not None and value is not False:
+            out[key] = value
+    return out
+
+
 def _maybe_embed_model_image_metadata_bytes(
     *,
     image: PILImage.Image,
@@ -5540,21 +5555,20 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                 if msg is not None:
                     content = dict(msg.content or {})
                     images_list = list(content.get("images") or [])
-                    images_list.append(
-                        {
-                            "image_id": image_id,
-                            "from_generation_id": task_id,
-                            "width": width,
-                            "height": height,
-                            "mime": orig_mime,
-                            "url": storage.public_url(key_orig),
-                            "display_url": f"/api/images/{image_id}/variants/display2048",
-                            "preview_url": f"/api/images/{image_id}/variants/preview1024",
-                            "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-                            "filename": model_metadata.get("suggested_filename"),
-                            "metadata_jsonb": image_metadata,
-                        }
-                    )
+                    image_ref = {
+                        "image_id": image_id,
+                        "from_generation_id": task_id,
+                        "width": width,
+                        "height": height,
+                        "mime": orig_mime,
+                        "url": storage.public_url(key_orig),
+                        "display_url": f"/api/images/{image_id}/variants/display2048",
+                        "preview_url": f"/api/images/{image_id}/variants/preview1024",
+                        "thumb_url": f"/api/images/{image_id}/variants/thumb256",
+                        "filename": model_metadata.get("suggested_filename"),
+                        **_compact_image_payload_meta(image_metadata),
+                    }
+                    images_list.append(image_ref)
                     content["images"] = images_list
                     msg.content = content
                     msg.status = MessageStatus.SUCCEEDED
@@ -5648,7 +5662,7 @@ async def run_generation(ctx: dict[str, Any], task_id: str) -> None:  # noqa: PL
                         "preview_url": f"/api/images/{image_id}/variants/preview1024",
                         "thumb_url": f"/api/images/{image_id}/variants/thumb256",
                         "filename": model_metadata.get("suggested_filename"),
-                        "metadata_jsonb": image_metadata,
+                        **_compact_image_payload_meta(image_metadata),
                     }
                 ],
                 "final_size": f"{width}x{height}",

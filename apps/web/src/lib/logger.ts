@@ -4,9 +4,10 @@
 // 2. 生产 console.warn 会被浏览器扩展、隐私模式、CI 不一致地处理；统一走这一层
 // 3. 也方便后续接 PII 脱敏 / 降采样
 
-import * as Sentry from "@sentry/nextjs";
-
 const isDev = process.env.NODE_ENV !== "production";
+const sentryDsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
+type SentryModule = typeof import("@sentry/nextjs");
+let sentryPromise: Promise<SentryModule> | null = null;
 
 interface LogContext {
   /** 错误码（来自 ApiError 等） */
@@ -27,6 +28,12 @@ function toError(input: unknown): Error {
   }
 }
 
+function loadSentry(): Promise<SentryModule> | null {
+  if (!sentryDsn) return null;
+  sentryPromise ??= import("@sentry/nextjs");
+  return sentryPromise;
+}
+
 /** 警告级日志：dev 输出 console.warn，生产作为 captureMessage(level=warning) 上报 */
 export function logWarn(message: string, ctx?: LogContext): void {
   if (isDev) {
@@ -34,7 +41,7 @@ export function logWarn(message: string, ctx?: LogContext): void {
     if (ctx?.extra) console.warn(`[${tag}] ${message}`, ctx.extra);
     else console.warn(`[${tag}] ${message}`);
   }
-  try {
+  void loadSentry()?.then((Sentry) => {
     Sentry.captureMessage(message, {
       level: "warning",
       tags: {
@@ -43,9 +50,9 @@ export function logWarn(message: string, ctx?: LogContext): void {
       },
       extra: ctx?.extra,
     });
-  } catch {
+  }).catch(() => {
     /* swallow */
-  }
+  });
 }
 
 /** 错误级日志：dev 输出 console.error，生产 captureException 上报 */
@@ -55,7 +62,7 @@ export function logError(error: unknown, ctx?: LogContext): void {
     if (ctx?.extra) console.error(`[${ctx?.scope ?? "app"}] ${err.message}`, err, ctx.extra);
     else console.error(`[${ctx?.scope ?? "app"}] ${err.message}`, err);
   }
-  try {
+  void loadSentry()?.then((Sentry) => {
     Sentry.captureException(err, {
       tags: {
         scope: ctx?.scope,
@@ -63,7 +70,7 @@ export function logError(error: unknown, ctx?: LogContext): void {
       },
       extra: ctx?.extra,
     });
-  } catch {
+  }).catch(() => {
     /* swallow */
-  }
+  });
 }

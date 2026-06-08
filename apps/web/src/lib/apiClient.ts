@@ -1643,12 +1643,30 @@ export interface TaskListResponse {
   next_cursor?: string | null;
 }
 
-export function getTask(kind: "generations", id: string): Promise<BackendGeneration>;
-export function getTask(kind: "completions", id: string): Promise<BackendCompletion>;
-export function getTask(kind: TaskKind, id: string): Promise<TaskResponse>;
-export function getTask(kind: TaskKind, id: string): Promise<TaskResponse> {
+export function getTask(
+  kind: "generations",
+  id: string,
+  opts?: { signal?: AbortSignal },
+): Promise<BackendGeneration>;
+export function getTask(
+  kind: "completions",
+  id: string,
+  opts?: { signal?: AbortSignal },
+): Promise<BackendCompletion>;
+export function getTask(
+  kind: TaskKind,
+  id: string,
+  opts?: { signal?: AbortSignal },
+): Promise<TaskResponse>;
+export function getTask(
+  kind: TaskKind,
+  id: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<TaskResponse> {
   const seg = kind === "generations" ? "generations" : "completions";
-  return apiFetch<TaskResponse>(`/${seg}/${id}`);
+  return apiFetch<TaskResponse>(`/${seg}/${id}`, {
+    signal: opts.signal,
+  });
 }
 
 export function cancelTask(
@@ -1681,7 +1699,10 @@ export interface TaskListOpts {
   limit?: number;
 }
 
-export function listTasks(opts: TaskListOpts = {}): Promise<TaskListResponse> {
+export function listTasks(
+  opts: TaskListOpts = {},
+  requestOpts: { signal?: AbortSignal } = {},
+): Promise<TaskListResponse> {
   const q = new URLSearchParams();
   if (opts.status) q.set("status", opts.status);
   if (opts.mine) q.set("mine", "1");
@@ -1695,7 +1716,9 @@ export function listTasks(opts: TaskListOpts = {}): Promise<TaskListResponse> {
   if (opts.retryable != null) q.set("retryable", opts.retryable ? "1" : "0");
   if (opts.limit != null) q.set("limit", String(opts.limit));
   const suffix = q.toString() ? `?${q.toString()}` : "";
-  return apiFetch<TaskListResponse>(`/tasks${suffix}`);
+  return apiFetch<TaskListResponse>(`/tasks${suffix}`, {
+    signal: requestOpts.signal,
+  });
 }
 
 // 用户级中心任务列表：返回当前登录用户**所有**会话的进行中任务完整字段，
@@ -1705,8 +1728,12 @@ export interface ActiveTasksResponse {
   completions: BackendCompletion[];
 }
 
-export function listMyActiveTasks(): Promise<ActiveTasksResponse> {
-  return apiFetch<ActiveTasksResponse>(`/tasks/mine/active`);
+export function listMyActiveTasks(
+  opts: { signal?: AbortSignal } = {},
+): Promise<ActiveTasksResponse> {
+  return apiFetch<ActiveTasksResponse>(`/tasks/mine/active`, {
+    signal: opts.signal,
+  });
 }
 
 // —— SSE URL 构造（供 useSSE 使用） ——

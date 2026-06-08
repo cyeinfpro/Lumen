@@ -1558,9 +1558,13 @@ export function useApparelModelLibraryJobsQuery(
   return useQuery<ApparelModelLibraryJobsList>({
     queryKey: [...qk.apparelModelLibraryJobs(), params ?? {}] as const,
     queryFn: () => getApparelModelLibraryJobs(params),
-    // 5s 轮询：进行中的 job 完成后自动 surface 新图。
-    // 无进行中也保持 5s——前端不知道后端何时完成；列表很轻可以接受。
-    refetchInterval: 5_000,
+    // 5s 轮询只在确实有进行中任务时开启；历史页很重，空跑会放大卡顿。
+    refetchInterval: (query) =>
+      query.state.data?.items.some(
+        (job) => job.status === "queued" || job.status === "running",
+      )
+        ? 5_000
+        : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     staleTime: 2_000,
@@ -1583,7 +1587,12 @@ export function useApparelModelLibraryJobsInfiniteQuery(params?: { limit?: numbe
     initialPageParam: 0,
     getNextPageParam: (last) =>
       last.has_more ? last.offset + last.items.length : undefined,
-    refetchInterval: 5_000,
+    refetchInterval: (query) =>
+      query.state.data?.pages[0]?.items.some(
+        (job) => job.status === "queued" || job.status === "running",
+      )
+        ? 5_000
+        : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     staleTime: 2_000,

@@ -456,6 +456,13 @@ class Message(Base, TimestampMixin, SoftDeleteMixin):
             "deleted_at",
             "created_at",
         ),
+        Index(
+            "ix_messages_conv_alive_created_id",
+            "conversation_id",
+            "deleted_at",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -646,6 +653,23 @@ class Generation(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("user_id", "idempotency_key", name="uq_gen_user_idemp"),
         Index("ix_gen_user_status_created", "user_id", "status", "created_at"),
+        Index("ix_generations_user_created", "user_id", "created_at"),
+        Index("ix_generations_user_message_created", "user_id", "message_id", "created_at", "id"),
+        Index(
+            "ix_gen_queued_created",
+            "created_at",
+            "id",
+            postgresql_where=text("status = 'queued'"),
+            sqlite_where=text("status = 'queued'"),
+        ),
+        Index(
+            "ix_generations_active_updated",
+            "status",
+            "updated_at",
+            "id",
+            postgresql_where=text("status IN ('queued', 'running')"),
+            sqlite_where=text("status IN ('queued', 'running')"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -878,6 +902,16 @@ class Completion(Base, TimestampMixin):
     __tablename__ = "completions"
     __table_args__ = (
         UniqueConstraint("user_id", "idempotency_key", name="uq_comp_user_idemp"),
+        Index("ix_completions_user_status_created", "user_id", "status", "created_at"),
+        Index("ix_completions_user_message_created", "user_id", "message_id", "created_at", "id"),
+        Index(
+            "ix_completions_active_updated",
+            "status",
+            "updated_at",
+            "id",
+            postgresql_where=text("status IN ('queued', 'streaming')"),
+            sqlite_where=text("status IN ('queued', 'streaming')"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -1472,6 +1506,13 @@ class OutboxEvent(Base, TimestampMixin):
     # requires alembic migration: drop & recreate index ix_outbox_unpublished with leading kind column
     __table_args__ = (
         Index("ix_outbox_unpublished", "kind", "published_at", "created_at"),
+        Index(
+            "ix_outbox_unpublished_created",
+            "created_at",
+            "id",
+            postgresql_where=text("published_at IS NULL"),
+            sqlite_where=text("published_at IS NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -1528,6 +1569,14 @@ class WalletTransaction(Base):
         UniqueConstraint("user_id", "idempotency_key", name="uq_wallet_tx_idemp"),
         Index("ix_wallet_tx_user_created", "user_id", "created_at"),
         Index("ix_wallet_tx_ref", "ref_type", "ref_id"),
+        Index("ix_wallet_tx_user_ref_kind", "user_id", "ref_type", "ref_id", "kind", "created_at", "id"),
+        Index(
+            "ix_wallet_hold_created",
+            "created_at",
+            "id",
+            postgresql_where=text("kind = 'hold'"),
+            sqlite_where=text("kind = 'hold'"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -1704,6 +1753,17 @@ class AuditLog(Base):
         Index("ix_audit_logs_event_type", "event_type"),
         Index("ix_audit_logs_created_at", "created_at"),
         Index("ix_audit_logs_user_id", "user_id"),
+        Index(
+            "ix_audit_logs_billing_created",
+            "created_at",
+            "id",
+            postgresql_where=text(
+                "event_type LIKE 'wallet.%' OR event_type LIKE 'redemption.%' OR event_type LIKE 'billing.%'"
+            ),
+            sqlite_where=text(
+                "event_type LIKE 'wallet.%' OR event_type LIKE 'redemption.%' OR event_type LIKE 'billing.%'"
+            ),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)

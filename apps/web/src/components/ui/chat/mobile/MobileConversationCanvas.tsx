@@ -12,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
   ArrowDownToLine,
@@ -44,10 +45,13 @@ import type { LightboxItem } from "@/components/ui/lightbox/types";
 import { DevelopingCard } from "./DevelopingCard";
 import { SceneDivider } from "./SceneDivider";
 
+const VIRTUALIZE_AFTER = 50;
+
 interface MobileConversationCanvasProps {
   messages: Message[];
   generations: Record<string, Generation>;
   scrollRef?: RefObject<HTMLDivElement | null>;
+  scrollToMessageId?: string | null;
   onEditImage: (imageId: string) => void;
   onRetryGen: (gid: string) => void;
   onRetryText: (assistantId: string) => void;
@@ -145,6 +149,53 @@ function openLightbox(
   );
 }
 
+function generationRenderSignature(
+  gen: Generation | undefined,
+): string {
+  if (!gen) return "missing";
+  const image = gen.image;
+  return [
+    gen.id,
+    gen.status,
+    gen.stage ?? "",
+    gen.substage ?? "",
+    gen.retrying ? "1" : "0",
+    gen.waiting_provider ? "1" : "0",
+    gen.cancelled ? "1" : "0",
+    gen.retryable ? "1" : "0",
+    gen.attempt ?? "",
+    gen.max_attempts ?? "",
+    gen.retry_eta ?? "",
+    gen.error_code ?? "",
+    gen.error_message ?? "",
+    gen.prompt,
+    gen.aspect_ratio,
+    gen.size_requested,
+    gen.started_at ?? "",
+    gen.finished_at ?? "",
+    gen.failover_count ?? "",
+    gen.billing_free ? "1" : "0",
+    gen.billing_label ?? "",
+    gen.is_dual_race_bonus ? "1" : "0",
+    image?.id ?? "",
+    image?.display_url ?? "",
+    image?.preview_url ?? "",
+    image?.thumb_url ?? "",
+    image?.width ?? "",
+    image?.height ?? "",
+    image?.size_actual ?? "",
+  ].join(":");
+}
+
+function assistantGenerationsRenderSignature(
+  msg: AssistantMessage,
+  generations: Record<string, Generation>,
+): string {
+  return generationIdsOf(msg)
+    .map((id) => generationRenderSignature(generations[id]))
+    .join("|");
+}
+
 function conversationImageSrc(image: GeneratedImage): string {
   return (
     image.preview_url ??
@@ -231,6 +282,7 @@ export function MobileConversationCanvas({
   messages,
   generations,
   scrollRef,
+  scrollToMessageId,
   onEditImage,
   onRetryGen,
   onRetryText,
@@ -243,6 +295,26 @@ export function MobileConversationCanvas({
     scrollRef,
     rootMargin: "96px 0px 0px 0px",
   });
+  const shouldVirtualize = messages.length > VIRTUALIZE_AFTER;
+
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: scenes.length,
+    getScrollElement: () => scrollRef?.current ?? null,
+    estimateSize: () => 330,
+    overscan: 4,
+    enabled: shouldVirtualize,
+  });
+  const scrollTargetKey = useMemo(() => {
+    if (!scrollToMessageId) return null;
+    const sceneIndex = scenes.findIndex(
+      (scene) =>
+        scene.user?.id === scrollToMessageId ||
+        scene.assistant?.id === scrollToMessageId,
+    );
+    if (sceneIndex < 0) return null;
+    return `${sceneIndex}:${scenes[sceneIndex].anchorId}`;
+  }, [scenes, scrollToMessageId]);
 
   const toggleCollapse = useCallback((anchorId: string) => {
     setCollapsed((prev) => {
@@ -286,6 +358,133 @@ export function MobileConversationCanvas({
     return () => el.removeEventListener("scroll", onScroll);
   }, [scrollRef]);
 
+  useEffect(() => {
+    if (!scrollToMessageId || !scrollTargetKey) return;
+    const separatorIndex = scrollTargetKey.indexOf(":");
+    const sceneIndex = Number(scrollTargetKey.slice(0, separatorIndex));
+    const anchorId = scrollTargetKey.slice(separatorIndex + 1);
+    if (!Number.isInteger(sceneIndex) || sceneIndex < 0 || !anchorId) return;
+
+    setCollapsed((prev) => {
+      if (!prev.has(anchorId)) return prev;
+      const next = new Set(prev);
+      next.delete(anchorId);
+      return next;
+    });
+
+    const scrollIntoView = (behavior: ScrollBehavior): boolean => {
+      const messageEl = document.getElementById(`msg-${scrollToMessageId}`);
+      if (messageEl) {
+        messageEl.scrollIntoView({ behavior, block: "center" });
+        return true;
+      }
+      const sceneEl = document.getElementById(`scene-${anchorId}`);
+      if (sceneEl) {
+        sceneEl.scrollIntoView({ behavior, block: "center" });
+        return true;
+      }
+      return false;
+    };
+
+    if (shouldVirtualize) {
+      rowVirtualizer.scrollToIndex(sceneIndex, { align: "center" });
+    }
+
+    requestAnimationFrame(() => {
+      if (scrollIntoView("smooth")) return;
+      requestAnimationFrame(() => {
+        void scrollIntoView("smooth");
+      });
+    });
+    const fallback = window.setTimeout(() => {
+      void scrollIntoView("auto");
+    }, 180);
+    return () => window.clearTimeout(fallback);
+  }, [
+    rowVirtualizer,
+    scrollToMessageId,
+    scrollTargetKey,
+    shouldVirtualize,
+  ]);
+
+  const renderScene = useCallback(
+    (scene: SceneEntry) => {
+      const isCollapsed = collapsed.has(scene.anchorId);
+      return (
+        <section
+          key={scene.anchorId}
+          id={`scene-${scene.anchorId}`}
+          data-history-scroll-anchor={scene.anchorId}
+          aria-label={`Scene ${String(scene.index).padStart(2, "0")}`}
+          className="relative"
+          style={
+            shouldVirtualize
+              ? undefined
+              : {
+                  contentVisibility: "auto",
+                  containIntrinsicSize: "320px",
+                }
+          }
+        >
+          <SceneDivider
+            index={scene.index}
+            collapsed={isCollapsed}
+            onToggle={() => toggleCollapse(scene.anchorId)}
+          />
+          {!isCollapsed && (
+            <div className="flex flex-col gap-2.5 pl-7 pr-0.5 pb-1.5">
+              {scene.user && <UserTurn msg={scene.user} />}
+              {scene.assistant && (
+                <AssistantTurn
+                  msg={scene.assistant}
+                  generations={generations}
+                  onEditImage={onEditImage}
+                  onRetryGen={onRetryGen}
+                  onRetryText={onRetryText}
+                  onRegenerate={onRegenerate}
+                />
+              )}
+            </div>
+          )}
+        </section>
+      );
+    },
+    [
+      collapsed,
+      generations,
+      onEditImage,
+      onRegenerate,
+      onRetryGen,
+      onRetryText,
+      shouldVirtualize,
+      toggleCollapse,
+    ],
+  );
+
+  const body = shouldVirtualize ? (
+    <div
+      className="relative w-full"
+      style={{ height: rowVirtualizer.getTotalSize() }}
+    >
+      {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+        const scene = scenes[virtualRow.index];
+        return (
+          <div
+            key={scene.anchorId}
+            ref={rowVirtualizer.measureElement}
+            data-index={virtualRow.index}
+            className="absolute left-0 top-0 w-full"
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
+          >
+            {renderScene(scene)}
+          </div>
+        );
+      })}
+    </div>
+  ) : (
+    <div className="flex flex-col">{scenes.map((scene) => renderScene(scene))}</div>
+  );
+
   return (
     <div
       role="log"
@@ -309,45 +508,7 @@ export function MobileConversationCanvas({
         onRetry={historyPaging.retry}
       />
 
-      <div className="flex flex-col">
-        {scenes.map((scene) => {
-          const isCollapsed = collapsed.has(scene.anchorId);
-          return (
-            <section
-              key={scene.anchorId}
-              id={`scene-${scene.anchorId}`}
-              data-history-scroll-anchor={scene.anchorId}
-              aria-label={`Scene ${String(scene.index).padStart(2, "0")}`}
-              className="relative"
-              style={{
-                contentVisibility: "auto",
-                containIntrinsicSize: "320px",
-              }}
-            >
-              <SceneDivider
-                index={scene.index}
-                collapsed={isCollapsed}
-                onToggle={() => toggleCollapse(scene.anchorId)}
-              />
-              {!isCollapsed && (
-                <div className="flex flex-col gap-2.5 pl-7 pr-0.5 pb-1.5">
-                  {scene.user && <UserTurn msg={scene.user} />}
-                  {scene.assistant && (
-                    <AssistantTurn
-                      msg={scene.assistant}
-                      generations={generations}
-                      onEditImage={onEditImage}
-                      onRetryGen={onRetryGen}
-                      onRetryText={onRetryText}
-                      onRegenerate={onRegenerate}
-                    />
-                  )}
-                </div>
-              )}
-            </section>
-          );
-        })}
-      </div>
+      {body}
 
       <JumpToLatestButton
         visible={showJumpToLatest}
@@ -384,7 +545,7 @@ function JumpToLatestButton({
 // ———————————————————————————————————————————————————
 // 用户 turn：右对齐，霞鹜文楷，左侧 2px × 40% 琥珀竖条
 // ———————————————————————————————————————————————————
-function UserTurn({ msg }: { msg: UserMessage }) {
+const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     if (!msg.text) return;
@@ -454,7 +615,7 @@ function UserTurn({ msg }: { msg: UserMessage }) {
       )}
     </div>
   );
-}
+});
 
 // ———————————————————————————————————————————————————
 // 助手 turn：左对齐 Markdown + 生成图 + 参数尾行
@@ -471,7 +632,7 @@ interface AssistantTurnProps {
   ) => void | Promise<void>;
 }
 
-function AssistantTurn({
+const AssistantTurn = memo(function AssistantTurn({
   msg,
   generations,
   onEditImage,
@@ -513,7 +674,9 @@ function AssistantTurn({
             )}
             style={{ fontFamily: "var(--font-body)" }}
           >
-            {msg.text ? <Markdown>{msg.text}</Markdown> : null}
+            {msg.text ? (
+              <Markdown autoDetectCode={!isStreaming}>{msg.text}</Markdown>
+            ) : null}
             {isStreaming && (
               <span
                 aria-hidden
@@ -615,6 +778,17 @@ function AssistantTurn({
         </div>
       )}
     </div>
+  );
+}, areAssistantTurnPropsEqual);
+
+function areAssistantTurnPropsEqual(
+  prev: AssistantTurnProps,
+  next: AssistantTurnProps,
+): boolean {
+  if (prev.msg !== next.msg) return false;
+  return (
+    assistantGenerationsRenderSignature(prev.msg, prev.generations) ===
+    assistantGenerationsRenderSignature(next.msg, next.generations)
   );
 }
 

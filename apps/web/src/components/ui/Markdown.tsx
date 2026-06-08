@@ -11,7 +11,7 @@
 //  - 图片点击统一打开全局 Lightbox（移动端保留手势缩放 / 下拉关闭 / safe-area）
 //  - components 对象 useMemo 缓存，避免每次渲染重建引用
 
-import { useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -25,6 +25,7 @@ import { useUiStore } from "@/store/useUiStore";
 export interface MarkdownProps {
   children: string;
   className?: string;
+  autoDetectCode?: boolean;
 }
 
 // 递归把 react children 拍平为字符串。code/pre 的内容多为字符串或 <code>…</code>。
@@ -201,7 +202,11 @@ function buildComponents(): Components {
   };
 }
 
-export function Markdown({ children, className }: MarkdownProps) {
+function MarkdownImpl({
+  children,
+  className,
+  autoDetectCode = true,
+}: MarkdownProps) {
   const cls = className ? `lumen-md ${className}` : "lumen-md";
   const openLightbox = useUiStore((s) => s.openLightboxFromItems);
   const components = useMemo(() => {
@@ -251,8 +256,13 @@ export function Markdown({ children, className }: MarkdownProps) {
   }, [openLightbox]);
   const rehypePlugins = useMemo(
     () =>
-      [[rehypeHighlight, { detect: true, ignoreMissing: true }]] as const,
-    [],
+      [
+        [
+          rehypeHighlight,
+          { detect: autoDetectCode, ignoreMissing: true },
+        ],
+      ] as const,
+    [autoDetectCode],
   );
   const remarkPlugins = useMemo(() => [remarkGfm], []);
   return (
@@ -271,5 +281,7 @@ export function Markdown({ children, className }: MarkdownProps) {
     </div>
   );
 }
+
+export const Markdown = memo(MarkdownImpl);
 
 export default Markdown;

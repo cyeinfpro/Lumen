@@ -12,20 +12,32 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { Loader2, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { Button } from "@/components/ui/primitives";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 
-import { MaskBoard, type MaskBoardHandle, type MaskExport } from "../inpaint/MaskBoard";
+import type { MaskBoardHandle, MaskExport } from "../inpaint/MaskBoard";
 
 export type { MaskExport } from "../inpaint/MaskBoard";
+
+const MaskBoard = lazy(async () => {
+  const mod = await import("../inpaint/MaskBoard");
+  return { default: mod.MaskBoard };
+});
 
 // 涂满判定阈值：> 95% 提示用户"基本全覆盖了"，但仍允许提交（业务上有人就是要重画几乎全图）。
 const FULL_COVERAGE_WARN = 0.95;
 
-interface MaskCanvasProps {
+export interface MaskCanvasProps {
   open: boolean;
   /** 原图 data URL（与 attachment.data_url 一致） */
   imageSrc: string;
@@ -164,12 +176,21 @@ function MaskCanvasInner({
                 正在载入图片…
               </div>
             ) : (
-              <MaskBoard
-                ref={boardRef}
-                imageSrc={imageSrc}
-                disabled={submitting}
-                onStatsChange={handleStatsChange}
-              />
+              <Suspense
+                fallback={
+                  <div className="flex min-h-[280px] items-center justify-center gap-2 text-sm text-[var(--fg-1)]">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    正在载入画布…
+                  </div>
+                }
+              >
+                <MaskBoard
+                  ref={boardRef}
+                  imageSrc={imageSrc}
+                  disabled={submitting}
+                  onStatsChange={handleStatsChange}
+                />
+              </Suspense>
             )}
           </div>
 
