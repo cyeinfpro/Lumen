@@ -60,7 +60,7 @@ import { ExecutionSummaryBar } from "../shared/ExecutionSummaryBar";
 import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
-import { MaskCanvas } from "../MaskCanvas";
+import { LazyMaskCanvas } from "../LazyMaskCanvas";
 
 interface MobileComposerPillProps {
   onSubmit: () => void | Promise<void>;
@@ -1404,13 +1404,15 @@ export function MobileComposerPill({
       </BottomSheet>
 
       {/* 局部修改 mask 画布弹窗 */}
-      <MaskCanvas
-        open={inpaint.open}
-        imageSrc={inpaint.sourceImageSrc}
-        onClose={inpaint.closeInpaint}
-        onConfirm={inpaint.handleConfirm}
-        submitting={inpaint.submitting}
-      />
+      {inpaint.open ? (
+        <LazyMaskCanvas
+          open={inpaint.open}
+          imageSrc={inpaint.sourceImageSrc}
+          onClose={inpaint.closeInpaint}
+          onConfirm={inpaint.handleConfirm}
+          submitting={inpaint.submitting}
+        />
+      ) : null}
     </>
   );
 }

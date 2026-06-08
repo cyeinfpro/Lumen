@@ -14,7 +14,7 @@ import { uploadImage as apiUploadImage } from "@/lib/apiClient";
 import { logError } from "@/lib/logger";
 import { useChatStore } from "@/store/useChatStore";
 
-import type { MaskExport } from "../MaskCanvas";
+import type { MaskExport } from "../../inpaint/MaskBoard";
 
 function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";

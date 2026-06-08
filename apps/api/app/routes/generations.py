@@ -285,16 +285,31 @@ async def list_generation_feed(
     gen_ids = [g.id for g in gens]
 
     # 每个 generation 拿"最早一张 owner image"（多图场景），没有则跳过。
-    # 本轮选择最旧一张（created_at, id ASC），便于 UI 稳定。
+    # 在 SQL 里先 row_number()，避免多图 generation 把所有图片都拉回 API 进程。
+    ranked_images = (
+        select(
+            Image.id.label("image_id"),
+            Image.owner_generation_id.label("owner_generation_id"),
+            func.row_number()
+            .over(
+                partition_by=Image.owner_generation_id,
+                order_by=(Image.created_at.asc(), Image.id.asc()),
+            )
+            .label("rn"),
+        )
+        .where(
+            Image.owner_generation_id.in_(gen_ids),
+            Image.deleted_at.is_(None),
+        )
+        .subquery()
+    )
     img_rows = (
         (
             await db.execute(
                 select(Image)
-                .where(
-                    Image.owner_generation_id.in_(gen_ids),
-                    Image.deleted_at.is_(None),
-                )
-                .order_by(Image.created_at.asc(), Image.id.asc())
+                .join(ranked_images, Image.id == ranked_images.c.image_id)
+                .where(ranked_images.c.rn == 1)
+                .order_by(ranked_images.c.owner_generation_id.asc())
             )
         )
         .scalars()

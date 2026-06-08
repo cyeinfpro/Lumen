@@ -506,6 +506,7 @@ export default function VideoPage() {
   const [selectedPromptEnhanceCandidateId, setSelectedPromptEnhanceCandidateId] =
     useState("");
   const [historyFilter, setHistoryFilter] = useState<VideoHistoryFilter>("all");
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const optionsQ = useQuery({
     queryKey: ["video", "options"],
@@ -1188,7 +1189,7 @@ export default function VideoPage() {
       <div className="hidden md:block">
         <DesktopTopNav active="video" />
       </div>
-      <main className="lumen-studio-bg mx-auto flex w-full max-w-[1520px] flex-col gap-4 px-4 pb-36 pt-3 md:px-6 md:pb-10">
+      <main className="lumen-studio-bg mx-auto flex w-full max-w-[1520px] flex-col gap-3 px-3 pb-32 pt-2 md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4">
         <VideoWorkbenchHeader
           mode={actionLabel(action)}
           profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
@@ -1201,52 +1202,76 @@ export default function VideoPage() {
           submitState={submitDisabledReason}
         />
 
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(350px,430px)] xl:items-start">
-          <section className="min-w-0 space-y-4">
-            <Card variant="subtle" elevation={2} padding="none" className="overflow-hidden border-[var(--border)]">
-              <div className="relative flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-4 sm:p-5">
-                <span aria-hidden="true" className="absolute left-0 top-4 h-8 w-1 rounded-r-full bg-[var(--accent)]" />
-                <div>
-                  <p className="type-card-title">创作区</p>
-                  <p className="mt-1 text-sm text-[var(--fg-2)]">
-                    {serviceEnabled
-                      ? `${actionLabel(action)} · 提示词、参考素材和参数都在这里完成`
-                      : serviceSummary}
+        <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(340px,420px)] xl:items-stretch">
+          <section className="min-w-0">
+            <Card
+              variant="subtle"
+              elevation={2}
+              padding="none"
+              className="flex h-full min-h-0 flex-col overflow-hidden border-[var(--border)]"
+            >
+              <div className="relative flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-3 sm:px-4">
+                <span aria-hidden="true" className="absolute left-0 top-3 h-7 w-1 rounded-r-full bg-[var(--accent)]" />
+                <div className="min-w-0 pl-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="type-card-title">创作区</p>
+                    <span className="hidden rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-0.5 text-xs text-[var(--fg-2)] sm:inline-flex">
+                      {actionLabel(action)} · {effectiveResolution} · {formatDurationLabel(durationS)}
+                    </span>
+                  </div>
+                  <p className="mt-1 truncate text-xs text-[var(--fg-2)]">
+                    {serviceEnabled ? submitDisabledReason : serviceSummary}
                   </p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    void optionsQ.refetch();
-                    void historyQ.refetch();
-                  }}
-                  leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
-                >
-                  刷新
-                </Button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void optionsQ.refetch();
+                      void historyQ.refetch();
+                    }}
+                    className="h-8 w-8 px-0 sm:w-auto sm:px-3"
+                    aria-label="刷新视频配置和记录"
+                    leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+                  >
+                    <span className="hidden sm:inline">刷新</span>
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setSettingsOpen(true)}
+                    className="h-8"
+                    leftIcon={<Settings2 className="h-3.5 w-3.5" />}
+                  >
+                    参数
+                  </Button>
+                </div>
               </div>
 
-              <div className="space-y-6 p-4 sm:p-5 lg:p-6">
-                <ReadinessBanner
-                  enabled={serviceEnabled}
-                  loading={optionsQ.isLoading}
-                  reason={submitDisabledReason}
-                  model={selectedModel}
-                  profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
-                />
-                <WorkflowRail
-                  action={action}
-                  hasPrompt={prompt.trim().length > 0}
-                  hasSource={
-                    action === "t2v" ||
-                    (action === "i2v" && inputImageId.trim().length > 0) ||
-                    (action === "reference" && referenceMedia.length > 0)
-                  }
-                  profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
-                />
-                <div className="space-y-2">
-                  <div className="grid grid-cols-3 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 sm:p-4">
+                <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(310px,0.72fr)]">
+                  <ReadinessBanner
+                    enabled={serviceEnabled}
+                    loading={optionsQ.isLoading}
+                    reason={submitDisabledReason}
+                    model={selectedModel}
+                    profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
+                  />
+                  <WorkflowRail
+                    action={action}
+                    hasPrompt={prompt.trim().length > 0}
+                    hasSource={
+                      action === "t2v" ||
+                      (action === "i2v" && inputImageId.trim().length > 0) ||
+                      (action === "reference" && referenceMedia.length > 0)
+                    }
+                    profile={`${effectiveResolution} · ${formatDurationLabel(durationS)}`}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="grid min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
                     {(Object.keys(MODE_COPY) as VideoAction[]).map((key) => (
                       <ModeCard
                         key={key}
@@ -1260,13 +1285,13 @@ export default function VideoPage() {
                       />
                     ))}
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--fg-2)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-[var(--fg-2)]">
                     <span>{MODE_COPY[action].description}</span>
                     <span className="font-medium text-[var(--fg-1)]">{MODE_COPY[action].requirement}</span>
                   </div>
                 </div>
 
-                <div className="space-y-3">
+                <div className="space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="type-caption text-[var(--fg-2)]">提示词</span>
                     <div className="flex items-center gap-2">
@@ -1290,11 +1315,11 @@ export default function VideoPage() {
                     value={prompt}
                     onChange={(event) => handlePromptChange(event.target.value)}
                     readOnly={isEnhancingPrompt}
-                    rows={9}
+                    rows={6}
                     maxLength={10000}
                     placeholder="写清主体、动作、镜头运动、节奏、参考素材怎么使用，以及不要出现的内容。"
                     className={cn(
-                      "min-h-[248px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-4 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)]",
+                      "min-h-[150px] w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/80 p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] focus:border-[var(--accent)]/60 focus:shadow-[var(--ring)] placeholder:text-[var(--fg-2)] sm:min-h-[168px]",
                       isEnhancingPrompt && "cursor-wait border-[var(--accent)]/50",
                     )}
                   />
@@ -1310,14 +1335,14 @@ export default function VideoPage() {
                       onDismiss={clearPromptEnhanceChoices}
                     />
                   )}
-                  <div className="flex flex-wrap gap-2">
+                  <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
                     {PROMPT_CHIPS.map((chip) => (
                       <button
                         key={chip}
                         type="button"
                         disabled={isEnhancingPrompt}
                         onClick={() => insertPromptText(chip)}
-                        className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
+                        className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50"
                       >
                         {chip}
                       </button>
@@ -1331,32 +1356,26 @@ export default function VideoPage() {
                 </div>
 
                 {action === "i2v" && (
-                  <div className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)]">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-medium text-[var(--fg-0)]">首帧图片</p>
-                        <p className="text-xs text-[var(--fg-2)]">上传首帧，或粘贴已有图片 ID。</p>
-                      </div>
-                      <input
-                        ref={fileRef}
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
-                        className="hidden"
-                        onChange={(event) => {
-                          const file = event.target.files?.[0];
-                          if (file) uploadMut.mutate(file);
-                          event.target.value = "";
-                        }}
-                      />
-                    </div>
-                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.35fr)]">
+                  <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-2.5 shadow-[var(--shadow-1)]">
+                    <input
+                      ref={fileRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) uploadMut.mutate(file);
+                        event.target.value = "";
+                      }}
+                    />
+                    <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.38fr)] lg:items-end">
                       <button
                         type="button"
                         onClick={() => fileRef.current?.click()}
                         disabled={uploadMut.isPending}
-                        className="group flex min-h-[116px] items-center gap-4 rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 p-4 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
+                        className="group flex min-h-14 items-center gap-3 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 p-3 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
                       >
-                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
                           {uploadMut.isPending ? (
                             <RefreshCw className="h-4 w-4 animate-spin" />
                           ) : (
@@ -1367,10 +1386,7 @@ export default function VideoPage() {
                           <span className="block text-sm font-semibold text-[var(--fg-0)]">
                             {inputImageId ? "替换首帧" : "上传首帧图片"}
                           </span>
-                          <span className="mt-1 block text-xs leading-5 text-[var(--fg-2)]">
-                            用图片锁定开场构图、人物和产品位置；支持 PNG、JPG、WebP。
-                          </span>
-                          <span className="mt-2 block text-xs font-medium text-[var(--fg-1)]">
+                          <span className="mt-1 block truncate text-xs font-medium text-[var(--fg-1)]">
                             {uploadedLabel || inputImageId ? uploadedLabel || "已填写图片 ID" : "尚未选择首帧"}
                           </span>
                         </span>
@@ -1396,7 +1412,7 @@ export default function VideoPage() {
                 )}
 
                 {action === "reference" && (
-                  <div className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)]">
+                  <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-2.5 shadow-[var(--shadow-1)]">
                     <input
                       ref={referenceFileRef}
                       type="file"
@@ -1408,147 +1424,51 @@ export default function VideoPage() {
                         event.target.value = "";
                       }}
                     />
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-medium text-[var(--fg-0)]">参考素材</p>
-                        <p className="text-xs text-[var(--fg-2)]">点击素材标签可插入描述。</p>
-                      </div>
-                    </div>
-                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.28fr)]">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         onClick={() => referenceFileRef.current?.click()}
                         disabled={referenceUploadMut.isPending}
-                        className="group flex min-h-[124px] items-center gap-4 rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 p-4 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
+                        className="group inline-flex min-h-10 shrink-0 items-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/72 px-3 text-left transition-[background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
                       >
-                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
-                          {referenceUploadMut.isPending ? (
-                            <RefreshCw className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Upload className="h-4 w-4" />
-                          )}
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block text-sm font-semibold text-[var(--fg-0)]">
-                            上传参考图片或视频
-                          </span>
-                          <span className="mt-1 block text-xs leading-5 text-[var(--fg-2)]">
-                            用参考素材约束人物、产品、风格或动作；上传后可点击标签插入到提示词。
-                          </span>
-                          <span className="mt-2 block text-xs font-medium text-[var(--fg-1)]">
-                            最多 9 张图片、3 个视频
-                          </span>
+                        {referenceUploadMut.isPending ? (
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" />
+                        ) : (
+                          <Upload className="h-3.5 w-3.5 text-[var(--accent)]" />
+                        )}
+                        <span className="text-sm font-semibold text-[var(--fg-0)]">
+                          上传参考
                         </span>
                       </button>
-                      <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/64 p-3">
-                        <p className="type-caption text-[var(--fg-2)]">已添加</p>
-                        <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2">
-                            <span className="block text-xs text-[var(--fg-2)]">图片</span>
-                            <span className="font-semibold tabular-nums text-[var(--fg-0)]">
-                              {referenceMedia.filter((item) => item.kind === "image").length}
-                            </span>
+                      <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
+                        图片 {referenceMedia.filter((item) => item.kind === "image").length}/9
+                      </span>
+                      <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
+                        视频 {referenceMedia.filter((item) => item.kind === "video").length}/3
+                      </span>
+                      <div className="flex min-w-[180px] flex-1 gap-2 overflow-x-auto py-1">
+                        {referenceMedia.map((item) => (
+                          <ReferenceChip
+                            key={item._key}
+                            item={item}
+                            onInsert={() => insertReferenceTag(item.label)}
+                            onRemove={() => {
+                              clearPromptEnhanceChoices();
+                              setReferenceMedia((prev) =>
+                                prev.filter((ref) => ref._key !== item._key),
+                              );
+                            }}
+                          />
+                        ))}
+                        {referenceMedia.length === 0 && (
+                          <span className="shrink-0 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
+                            未添加参考素材
                           </span>
-                          <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2">
-                            <span className="block text-xs text-[var(--fg-2)]">视频</span>
-                            <span className="font-semibold tabular-nums text-[var(--fg-0)]">
-                              {referenceMedia.filter((item) => item.kind === "video").length}
-                            </span>
-                          </span>
-                        </div>
+                        )}
                       </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {referenceMedia.map((item) => (
-                        <ReferenceChip
-                          key={item._key}
-                          item={item}
-                          onInsert={() => insertReferenceTag(item.label)}
-                          onRemove={() => {
-                            clearPromptEnhanceChoices();
-                            setReferenceMedia((prev) =>
-                              prev.filter((ref) => ref._key !== item._key),
-                            );
-                          }}
-                        />
-                      ))}
-                      {referenceMedia.length === 0 && (
-                        <span className="rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-2 text-xs text-[var(--fg-2)]">
-                          未添加参考素材
-                        </span>
-                      )}
                     </div>
                   </div>
                 )}
-
-                <div className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-4 shadow-[var(--shadow-1)]">
-                  <div className="flex items-center gap-2">
-                    <Settings2 className="h-4 w-4 text-[var(--fg-2)]" />
-                    <p className="text-sm font-medium text-[var(--fg-0)]">生成参数</p>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                    <SelectField
-                      label="模型"
-                      value={selectedModel}
-                      onChange={(value) => {
-                        clearPromptEnhanceChoices();
-                        setModel(value);
-                      }}
-                      options={availableModels.map((item) => item.model)}
-                    />
-                    <SelectField
-                      label="时长"
-                      value={String(durationS)}
-                      onChange={(value) => {
-                        clearPromptEnhanceChoices();
-                        setDurationS(Number(value));
-                      }}
-                      options={(options?.durations_s ?? VIDEO_DURATION_OPTIONS).map(String)}
-                      renderOption={(value) => formatDurationLabel(Number(value))}
-                    />
-                    <SelectField
-                      label="分辨率"
-                      value={effectiveResolution}
-                      onChange={(value) => {
-                        clearPromptEnhanceChoices();
-                        setResolution(value);
-                      }}
-                      options={availableResolutions}
-                    />
-                    <SelectField
-                      label="比例"
-                      value={aspectRatio}
-                      onChange={(value) => {
-                        clearPromptEnhanceChoices();
-                        setAspectRatio(value);
-                      }}
-                      options={options?.aspect_ratios ?? ["adaptive", "16:9", "9:16", "1:1"]}
-                    />
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-                    <label className="space-y-1.5">
-                      <span className="type-caption text-[var(--fg-2)]">种子</span>
-                      <input
-                        value={seed}
-                        onChange={(event) => setSeed(event.target.value)}
-                        inputMode="numeric"
-                        placeholder="随机"
-                        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-                      />
-                    </label>
-                    <label className="flex min-h-10 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-sm">
-                      <span>生成音频</span>
-                      <input
-                        type="checkbox"
-                        checked={generateAudio}
-                        onChange={(event) => {
-                          clearPromptEnhanceChoices();
-                          setGenerateAudio(event.target.checked);
-                        }}
-                      />
-                    </label>
-                  </div>
-                </div>
 
                 <div className="hidden md:block">
                   <SubmitPanel
@@ -1724,6 +1644,41 @@ export default function VideoPage() {
           onDelete={() => deleteMut.mutate(playbackVideoItem.video.id)}
         />
       )}
+      <VideoSettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        selectedModel={selectedModel}
+        modelOptions={availableModels.map((item) => item.model)}
+        durationS={durationS}
+        durationOptions={(options?.durations_s ?? VIDEO_DURATION_OPTIONS).map(String)}
+        resolution={effectiveResolution}
+        resolutionOptions={availableResolutions}
+        aspectRatio={aspectRatio}
+        aspectRatioOptions={options?.aspect_ratios ?? ["adaptive", "16:9", "9:16", "1:1"]}
+        seed={seed}
+        generateAudio={generateAudio}
+        onModelChange={(value) => {
+          clearPromptEnhanceChoices();
+          setModel(value);
+        }}
+        onDurationChange={(value) => {
+          clearPromptEnhanceChoices();
+          setDurationS(Number(value));
+        }}
+        onResolutionChange={(value) => {
+          clearPromptEnhanceChoices();
+          setResolution(value);
+        }}
+        onAspectRatioChange={(value) => {
+          clearPromptEnhanceChoices();
+          setAspectRatio(value);
+        }}
+        onSeedChange={setSeed}
+        onGenerateAudioChange={(value) => {
+          clearPromptEnhanceChoices();
+          setGenerateAudio(value);
+        }}
+      />
       <div className="md:hidden">
         <MobileTabBar />
       </div>
@@ -1762,6 +1717,145 @@ function SelectField({
   );
 }
 
+function VideoSettingsDialog({
+  open,
+  onClose,
+  selectedModel,
+  modelOptions,
+  durationS,
+  durationOptions,
+  resolution,
+  resolutionOptions,
+  aspectRatio,
+  aspectRatioOptions,
+  seed,
+  generateAudio,
+  onModelChange,
+  onDurationChange,
+  onResolutionChange,
+  onAspectRatioChange,
+  onSeedChange,
+  onGenerateAudioChange,
+}: {
+  open: boolean;
+  onClose: () => void;
+  selectedModel: string;
+  modelOptions: string[];
+  durationS: number;
+  durationOptions: string[];
+  resolution: string;
+  resolutionOptions: string[];
+  aspectRatio: string;
+  aspectRatioOptions: string[];
+  seed: string;
+  generateAudio: boolean;
+  onModelChange: (value: string) => void;
+  onDurationChange: (value: string) => void;
+  onResolutionChange: (value: string) => void;
+  onAspectRatioChange: (value: string) => void;
+  onSeedChange: (value: string) => void;
+  onGenerateAudioChange: (value: boolean) => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, open]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/55 backdrop-blur-md sm:items-center sm:p-5"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="video-settings-title"
+        className="mobile-dialog-panel flex w-full flex-col overflow-hidden rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] sm:!max-w-2xl sm:max-h-[min(720px,calc(100dvh-2.5rem))] sm:rounded-[var(--radius-panel)] sm:border-b"
+      >
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-1)]/95 px-4 py-3 sm:px-5">
+          <div className="min-w-0">
+            <h2 id="video-settings-title" className="text-base font-semibold text-[var(--fg-0)]">
+              生成参数
+            </h2>
+            <p className="mt-1 truncate text-xs text-[var(--fg-2)]">
+              {selectedModel || "未选择模型"} · {resolution} · {formatDurationLabel(durationS)}
+            </p>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-9 w-9 px-0"
+            onClick={onClose}
+            aria-label="关闭生成参数"
+          >
+            <XCircle className="h-4 w-4" />
+          </Button>
+        </header>
+        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <SelectField
+              label="模型"
+              value={selectedModel}
+              onChange={onModelChange}
+              options={modelOptions}
+            />
+            <SelectField
+              label="时长"
+              value={String(durationS)}
+              onChange={onDurationChange}
+              options={durationOptions}
+              renderOption={(value) => formatDurationLabel(Number(value))}
+            />
+            <SelectField
+              label="分辨率"
+              value={resolution}
+              onChange={onResolutionChange}
+              options={resolutionOptions}
+            />
+            <SelectField
+              label="比例"
+              value={aspectRatio}
+              onChange={onAspectRatioChange}
+              options={aspectRatioOptions}
+            />
+            <label className="space-y-1.5">
+              <span className="type-caption text-[var(--fg-2)]">种子</span>
+              <input
+                value={seed}
+                onChange={(event) => onSeedChange(event.target.value)}
+                inputMode="numeric"
+                placeholder="随机"
+                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+              />
+            </label>
+            <label className="flex min-h-10 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
+              <span className="font-medium text-[var(--fg-0)]">生成音频</span>
+              <input
+                type="checkbox"
+                checked={generateAudio}
+                onChange={(event) => onGenerateAudioChange(event.target.checked)}
+              />
+            </label>
+          </div>
+        </div>
+        <footer className="mobile-dialog-footer flex shrink-0 justify-end border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 sm:px-5">
+          <Button variant="primary" size="sm" onClick={onClose}>
+            完成
+          </Button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function WorkflowRail({
   action,
   hasPrompt,
@@ -1774,7 +1868,7 @@ function WorkflowRail({
   profile: string;
 }) {
   return (
-    <div className="grid gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-2 shadow-[var(--shadow-1)] sm:grid-cols-3">
+    <div className="hidden min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] gap-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-1.5 shadow-[var(--shadow-1)] sm:grid">
       <WorkflowStep
         label="描述"
         value={hasPrompt ? "已填写" : "待输入"}
@@ -1816,7 +1910,7 @@ function WorkflowStep({
   return (
     <div
       className={cn(
-        "relative min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2 py-2 transition-colors sm:px-3",
+        "relative min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-1.5 py-1.5 transition-colors sm:px-2",
         done || active
           ? "border-[var(--border-strong)] bg-[var(--bg-0)] shadow-[var(--shadow-1)]"
           : "border-[var(--border-subtle)] bg-[var(--bg-1)]/70",
@@ -1842,7 +1936,7 @@ function WorkflowStep({
         </span>
         <span className="type-caption truncate text-[var(--fg-2)]">{label}</span>
       </div>
-      <p className="mt-1 truncate text-xs font-medium text-[var(--fg-0)]">{value}</p>
+      <p className="mt-0.5 truncate text-xs font-medium text-[var(--fg-0)]">{value}</p>
     </div>
   );
 }
@@ -1874,23 +1968,25 @@ function VideoWorkbenchHeader({
   const queueDetail = activeCount > 0 ? "任务队列" : "最近结果";
 
   return (
-    <section className="grid gap-4 border-b border-[var(--border)] pb-4 lg:grid-cols-[minmax(0,1fr)_minmax(560px,0.9fr)] lg:items-end">
+    <section className="grid shrink-0 gap-2 border-b border-[var(--border)] pb-2 lg:grid-cols-[minmax(0,1fr)_minmax(520px,0.86fr)] lg:items-center">
       <div className="min-w-0">
-        <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 py-1.5 text-xs font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
+        <div className="hidden max-w-full items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-2.5 py-1 text-xs font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)] sm:inline-flex">
           <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
           <span className="truncate">Lumen 视频工作台</span>
         </div>
-        <div className="mt-3 flex flex-wrap items-end gap-x-3 gap-y-2">
-          <h1 className="type-page-title">视频工作台</h1>
-          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-2.5 py-1 text-xs text-[var(--fg-2)]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 sm:mt-1.5">
+          <h1 className="text-2xl font-semibold leading-tight tracking-normal text-[var(--fg-0)] sm:type-page-title-sm">
+            视频工作台
+          </h1>
+          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)]/72 px-2 py-0.5 text-xs text-[var(--fg-2)]">
             {submitState}
           </span>
         </div>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
-          创作区优先承载提示词、参考素材和参数选择；结果进入右侧记录，点击播放后再弹窗大屏查看。
+        <p className="mt-1 hidden max-w-2xl truncate text-xs text-[var(--fg-2)] sm:block">
+          主输入留在首屏；进阶参数和播放细节按需打开。
         </p>
       </div>
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="hidden min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] gap-1.5 sm:grid sm:gap-2">
         <StatusStripItem
           label="服务"
           value={serviceValue}
@@ -1941,7 +2037,7 @@ function ReadinessBanner({
   return (
     <div
       className={cn(
-        "grid gap-3 rounded-[var(--radius-card)] border p-3 shadow-[var(--shadow-1)] sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center",
+        "grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-[var(--radius-card)] border p-2 shadow-[var(--shadow-1)] sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:p-2.5",
         ready
           ? "border-success-border bg-success-soft"
           : enabled
@@ -1951,7 +2047,7 @@ function ReadinessBanner({
     >
       <span
         className={cn(
-          "flex h-9 w-9 items-center justify-center rounded-[var(--radius-control)] border bg-[var(--bg-0)]",
+          "flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border bg-[var(--bg-0)] sm:h-8 sm:w-8",
           ready
             ? "border-success-border text-[var(--success-fg)]"
             : enabled
@@ -1962,10 +2058,10 @@ function ReadinessBanner({
         {icon}
       </span>
       <div className="min-w-0">
-        <p className="text-sm font-semibold text-[var(--fg-0)]">
+        <p className="truncate text-sm font-semibold text-[var(--fg-0)]">
           {loading ? "正在读取配置" : ready ? "任务已准备好" : reason}
         </p>
-        <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
+        <p className="mt-0.5 hidden truncate text-xs text-[var(--fg-2)] sm:block">
           {enabled
             ? `${model || "未选择模型"} · ${profile}`
             : "配置视频供应商后，提交按钮会自动进入可用状态。"}
@@ -1994,7 +2090,7 @@ function StatusStripItem({
   return (
     <div
       className={cn(
-        "relative min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-3 py-2.5",
+        "relative min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2 py-1.5 sm:px-2.5 sm:py-2",
         active
           ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
           : "border-[var(--border-subtle)] bg-[var(--bg-0)]/64",
@@ -2007,10 +2103,10 @@ function StatusStripItem({
           active ? "bg-[var(--accent)]" : "bg-[var(--border-strong)]",
         )}
       />
-      <div className="flex min-w-0 items-start gap-2.5">
+      <div className="flex min-w-0 items-start gap-1.5 sm:gap-2.5">
         <span
           className={cn(
-            "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
+            "mt-0.5 hidden h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-control)] border sm:flex",
             active
               ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
               : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
@@ -2019,11 +2115,13 @@ function StatusStripItem({
           {icon}
         </span>
         <span className="min-w-0">
-          <span className="type-caption block text-[var(--fg-2)]">{label}</span>
-          <span className="mt-0.5 block truncate text-sm font-semibold text-[var(--fg-0)]">
+          <span className="block truncate text-[11px] leading-tight text-[var(--fg-2)] sm:type-caption">
+            {label}
+          </span>
+          <span className="mt-0.5 block truncate text-[10px] font-semibold text-[var(--fg-0)] sm:text-xs">
             {value}
           </span>
-          <span className="mt-0.5 block truncate text-xs text-[var(--fg-2)]">
+          <span className="mt-0.5 hidden truncate text-[11px] text-[var(--fg-2)] sm:block">
             {detail}
           </span>
         </span>
@@ -2056,7 +2154,7 @@ function ModeCard({
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        "group relative min-h-[88px] overflow-hidden rounded-[var(--radius-control)] border px-3 py-2.5 text-left transition-[background-color,border-color,color,transform] duration-200",
+        "group relative min-h-[54px] min-w-0 overflow-hidden rounded-[var(--radius-control)] border px-2.5 py-2 text-left transition-[background-color,border-color,color,transform] duration-200",
         selected
           ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
           : "border-transparent text-[var(--fg-1)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -2065,14 +2163,14 @@ function ModeCard({
       <span
         aria-hidden="true"
         className={cn(
-          "absolute inset-x-3 bottom-0 h-0.5 rounded-t-full transition-colors",
+          "absolute inset-x-2 bottom-0 h-0.5 rounded-t-full transition-colors",
           selected ? "bg-[var(--accent)]" : "bg-transparent",
         )}
       />
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex items-center justify-between gap-2">
         <span
           className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border",
             selected
               ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
               : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
@@ -2087,10 +2185,10 @@ function ModeCard({
           )}
         />
       </div>
-      <p className="mt-3 text-sm font-semibold text-[var(--fg-0)]">
+      <p className="mt-1.5 text-sm font-semibold text-[var(--fg-0)]">
         {copy.title}
       </p>
-      <p className="mt-1 truncate text-[11px] font-medium text-[var(--fg-2)]">
+      <p className="mt-0.5 truncate text-[11px] font-medium text-[var(--fg-2)]">
         {copy.eyebrow}
       </p>
     </button>
@@ -2298,20 +2396,20 @@ function SubmitPanel({
     <div
       className={cn(
         "rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/95 shadow-[var(--shadow-2)] backdrop-blur-xl",
-        compact ? "p-3" : "p-4",
+        compact ? "p-2.5" : "p-3",
       )}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="grid min-w-0 flex-1 grid-cols-2 gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="grid min-w-0 flex-1 grid-cols-2 gap-2">
           <div>
             <p className="type-caption text-[var(--fg-2)]">预扣</p>
-            <p className="text-base font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="text-sm font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? formatRmb(estimate.micro / 1_000_000) : "-"}
             </p>
           </div>
           <div>
             <p className="type-caption text-[var(--fg-2)]">Token 上限</p>
-            <p className="text-base font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="text-sm font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? estimate.tokens.toLocaleString() : "-"}
             </p>
           </div>
@@ -2329,7 +2427,7 @@ function SubmitPanel({
       </div>
       <p
         className={cn(
-          "mt-2 text-xs",
+          "mt-1.5 text-xs",
           canSubmit ? "text-success" : "text-[var(--fg-2)]",
         )}
       >

@@ -45,10 +45,14 @@ export function GlobalTaskTray() {
   const activeCount = active.length;
   const recentTasks = useQuery({
     queryKey: ["tasks", "recent", "presence"],
-    queryFn: () => listTasks({ limit: 20 }),
+    queryFn: ({ signal }) => listTasks({ limit: 20 }, { signal }),
     enabled: Boolean(userId),
     staleTime: 10_000,
-    refetchInterval: hasActive ? 10_000 : 30_000,
+    refetchInterval: taskTrayMinimized
+      ? false
+      : hasActive
+        ? 10_000
+        : 30_000,
   });
 
   const recentCount = recentTasks.data?.items.length ?? 0;

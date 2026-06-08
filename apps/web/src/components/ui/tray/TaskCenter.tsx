@@ -130,7 +130,7 @@ export function TaskCenter({
   const status = filter === "active" ? "active" : filter === "failed" ? "failed" : undefined;
   const query = useQuery({
     queryKey: ["tasks", "recent", status ?? "all"],
-    queryFn: () => listTasks({ status, limit: 80 }),
+    queryFn: ({ signal }) => listTasks({ status, limit: 80 }, { signal }),
     staleTime: 8_000,
   });
 

@@ -3,7 +3,7 @@ import { cookies, headers } from "next/headers";
 import localFont from "next/font/local";
 import "./globals.css";
 import { Lightbox } from "@/components/ui/Lightbox";
-import { InpaintModal } from "@/components/ui/inpaint";
+import { LazyInpaintModal as InpaintModal } from "@/components/ui/inpaint/LazyInpaintModal";
 import { GlobalTaskTray } from "@/components/ui/GlobalTaskTray";
 import { SSEProvider } from "@/components/SSEProvider";
 import { QueryProvider } from "@/components/QueryProvider";

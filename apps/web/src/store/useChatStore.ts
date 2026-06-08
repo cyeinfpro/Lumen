@@ -205,12 +205,20 @@ interface ChatState {
 
   // —— 自愈：扫描在途任务，发现服务端已 terminal 但本地仍 running 时主动 refetch ——
   // 用途：刷新瞬间 worker 完成 → SSE 事件已发但浏览器还没订上 → 错过事件 → 永远卡 running
-  pollInflightTasks: () => Promise<void>;
+  pollInflightTasks: (opts?: {
+    signal?: AbortSignal;
+    generationIds?: string[];
+    completionIds?: string[];
+    maxChecks?: number;
+  }) => Promise<void>;
   // —— 用户级中心任务列表：从 /tasks/mine/active 拉取当前用户全部进行中任务，
   //     一次性 merge 到 store.generations，让 GlobalTaskTray 显示**所有会话**的任务（即便
   //     当前会话没访问过也能看到）。SSE onOpen / 在线恢复时调用。
-  hydrateActiveTasks: () => Promise<void>;
-  refreshCompletionText: (completionId: string) => Promise<void>;
+  hydrateActiveTasks: (opts?: { signal?: AbortSignal }) => Promise<void>;
+  refreshCompletionText: (
+    completionId: string,
+    opts?: { signal?: AbortSignal },
+  ) => Promise<void>;
   reset: () => void;
 }
 
@@ -4607,11 +4615,12 @@ function createChatStore() {
       }
     },
 
-    async refreshCompletionText(completionId) {
+    async refreshCompletionText(completionId, opts) {
       try {
         const fresh = (await apiGetTask(
           "completions",
           completionId,
+          { signal: opts?.signal },
         )) as BackendCompletion;
         flushCompletionStreamPatches();
         const snapshotNow = Date.now();
@@ -4624,6 +4633,7 @@ function createChatStore() {
           ),
         }));
       } catch (err) {
+        if (opts?.signal && isAbortRequest(err, opts.signal)) return;
         logWarn("refreshCompletionText failed", {
           scope: "chat-poll",
           code: err instanceof ApiError ? err.code : undefined,
@@ -4633,40 +4643,63 @@ function createChatStore() {
       }
     },
 
-    async pollInflightTasks() {
+    async pollInflightTasks(opts) {
       const state = get();
 
       // 收集所有 in-flight 任务 id（排除乐观占位）
       const inflightGenIds: string[] = [];
+      const allowedGenIds =
+        opts?.generationIds != null ? new Set(opts.generationIds) : null;
       for (const g of Object.values(state.generations)) {
         if (
           (g.status === "queued" || g.status === "running") &&
-          !g.id.startsWith("opt-")
+          !g.id.startsWith("opt-") &&
+          (!allowedGenIds || allowedGenIds.has(g.id))
         ) {
           inflightGenIds.push(g.id);
         }
       }
       const inflightCompIds: string[] = [];
+      const allowedCompIds =
+        opts?.completionIds != null ? new Set(opts.completionIds) : null;
       for (const m of state.messages) {
         if (m.role !== "assistant") continue;
         if (m.status !== "pending" && m.status !== "streaming") continue;
-        if (m.completion_id && !m.completion_id.startsWith("opt-")) {
+        if (
+          m.completion_id &&
+          !m.completion_id.startsWith("opt-") &&
+          (!allowedCompIds || allowedCompIds.has(m.completion_id))
+        ) {
           inflightCompIds.push(m.completion_id);
         }
       }
-      if (inflightGenIds.length === 0 && inflightCompIds.length === 0) return;
+      const maxChecks =
+        typeof opts?.maxChecks === "number" && Number.isFinite(opts.maxChecks)
+          ? Math.max(0, Math.trunc(opts.maxChecks))
+          : undefined;
+      const checkGenIds =
+        maxChecks === undefined ? inflightGenIds : inflightGenIds.slice(0, maxChecks);
+      const remainingChecks =
+        maxChecks === undefined ? undefined : Math.max(0, maxChecks - checkGenIds.length);
+      const checkCompIds =
+        remainingChecks === undefined
+          ? inflightCompIds
+          : inflightCompIds.slice(0, remainingChecks);
+      if (checkGenIds.length === 0 && checkCompIds.length === 0) return;
 
       // 并行拉最新状态；不阻塞彼此，单条失败容忍
       let needRefetchConvId: string | null = null;
       const checks: Array<Promise<void>> = [];
 
-      for (const gid of inflightGenIds) {
+      for (const gid of checkGenIds) {
         checks.push(
           (async () => {
             try {
+              if (opts?.signal?.aborted) return;
               const fresh = (await apiGetTask(
                 "generations",
                 gid,
+                { signal: opts?.signal },
               )) as BackendGeneration;
               const freshExplainability = generationExplainabilityFromBackend(fresh);
               const freshTaskMeta = generationTaskMetaFromBackend(fresh);
@@ -4754,6 +4787,7 @@ function createChatStore() {
                 }
               }
             } catch (err) {
+              if (opts?.signal && isAbortRequest(err, opts.signal)) return;
               logWarn("pollInflightTasks generation check failed", {
                 scope: "chat-poll",
                 code: err instanceof ApiError ? err.code : undefined,
@@ -4764,13 +4798,15 @@ function createChatStore() {
         );
       }
 
-      for (const cid of inflightCompIds) {
+      for (const cid of checkCompIds) {
         checks.push(
           (async () => {
             try {
+              if (opts?.signal?.aborted) return;
               const fresh = (await apiGetTask(
                 "completions",
                 cid,
+                { signal: opts?.signal },
               )) as BackendCompletion;
               flushCompletionStreamPatches();
               const snapshotNow = Date.now();
@@ -4798,6 +4834,7 @@ function createChatStore() {
                 needRefetchConvId = get().currentConvId;
               }
             } catch (err) {
+              if (opts?.signal && isAbortRequest(err, opts.signal)) return;
               logWarn("pollInflightTasks completion check failed", {
                 scope: "chat-poll",
                 code: err instanceof ApiError ? err.code : undefined,
@@ -4810,7 +4847,7 @@ function createChatStore() {
 
       await Promise.all(checks);
 
-      if (needRefetchConvId) {
+      if (needRefetchConvId && !opts?.signal?.aborted) {
         // refetch 拉完整状态（含 image / 最终 text）；
         // loadHistoricalMessages 内部有 conv 切换防护，跨会话切换不会串数据
         try {
@@ -4825,11 +4862,12 @@ function createChatStore() {
       }
     },
 
-    async hydrateActiveTasks() {
+    async hydrateActiveTasks(opts) {
       let resp: Awaited<ReturnType<typeof listMyActiveTasks>>;
       try {
-        resp = await listMyActiveTasks();
+        resp = await listMyActiveTasks({ signal: opts?.signal });
       } catch (err) {
+        if (opts?.signal && isAbortRequest(err, opts.signal)) return;
         logWarn("hydrateActiveTasks fetch failed", {
           scope: "chat-hydrate",
           code: err instanceof ApiError ? err.code : undefined,

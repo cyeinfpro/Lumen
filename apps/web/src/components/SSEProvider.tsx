@@ -84,11 +84,27 @@ type SSEBroadcastPayload = {
 };
 
 type SeenEventResult = "accepted" | "duplicate" | null;
+type RecoveryPollMode = "none" | "overflow" | "limited" | "all";
 type RecoveryRequest = {
   phase: string;
   hydrateTasks: boolean;
   refreshCompletionText: boolean;
+  pollTasks: RecoveryPollMode;
 };
+
+const POLL_MODE_WEIGHT: Record<RecoveryPollMode, number> = {
+  none: 0,
+  overflow: 1,
+  limited: 2,
+  all: 3,
+};
+
+function mergePollMode(
+  current: RecoveryPollMode,
+  next: RecoveryPollMode,
+): RecoveryPollMode {
+  return POLL_MODE_WEIGHT[next] > POLL_MODE_WEIGHT[current] ? next : current;
+}
 
 function mergeRecoveryRequest(
   current: RecoveryRequest | null,
@@ -100,6 +116,7 @@ function mergeRecoveryRequest(
     hydrateTasks: current.hydrateTasks || next.hydrateTasks,
     refreshCompletionText:
       current.refreshCompletionText || next.refreshCompletionText,
+    pollTasks: mergePollMode(current.pollTasks, next.pollTasks),
   };
 }
 
@@ -256,13 +273,28 @@ function applyCompletionSnapshot(fresh: BackendCompletion): void {
   });
 }
 
-async function refreshActiveCompletionText(): Promise<void> {
-  const ids = activeCompletionIds(useChatStore.getState().messages);
+async function refreshActiveCompletionText(opts: {
+  signal?: AbortSignal;
+  completionIds?: string[];
+  maxChecks?: number;
+} = {}): Promise<void> {
+  const sourceIds =
+    opts.completionIds ?? activeCompletionIds(useChatStore.getState().messages);
+  const maxChecks =
+    typeof opts.maxChecks === "number" && Number.isFinite(opts.maxChecks)
+      ? Math.max(0, Math.trunc(opts.maxChecks))
+      : undefined;
+  const ids =
+    maxChecks === undefined ? sourceIds : sourceIds.slice(0, maxChecks);
   await Promise.all(
     ids.map(async (id) => {
       try {
-        applyCompletionSnapshot(await getTask("completions", id));
+        if (opts.signal?.aborted) return;
+        applyCompletionSnapshot(
+          await getTask("completions", id, { signal: opts.signal }),
+        );
       } catch (err) {
+        if (opts.signal?.aborted) return;
         logError(err, {
           scope: "sse-recovery",
           extra: { task: "completion", id },
@@ -278,11 +310,24 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   const convId = useChatStore((s) => s.currentConvId);
   const generationTaskKey = useChatStore((s) => activeGenerationTaskKey(s.generations));
   const assistantTaskKey = useChatStore((s) => activeAssistantTaskKey(s.messages));
+  const generationTaskIds = useMemo(
+    () => splitTaskKey(generationTaskKey),
+    [generationTaskKey],
+  );
+  const assistantTaskIds = useMemo(
+    () => splitTaskKey(assistantTaskKey),
+    [assistantTaskKey],
+  );
   const qc = useQueryClient();
   const qcRef = useRef(qc);
   const broadcastRef = useRef<BroadcastChannel | null>(null);
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenEventIdQueueRef = useRef<string[]>([]);
+  const overflowGenerationIdsRef = useRef<string[]>([]);
+  const overflowCompletionIdsRef = useRef<string[]>([]);
+  const recoveryAbortRef = useRef<AbortController | null>(null);
+  const initialSSEOpenRef = useRef(false);
+  const lastOpenChannelsKeyRef = useRef<string | null>(null);
   const taskInvalidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -331,10 +376,26 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     };
     if (userId) add(`user:${userId}`);
     if (convId) add(`conv:${convId}`);
-    for (const id of splitTaskKey(assistantTaskKey)) add(`task:${id}`);
-    for (const id of splitTaskKey(generationTaskKey)) add(`task:${id}`);
+    for (const id of assistantTaskIds) add(`task:${id}`);
+    for (const id of generationTaskIds) add(`task:${id}`);
     return out;
-  }, [userId, convId, generationTaskKey, assistantTaskKey]);
+  }, [userId, convId, generationTaskIds, assistantTaskIds]);
+
+  const channelsKey = useMemo(() => channels.join(","), [channels]);
+
+  useEffect(() => {
+    const liveTaskIds = new Set(
+      channels
+        .filter((channel) => channel.startsWith("task:"))
+        .map((channel) => channel.slice("task:".length)),
+    );
+    overflowGenerationIdsRef.current = generationTaskIds.filter(
+      (id) => !liveTaskIds.has(id),
+    );
+    overflowCompletionIdsRef.current = assistantTaskIds.filter(
+      (id) => !liveTaskIds.has(id),
+    );
+  }, [channels, generationTaskIds, assistantTaskIds]);
 
   const applySSEEventWithSideEffects = useCallback((name: string, data: unknown) => {
     useChatStore.getState().applySSEEvent(name, data);
@@ -467,6 +528,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
       phase: string,
       hydrateTasks: boolean,
       refreshCompletionText: boolean,
+      pollTasks: RecoveryPollMode,
     ) {
       if (recoveryDisposedRef.current) return;
       const lifecycle = recoveryLifecycleRef.current;
@@ -474,6 +536,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
         phase,
         hydrateTasks,
         refreshCompletionText,
+        pollTasks,
       };
       const queueRequest = () => {
         queuedRecoveryRef.current = mergeRecoveryRequest(
@@ -505,6 +568,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
               queued.phase,
               queued.hydrateTasks,
               queued.refreshCompletionText,
+              queued.pollTasks,
             );
           }
         }, SSE_RECOVERY_COALESCE_MS - elapsed);
@@ -513,11 +577,58 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
 
       recoveryInFlightRef.current = true;
       lastRecoveryStartedAtRef.current = Date.now();
+      recoveryAbortRef.current?.abort(
+        new DOMException("superseded SSE recovery", "AbortError"),
+      );
+      const recoveryAbort = new AbortController();
+      recoveryAbortRef.current = recoveryAbort;
       const store = useChatStore.getState();
       const jobs: Array<Promise<unknown>> = [];
-      if (hydrateTasks) jobs.push(store.hydrateActiveTasks());
-      jobs.push(store.pollInflightTasks());
-      if (refreshCompletionText) jobs.push(refreshActiveCompletionText());
+      if (hydrateTasks) jobs.push(store.hydrateActiveTasks({ signal: recoveryAbort.signal }));
+      if (pollTasks === "overflow") {
+        const generationIds = overflowGenerationIdsRef.current;
+        const completionIds = overflowCompletionIdsRef.current;
+        if (generationIds.length > 0 || completionIds.length > 0) {
+          jobs.push(
+            store.pollInflightTasks({
+              signal: recoveryAbort.signal,
+              generationIds,
+              completionIds,
+              maxChecks: 24,
+            }),
+          );
+        }
+      } else if (pollTasks === "limited") {
+        jobs.push(
+          store.pollInflightTasks({
+            signal: recoveryAbort.signal,
+            maxChecks: 12,
+          }),
+        );
+      } else if (pollTasks === "all") {
+        jobs.push(
+          store.pollInflightTasks({
+            signal: recoveryAbort.signal,
+            maxChecks: 50,
+          }),
+        );
+      }
+      if (refreshCompletionText) {
+        jobs.push(
+          refreshActiveCompletionText({
+            signal: recoveryAbort.signal,
+            maxChecks: pollTasks === "all" ? 16 : 8,
+          }),
+        );
+      }
+
+      if (jobs.length === 0) {
+        recoveryInFlightRef.current = false;
+        if (recoveryAbortRef.current === recoveryAbort) {
+          recoveryAbortRef.current = null;
+        }
+        return;
+      }
 
       void Promise.allSettled(jobs)
         .then((results) => {
@@ -538,6 +649,9 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
             return;
           }
           recoveryInFlightRef.current = false;
+          if (recoveryAbortRef.current === recoveryAbort) {
+            recoveryAbortRef.current = null;
+          }
           const queued = queuedRecoveryRef.current;
           queuedRecoveryRef.current = null;
           if (queued) {
@@ -545,6 +659,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
               queued.phase,
               queued.hydrateTasks,
               queued.refreshCompletionText,
+              queued.pollTasks,
             );
           }
         });
@@ -553,8 +668,22 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   );
 
   const handleSSEOpen = useCallback(() => {
-    runRecovery("onOpen", true, true);
-  }, [runRecovery]);
+    const previousChannelsKey = lastOpenChannelsKeyRef.current;
+    lastOpenChannelsKeyRef.current = channelsKey;
+
+    if (!initialSSEOpenRef.current) {
+      initialSSEOpenRef.current = true;
+      runRecovery("initial-open", true, true, "overflow");
+      return;
+    }
+
+    if (previousChannelsKey !== channelsKey) {
+      runRecovery("channel-open", false, false, "overflow");
+      return;
+    }
+
+    runRecovery("reconnect-open", true, true, "limited");
+  }, [channelsKey, runRecovery]);
 
   useSSE(channels, handlers, { onOpen: handleSSEOpen });
 
@@ -562,7 +691,7 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
     recoveryDisposedRef.current = false;
     recoveryLifecycleRef.current += 1;
     const unsubscribeOnlineRestore = onOnlineRestore(() => {
-      runRecovery("online-restore", true, false);
+      runRecovery("online-restore", true, false, "limited");
     });
     const stopConnectivity = startConnectivity();
     return () => {
@@ -578,6 +707,10 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
         clearTimeout(recoveryCooldownTimerRef.current);
         recoveryCooldownTimerRef.current = null;
       }
+      recoveryAbortRef.current?.abort(
+        new DOMException("SSE provider unmounted", "AbortError"),
+      );
+      recoveryAbortRef.current = null;
       recoveryInFlightRef.current = false;
       queuedRecoveryRef.current = null;
       disposeChatStoreRuntime();
@@ -588,13 +721,31 @@ export function SSEProvider({ children }: { children: React.ReactNode }) {
   // 覆盖 Redis Pub/Sub 不持久化的盲区（刷新瞬间错过的 succeeded/failed event）。
   useEffect(() => {
     const tick = () => {
-      runRecovery("poll-inflight", false, false);
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
+      runRecovery("poll-inflight", false, false, "limited");
     };
     // 挂载后立刻跑一次，覆盖刷新瞬间错过的 terminal event；
     // tick 走 runRecovery，无 in-flight 任务时为 no-op，重复调用安全。
     tick();
     const t = setInterval(tick, SSE_RECOVERY_POLL_MS);
     return () => clearInterval(t);
+  }, [runRecovery]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        runRecovery("visible-restore", true, false, "limited");
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () =>
+      document.removeEventListener("visibilitychange", onVisibilityChange);
   }, [runRecovery]);
 
   return <>{children}</>;

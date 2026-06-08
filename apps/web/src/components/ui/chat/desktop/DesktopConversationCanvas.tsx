@@ -224,6 +224,53 @@ function latestAssistantIsStreaming(messages: Message[]): boolean {
   return last?.role === "assistant" && last.status === "streaming";
 }
 
+function generationRenderSignature(
+  gen: Generation | undefined,
+): string {
+  if (!gen) return "missing";
+  const image = gen.image;
+  return [
+    gen.id,
+    gen.status,
+    gen.stage ?? "",
+    gen.substage ?? "",
+    gen.retrying ? "1" : "0",
+    gen.waiting_provider ? "1" : "0",
+    gen.cancelled ? "1" : "0",
+    gen.retryable ? "1" : "0",
+    gen.attempt ?? "",
+    gen.max_attempts ?? "",
+    gen.retry_eta ?? "",
+    gen.error_code ?? "",
+    gen.error_message ?? "",
+    gen.prompt,
+    gen.aspect_ratio,
+    gen.size_requested,
+    gen.started_at ?? "",
+    gen.finished_at ?? "",
+    gen.failover_count ?? "",
+    gen.billing_free ? "1" : "0",
+    gen.billing_label ?? "",
+    gen.is_dual_race_bonus ? "1" : "0",
+    image?.id ?? "",
+    image?.display_url ?? "",
+    image?.preview_url ?? "",
+    image?.thumb_url ?? "",
+    image?.width ?? "",
+    image?.height ?? "",
+    image?.size_actual ?? "",
+  ].join(":");
+}
+
+function assistantGenerationsRenderSignature(
+  msg: AssistantMessage,
+  generations: Record<string, Generation>,
+): string {
+  return generationIdsOf(msg)
+    .map((id) => generationRenderSignature(generations[id]))
+    .join("|");
+}
+
 function HistoryLoadControl({
   sentinelRef,
   hasMore,
@@ -615,7 +662,7 @@ function CopyButton({
 // ———————————————————————————————————————————————————
 // 用户 turn：右对齐，霞鹜文楷，左侧 2px × 40% 琥珀竖条
 // ———————————————————————————————————————————————————
-function UserTurn({ msg }: { msg: UserMessage }) {
+const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
   return (
     <div
       id={`msg-${msg.id}`}
@@ -672,7 +719,7 @@ function UserTurn({ msg }: { msg: UserMessage }) {
       )}
     </div>
   );
-}
+});
 
 // ———————————————————————————————————————————————————
 // 助手 turn：左对齐 Markdown + 生成图 + 参数尾行
@@ -690,7 +737,7 @@ interface AssistantTurnProps {
   onOpenMenu: (info: ImageMenuInfo) => void;
 }
 
-function AssistantTurn({
+const AssistantTurn = memo(function AssistantTurn({
   msg,
   generations,
   onRetryGen,
@@ -722,7 +769,12 @@ function AssistantTurn({
             style={{ fontFamily: "var(--font-body)" }}
           >
             {msg.text ? (
-              <Markdown className="lumen-md-desktop-compact">{msg.text}</Markdown>
+              <Markdown
+                className="lumen-md-desktop-compact"
+                autoDetectCode={!isStreaming}
+              >
+                {msg.text}
+              </Markdown>
             ) : null}
             {isStreaming && (
               <span
@@ -784,6 +836,17 @@ function AssistantTurn({
         </ImageGrid>
       )}
     </div>
+  );
+}, areAssistantTurnPropsEqual);
+
+function areAssistantTurnPropsEqual(
+  prev: AssistantTurnProps,
+  next: AssistantTurnProps,
+): boolean {
+  if (prev.msg !== next.msg) return false;
+  return (
+    assistantGenerationsRenderSignature(prev.msg, prev.generations) ===
+    assistantGenerationsRenderSignature(next.msg, next.generations)
   );
 }
 
