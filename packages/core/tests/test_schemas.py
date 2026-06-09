@@ -358,9 +358,16 @@ def test_video_reference_media_rejects_unsafe_url_sources():
     from lumen_core.schemas import VideoReferenceMediaIn
 
     VideoReferenceMediaIn(kind="image", url="https://cdn.example.com/ref.png")
+    VideoReferenceMediaIn(kind="image", url="asset://asset-20260609161523-stlqd")
+    mixed_asset = VideoReferenceMediaIn(
+        kind="image",
+        url=" `Asset : //ASSET-20260609161523-STLQD` ",
+    )
+    assert mixed_asset.url == "asset://asset-20260609161523-stlqd"
 
     for url in (
         "file:///etc/passwd",
+        "asset://",
         "http://169.254.169.254/latest/meta-data",
         "https://127.0.0.1/ref.png",
         "https://localhost/ref.png",

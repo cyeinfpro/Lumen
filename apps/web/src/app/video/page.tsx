@@ -24,6 +24,7 @@ import {
   Send,
   Settings2,
   Sparkles,
+  Tags,
   Trash2,
   Upload,
   Video as VideoIcon,
@@ -470,6 +471,30 @@ function parsePromptEnhanceCandidates(raw: string): PromptEnhanceCandidate[] {
   return fallback ? [{ id: "variant-1", title: "优化结果", prompt: fallback }] : [];
 }
 
+function normalizeAssetUrl(value: string): string {
+  const raw = value.trim().replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, "").trim();
+  if (!raw) return "";
+  const stripped = raw.replace(/^asset\s*:\s*\/\s*\//i, "");
+  const assetId = stripped.replace(/^[/\\]+/, "").trim();
+  return assetId ? `asset://${assetId.toLowerCase()}` : "";
+}
+
+function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
+  if (item.url) {
+    return {
+      kind: item.kind,
+      url: item.url,
+      label: item.label,
+    };
+  }
+  return {
+    kind: item.kind,
+    image_id: item.kind === "image" ? item.image_id ?? null : null,
+    video_id: item.kind === "video" ? item.video_id ?? null : null,
+    label: item.label,
+  };
+}
+
 export default function VideoPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -494,6 +519,7 @@ export default function VideoPage() {
   const [inputImageId, setInputImageId] = useState("");
   const [uploadedLabel, setUploadedLabel] = useState("");
   const [referenceMedia, setReferenceMedia] = useState<ReferenceDraft[]>([]);
+  const [assetUrlInput, setAssetUrlInput] = useState("");
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState("");
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
@@ -908,6 +934,34 @@ export default function VideoPage() {
     onError: (err) => toast.error("上传失败", { description: err instanceof Error ? err.message : undefined }),
   });
 
+  const addAssetReference = useCallback(() => {
+    const url = normalizeAssetUrl(assetUrlInput);
+    if (!url) return;
+    if (referenceMedia.filter((item) => item.kind === "image").length >= 9) {
+      toast.error("参考图片最多 9 张");
+      return;
+    }
+    clearPromptEnhanceChoices();
+    const label = nextReferenceLabel("image");
+    setReferenceMedia((prev) => [
+      ...prev,
+      {
+        _key: uuid(),
+        kind: "image",
+        url,
+        label,
+        display: url,
+      },
+    ]);
+    setAssetUrlInput("");
+    toast.success("官方素材已添加");
+  }, [
+    assetUrlInput,
+    clearPromptEnhanceChoices,
+    nextReferenceLabel,
+    referenceMedia,
+  ]);
+
   const createMut = useMutation({
     mutationFn: () =>
       createVideoGeneration({
@@ -917,12 +971,7 @@ export default function VideoPage() {
         input_image_id: action === "i2v" ? inputImageId.trim() : null,
         reference_media:
           action === "reference"
-            ? referenceMedia.map((item) => ({
-                kind: item.kind,
-                image_id: item.kind === "image" ? item.image_id ?? null : null,
-                video_id: item.kind === "video" ? item.video_id ?? null : null,
-                label: item.label,
-              }))
+            ? referenceMedia.map(referenceMediaPayload)
             : [],
         duration_s: durationS,
         resolution: toVideoResolution(effectiveResolution),
@@ -1000,9 +1049,12 @@ export default function VideoPage() {
           kind: ref.kind,
           image_id: ref.kind === "image" ? ref.image_id ?? null : null,
           video_id: ref.kind === "video" ? ref.video_id ?? null : null,
+          url: ref.url ?? null,
           label,
           display:
-            ref.kind === "image"
+            ref.url
+              ? ref.url.replace(/^asset:\/\//i, "asset://")
+              : ref.kind === "image"
               ? ref.image_id?.slice(0, 8) ?? "图片"
               : ref.video_id?.slice(0, 8) ?? "视频",
         };
@@ -1042,12 +1094,7 @@ export default function VideoPage() {
           variant_count: VIDEO_PROMPT_VARIANT_COUNT,
           reference_media:
             action === "reference"
-              ? referenceMedia.map((item) => ({
-                  kind: item.kind,
-                  image_id: item.kind === "image" ? item.image_id ?? null : null,
-                  video_id: item.kind === "video" ? item.video_id ?? null : null,
-                  label: item.label,
-                }))
+              ? referenceMedia.map(referenceMediaPayload)
               : [],
         },
         (delta) => {
@@ -1337,6 +1384,33 @@ export default function VideoPage() {
                           <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
                             视频 {referenceMedia.filter((item) => item.kind === "video").length}/3
                           </span>
+                          <div className="flex w-full min-w-0 flex-wrap items-center gap-2 lg:w-auto lg:min-w-[360px] lg:flex-1">
+                            <div className="relative min-w-[180px] flex-1">
+                              <Tags className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
+                              <input
+                                value={assetUrlInput}
+                                onChange={(event) =>
+                                  setAssetUrlInput(event.target.value.toLowerCase())
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    addAssetReference();
+                                  }
+                                }}
+                                placeholder="asset://asset-..."
+                                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] pl-9 pr-3 font-mono text-xs text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                              />
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={!assetUrlInput.trim()}
+                              onClick={addAssetReference}
+                            >
+                              添加官方素材
+                            </Button>
+                          </div>
                           <div className="flex min-w-[180px] flex-1 gap-2 overflow-x-auto py-1">
                             {referenceMedia.map((item) => (
                               <ReferenceChip

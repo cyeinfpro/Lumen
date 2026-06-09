@@ -174,6 +174,39 @@ async def test_video_prompt_enhance_content_accepts_reference_only_input() -> No
     )
 
 
+@pytest.mark.asyncio
+async def test_video_prompt_enhance_content_accepts_asset_reference() -> None:
+    from app.routes import prompts
+    from lumen_core.schemas import VideoReferenceMediaIn
+
+    body = prompts.VideoEnhanceIn(
+        text="",
+        action="reference",
+        reference_media=[
+            VideoReferenceMediaIn(
+                kind="image",
+                url="asset://asset-20260609161523-stlqd",
+                label="真人素材",
+            ),
+        ],
+    )
+
+    content, token_changed = await prompts._build_video_enhance_content(  # noqa: SLF001
+        body,
+        request=object(),  # type: ignore[arg-type]
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+    )
+
+    assert token_changed is False
+    assert all(item.get("type") != "input_image" for item in content)
+    assert any(
+        item.get("type") == "input_text"
+        and "asset://asset-20260609161523-stlqd" in item.get("text", "")
+        for item in content
+    )
+
+
 def test_video_prompt_enhance_media_budget_downgrades_large_data_urls() -> None:
     from app.routes import prompts
 

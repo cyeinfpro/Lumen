@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -27,6 +28,22 @@ from .constants import (
 )
 from .sizing import AspectRatio as AspectRatioLiteral
 from .url_security import is_private_host
+
+
+_ASSET_URL_PREFIX_RE = re.compile(r"^asset\s*:\s*/\s*/", re.IGNORECASE)
+_ASSET_ID_RE = re.compile(r"^asset[-_][A-Za-z0-9_-]+$", re.IGNORECASE)
+_ASSET_URL_WRAPPER_CHARS = "\"'`“”‘’"
+
+
+def normalize_asset_reference_url(raw_url: str) -> str | None:
+    value = raw_url.strip().strip(_ASSET_URL_WRAPPER_CHARS).strip()
+    if not value:
+        return None
+    without_prefix = _ASSET_URL_PREFIX_RE.sub("", value, count=1)
+    if without_prefix == value and not _ASSET_ID_RE.fullmatch(value):
+        return None
+    asset_id = without_prefix.replace("\\", "/").lstrip("/").strip()
+    return f"asset://{asset_id.lower()}" if asset_id else ""
 
 
 class BaseOut(BaseModel):
@@ -509,9 +526,20 @@ class VideoReferenceMediaIn(BaseModel):
         if self.kind == "video" and (self.image_id or "").strip():
             raise ValueError("video reference must not include image_id")
         if self.url:
-            parsed = urlsplit(self.url.strip())
+            asset_url = normalize_asset_reference_url(self.url)
+            if asset_url is not None:
+                if not asset_url:
+                    raise ValueError("reference media asset url must not be empty")
+                self.url = asset_url
+                return self
+            value = self.url.strip()
+            parsed = urlsplit(value)
+            if parsed.scheme.lower() == "asset":
+                if not (parsed.netloc or parsed.path.strip("/")):
+                    raise ValueError("reference media asset url must not be empty")
+                return self
             if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise ValueError("reference media url must be an http(s) URL")
+                raise ValueError("reference media url must be an http(s) or asset URL")
             if parsed.username or parsed.password:
                 raise ValueError("reference media url must not include credentials")
             if is_private_host(parsed.hostname):
@@ -2620,6 +2648,7 @@ class PosterStyleAutoTagOut(BaseModel):
 
 
 __all__ += [
+    "normalize_asset_reference_url",
     "PosterStyleSource",
     "PosterStyleVisibilityScope",
     "PosterStyleCategory",

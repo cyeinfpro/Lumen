@@ -54,6 +54,7 @@ from lumen_core.schemas import (
     VideoPriceOptionOut,
     VideoReferenceMediaIn,
     VideoReferenceMediaOut,
+    normalize_asset_reference_url,
 )
 from lumen_core.video_billing import (
     SMART_VIDEO_DURATION_S,
@@ -1002,12 +1003,18 @@ async def _input_image_snapshot(
 
 
 def _validate_reference_url(raw_url: str) -> str:
+    asset_url = normalize_asset_reference_url(raw_url)
+    if asset_url is not None:
+        if not asset_url:
+            raise _http("invalid_reference_url", "asset reference is empty", 422)
+        return asset_url
     value = raw_url.strip()
     parts = urlsplit(value)
     if parts.scheme.lower() == "asset":
-        if not (parts.netloc or parts.path.strip("/")):
+        asset_id = (parts.netloc or parts.path.strip("/")).strip()
+        if not asset_id:
             raise _http("invalid_reference_url", "asset reference is empty", 422)
-        return value
+        return f"asset://{asset_id.lower()}"
     if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
         raise _http(
             "invalid_reference_url",
