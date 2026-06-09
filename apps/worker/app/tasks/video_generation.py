@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from arq.cron import cron
 from sqlalchemy import or_, select
 
@@ -55,6 +56,9 @@ logger = logging.getLogger(__name__)
 _LEASE_TTL_S = 120
 _POLL_INTERVAL_S = 8
 _MAX_POLL_COUNT = 120
+_MAX_SUBMIT_ATTEMPTS = 4
+_SUBMIT_RETRY_DELAYS_S = (8, 24, 60)
+_POLL_RETRY_DELAY_S = 12
 _RECON_STALE_AFTER_S = 30
 _RECON_LIMIT = 100
 _SUBMIT_RESULT_CACHE_TTL_S = 7 * 24 * 60 * 60
@@ -69,6 +73,14 @@ _TERMINAL_STATUSES = {
     VideoGenerationStatus.CANCELED.value,
     VideoGenerationStatus.EXPIRED.value,
 }
+_RETRYABLE_VIDEO_ERROR_CODES = {
+    "capacity",
+    "fetch_failed",
+    "provider_error",
+    "upstream_network_error",
+    "upstream_timeout",
+    "upstream_unknown",
+}
 
 
 @dataclass(frozen=True)
@@ -79,6 +91,68 @@ class _StoredVideo:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _video_exception_code(exc: Exception, *, default: str) -> str:
+    if isinstance(exc, VideoUpstreamError):
+        value = (exc.error_code or "").strip()
+        return value or default
+    if isinstance(exc, httpx.TimeoutException) or isinstance(exc, asyncio.TimeoutError):
+        return "upstream_timeout"
+    if isinstance(exc, httpx.TransportError):
+        return "upstream_network_error"
+    return default
+
+
+def _video_exception_message(exc: Exception, *, phase: str) -> str:
+    raw = str(exc).strip()
+    if raw:
+        return raw[:1000]
+    code = _video_exception_code(exc, default="provider_unavailable")
+    status_code = getattr(exc, "status_code", None)
+    suffix = f" status={status_code}" if status_code else ""
+    return f"video upstream {phase} failed: {code} ({exc.__class__.__name__}){suffix}"[
+        :1000
+    ]
+
+
+def _is_retryable_video_exception(exc: Exception) -> bool:
+    if isinstance(exc, VideoUpstreamError):
+        if exc.status_code in {408, 409, 425, 429}:
+            return True
+        if exc.status_code is not None and exc.status_code >= 500:
+            return True
+        return exc.error_code in _RETRYABLE_VIDEO_ERROR_CODES
+    if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
+        return True
+    return isinstance(exc, httpx.TransportError)
+
+
+def _submit_retry_delay_s(attempt: int) -> int:
+    index = max(0, min(attempt - 1, len(_SUBMIT_RETRY_DELAYS_S) - 1))
+    return _SUBMIT_RETRY_DELAYS_S[index]
+
+
+def _generation_attempt(generation: VideoGeneration) -> int:
+    return int(getattr(generation, "attempt", 0) or 0)
+
+
+def _generation_diagnostics(generation: VideoGeneration) -> dict[str, Any]:
+    raw = getattr(generation, "diagnostics", None)
+    return dict(raw or {}) if isinstance(raw, dict) else {}
+
+
+def _exception_log_info(exc: Exception):
+    return (type(exc), exc, exc.__traceback__)
+
+
+def _append_bounded_history(
+    diagnostics: dict[str, Any], key: str, item: dict[str, Any], *, limit: int = 10
+) -> None:
+    raw = diagnostics.get(key)
+    history = list(raw) if isinstance(raw, list) else []
+    history.append(item)
+    diagnostics[key] = history[-limit:]
 
 
 async def _acquire_lease(redis: Any, task_id: str, token: str) -> bool:
@@ -250,6 +324,7 @@ async def _publish(
         "progress_pct": generation.progress_pct,
         "video_id": extra.pop("video_id", None),
         "error_code": generation.error_code,
+        "error_message": generation.error_message,
         **extra,
     }
     await publish_event(
@@ -532,11 +607,33 @@ async def _fail_before_submit(
             if generation is None or generation.status in _TERMINAL_STATUSES:
                 return
             release_provider_name = release_provider_name or generation.provider_name
+            if await _schedule_submit_retry(session, redis, generation, exc):
+                return
+            error_code = _video_exception_code(exc, default="provider_unavailable")
+            error_message = _video_exception_message(exc, phase="submit")
+            logger.warning(
+                "video submit failed task=%s attempt=%s code=%s error=%s",
+                task_id,
+                _generation_attempt(generation),
+                error_code,
+                error_message,
+                exc_info=_exception_log_info(exc),
+            )
+            diagnostics = _generation_diagnostics(generation)
+            diagnostics["last_submit_error"] = {
+                "at": _now().isoformat(),
+                "attempt": _generation_attempt(generation),
+                "error_code": error_code,
+                "message": error_message[:500],
+                "retryable": _is_retryable_video_exception(exc),
+                "terminal": True,
+            }
             generation.status = VideoGenerationStatus.FAILED.value
             generation.progress_stage = VideoGenerationStage.FINISHED.value
             generation.progress_pct = 100
-            generation.error_code = getattr(exc, "error_code", "provider_unavailable")
-            generation.error_message = str(exc)[:1000]
+            generation.error_code = error_code
+            generation.error_message = error_message
+            generation.diagnostics = diagnostics
             generation.finished_at = _now()
             await resolve_video_billing(
                 session,
@@ -544,7 +641,11 @@ async def _fail_before_submit(
                 poll_result=PollResult(
                     status="failed",
                     upstream_billable=False,
-                    raw={"phase": "submit", "error": str(exc)},
+                    raw={
+                        "phase": "submit",
+                        "error": error_message,
+                        "error_code": error_code,
+                    },
                 ),
                 reason="submit_failed_before_upstream_cost",
             )
@@ -553,6 +654,75 @@ async def _fail_before_submit(
     finally:
         if release_provider_name:
             await _release_provider_slot(redis, release_provider_name, task_id)
+
+
+async def _schedule_submit_retry(
+    session,
+    redis: Any,
+    generation: VideoGeneration,
+    exc: Exception,
+) -> bool:
+    if not _is_retryable_video_exception(exc):
+        return False
+    attempt = _generation_attempt(generation)
+    if attempt >= _MAX_SUBMIT_ATTEMPTS:
+        return False
+    now = _now()
+    remaining_s = int((generation.deadline_at - now).total_seconds())
+    if remaining_s <= 1:
+        return False
+    delay_s = max(1, min(_submit_retry_delay_s(attempt), remaining_s - 1))
+    error_code = _video_exception_code(exc, default="provider_unavailable")
+    error_message = _video_exception_message(exc, phase="submit")
+    diagnostics = _generation_diagnostics(generation)
+    retry_item = {
+        "at": now.isoformat(),
+        "attempt": attempt,
+        "error_code": error_code,
+        "message": error_message[:500],
+        "next_retry_delay_s": delay_s,
+    }
+    _append_bounded_history(diagnostics, "submit_retry_history", retry_item)
+    diagnostics["last_submit_error"] = {**retry_item, "retryable": True}
+    diagnostics["submit_retry_count"] = len(diagnostics["submit_retry_history"])
+    generation.status = VideoGenerationStatus.SUBMITTING.value
+    generation.progress_stage = VideoGenerationStage.SUBMITTING.value
+    generation.progress_pct = max(generation.progress_pct, 5)
+    generation.next_poll_at = now + timedelta(seconds=delay_s)
+    generation.error_code = None
+    generation.error_message = None
+    generation.diagnostics = diagnostics
+    await session.commit()
+    logger.info(
+        "video submit retry scheduled task=%s attempt=%s delay_s=%s code=%s error=%s",
+        generation.id,
+        attempt,
+        delay_s,
+        error_code,
+        error_message,
+    )
+    try:
+        await _publish(
+            redis,
+            generation,
+            EV_VIDEO_PROGRESS,
+            retry_after_s=delay_s,
+            retry_attempt=attempt,
+            retry_error_code=error_code,
+        )
+    except Exception:
+        logger.warning(
+            "video submit retry publish failed task=%s",
+            generation.id,
+            exc_info=True,
+        )
+    try:
+        await _enqueue_submit(redis, generation.id, defer_s=delay_s)
+    except Exception:
+        logger.warning(
+            "video submit retry enqueue failed task=%s", generation.id, exc_info=True
+        )
+    return True
 
 
 async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
@@ -595,17 +765,24 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
         )
         await _apply_poll_result(redis, task_id, poll)
     except VideoUpstreamError as exc:
-        await _apply_poll_result(
-            redis,
-            task_id,
-            PollResult(
-                status="failed",
-                failure_class=exc.error_code,
-                upstream_billable=None,
-                raw=exc.raw or {"error": str(exc)},
-            ),
-            fallback_error_message=str(exc),
-        )
+        if not await _schedule_poll_retry(redis, task_id, exc):
+            await _apply_poll_result(
+                redis,
+                task_id,
+                PollResult(
+                    status="failed",
+                    failure_class=exc.error_code,
+                    upstream_billable=None,
+                    raw=exc.raw
+                    or {
+                        "error": _video_exception_message(exc, phase="poll"),
+                        "error_code": _video_exception_code(
+                            exc, default="upstream_unknown"
+                        ),
+                    },
+                ),
+                fallback_error_message=_video_exception_message(exc, phase="poll"),
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("video poll failed task=%s err=%s", task_id, exc, exc_info=True)
         async with SessionLocal() as session:
@@ -627,8 +804,90 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
         await _release_lease(redis, task_id, token)
 
 
+async def _schedule_poll_retry(
+    redis: Any,
+    task_id: str,
+    exc: Exception,
+) -> bool:
+    if not _is_retryable_video_exception(exc):
+        return False
+    async with SessionLocal() as session:
+        generation = (
+            await session.execute(
+                select(VideoGeneration)
+                .where(VideoGeneration.id == task_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if generation is None or generation.status in _TERMINAL_STATUSES:
+            return True
+        now = _now()
+        if generation.deadline_at <= now or generation.poll_count >= _MAX_POLL_COUNT:
+            return False
+        remaining_s = int((generation.deadline_at - now).total_seconds())
+        if remaining_s <= 1:
+            return False
+        delay_s = max(1, min(_POLL_RETRY_DELAY_S, remaining_s - 1))
+        error_code = _video_exception_code(exc, default="upstream_unknown")
+        error_message = _video_exception_message(exc, phase="poll")
+        diagnostics = dict(generation.diagnostics or {})
+        retry_item = {
+            "at": now.isoformat(),
+            "poll_count": generation.poll_count,
+            "error_code": error_code,
+            "message": error_message[:500],
+            "next_retry_delay_s": delay_s,
+        }
+        _append_bounded_history(diagnostics, "poll_retry_history", retry_item)
+        diagnostics["last_poll_error"] = {**retry_item, "retryable": True}
+        diagnostics["poll_retry_count"] = len(diagnostics["poll_retry_history"])
+        generation.status = VideoGenerationStatus.RUNNING.value
+        generation.progress_stage = (
+            VideoGenerationStage.FETCHING.value
+            if error_code == "fetch_failed"
+            else VideoGenerationStage.RENDERING.value
+        )
+        generation.progress_pct = max(generation.progress_pct, 20)
+        generation.poll_count += 1
+        generation.next_poll_at = now + timedelta(seconds=delay_s)
+        generation.error_code = None
+        generation.error_message = None
+        generation.diagnostics = diagnostics
+        await session.commit()
+        logger.info(
+            "video poll retry scheduled task=%s poll_count=%s delay_s=%s code=%s "
+            "error=%s",
+            generation.id,
+            generation.poll_count,
+            delay_s,
+            error_code,
+            error_message,
+        )
+        try:
+            await _publish(
+                redis,
+                generation,
+                EV_VIDEO_PROGRESS,
+                retry_after_s=delay_s,
+                retry_error_code=error_code,
+            )
+        except Exception:
+            logger.warning(
+                "video poll retry publish failed task=%s",
+                generation.id,
+                exc_info=True,
+            )
+        try:
+            await _enqueue_poll(redis, generation.id, defer_s=delay_s)
+        except Exception:
+            logger.warning(
+                "video poll retry enqueue failed task=%s", generation.id, exc_info=True
+            )
+        return True
+
+
 async def _try_provider_cancel(adapter: Any, generation: VideoGeneration) -> None:
-    diagnostics = dict(generation.diagnostics or {})
+    diagnostics = _generation_diagnostics(generation)
     if diagnostics.get("cancel_sent_at") or diagnostics.get("cancel_unsupported_at"):
         return
     try:
