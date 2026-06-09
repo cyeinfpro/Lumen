@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from app.tasks import video_generation as video_generation_tasks
 from app.tasks.video_generation import _reference_media_bytes, _try_provider_cancel
 from app.video_upstream import (
     CancelResult,
@@ -50,6 +51,73 @@ async def test_reference_media_bytes_accepts_url_snapshots() -> None:
     assert len(result) == 1
     assert result[0].kind == "video"
     assert result[0].url == "https://example.com/reference.mp4"
+
+
+@pytest.mark.asyncio
+async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "url": "https://lumen.example/api/images/reference/image-1/binary",
+                    "upstream_reference_storage_key": "u/user-1/ref.jpg",
+                    "upstream_reference_mime": "image/jpeg",
+                }
+            ]
+        },
+    )
+
+    async def fake_get_bytes(key: str) -> bytes:
+        assert key == "u/user-1/ref.jpg"
+        return b"image"
+
+    monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", fake_get_bytes)
+
+    result = await _reference_media_bytes(generation)
+
+    assert len(result) == 1
+    assert result[0].kind == "image"
+    assert result[0].url == "https://lumen.example/api/images/reference/image-1/binary"
+    assert result[0].data == b"image"
+    assert result[0].mime == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_reference_media_bytes_url_snapshot_survives_missing_variant_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "url": "https://lumen.example/api/images/reference/image-1/binary",
+                    "upstream_reference_storage_key": "u/user-1/ref.jpg",
+                    "upstream_reference_mime": "image/jpeg",
+                }
+            ]
+        },
+    )
+
+    async def failing_get_bytes(key: str) -> bytes:
+        raise FileNotFoundError(key)
+
+    monkeypatch.setattr(
+        video_generation_tasks.storage, "aget_bytes", failing_get_bytes
+    )
+
+    result = await _reference_media_bytes(generation)
+
+    assert len(result) == 1
+    assert result[0].kind == "image"
+    assert result[0].url == "https://lumen.example/api/images/reference/image-1/binary"
+    assert result[0].data is None
+    assert result[0].mime == "image/jpeg"
 
 
 @pytest.mark.asyncio
@@ -132,6 +200,20 @@ class ThirdPartyCaptureClient(CaptureClient):
     async def delete(self, path: str):
         self.path = path
         return httpx.Response(200, json=self.delete_json)
+
+
+class SequentialThirdPartyCaptureClient(ThirdPartyCaptureClient):
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        super().__init__()
+        self.responses = responses
+        self.requests: list[dict] = []
+
+    async def post(self, path: str, *, json):
+        self.path = path
+        self.body = json
+        self.requests.append({"path": path, "body": json})
+        index = len(self.requests) - 1
+        return self.responses[index]
 
 
 @pytest.mark.asyncio
@@ -539,6 +621,56 @@ async def test_unified_video_create_submit_uses_omni_flash_payload() -> None:
         "generate_audio": False,
         "images": ["https://lumen.example/ref.jpg"],
     }
+
+
+@pytest.mark.asyncio
+async def test_unified_video_create_retries_invalid_url_with_data_urls() -> None:
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={"omni-flash:reference": "gemini_omni_flash"},
+    )
+    adapter = UnifiedVideoCreateAdapter(provider)
+    client = SequentialThirdPartyCaptureClient(
+        [
+            httpx.Response(400, json={"error": {"message": "Invalid URL"}}),
+            httpx.Response(200, json={"data": {"task_id": "omni-task-1"}}),
+        ]
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="omni-flash",
+            upstream_model="gemini_omni_flash",
+            prompt="keep these references consistent",
+            duration_s=6,
+            resolution="720p",
+            aspect_ratio="16:9",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="image",
+                    url="https://lumen.example/api/images/reference/image-1/binary",
+                    data=b"image",
+                    mime="image/jpeg",
+                )
+            ],
+        )
+    )
+
+    assert result.provider_task_id == "omni-task-1"
+    assert len(client.requests) == 2
+    assert client.requests[0]["body"]["images"] == [
+        "https://lumen.example/api/images/reference/image-1/binary"
+    ]
+    assert client.requests[1]["body"]["images"] == [
+        "data:image/jpeg;base64,aW1hZ2U="
+    ]
 
 
 @pytest.mark.asyncio

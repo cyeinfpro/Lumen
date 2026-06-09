@@ -575,6 +575,58 @@ def _duration_options(estimates: dict[str, Any]) -> list[int]:
     ]
 
 
+def _duration_options_for_model(
+    model: str,
+    *,
+    upstream_model: str | None = None,
+    available_durations: Iterable[int] | None = None,
+) -> list[int]:
+    if _is_omni_flash_model(model, upstream_model):
+        return list(_OMNI_FLASH_DURATIONS)
+    available = set(available_durations or _DEFAULT_VIDEO_DURATIONS)
+    positive_durations = sorted(item for item in available if item > 0)
+    return [SMART_VIDEO_DURATION_S, *positive_durations]
+
+
+def _estimate_duration_options_for_model_action(
+    estimates: dict[str, Any],
+    *,
+    model: str,
+    action: str,
+    resolutions: Iterable[str],
+) -> list[int]:
+    model_value = estimates.get(model)
+    if not isinstance(model_value, dict):
+        return []
+    actions = [action]
+    if action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT:
+        actions = [
+            "reference_image",
+            "reference_video",
+            VIDEO_LEGACY_REFERENCE_PRICING_VARIANT,
+            "i2v",
+        ]
+    allowed_resolutions = set(resolutions)
+    durations: set[int] = set()
+    for action_name in actions:
+        action_value = model_value.get(action_name)
+        if not isinstance(action_value, dict):
+            continue
+        for key in action_value:
+            if not isinstance(key, str) or ":" not in key:
+                continue
+            resolution, duration = key.rsplit(":", 1)
+            if allowed_resolutions and resolution not in allowed_resolutions:
+                continue
+            try:
+                duration_s = int(duration)
+            except ValueError:
+                continue
+            if duration_s > 0:
+                durations.add(duration_s)
+    return sorted(durations)
+
+
 def _ordered_video_resolutions(values: Iterable[str]) -> list[str]:
     return sorted(
         set(values),
@@ -623,10 +675,10 @@ def _video_resolution_options_for_model(
     if _is_omni_flash_model(model, upstream_model):
         allowed = set(_OMNI_FLASH_RESOLUTIONS)
         return [resolution for resolution in available if resolution in allowed]
-    if not _is_seedance_20_fast_model(model, upstream_model):
-        return available
-    allowed = set(_SEEDANCE_20_FAST_RESOLUTIONS)
-    return [resolution for resolution in available if resolution in allowed]
+    if _is_seedance_20_fast_model(model, upstream_model):
+        allowed = set(_SEEDANCE_20_FAST_RESOLUTIONS)
+        return [resolution for resolution in available if resolution in allowed]
+    return [resolution for resolution in available if resolution != "4k"]
 
 
 def _request_fingerprint(body: VideoCreateIn) -> str:
@@ -821,9 +873,11 @@ async def video_options(
         unavailable_reason = "video_provider_config_invalid"
     prices = await _video_price_options(db)
     price_pairs = {(item.model, item.action, item.resolution) for item in prices}
-    _, resolutions = _estimate_pairs(estimates)
+    durations, resolutions = _estimate_pairs(estimates)
+    global_durations = _duration_options(estimates)
 
     model_actions: dict[str, set[str]] = {}
+    model_durations: dict[str, set[int]] = {}
     model_resolutions: dict[str, set[str]] = {}
     model_billing_models: dict[str, dict[str, str]] = {}
     for provider in providers:
@@ -856,8 +910,22 @@ async def video_options(
                             resolutions=[resolution],
                         )
                     ]
+                    estimate_durations = _estimate_duration_options_for_model_action(
+                        estimates,
+                        model=billing_model,
+                        action=price_action,
+                        resolutions=action_resolutions,
+                    )
+                    action_durations = _duration_options_for_model(
+                        key,
+                        upstream_model=upstream_model,
+                        available_durations=estimate_durations
+                        or durations
+                        or global_durations,
+                    )
                     if action_resolutions:
                         model_actions.setdefault(key, set()).add(action)
+                        model_durations.setdefault(key, set()).update(action_durations)
                         model_resolutions.setdefault(key, set()).update(
                             action_resolutions
                         )
@@ -889,8 +957,20 @@ async def video_options(
                     resolutions=[resolution],
                 )
             ]
+            estimate_durations = _estimate_duration_options_for_model_action(
+                estimates,
+                model=billing_model,
+                action=price_action,
+                resolutions=action_resolutions,
+            )
+            action_durations = _duration_options_for_model(
+                model,
+                upstream_model=upstream_model,
+                available_durations=estimate_durations or durations or global_durations,
+            )
             if action_resolutions:
                 model_actions.setdefault(model, set()).add(action)
+                model_durations.setdefault(model, set()).update(action_durations)
                 model_resolutions.setdefault(model, set()).update(action_resolutions)
                 model_billing_models.setdefault(model, {})[action] = billing_model
     if enabled and not model_actions and unavailable_reason is None:
@@ -913,6 +993,7 @@ async def video_options(
                 ),
                 billing_models=billing_models,
                 actions=sorted_actions,  # type: ignore[arg-type]
+                durations_s=sorted(model_durations.get(model, set())),
                 resolutions=_ordered_video_resolutions(
                     model_resolutions.get(model, set())
                 ),  # type: ignore[arg-type]
@@ -944,8 +1025,6 @@ async def _require_video_create_ready(
     estimates = await _video_hold_estimates(db)
     _, resolutions = _estimate_pairs(estimates)
     durations = _duration_options(estimates)
-    if body.duration_s not in durations:
-        raise _http("invalid_duration", "duration_s is not available", 422)
     if body.resolution not in resolutions:
         raise _http("invalid_resolution", "resolution is not available", 422)
     if body.aspect_ratio not in _DEFAULT_VIDEO_ASPECT_RATIOS:
@@ -960,16 +1039,21 @@ async def _require_video_create_ready(
             "no enabled video provider supports this model/action",
             503,
         )
-    if provider.kind == "omni_flash" and body.duration_s not in _OMNI_FLASH_DURATIONS:
+    upstream_model = provider.upstream_model_for(body.model, body.action)
+    model_durations = _duration_options_for_model(
+        body.model,
+        upstream_model=upstream_model,
+        available_durations=durations,
+    )
+    if body.duration_s not in model_durations:
         raise _http(
             "invalid_duration",
-            "duration_s is not available for Omni Flash",
+            "duration_s is not available for this model",
             422,
             model=body.model,
             duration_s=body.duration_s,
-            available_durations_s=list(_OMNI_FLASH_DURATIONS),
+            available_durations_s=model_durations,
         )
-    upstream_model = provider.upstream_model_for(body.model, body.action)
     model_resolutions = _video_resolution_options_for_model(
         body.model,
         upstream_model=upstream_model,

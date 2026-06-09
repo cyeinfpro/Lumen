@@ -383,21 +383,58 @@ async def _reference_media_bytes(
         if kind not in {"image", "video"}:
             continue
         url = item.get("url")
-        if isinstance(url, str) and url.strip():
+        clean_url = url.strip() if isinstance(url, str) else ""
+        mime = item.get("mime") if isinstance(item.get("mime"), str) else None
+        upstream_mime = item.get("upstream_reference_mime")
+        if isinstance(upstream_mime, str) and upstream_mime.strip():
+            mime = upstream_mime.strip()
+        storage_key = item.get("upstream_reference_storage_key") or item.get(
+            "storage_key"
+        )
+        clean_storage_key = (
+            storage_key.strip() if isinstance(storage_key, str) else None
+        )
+        data: bytes | None = None
+        if kind == "image" and clean_storage_key:
+            if clean_url:
+                # The public URL is the primary upstream input; these bytes are
+                # only an optimization for the data-URL fallback retry. A
+                # missing/expired variant must not fail a generation the URL can
+                # still satisfy on its own.
+                try:
+                    data = await storage.aget_bytes(clean_storage_key)
+                except Exception:
+                    logger.warning(
+                        "reference image variant bytes unavailable; "
+                        "falling back to url storage_key=%s",
+                        clean_storage_key,
+                        exc_info=True,
+                    )
+                    data = None
+            else:
+                data = await storage.aget_bytes(clean_storage_key)
+        if clean_url:
             result.append(
-                VideoReferenceMedia(kind=kind, url=url.strip())  # type: ignore[arg-type]
+                VideoReferenceMedia(  # type: ignore[arg-type]
+                    kind=kind,
+                    data=data,
+                    mime=mime,
+                    url=clean_url,
+                )
             )
             continue
         if kind == "video":
             raise RuntimeError("reference video snapshot missing public URL")
-        storage_key = item.get("storage_key")
-        if not isinstance(storage_key, str) or not storage_key.strip():
+        if not clean_storage_key:
             raise RuntimeError("reference media storage key missing")
-        mime = item.get("mime") if isinstance(item.get("mime"), str) else None
         result.append(
             VideoReferenceMedia(
                 kind=kind,  # type: ignore[arg-type]
-                data=await storage.aget_bytes(storage_key),
+                data=(
+                    data
+                    if data is not None
+                    else await storage.aget_bytes(clean_storage_key)
+                ),
                 mime=mime,
             )
         )

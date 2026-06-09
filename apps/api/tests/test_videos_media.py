@@ -189,8 +189,19 @@ def test_seedance_20_fast_resolution_options_exclude_1080p() -> None:
     ) == ["480p", "720p"]
     assert videos._video_resolution_options_for_model(  # noqa: SLF001
         "seedance-2.0",
-        available_resolutions=["480p", "720p", "1080p"],
+        available_resolutions=["480p", "720p", "1080p", "4k"],
     ) == ["480p", "720p", "1080p"]
+
+
+def test_omni_flash_duration_options_are_model_specific() -> None:
+    assert videos._duration_options_for_model(  # noqa: SLF001
+        "omni-flash",
+        available_durations=[-1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    ) == [6, 7, 8, 9, 10]
+    assert videos._duration_options_for_model(  # noqa: SLF001
+        "seedance-2.0",
+        available_durations=[5, 6],
+    ) == [-1, 5, 6]
 
 
 def test_happyhorse_resolution_options_exclude_480p() -> None:
@@ -340,6 +351,7 @@ async def test_video_options_exposes_happyhorse_reference_with_image_pricing_onl
     assert len(options.models) == 1
     assert options.models[0].model == "happyhorse-1.0"
     assert set(options.models[0].actions) == {"t2v", "i2v", "reference"}
+    assert options.models[0].durations_s == [-1, 3]
     assert options.models[0].resolutions == ["720p"]
 
 
@@ -476,6 +488,7 @@ async def test_video_options_exposes_omni_flash_reference_with_image_pricing_onl
     assert len(options.models) == 1
     assert options.models[0].model == "omni-flash"
     assert set(options.models[0].actions) == {"t2v", "i2v", "reference"}
+    assert options.models[0].durations_s == [6, 7, 8, 9, 10]
     assert options.models[0].resolutions == ["720p", "1080p", "4k"]
 
 

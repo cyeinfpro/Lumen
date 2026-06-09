@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from lumen_core.providers import socks_proxy_url
+from lumen_core.url_security import resolve_public_http_target
 from lumen_core.video_billing import VIDEO_BILLING_TOKENS_PER_SECOND
 from lumen_core.video_providers import VideoProviderDefinition
 
@@ -438,6 +439,88 @@ def _image_data_url(data: bytes, mime: str | None) -> str:
     return f"data:{mime_value};base64,{base64.b64encode(data).decode('ascii')}"
 
 
+_OMNI_FALLBACK_IMAGE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _image_response_mime(response: httpx.Response, fallback: str | None) -> str | None:
+    fallback_value = fallback.strip() if isinstance(fallback, str) else ""
+    raw = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if raw:
+        if raw.startswith("image/"):
+            return raw
+        if fallback_value.startswith("image/"):
+            return fallback_value
+        raise VideoUpstreamError(
+            "Omni Flash fallback image URL did not return an image",
+            error_code="invalid_input",
+            status_code=response.status_code,
+        )
+    return fallback_value or None
+
+
+async def _fetch_image_url_as_data_url(
+    raw_url: str,
+    *,
+    field: str,
+    fallback_mime: str | None = None,
+) -> str:
+    try:
+        target = await resolve_public_http_target(raw_url, allow_http=True)
+    except ValueError as exc:
+        raise VideoUpstreamError(
+            f"{field} fallback URL must be public HTTP(S)",
+            error_code="invalid_input",
+            status_code=422,
+        ) from exc
+
+    timeout = httpx.Timeout(
+        connect=settings.upstream_connect_timeout_s,
+        read=min(settings.upstream_read_timeout_s, 120.0),
+        write=settings.upstream_write_timeout_s,
+        pool=30.0,
+    )
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with client.stream("GET", target.url) as response:
+            if response.status_code >= 300:
+                raise VideoUpstreamError(
+                    f"{field} fallback fetch failed status={response.status_code}",
+                    error_code="invalid_input",
+                    status_code=response.status_code,
+                )
+            content_length = response.headers.get("content-length")
+            if content_length:
+                try:
+                    expected_bytes = int(content_length)
+                except ValueError:
+                    expected_bytes = 0
+                if expected_bytes > _OMNI_FALLBACK_IMAGE_MAX_BYTES:
+                    raise VideoUpstreamError(
+                        f"{field} fallback image is too large",
+                        error_code="invalid_input",
+                        status_code=413,
+                    )
+            mime = _image_response_mime(response, fallback_mime)
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > _OMNI_FALLBACK_IMAGE_MAX_BYTES:
+                    raise VideoUpstreamError(
+                        f"{field} fallback image is too large",
+                        error_code="invalid_input",
+                        status_code=413,
+                    )
+                chunks.append(bytes(chunk))
+    data = b"".join(chunks)
+    if not data:
+        raise VideoUpstreamError(
+            f"{field} fallback image is empty",
+            error_code="invalid_input",
+            status_code=422,
+        )
+    return _image_data_url(data, mime)
+
+
 def _safety_identifier(user_id: str) -> str:
     return hashlib.sha256(f"lumen:{user_id}".encode("utf-8")).hexdigest()
 
@@ -754,6 +837,62 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             )
         return _image_data_url(item.data, item.mime)
 
+    async def _media_data_url(self, item: VideoReferenceMedia, *, field: str) -> str:
+        if item.kind != "image":
+            raise VideoUpstreamError(
+                "Omni Flash unified video create supports image references only",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if item.data:
+            return _image_data_url(item.data, item.mime)
+        if item.url:
+            return await self._fetch_image_url_data_url(
+                item.url,
+                field=field,
+                fallback_mime=item.mime,
+            )
+        raise VideoUpstreamError(
+            f"{field} is required",
+            error_code="invalid_input",
+            status_code=422,
+        )
+
+    async def _fetch_image_url_data_url(
+        self,
+        raw_url: str,
+        *,
+        field: str,
+        fallback_mime: str | None = None,
+    ) -> str:
+        return await _fetch_image_url_as_data_url(
+            raw_url,
+            field=field,
+            fallback_mime=fallback_mime,
+        )
+
+    def _reference_image_refs(self, req: VideoSubmitRequest) -> list[VideoReferenceMedia]:
+        image_refs = [item for item in req.reference_media if item.kind == "image"]
+        if len(image_refs) != len(req.reference_media):
+            raise VideoUpstreamError(
+                "Omni Flash unified video create supports image references only",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if not image_refs:
+            raise VideoUpstreamError(
+                "reference generation requires reference images",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if len(image_refs) > 9:
+            raise VideoUpstreamError(
+                "too many reference image items",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        return image_refs
+
     def _images(self, req: VideoSubmitRequest) -> list[str]:
         if req.action == "t2v":
             return []
@@ -768,25 +907,7 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
                 )
             return [_image_data_url(req.input_image_bytes, req.input_image_mime)]
         if req.action == "reference":
-            image_refs = [item for item in req.reference_media if item.kind == "image"]
-            if len(image_refs) != len(req.reference_media):
-                raise VideoUpstreamError(
-                    "Omni Flash unified video create supports image references only",
-                    error_code="invalid_input",
-                    status_code=422,
-                )
-            if not image_refs:
-                raise VideoUpstreamError(
-                    "reference generation requires reference images",
-                    error_code="invalid_input",
-                    status_code=422,
-                )
-            if len(image_refs) > 9:
-                raise VideoUpstreamError(
-                    "too many reference image items",
-                    error_code="invalid_input",
-                    status_code=422,
-                )
+            image_refs = self._reference_image_refs(req)
             return [
                 self._media_url(item, field="Omni Flash reference image")
                 for item in image_refs
@@ -797,7 +918,46 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             status_code=422,
         )
 
-    async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+    async def _data_url_images(self, req: VideoSubmitRequest) -> list[str]:
+        if req.action == "t2v":
+            return []
+        if req.action == "i2v":
+            if req.input_image_bytes:
+                return [_image_data_url(req.input_image_bytes, req.input_image_mime)]
+            if req.input_image_url:
+                return [
+                    await self._fetch_image_url_data_url(
+                        req.input_image_url,
+                        field="Omni Flash input image",
+                        fallback_mime=req.input_image_mime,
+                    )
+                ]
+            raise VideoUpstreamError(
+                "missing input image bytes",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if req.action == "reference":
+            image_refs = self._reference_image_refs(req)
+            return [
+                await self._media_data_url(
+                    item,
+                    field="Omni Flash reference image",
+                )
+                for item in image_refs
+            ]
+        raise VideoUpstreamError(
+            f"unsupported video action: {req.action}",
+            error_code="invalid_input",
+            status_code=422,
+        )
+
+    def _submit_body(
+        self,
+        req: VideoSubmitRequest,
+        *,
+        images: list[str],
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": req.upstream_model,
             "prompt": req.prompt,
@@ -815,9 +975,11 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             body["generate_audio"] = False
         if req.callback_url:
             body["callback_url"] = req.callback_url
-        images = self._images(req)
         if images:
             body["images"] = images
+        return body
+
+    async def _post_submit_body(self, body: dict[str, Any]) -> SubmitResult:
         async with self._client() as client:
             response = await client.post(self._path("video/create"), json=body)
         raw = _response_json(response)
@@ -832,6 +994,36 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
                 raw=raw,
             )
         return SubmitResult(provider_task_id=provider_task_id, raw=raw)
+
+    def _should_retry_with_data_urls(self, exc: VideoUpstreamError) -> bool:
+        if exc.error_code != "invalid_input":
+            return False
+        messages = [
+            str(exc),
+            _nested_get(exc.raw, ("error", "message"), ("message",), ("text",)),
+        ]
+        return any(
+            isinstance(message, str) and "invalid url" in message.lower()
+            for message in messages
+        )
+
+    async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        images = self._images(req)
+        body = self._submit_body(req, images=images)
+        try:
+            return await self._post_submit_body(body)
+        except VideoUpstreamError as exc:
+            if not self._should_retry_with_data_urls(exc):
+                raise
+            try:
+                fallback_images = await self._data_url_images(req)
+            except VideoUpstreamError:
+                raise exc
+            if fallback_images == images:
+                raise exc
+            return await self._post_submit_body(
+                self._submit_body(req, images=fallback_images)
+            )
 
     async def poll(self, provider_task_id: str) -> PollResult:
         async with self._client() as client:
