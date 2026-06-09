@@ -1135,6 +1135,7 @@ export interface VideoModelOptionOut {
   billing_model?: string | null;
   billing_models?: Partial<Record<VideoAction, string>>;
   actions: VideoAction[];
+  durations_s?: number[];
   resolutions?: Array<VideoCreateIn["resolution"]>;
 }
 

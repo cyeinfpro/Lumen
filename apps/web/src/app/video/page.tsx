@@ -129,6 +129,12 @@ type StoryboardShot = {
 
 type StoryboardShotPatch = Partial<Omit<StoryboardShot, "id">>;
 
+type StoryboardScriptBeat = {
+  part: string;
+  index: number;
+  durationS: number;
+};
+
 type StoryboardReferenceAsset = {
   id: string;
   kind: StoryboardAssetKind;
@@ -189,6 +195,7 @@ const STORYBOARD_MAX_GROUP_DURATION_S = 15;
 const STORYBOARD_MIN_SHOT_DURATION_S = 3;
 const STORYBOARD_MAX_SHOT_COUNT = 60;
 const STORYBOARD_MAX_REFERENCE_IMAGES_PER_SHOT = 8;
+const STORYBOARD_MAX_VIDEO_REFERENCE_IMAGES = 9;
 const DEFAULT_STORYBOARD_STYLE =
   "真人电影感，清晰主体，统一角色外观，干净转场，镜头运动服务叙事，不添加分镜外的新剧情。";
 const DEFAULT_STORYBOARD_SCRIPT =
@@ -256,11 +263,11 @@ function clampStoryboardDuration(value: number): number {
 function createStoryboardShot(input: Partial<StoryboardShot> = {}): StoryboardShot {
   return {
     id: uuid(),
-    title: input.title ?? "新镜头",
+    title: input.title ?? "新生成段",
     purpose: input.purpose ?? "推进叙事或补充动作信息",
     durationS: clampStoryboardDuration(input.durationS ?? 5),
     narration: input.narration ?? "",
-    visual: input.visual ?? "描述这一镜头的画面主体、动作起点、动作峰值和落点。",
+    visual: input.visual ?? "按 15 秒内的小分镜顺序描述画面主体、动作起点、动作峰值和落点。",
     shotType: input.shotType ?? "中景",
     cameraMove: input.cameraMove ?? "缓慢推镜",
     transition: input.transition ?? "动作转场",
@@ -279,51 +286,6 @@ function createStoryboardShot(input: Partial<StoryboardShot> = {}): StoryboardSh
     videoApproved: input.videoApproved ?? false,
     videoApprovedAt: input.videoApprovedAt,
   };
-}
-
-function createInitialStoryboardShots(): StoryboardShot[] {
-  return [
-    createStoryboardShot({
-      title: "钩子开场",
-      purpose: "用问题或反差让观众立刻进入故事。",
-      durationS: 5,
-      narration: "先把观众拉进主角的处境。",
-      visual: "主角停在画面中心，环境里有一个清晰的冲突信号，镜头从细节推到人物反应。",
-      shotType: "近景",
-      cameraMove: "缓慢推镜",
-      transition: "声音先入后切画面",
-    }),
-    createStoryboardShot({
-      title: "痛点动作",
-      purpose: "把问题变成可看见的动作和反应。",
-      durationS: 6,
-      narration: "问题不是被讲出来，而是被看见。",
-      visual: "主角尝试完成动作但被阻断，手部、表情和道具形成连续动作。",
-      shotType: "手部特写",
-      cameraMove: "稳定跟拍",
-      transition: "动作接动作",
-    }),
-    createStoryboardShot({
-      title: "解决方案进入",
-      purpose: "让产品、方法或关键转折自然出现。",
-      durationS: 7,
-      narration: "解决方案进入，但不要像硬广告。",
-      visual: "关键物件从前景进入，主角视线被引导过去，环境光线变得更干净。",
-      shotType: "过肩",
-      cameraMove: "焦点转换",
-      transition: "视线转场",
-    }),
-    createStoryboardShot({
-      title: "结果释放",
-      purpose: "给出完成感、情绪变化和下一步行动。",
-      durationS: 6,
-      narration: "结尾展示结果，让观众知道改变发生了。",
-      visual: "主角完成动作并停留半秒，画面空间打开，结果物在清晰位置出现。",
-      shotType: "全景",
-      cameraMove: "轻微横移",
-      transition: "硬切到收束画面",
-    }),
-  ];
 }
 
 function createStoryboardAsset(
@@ -536,7 +498,7 @@ function splitStoryboardScript(script: string): string[] {
 function titleFromScriptPart(part: string, index: number): string {
   const cleaned = part.replace(/[，。！？；：,.!?;:]/g, " ").trim();
   const first = cleaned.split(/\s+/).filter(Boolean).join("");
-  return first ? first.slice(0, 12) : `镜头 ${index + 1}`;
+  return first ? first.slice(0, 12) : `生成段 ${index + 1}`;
 }
 
 function estimateShotDuration(part: string, index: number): number {
@@ -549,28 +511,67 @@ function estimateShotDuration(part: string, index: number): number {
 function createShotsFromScript(script: string): StoryboardShot[] {
   const parts = splitStoryboardScript(script);
   if (parts.length === 0) return [];
-  return parts.map((part, index) =>
-    createStoryboardShot({
-      title: titleFromScriptPart(part, index),
+  const beats: StoryboardScriptBeat[] = parts.map((part, index) => ({
+    part,
+    index,
+    durationS: estimateShotDuration(part, index),
+  }));
+  const groups: StoryboardScriptBeat[][] = [];
+  let currentGroup: StoryboardScriptBeat[] = [];
+  let currentDuration = 0;
+
+  for (const beat of beats) {
+    if (
+      currentGroup.length > 0 &&
+      currentDuration + beat.durationS > STORYBOARD_MAX_GROUP_DURATION_S
+    ) {
+      groups.push(currentGroup);
+      currentGroup = [];
+      currentDuration = 0;
+    }
+    currentGroup.push(beat);
+    currentDuration += beat.durationS;
+  }
+  if (currentGroup.length > 0) groups.push(currentGroup);
+
+  return groups.map((group, segmentIndex) => {
+    const segmentDuration = clampStoryboardDuration(
+      group.reduce((sum, beat) => sum + beat.durationS, 0),
+    );
+    const firstPart = group[0]?.part ?? "";
+    const titleBase = titleFromScriptPart(firstPart, segmentIndex);
+    const title =
+      group.length > 1 ? `${titleBase}等${group.length}镜` : titleBase;
+    const beatPlan = group
+      .map(
+        (beat, beatIndex) =>
+          `分镜 ${beatIndex + 1}（约 ${beat.durationS}s）：${beat.part}`,
+      )
+      .join("\n");
+    const narration = group
+      .map((beat, beatIndex) => `分镜 ${beatIndex + 1}：${beat.part}`)
+      .join("\n");
+    return createStoryboardShot({
+      title,
       purpose:
-        index === 0
-          ? "开场建立钩子和处境。"
-          : index === parts.length - 1
-            ? "收束结果，保留情绪停顿。"
-            : "推进动作、信息或情绪转折。",
-      durationS: estimateShotDuration(part, index),
-      narration: part,
-      visual: `${part} 用一个清楚的动作瞬间表达，不依赖屏幕文字说明。`,
-      shotType: STORYBOARD_SHOT_TYPES[index % STORYBOARD_SHOT_TYPES.length],
-      cameraMove: STORYBOARD_CAMERA_MOVES[index % STORYBOARD_CAMERA_MOVES.length],
+        segmentIndex === 0
+          ? "在 15 秒内建立钩子、人物处境和第一个动作承接。"
+          : segmentIndex === groups.length - 1
+            ? "在 15 秒内收束结果，并给下一步或结尾留停顿。"
+            : "在 15 秒内推进一组连续动作、信息或情绪转折。",
+      durationS: segmentDuration,
+      narration,
+      visual: `${beatPlan}\n段内要求：这些小分镜在同一次 15 秒生成里完成，动作、人物、道具、空间和光线需要连续，不要做成互相割裂的独立短片。`,
+      shotType: STORYBOARD_SHOT_TYPES[segmentIndex % STORYBOARD_SHOT_TYPES.length],
+      cameraMove: STORYBOARD_CAMERA_MOVES[segmentIndex % STORYBOARD_CAMERA_MOVES.length],
       transition:
-        index === 0
+        segmentIndex === 0
           ? "声音先入"
-          : index === parts.length - 1
+          : segmentIndex === groups.length - 1
             ? "节奏停顿后收束"
             : "动作接动作",
-    }),
-  );
+    });
+  });
 }
 
 function bindAllStoryboardAssetIds(assets: StoryboardReferenceAsset[]): string[] {
@@ -664,21 +665,21 @@ function formatStoryboardShotPrompt({
 }): string {
   const referenceInstruction = hasReferences
     ? "参考素材用于保持角色、产品、场景和风格一致；不要机械复刻参考素材中的文字、边框、标注或 UI。"
-    : "无参考素材时，按本镜头描述建立清晰主体和稳定视觉风格。";
+    : "无参考素材时，按本生成段描述建立清晰主体和稳定视觉风格。";
   return [
     `项目：${projectTitle || "Lumen 分镜项目"}`,
-    `片段：SHOT ${String(shotNumber).padStart(2, "0")} / ${totalShots} - ${shot.title}`,
-    `时长：${shot.durationS} 秒，生成为可独立剪辑的视频片段。`,
+    `生成段：SEG ${String(shotNumber).padStart(2, "0")} / ${totalShots} - ${shot.title}`,
+    `时长：${shot.durationS} 秒，这是一次 Seedance 生成单元，段内可以包含多个连续小分镜。`,
     `视觉风格：${projectStyle || DEFAULT_STORYBOARD_STYLE}`,
-    `镜头目的：${shot.purpose}`,
-    `画面内容：${shot.visual}`,
-    `景别与机位：${shot.shotType}`,
-    `镜头运动：${shot.cameraMove}`,
+    `段落目标：${shot.purpose}`,
+    `段内分镜计划：${shot.visual}`,
+    `主景别与机位：${shot.shotType}`,
+    `段内镜头运动：${shot.cameraMove}`,
     `转场方式：${shot.transition}`,
     `台词/旁白/字幕信息：${shot.narration || "无对白，用动作和情绪推进。"}`,
     `参考说明：${shot.referenceNotes || referenceInstruction}`,
-    "首帧约束：输入图片是本镜头已确认的分镜关键帧，必须保持人物身份、服装、场景结构、主体位置和光线方向。",
-    "生成要求：主体动作要有起点、峰值和落点；镜头运动必须服务叙事；保持角色、服装、道具、光线方向和空间关系连续；不要添加新角色、新剧情、logo、水印或额外屏幕文字。",
+    "首帧约束：输入图片是本生成段已确认的首帧/关键帧，必须保持人物身份、服装、场景结构、主体位置和光线方向。",
+    "生成要求：把段内小分镜做成一个连贯 15 秒以内视频段；允许自然切换景别和动作，但人物、服装、道具、光线方向和空间关系必须连续；不要添加新角色、新剧情、logo、水印或额外屏幕文字。",
   ].join("\n");
 }
 
@@ -701,19 +702,19 @@ function formatStoryboardKeyframePrompt({
     ? "参考素材只用于保持角色、产品、服装、材质和场景风格一致。"
     : "无参考素材时，按项目视觉风格建立清晰、可复用的角色和场景。";
   return [
-    "请生成一张单镜头最终效果画面图（single-shot cinematic keyframe reference）。",
+    "请生成一张 15 秒生成段的首帧/关键参考图（cinematic opening keyframe reference）。",
     "这不是 storyboard sheet，不是漫画格，不是多格拼图，不要出现分镜边框、编号、箭头、标注、字幕、logo、水印或 UI。",
     `项目：${projectTitle || "Lumen 分镜项目"}`,
-    `镜头：SHOT ${String(shotNumber).padStart(2, "0")} / ${totalShots} - ${shot.title}`,
+    `生成段：SEG ${String(shotNumber).padStart(2, "0")} / ${totalShots} - ${shot.title}`,
     `最终视觉风格：${projectStyle || DEFAULT_STORYBOARD_STYLE}`,
-    `镜头目的：${shot.purpose}`,
-    `画面内容：${shot.visual}`,
-    `景别与机位：${shot.shotType}`,
-    `镜头运动意图：${shot.cameraMove}`,
+    `段落目标：${shot.purpose}`,
+    `段内分镜计划：${shot.visual}`,
+    `主景别与机位：${shot.shotType}`,
+    `段内镜头运动意图：${shot.cameraMove}`,
     `转场/节奏意图：${shot.transition}`,
-    `台词/旁白对应瞬间：${shot.narration || "无对白，用动作和情绪推进。"}`,
+    `台词/旁白对应段落：${shot.narration || "无对白，用动作和情绪推进。"}`,
     `参考素材说明：${shot.referenceNotes || referenceInstruction}`,
-    "画面要求：16:9 横版，电影感构图，主体动作有清晰起点、峰值和落点；角色、服装、道具、光线方向、空间关系需要能和相邻镜头连续；画面应可直接作为图生视频首帧使用。",
+    "画面要求：16:9 横版，电影感构图，作为这个 15 秒生成段的起始画面；角色、服装、道具、光线方向、空间关系需要能支撑段内后续小分镜连续发展。",
     "禁止事项：不要新增分镜外的新角色、新剧情、新道具；不要改变已建立的角色外观、服装或场景逻辑；不要加入任何屏幕文字。",
   ].join("\n");
 }
@@ -1002,6 +1003,15 @@ function resolutionOptionsForModel(
   return options?.resolutions?.length ? options.resolutions : ["480p", "720p", "1080p"];
 }
 
+function durationOptionsForModel(
+  options: VideoOptionsOut | undefined,
+  model: string,
+): number[] {
+  const modelOptions = options?.models.find((item) => item.model === model);
+  if (modelOptions?.durations_s?.length) return modelOptions.durations_s;
+  return options?.durations_s?.length ? options.durations_s : VIDEO_DURATION_OPTIONS;
+}
+
 function billingModelForAction(
   options: VideoOptionsOut | undefined,
   model: string,
@@ -1016,6 +1026,10 @@ function billingModelForAction(
 
 function preferredResolution(options: string[]): string {
   return options.includes("720p") ? "720p" : options[0] ?? "720p";
+}
+
+function preferredDuration(options: number[]): number {
+  return options.includes(5) ? 5 : options[0] ?? 5;
 }
 
 function mergeById(
@@ -1193,6 +1207,70 @@ function referenceMediaPayload(item: ReferenceDraft): VideoReferenceMediaIn {
   };
 }
 
+function storyboardSegmentVideoReferenceMedia(
+  shot: StoryboardShot,
+  assets: StoryboardReferenceAsset[],
+  referenceMedia: ReferenceDraft[],
+): VideoReferenceMediaIn[] {
+  const result: VideoReferenceMediaIn[] = [];
+  const seen = new Set<string>();
+  const add = (item: VideoReferenceMediaIn, fallbackLabel: string) => {
+    if (item.kind !== "image") return;
+    const key = item.image_id ? `image:${item.image_id}` : item.url ? `url:${item.url}` : "";
+    if (!key || seen.has(key) || result.length >= STORYBOARD_MAX_VIDEO_REFERENCE_IMAGES) return;
+    seen.add(key);
+    result.push({
+      ...item,
+      kind: "image",
+      label: (item.label || fallbackLabel).slice(0, 32),
+    });
+  };
+
+  if (shot.keyframeImageId) {
+    add(
+      {
+        kind: "image",
+        image_id: shot.keyframeImageId,
+        label: "生成段首帧",
+      },
+      "生成段首帧",
+    );
+  }
+
+  for (const asset of assetsForShot(shot, assets)) {
+    if (!asset.approved || !asset.imageId) continue;
+    add(
+      {
+        kind: "image",
+        image_id: asset.imageId,
+        label: `${storyboardAssetLabel(asset.kind)} · ${asset.name}`,
+      },
+      storyboardAssetLabel(asset.kind),
+    );
+  }
+
+  for (const item of referenceMedia) {
+    if (item.kind !== "image") continue;
+    add(referenceMediaPayload(item), item.label || "参考图");
+  }
+
+  return result;
+}
+
+function segmentReferenceDrafts(
+  items: VideoReferenceMediaIn[],
+): ReferenceDraft[] {
+  return items.map((item, index) => ({
+    ...item,
+    _key: uuid(),
+    kind: "image",
+    image_id: item.image_id ?? null,
+    video_id: null,
+    label: item.label || `参考图 ${index + 1}`,
+    display: item.image_id ?? item.url ?? "参考图",
+  }));
+}
+
 function storyboardReferenceImageIds(referenceMedia: ReferenceDraft[]): string[] {
   return referenceMedia
     .filter((item) => item.kind === "image" && item.image_id)
@@ -1230,11 +1308,12 @@ export default function VideoPage() {
   const refreshBackoffUntilRef = useRef<Map<string, number>>(new Map());
   const refreshFailureCountRef = useRef<Map<string, number>>(new Map());
   const [workspaceMode, setWorkspaceMode] = useState<VideoWorkspaceMode>("single");
+  const [storyboardProjectStarted, setStoryboardProjectStarted] = useState(false);
   const [storyboardStage, setStoryboardStage] =
     useState<StoryboardWorkflowStage>("idea");
-  const [storyboardTitle, setStoryboardTitle] = useState("Lumen 分镜视频项目");
-  const [storyboardIdea, setStoryboardIdea] = useState(DEFAULT_STORYBOARD_IDEA);
-  const [storyboardScript, setStoryboardScript] = useState(DEFAULT_STORYBOARD_SCRIPT);
+  const [storyboardTitle, setStoryboardTitle] = useState("");
+  const [storyboardIdea, setStoryboardIdea] = useState("");
+  const [storyboardScript, setStoryboardScript] = useState("");
   const [scriptConfirmed, setScriptConfirmed] = useState(false);
   const [scriptRevision, setScriptRevision] = useState(1);
   const [scriptApprovedRevision, setScriptApprovedRevision] = useState(0);
@@ -1243,10 +1322,8 @@ export default function VideoPage() {
   const [storyboardAssets, setStoryboardAssets] = useState<
     StoryboardReferenceAsset[]
   >(() => createInitialStoryboardAssets());
-  const [storyboardShots, setStoryboardShots] = useState<StoryboardShot[]>(
-    () => createInitialStoryboardShots(),
-  );
-  const [selectedShotId, setSelectedShotId] = useState(() => storyboardShots[0]?.id ?? "");
+  const [storyboardShots, setStoryboardShots] = useState<StoryboardShot[]>([]);
+  const [selectedShotId, setSelectedShotId] = useState("");
   const [isSubmittingStoryboard, setIsSubmittingStoryboard] = useState(false);
   const [storyboardConversationId, setStoryboardConversationId] = useState("");
   const [isExpandingScript, setIsExpandingScript] = useState(false);
@@ -1339,6 +1416,13 @@ export default function VideoPage() {
     () => storyboardReferenceImageIds(referenceMedia),
     [referenceMedia],
   );
+  const selectedShotVideoReferenceCount = selectedShot
+    ? storyboardSegmentVideoReferenceMedia(
+        selectedShot,
+        storyboardAssets,
+        referenceMedia,
+      ).length
+    : 0;
   const storyboardAssetReadyCount = storyboardAssets.filter(
     (asset) => asset.imageId,
   ).length;
@@ -1628,18 +1712,25 @@ export default function VideoPage() {
     () => resolutionOptionsForModel(options, selectedModel),
     [options, selectedModel],
   );
+  const availableDurations = useMemo(
+    () => durationOptionsForModel(options, selectedModel),
+    [options, selectedModel],
+  );
   const effectiveResolution = availableResolutions.includes(resolution)
     ? resolution
     : preferredResolution(availableResolutions);
+  const effectiveDurationS = availableDurations.includes(durationS)
+    ? durationS
+    : preferredDuration(availableDurations);
   const estimate = estimateHoldMicro(options, {
     model: selectedModel,
     billingModel: selectedBillingModel,
     action,
     resolution: effectiveResolution,
-    durationS,
+    durationS: effectiveDurationS,
     referenceHasVideo: referenceMedia.some((item) => item.kind === "video"),
   });
-  const storyboardAction: VideoAction = "i2v";
+  const storyboardAction: VideoAction = "reference";
   const storyboardModelSupportsAction = Boolean(
     model &&
       options?.models.some(
@@ -1658,19 +1749,31 @@ export default function VideoPage() {
     options,
     storyboardSelectedModel,
   );
+  const storyboardDurationOptions = durationOptionsForModel(
+    options,
+    storyboardSelectedModel,
+  );
   const storyboardEffectiveResolution = storyboardResolutionOptions.includes(
     effectiveResolution,
   )
     ? effectiveResolution
     : preferredResolution(storyboardResolutionOptions);
+  const storyboardDurationForShot = useCallback(
+    (value: number) =>
+      storyboardDurationOptions.includes(value)
+        ? value
+        : preferredDuration(storyboardDurationOptions),
+    [storyboardDurationOptions],
+  );
   const storyboardEstimate = estimateHoldMicro(options, {
     model: storyboardSelectedModel,
     billingModel: storyboardBillingModel,
     action: storyboardAction,
     resolution: storyboardEffectiveResolution,
-    durationS: selectedShot?.durationS ?? 5,
+    durationS: storyboardDurationForShot(selectedShot?.durationS ?? 5),
     referenceHasVideo: false,
   });
+
   const nextReferenceLabel = useCallback(
     (kind: "image" | "video") => {
       const count = referenceMedia.filter((item) => item.kind === kind).length + 1;
@@ -1683,6 +1786,65 @@ export default function VideoPage() {
     setPromptEnhanceCandidates([]);
     setSelectedPromptEnhanceCandidateId("");
   }, []);
+
+  const resetStoryboardProjectDraft = useCallback(() => {
+    setStoryboardProjectStarted(false);
+    setStoryboardStage("idea");
+    setStoryboardTitle("");
+    setStoryboardIdea("");
+    setStoryboardScript("");
+    setScriptConfirmed(false);
+    setScriptRevision(1);
+    setScriptApprovedRevision(0);
+    setScriptApprovedAt("");
+    setStoryboardStyle(DEFAULT_STORYBOARD_STYLE);
+    setStoryboardAssets(createInitialStoryboardAssets());
+    setStoryboardShots([]);
+    setSelectedShotId("");
+    setStoryboardConversationId("");
+    setStoryboardImageTasks([]);
+    setGeneratingAssetId("");
+    setGeneratingKeyframeShotId("");
+    setReferenceMedia([]);
+    setAssetUrlInput("");
+    clearPromptEnhanceChoices();
+  }, [clearPromptEnhanceChoices]);
+
+  const createStoryboardProject = useCallback(() => {
+    const title = storyboardTitle.trim();
+    const idea = storyboardIdea.trim();
+    if (!title) {
+      toast.error("先填写故事版项目名");
+      return;
+    }
+    if (!idea) {
+      toast.error("先填写项目想法");
+      return;
+    }
+    setStoryboardTitle(title);
+    setStoryboardIdea(idea);
+    setStoryboardScript("");
+    setScriptConfirmed(false);
+    setScriptRevision(1);
+    setScriptApprovedRevision(0);
+    setScriptApprovedAt("");
+    setStoryboardStyle(DEFAULT_STORYBOARD_STYLE);
+    setStoryboardAssets(createInitialStoryboardAssets());
+    setStoryboardShots([]);
+    setSelectedShotId("");
+    setStoryboardStage("idea");
+    setStoryboardConversationId("");
+    setStoryboardImageTasks([]);
+    setGeneratingAssetId("");
+    setGeneratingKeyframeShotId("");
+    setReferenceMedia([]);
+    setAssetUrlInput("");
+    setStoryboardProjectStarted(true);
+    clearPromptEnhanceChoices();
+    toast.success("故事版项目已创建", {
+      description: "锁定脚本后拆成 15s 生成段，或手动添加任意数量的生成段。",
+    });
+  }, [clearPromptEnhanceChoices, storyboardIdea, storyboardTitle]);
 
   const insertPromptText = useCallback((text: string) => {
     clearPromptEnhanceChoices();
@@ -2197,8 +2359,8 @@ export default function VideoPage() {
       const shot = storyboardShots.find((item) => item.id === shotId);
       if (!shot || generatingKeyframeShotId) return;
       if (!shot.approved) {
-        toast.error("先批准镜头", {
-          description: "镜头内容确认后再生成分镜图，避免反复浪费图片任务。",
+        toast.error("先批准生成段", {
+          description: "生成段内容确认后再生成分镜图，避免反复浪费图片任务。",
         });
         return;
       }
@@ -2290,7 +2452,7 @@ export default function VideoPage() {
     if (!scriptConfirmed) {
       setStoryboardStage("script");
       toast.error("先确认脚本", {
-        description: "脚本确认后再拆分镜，避免后续资产和镜头反复失配。",
+        description: "脚本确认后再拆成 15s 生成段，避免后续资产和分段反复失配。",
       });
       return;
     }
@@ -2299,18 +2461,21 @@ export default function VideoPage() {
       assetIds: bindAllStoryboardAssetIds(storyboardAssets),
     }));
     if (next.length === 0) {
-      toast.error("先粘贴脚本", { description: "至少需要一段文案或一行镜头描述。" });
+      toast.error("先粘贴脚本", { description: "至少需要一段文案或一行分镜描述。" });
       return;
     }
     setStoryboardShots(next);
     setSelectedShotId(next[0]?.id ?? "");
     setStoryboardStage("shots");
-    toast.success(`已拆成 ${next.length} 个镜头`);
+    toast.success(`已拆成 ${next.length} 个 15s 生成段`);
   }, [scriptConfirmed, storyboardAssets, storyboardScript]);
 
   const addStoryboardShot = useCallback(() => {
     const next = createStoryboardShot({
-      title: `镜头 ${storyboardShots.length + 1}`,
+      title: `生成段 ${storyboardShots.length + 1}`,
+      durationS: STORYBOARD_MAX_GROUP_DURATION_S,
+      purpose: "在 15 秒内完成一组连续小分镜。",
+      visual: "分镜 1（约 5s）：写清起始动作和画面。\n分镜 2（约 5s）：写清动作推进和景别变化。\n分镜 3（约 5s）：写清结果、停顿或转场。",
       assetIds: bindAllStoryboardAssetIds(storyboardAssets),
     });
     setStoryboardShots((prev) => [...prev, next]);
@@ -2346,11 +2511,8 @@ export default function VideoPage() {
 
   const removeStoryboardShot = useCallback((shotId: string) => {
     setStoryboardShots((prev) => {
-      if (prev.length <= 1) {
-        toast.error("至少保留一个镜头");
-        return prev;
-      }
       const index = prev.findIndex((shot) => shot.id === shotId);
+      if (index < 0) return prev;
       const next = prev.filter((shot) => shot.id !== shotId);
       if (shotId === selectedShotId) {
         setSelectedShotId(next[Math.max(0, index - 1)]?.id ?? next[0]?.id ?? "");
@@ -2394,14 +2556,14 @@ export default function VideoPage() {
   ]);
 
   const storyboardSubmitDisabledReason = useMemo(() => {
-    if (isSubmittingStoryboard) return "正在提交分镜";
+    if (isSubmittingStoryboard) return "正在提交生成段";
     if (optionsQ.isLoading) return "正在读取配置";
     if (!options?.enabled) return options?.unavailable_reason ?? "功能未启用";
     if (!storyboardSelectedModel) return "没有可用模型";
     if (!storyboardResolutionOptions.includes(storyboardEffectiveResolution)) {
       return "当前模型不支持该分辨率";
     }
-    if (!selectedShot) return "先添加镜头";
+    if (!selectedShot) return "先添加生成段";
     if (!selectedShot.keyframeImageId) return "先生成并确认分镜图";
     if (
       storyboardShotKeyframeStale(
@@ -2411,8 +2573,9 @@ export default function VideoPage() {
       )
     ) return "分镜图已过期";
     if (!selectedShot.keyframeApproved) return "先批准分镜图";
+    if (selectedShotVideoReferenceCount === 0) return "缺少生成段参考图";
     if (storyboardEstimate === null) return "缺少预扣估算";
-    return "可用分镜图生成视频";
+    return "可用分镜图生成视频段";
   }, [
     isSubmittingStoryboard,
     options?.enabled,
@@ -2425,6 +2588,7 @@ export default function VideoPage() {
     storyboardEstimate,
     storyboardResolutionOptions,
     storyboardSelectedModel,
+    selectedShotVideoReferenceCount,
   ]);
 
   const canSubmitStoryboardShot =
@@ -2440,6 +2604,7 @@ export default function VideoPage() {
           storyboardExternalReferenceImageIds,
         ),
     ) &&
+    selectedShotVideoReferenceCount > 0 &&
     storyboardResolutionOptions.includes(storyboardEffectiveResolution) &&
     storyboardEstimate !== null &&
     !isSubmittingStoryboard;
@@ -2447,8 +2612,8 @@ export default function VideoPage() {
   const submitStoryboardShot = useCallback(
     async (shotId: string, opts: { quiet?: boolean } = {}) => {
       const shot = storyboardShots.find((item) => item.id === shotId);
-      if (!shot) throw new Error("镜头不存在");
-      if (!shot.keyframeImageId) throw new Error("先生成这个镜头的分镜图");
+      if (!shot) throw new Error("生成段不存在");
+      if (!shot.keyframeImageId) throw new Error("先生成这个生成段的分镜图");
       if (
         storyboardShotKeyframeStale(
           shot,
@@ -2456,19 +2621,30 @@ export default function VideoPage() {
           storyboardExternalReferenceImageIds,
         )
       ) {
-        throw new Error("这个镜头的分镜图已过期，请重新生成或重新批准");
+        throw new Error("这个生成段的分镜图已过期，请重新生成或重新批准");
       }
-      if (!shot.keyframeApproved) throw new Error("先批准这个镜头的分镜图");
+      if (!shot.keyframeApproved) throw new Error("先批准这个生成段的分镜图");
       if (!options?.enabled) {
         throw new Error(options?.unavailable_reason ?? "视频功能未启用");
       }
       if (!storyboardSelectedModel) throw new Error("没有可用模型");
+      if (!storyboardResolutionOptions.includes(storyboardEffectiveResolution)) {
+        throw new Error("当前模型不支持该分辨率");
+      }
+      const videoReferenceMedia = storyboardSegmentVideoReferenceMedia(
+        shot,
+        storyboardAssets,
+        referenceMedia,
+      );
+      if (videoReferenceMedia.length === 0) {
+        throw new Error("至少需要一张生成段参考图");
+      }
       const shotEstimate = estimateHoldMicro(options, {
         model: storyboardSelectedModel,
         billingModel: storyboardBillingModel,
         action: storyboardAction,
         resolution: storyboardEffectiveResolution,
-        durationS: shot.durationS,
+        durationS: storyboardDurationForShot(shot.durationS),
         referenceHasVideo: false,
       });
       if (shotEstimate === null) throw new Error("缺少预扣估算");
@@ -2484,9 +2660,9 @@ export default function VideoPage() {
           totalShots: storyboardShots.length,
           hasReferences: true,
         }),
-        input_image_id: shot.keyframeImageId,
-        reference_media: [],
-        duration_s: clampStoryboardDuration(shot.durationS),
+        input_image_id: null,
+        reference_media: videoReferenceMedia,
+        duration_s: storyboardDurationForShot(shot.durationS),
         resolution: toVideoResolution(storyboardEffectiveResolution),
         aspect_ratio: aspectRatio,
         generate_audio: generateAudio,
@@ -2502,7 +2678,7 @@ export default function VideoPage() {
       );
       scheduleGenerationRefresh(gen.id, { delayMs: 800 });
       void qc.invalidateQueries({ queryKey: ["video", "generations"] });
-      if (!opts.quiet) toast.success("镜头任务已提交");
+      if (!opts.quiet) toast.success("生成段任务已提交");
       return gen;
     },
     [
@@ -2514,8 +2690,11 @@ export default function VideoPage() {
       seed,
       storyboardAction,
       storyboardBillingModel,
+      referenceMedia,
+      storyboardDurationForShot,
       storyboardEffectiveResolution,
       storyboardExternalReferenceImageIds,
+      storyboardResolutionOptions,
       storyboardSelectedModel,
       storyboardAssets,
       storyboardShots,
@@ -2538,6 +2717,54 @@ export default function VideoPage() {
 
   const submitStoryboardQueue = useCallback(async () => {
     if (isSubmittingStoryboard || storyboardShots.length === 0) return;
+    const blockedShot = storyboardShots.find((shot) => {
+      if (!shot.keyframeImageId) return true;
+      if (
+        storyboardShotKeyframeStale(
+          shot,
+          storyboardAssets,
+          storyboardExternalReferenceImageIds,
+        )
+      ) {
+        return true;
+      }
+      if (!shot.keyframeApproved) return true;
+      return (
+        storyboardSegmentVideoReferenceMedia(
+          shot,
+          storyboardAssets,
+          referenceMedia,
+        ).length === 0
+      );
+    });
+    if (blockedShot) {
+      let reason = "先补齐段首帧、批准状态和参考图";
+      if (!blockedShot.keyframeImageId) {
+        reason = "还没有段首帧";
+      } else if (
+        storyboardShotKeyframeStale(
+          blockedShot,
+          storyboardAssets,
+          storyboardExternalReferenceImageIds,
+        )
+      ) {
+        reason = "段首帧已过期";
+      } else if (!blockedShot.keyframeApproved) {
+        reason = "段首帧还未批准";
+      } else if (
+        storyboardSegmentVideoReferenceMedia(
+          blockedShot,
+          storyboardAssets,
+          referenceMedia,
+        ).length === 0
+      ) {
+        reason = "缺少生成段参考图";
+      }
+      toast.error("批量提交前先处理阻塞段", {
+        description: `${blockedShot.title}：${reason}`,
+      });
+      return;
+    }
     setIsSubmittingStoryboard(true);
     let submitted = 0;
     try {
@@ -2545,7 +2772,7 @@ export default function VideoPage() {
         await submitStoryboardShot(shot.id, { quiet: true });
         submitted += 1;
       }
-      toast.success(`已提交 ${submitted} 个镜头`);
+      toast.success(`已提交 ${submitted} 个生成段`);
     } catch (err) {
       toast.error("批量提交中断", {
         description: err instanceof Error ? err.message : undefined,
@@ -2553,26 +2780,39 @@ export default function VideoPage() {
     } finally {
       setIsSubmittingStoryboard(false);
     }
-  }, [isSubmittingStoryboard, storyboardShots, submitStoryboardShot]);
+  }, [
+    isSubmittingStoryboard,
+    referenceMedia,
+    storyboardAssets,
+    storyboardExternalReferenceImageIds,
+    storyboardShots,
+    submitStoryboardShot,
+  ]);
 
   const applySelectedShotToSingleGenerator = useCallback(() => {
     if (!selectedShot) return;
     clearPromptEnhanceChoices();
+    const videoReferenceMedia = storyboardSegmentVideoReferenceMedia(
+      selectedShot,
+      storyboardAssets,
+      referenceMedia,
+    );
     setAction(storyboardAction);
     setPrompt(selectedShotPrompt);
-    setInputImageId(selectedShot.keyframeImageId ?? "");
-    setUploadedLabel(
-      selectedShot.keyframeImageId ? `分镜图 · ${selectedShot.title}` : "",
-    );
+    setInputImageId("");
+    setUploadedLabel("");
+    setReferenceMedia(segmentReferenceDrafts(videoReferenceMedia));
     setDurationS(clampStoryboardDuration(selectedShot.durationS));
     setResolution(storyboardEffectiveResolution);
     setWorkspaceMode("single");
     requestAnimationFrame(() => promptRef.current?.focus());
   }, [
     clearPromptEnhanceChoices,
+    referenceMedia,
     selectedShot,
     selectedShotPrompt,
     storyboardAction,
+    storyboardAssets,
     storyboardEffectiveResolution,
   ]);
 
@@ -2587,7 +2827,7 @@ export default function VideoPage() {
           action === "reference"
             ? referenceMedia.map(referenceMediaPayload)
             : [],
-        duration_s: durationS,
+        duration_s: effectiveDurationS,
         resolution: toVideoResolution(effectiveResolution),
         aspect_ratio: aspectRatio,
         generate_audio: generateAudio,
@@ -2700,7 +2940,7 @@ export default function VideoPage() {
           text: current,
           action,
           model: selectedModel,
-          duration_s: durationS,
+          duration_s: effectiveDurationS,
           resolution: effectiveResolution,
           aspect_ratio: aspectRatio,
           generate_audio: generateAudio,
@@ -2770,7 +3010,7 @@ export default function VideoPage() {
     aspectRatio,
     canEnhancePrompt,
     clearPromptEnhanceChoices,
-    durationS,
+    effectiveDurationS,
     effectiveResolution,
     generateAudio,
     inputImageId,
@@ -2803,6 +3043,7 @@ export default function VideoPage() {
     if (!options?.enabled) return options?.unavailable_reason ?? "功能未启用";
     if (!selectedModel) return "没有可用模型";
     if (!availableResolutions.includes(effectiveResolution)) return "当前模型不支持该分辨率";
+    if (!availableDurations.includes(effectiveDurationS)) return "当前模型不支持该时长";
     if (!prompt.trim()) return "先填写描述";
     if (action === "i2v" && !inputImageId.trim()) return "需要上传首帧或填写图片 ID";
     if (action === "reference" && referenceMedia.length === 0) {
@@ -2812,8 +3053,10 @@ export default function VideoPage() {
     return "可以提交";
   }, [
     action,
+    availableDurations,
     availableResolutions,
     createMut.isPending,
+    effectiveDurationS,
     estimate,
     inputImageId,
     options?.enabled,
@@ -2830,6 +3073,7 @@ export default function VideoPage() {
     Boolean(selectedModel) &&
     prompt.trim().length > 0 &&
     availableResolutions.includes(effectiveResolution) &&
+    availableDurations.includes(effectiveDurationS) &&
     (action === "t2v" ||
       (action === "i2v" && inputImageId.trim().length > 0) ||
       (action === "reference" && referenceMedia.length > 0)) &&
@@ -2841,7 +3085,7 @@ export default function VideoPage() {
     : serviceEnabled
       ? `${availableModels.length} 个模型可用`
       : options?.unavailable_reason ?? "需要先配置可用的视频供应商";
-  const parameterProfile = `${effectiveResolution} · ${formatDurationLabel(durationS)}`;
+  const parameterProfile = `${effectiveResolution} · ${formatDurationLabel(effectiveDurationS)}`;
   const sourceReady =
     action === "t2v" ||
     (action === "i2v" && inputImageId.trim().length > 0) ||
@@ -2850,7 +3094,7 @@ export default function VideoPage() {
   const storyboardModelOptionValues = (
     options?.models.filter((item) => item.actions.includes(storyboardAction)) ?? []
   ).map((item) => item.model);
-  const durationOptionValues = (options?.durations_s ?? VIDEO_DURATION_OPTIONS).map(String);
+  const durationOptionValues = availableDurations.map(String);
   const aspectRatioOptionValues = options?.aspect_ratios ?? [
     "adaptive",
     "16:9",
@@ -2878,35 +3122,61 @@ export default function VideoPage() {
           event.target.value = "";
         }}
       />
-      <main className="lumen-studio-bg mx-auto flex w-full max-w-[1520px] flex-col gap-3 px-3 pb-32 pt-2 md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4">
-        <VideoWorkbenchHeader
-          mode={workspaceMode === "storyboard" ? "高级故事板" : actionLabel(action)}
-          profile={
-            workspaceMode === "storyboard"
-              ? `${storyboardShots.length} 镜头 · ${storyboardKeyframeApprovedCount} 批准帧 · ${storyboardGeneratedCount} 已成片`
-              : parameterProfile
-          }
-          audio={generateAudio}
-          enabled={serviceEnabled}
-          loading={optionsQ.isLoading}
-          activeCount={activeItems.length}
-          completedCount={completedVideoItems.length}
-          serviceSummary={serviceSummary}
-          submitState={
-            workspaceMode === "storyboard"
-              ? storyboardSubmitDisabledReason
-              : submitDisabledReason
-          }
-        />
-
-        <WorkspaceModeSwitch
-          value={workspaceMode}
-          onChange={setWorkspaceMode}
-          storyboardCount={storyboardShots.length}
-          activeCount={activeItems.length}
-        />
-
+      <main
+        className={cn(
+          "lumen-studio-bg mx-auto flex w-full max-w-[1520px] flex-col px-3 pb-32 pt-2 md:h-[calc(100dvh-3rem)] md:px-5 md:pb-4",
+          workspaceMode === "storyboard" ? "gap-2" : "gap-3",
+        )}
+      >
         {workspaceMode === "storyboard" ? (
+          <StoryboardCompactHeader
+            enabled={serviceEnabled}
+            activeCount={activeItems.length}
+            completedCount={storyboardGeneratedCount}
+            projectStarted={storyboardProjectStarted}
+            onNewProject={resetStoryboardProjectDraft}
+            modeSwitch={
+              <WorkspaceModeSwitch
+                value={workspaceMode}
+                onChange={setWorkspaceMode}
+                storyboardCount={storyboardShots.length}
+                activeCount={activeItems.length}
+                compact
+              />
+            }
+          />
+        ) : (
+          <>
+            <VideoWorkbenchHeader
+              mode={actionLabel(action)}
+              profile={parameterProfile}
+              audio={generateAudio}
+              enabled={serviceEnabled}
+              loading={optionsQ.isLoading}
+              activeCount={activeItems.length}
+              completedCount={completedVideoItems.length}
+              serviceSummary={serviceSummary}
+              submitState={submitDisabledReason}
+            />
+
+            <WorkspaceModeSwitch
+              value={workspaceMode}
+              onChange={setWorkspaceMode}
+              storyboardCount={storyboardShots.length}
+              activeCount={activeItems.length}
+            />
+          </>
+        )}
+
+        {workspaceMode === "storyboard" && !storyboardProjectStarted ? (
+          <StoryboardProjectLauncher
+            title={storyboardTitle}
+            idea={storyboardIdea}
+            onTitleChange={setStoryboardTitle}
+            onIdeaChange={setStoryboardIdea}
+            onCreate={createStoryboardProject}
+          />
+        ) : workspaceMode === "storyboard" ? (
           <StoryboardWorkspace
             title={storyboardTitle}
             stage={storyboardStage}
@@ -2985,7 +3255,7 @@ export default function VideoPage() {
             onRetryGeneration={(item) => retryMut.mutate(item.id)}
             onCopyPrompt={() => {
               void navigator.clipboard?.writeText(selectedShotPrompt);
-              toast.success("镜头提示词已复制");
+              toast.success("生成段提示词已复制");
             }}
             onReferenceUploadClick={() => referenceFileRef.current?.click()}
             onRemoveReference={(key) => {
@@ -3003,7 +3273,7 @@ export default function VideoPage() {
                   label,
                 ),
               });
-              toast.success("已写入当前镜头参考说明");
+              toast.success("已写入当前生成段参考说明");
             }}
             onAssetUrlInputChange={setAssetUrlInput}
             onAddAssetReference={addAssetReference}
@@ -3266,7 +3536,7 @@ export default function VideoPage() {
                     className="order-first xl:sticky xl:top-4 xl:order-none"
                     selectedModel={selectedModel}
                     modelOptions={modelOptionValues}
-                    durationS={durationS}
+                    durationS={effectiveDurationS}
                     durationOptions={durationOptionValues}
                     resolution={effectiveResolution}
                     resolutionOptions={availableResolutions}
@@ -3471,11 +3741,13 @@ function WorkspaceModeSwitch({
   onChange,
   storyboardCount,
   activeCount,
+  compact = false,
 }: {
   value: VideoWorkspaceMode;
   onChange: (value: VideoWorkspaceMode) => void;
   storyboardCount: number;
   activeCount: number;
+  compact?: boolean;
 }) {
   const tabs: Array<{
     value: VideoWorkspaceMode;
@@ -3492,13 +3764,18 @@ function WorkspaceModeSwitch({
     {
       value: "storyboard",
       label: "高级故事板",
-      detail: `${storyboardCount} 个镜头 · 可增减`,
+      detail: `${storyboardCount} 个生成段 · 可增减`,
       icon: <ClipboardList className="h-4 w-4" />,
     },
   ];
 
   return (
-    <div className="grid w-full min-w-0 max-w-[420px] shrink-0 grid-cols-2 gap-1 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-1">
+    <div
+      className={cn(
+        "grid w-full min-w-0 shrink-0 grid-cols-2 gap-1 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-1",
+        compact ? "max-w-[320px]" : "max-w-[420px]",
+      )}
+    >
       {tabs.map((tab) => {
         const active = tab.value === value;
         return (
@@ -3508,25 +3785,28 @@ function WorkspaceModeSwitch({
             onClick={() => onChange(tab.value)}
             aria-pressed={active}
             className={cn(
-              "flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-[var(--radius-control)] px-2 text-center transition-[background-color,border-color,color,box-shadow] sm:px-3 sm:text-left",
+              "flex min-w-0 items-center justify-center gap-2 rounded-[var(--radius-control)] px-2 text-center transition-[background-color,border-color,color,box-shadow] sm:px-3 sm:text-left",
+              compact ? "min-h-9" : "min-h-11",
               active
                 ? "bg-[var(--bg-2)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
                 : "text-[var(--fg-2)] hover:bg-[var(--bg-1)] hover:text-[var(--fg-0)]",
             )}
           >
-            <span
-              className={cn(
-                "hidden h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border sm:flex",
-                active
-                  ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                  : "border-[var(--border-subtle)] bg-[var(--bg-1)]",
-              )}
-            >
-              {tab.icon}
-            </span>
+            {!compact && (
+              <span
+                className={cn(
+                  "hidden h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border sm:flex",
+                  active
+                    ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                    : "border-[var(--border-subtle)] bg-[var(--bg-1)]",
+                )}
+              >
+                {tab.icon}
+              </span>
+            )}
             <span className="min-w-0">
               <span className="block truncate text-[13px] font-semibold sm:text-sm">{tab.label}</span>
-              <span className="hidden truncate text-[11px] text-[var(--fg-2)] sm:block">
+              <span className={cn("truncate text-[11px] text-[var(--fg-2)]", compact ? "hidden" : "hidden sm:block")}>
                 {tab.detail}
               </span>
             </span>
@@ -3534,6 +3814,140 @@ function WorkspaceModeSwitch({
         );
       })}
     </div>
+  );
+}
+
+function StoryboardCompactHeader({
+  enabled,
+  activeCount,
+  completedCount,
+  projectStarted,
+  onNewProject,
+  modeSwitch,
+}: {
+  enabled: boolean;
+  activeCount: number;
+  completedCount: number;
+  projectStarted: boolean;
+  onNewProject: () => void;
+  modeSwitch: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-2">
+      <div className="flex min-w-0 items-center gap-2">
+        {modeSwitch}
+        {projectStarted && (
+          <>
+            <button
+              type="button"
+              onClick={onNewProject}
+              aria-label="新建项目"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] sm:hidden"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="hidden h-8 shrink-0 px-2.5 sm:inline-flex"
+              onClick={onNewProject}
+              leftIcon={<Plus className="h-3.5 w-3.5" />}
+            >
+              新建项目
+            </Button>
+          </>
+        )}
+      </div>
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 text-xs text-[var(--fg-2)]">
+        <span
+          className={cn(
+            "rounded-full border px-2 py-1",
+            enabled
+              ? "border-success-border bg-success-soft text-success"
+              : "border-[var(--border)] bg-[var(--bg-1)]",
+          )}
+        >
+          {enabled ? "服务在线" : "功能未启用"}
+        </span>
+        <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
+          {activeCount > 0 ? `${activeCount} 进行中` : `${completedCount} 已成片`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function StoryboardProjectLauncher({
+  title,
+  idea,
+  onTitleChange,
+  onIdeaChange,
+  onCreate,
+}: {
+  title: string;
+  idea: string;
+  onTitleChange: (value: string) => void;
+  onIdeaChange: (value: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <section className="grid min-h-0 flex-1 place-items-center px-1 py-6">
+      <form
+        className="w-full max-w-2xl rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/86 p-4 shadow-[var(--shadow-1)] backdrop-blur-xl sm:p-5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onCreate();
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+            <ClipboardList className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="truncate text-base font-semibold text-[var(--fg-0)]">
+              新建故事版项目
+            </h1>
+            <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+              每个项目独立承载想法、脚本、素材、分镜和生成任务。
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          <label className="space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">项目名</span>
+            <input
+              value={title}
+              onChange={(event) => onTitleChange(event.target.value)}
+              placeholder="例如：夏季新品 15 秒短片"
+              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm font-medium text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/50"
+            />
+          </label>
+          <label className="space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">项目想法</span>
+            <textarea
+              value={idea}
+              onChange={(event) => onIdeaChange(event.target.value)}
+              placeholder="写下这条视频要表达的主题、产品、场景和情绪。"
+              rows={5}
+              className="min-h-32 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/50"
+            />
+          </label>
+        </div>
+
+        <div className="mt-4 flex justify-end">
+          <Button
+            type="submit"
+            variant="primary"
+            size="sm"
+            className="h-9 px-4"
+            leftIcon={<Plus className="h-3.5 w-3.5" />}
+          >
+            创建项目
+          </Button>
+        </div>
+      </form>
+    </section>
   );
 }
 
@@ -3601,11 +4015,11 @@ function StoryboardWorkspace({
   onSelectShot,
   onUpdateShot,
   onApproveShot,
+  onGenerateKeyframe,
+  onApproveKeyframe,
   onDuplicateShot,
   onRemoveShot,
   onMoveShot,
-  onGenerateKeyframe,
-  onApproveKeyframe,
   onGenerateAllKeyframes,
   onSubmitShot,
   onSubmitAll,
@@ -3727,6 +4141,13 @@ function StoryboardWorkspace({
   const selectedShotKeyframeStale = selectedShot
     ? storyboardShotKeyframeStale(selectedShot, assets, externalReferenceImageIds)
     : false;
+  const selectedShotVideoReferenceCount = selectedShot
+    ? storyboardSegmentVideoReferenceMedia(
+        selectedShot,
+        assets,
+        referenceMedia,
+      ).length
+    : 0;
   const totalDuration = shots.reduce((sum, shot) => sum + shot.durationS, 0);
   const runningStoryboardCount = shots.filter((shot) => {
     const gen = shot.generationId ? generationById.get(shot.generationId) : undefined;
@@ -3736,14 +4157,49 @@ function StoryboardWorkspace({
     isActiveImageTask,
   ).length;
 
+  const selectedShotIndex = selectedShot
+    ? shots.findIndex((shot) => shot.id === selectedShot.id)
+    : -1;
+  const shotApprovedCount = shots.filter((shot) => shot.approved).length;
+  const showingPreproductionStage =
+    stage === "idea" || stage === "script" || stage === "assets";
+  const showingVideoStage = stage === "videos";
+  const timelineTitle =
+    stage === "keyframes"
+      ? "关键帧队列"
+      : stage === "videos"
+        ? "视频片段队列"
+        : "15s 生成段";
+  const timelineDetail =
+    stage === "keyframes"
+      ? `${keyframeReadyCount}/${shots.length} 已出图 · ${keyframeApprovedCount} 已批准`
+      : stage === "videos"
+        ? `${completedCount}/${shots.length} 已成片 · ${runningStoryboardCount} 运行中`
+        : `${shots.length} 个生成段 · 合计 ${totalDuration}s · ${shotApprovedCount} 个已批准`;
+
   return (
-    <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)_minmax(300px,360px)]">
-      <Card
-        variant="subtle"
-        elevation={2}
-        padding="none"
-        className="min-h-0 overflow-hidden border-[var(--border)]"
-      >
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
+      <StoryboardStageStrip
+        title={title}
+        stage={stage}
+        shots={shots}
+        totalDuration={totalDuration}
+        completedCount={completedCount}
+        assetApprovedCount={assetApprovedCount}
+        keyframeApprovedCount={keyframeApprovedCount}
+        staleKeyframeCount={staleKeyframeCount}
+        shotApprovedCount={shotApprovedCount}
+        onTitleChange={onTitleChange}
+        onStageChange={onStageChange}
+      />
+
+      {showingPreproductionStage ? (
+        <Card
+          variant="subtle"
+          elevation={2}
+          padding="none"
+          className="min-h-0 flex-1 overflow-hidden border-[var(--border)]"
+        >
         <StoryboardProductionPanel
           title={title}
           stage={stage}
@@ -3783,146 +4239,119 @@ function StoryboardWorkspace({
           onRevokeAssetApproval={onRevokeAssetApproval}
           onGenerateAssetImage={onGenerateAssetImage}
           onGenerateDraft={onGenerateDraft}
+          onGenerateAllKeyframes={onGenerateAllKeyframes}
+          showShell={false}
         />
-      </Card>
+        </Card>
+      ) : (
+        <div
+          className={cn(
+            "grid min-h-0 min-w-0 flex-1 gap-3",
+            showingVideoStage &&
+              "xl:grid-cols-[minmax(0,1fr)_minmax(280px,340px)]",
+          )}
+        >
+          <section className="flex min-h-0 min-w-0 overflow-hidden border border-[var(--border-subtle)] bg-[var(--bg-0)]/38 md:rounded-[var(--radius-panel)]">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <StoryboardShotQuickNav
+                title={timelineTitle}
+                detail={timelineDetail}
+                runningCount={runningStoryboardCount}
+                shots={shots}
+                selectedShotId={selectedShotId}
+                generationById={generationById}
+                imageTaskById={imageTaskById}
+                assets={assets}
+                externalReferenceImageIds={externalReferenceImageIds}
+                onSelect={onSelectShot}
+                onAddShot={onAddShot}
+              />
+              <StoryboardShotEditor
+                shot={selectedShot}
+                shotIndex={selectedShotIndex}
+                shotTotal={shots.length}
+                focusStage={stage}
+                generation={selectedGeneration}
+                keyframeTask={selectedKeyframeTask}
+                assets={assets}
+                selectedAssets={selectedShotAssets}
+                referenceImageCount={externalReferenceImageIds.length}
+                videoReferenceCount={selectedShotVideoReferenceCount}
+                keyframeStale={selectedShotKeyframeStale}
+                prompt={selectedShotPrompt}
+                keyframePrompt={selectedShotKeyframePrompt}
+                canSubmit={canSubmitShot}
+                submitting={submitting}
+                generatingKeyframe={generatingKeyframeShotId === selectedShot?.id}
+                submitReason={submitReason}
+                onUpdate={onUpdateShot}
+                onApproveShot={() => {
+                  if (selectedShot) onApproveShot(selectedShot.id);
+                }}
+                onGenerateKeyframe={() => {
+                  if (selectedShot) onGenerateKeyframe(selectedShot.id);
+                }}
+                onApproveKeyframe={() => {
+                  if (selectedShot) onApproveKeyframe(selectedShot.id);
+                }}
+                onDuplicateShot={() => {
+                  if (selectedShot) onDuplicateShot(selectedShot.id);
+                }}
+                onRemoveShot={() => {
+                  if (selectedShot) onRemoveShot(selectedShot.id);
+                }}
+                onMoveShot={(direction) => {
+                  if (selectedShot) onMoveShot(selectedShot.id, direction);
+                }}
+                onAddShot={onAddShot}
+                onGenerateDraft={onGenerateDraft}
+                onGenerateAllKeyframes={onGenerateAllKeyframes}
+                onSubmit={onSubmitShot}
+                onSubmitAll={onSubmitAll}
+                onUseSingleGenerator={onUseSingleGenerator}
+                onCopyPrompt={onCopyPrompt}
+                onPreview={onPreview}
+                onCancelGeneration={onCancelGeneration}
+                onRetryGeneration={onRetryGeneration}
+              />
+            </div>
+          </section>
 
-      <Card
-        variant="subtle"
-        elevation={2}
-        padding="none"
-        className="min-h-0 overflow-hidden border-[var(--border)]"
-      >
-        <div className="flex h-full min-h-0 flex-col">
-          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
-                <Layers3 className="h-4 w-4" />
-              </span>
-              <div className="min-w-0">
-                <p className="type-card-title">分镜编排</p>
-                <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
-                  每个镜头按 15 秒内片段提交
-                </p>
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2.5 py-1 text-xs text-[var(--fg-2)]">
-                {runningStoryboardCount} 镜头运行中
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onAddShot}
-                leftIcon={<Plus className="h-3.5 w-3.5" />}
-              >
-                加镜头
-              </Button>
-            </div>
-          </header>
-          <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[minmax(250px,330px)_minmax(0,1fr)]">
-            <div className="min-h-0 border-b border-[var(--border)] lg:border-b-0 lg:border-r">
-              <div className="flex max-h-72 gap-2 overflow-x-auto p-3 lg:max-h-none lg:h-full lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden">
-                {shots.map((shot, index) => {
-                  const generation = shot.generationId
-                    ? generationById.get(shot.generationId)
-                    : undefined;
-                  return (
-                    <StoryboardShotCard
-                      key={shot.id}
-                      shot={shot}
-                      index={index}
-                      total={shots.length}
-                      selected={shot.id === selectedShotId}
-                      generation={generation}
-                      keyframeTask={
-                        shot.keyframeGenerationId
-                          ? imageTaskById.get(shot.keyframeGenerationId)
-                          : undefined
-                      }
-                      keyframeStale={storyboardShotKeyframeStale(
-                        shot,
-                        assets,
-                        externalReferenceImageIds,
-                      )}
-                      boundAssetCount={assetIdsForShot(shot, assets).length}
-                      onSelect={() => onSelectShot(shot.id)}
-                      onDuplicate={() => onDuplicateShot(shot.id)}
-                      onRemove={() => onRemoveShot(shot.id)}
-                      onMoveUp={() => onMoveShot(shot.id, -1)}
-                      onMoveDown={() => onMoveShot(shot.id, 1)}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-            <StoryboardShotEditor
-              shot={selectedShot}
-              generation={selectedGeneration}
-              keyframeTask={selectedKeyframeTask}
-              assets={assets}
-              selectedAssets={selectedShotAssets}
-              referenceImageCount={externalReferenceImageIds.length}
-              keyframeStale={selectedShotKeyframeStale}
-              prompt={selectedShotPrompt}
-              keyframePrompt={selectedShotKeyframePrompt}
-              canSubmit={canSubmitShot}
-              submitting={submitting}
-              generatingKeyframe={generatingKeyframeShotId === selectedShot?.id}
+          {showingVideoStage && (
+            <StoryboardSidePanel
+              action={storyboardAction}
+              selectedModel={selectedModel}
+              modelOptions={modelOptions}
+              resolution={resolution}
+              resolutionOptions={resolutionOptions}
+              aspectRatio={aspectRatio}
+              aspectRatioOptions={aspectRatioOptions}
+              generateAudio={generateAudio}
+              seed={seed}
+              estimate={estimate}
               submitReason={submitReason}
-              onUpdate={onUpdateShot}
-              onApproveShot={() => {
-                if (selectedShot) onApproveShot(selectedShot.id);
-              }}
-              onGenerateKeyframe={() => {
-                if (selectedShot) onGenerateKeyframe(selectedShot.id);
-              }}
-              onApproveKeyframe={() => {
-                if (selectedShot) onApproveKeyframe(selectedShot.id);
-              }}
-              onGenerateAllKeyframes={onGenerateAllKeyframes}
-              onSubmit={onSubmitShot}
-              onSubmitAll={onSubmitAll}
-              onUseSingleGenerator={onUseSingleGenerator}
-              onCopyPrompt={onCopyPrompt}
+              activeCount={activeCount}
+              referenceMedia={referenceMedia}
+              referenceUploading={referenceUploading}
+              assetUrlInput={assetUrlInput}
+              selectedGeneration={selectedGeneration}
+              onModelChange={onModelChange}
+              onResolutionChange={onResolutionChange}
+              onAspectRatioChange={onAspectRatioChange}
+              onGenerateAudioChange={onGenerateAudioChange}
+              onSeedChange={onSeedChange}
+              onReferenceUploadClick={onReferenceUploadClick}
+              onRemoveReference={onRemoveReference}
+              onInsertReference={onInsertReference}
+              onAssetUrlInputChange={onAssetUrlInputChange}
+              onAddAssetReference={onAddAssetReference}
               onPreview={onPreview}
               onCancelGeneration={onCancelGeneration}
               onRetryGeneration={onRetryGeneration}
             />
-          </div>
+          )}
         </div>
-      </Card>
-
-      <StoryboardSidePanel
-        action={storyboardAction}
-        selectedModel={selectedModel}
-        modelOptions={modelOptions}
-        resolution={resolution}
-        resolutionOptions={resolutionOptions}
-        aspectRatio={aspectRatio}
-        aspectRatioOptions={aspectRatioOptions}
-        generateAudio={generateAudio}
-        seed={seed}
-        estimate={estimate}
-        submitReason={submitReason}
-        activeCount={activeCount}
-        referenceMedia={referenceMedia}
-        referenceUploading={referenceUploading}
-        assetUrlInput={assetUrlInput}
-        selectedGeneration={selectedGeneration}
-        onModelChange={onModelChange}
-        onResolutionChange={onResolutionChange}
-        onAspectRatioChange={onAspectRatioChange}
-        onGenerateAudioChange={onGenerateAudioChange}
-        onSeedChange={onSeedChange}
-        onReferenceUploadClick={onReferenceUploadClick}
-        onRemoveReference={onRemoveReference}
-        onInsertReference={onInsertReference}
-        onAssetUrlInputChange={onAssetUrlInputChange}
-        onAddAssetReference={onAddAssetReference}
-        onPreview={onPreview}
-        onCancelGeneration={onCancelGeneration}
-        onRetryGeneration={onRetryGeneration}
-      />
+      )}
     </div>
   );
 }
@@ -3935,10 +4364,99 @@ const STORYBOARD_STAGE_COPY: Array<{
   { id: "idea", label: "想法", detail: "扩写" },
   { id: "script", label: "脚本", detail: "确认" },
   { id: "assets", label: "人物/场景", detail: "设定图" },
-  { id: "shots", label: "分镜", detail: "拆分" },
-  { id: "keyframes", label: "分镜图", detail: "逐镜头" },
-  { id: "videos", label: "视频", detail: "图生片段" },
+  { id: "shots", label: "分镜", detail: "15s 分段" },
+  { id: "keyframes", label: "分镜图", detail: "逐段首帧" },
+  { id: "videos", label: "视频", detail: "逐段生成" },
 ];
+
+function StoryboardStageStrip({
+  title,
+  stage,
+  shots,
+  totalDuration,
+  completedCount,
+  assetApprovedCount,
+  keyframeApprovedCount,
+  staleKeyframeCount,
+  shotApprovedCount,
+  onTitleChange,
+  onStageChange,
+}: {
+  title: string;
+  stage: StoryboardWorkflowStage;
+  shots: StoryboardShot[];
+  totalDuration: number;
+  completedCount: number;
+  assetApprovedCount: number;
+  keyframeApprovedCount: number;
+  staleKeyframeCount: number;
+  shotApprovedCount: number;
+  onTitleChange: (value: string) => void;
+  onStageChange: (value: StoryboardWorkflowStage) => void;
+}) {
+  const activeIndex = STORYBOARD_STAGE_COPY.findIndex((item) => item.id === stage);
+  const stageStatus = (id: StoryboardWorkflowStage) => {
+    if (id === "idea") return `${totalDuration}s`;
+    if (id === "script") return `${shots.length} 段`;
+    if (id === "assets") return `${assetApprovedCount} 已批`;
+    if (id === "shots") return shots.length === 0 ? "待拆镜" : `${shotApprovedCount}/${shots.length}`;
+    if (id === "keyframes") {
+      if (shots.length === 0) return "待出图";
+      return staleKeyframeCount > 0
+        ? `${staleKeyframeCount} 过期`
+        : `${keyframeApprovedCount}/${shots.length}`;
+    }
+    return shots.length === 0 ? "待视频" : `${completedCount}/${shots.length}`;
+  };
+
+  return (
+    <section className="shrink-0 border-b border-[var(--border-subtle)] pb-2">
+      <div className="flex min-w-0 flex-col gap-1.5 lg:flex-row lg:items-center">
+        <label className="flex min-w-0 shrink-0 items-center gap-2 lg:w-[280px]">
+          <span className="hidden shrink-0 text-xs text-[var(--fg-2)] sm:inline">项目</span>
+          <input
+            value={title}
+            onChange={(event) => onTitleChange(event.target.value)}
+            className="h-8 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-2.5 text-sm font-semibold text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+          />
+        </label>
+        <div className="min-w-0 flex-1">
+          <div className="flex gap-1.5 overflow-x-auto">
+            {STORYBOARD_STAGE_COPY.map((item, index) => {
+              const active = item.id === stage;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onStageChange(item.id)}
+                  className={cn(
+                    "flex h-8 min-w-[86px] items-center justify-center gap-1.5 rounded-[var(--radius-control)] border px-2 text-center text-xs transition-colors lg:min-w-0 lg:flex-1",
+                    active
+                      ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-2)] hover:border-[var(--border)] hover:text-[var(--fg-0)]",
+                  )}
+                >
+                  <span className="font-mono text-[10px] tabular-nums opacity-70">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <span className="truncate font-semibold">
+                    {item.label}
+                  </span>
+                  <span className="hidden truncate text-[10px] opacity-70 2xl:inline">
+                    {stageStatus(item.id)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <span className="hidden shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)] xl:inline-flex">
+          {STORYBOARD_STAGE_COPY[activeIndex]?.label ?? "故事版"} · {shots.length} 段 · {totalDuration}s
+        </span>
+      </div>
+    </section>
+  );
+}
 
 function StoryboardProductionPanel({
   title,
@@ -3979,6 +4497,8 @@ function StoryboardProductionPanel({
   onRevokeAssetApproval,
   onGenerateAssetImage,
   onGenerateDraft,
+  onGenerateAllKeyframes,
+  showShell = true,
 }: {
   title: string;
   stage: StoryboardWorkflowStage;
@@ -4018,241 +4538,322 @@ function StoryboardProductionPanel({
   onRevokeAssetApproval: (id: string) => void;
   onGenerateAssetImage: (id: string) => void;
   onGenerateDraft: () => void;
+  onGenerateAllKeyframes: () => void;
+  showShell?: boolean;
 }) {
   const characters = assets.filter((asset) => asset.kind === "character");
   const scenes = assets.filter((asset) => asset.kind === "scene");
   const props = assets.filter((asset) => asset.kind === "prop");
   const shotApprovedCount = shots.filter((shot) => shot.approved).length;
+  const activeStage = STORYBOARD_STAGE_COPY.find((item) => item.id === stage);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-3">
-        <div className="flex items-center gap-2">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
-            <FileText className="h-4 w-4" />
-          </span>
-          <div className="min-w-0">
-            <p className="type-card-title">故事版预生产</p>
-            <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
-              想法到脚本，再到一致性设定和分镜图
-            </p>
-          </div>
-        </div>
-        <div className="mt-3 grid grid-cols-3 gap-1.5">
-          {STORYBOARD_STAGE_COPY.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onStageChange(item.id)}
-              className={cn(
-                "min-w-0 rounded-[var(--radius-control)] border px-2 py-1.5 text-left transition-colors",
-                stage === item.id
-                  ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                  : "border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-2)] hover:border-[var(--border)]",
-              )}
-            >
-              <span className="block truncate text-xs font-semibold">{item.label}</span>
-              <span className="block truncate text-[10px]">{item.detail}</span>
-            </button>
-          ))}
-        </div>
-      </header>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3">
-        <section className="grid grid-cols-2 gap-2">
-          <StoryboardGateMetric
-            label="脚本锁定"
-            value={scriptConfirmed ? `v${scriptApprovedRevision}` : `草稿 v${scriptRevision}`}
-            state={scriptConfirmed ? "done" : "draft"}
-          />
-          <StoryboardGateMetric
-            label="设定批准"
-            value={`${assetApprovedCount}/${assets.length}`}
-            state={assetApprovedCount === assets.length && assets.length > 0 ? "done" : "draft"}
-          />
-          <StoryboardGateMetric
-            label="镜头批准"
-            value={`${shotApprovedCount}/${shots.length}`}
-            state={shotApprovedCount === shots.length && shots.length > 0 ? "done" : "draft"}
-          />
-          <StoryboardGateMetric
-            label="关键帧批准"
-            value={
-              staleKeyframeCount > 0
-                ? `${staleKeyframeCount} 过期`
-                : `${keyframeApprovedCount}/${shots.length}`
-            }
-            state={
-              staleKeyframeCount > 0
-                ? "warning"
-                : keyframeApprovedCount === shots.length && shots.length > 0
-                  ? "done"
-                  : "draft"
-            }
-          />
-        </section>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">项目名</span>
-          <input
-            value={title}
-            onChange={(event) => onTitleChange(event.target.value)}
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-
-        <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <p className="type-caption text-[var(--fg-2)]">想法</p>
-            <Button
-              variant="outline"
-              size="sm"
-              loading={expandingScript}
-              onClick={onExpandIdea}
-              leftIcon={<Sparkles className="h-3.5 w-3.5" />}
-            >
-              AI 扩写脚本
-            </Button>
-          </div>
-          <textarea
-            value={idea}
-            onChange={(event) => onIdeaChange(event.target.value)}
-            rows={4}
-            className="min-h-24 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-          />
-        </section>
-
-        <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <p className="type-caption text-[var(--fg-2)]">脚本</p>
-            <span
-              className={cn(
-                "rounded-full border px-2 py-1 text-[11px]",
-                scriptConfirmed
-                  ? "border-success-border bg-success-soft text-success"
-                  : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
-              )}
-            >
-              {scriptConfirmed ? `已锁定 v${scriptApprovedRevision}` : `草稿 v${scriptRevision}`}
+      {showShell && (
+        <header className="border-b border-[var(--border-subtle)] bg-[var(--bg-1)]/74 p-3">
+          <div className="flex items-center gap-2">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+              <FileText className="h-4 w-4" />
             </span>
+            <div className="min-w-0">
+              <p className="type-card-title">故事版预生产</p>
+              <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
+                想法到脚本，再到一致性设定和分镜图
+              </p>
+            </div>
           </div>
-          {scriptApprovedAt && (
-            <p className="text-[11px] text-[var(--fg-2)]">
-              锁定时间 {new Date(scriptApprovedAt).toLocaleString()}
-            </p>
-          )}
-          <textarea
-            value={script}
-            onChange={(event) => onScriptChange(event.target.value)}
-            rows={7}
-            className="min-h-40 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-          />
-          <div className="grid grid-cols-2 gap-2">
+          <label className="mt-3 block space-y-1.5">
+            <span className="type-caption text-[var(--fg-2)]">项目名</span>
+            <input
+              value={title}
+              onChange={(event) => onTitleChange(event.target.value)}
+              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+            />
+          </label>
+          <div className="mt-3 grid grid-cols-3 gap-1.5">
+            {STORYBOARD_STAGE_COPY.map((item, index) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onStageChange(item.id)}
+                className={cn(
+                  "min-w-0 rounded-[var(--radius-control)] border px-2 py-1.5 text-left transition-colors",
+                  stage === item.id
+                    ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                    : "border-[var(--border-subtle)] bg-[var(--bg-0)] text-[var(--fg-2)] hover:border-[var(--border)]",
+                )}
+              >
+                <span className="block truncate font-mono text-[9px] tabular-nums text-[var(--fg-3)]">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+                <span className="block truncate text-xs font-semibold">{item.label}</span>
+                <span className="block truncate text-[10px]">{item.detail}</span>
+              </button>
+            ))}
+          </div>
+        </header>
+      )}
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3">
+        {showShell && (
+          <>
+            <section className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+              <p className="type-caption text-[var(--fg-2)]">
+                阶段
+              </p>
+              <div className="mt-1 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-[var(--fg-0)]">
+                    {activeStage?.label ?? "故事版"}
+                  </p>
+                  <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
+                    {activeStage?.detail ?? "继续完善"}
+                  </p>
+                </div>
+                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-xs text-[var(--fg-2)]">
+                  {shots.length} 生成段
+                </span>
+              </div>
+            </section>
+            <section className="grid grid-cols-2 gap-2">
+              <StoryboardGateMetric
+                label="脚本锁定"
+                value={scriptConfirmed ? `v${scriptApprovedRevision}` : `草稿 v${scriptRevision}`}
+                state={scriptConfirmed ? "done" : "draft"}
+              />
+              <StoryboardGateMetric
+                label="设定批准"
+                value={`${assetApprovedCount}/${assets.length}`}
+                state={assetApprovedCount === assets.length && assets.length > 0 ? "done" : "draft"}
+              />
+              <StoryboardGateMetric
+                label="生成段批准"
+                value={`${shotApprovedCount}/${shots.length}`}
+                state={shotApprovedCount === shots.length && shots.length > 0 ? "done" : "draft"}
+              />
+              <StoryboardGateMetric
+                label="关键帧批准"
+                value={
+                  staleKeyframeCount > 0
+                    ? `${staleKeyframeCount} 过期`
+                    : `${keyframeApprovedCount}/${shots.length}`
+                }
+                state={
+                  staleKeyframeCount > 0
+                    ? "warning"
+                    : keyframeApprovedCount === shots.length && shots.length > 0
+                      ? "done"
+                      : "draft"
+                }
+              />
+            </section>
+          </>
+        )}
+        {stage === "idea" && (
+          <div className="space-y-3">
+            <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="type-caption text-[var(--fg-2)]">想法</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  loading={expandingScript}
+                  onClick={onExpandIdea}
+                  leftIcon={<Sparkles className="h-3.5 w-3.5" />}
+                >
+                  AI 扩写脚本
+                </Button>
+              </div>
+              <textarea
+                value={idea}
+                onChange={(event) => onIdeaChange(event.target.value)}
+                rows={5}
+                className="min-h-32 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+              />
+            </section>
+            <label className="block space-y-1.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+              <span className="type-caption text-[var(--fg-2)]">全片视觉连续性</span>
+              <textarea
+                value={style}
+                onChange={(event) => onStyleChange(event.target.value)}
+                rows={4}
+                className="min-h-24 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+              />
+            </label>
+          </div>
+        )}
+
+        {stage === "script" && (
+          <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="type-caption text-[var(--fg-2)]">脚本</p>
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-1 text-[11px]",
+                  scriptConfirmed
+                    ? "border-success-border bg-success-soft text-success"
+                    : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
+                )}
+              >
+                {scriptConfirmed ? `已锁定 v${scriptApprovedRevision}` : `草稿 v${scriptRevision}`}
+              </span>
+            </div>
+            {scriptApprovedAt && (
+              <p className="text-[11px] text-[var(--fg-2)]">
+                锁定时间 {new Date(scriptApprovedAt).toLocaleString()}
+              </p>
+            )}
+            <textarea
+              value={script}
+              onChange={(event) => onScriptChange(event.target.value)}
+              rows={10}
+              className="min-h-56 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onExpandIdea}
+                loading={expandingScript}
+                leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+              >
+                继续优化
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={onConfirmScript}
+                leftIcon={<CircleCheck className="h-3.5 w-3.5" />}
+              >
+                锁定脚本
+              </Button>
+            </div>
             <Button
-              variant="outline"
+              variant="secondary"
               size="sm"
-              onClick={onExpandIdea}
-              loading={expandingScript}
-              leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+              className="w-full"
+              onClick={onGenerateDraft}
+              leftIcon={<ListChecks className="h-3.5 w-3.5" />}
             >
-              继续优化
+              按脚本拆 15s 段
             </Button>
+          </section>
+        )}
+
+        {stage === "assets" && (
+          <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="type-caption text-[var(--fg-2)]">人物 / 场景 / 道具设定图</p>
+                <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+                  {assetReadyCount}/{assets.length} 已有图 · {assetApprovedCount} 已批准 · {runningImageCount} 图像任务
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                loading={extractingAssets}
+                onClick={onExtractAssets}
+                leftIcon={<Tags className="h-3.5 w-3.5" />}
+              >
+                AI 提取
+              </Button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onAddAsset("character")}
+                leftIcon={<Plus className="h-3.5 w-3.5" />}
+              >
+                人物
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onAddAsset("scene")}
+                leftIcon={<Plus className="h-3.5 w-3.5" />}
+              >
+                场景
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onAddAsset("prop")}
+                leftIcon={<Plus className="h-3.5 w-3.5" />}
+              >
+                道具
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {[...characters, ...scenes, ...props].map((asset) => (
+                <StoryboardAssetCard
+                  key={asset.id}
+                  asset={asset}
+                  task={
+                    asset.generationId ? imageTaskById.get(asset.generationId) : undefined
+                  }
+                  generating={generatingAssetId === asset.id}
+                  onUpdate={(patch) => onUpdateAsset(asset.id, patch)}
+                  onRemove={() => onRemoveAsset(asset.id)}
+                  onApprove={() => onApproveAsset(asset.id)}
+                  onRevokeApproval={() => onRevokeAssetApproval(asset.id)}
+                  onGenerate={() => onGenerateAssetImage(asset.id)}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {stage === "shots" && (
+          <section className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+            <div className="grid grid-cols-2 gap-2">
+              <StoryboardMetric label="生成段" value={shots.length} />
+              <StoryboardMetric label="总时长" value={`${totalDuration}s`} />
+              <StoryboardMetric label="已批准" value={`${shotApprovedCount}/${shots.length}`} />
+              <StoryboardMetric label="已成片" value={completedCount} />
+            </div>
             <Button
               variant="primary"
               size="sm"
-              onClick={onConfirmScript}
-              leftIcon={<CircleCheck className="h-3.5 w-3.5" />}
+              className="w-full"
+              onClick={onGenerateDraft}
+              leftIcon={<ListChecks className="h-3.5 w-3.5" />}
             >
-              锁定脚本
+              按脚本拆 15s 段
             </Button>
-          </div>
-        </section>
+          </section>
+        )}
 
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">全片视觉连续性</span>
-          <textarea
-            value={style}
-            onChange={(event) => onStyleChange(event.target.value)}
-            rows={4}
-            className="min-h-24 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-
-        <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <p className="type-caption text-[var(--fg-2)]">人物 / 场景 / 道具设定图</p>
-              <p className="mt-0.5 text-xs text-[var(--fg-2)]">
-                {assetReadyCount}/{assets.length} 已有图 · {assetApprovedCount} 已批准 · {runningImageCount} 图像任务
-              </p>
+        {stage === "keyframes" && (
+          <section className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+            <div className="grid grid-cols-2 gap-2">
+              <StoryboardMetric label="段首帧" value={`${keyframeReadyCount}/${shots.length}`} />
+              <StoryboardMetric label="已批准" value={`${keyframeApprovedCount}/${shots.length}`} />
+              <StoryboardMetric label="已过期" value={staleKeyframeCount} />
+              <StoryboardMetric label="图像任务" value={runningImageCount} />
             </div>
             <Button
-              variant="outline"
+              variant="secondary"
               size="sm"
-              loading={extractingAssets}
-              onClick={onExtractAssets}
-              leftIcon={<Tags className="h-3.5 w-3.5" />}
+              className="w-full"
+              onClick={onGenerateAllKeyframes}
+              leftIcon={<ImageIcon className="h-3.5 w-3.5" />}
             >
-              AI 提取
+              补齐全部段首帧
             </Button>
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onAddAsset("character")}
-              leftIcon={<Plus className="h-3.5 w-3.5" />}
-            >
-              人物
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onAddAsset("scene")}
-              leftIcon={<Plus className="h-3.5 w-3.5" />}
-            >
-              场景
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onAddAsset("prop")}
-              leftIcon={<Plus className="h-3.5 w-3.5" />}
-            >
-              道具
-            </Button>
-          </div>
-          <div className="space-y-2">
-            {[...characters, ...scenes, ...props].map((asset) => (
-              <StoryboardAssetCard
-                key={asset.id}
-                asset={asset}
-                task={
-                  asset.generationId ? imageTaskById.get(asset.generationId) : undefined
-                }
-                generating={generatingAssetId === asset.id}
-                onUpdate={(patch) => onUpdateAsset(asset.id, patch)}
-                onRemove={() => onRemoveAsset(asset.id)}
-                onApprove={() => onApproveAsset(asset.id)}
-                onRevokeApproval={() => onRevokeAssetApproval(asset.id)}
-                onGenerate={() => onGenerateAssetImage(asset.id)}
-              />
-            ))}
-          </div>
-        </section>
+          </section>
+        )}
 
-        <div className="grid grid-cols-3 gap-2">
-          <StoryboardMetric label="镜头" value={shots.length} />
-          <StoryboardMetric label="已出图" value={`${keyframeReadyCount}/${shots.length}`} />
-          <StoryboardMetric label="已成片" value={completedCount} />
-        </div>
-        <StoryboardMetric label="总时长" value={`${totalDuration}s`} />
-        <Button
-          variant="primary"
-          size="sm"
-          className="w-full"
-          onClick={onGenerateDraft}
-          leftIcon={<ListChecks className="h-3.5 w-3.5" />}
-        >
-          按确认脚本拆分镜
-        </Button>
+        {stage === "videos" && (
+          <section className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+            <div className="grid grid-cols-2 gap-2">
+              <StoryboardMetric label="生成段" value={shots.length} />
+              <StoryboardMetric label="已成片" value={completedCount} />
+              <StoryboardMetric label="段首帧" value={`${keyframeApprovedCount}/${shots.length}`} />
+              <StoryboardMetric label="总时长" value={`${totalDuration}s`} />
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
@@ -4421,190 +5022,140 @@ function StoryboardMetric({ label, value }: { label: string; value: React.ReactN
   );
 }
 
-function StoryboardShotCard({
-  shot,
-  index,
-  total,
-  selected,
-  generation,
-  keyframeTask,
-  keyframeStale,
-  boundAssetCount,
+function StoryboardShotQuickNav({
+  title,
+  detail,
+  runningCount,
+  shots,
+  selectedShotId,
+  generationById,
+  imageTaskById,
+  assets,
+  externalReferenceImageIds,
   onSelect,
-  onDuplicate,
-  onRemove,
-  onMoveUp,
-  onMoveDown,
+  onAddShot,
 }: {
-  shot: StoryboardShot;
-  index: number;
-  total: number;
-  selected: boolean;
-  generation?: VideoGenerationOut;
-  keyframeTask?: BackendGeneration;
-  keyframeStale: boolean;
-  boundAssetCount: number;
-  onSelect: () => void;
-  onDuplicate: () => void;
-  onRemove: () => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
+  title: string;
+  detail: string;
+  runningCount: number;
+  shots: StoryboardShot[];
+  selectedShotId: string;
+  generationById: Map<string, VideoGenerationOut>;
+  imageTaskById: Map<string, BackendGeneration>;
+  assets: StoryboardReferenceAsset[];
+  externalReferenceImageIds: string[];
+  onSelect: (id: string) => void;
+  onAddShot: () => void;
 }) {
-  const active = generation ? isActiveVideo(generation) : false;
-  const succeeded = generation?.status === "succeeded" && Boolean(generation.video);
-  const failed = generation ? isFailedHistoryVideo(generation) : false;
-  const keyframeActive = keyframeTask ? isActiveImageTask(keyframeTask) : false;
-  const keyframeFailed = keyframeTask?.status === "failed" || keyframeTask?.status === "canceled";
-  const keyframeSucceeded = Boolean(shot.keyframeImageId);
-  const progress = generation
-    ? progressForItem(generation)
-    : keyframeTask
-      ? imageTaskProgress(keyframeTask)
-      : 0;
-  const label = succeeded
-    ? "已成片"
-    : failed
-      ? "视频失败"
-      : active
-        ? "视频中"
-        : keyframeStale
-          ? "图过期"
-          : keyframeSucceeded && shot.keyframeApproved
-            ? "帧已批"
-            : keyframeSucceeded
-              ? "待批帧"
-              : keyframeFailed
-                ? "出图失败"
-                : keyframeActive
-                  ? "出图中"
-                  : "草稿";
   return (
-    <article
-      className={cn(
-        "group relative flex min-w-[260px] flex-col rounded-[var(--radius-card)] border p-3 text-left transition-colors lg:min-w-0",
-        selected
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
-          : "border-[var(--border-subtle)] bg-[var(--bg-0)]/62 hover:border-[var(--border)] hover:bg-[var(--bg-1)]/78",
-      )}
-    >
-      {selected && (
-        <span aria-hidden="true" className="absolute inset-y-3 left-0 w-1 rounded-r-full bg-[var(--accent)]" />
-      )}
-      <button type="button" onClick={onSelect} className="min-w-0 text-left">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-              SHOT {String(index + 1).padStart(2, "0")}
-            </p>
-            <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-[var(--fg-0)]">
-              {shot.title}
-            </h3>
-          </div>
-          <span
-            className={cn(
-              "shrink-0 rounded-full border px-2 py-1 text-[11px]",
-              succeeded
-                ? "border-success-border bg-success-soft text-success"
-                : failed
-                  ? "border-danger-border bg-danger-soft text-danger"
-                  : active
-                    ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
-                    : keyframeStale
-                      ? "border-warning-border bg-warning-soft text-warning"
-                      : keyframeSucceeded && shot.keyframeApproved
-                        ? "border-success-border bg-success-soft text-success"
-                        : keyframeSucceeded
-                          ? "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]"
-                          : keyframeFailed
-                            ? "border-danger-border bg-danger-soft text-danger"
-                            : keyframeActive
-                              ? "border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]"
-                              : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
-            )}
-          >
-            {label}
-          </span>
+    <nav className="flex h-10 shrink-0 items-center gap-1.5 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/48 px-2 py-1">
+      <div className="hidden min-w-[150px] shrink-0 items-center gap-1.5 sm:flex">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+          <Layers3 className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <p className="truncate text-xs font-semibold text-[var(--fg-0)]">{title}</p>
+          <p className="truncate text-[10px] text-[var(--fg-2)]">{detail}</p>
         </div>
-        {shot.keyframeImageUrl && (
-          <img
-            src={shot.keyframeImageUrl}
-            alt={shot.title}
-            className="mt-2 aspect-video w-full rounded-[var(--radius-control)] border border-[var(--border)] object-cover"
-          />
+      </div>
+      <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
+        {shots.length === 0 && (
+          <span className="inline-flex h-8 min-w-[180px] items-center rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)] px-2 text-xs text-[var(--fg-2)]">
+            暂无生成段，按脚本拆成 15s 段或手动添加
+          </span>
         )}
-        <p className="mt-2 line-clamp-2 text-xs leading-5 text-[var(--fg-2)]">
-          {shot.visual}
-        </p>
-        <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-[var(--fg-2)]">
-          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-0.5">
-            {shot.durationS}s
-          </span>
-          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-0.5">
-            {shot.shotType}
-          </span>
-          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-0.5">
-            {shot.cameraMove}
-          </span>
-          <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-0.5">
-            {boundAssetCount} 设定
-          </span>
-          {shot.approved && (
-            <span className="rounded-full border border-success-border bg-success-soft px-2 py-0.5 text-success">
-              镜头已批
-            </span>
-          )}
-        </div>
-      </button>
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
-        <div
-          className={cn(
-            "h-full rounded-full transition-[width]",
-            succeeded || (keyframeSucceeded && shot.keyframeApproved && !keyframeStale)
-              ? "bg-[var(--success)]"
-              : active || keyframeActive || keyframeStale
-                ? "bg-[var(--accent)]"
-                : "bg-[var(--fg-3)]",
-          )}
-          style={{ width: `${generation || keyframeTask ? progress : 0}%` }}
-        />
+        {shots.map((shot, index) => {
+          const generation = shot.generationId
+            ? generationById.get(shot.generationId)
+            : undefined;
+          const keyframeTask = shot.keyframeGenerationId
+            ? imageTaskById.get(shot.keyframeGenerationId)
+            : undefined;
+          const active = generation ? isActiveVideo(generation) : false;
+          const succeeded = generation?.status === "succeeded" && Boolean(generation.video);
+          const failed = generation ? isFailedHistoryVideo(generation) : false;
+          const keyframeActive = keyframeTask ? isActiveImageTask(keyframeTask) : false;
+          const keyframeStale = storyboardShotKeyframeStale(
+            shot,
+            assets,
+            externalReferenceImageIds,
+          );
+          const keyframeDone = Boolean(shot.keyframeImageId);
+          const selected = shot.id === selectedShotId;
+          const tone = succeeded || (keyframeDone && shot.keyframeApproved && !keyframeStale)
+            ? "done"
+            : failed
+              ? "failed"
+              : active || keyframeActive
+                ? "running"
+                : keyframeStale
+                  ? "warning"
+                  : "draft";
+
+          return (
+            <button
+              key={shot.id}
+              type="button"
+              onClick={() => onSelect(shot.id)}
+              className={cn(
+                "flex h-8 min-w-[118px] items-center gap-1.5 rounded-[var(--radius-control)] border px-2 text-left text-xs transition-colors",
+                selected
+                  ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                  : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)] hover:border-[var(--border)] hover:text-[var(--fg-0)]",
+              )}
+            >
+              <span
+                className={cn(
+                  "h-2 w-2 shrink-0 rounded-full",
+                  tone === "done"
+                    ? "bg-[var(--success)]"
+                    : tone === "failed"
+                      ? "bg-[var(--danger)]"
+                      : tone === "running"
+                        ? "bg-[var(--accent)]"
+                        : tone === "warning"
+                          ? "bg-[var(--warning)]"
+                          : "bg-[var(--fg-3)]",
+                )}
+              />
+              <span className="shrink-0 font-mono text-[10px] tabular-nums">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <span className="min-w-0 flex-1 truncate font-medium">{shot.title}</span>
+              <span className="hidden shrink-0 text-[10px] text-[var(--fg-3)] sm:inline">
+                {shot.durationS}s
+              </span>
+            </button>
+          );
+        })}
       </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        <button
-          type="button"
-          onClick={onMoveUp}
-          disabled={index === 0}
-          aria-label="上移镜头"
-          className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-35"
-        >
-          <ArrowUp className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={onMoveDown}
-          disabled={index === total - 1}
-          aria-label="下移镜头"
-          className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-35"
-        >
-          <ArrowDown className="h-3.5 w-3.5" />
-        </button>
-        <Button variant="outline" size="sm" onClick={onDuplicate}>
-          复制
-        </Button>
-        <Button variant="outline" size="sm" onClick={onRemove}>
-          删除
-        </Button>
-      </div>
-    </article>
+      <span className="hidden shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-[10px] text-[var(--fg-2)] xl:inline-flex">
+        {runningCount} 运行中
+      </span>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-8 shrink-0 px-2"
+        onClick={onAddShot}
+        leftIcon={<Plus className="h-3.5 w-3.5" />}
+      >
+        加
+      </Button>
+    </nav>
   );
 }
 
 function StoryboardShotEditor({
   shot,
+  shotIndex,
+  shotTotal,
+  focusStage,
   generation,
   keyframeTask,
   assets,
   selectedAssets,
   referenceImageCount,
+  videoReferenceCount,
   keyframeStale,
   prompt,
   keyframePrompt,
@@ -4616,6 +5167,11 @@ function StoryboardShotEditor({
   onApproveShot,
   onGenerateKeyframe,
   onApproveKeyframe,
+  onDuplicateShot,
+  onRemoveShot,
+  onMoveShot,
+  onAddShot,
+  onGenerateDraft,
   onGenerateAllKeyframes,
   onSubmit,
   onSubmitAll,
@@ -4626,11 +5182,15 @@ function StoryboardShotEditor({
   onRetryGeneration,
 }: {
   shot?: StoryboardShot;
+  shotIndex: number;
+  shotTotal: number;
+  focusStage: StoryboardWorkflowStage;
   generation?: VideoGenerationOut;
   keyframeTask?: BackendGeneration;
   assets: StoryboardReferenceAsset[];
   selectedAssets: StoryboardReferenceAsset[];
   referenceImageCount: number;
+  videoReferenceCount: number;
   keyframeStale: boolean;
   prompt: string;
   keyframePrompt: string;
@@ -4642,6 +5202,11 @@ function StoryboardShotEditor({
   onApproveShot: () => void;
   onGenerateKeyframe: () => void;
   onApproveKeyframe: () => void;
+  onDuplicateShot: () => void;
+  onRemoveShot: () => void;
+  onMoveShot: (direction: -1 | 1) => void;
+  onAddShot: () => void;
+  onGenerateDraft: () => void;
   onGenerateAllKeyframes: () => void;
   onSubmit: () => void;
   onSubmitAll: () => void;
@@ -4654,11 +5219,35 @@ function StoryboardShotEditor({
   if (!shot) {
     return (
       <div className="grid min-h-[420px] place-items-center p-6">
-        <EmptyPanel
-          icon={<ClipboardList className="h-5 w-5" />}
-          title="还没有镜头"
-          description="先从左侧脚本拆镜，或手动添加一个镜头。"
-        />
+        <div className="w-full max-w-md rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/62 p-4 text-center">
+          <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+            <ClipboardList className="h-5 w-5" />
+          </span>
+          <h3 className="mt-3 text-sm font-semibold text-[var(--fg-0)]">
+            还没有生成段
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-[var(--fg-2)]">
+            先按脚本拆成 15s 段，或手动添加一个生成段。
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={onGenerateDraft}
+              leftIcon={<ListChecks className="h-3.5 w-3.5" />}
+            >
+              拆 15s 段
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onAddShot}
+              leftIcon={<Plus className="h-3.5 w-3.5" />}
+            >
+              手动添加
+            </Button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -4680,308 +5269,439 @@ function StoryboardShotEditor({
       : [...boundAssetIds, assetId];
     onUpdate(shot.id, { assetIds: next });
   };
+  const shotLabel =
+    shotIndex >= 0 ? `SEG ${String(shotIndex + 1).padStart(2, "0")}` : "SEG";
+  const keyframeState = keyframeStale
+    ? "关键帧过期"
+    : shot.keyframeApproved
+      ? "关键帧已批"
+      : shot.keyframeImageId
+        ? "待批关键帧"
+        : keyframeTask
+          ? "关键帧生成中"
+          : "未出关键帧";
+  const videoState = videoItem
+    ? "视频已完成"
+    : generation
+      ? generation.status
+      : "未提交视频";
+  const showingShotDraft = focusStage === "shots";
+  const showingKeyframeStage = focusStage === "keyframes";
+  const showingVideoStage = focusStage === "videos";
+  const shotManagementControls = (
+    <div className="flex shrink-0 items-center gap-1">
+      <button
+        type="button"
+        onClick={() => onMoveShot(-1)}
+        disabled={shotIndex <= 0}
+        aria-label="上移生成段"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-35"
+      >
+        <ArrowUp className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={() => onMoveShot(1)}
+        disabled={shotIndex >= shotTotal - 1}
+        aria-label="下移生成段"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-35"
+      >
+        <ArrowDown className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={onDuplicateShot}
+        aria-label="复制生成段"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)]"
+      >
+        <Copy className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={onRemoveShot}
+        aria-label="删除生成段"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] text-[var(--danger)] transition-colors hover:bg-danger-soft"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
   return (
-    <div className="min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4">
-      <div className="grid gap-3">
-        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
-          <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">镜头标题</span>
-            <input
-              value={shot.title}
-              onChange={(event) => onUpdate(shot.id, { title: event.target.value })}
-              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-            />
-          </label>
-          <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">时长</span>
-            <input
-              value={shot.durationS}
-              type="number"
-              min={STORYBOARD_MIN_SHOT_DURATION_S}
-              max={STORYBOARD_MAX_GROUP_DURATION_S}
-              onChange={(event) =>
-                onUpdate(shot.id, { durationS: Number(event.target.value) })
-              }
-              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-            />
-          </label>
-        </div>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">镜头目的</span>
-          <input
-            value={shot.purpose}
-            onChange={(event) => onUpdate(shot.id, { purpose: event.target.value })}
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">画面内容</span>
-          <textarea
-            value={shot.visual}
-            onChange={(event) => onUpdate(shot.id, { visual: event.target.value })}
-            rows={4}
-            className="min-h-28 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">台词 / 旁白 / 字幕信息</span>
-          <textarea
-            value={shot.narration}
-            onChange={(event) => onUpdate(shot.id, { narration: event.target.value })}
-            rows={3}
-            className="min-h-24 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-        <div className="grid gap-2 sm:grid-cols-3">
-          <SelectField
-            label="景别"
-            value={shot.shotType}
-            onChange={(value) => onUpdate(shot.id, { shotType: value })}
-            options={STORYBOARD_SHOT_TYPES}
-          />
-          <SelectField
-            label="运镜"
-            value={shot.cameraMove}
-            onChange={(value) => onUpdate(shot.id, { cameraMove: value })}
-            options={STORYBOARD_CAMERA_MOVES}
-          />
-          <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">转场</span>
-            <input
-              value={shot.transition}
-              onChange={(event) => onUpdate(shot.id, { transition: event.target.value })}
-              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-            />
-          </label>
-        </div>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">参考素材说明</span>
-          <input
-            value={shot.referenceNotes}
-            onChange={(event) =>
-              onUpdate(shot.id, { referenceNotes: event.target.value })
-            }
-            placeholder="例如：参考图 1 保持人物服装，参考图 2 保持产品外观。"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50 placeholder:text-[var(--fg-2)]"
-          />
-        </label>
-        <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="type-caption text-[var(--fg-2)]">镜头设定绑定</p>
-              <p className="mt-0.5 text-xs text-[var(--fg-2)]">
-                {boundAssetIds.length} 个设定 · {approvedBoundCount} 个可用于出图 · {referenceImageCount} 张侧栏参考
-              </p>
-            </div>
-            <Button
-              variant={shot.approved ? "outline" : "secondary"}
-              size="sm"
-              onClick={onApproveShot}
-              disabled={shot.approved || boundAssetIds.length === 0}
-              leftIcon={<CircleCheck className="h-3.5 w-3.5" />}
-            >
-              {shot.approved ? "镜头已批准" : "批准镜头"}
-            </Button>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {assets.map((asset) => {
-              const checked = boundAssetIdSet.has(asset.id);
-              return (
-                <label
-                  key={asset.id}
-                  className={cn(
-                    "flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-xs transition-colors",
-                    checked
-                      ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                      : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
-                  )}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleAssetBinding(asset.id)}
-                  />
-                  <span className="min-w-0 flex-1 truncate">
-                    {storyboardAssetLabel(asset.kind)} · {asset.name}
-                  </span>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px]",
-                      asset.approved
-                        ? "border-success-border bg-success-soft text-success"
-                        : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]",
-                    )}
-                  >
-                    {asset.approved ? "已批" : "草稿"}
-                  </span>
-                </label>
-              );
-            })}
-          </div>
-        </section>
-        <section className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="type-caption text-[var(--fg-2)]">分镜图</p>
-              <p className="mt-0.5 text-xs text-[var(--fg-2)]">
-                先批准镜头和设定，再确认画面用于视频片段
-              </p>
-            </div>
-            {keyframeStale && (
-              <span className="rounded-full border border-warning-border bg-warning-soft px-2 py-1 text-[11px] text-warning">
-                当前图已过期
+    <div className="min-h-0 min-w-0 overflow-y-auto overscroll-contain p-2.5 sm:p-3">
+      <div className="space-y-3">
+        {!showingShotDraft && (
+          <header className="flex min-h-9 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="shrink-0 font-mono text-[11px] text-[var(--fg-3)]">
+                {shotLabel} / {shotTotal}
               </span>
-            )}
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!canGenerateKeyframe}
-                loading={generatingKeyframe}
-                onClick={onGenerateKeyframe}
-                leftIcon={<ImageIcon className="h-3.5 w-3.5" />}
-              >
-                {shot.keyframeImageId ? "重新生成" : "生成分镜图"}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onGenerateAllKeyframes}
-                leftIcon={<ListChecks className="h-3.5 w-3.5" />}
-              >
-                补齐全部
-              </Button>
+              <h2 className="min-w-0 truncate text-sm font-semibold text-[var(--fg-0)]">
+                {shot.title}
+              </h2>
             </div>
-          </div>
-          {shot.keyframeImageUrl && (
-            <img
-              src={shot.keyframeImageUrl}
-              alt={shot.title}
-              className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
-            />
-          )}
-          {shot.keyframeImageId && (
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant={shot.keyframeApproved && !keyframeStale ? "outline" : "secondary"}
-                size="sm"
-                disabled={shot.keyframeApproved && !keyframeStale}
-                onClick={onApproveKeyframe}
-                leftIcon={<CircleCheck className="h-3.5 w-3.5" />}
+            <div className="flex flex-wrap items-center justify-end gap-1.5 text-[11px]">
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-1",
+                  shot.approved
+                    ? "border-success-border bg-success-soft text-success"
+                    : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]",
+                )}
               >
-                {shot.keyframeApproved && !keyframeStale ? "关键帧已批准" : "批准关键帧"}
-              </Button>
+                {shot.approved ? "生成段已批" : "生成段草稿"}
+              </span>
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-1",
+                  shot.keyframeApproved && !keyframeStale
+                    ? "border-success-border bg-success-soft text-success"
+                    : keyframeStale
+                      ? "border-warning-border bg-warning-soft text-warning"
+                      : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]",
+                )}
+              >
+                {keyframeState}
+              </span>
+              <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-[var(--fg-2)]">
+                {videoState}
+              </span>
             </div>
-          )}
-          {keyframeTask && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] text-[var(--fg-2)]">
-                <span>
-                  {keyframeTask.status === "succeeded"
-                    ? "分镜图已完成"
-                    : keyframeTask.status === "failed"
-                      ? "分镜图失败"
-                      : "分镜图生成中"}
-                </span>
-                <span>{keyframeProgress}%</span>
+          </header>
+        )}
+
+        <div className="space-y-3">
+          {showingShotDraft && (
+          <div className="space-y-3">
+            <section className="space-y-2.5 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="type-caption text-[var(--fg-2)]">15s 生成段</p>
+                {shotManagementControls}
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
-                <div
-                  className={cn(
-                    "h-full rounded-full transition-[width]",
-                    keyframeTask.status === "succeeded"
-                      ? "bg-[var(--success)]"
-                      : keyframeTask.status === "failed"
-                        ? "bg-[var(--danger)]"
-                        : "bg-[var(--accent)]",
-                  )}
-                  style={{ width: `${keyframeProgress}%` }}
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
+                <label className="space-y-1.5">
+                  <span className="type-caption text-[var(--fg-2)]">段标题</span>
+                  <input
+                    value={shot.title}
+                    onChange={(event) => onUpdate(shot.id, { title: event.target.value })}
+                    className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="type-caption text-[var(--fg-2)]">生成段时长</span>
+                  <input
+                    value={shot.durationS}
+                    type="number"
+                    min={STORYBOARD_MIN_SHOT_DURATION_S}
+                    max={STORYBOARD_MAX_GROUP_DURATION_S}
+                    onChange={(event) =>
+                      onUpdate(shot.id, { durationS: Number(event.target.value) })
+                    }
+                    className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                  />
+                </label>
+              </div>
+              <label className="space-y-1.5">
+                <span className="type-caption text-[var(--fg-2)]">段落目标</span>
+                <input
+                  value={shot.purpose}
+                  onChange={(event) => onUpdate(shot.id, { purpose: event.target.value })}
+                  className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
                 />
+              </label>
+              <label className="space-y-1.5">
+                <span className="type-caption text-[var(--fg-2)]">段内分镜</span>
+                <textarea
+                  value={shot.visual}
+                  onChange={(event) => onUpdate(shot.id, { visual: event.target.value })}
+                  rows={5}
+                  className="min-h-36 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <span className="type-caption text-[var(--fg-2)]">台词 / 旁白 / 字幕信息</span>
+                <textarea
+                  value={shot.narration}
+                  onChange={(event) => onUpdate(shot.id, { narration: event.target.value })}
+                  rows={3}
+                  className="min-h-24 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm leading-6 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                />
+              </label>
+            </section>
+
+            <section className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+              <p className="type-caption text-[var(--fg-2)]">段内镜头语言</p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <SelectField
+                  label="景别"
+                  value={shot.shotType}
+                  onChange={(value) => onUpdate(shot.id, { shotType: value })}
+                  options={STORYBOARD_SHOT_TYPES}
+                />
+                <SelectField
+                  label="运镜"
+                  value={shot.cameraMove}
+                  onChange={(value) => onUpdate(shot.id, { cameraMove: value })}
+                  options={STORYBOARD_CAMERA_MOVES}
+                />
+                <label className="space-y-1.5">
+                  <span className="type-caption text-[var(--fg-2)]">转场</span>
+                  <input
+                    value={shot.transition}
+                    onChange={(event) =>
+                      onUpdate(shot.id, { transition: event.target.value })
+                    }
+                    className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                  />
+                </label>
+              </div>
+              <label className="space-y-1.5">
+                <span className="type-caption text-[var(--fg-2)]">参考素材说明</span>
+                <input
+                  value={shot.referenceNotes}
+                  onChange={(event) =>
+                    onUpdate(shot.id, { referenceNotes: event.target.value })
+                  }
+                  placeholder="例如：参考图 1 保持人物服装，参考图 2 保持产品外观。"
+                  className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50 placeholder:text-[var(--fg-2)]"
+                />
+              </label>
+            </section>
+
+            <section className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/58 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="type-caption text-[var(--fg-2)]">生成段设定绑定</p>
+                  <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+                    出视频最多带 {STORYBOARD_MAX_VIDEO_REFERENCE_IMAGES} 张参考图 · 实际 {videoReferenceCount}/{STORYBOARD_MAX_VIDEO_REFERENCE_IMAGES}
+                  </p>
+                </div>
+                <Button
+                  variant={shot.approved ? "outline" : "secondary"}
+                  size="sm"
+                  onClick={onApproveShot}
+                  disabled={shot.approved || boundAssetIds.length === 0}
+                  leftIcon={<CircleCheck className="h-3.5 w-3.5" />}
+                >
+                  {shot.approved ? "生成段已批准" : "批准生成段"}
+                </Button>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {assets.map((asset) => {
+                  const checked = boundAssetIdSet.has(asset.id);
+                  return (
+                    <label
+                      key={asset.id}
+                      className={cn(
+                        "flex min-h-11 cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2 text-xs transition-colors",
+                        checked
+                          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                          : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleAssetBinding(asset.id)}
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {storyboardAssetLabel(asset.kind)} · {asset.name}
+                      </span>
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px]",
+                          asset.approved
+                            ? "border-success-border bg-success-soft text-success"
+                            : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]",
+                        )}
+                      >
+                        {asset.approved ? "已批" : "草稿"}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </section>
+          </div>
+          )}
+
+          {(showingKeyframeStage || showingVideoStage) && (
+          <div className="space-y-3">
+            <section className="space-y-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="type-caption text-[var(--fg-2)]">段首帧 / 参考图</p>
+                  <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+                    {keyframeState}
+                  </p>
+                </div>
+                {keyframeStale && (
+                  <span className="rounded-full border border-warning-border bg-warning-soft px-2 py-1 text-[11px] text-warning">
+                    当前图已过期
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!canGenerateKeyframe}
+                  loading={generatingKeyframe}
+                  onClick={onGenerateKeyframe}
+                  leftIcon={<ImageIcon className="h-3.5 w-3.5" />}
+                >
+                  {shot.keyframeImageId ? "重新生成" : "生成段首帧"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onGenerateAllKeyframes}
+                  leftIcon={<ListChecks className="h-3.5 w-3.5" />}
+                >
+                  补齐全部
+                </Button>
+              </div>
+              {shot.keyframeImageUrl ? (
+                <img
+                  src={shot.keyframeImageUrl}
+                  alt={shot.title}
+                  className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)] object-cover"
+                />
+              ) : (
+                <div className="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-0)]/70">
+                  <ImageIcon className="h-5 w-5 text-[var(--fg-3)]" />
+                </div>
+              )}
+              {shot.keyframeImageId && (
+                <Button
+                  variant={shot.keyframeApproved && !keyframeStale ? "outline" : "secondary"}
+                  size="sm"
+                  disabled={shot.keyframeApproved && !keyframeStale}
+                  onClick={onApproveKeyframe}
+                  leftIcon={<CircleCheck className="h-3.5 w-3.5" />}
+                >
+                  {shot.keyframeApproved && !keyframeStale ? "段首帧已批准" : "批准段首帧"}
+                </Button>
+              )}
+              {keyframeTask && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] text-[var(--fg-2)]">
+                    <span>
+                      {keyframeTask.status === "succeeded"
+                        ? "段首帧已完成"
+                        : keyframeTask.status === "failed"
+                          ? "段首帧失败"
+                          : "段首帧生成中"}
+                    </span>
+                    <span>{keyframeProgress}%</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]">
+                    <div
+                      className={cn(
+                        "h-full rounded-full transition-[width]",
+                        keyframeTask.status === "succeeded"
+                          ? "bg-[var(--success)]"
+                          : keyframeTask.status === "failed"
+                            ? "bg-[var(--danger)]"
+                            : "bg-[var(--accent)]",
+                      )}
+                      style={{ width: `${keyframeProgress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              <label className="space-y-1.5">
+                <span className="type-caption text-[var(--fg-2)]">段首帧提示词</span>
+                <textarea
+                  value={keyframePrompt}
+                  onChange={(event) =>
+                    onUpdate(shot.id, { keyframePrompt: event.target.value })
+                  }
+                  rows={5}
+                  className="min-h-28 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-xs leading-5 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
+                />
+              </label>
+            </section>
+
+            {showingVideoStage && (
+            <>
+            {videoItem && (
+              <VideoPosterButton
+                item={videoItem}
+                onPreview={() => onPreview(videoItem)}
+                compact
+              />
+            )}
+            {generation && !videoItem && (
+              <TaskRow
+                item={generation}
+                onCancel={() => onCancelGeneration(generation)}
+                onRetry={() => onRetryGeneration(generation)}
+                onCopy={onCopyPrompt}
+                showPreview={false}
+              />
+            )}
+
+            <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/70 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="type-caption text-[var(--fg-2)]">当前生成段提示词</p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onCopyPrompt}
+                  leftIcon={<Copy className="h-3.5 w-3.5" />}
+                >
+                  复制
+                </Button>
+              </div>
+              <p className="mt-2 max-h-36 overflow-y-auto whitespace-pre-wrap text-xs leading-5 text-[var(--fg-1)]">
+                {prompt}
+              </p>
+            </div>
+
+            <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3">
+              <p
+                className={cn(
+                  "text-xs leading-5",
+                  canSubmit ? "text-success" : "text-[var(--fg-2)]",
+                )}
+              >
+                {submitReason}
+              </p>
+              <Button
+                variant="primary"
+                size="sm"
+                className="w-full"
+                disabled={!canSubmit}
+                loading={submitting}
+                onClick={onSubmit}
+                leftIcon={<Send className="h-3.5 w-3.5" />}
+              >
+                用图生成视频
+              </Button>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onUseSingleGenerator}
+                  leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
+                >
+                  套入单条
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={submitting}
+                  onClick={onSubmitAll}
+                  leftIcon={<ListChecks className="h-3.5 w-3.5" />}
+                >
+                  全部提交
+                </Button>
               </div>
             </div>
-          )}
-          <label className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">分镜图提示词</span>
-            <textarea
-              value={keyframePrompt}
-              onChange={(event) =>
-                onUpdate(shot.id, { keyframePrompt: event.target.value })
-              }
-              rows={6}
-              className="min-h-32 w-full resize-none rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-xs leading-5 text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
-            />
-          </label>
-        </section>
-        {videoItem && (
-          <VideoPosterButton
-            item={videoItem}
-            onPreview={() => onPreview(videoItem)}
-            compact
-          />
-        )}
-        {generation && !videoItem && (
-          <TaskRow
-            item={generation}
-            onCancel={() => onCancelGeneration(generation)}
-            onRetry={() => onRetryGeneration(generation)}
-            onCopy={onCopyPrompt}
-            showPreview={false}
-          />
-        )}
-        <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/70 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <p className="type-caption text-[var(--fg-2)]">当前镜头提示词</p>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onCopyPrompt}
-              leftIcon={<Copy className="h-3.5 w-3.5" />}
-            >
-              复制
-            </Button>
-          </div>
-          <p className="mt-2 max-h-36 overflow-y-auto whitespace-pre-wrap text-xs leading-5 text-[var(--fg-1)]">
-            {prompt}
-          </p>
-        </div>
-        <div className="grid gap-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center">
-          <p
-            className={cn(
-              "text-xs leading-5",
-              canSubmit ? "text-success" : "text-[var(--fg-2)]",
+            </>
             )}
-          >
-            {submitReason}
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onUseSingleGenerator}
-            leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
-          >
-            套入单条
-          </Button>
-          <div className="flex gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={submitting}
-              onClick={onSubmitAll}
-              leftIcon={<ListChecks className="h-3.5 w-3.5" />}
-            >
-              全部提交
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={!canSubmit}
-              loading={submitting}
-              onClick={onSubmit}
-              leftIcon={<Send className="h-3.5 w-3.5" />}
-            >
-              用图生成视频
-            </Button>
           </div>
+          )}
         </div>
       </div>
     </div>
@@ -5117,7 +5837,7 @@ function StoryboardSidePanel({
           </div>
           <div className="grid grid-cols-2 gap-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/72 p-3">
             <div>
-              <p className="type-caption text-[var(--fg-2)]">当前镜头预扣</p>
+              <p className="type-caption text-[var(--fg-2)]">当前生成段预扣</p>
               <p className="mt-1 text-base font-semibold tabular-nums text-[var(--fg-0)]">
                 {estimate ? formatRmb(estimate.micro / 1_000_000) : "-"}
               </p>
@@ -5137,7 +5857,7 @@ function StoryboardSidePanel({
                 <p className="mt-0.5 text-xs text-[var(--fg-2)]">
                   {referenceImageCount > 0
                     ? `${referenceImageCount} 张上传图片会参与分镜图`
-                    : "上传图片会参与分镜图，素材链接写入镜头说明"}
+                    : "上传图片会参与分镜图，素材链接写入生成段说明"}
                 </p>
               </div>
               <Button
@@ -5192,7 +5912,7 @@ function StoryboardSidePanel({
 
           {selectedGeneration && (
             <section className="space-y-2">
-              <p className="type-caption text-[var(--fg-2)]">当前镜头任务</p>
+              <p className="type-caption text-[var(--fg-2)]">当前生成段任务</p>
               <TaskRow
                 item={selectedGeneration}
                 onCancel={() => onCancelGeneration(selectedGeneration)}
