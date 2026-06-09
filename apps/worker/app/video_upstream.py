@@ -144,6 +144,9 @@ def _status(raw: Any) -> VideoProviderStatus:
         "succeeded": "succeeded",
         "success": "succeeded",
         "completed": "succeeded",
+        "complete": "succeeded",
+        "done": "succeeded",
+        "finished": "succeeded",
         "failed": "failed",
         "failure": "failed",
         "error": "failed",
@@ -232,13 +235,19 @@ def _video_url(payload: dict[str, Any]) -> str | None:
         payload,
         ("content", "video_url"),
         ("result", "video_url"),
+        ("result", "url"),
         ("output", "video_url"),
+        ("output", "url"),
         ("video_url",),
+        ("url",),
         ("data", "video_url"),
+        ("data", "url"),
         ("data", "content", "video_url"),
         ("data", "data", "video_url"),
+        ("data", "data", "url"),
         ("data", "data", "content", "video_url"),
         ("data", "data", "data", "video_url"),
+        ("data", "data", "data", "url"),
         ("data", "data", "data", "content", "video_url"),
         ("data", "data", "url"),
         ("data", "data", "result_url"),
@@ -277,6 +286,40 @@ def _video_url(payload: dict[str, Any]) -> str | None:
                 value = _nested_get(item, ("video_url",), ("url",))
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+    for values in (
+        payload.get("video_urls"),
+        _nested_get(
+            payload,
+            ("data", "video_urls"),
+            ("data", "data", "video_urls"),
+            ("result", "video_urls"),
+            ("output", "video_urls"),
+        ),
+        _nested_get(
+            payload,
+            ("data", "videos"),
+            ("data", "data", "videos"),
+            ("result", "videos"),
+            ("output", "videos"),
+        ),
+        _nested_get(
+            payload,
+            ("data", "outputs"),
+            ("data", "data", "outputs"),
+            ("result", "outputs"),
+            ("output", "outputs"),
+        ),
+    ):
+        if isinstance(values, list):
+            for item in values:
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+                if isinstance(item, dict):
+                    value = _nested_get(
+                        item, ("video_url",), ("url",), ("content", "video_url")
+                    )
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
     content = payload.get("content")
     if isinstance(content, list):
         for item in content:
@@ -377,9 +420,15 @@ def _provider_task_id(payload: dict[str, Any]) -> str | None:
         payload,
         ("id",),
         ("task_id",),
+        ("taskId",),
         ("data", "id"),
         ("data", "task_id"),
+        ("data", "taskId"),
+        ("result", "id"),
+        ("result", "task_id"),
+        ("result", "taskId"),
         ("output", "task_id"),
+        ("output", "taskId"),
     )
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
@@ -676,6 +725,169 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
         return CancelResult(accepted=True, raw=raw)
 
 
+class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
+    """Third-party unified video gateways using /v1/video/create."""
+
+    def _client_base_url(self) -> str:
+        return _collapse_url_path_slashes(self.provider.base_url)
+
+    def _path(self, suffix: str) -> str:
+        base_path = urlsplit(self._client_base_url()).path.rstrip("/")
+        if base_path.endswith("/v1"):
+            return suffix
+        return f"v1/{suffix}"
+
+    def _media_url(self, item: VideoReferenceMedia, *, field: str) -> str:
+        if item.kind != "image":
+            raise VideoUpstreamError(
+                "Omni Flash unified video create supports image references only",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        if item.url:
+            return item.url
+        if not item.data:
+            raise VideoUpstreamError(
+                f"{field} is required",
+                error_code="invalid_input",
+                status_code=422,
+            )
+        return _image_data_url(item.data, item.mime)
+
+    def _images(self, req: VideoSubmitRequest) -> list[str]:
+        if req.action == "t2v":
+            return []
+        if req.action == "i2v":
+            if req.input_image_url:
+                return [req.input_image_url]
+            if not req.input_image_bytes:
+                raise VideoUpstreamError(
+                    "missing input image bytes",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            return [_image_data_url(req.input_image_bytes, req.input_image_mime)]
+        if req.action == "reference":
+            image_refs = [item for item in req.reference_media if item.kind == "image"]
+            if len(image_refs) != len(req.reference_media):
+                raise VideoUpstreamError(
+                    "Omni Flash unified video create supports image references only",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            if not image_refs:
+                raise VideoUpstreamError(
+                    "reference generation requires reference images",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            if len(image_refs) > 9:
+                raise VideoUpstreamError(
+                    "too many reference image items",
+                    error_code="invalid_input",
+                    status_code=422,
+                )
+            return [
+                self._media_url(item, field="Omni Flash reference image")
+                for item in image_refs
+            ]
+        raise VideoUpstreamError(
+            f"unsupported video action: {req.action}",
+            error_code="invalid_input",
+            status_code=422,
+        )
+
+    async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        body: dict[str, Any] = {
+            "model": req.upstream_model,
+            "prompt": req.prompt,
+            "size": req.resolution.upper(),
+        }
+        if req.aspect_ratio != "adaptive":
+            body["aspect_ratio"] = req.aspect_ratio
+        if req.duration_s != -1:
+            body["duration"] = req.duration_s
+        if req.seed is not None and req.seed != -1:
+            body["seed"] = req.seed
+        if req.watermark:
+            body["watermark"] = req.watermark
+        if not req.generate_audio:
+            body["generate_audio"] = False
+        if req.callback_url:
+            body["callback_url"] = req.callback_url
+        images = self._images(req)
+        if images:
+            body["images"] = images
+        async with self._client() as client:
+            response = await client.post(self._path("video/create"), json=body)
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("submit", response.status_code, raw)
+        provider_task_id = _provider_task_id(raw)
+        if provider_task_id is None:
+            raise VideoUpstreamError(
+                "video submit response did not include task id",
+                error_code="bad_response",
+                status_code=response.status_code,
+                raw=raw,
+            )
+        return SubmitResult(provider_task_id=provider_task_id, raw=raw)
+
+    async def poll(self, provider_task_id: str) -> PollResult:
+        async with self._client() as client:
+            response = await client.get(
+                self._path("video/query"),
+                params={"id": provider_task_id},
+            )
+        raw = _response_json(response)
+        if response.status_code >= 400:
+            raise _http_error("poll", response.status_code, raw)
+        status = _status(
+            _nested_get(
+                raw,
+                ("status",),
+                ("data", "status"),
+                ("data", "data", "status"),
+                ("result", "status"),
+                ("output", "status"),
+                ("task_status",),
+                ("data", "task_status"),
+                ("output", "task_status"),
+            )
+        )
+        progress = _int_or_none(
+            _nested_get(
+                raw,
+                ("progress",),
+                ("data", "progress"),
+                ("data", "data", "progress"),
+                ("result", "progress"),
+                ("output", "progress"),
+                ("percent",),
+            )
+        )
+        upstream_billable = _billable(raw)
+        video_url = _absolute_url(_video_url(raw), self._client_base_url())
+        if status == "running" and video_url:
+            status = "succeeded"
+        return PollResult(
+            status=status,
+            progress=progress,
+            video_url=video_url,
+            failure_class=_failure_class(raw),
+            usage_total_tokens=_usage_total_tokens(raw)
+            or _duration_usage_total_tokens(raw),
+            upstream_billable=upstream_billable
+            if upstream_billable is not None
+            else (True if status == "succeeded" else None),
+            raw=raw,
+        )
+
+    async def cancel(self, provider_task_id: str) -> CancelResult | None:
+        del provider_task_id
+        return None
+
+
 class DashScopeHappyHorseAdapter:
     def __init__(self, provider: VideoProviderDefinition) -> None:
         self.provider = provider
@@ -881,6 +1093,8 @@ def adapter_for_provider(provider: VideoProviderDefinition) -> VideoProviderAdap
         return VolcanoThirdPartySeedanceAdapter(provider)
     if provider.kind == "dashscope":
         return DashScopeHappyHorseAdapter(provider)
+    if provider.kind == "omni_flash":
+        return UnifiedVideoCreateAdapter(provider)
     raise VideoUpstreamError(
         f"unsupported video provider kind: {provider.kind}",
         error_code="provider_unavailable",
@@ -927,6 +1141,7 @@ __all__ = [
     "FakeVideoAdapter",
     "PollResult",
     "SubmitResult",
+    "UnifiedVideoCreateAdapter",
     "VideoProviderAdapter",
     "VideoReferenceMedia",
     "VideoSubmitRequest",

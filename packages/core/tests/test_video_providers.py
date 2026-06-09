@@ -91,6 +91,29 @@ def test_parse_volcano_third_party_provider() -> None:
     assert provider.supports("seedance-2.0", "reference")
 
 
+def test_parse_omni_flash_provider() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            name="google-omni-flash",
+            kind="omni_flash",
+            base_url="https://gateway.example.com/v1",
+            models={
+                "omni-flash:t2v": "gemini_omni_flash",
+                "omni-flash:i2v": "gemini_omni_flash",
+                "omni-flash:reference": "gemini_omni_flash",
+            },
+        ),
+        index=0,
+    )
+
+    assert provider.kind == "omni_flash"
+    assert provider.base_url == "https://gateway.example.com/v1"
+    assert provider.supports("omni-flash", "t2v")
+    assert provider.supports("omni-flash", "i2v")
+    assert provider.supports("omni-flash", "reference")
+    assert provider.upstream_model_for("omni-flash", "i2v") == "gemini_omni_flash"
+
+
 def test_video_provider_config_can_reference_shared_proxy() -> None:
     shared = json.dumps(
         {

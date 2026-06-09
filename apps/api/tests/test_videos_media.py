@@ -205,6 +205,18 @@ def test_happyhorse_resolution_options_exclude_480p() -> None:
     ) == ["720p", "1080p"]
 
 
+def test_omni_flash_resolution_options_exclude_480p() -> None:
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "omni-flash",
+        available_resolutions=["480p", "720p", "1080p", "4k"],
+    ) == ["720p", "1080p", "4k"]
+    assert videos._video_resolution_options_for_model(  # noqa: SLF001
+        "video",
+        upstream_model="gemini_omni_flash",
+        available_resolutions=["480p", "720p", "1080p", "4k"],
+    ) == ["720p", "1080p", "4k"]
+
+
 @pytest.mark.asyncio
 async def test_video_options_exposes_billing_model_for_provider_alias(
     monkeypatch: pytest.MonkeyPatch,
@@ -332,6 +344,142 @@ async def test_video_options_exposes_happyhorse_reference_with_image_pricing_onl
 
 
 @pytest.mark.asyncio
+async def test_video_options_exposes_omni_flash_reference_with_image_pricing_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={
+            "omni-flash:t2v": "gemini_omni_flash",
+            "omni-flash:i2v": "gemini_omni_flash",
+            "omni-flash:reference": "gemini_omni_flash",
+        },
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "omni-flash": {
+                "t2v": {
+                    "720p:6": 6_000_000,
+                    "1080p:6": 6_000_000,
+                    "4k:6": 6_000_000,
+                },
+                "i2v": {
+                    "720p:6": 6_000_000,
+                    "1080p:6": 6_000_000,
+                    "4k:6": 6_000_000,
+                },
+                "reference_image": {
+                    "720p:6": 6_000_000,
+                    "1080p:6": 6_000_000,
+                    "4k:6": 6_000_000,
+                },
+            }
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    async def price_options(_db):
+        return [
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="t2v",
+                resolution="720p",
+                variant="t2v_720p",
+                price=videos._money(1_008_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="t2v",
+                resolution="1080p",
+                variant="t2v_1080p",
+                price=videos._money(1_728_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="t2v",
+                resolution="4k",
+                variant="t2v_4k",
+                price=videos._money(3_456_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="i2v",
+                resolution="720p",
+                variant="i2v_720p",
+                price=videos._money(1_008_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="i2v",
+                resolution="1080p",
+                variant="i2v_1080p",
+                price=videos._money(1_728_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="i2v",
+                resolution="4k",
+                variant="i2v_4k",
+                price=videos._money(3_456_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="reference_image",
+                resolution="720p",
+                variant="reference_image_720p",
+                price=videos._money(1_008_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="reference_image",
+                resolution="1080p",
+                variant="reference_image_1080p",
+                price=videos._money(1_728_000),  # noqa: SLF001
+                enabled=True,
+            ),
+            VideoPriceOptionOut(
+                model="omni-flash",
+                action="reference_image",
+                resolution="4k",
+                variant="reference_image_4k",
+                price=videos._money(3_456_000),  # noqa: SLF001
+                enabled=True,
+            ),
+        ]
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+    monkeypatch.setattr(videos, "_video_price_options", price_options)
+
+    options = await videos.video_options(  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),
+        object(),
+    )
+
+    assert options.enabled is True
+    assert len(options.models) == 1
+    assert options.models[0].model == "omni-flash"
+    assert set(options.models[0].actions) == {"t2v", "i2v", "reference"}
+    assert options.models[0].resolutions == ["720p", "1080p", "4k"]
+
+
+@pytest.mark.asyncio
 async def test_video_create_rejects_seedance_20_fast_1080p(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -380,6 +528,58 @@ async def test_video_create_rejects_seedance_20_fast_1080p(
     assert excinfo.value.detail["error"]["details"]["available_resolutions"] == [
         "480p",
         "720p",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_video_create_rejects_omni_flash_unsupported_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="t2v",
+        model="omni-flash",
+        prompt="make a clip",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idem-omni-5s",
+    )
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={"omni-flash:t2v": "gemini_omni_flash"},
+    )
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "seedance-2.0": {"t2v": {"720p:5": 60_000}},
+            "omni-flash": {"t2v": {"720p:6": 6_000_000}},
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_billing_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await videos._require_video_create_ready(object(), body)  # noqa: SLF001
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_duration"
+    assert excinfo.value.detail["error"]["details"]["available_durations_s"] == [
+        6,
+        7,
+        8,
+        9,
+        10,
     ]
 
 
@@ -469,12 +669,15 @@ def test_volcano_third_party_prefers_reference_public_urls() -> None:
     third_party = _video_provider("volcano_third_party")
     official = _video_provider("volcano")
     dashscope = _video_provider("dashscope")
+    omni_flash = _video_provider("omni_flash")
 
     assert videos._provider_prefers_public_media_url(third_party) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(third_party) is False  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(official) is False  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(dashscope) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(dashscope) is True  # noqa: SLF001
+    assert videos._provider_prefers_public_media_url(omni_flash) is True  # noqa: SLF001
+    assert videos._provider_requires_public_media(omni_flash) is False  # noqa: SLF001
 
 
 @pytest.mark.asyncio

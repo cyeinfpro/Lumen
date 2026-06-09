@@ -96,7 +96,12 @@ def split_video_resolution_pricing_variant(
     if "_" not in raw:
         return raw, None
     variant, maybe_resolution = raw.rsplit("_", 1)
-    if maybe_resolution.endswith("p") and maybe_resolution[:-1].isdigit():
+    normalized_resolution = maybe_resolution.strip().lower()
+    if (
+        normalized_resolution == "4k"
+        or normalized_resolution.endswith("p")
+        and normalized_resolution[:-1].isdigit()
+    ):
         return variant, maybe_resolution
     return raw, None
 

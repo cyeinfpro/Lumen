@@ -98,14 +98,17 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _DEFAULT_VIDEO_DURATIONS = list(SUPPORTED_VIDEO_DURATIONS_S)
-_DEFAULT_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"]
+_DEFAULT_VIDEO_RESOLUTIONS = ["480p", "720p", "1080p", "4k"]
 _VIDEO_RESOLUTION_ORDER = {
     value: index for index, value in enumerate(_DEFAULT_VIDEO_RESOLUTIONS)
 }
 _SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
 _HAPPYHORSE_RESOLUTIONS = ("720p", "1080p")
+_OMNI_FLASH_RESOLUTIONS = ("720p", "1080p", "4k")
+_OMNI_FLASH_DURATIONS = tuple(range(6, 11))
 _HAPPYHORSE_ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
 _HAPPYHORSE_MODEL_PREFIX = "happyhorse-1.0"
+_OMNI_FLASH_MODEL_PREFIXES = ("omni-flash", "gemini_omni_flash")
 _DEFAULT_VIDEO_ASPECT_RATIOS = [
     "adaptive",
     "16:9",
@@ -306,7 +309,7 @@ def _provider_requires_public_media(provider: Any) -> bool:
 def _provider_prefers_public_media_url(provider: Any) -> bool:
     return _provider_requires_public_media(provider) or getattr(
         provider, "kind", None
-    ) in {"volcano_third_party"}
+    ) in {"volcano_third_party", "omni_flash"}
 
 
 def _write_new_file_atomic(path: Path, data: bytes) -> None:
@@ -592,6 +595,19 @@ def _is_happyhorse_model(*identifiers: str | None) -> bool:
     return False
 
 
+def _is_omni_flash_model(*identifiers: str | None) -> bool:
+    for identifier in identifiers:
+        if not isinstance(identifier, str):
+            continue
+        value = identifier.strip().lower().replace("-", "_")
+        if any(
+            value.startswith(prefix.replace("-", "_"))
+            for prefix in _OMNI_FLASH_MODEL_PREFIXES
+        ):
+            return True
+    return False
+
+
 def _video_resolution_options_for_model(
     model: str,
     *,
@@ -603,6 +619,9 @@ def _video_resolution_options_for_model(
     )
     if _is_happyhorse_model(model, upstream_model):
         allowed = set(_HAPPYHORSE_RESOLUTIONS)
+        return [resolution for resolution in available if resolution in allowed]
+    if _is_omni_flash_model(model, upstream_model):
+        allowed = set(_OMNI_FLASH_RESOLUTIONS)
         return [resolution for resolution in available if resolution in allowed]
     if not _is_seedance_20_fast_model(model, upstream_model):
         return available
@@ -823,7 +842,7 @@ async def video_options(
                     )
                     price_action = (
                         "reference_image"
-                        if provider.kind == "dashscope"
+                        if provider.kind in {"dashscope", "omni_flash"}
                         and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
                         else action
                     )
@@ -856,7 +875,7 @@ async def video_options(
             )
             price_action = (
                 "reference_image"
-                if provider.kind == "dashscope"
+                if provider.kind in {"dashscope", "omni_flash"}
                 and action == VIDEO_LEGACY_REFERENCE_PRICING_VARIANT
                 else action
             )
@@ -940,6 +959,15 @@ async def _require_video_create_ready(
             "video_provider_missing",
             "no enabled video provider supports this model/action",
             503,
+        )
+    if provider.kind == "omni_flash" and body.duration_s not in _OMNI_FLASH_DURATIONS:
+        raise _http(
+            "invalid_duration",
+            "duration_s is not available for Omni Flash",
+            422,
+            model=body.model,
+            duration_s=body.duration_s,
+            available_durations_s=list(_OMNI_FLASH_DURATIONS),
         )
     upstream_model = provider.upstream_model_for(body.model, body.action)
     model_resolutions = _video_resolution_options_for_model(
@@ -1221,6 +1249,16 @@ async def _create_video_generation_record(
         raise _http(
             "unsupported_reference_media",
             "HappyHorse reference-to-video supports image references only",
+            422,
+        )
+    if provider.kind == "omni_flash" and any(
+        item.get("kind") == "video"
+        for item in reference_snapshots
+        if isinstance(item, dict)
+    ):
+        raise _http(
+            "unsupported_reference_media",
+            "Omni Flash unified video create supports image references only",
             422,
         )
     if (

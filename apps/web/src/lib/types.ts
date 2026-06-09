@@ -706,6 +706,7 @@ export type VideoProviderKind =
   | "volcano_third_party"
   | "dashscope"
   | "veo"
+  | "omni_flash"
   | "fake";
 
 export interface VideoProviderItemOut {
@@ -1097,7 +1098,7 @@ export interface VideoCreateIn {
   input_image_id?: string | null;
   reference_media?: VideoReferenceMediaIn[];
   duration_s: number;
-  resolution: "480p" | "720p" | "1080p";
+  resolution: "480p" | "720p" | "1080p" | "4k";
   aspect_ratio: string;
   generate_audio?: boolean;
   seed?: number | null;

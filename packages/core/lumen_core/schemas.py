@@ -491,7 +491,7 @@ VideoPricingVariant = Literal[
     "reference_image",
     "reference_video",
 ]
-VideoResolution = Literal["480p", "720p", "1080p"]
+VideoResolution = Literal["480p", "720p", "1080p", "4k"]
 VideoAspectRatio = Literal["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
 
 
@@ -1853,6 +1853,7 @@ VideoProviderKind = Literal[
     "volcano_third_party",
     "dashscope",
     "veo",
+    "omni_flash",
     "fake",
 ]
 
