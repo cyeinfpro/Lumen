@@ -654,6 +654,18 @@ def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
         videos._validate_reference_url("asset://asset-1")  # noqa: SLF001
         == "asset://asset-1"
     )
+    assert (
+        videos._validate_reference_url("Asset://ASSET-20260609161523-STLQD")  # noqa: SLF001
+        == "asset://asset-20260609161523-stlqd"
+    )
+    assert (
+        videos._validate_reference_url(" `Asset : //ASSET-20260609161523-STLQD` ")  # noqa: SLF001
+        == "asset://asset-20260609161523-stlqd"
+    )
+    assert (
+        videos._validate_reference_url("ASSET-20260609161523-STLQD")  # noqa: SLF001
+        == "asset://asset-20260609161523-stlqd"
+    )
 
     with pytest.raises(Exception) as excinfo:
         videos._validate_reference_url("ftp://example.com/ref.mp4")  # noqa: SLF001

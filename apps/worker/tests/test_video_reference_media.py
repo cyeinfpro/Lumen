@@ -195,6 +195,46 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
 
 
 @pytest.mark.asyncio
+async def test_seedance_submit_forwards_asset_reference_url() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.0:reference": "dreamina-seedance-2-0-260128"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+    client = CaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="seedance-2.0",
+            upstream_model="dreamina-seedance-2-0-260128",
+            prompt="[Image 1]",
+            duration_s=5,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://asset-20260609161523-stlqd",
+                )
+            ],
+        )
+    )
+
+    assert client.body["content"][1] == {
+        "type": "image_url",
+        "role": "reference_image",
+        "image_url": {"url": "asset://asset-20260609161523-stlqd"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_volcano_third_party_submit_uses_moyu_video_generation_payload() -> None:
     provider = VideoProviderDefinition(
         name="moyu",
