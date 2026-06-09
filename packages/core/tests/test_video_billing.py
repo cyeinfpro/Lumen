@@ -167,6 +167,11 @@ def test_official_seedance_480p_and_720p_hold_estimates_are_not_equal() -> None:
 def test_video_pricing_variant_splits_reference_media_kind() -> None:
     assert video_billing.video_pricing_variant("t2v") == "t2v"
     assert video_billing.video_pricing_variant("t2v", resolution="720p") == "t2v_720p"
+    assert video_billing.video_pricing_variant("t2v", resolution="4k") == "t2v_4k"
+    assert video_billing.split_video_resolution_pricing_variant("t2v_4k") == (
+        "t2v",
+        "4k",
+    )
     assert (
         video_billing.video_pricing_variant(
             "reference",

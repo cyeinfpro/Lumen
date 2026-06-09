@@ -79,6 +79,7 @@ const VOLCANO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const VOLCANO_THIRD_PARTY_BASE_URL = "https://www.moyu.info";
 const DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com";
 const VEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+const OMNI_FLASH_BASE_URL = "https://api.example.com";
 const VOLCANO_MODEL_PRESETS = [
   {
     model: "seedance-2.0",
@@ -107,6 +108,7 @@ const VEO_MODEL_PRESETS = [
   },
 ] as const;
 const HAPPYHORSE_MODEL = "happyhorse-1.0";
+const OMNI_FLASH_MODEL = "omni-flash";
 const TEST_VIDEO_MODEL = "test-video";
 const VIDEO_ACTIONS: VideoAction[] = ["t2v", "i2v", "reference"];
 
@@ -121,6 +123,7 @@ const KIND_LABELS: Record<VideoProviderKind, string> = {
   volcano_third_party: "火山第三方",
   dashscope: "DashScope",
   veo: "Google Veo",
+  omni_flash: "Google Omni Flash",
   fake: "测试",
 };
 
@@ -171,6 +174,17 @@ function veoModelDrafts(): ModelDraft[] {
       preset.reference ? preset.upstream : "",
     ),
   );
+}
+
+function omniFlashModelDrafts(): ModelDraft[] {
+  return [
+    modelDraft(
+      OMNI_FLASH_MODEL,
+      "gemini_omni_flash",
+      "gemini_omni_flash",
+      "gemini_omni_flash",
+    ),
+  ];
 }
 
 function fakeModelDrafts(): ModelDraft[] {
@@ -348,6 +362,22 @@ function emptyVeoDraft(): Draft {
   };
 }
 
+function emptyOmniFlashDraft(): Draft {
+  return {
+    _key: nextKey(),
+    name: "google-omni-flash",
+    kind: "omni_flash",
+    base_url: OMNI_FLASH_BASE_URL,
+    api_key: "",
+    enabled: true,
+    priority: 90,
+    weight: 1,
+    concurrency: 2,
+    proxy: "",
+    models: omniFlashModelDrafts(),
+  };
+}
+
 function emptyFakeDraft(): Draft {
   return {
     _key: nextKey(),
@@ -372,6 +402,7 @@ function presetName(draft: Draft, fallback: string): string {
     name === "volcano-third-party" ||
     name === "dashscope-happyhorse" ||
     name === "google-veo" ||
+    name === "google-omni-flash" ||
     name === "video-test"
   ) {
     return fallback;
@@ -431,6 +462,19 @@ function veoPresetPatch(draft: Draft): Partial<Draft> {
   };
 }
 
+function omniFlashPresetPatch(draft: Draft): Partial<Draft> {
+  return {
+    name: presetName(draft, "google-omni-flash"),
+    kind: "omni_flash",
+    base_url: OMNI_FLASH_BASE_URL,
+    enabled: draft.enabled,
+    priority: draft.priority || 90,
+    weight: Math.max(1, Number(draft.weight) || 1),
+    concurrency: Math.max(1, Number(draft.concurrency) || 2),
+    models: omniFlashModelDrafts(),
+  };
+}
+
 function fakePresetPatch(draft: Draft): Partial<Draft> {
   return {
     name: presetName(draft, "video-test"),
@@ -448,6 +492,7 @@ function presetPatchForKind(draft: Draft): Partial<Draft> {
   if (draft.kind === "volcano_third_party") return volcanoThirdPartyPresetPatch(draft);
   if (draft.kind === "dashscope") return dashscopePresetPatch(draft);
   if (draft.kind === "veo") return veoPresetPatch(draft);
+  if (draft.kind === "omni_flash") return omniFlashPresetPatch(draft);
   if (draft.kind === "fake") return fakePresetPatch(draft);
   return volcanoPresetPatch(draft);
 }
@@ -813,7 +858,7 @@ export function VideoProvidersPanel() {
                   AI 视频供应商
                 </h3>
                 <p className="mt-0.5 type-caption text-[var(--fg-2)]">
-                  Seedance / HappyHorse / Veo · 模型映射与并发路由
+                  Seedance / HappyHorse / Omni Flash · 模型映射与并发路由
                 </p>
               </div>
             </div>
@@ -908,6 +953,7 @@ export function VideoProvidersPanel() {
             onAddVolcanoThirdParty={() => addDraft(emptyVolcanoThirdPartyDraft())}
             onAddDashscope={() => addDraft(emptyDashScopeDraft())}
             onAddVeo={() => addDraft(emptyVeoDraft())}
+            onAddOmniFlash={() => addDraft(emptyOmniFlashDraft())}
             onAddFake={() => addDraft(emptyFakeDraft())}
           />
 
@@ -1295,7 +1341,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       </div>
       <p className="mt-3 text-sm font-medium text-[var(--fg-0)]">还没有 AI 视频供应商</p>
       <p className="mx-auto mt-1 max-w-md type-caption text-[var(--fg-2)]">
-        添加供应商后，视频页才能创建 Seedance 或 HappyHorse 任务。
+        添加供应商后，视频页才能创建可用模型对应的视频任务。
       </p>
       <Button
         className="mt-4"
@@ -1322,6 +1368,7 @@ function EditCommandCenter({
   onAddVolcanoThirdParty,
   onAddDashscope,
   onAddVeo,
+  onAddOmniFlash,
   onAddFake,
 }: {
   enabled: boolean;
@@ -1335,6 +1382,7 @@ function EditCommandCenter({
   onAddVolcanoThirdParty: () => void;
   onAddDashscope: () => void;
   onAddVeo: () => void;
+  onAddOmniFlash: () => void;
   onAddFake: () => void;
 }) {
   return (
@@ -1370,7 +1418,7 @@ function EditCommandCenter({
           {globalIssue}
         </div>
       )}
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
         <PresetButton
           icon={<Zap className="h-4 w-4" />}
           title="火山 Seedance"
@@ -1394,6 +1442,12 @@ function EditCommandCenter({
           title="Google Veo"
           detail="Veo 3.1 / fast / lite"
           onClick={onAddVeo}
+        />
+        <PresetButton
+          icon={<Server className="h-4 w-4" />}
+          title="Omni Flash"
+          detail="/v1/video/create"
+          onClick={onAddOmniFlash}
         />
         <PresetButton
           icon={<ShieldCheck className="h-4 w-4" />}
@@ -1504,6 +1558,8 @@ function ProviderEditor({
                     onPatch(dashscopePresetPatch(draft));
                   } else if (kind === "veo") {
                     onPatch(veoPresetPatch(draft));
+                  } else if (kind === "omni_flash") {
+                    onPatch(omniFlashPresetPatch(draft));
                   } else if (kind === "fake") {
                     onPatch(fakePresetPatch(draft));
                   } else {
@@ -1516,6 +1572,7 @@ function ProviderEditor({
                 <option value="volcano_third_party">火山第三方 / MOYU</option>
                 <option value="dashscope">DashScope / HappyHorse</option>
                 <option value="veo">Google Veo</option>
+                <option value="omni_flash">Google Omni Flash / 第三方</option>
                 <option value="fake">测试</option>
               </select>
             </label>

@@ -67,6 +67,35 @@ def test_video_provider_schema_accepts_volcano_third_party():
     )
 
 
+def test_video_provider_schema_accepts_omni_flash():
+    from lumen_core.schemas import VideoProvidersUpdateIn
+
+    body = VideoProvidersUpdateIn(
+        enabled=True,
+        items=[
+            {
+                "name": "google-omni-flash",
+                "kind": "omni_flash",
+                "base_url": "https://gateway.example.com",
+                "api_key": "sk-test",
+                "enabled": True,
+                "priority": 90,
+                "weight": 1,
+                "concurrency": 2,
+                "models": {
+                    "omni-flash:t2v": "gemini_omni_flash",
+                    "omni-flash:i2v": "gemini_omni_flash",
+                    "omni-flash:reference": "gemini_omni_flash",
+                },
+            }
+        ],
+    )
+
+    item = body.items[0]
+    assert item.kind == "omni_flash"
+    assert item.models["omni-flash:t2v"] == "gemini_omni_flash"
+
+
 def test_image_params_support_render_and_output_options():
     from pydantic import ValidationError
 
@@ -288,6 +317,15 @@ def test_video_create_schema_enforces_action_image_contract():
         aspect_ratio="16:9",
         idempotency_key="idem-t2v-three-seconds",
     )
+    VideoCreateIn(
+        action="t2v",
+        model="omni-flash",
+        prompt="make a high resolution clip",
+        duration_s=6,
+        resolution="4k",
+        aspect_ratio="16:9",
+        idempotency_key="idem-t2v-4k",
+    )
 
     for kwargs in (
         {"action": "t2v", "input_image_id": "img-1"},
@@ -300,7 +338,6 @@ def test_video_create_schema_enforces_action_image_contract():
         },
         {"action": "reference", "reference_media": []},
         {"action": "t2v", "duration_s": 2},
-        {"action": "t2v", "resolution": "4k"},
         {"action": "t2v", "aspect_ratio": "4:5"},
         {"action": "t2v", "fps": 24},
         {
