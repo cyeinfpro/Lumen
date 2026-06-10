@@ -187,6 +187,7 @@ def parse_video_provider_config_json(
     raw: str | None,
     *,
     shared_provider_raw: str | None = None,
+    allow_missing_proxy: bool = False,
 ) -> tuple[list[VideoProviderDefinition], list[ProviderProxyDefinition], list[str]]:
     provider_items, proxy_items, errors = _split_video_config(raw)
     if errors:
@@ -239,7 +240,7 @@ def parse_video_provider_config_json(
         proxy = None
         if provider.proxy_name:
             proxy = proxy_by_name.get(provider.proxy_name)
-            if proxy is None:
+            if proxy is None and not allow_missing_proxy:
                 errors.append(
                     f"provider {provider.name}: proxy {provider.proxy_name} not found"
                 )
@@ -247,8 +248,17 @@ def parse_video_provider_config_json(
     return attached, proxies, errors
 
 
-def validate_video_providers(raw: str) -> str:
-    providers, _proxies, errors = parse_video_provider_config_json(raw)
+def validate_video_providers(
+    raw: str,
+    *,
+    shared_provider_raw: str | None = None,
+    allow_missing_proxy: bool = False,
+) -> str:
+    providers, _proxies, errors = parse_video_provider_config_json(
+        raw,
+        shared_provider_raw=shared_provider_raw,
+        allow_missing_proxy=allow_missing_proxy,
+    )
     if errors:
         raise ValueError("; ".join(errors))
     if not providers:

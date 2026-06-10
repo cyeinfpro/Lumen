@@ -27,7 +27,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,6 +107,7 @@ _HAPPYHORSE_RESOLUTIONS = ("720p", "1080p")
 _OMNI_FLASH_RESOLUTIONS = ("720p", "1080p", "4k")
 _OMNI_FLASH_DURATIONS = tuple(range(6, 11))
 _HAPPYHORSE_ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
+_OMNI_FLASH_ASPECT_RATIOS = ("adaptive", "16:9", "9:16", "1:1")
 _HAPPYHORSE_MODEL_PREFIX = "happyhorse-1.0"
 _OMNI_FLASH_MODEL_PREFIXES = ("omni-flash", "gemini_omni_flash")
 _DEFAULT_VIDEO_ASPECT_RATIOS = [
@@ -121,6 +122,9 @@ _DEFAULT_VIDEO_ASPECT_RATIOS = [
 _VIDEO_DEADLINE = timedelta(minutes=10)
 _VIDEO_LIST_LIMIT_MAX = 100
 _VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
+_VIDEO_REFERENCE_UPLOAD_MAX_COUNT = 20
+_VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES = 1024 * 1024 * 1024
+_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
 _VIDEO_REFERENCE_MIME_EXT = {
     "video/mp4": "mp4",
     "video/quicktime": "mov",
@@ -188,17 +192,83 @@ def _reference_upload_ext(file: UploadFile) -> tuple[str, str]:
     return mime, ext
 
 
+def _reference_token_expiry(now: datetime | None = None) -> str:
+    return ((now or datetime.now(timezone.utc)) + _REFERENCE_ACCESS_TOKEN_TTL).isoformat()
+
+
+def _parse_reference_token_expiry(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _reference_token_is_valid(
+    metadata: dict[str, Any],
+    *,
+    token_key: str,
+    expires_key: str,
+    token: str,
+    updated_at: datetime | None,
+) -> bool:
+    expected = metadata.get(token_key)
+    if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
+        return False
+    expires_at = _parse_reference_token_expiry(metadata.get(expires_key))
+    now = datetime.now(timezone.utc)
+    if expires_at is not None:
+        return expires_at > now
+    if updated_at is None:
+        return False
+    fallback_updated_at = (
+        updated_at.replace(tzinfo=timezone.utc)
+        if updated_at.tzinfo is None
+        else updated_at.astimezone(timezone.utc)
+    )
+    return fallback_updated_at + _REFERENCE_ACCESS_TOKEN_TTL > now
+
+
+def _ensure_reference_access_token(
+    metadata: dict[str, Any],
+    *,
+    token_key: str,
+    expires_key: str,
+) -> str:
+    token = metadata.get(token_key)
+    expires_at = _parse_reference_token_expiry(metadata.get(expires_key))
+    if (
+        not isinstance(token, str)
+        or not token
+        or expires_at is None
+        or expires_at <= datetime.now(timezone.utc)
+    ):
+        token = secrets.token_urlsafe(32)
+    metadata[token_key] = token
+    metadata[expires_key] = _reference_token_expiry()
+    return token
+
+
+def _looks_like_reference_video(data: bytes) -> bool:
+    return len(data) >= 12 and data[4:8] == b"ftyp"
+
+
 def _reference_video_upload_key(user_id: str, video_id: str, ext: str) -> str:
     return f"u/{user_id}/vref/{video_id}/original.{ext}"
 
 
 def _ensure_reference_video_access_token(video: Video) -> str:
     metadata = dict(video.metadata_jsonb or {})
-    token = metadata.get("reference_access_token")
-    if not isinstance(token, str) or not token:
-        token = secrets.token_urlsafe(32)
-        metadata["reference_access_token"] = token
-        video.metadata_jsonb = metadata
+    token = _ensure_reference_access_token(
+        metadata,
+        token_key="reference_access_token",
+        expires_key="reference_access_token_expires_at",
+    )
+    video.metadata_jsonb = metadata
     return token
 
 
@@ -212,11 +282,12 @@ def _reference_video_public_url(video: Video, public_base_url: str) -> str:
 
 def _ensure_reference_image_access_token(image: Image) -> str:
     metadata = dict(image.metadata_jsonb or {})
-    token = metadata.get("video_reference_access_token")
-    if not isinstance(token, str) or not token:
-        token = secrets.token_urlsafe(32)
-        metadata["video_reference_access_token"] = token
-        image.metadata_jsonb = metadata
+    token = _ensure_reference_access_token(
+        metadata,
+        token_key="video_reference_access_token",
+        expires_key="video_reference_access_token_expires_at",
+    )
+    image.metadata_jsonb = metadata
     return token
 
 
@@ -338,6 +409,8 @@ def _reference_media_out(snapshot: dict[str, Any]) -> VideoReferenceMediaOut | N
     kind = snapshot.get("kind")
     if kind not in {"image", "video"}:
         return None
+    raw_url = snapshot.get("url") if isinstance(snapshot.get("url"), str) else None
+    url = None if _is_internal_reference_url(raw_url) else raw_url
     return VideoReferenceMediaOut(
         kind=kind,
         image_id=snapshot.get("image_id")
@@ -346,10 +419,79 @@ def _reference_media_out(snapshot: dict[str, Any]) -> VideoReferenceMediaOut | N
         video_id=snapshot.get("video_id")
         if isinstance(snapshot.get("video_id"), str)
         else None,
-        url=snapshot.get("url") if isinstance(snapshot.get("url"), str) else None,
+        url=url,
         label=snapshot.get("label") if isinstance(snapshot.get("label"), str) else None,
         mime=snapshot.get("mime") if isinstance(snapshot.get("mime"), str) else None,
     )
+
+
+def _is_internal_reference_url(raw_url: str | None) -> bool:
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        return False
+    path = urlsplit(raw_url).path
+    return path.startswith("/api/images/reference/") or path.startswith(
+        "/api/videos/reference/"
+    )
+
+
+def _public_retry_error(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in (
+        "at",
+        "attempt",
+        "poll_count",
+        "error_code",
+        "retryable",
+        "terminal",
+        "next_retry_delay_s",
+    ):
+        value = raw.get(key)
+        if isinstance(value, (str, int, bool)) or value is None:
+            out[key] = value
+    return out
+
+
+def _public_retry_history(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    return [_public_retry_error(item) for item in raw if isinstance(item, dict)][-5:]
+
+
+def _public_video_diagnostics(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in (
+        "billing_decision",
+        "pricing_variant",
+        "billing_model",
+        "requested_model",
+        "reference_media_count",
+        "reference_image_public_variant",
+        "reference_image_public_variant_error_count",
+        "requires_public_media",
+        "prefers_public_media_url",
+        "reference_public_media_url_enabled",
+        "submit_retry_count",
+        "poll_retry_count",
+        "deadline_expired_polling_continues",
+        "faststart",
+        "ffmpeg_missing",
+    ):
+        value = raw.get(key)
+        if isinstance(value, (str, int, bool)) or value is None:
+            out[key] = value
+    for key in ("last_submit_error", "last_poll_error"):
+        safe = _public_retry_error(raw.get(key))
+        if safe:
+            out[key] = safe
+    for key in ("submit_retry_history", "poll_retry_history"):
+        safe_history = _public_retry_history(raw.get(key))
+        if safe_history:
+            out[key] = safe_history
+    return out
 
 
 def _generation_reference_media(row: VideoGeneration) -> list[VideoReferenceMediaOut]:
@@ -412,7 +554,7 @@ async def _generation_out(
         video=_video_out(video) if video is not None else None,
         error_code=row.error_code,
         error_message=row.error_message,
-        diagnostics=row.diagnostics or {},
+        diagnostics=_public_video_diagnostics(row.diagnostics),
         created_at=row.created_at,
         updated_at=row.updated_at,
         started_at=row.started_at,
@@ -501,7 +643,54 @@ async def upload_reference_video(
     if not buf:
         raise _http("empty_file", "empty file", 400)
     data = bytes(buf)
+    if not _looks_like_reference_video(data):
+        raise _http(
+            "invalid_video_file",
+            "reference video must be a valid mp4 or mov file",
+            415,
+        )
     sha = hashlib.sha256(data).hexdigest()
+    existing = (
+        await db.execute(
+            select(Video).where(
+                Video.user_id == user.id,
+                Video.owner_generation_id.is_(None),
+                Video.deleted_at.is_(None),
+                Video.sha256 == sha,
+                Video.storage_key.like(f"u/{user.id}/vref/%"),
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        _ensure_reference_video_access_token(existing)
+        await db.commit()
+        await db.refresh(existing)
+        return _video_out(existing)
+    count, total_bytes = (
+        await db.execute(
+            select(
+                func.count(Video.id),
+                func.coalesce(func.sum(Video.size_bytes), 0),
+            ).where(
+                Video.user_id == user.id,
+                Video.owner_generation_id.is_(None),
+                Video.deleted_at.is_(None),
+                Video.storage_key.like(f"u/{user.id}/vref/%"),
+            )
+        )
+    ).one()
+    if int(count or 0) >= _VIDEO_REFERENCE_UPLOAD_MAX_COUNT:
+        raise _http(
+            "reference_video_quota_exceeded",
+            f"reference video limit is {_VIDEO_REFERENCE_UPLOAD_MAX_COUNT} files",
+            429,
+        )
+    if int(total_bytes or 0) + len(data) > _VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES:
+        raise _http(
+            "reference_video_quota_exceeded",
+            "reference video storage quota exceeded",
+            429,
+        )
     video = Video(
         user_id=user.id,
         owner_generation_id=None,
@@ -522,6 +711,7 @@ async def upload_reference_video(
             "source": "uploaded_reference",
             "filename": file.filename or "",
             "reference_access_token": secrets.token_urlsafe(32),
+            "reference_access_token_expires_at": _reference_token_expiry(),
         },
     )
     db.add(video)
@@ -840,15 +1030,32 @@ def _has_video_price(
         return any(has(action, resolution) for resolution in resolution_options)
     for resolution in resolution_options:
         legacy_priced = has(VIDEO_LEGACY_REFERENCE_PRICING_VARIANT, resolution)
-        image_priced = (
+        if (
             legacy_priced
             or has("reference_image", resolution)
             or has("i2v", resolution)
-        )
-        video_priced = legacy_priced or has("reference_video", resolution)
-        if image_priced and video_priced:
+            or has("reference_video", resolution)
+        ):
             return True
     return False
+
+
+def _public_video_hold_estimates(
+    estimates: dict[str, Any],
+    model_billing_models: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    allowed_models = {
+        billing_model
+        for action_map in model_billing_models.values()
+        for billing_model in action_map.values()
+        if isinstance(billing_model, str) and billing_model
+    }
+    out: dict[str, Any] = {}
+    for model in sorted(allowed_models):
+        value = estimates.get(model)
+        if isinstance(value, dict):
+            out[model] = value
+    return out
 
 
 @router.get("/options", response_model=VideoOptionsOut)
@@ -999,6 +1206,10 @@ async def video_options(
                 ),  # type: ignore[arg-type]
             )
         )
+    public_hold_estimates = _public_video_hold_estimates(
+        estimates,
+        model_billing_models,
+    )
     return VideoOptionsOut(
         enabled=enabled and unavailable_reason is None,
         models=model_options,
@@ -1007,7 +1218,7 @@ async def video_options(
         aspect_ratios=list(_DEFAULT_VIDEO_ASPECT_RATIOS),
         generate_audio=True,
         pricing=prices,
-        hold_estimates=estimates,
+        hold_estimates=public_hold_estimates,
         unavailable_reason=None
         if enabled and unavailable_reason is None
         else unavailable_reason or "video_disabled",
@@ -1359,6 +1570,15 @@ async def _create_video_generation_record(
             aspect_ratio=body.aspect_ratio,
             available_aspect_ratios=list(_HAPPYHORSE_ASPECT_RATIOS),
         )
+    if provider.kind == "omni_flash" and body.aspect_ratio not in _OMNI_FLASH_ASPECT_RATIOS:
+        raise _http(
+            "invalid_aspect_ratio",
+            "aspect_ratio is not available for Omni Flash",
+            422,
+            model=body.model,
+            aspect_ratio=body.aspect_ratio,
+            available_aspect_ratios=list(_OMNI_FLASH_ASPECT_RATIOS),
+        )
     upstream_model = provider.upstream_model_for(body.model, body.action)
     billing_model = video_billing_model(body.model, upstream_model)
     pricing_variant = video_pricing_variant(
@@ -1590,7 +1810,10 @@ def _decode_cursor(cursor: str | None) -> tuple[datetime, str] | None:
         return None
     try:
         ts, row_id = cursor.split("|", 1)
-        return datetime.fromisoformat(ts), row_id
+        created_at = datetime.fromisoformat(ts)
+        if created_at.tzinfo is None:
+            raise ValueError("cursor timestamp must include timezone")
+        return created_at, row_id
     except (ValueError, TypeError):
         raise _http("invalid_cursor", "cursor is invalid", 422)
 
@@ -1761,6 +1984,10 @@ async def retry_video_generation(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoGenerationOut:
+    if getattr(user, "account_mode", "wallet") != "wallet":
+        raise _http(
+            "account_mode_forbidden", "video generation requires wallet mode", 403
+        )
     row = (
         await db.execute(
             select(VideoGeneration).where(
@@ -1771,6 +1998,17 @@ async def retry_video_generation(
     ).scalar_one_or_none()
     if row is None:
         raise _http("not_found", "video generation not found", 404)
+    if row.status not in {
+        VideoGenerationStatus.FAILED.value,
+        VideoGenerationStatus.CANCELED.value,
+        VideoGenerationStatus.EXPIRED.value,
+    }:
+        raise _http(
+            "video_retry_not_terminal",
+            "only failed, canceled, or expired video tasks can be retried",
+            409,
+            status=row.status,
+        )
     reference_snapshots = []
     raw_reference_media = (row.upstream_request or {}).get("reference_media")
     if isinstance(raw_reference_media, list):
@@ -1821,7 +2059,7 @@ async def retry_video_generation(
             generate_audio=row.generate_audio,
             seed=row.seed,
             watermark=row.watermark,
-            idempotency_key=f"retry:{row.id}:{new_uuid7()}",
+            idempotency_key=f"retry:{row.id}:{row.updated_at.isoformat()}",
         )
     except ValueError as exc:
         raise _http(
@@ -1939,6 +2177,20 @@ def _quote_etag(etag: str) -> str:
     return f'"{value}"'
 
 
+def _etag_matches(if_none_match: str | None, quoted_etag: str) -> bool:
+    if not if_none_match:
+        return False
+    for candidate in if_none_match.split(","):
+        value = candidate.strip()
+        if value == "*":
+            return True
+        if value.startswith("W/"):
+            value = value[2:].strip()
+        if value == quoted_etag:
+            return True
+    return False
+
+
 def _parse_range(range_header: str, size: int) -> tuple[int, int] | None:
     if not range_header.startswith("bytes=") or "," in range_header:
         return None
@@ -1987,7 +2239,7 @@ def _media_response(
         headers["Content-Disposition"] = f'attachment; filename="{download_filename}"'
     if last_modified is not None:
         headers["Last-Modified"] = format_datetime(last_modified, usegmt=True)
-    if request.headers.get("if-none-match") == quoted_etag:
+    if _etag_matches(request.headers.get("if-none-match"), quoted_etag):
         return Response(status_code=304, headers=headers)
     f, size = _open_regular_file_no_symlink(path)
     range_header = request.headers.get("range")
@@ -2051,8 +2303,13 @@ async def reference_video_binary(
     if video is None:
         raise _http("not_found", "video not found", 404)
     metadata = video.metadata_jsonb or {}
-    expected = metadata.get("reference_access_token")
-    if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
+    if not _reference_token_is_valid(
+        metadata,
+        token_key="reference_access_token",
+        expires_key="reference_access_token_expires_at",
+        token=token,
+        updated_at=video.updated_at,
+    ):
         raise _http("not_found", "video not found", 404)
     return _media_response(
         request,

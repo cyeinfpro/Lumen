@@ -78,6 +78,7 @@ _RETRYABLE_VIDEO_ERROR_CODES = {
     "fetch_failed",
     "provider_error",
     "upstream_network_error",
+    "upstream_not_ready",
     "upstream_timeout",
     "upstream_unknown",
 }
@@ -140,6 +141,17 @@ def _generation_attempt(generation: VideoGeneration) -> int:
 def _generation_diagnostics(generation: VideoGeneration) -> dict[str, Any]:
     raw = getattr(generation, "diagnostics", None)
     return dict(raw or {}) if isinstance(raw, dict) else {}
+
+
+def _submit_failure_billable_hint(exc: Exception) -> bool | None:
+    if _is_retryable_video_exception(exc):
+        return None
+    if isinstance(exc, VideoUpstreamError) and exc.error_code in {
+        "bad_response",
+        "upstream_unknown",
+    }:
+        return None
+    return False
 
 
 def _exception_log_info(exc: Exception):
@@ -461,7 +473,6 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
             if generation is None or generation.status in _TERMINAL_STATUSES:
                 await _release_lease(redis, task_id, token)
                 return
-            cached_submit = None
             if generation.provider_task_id:
                 try:
                     await _enqueue_poll(redis, generation.id, defer_s=0)
@@ -474,6 +485,16 @@ async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
                 await _release_lease(redis, task_id, token)
                 return
             cached_submit = await _load_submit_result(redis, generation.id)
+            if cached_submit is None and generation.deadline_at <= _now():
+                await _mark_pre_submit_expired(
+                    session,
+                    redis,
+                    generation,
+                    reason="deadline_expired_before_submit",
+                )
+                await session.commit()
+                await _release_lease(redis, task_id, token)
+                return
             if (
                 cached_submit is None
                 and generation.cancel_requested_at is not None
@@ -624,6 +645,32 @@ async def _mark_pre_submit_canceled(
     await _publish(redis, generation, EV_VIDEO_CANCELED)
 
 
+async def _mark_pre_submit_expired(
+    session, redis: Any, generation: VideoGeneration, *, reason: str
+) -> None:
+    diagnostics = _generation_diagnostics(generation)
+    diagnostics["pre_submit_expired_at"] = _now().isoformat()
+    generation.status = VideoGenerationStatus.EXPIRED.value
+    generation.progress_stage = VideoGenerationStage.FINISHED.value
+    generation.progress_pct = 100
+    generation.error_code = "deadline_expired"
+    generation.error_message = "video task expired before upstream submission"
+    generation.diagnostics = diagnostics
+    generation.finished_at = _now()
+    await resolve_video_billing(
+        session,
+        generation,
+        poll_result=PollResult(
+            status="expired",
+            failure_class="deadline_expired",
+            upstream_billable=False,
+            raw={"reason": reason},
+        ),
+        reason=reason,
+    )
+    await _publish(redis, generation, EV_VIDEO_FAILED)
+
+
 async def _fail_before_submit(
     redis: Any,
     task_id: str,
@@ -672,19 +719,23 @@ async def _fail_before_submit(
             generation.error_message = error_message
             generation.diagnostics = diagnostics
             generation.finished_at = _now()
+            billable_hint = _submit_failure_billable_hint(exc)
             await resolve_video_billing(
                 session,
                 generation,
                 poll_result=PollResult(
                     status="failed",
-                    upstream_billable=False,
+                    upstream_billable=billable_hint,
                     raw={
                         "phase": "submit",
                         "error": error_message,
                         "error_code": error_code,
+                        "upstream_cost_ambiguous": billable_hint is None,
                     },
                 ),
-                reason="submit_failed_before_upstream_cost",
+                reason="submit_failed_ambiguous_upstream_cost"
+                if billable_hint is None
+                else "submit_failed_before_upstream_cost",
             )
             await session.commit()
             await _publish(redis, generation, EV_VIDEO_FAILED)
@@ -785,21 +836,17 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
                 return
             provider = await _provider_for_generation(generation)
             adapter = adapter_for_provider(provider)
-            if generation.cancel_requested_at is not None:
-                await _try_provider_cancel(adapter, generation)
-                await session.commit()
             deadline_expired = generation.deadline_at <= _now()
+            if generation.cancel_requested_at is not None or deadline_expired:
+                await _try_provider_cancel(adapter, generation)
+                if deadline_expired:
+                    diagnostics = _generation_diagnostics(generation)
+                    diagnostics["deadline_expired_at"] = _now().isoformat()
+                    diagnostics["deadline_expired_polling_continues"] = True
+                    generation.diagnostics = diagnostics
+                await session.commit()
 
-        poll = (
-            PollResult(
-                status="expired",
-                failure_class="timeout",
-                upstream_billable=None,
-                raw={"deadline_expired": True},
-            )
-            if deadline_expired
-            else await adapter.poll(generation.provider_task_id)
-        )
+        poll = await adapter.poll(generation.provider_task_id)
         await _apply_poll_result(redis, task_id, poll)
     except VideoUpstreamError as exc:
         if not await _schedule_poll_retry(redis, task_id, exc):
@@ -859,13 +906,21 @@ async def _schedule_poll_retry(
         if generation is None or generation.status in _TERMINAL_STATUSES:
             return True
         now = _now()
-        if generation.deadline_at <= now or generation.poll_count >= _MAX_POLL_COUNT:
+        error_code = _video_exception_code(exc, default="upstream_unknown")
+        allow_after_deadline = error_code == "fetch_failed"
+        if (
+            (generation.deadline_at <= now and not allow_after_deadline)
+            or generation.poll_count >= _MAX_POLL_COUNT
+        ):
             return False
         remaining_s = int((generation.deadline_at - now).total_seconds())
-        if remaining_s <= 1:
+        if remaining_s <= 1 and not allow_after_deadline:
             return False
-        delay_s = max(1, min(_POLL_RETRY_DELAY_S, remaining_s - 1))
-        error_code = _video_exception_code(exc, default="upstream_unknown")
+        delay_s = (
+            _POLL_RETRY_DELAY_S
+            if allow_after_deadline and remaining_s <= 1
+            else max(1, min(_POLL_RETRY_DELAY_S, remaining_s - 1))
+        )
         error_message = _video_exception_message(exc, phase="poll")
         diagnostics = dict(generation.diagnostics or {})
         retry_item = {
@@ -1319,9 +1374,33 @@ def _fps(value: Any) -> float | None:
 
 
 def _looks_faststart(data: bytes) -> bool:
-    moov = data.find(b"moov")
-    mdat = data.find(b"mdat")
-    return moov != -1 and (mdat == -1 or moov < mdat)
+    offset = 0
+    moov_offset: int | None = None
+    mdat_offset: int | None = None
+    data_len = len(data)
+    while offset + 8 <= data_len:
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        box_type = data[offset + 4 : offset + 8]
+        header_size = 8
+        if size == 1:
+            if offset + 16 > data_len:
+                break
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = data_len - offset
+        if size < header_size:
+            break
+        if box_type == b"moov" and moov_offset is None:
+            moov_offset = offset
+        elif box_type == b"mdat" and mdat_offset is None:
+            mdat_offset = offset
+        if moov_offset is not None and mdat_offset is not None:
+            break
+        offset += size
+    return moov_offset is not None and (
+        mdat_offset is None or moov_offset < mdat_offset
+    )
 
 
 async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
@@ -1356,10 +1435,15 @@ async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
             .all()
         )
         for row in rows:
-            if row.deadline_at <= _now() and row.provider_task_id:
+            if row.provider_task_id:
                 await _enqueue_poll(redis, row.id, defer_s=0)
-            elif row.provider_task_id:
-                await _enqueue_poll(redis, row.id, defer_s=0)
+            elif row.deadline_at <= _now():
+                await _mark_pre_submit_expired(
+                    session,
+                    redis,
+                    row,
+                    reason="reconcile_deadline_expired_before_submit",
+                )
             else:
                 row.status = VideoGenerationStatus.QUEUED.value
                 row.progress_stage = VideoGenerationStage.QUEUED.value

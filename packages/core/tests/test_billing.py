@@ -580,6 +580,56 @@ async def test_settle_records_lifetime_spend_as_collected_amount(
 
 
 @pytest.mark.asyncio
+async def test_settle_records_zero_amount_audit_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    wallet = SimpleNamespace(
+        balance_micro=20,
+        hold_micro=0,
+        lifetime_spend_micro=7,
+        version=1,
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_held_amount(*_args: Any) -> int:
+        return 0
+
+    async def fake_ref_consumption(*_args: Any) -> None:
+        return None
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    tx = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="generation",
+        ref_id="gen-1",
+        actual_micro=0,
+        idempotency_key="settle:gen-1",
+    )
+
+    assert tx.kind == "settle"
+    assert tx.amount_micro == 0
+    assert tx.meta["actual_micro"] == 0
+    assert wallet.balance_micro == 20
+    assert wallet.hold_micro == 0
+    assert wallet.lifetime_spend_micro == 7
+    assert wallet.version == 2
+
+
+@pytest.mark.asyncio
 async def test_release_recomputes_held_amount_after_wallet_lock(
     monkeypatch: pytest.MonkeyPatch,
 ):

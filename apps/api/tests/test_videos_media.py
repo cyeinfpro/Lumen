@@ -139,6 +139,33 @@ def test_video_media_response_honors_if_none_match(tmp_path: Path) -> None:
     assert response.headers["etag"] == '"abc123"'
 
 
+def test_video_media_response_honors_weak_multi_and_wildcard_etags(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"0123456789")
+
+    multi = videos._media_response(  # noqa: SLF001
+        _request([(b"if-none-match", b'"other", W/"abc123"')]),
+        path,
+        media_type="video/mp4",
+        etag="abc123",
+        last_modified=None,
+        immutable=True,
+    )
+    wildcard = videos._media_response(  # noqa: SLF001
+        _request([(b"if-none-match", b"*")]),
+        path,
+        media_type="video/mp4",
+        etag="abc123",
+        last_modified=None,
+        immutable=True,
+    )
+
+    assert multi.status_code == 304
+    assert wildcard.status_code == 304
+
+
 def test_video_duration_options_include_smart_duration() -> None:
     assert (
         videos._duration_options(  # noqa: SLF001
@@ -148,10 +175,10 @@ def test_video_duration_options_include_smart_duration() -> None:
     )
 
 
-def test_reference_video_action_requires_image_and_video_pricing_paths() -> None:
+def test_reference_action_accepts_any_reference_pricing_path() -> None:
     model = "seedance-2.0"
 
-    assert not videos._has_video_price(  # noqa: SLF001
+    assert videos._has_video_price(  # noqa: SLF001
         {(model, "reference_image", "720p")},
         model=model,
         action="reference",
@@ -175,6 +202,14 @@ def test_reference_video_action_requires_image_and_video_pricing_paths() -> None
         action="reference",
         resolutions=["720p"],
     )
+
+
+def test_video_cursor_requires_timezone() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        videos._decode_cursor("2026-06-10T12:00:00|row-1")  # noqa: SLF001
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_cursor"
 
 
 def test_seedance_20_fast_resolution_options_exclude_1080p() -> None:
@@ -823,6 +858,40 @@ def test_idempotent_replay_allows_legacy_rows_without_fingerprint() -> None:
     videos._ensure_idempotent_replay_matches(row, "new")  # noqa: SLF001
 
 
+def test_reference_media_out_hides_internal_reference_token_url() -> None:
+    ref = videos._reference_media_out(  # noqa: SLF001
+        {
+            "kind": "image",
+            "image_id": "image-1",
+            "url": "https://lumen.example/api/images/reference/image-1/binary?token=secret",
+        }
+    )
+
+    assert ref is not None
+    assert ref.image_id == "image-1"
+    assert ref.url is None
+
+
+def test_public_video_diagnostics_redacts_raw_error_messages() -> None:
+    public = videos._public_video_diagnostics(  # noqa: SLF001
+        {
+            "billing_decision": "actual_usage_settle",
+            "last_poll_error": {
+                "at": "2026-06-10T00:00:00Z",
+                "error_code": "provider_error",
+                "message": "raw upstream secret",
+                "retryable": True,
+            },
+            "cancel_result": {"raw": "provider details"},
+        }
+    )
+
+    assert public["billing_decision"] == "actual_usage_settle"
+    assert public["last_poll_error"]["error_code"] == "provider_error"
+    assert "message" not in public["last_poll_error"]
+    assert "cancel_result" not in public
+
+
 @pytest.mark.asyncio
 async def test_reference_media_snapshots_default_labels_are_per_kind() -> None:
     class Db:
@@ -861,6 +930,13 @@ def test_reference_upload_ext_only_accepts_official_seedance_video_formats() -> 
         assert getattr(excinfo.value, "status_code", None) == 415
 
 
+def test_reference_video_magic_requires_iso_bmff_file() -> None:
+    assert videos._looks_like_reference_video(  # noqa: SLF001
+        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+    )
+    assert not videos._looks_like_reference_video(b"not-a-video")  # noqa: SLF001
+
+
 def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
     assert (
         videos._validate_reference_url("https://example.com/ref.mp4")  # noqa: SLF001
@@ -890,16 +966,18 @@ def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
 
 @pytest.mark.asyncio
 async def test_reference_media_snapshots_adds_public_url_for_uploaded_video() -> None:
+    video = SimpleNamespace(
+        id="video-1",
+        storage_key="u/user-1/vref/video-1/original.mp4",
+        sha256="sha",
+        mime="video/mp4",
+        metadata_jsonb={},
+        deleted_at=None,
+    )
+
     class Result:
         def scalar_one_or_none(self):
-            return SimpleNamespace(
-                id="video-1",
-                storage_key="u/user-1/vref/video-1/original.mp4",
-                sha256="sha",
-                mime="video/mp4",
-                metadata_jsonb={},
-                deleted_at=None,
-            )
+            return video
 
     class Db:
         async def execute(self, _statement):
@@ -915,6 +993,7 @@ async def test_reference_media_snapshots_adds_public_url_for_uploaded_video() ->
     assert snapshots[0]["url"].startswith(
         "https://lumen.example/api/videos/reference/video-1/binary?token="
     )
+    assert "reference_access_token_expires_at" in video.metadata_jsonb
 
 
 @pytest.mark.asyncio
@@ -964,6 +1043,7 @@ async def test_reference_media_snapshots_adds_public_url_for_image(
     )
     assert f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in snapshots[0]["url"]
     assert "video_reference_access_token" in image.metadata_jsonb
+    assert "video_reference_access_token_expires_at" in image.metadata_jsonb
     assert ensured == ["image-1"]
 
 
@@ -1111,6 +1191,9 @@ def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:
 def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:
     source = inspect.getsource(videos.retry_video_generation)
 
+    assert "account_mode_forbidden" in source
+    assert "video_retry_not_terminal" in source
+    assert "row.updated_at.isoformat()" in source
     assert "valid_reference_snapshots.append(item)" in source
     assert "reference_media_snapshot=valid_reference_snapshots" in source
 

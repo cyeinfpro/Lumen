@@ -513,8 +513,6 @@ async def settle(
     if consumed is not None:
         return consumed
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
-    if held <= 0 and raw_actual <= 0:
-        return None
     before_balance = wallet.balance_micro
     actual = raw_actual
     balance_delta = held - actual

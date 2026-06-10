@@ -270,11 +270,13 @@ async def ensure_video_reference_image_variant(
         width=rendered.width,
         height=rendered.height,
     )
-    db.add(variant)
     try:
-        await db.flush()
+        async with db.begin_nested():
+            db.add(variant)
+            await db.flush()
     except IntegrityError:
-        await db.rollback()
+        if variant in db:
+            db.expunge(variant)
         winner = (
             await db.execute(
                 select(ImageVariant)

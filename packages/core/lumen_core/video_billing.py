@@ -102,7 +102,7 @@ def split_video_resolution_pricing_variant(
         or normalized_resolution.endswith("p")
         and normalized_resolution[:-1].isdigit()
     ):
-        return variant, maybe_resolution
+        return variant, normalized_resolution
     return raw, None
 
 
@@ -369,6 +369,8 @@ async def settle_video_cost(
     resolution: str | None = None,
     pricing_variant: str | None = None,
     reference_media: Iterable[Any] | None = None,
+    estimated_micro: int | None = None,
+    max_estimate_multiplier: int = 3,
 ) -> int:
     effective_pricing_variant = pricing_variant or video_pricing_variant(
         action, reference_media, resolution=resolution
@@ -386,7 +388,12 @@ async def settle_video_cost(
             f"missing enabled video pricing rule for {model}/{effective_pricing_variant}",
             503,
         )
-    return round_micro_for_tokens(int(actual_total_tokens), int(unit_price))
+    actual_micro = round_micro_for_tokens(int(actual_total_tokens), int(unit_price))
+    if estimated_micro is not None:
+        estimate = int(estimated_micro)
+        if estimate > 0 and actual_micro > estimate * max(1, int(max_estimate_multiplier)):
+            return estimate
+    return actual_micro
 
 
 __all__ = [

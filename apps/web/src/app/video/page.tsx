@@ -178,13 +178,15 @@ const VIDEO_RESOLUTION_VALUES = new Set<VideoCreateIn["resolution"]>([
 ]);
 const ACTIVE_VIDEO_STATUSES = ["queued", "submitting", "submitted", "running"] as const;
 const TERMINAL_VIDEO_STATUSES = ["succeeded", "failed", "canceled", "expired"] as const;
-const SETTLING_VIDEO_STAGES = ["fetching", "storing", "billing"] as const;
+const SETTLING_VIDEO_STAGES = ["fetching"] as const;
 const VIDEO_ACTIVE_POLL_MS = 2500;
 const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
 const VIDEO_REFRESH_RETRY_BASE_MS = 1500;
 const VIDEO_REFRESH_RETRY_MAX_MS = 15000;
 const VIDEO_PROMPT_VARIANT_COUNT = 3;
 const VIDEO_HISTORY_PAGE_SIZE = 12;
+const VIDEO_SEED_MIN = -1;
+const VIDEO_SEED_MAX = 4_294_967_295;
 const VIDEO_PROMPT_VARIANT_TITLES = [
   "推荐镜头版",
   "动作节奏版",
@@ -780,20 +782,48 @@ function storyboardImageAspect(value: string): "16:9" | "9:16" | "1:1" | "21:9" 
   return "16:9";
 }
 
-async function waitForStoryboardCompletion(id: string): Promise<BackendCompletion> {
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  return new Promise((resolve, reject) => {
+    let timer = 0;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    };
+    const abort = () => {
+      cleanup();
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    timer = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function waitForStoryboardCompletion(
+  id: string,
+  signal?: AbortSignal,
+): Promise<BackendCompletion> {
   for (let attempt = 0; attempt < 90; attempt += 1) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const task = await getTask("completions", id);
     if (isTerminalCompletionTask(task)) return task;
-    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    await abortableDelay(1200, signal);
   }
   throw new Error("AI 文本任务超时");
 }
 
-async function waitForStoryboardImageTask(id: string): Promise<BackendGeneration> {
+async function waitForStoryboardImageTask(
+  id: string,
+  signal?: AbortSignal,
+): Promise<BackendGeneration> {
   for (let attempt = 0; attempt < 150; attempt += 1) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const task = await getTask("generations", id);
     if (isTerminalImageTask(task)) return task;
-    await new Promise((resolve) => window.setTimeout(resolve, 1400));
+    await abortableDelay(1400, signal);
   }
   throw new Error("图片任务超时");
 }
@@ -883,14 +913,6 @@ const STAGE_COPY: Record<
     label: "取回结果",
     detail: "正在取回文件。",
   },
-  storing: {
-    label: "保存中",
-    detail: "正在保存。",
-  },
-  billing: {
-    label: "结算中",
-    detail: "正在结算。",
-  },
   finished: {
     label: "已完成",
     detail: "已保存。",
@@ -927,7 +949,6 @@ function isActiveVideo(item: VideoGenerationOut): boolean {
   )) {
     return true;
   }
-  if (item.status === "succeeded" && !item.video) return true;
   return SETTLING_VIDEO_STAGES.includes(
     item.progress_stage as (typeof SETTLING_VIDEO_STAGES)[number],
   );
@@ -987,7 +1008,11 @@ function parseSeed(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) ? parsed : null;
+  return Number.isSafeInteger(parsed) &&
+    parsed >= VIDEO_SEED_MIN &&
+    parsed <= VIDEO_SEED_MAX
+    ? parsed
+    : null;
 }
 
 function firstModelForAction(options: VideoOptionsOut | undefined, action: VideoAction): string {
@@ -1117,7 +1142,7 @@ function estimateHoldMicro(
     findPrice(pricingAction) ??
     (action === "reference" ? findPrice("reference") : undefined) ??
     (action === "reference" && !referenceHasVideo ? findPrice("i2v") : undefined);
-  if (!price) return { tokens, micro: 0 };
+  if (!price) return null;
   return { tokens, micro: Math.round((tokens * price.price.micro) / 1_000_000) };
 }
 
@@ -1300,6 +1325,7 @@ export default function VideoPage() {
   const referenceFileRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const promptEnhanceAbortRef = useRef<AbortController | null>(null);
+  const storyboardAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const terminalHistorySyncedRef = useRef<Set<string>>(new Set());
   const refreshInFlightRef = useRef<Set<string>>(new Set());
   const scheduledRefreshTimersRef = useRef<Map<string, number>>(new Map());
@@ -1344,6 +1370,7 @@ export default function VideoPage() {
   const [inputImageId, setInputImageId] = useState("");
   const [uploadedLabel, setUploadedLabel] = useState("");
   const [referenceMedia, setReferenceMedia] = useState<ReferenceDraft[]>([]);
+  const referenceMediaRef = useRef<ReferenceDraft[]>([]);
   const [assetUrlInput, setAssetUrlInput] = useState("");
   const [items, setItems] = useState<VideoGenerationOut[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState("");
@@ -1382,6 +1409,28 @@ export default function VideoPage() {
   );
 
   const options = optionsQ.data;
+
+  useEffect(() => {
+    referenceMediaRef.current = referenceMedia;
+  }, [referenceMedia]);
+
+  useEffect(
+    () => () => {
+      storyboardAbortControllersRef.current.forEach((controller) => controller.abort());
+      storyboardAbortControllersRef.current.clear();
+    },
+    [],
+  );
+
+  const createStoryboardAbortController = useCallback(() => {
+    const controller = new AbortController();
+    storyboardAbortControllersRef.current.add(controller);
+    return controller;
+  }, []);
+
+  const releaseStoryboardAbortController = useCallback((controller: AbortController) => {
+    storyboardAbortControllersRef.current.delete(controller);
+  }, []);
   const effectiveItems = useMemo(
     () => mergeById(historyItems, items),
     [historyItems, items],
@@ -1423,6 +1472,7 @@ export default function VideoPage() {
         referenceMedia,
       ).length
     : 0;
+  const seedIsValid = !seed.trim() || parseSeed(seed) !== null;
   const storyboardAssetReadyCount = storyboardAssets.filter(
     (asset) => asset.imageId,
   ).length;
@@ -1888,7 +1938,9 @@ export default function VideoPage() {
         throw new Error("故事板参考只支持图片，视频参考请在单条参考生成中使用");
       }
       if (file.type.startsWith("image/")) {
-        if (referenceMedia.filter((item) => item.kind === "image").length >= 9) {
+        if (
+          referenceMediaRef.current.filter((item) => item.kind === "image").length >= 9
+        ) {
           throw new Error("参考图片最多 9 张");
         }
         const img = await uploadImage(file);
@@ -1899,7 +1951,9 @@ export default function VideoPage() {
         };
       }
       if (file.type.startsWith("video/")) {
-        if (referenceMedia.filter((item) => item.kind === "video").length >= 3) {
+        if (
+          referenceMediaRef.current.filter((item) => item.kind === "video").length >= 3
+        ) {
           throw new Error("参考视频最多 3 个");
         }
         const video = await uploadVideo(file);
@@ -1913,19 +1967,29 @@ export default function VideoPage() {
     },
     onSuccess: (ref) => {
       clearPromptEnhanceChoices();
-      const label = nextReferenceLabel(ref.kind);
-      setReferenceMedia((prev) => [
-        ...prev,
-        {
-          _key: uuid(),
-          kind: ref.kind,
-          image_id: ref.kind === "image" ? ref.image_id : null,
-          video_id: ref.kind === "video" ? ref.video_id : null,
-          label,
-          display: ref.display,
-        },
-      ]);
-      toast.success("参考素材已上传");
+      let accepted = false;
+      setReferenceMedia((prev) => {
+        const limit = ref.kind === "image" ? 9 : 3;
+        const currentCount = prev.filter((item) => item.kind === ref.kind).length;
+        if (currentCount >= limit) {
+          toast.error(ref.kind === "image" ? "参考图片最多 9 张" : "参考视频最多 3 个");
+          return prev;
+        }
+        accepted = true;
+        const label = `${ref.kind === "image" ? "图片" : "视频"} ${currentCount + 1}`;
+        return [
+          ...prev,
+          {
+            _key: uuid(),
+            kind: ref.kind,
+            image_id: ref.kind === "image" ? ref.image_id : null,
+            video_id: ref.kind === "video" ? ref.video_id : null,
+            label,
+            display: ref.display,
+          },
+        ];
+      });
+      if (accepted) toast.success("参考素材已上传");
     },
     onError: (err) => toast.error("上传失败", { description: err instanceof Error ? err.message : undefined }),
   });
@@ -1972,25 +2036,37 @@ export default function VideoPage() {
 
   const runStoryboardTextTask = useCallback(
     async (text: string) => {
+      const controller = createStoryboardAbortController();
       const conversationId = await ensureStoryboardConversation();
-      const out = await postMessage(conversationId, {
-        idempotency_key: uuid(),
-        text,
-        intent: "chat",
-        source: "video_storyboard_workspace",
-        action_source: "storyboard.preproduction.chat",
-        trace_id: uuid(),
-        chat_params: { fast: false },
-      });
-      const completionId = out.completion_id;
-      if (!completionId) throw new Error("AI 未返回文本任务");
-      const task = await waitForStoryboardCompletion(completionId);
-      if (task.status !== "succeeded") {
-        throw new Error(task.error_message || "AI 文本任务失败");
+      try {
+        const out = await postMessage(conversationId, {
+          idempotency_key: uuid(),
+          text,
+          intent: "chat",
+          source: "video_storyboard_workspace",
+          action_source: "storyboard.preproduction.chat",
+          trace_id: uuid(),
+          chat_params: { fast: false },
+        });
+        const completionId = out.completion_id;
+        if (!completionId) throw new Error("AI 未返回文本任务");
+        const task = await waitForStoryboardCompletion(
+          completionId,
+          controller.signal,
+        );
+        if (task.status !== "succeeded") {
+          throw new Error(task.error_message || "AI 文本任务失败");
+        }
+        return task.text.trim();
+      } finally {
+        releaseStoryboardAbortController(controller);
       }
-      return task.text.trim();
     },
-    [ensureStoryboardConversation],
+    [
+      createStoryboardAbortController,
+      ensureStoryboardConversation,
+      releaseStoryboardAbortController,
+    ],
   );
 
   const handleStoryboardScriptChange = useCallback((value: string) => {
@@ -2188,16 +2264,29 @@ export default function VideoPage() {
       if (!generationId) throw new Error("AI 未返回图片任务");
       const initialTask = await getTask("generations", generationId);
       setStoryboardImageTasks((prev) => mergeImageTasks(prev, [initialTask]));
-      const finalTask = await waitForStoryboardImageTask(generationId);
-      setStoryboardImageTasks((prev) => mergeImageTasks(prev, [finalTask]));
-      if (finalTask.status !== "succeeded") {
-        throw new Error(finalTask.error_message || "图片任务失败");
+      const controller = createStoryboardAbortController();
+      try {
+        const finalTask = await waitForStoryboardImageTask(
+          generationId,
+          controller.signal,
+        );
+        setStoryboardImageTasks((prev) => mergeImageTasks(prev, [finalTask]));
+        if (finalTask.status !== "succeeded") {
+          throw new Error(finalTask.error_message || "图片任务失败");
+        }
+        const image = await findGeneratedImage(conversationId, generationId);
+        if (!image) throw new Error("图片生成成功，但没有找到输出图");
+        return { task: finalTask, image };
+      } finally {
+        releaseStoryboardAbortController(controller);
       }
-      const image = await findGeneratedImage(conversationId, generationId);
-      if (!image) throw new Error("图片生成成功，但没有找到输出图");
-      return { task: finalTask, image };
     },
-    [aspectRatio, ensureStoryboardConversation],
+    [
+      aspectRatio,
+      createStoryboardAbortController,
+      ensureStoryboardConversation,
+      releaseStoryboardAbortController,
+    ],
   );
 
   const generateStoryboardAssetImage = useCallback(
@@ -2574,6 +2663,7 @@ export default function VideoPage() {
     ) return "分镜图已过期";
     if (!selectedShot.keyframeApproved) return "先批准分镜图";
     if (selectedShotVideoReferenceCount === 0) return "缺少生成段参考图";
+    if (!seedIsValid) return "Seed 需为 -1 到 4294967295 的整数";
     if (storyboardEstimate === null) return "缺少预扣估算";
     return "可用分镜图生成视频段";
   }, [
@@ -2589,6 +2679,7 @@ export default function VideoPage() {
     storyboardResolutionOptions,
     storyboardSelectedModel,
     selectedShotVideoReferenceCount,
+    seedIsValid,
   ]);
 
   const canSubmitStoryboardShot =
@@ -2606,6 +2697,7 @@ export default function VideoPage() {
     ) &&
     selectedShotVideoReferenceCount > 0 &&
     storyboardResolutionOptions.includes(storyboardEffectiveResolution) &&
+    seedIsValid &&
     storyboardEstimate !== null &&
     !isSubmittingStoryboard;
 
@@ -2639,6 +2731,7 @@ export default function VideoPage() {
       if (videoReferenceMedia.length === 0) {
         throw new Error("至少需要一张生成段参考图");
       }
+      if (!seedIsValid) throw new Error("Seed 需为 -1 到 4294967295 的整数");
       const shotEstimate = estimateHoldMicro(options, {
         model: storyboardSelectedModel,
         billingModel: storyboardBillingModel,
@@ -2688,6 +2781,7 @@ export default function VideoPage() {
       qc,
       scheduleGenerationRefresh,
       seed,
+      seedIsValid,
       storyboardAction,
       storyboardBillingModel,
       referenceMedia,
@@ -2848,7 +2942,12 @@ export default function VideoPage() {
     mutationFn: cancelVideoGeneration,
     onSuccess: (gen) => {
       setItems((prev) => mergeById(prev, [gen]));
-      toast.success("已请求取消");
+      toast.success("已请求取消", {
+        description:
+          gen.provider_kind === "dashscope" || gen.provider_kind === "omni_flash"
+            ? "该供应商可能无法中止已提交任务，若上游最终成功仍会按结果计费。"
+            : undefined,
+      });
       scheduleGenerationRefresh(gen.id, { forceHistorySync: true });
     },
     onError: (err) => toast.error("取消失败", { description: err instanceof Error ? err.message : undefined }),
@@ -3049,6 +3148,7 @@ export default function VideoPage() {
     if (action === "reference" && referenceMedia.length === 0) {
       return "先添加参考素材";
     }
+    if (!seedIsValid) return "Seed 需为 -1 到 4294967295 的整数";
     if (estimate === null) return "缺少预扣估算";
     return "可以提交";
   }, [
@@ -3064,6 +3164,7 @@ export default function VideoPage() {
     optionsQ.isLoading,
     prompt,
     referenceMedia.length,
+    seedIsValid,
     effectiveResolution,
     selectedModel,
   ]);
@@ -3077,6 +3178,7 @@ export default function VideoPage() {
     (action === "t2v" ||
       (action === "i2v" && inputImageId.trim().length > 0) ||
       (action === "reference" && referenceMedia.length > 0)) &&
+    seedIsValid &&
     estimate !== null &&
     !createMut.isPending;
   const serviceEnabled = Boolean(options?.enabled);
@@ -3630,6 +3732,7 @@ export default function VideoPage() {
                           item={item}
                           onCancel={() => cancelMut.mutate(item.id)}
                           onRetry={() => retryMut.mutate(item.id)}
+                          retryDisabled={retryMut.isPending}
                           onCopy={() => {
                             void navigator.clipboard?.writeText(item.prompt);
                             toast.success("描述已复制");
@@ -3668,6 +3771,7 @@ export default function VideoPage() {
                         item={item}
                         onCancel={() => cancelMut.mutate(item.id)}
                         onRetry={() => retryMut.mutate(item.id)}
+                        retryDisabled={retryMut.isPending}
                         onCopy={() => {
                           void navigator.clipboard?.writeText(item.prompt);
                           toast.success("描述已复制");
@@ -6861,14 +6965,16 @@ function VideoPreviewDialog({
             >
               套用参数
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onRetry}
-              leftIcon={<Play className="h-3.5 w-3.5" />}
-            >
-              重新生成
-            </Button>
+            {isFailedHistoryVideo(item) && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onRetry}
+                leftIcon={<Play className="h-3.5 w-3.5" />}
+              >
+                重新生成
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -6943,6 +7049,7 @@ function TaskRow({
   item,
   onCancel,
   onRetry,
+  retryDisabled = false,
   onCopy,
   onUseDraft,
   onDelete,
@@ -6953,6 +7060,7 @@ function TaskRow({
   item: VideoGenerationOut;
   onCancel: () => void;
   onRetry: () => void;
+  retryDisabled?: boolean;
   onCopy: () => void;
   onUseDraft?: () => void;
   onDelete?: () => void;
@@ -6964,6 +7072,7 @@ function TaskRow({
   const progress = progressForItem(item);
   const copy = stageCopy(item);
   const videoItem = hasVideo(item) ? item : null;
+  const retryable = isFailedHistoryVideo(item);
   return (
     <article
       className={cn(
@@ -7021,14 +7130,18 @@ function TaskRow({
             取消
           </Button>
         )}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onRetry}
-          leftIcon={<Play className="h-3.5 w-3.5" />}
-        >
-          重新生成
-        </Button>
+        {retryable && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={retryDisabled}
+            loading={retryDisabled}
+            onClick={onRetry}
+            leftIcon={<Play className="h-3.5 w-3.5" />}
+          >
+            重新生成
+          </Button>
+        )}
         <Button
           variant="outline"
           size="sm"
