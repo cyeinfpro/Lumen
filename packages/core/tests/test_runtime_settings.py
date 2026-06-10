@@ -268,6 +268,27 @@ def test_model_library_sync_proxy_settings_are_registered_and_validated():
     assert parse_value(proxy_name, "s5-us") == "s5-us"
 
 
+def test_video_providers_setting_allows_shared_proxy_reference() -> None:
+    spec = get_spec("video.providers")
+    assert spec is not None
+    raw = json.dumps(
+        {
+            "providers": [
+                {
+                    "name": "video-main",
+                    "kind": "volcano",
+                    "base_url": "https://ark.example.com/api/v3",
+                    "api_key": "sk-test",
+                    "proxy": "shared-socks",
+                    "models": {"seedance-2.0:t2v": "seedance-upstream"},
+                }
+            ]
+        }
+    )
+
+    assert parse_value(spec, raw) == raw
+
+
 def test_legacy_text_to_image_route_key_still_registered_for_fallback():
     """旧键保留在 SUPPORTED_SETTINGS，让现有 DB 行仍能被 worker resolve 拿到。"""
     spec = get_spec("image.text_to_image_primary_route")

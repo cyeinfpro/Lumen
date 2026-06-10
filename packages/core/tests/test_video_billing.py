@@ -172,6 +172,10 @@ def test_video_pricing_variant_splits_reference_media_kind() -> None:
         "t2v",
         "4k",
     )
+    assert video_billing.split_video_resolution_pricing_variant("t2v_1080P") == (
+        "t2v",
+        "1080p",
+    )
     assert (
         video_billing.video_pricing_variant(
             "reference",
@@ -329,6 +333,35 @@ async def test_settle_video_cost_derives_reference_video_variant_without_explici
 
     assert calls == ["reference_video_720p"]
     assert charged == 3_886
+
+
+@pytest.mark.asyncio
+async def test_settle_video_cost_caps_implausible_usage_to_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_price(
+        _db, *, scope: str, key: str, unit: str, variant: str
+    ) -> int | None:
+        assert (scope, key, unit, variant) == (
+            "video",
+            "seedance-2.0",
+            "per_mtoken",
+            "t2v_720p",
+        )
+        return 1_000_000
+
+    monkeypatch.setattr(video_billing, "pricing_price_micro", fake_price)
+
+    charged = await video_billing.settle_video_cost(
+        object(),  # type: ignore[arg-type]
+        model="seedance-2.0",
+        action="t2v",
+        actual_total_tokens=10_000_000_000,
+        resolution="720p",
+        estimated_micro=5_000,
+    )
+
+    assert charged == 5_000
 
 
 @pytest.mark.asyncio

@@ -1164,7 +1164,7 @@ def parse_value(spec: SettingSpec, raw: str) -> object:
     if spec.key == "providers":
         return validate_providers(raw)
     if spec.key == "video.providers":
-        return validate_video_providers(raw)
+        return validate_video_providers(raw, allow_missing_proxy=True)
     if spec.key == "video.token_hold_estimates":
         return validate_video_token_hold_estimates(raw)
     if spec.key == "site.public_base_url":

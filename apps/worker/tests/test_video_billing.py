@@ -70,10 +70,12 @@ async def test_resolve_video_billing_settles_success_with_actual_usage(
         actual_total_tokens: int,
         resolution: str | None = None,
         pricing_variant: str | None = None,
+        estimated_micro: int | None = None,
     ) -> int:
         assert (model, action, actual_total_tokens) == ("seedance-2.0", "t2v", 42_000)
         assert resolution == "720p"
         assert pricing_variant == "t2v_720p"
+        assert estimated_micro == 1_000
         return 420
 
     async def settle(_session, user_id: str, **kwargs):
@@ -141,6 +143,7 @@ async def test_resolve_video_billing_uses_reference_video_pricing_variant(
         actual_total_tokens: int,
         resolution: str | None = None,
         pricing_variant: str | None = None,
+        estimated_micro: int | None = None,
     ) -> int:
         assert (model, action, actual_total_tokens) == (
             "seedance-2.0",
@@ -149,6 +152,7 @@ async def test_resolve_video_billing_uses_reference_video_pricing_variant(
         )
         assert resolution == "720p"
         assert pricing_variant == "reference_video_720p"
+        assert estimated_micro == 1_000
         return 840
 
     async def settle(_session, user_id: str, **kwargs):
@@ -205,6 +209,7 @@ async def test_resolve_video_billing_uses_fast_model_from_upstream_model(
         actual_total_tokens: int,
         resolution: str | None = None,
         pricing_variant: str | None = None,
+        estimated_micro: int | None = None,
     ) -> int:
         assert (model, action, actual_total_tokens) == (
             "seedance-2.0-fast",
@@ -213,6 +218,7 @@ async def test_resolve_video_billing_uses_fast_model_from_upstream_model(
         )
         assert resolution == "720p"
         assert pricing_variant == "t2v_720p"
+        assert estimated_micro == 1_000
         return 4_029_300
 
     async def settle(_session, user_id: str, **kwargs):
@@ -293,7 +299,7 @@ async def test_resolve_video_billing_releases_when_upstream_not_billable(
 
 
 @pytest.mark.asyncio
-async def test_resolve_video_billing_releases_success_when_usage_missing(
+async def test_resolve_video_billing_charges_success_when_usage_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = FakeSession()
@@ -302,20 +308,24 @@ async def test_resolve_video_billing_releases_success_when_usage_missing(
     async def held_amount_for_ref(*_args, **_kwargs) -> int:
         return 1_000
 
-    async def release(_session, user_id: str, **kwargs):
-        calls.append(("release", {"user_id": user_id, **kwargs}))
-        return SimpleNamespace(amount_micro=1_000, balance_after=10_000, hold_after=0)
+    async def allow_negative_balance() -> bool:
+        return False
 
-    async def fail_settle_cost(*_args, **_kwargs) -> int:
-        raise AssertionError("must not settle without official usage tokens")
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_000, balance_after=9_000, hold_after=0)
 
     monkeypatch.setattr(
         video_billing.worker_billing,
         "held_amount_for_ref",
         held_amount_for_ref,
     )
-    monkeypatch.setattr(video_billing.billing_core, "release", release)
-    monkeypatch.setattr(video_billing, "settle_video_cost", fail_settle_cost)
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
 
     resolution = await video_billing.resolve_video_billing(
         session,  # type: ignore[arg-type]
@@ -324,17 +334,17 @@ async def test_resolve_video_billing_releases_success_when_usage_missing(
         reason="succeeded",
     )
 
-    assert resolution.decision == "missing_usage_release"
-    assert resolution.actual_micro == 0
+    assert resolution.decision == "missing_usage_default_charge"
+    assert resolution.actual_micro == 1_000
     assert resolution.actual_tokens is None
-    assert resolution.released is True
-    assert calls[0][1]["meta"]["billing_decision"] == "missing_usage_release"
+    assert resolution.released is False
+    assert calls[0][1]["meta"]["billing_decision"] == "missing_usage_default_charge"
     assert calls[0][1]["meta"]["pricing_variant"] == "t2v_720p"
-    assert session.added[0].details["decision"] == "missing_usage_release"
+    assert session.added[0].details["decision"] == "missing_usage_default_charge"
 
 
 @pytest.mark.asyncio
-async def test_resolve_video_billing_releases_terminal_without_billable_signal(
+async def test_resolve_video_billing_charges_terminal_without_billable_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = FakeSession()
@@ -343,20 +353,24 @@ async def test_resolve_video_billing_releases_terminal_without_billable_signal(
     async def held_amount_for_ref(*_args, **_kwargs) -> int:
         return 1_000
 
-    async def release(_session, user_id: str, **kwargs):
-        calls.append(("release", {"user_id": user_id, **kwargs}))
-        return SimpleNamespace(amount_micro=1_000, balance_after=10_000, hold_after=0)
+    async def allow_negative_balance() -> bool:
+        return False
 
-    async def fail_settle(_session, user_id: str, **kwargs):
-        raise AssertionError("must not settle failed video without billable signal")
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_000, balance_after=9_000, hold_after=0)
 
     monkeypatch.setattr(
         video_billing.worker_billing,
         "held_amount_for_ref",
         held_amount_for_ref,
     )
-    monkeypatch.setattr(video_billing.billing_core, "release", release)
-    monkeypatch.setattr(video_billing.billing_core, "settle", fail_settle)
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
 
     resolution = await video_billing.resolve_video_billing(
         session,  # type: ignore[arg-type]
@@ -365,15 +379,15 @@ async def test_resolve_video_billing_releases_terminal_without_billable_signal(
         reason="failed",
     )
 
-    assert resolution.decision == "terminal_not_billable_release"
-    assert resolution.actual_micro == 0
-    assert resolution.released is True
-    assert calls[0][1]["idempotency_key"] == "video_generation:release:video-gen-1"
-    assert calls[0][1]["meta"]["billing_decision"] == "terminal_not_billable_release"
+    assert resolution.decision == "unknown_default_charge"
+    assert resolution.actual_micro == 1_000
+    assert resolution.released is False
+    assert calls[0][1]["idempotency_key"] == "video_generation:settle:video-gen-1"
+    assert calls[0][1]["meta"]["billing_decision"] == "unknown_default_charge"
 
 
 @pytest.mark.asyncio
-async def test_resolve_video_billing_does_not_charge_failed_usage_without_billable(
+async def test_resolve_video_billing_charges_failed_usage_without_billable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = FakeSession()
@@ -382,20 +396,41 @@ async def test_resolve_video_billing_does_not_charge_failed_usage_without_billab
     async def held_amount_for_ref(*_args, **_kwargs) -> int:
         return 1_000
 
-    async def release(_session, user_id: str, **kwargs):
-        calls.append(("release", {"user_id": user_id, **kwargs}))
-        return SimpleNamespace(amount_micro=1_000, balance_after=10_000, hold_after=0)
+    async def allow_negative_balance() -> bool:
+        return False
 
-    async def fail_settle_cost(*_args, **_kwargs) -> int:
-        raise AssertionError("failed videos are not billable without billable=true")
+    async def settle_cost(
+        _session,
+        *,
+        model: str,
+        action: str,
+        actual_total_tokens: int,
+        resolution: str | None = None,
+        pricing_variant: str | None = None,
+        estimated_micro: int | None = None,
+    ) -> int:
+        assert (model, action, actual_total_tokens) == ("seedance-2.0", "t2v", 42_000)
+        assert resolution == "720p"
+        assert pricing_variant == "t2v_720p"
+        assert estimated_micro == 1_000
+        return 420
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-420, balance_after=9_580, hold_after=0)
 
     monkeypatch.setattr(
         video_billing.worker_billing,
         "held_amount_for_ref",
         held_amount_for_ref,
     )
-    monkeypatch.setattr(video_billing.billing_core, "release", release)
-    monkeypatch.setattr(video_billing, "settle_video_cost", fail_settle_cost)
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing, "settle_video_cost", settle_cost)
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
 
     resolution = await video_billing.resolve_video_billing(
         session,  # type: ignore[arg-type]
@@ -404,7 +439,8 @@ async def test_resolve_video_billing_does_not_charge_failed_usage_without_billab
         reason="failed",
     )
 
-    assert resolution.decision == "terminal_not_billable_release"
-    assert resolution.actual_micro == 0
+    assert resolution.decision == "failure_usage_settle"
+    assert resolution.actual_micro == 420
     assert resolution.actual_tokens == 42_000
+    assert resolution.released is False
     assert calls[0][1]["meta"]["actual_tokens"] == 42_000

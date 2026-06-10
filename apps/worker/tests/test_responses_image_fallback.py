@@ -154,8 +154,16 @@ def _patch_provider_pool_to_use_resolved_runtime(
     async def fake_resolve(_key: str) -> str | None:
         return None
 
+    async def fake_resolve_public_http_target(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(upstream, "resolve", fake_resolve)
+    monkeypatch.setattr(
+        upstream,
+        "resolve_public_http_target",
+        fake_resolve_public_http_target,
+    )
 
 
 def _assert_webp_bytes(raw: bytes) -> None:

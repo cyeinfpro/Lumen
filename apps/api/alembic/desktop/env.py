@@ -19,7 +19,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-_db_url = make_url(settings.database_url)
+_db_url = make_url(config.get_main_option("sqlalchemy.url") or settings.database_url)
 if _db_url.drivername == "sqlite+aiosqlite":
     _db_url = _db_url.set(drivername="sqlite")
 sync_url = _db_url.render_as_string(hide_password=False)

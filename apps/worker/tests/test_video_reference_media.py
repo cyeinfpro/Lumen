@@ -18,6 +18,7 @@ from app.video_upstream import (
     VolcanoThirdPartySeedanceAdapter,
     _billable,
     _duration_usage_total_tokens,
+    _http_error,
     _usage_total_tokens,
     adapter_for_provider,
 )
@@ -152,7 +153,7 @@ class CaptureClient:
     async def __aexit__(self, *_exc):
         return None
 
-    async def post(self, path: str, *, json):
+    async def post(self, path: str, *, json, **_kwargs):
         self.path = path
         self.body = json
         return httpx.Response(200, json={"id": "seedance-task-1"})
@@ -163,7 +164,7 @@ class DashScopeCaptureClient(CaptureClient):
         super().__init__()
         self.get_json = get_json or {}
 
-    async def post(self, path: str, *, json):
+    async def post(self, path: str, *, json, **_kwargs):
         self.path = path
         self.body = json
         return httpx.Response(200, json={"output": {"task_id": "hh-task-1"}})
@@ -187,7 +188,7 @@ class ThirdPartyCaptureClient(CaptureClient):
         self.delete_json = delete_json or {"code": "success"}
         self.params = None
 
-    async def post(self, path: str, *, json):
+    async def post(self, path: str, *, json, **_kwargs):
         self.path = path
         self.body = json
         return httpx.Response(200, json=self.post_json)
@@ -208,7 +209,7 @@ class SequentialThirdPartyCaptureClient(ThirdPartyCaptureClient):
         self.responses = responses
         self.requests: list[dict] = []
 
-    async def post(self, path: str, *, json):
+    async def post(self, path: str, *, json, **_kwargs):
         self.path = path
         self.body = json
         self.requests.append({"path": path, "body": json})
@@ -580,7 +581,7 @@ async def test_volcano_third_party_poll_respects_explicit_billable_false() -> No
 
 
 @pytest.mark.asyncio
-async def test_unified_video_create_submit_uses_omni_flash_payload() -> None:
+async def test_unified_video_create_submit_uses_omni_flash_generations_payload() -> None:
     provider = VideoProviderDefinition(
         name="google-omni-flash",
         kind="omni_flash",
@@ -610,7 +611,7 @@ async def test_unified_video_create_submit_uses_omni_flash_payload() -> None:
     )
 
     assert result.provider_task_id == "omni-task-1"
-    assert client.path == "v1/video/create"
+    assert client.path == "v1/video/generations"
     assert client.body == {
         "model": "gemini_omni_flash",
         "prompt": "make it cinematic",
@@ -665,6 +666,8 @@ async def test_unified_video_create_retries_invalid_url_with_data_urls() -> None
 
     assert result.provider_task_id == "omni-task-1"
     assert len(client.requests) == 2
+    assert client.requests[0]["path"] == "v1/video/generations"
+    assert client.requests[1]["path"] == "v1/video/generations"
     assert client.requests[0]["body"]["images"] == [
         "https://lumen.example/api/images/reference/image-1/binary"
     ]
@@ -700,7 +703,51 @@ async def test_unified_video_create_base_url_can_include_v1_path() -> None:
         )
     )
 
-    assert client.path == "video/create"
+    assert client.path == "video/generations"
+
+
+@pytest.mark.asyncio
+async def test_unified_video_create_falls_back_to_legacy_create_path() -> None:
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={"omni-flash:t2v": "gemini_omni_flash"},
+    )
+    adapter = UnifiedVideoCreateAdapter(provider)
+    client = SequentialThirdPartyCaptureClient(
+        [
+            httpx.Response(
+                404,
+                json={
+                    "error": {"message": "Invalid URL (POST /v1/video/generations)"}
+                },
+            ),
+            httpx.Response(200, json={"task_id": "omni-task-1"}),
+        ]
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="t2v",
+            model="omni-flash",
+            upstream_model="gemini_omni_flash",
+            prompt="a product shot",
+            duration_s=5,
+            resolution="720p",
+            aspect_ratio="adaptive",
+        )
+    )
+
+    assert result.provider_task_id == "omni-task-1"
+    assert [request["path"] for request in client.requests] == [
+        "v1/video/generations",
+        "v1/video/create",
+    ]
 
 
 @pytest.mark.asyncio
@@ -727,12 +774,66 @@ async def test_unified_video_create_poll_reads_query_result() -> None:
 
     result = await adapter.poll("omni-task-1")
 
-    assert client.path == "v1/video/query"
-    assert client.params == {"id": "omni-task-1"}
+    assert client.path == "v1/video/generations/omni-task-1"
+    assert client.params is None
     assert result.status == "succeeded"
     assert result.progress == 100
     assert result.video_url == "https://cdn.example/omni.mp4"
     assert result.usage_total_tokens == 6_000_000
+    assert result.upstream_billable is True
+
+
+@pytest.mark.asyncio
+async def test_unified_video_create_poll_does_not_complete_on_ambiguous_running_url() -> None:
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={"omni-flash:t2v": "gemini_omni_flash"},
+    )
+    adapter = UnifiedVideoCreateAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "status": "running",
+            "progress": 42,
+            "url": "https://gateway.example.com/v1/video/generations/omni-task-1",
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("omni-task-1")
+
+    assert result.status == "running"
+    assert result.progress == 42
+    assert result.video_url == "https://gateway.example.com/v1/video/generations/omni-task-1"
+    assert result.upstream_billable is None
+
+
+@pytest.mark.asyncio
+async def test_unified_video_create_poll_completes_on_explicit_running_video_url() -> None:
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={"omni-flash:t2v": "gemini_omni_flash"},
+    )
+    adapter = UnifiedVideoCreateAdapter(provider)
+    client = ThirdPartyCaptureClient(
+        get_json={
+            "status": "running",
+            "progress": 100,
+            "data": {"video_urls": ["https://cdn.example/omni.mp4"]},
+        }
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    result = await adapter.poll("omni-task-1")
+
+    assert result.status == "succeeded"
+    assert result.progress == 100
+    assert result.video_url == "https://cdn.example/omni.mp4"
     assert result.upstream_billable is True
 
 
@@ -812,7 +913,7 @@ async def test_volcano_third_party_cancel_uses_moyu_cancel_path() -> None:
 
     assert result is not None
     assert result.accepted is True
-    assert client.path == "v1/videos/moyu-task-1"
+    assert client.path == "v1/video/generations/moyu-task-1"
 
 
 def test_adapter_for_provider_selects_volcano_third_party_adapter() -> None:
@@ -837,6 +938,36 @@ def test_adapter_for_provider_selects_unified_video_create_adapter() -> None:
     )
 
     assert isinstance(adapter_for_provider(provider), UnifiedVideoCreateAdapter)
+
+
+def test_video_http_error_classifies_upstream_model_unavailable() -> None:
+    exc = _http_error(
+        "submit",
+        400,
+        {
+            "code": "fail_to_fetch_task",
+            "message": (
+                "无效的请求，模型 'omni-flash' 不是 Gemini 原生 API 格式的有效 "
+                "Gemini 模型"
+            ),
+        },
+    )
+
+    assert exc.error_code == "provider_unavailable"
+
+
+def test_video_http_error_keeps_missing_model_as_invalid_input() -> None:
+    exc = _http_error(
+        "submit",
+        400,
+        {
+            "error": {
+                "message": "Model name not specified, model name cannot be empty"
+            }
+        },
+    )
+
+    assert exc.error_code == "invalid_input"
 
 
 @pytest.mark.asyncio
@@ -1064,6 +1195,7 @@ def test_happyhorse_usage_duration_maps_seconds_to_internal_tokens() -> None:
         _duration_usage_total_tokens({"usage": {"output_video_duration": "5.5"}})
         == 5_500_000
     )
+    assert _duration_usage_total_tokens({"duration": 10_000}) is None
 
 
 @pytest.mark.asyncio

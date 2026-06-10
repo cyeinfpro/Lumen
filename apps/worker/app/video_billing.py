@@ -73,6 +73,30 @@ def _generation_billing_model(generation: VideoGeneration) -> str:
     return video_billing_model(model, _generation_upstream_model(generation))
 
 
+def _default_video_charge_micro(generation: VideoGeneration, held: int) -> int:
+    return max(int(held), int(generation.est_cost_micro or 0))
+
+
+async def _usage_charge_micro(
+    session: AsyncSession,
+    generation: VideoGeneration,
+    *,
+    held: int,
+    usage_tokens: int,
+    pricing_variant: str,
+    billing_model: str,
+) -> int:
+    return await settle_video_cost(
+        session,
+        model=billing_model,
+        action=generation.action,
+        actual_total_tokens=usage_tokens,
+        resolution=generation.resolution,
+        pricing_variant=pricing_variant,
+        estimated_micro=_default_video_charge_micro(generation, held),
+    )
+
+
 async def resolve_video_billing(
     session: AsyncSession,
     generation: VideoGeneration,
@@ -111,30 +135,21 @@ async def resolve_video_billing(
 
     if status == "succeeded" and usage_tokens is not None:
         try:
-            actual_micro = await settle_video_cost(
+            actual_micro = await _usage_charge_micro(
                 session,
-                model=billing_model,
-                action=generation.action,
-                actual_total_tokens=usage_tokens,
-                resolution=generation.resolution,
+                generation,
+                held=held,
+                usage_tokens=usage_tokens,
                 pricing_variant=pricing_variant,
+                billing_model=billing_model,
             )
             decision = "actual_usage_settle"
         except VideoBillingError:
-            actual_micro = max(held, int(generation.est_cost_micro or 0))
+            actual_micro = _default_video_charge_micro(generation, held)
             decision = "pricing_missing_default_charge"
-    elif status == "succeeded" and upstream_billable is True:
-        actual_micro = max(held, int(generation.est_cost_micro or 0))
-        decision = "missing_usage_default_charge"
     elif status == "succeeded":
-        return await _release_video_hold(
-            session,
-            generation,
-            reason=reason,
-            decision="missing_usage_release",
-            actual_tokens=usage_tokens,
-            pricing_variant=pricing_variant,
-        )
+        actual_micro = _default_video_charge_micro(generation, held)
+        decision = "missing_usage_default_charge"
     elif upstream_billable is False:
         return await _release_video_hold(
             session,
@@ -144,34 +159,25 @@ async def resolve_video_billing(
             actual_tokens=usage_tokens,
             pricing_variant=pricing_variant,
         )
-    elif upstream_billable is not True:
-        return await _release_video_hold(
-            session,
-            generation,
-            reason=reason,
-            decision="terminal_not_billable_release",
-            actual_tokens=usage_tokens,
-            pricing_variant=pricing_variant,
-        )
     elif usage_tokens is not None:
         try:
-            actual_micro = await settle_video_cost(
+            actual_micro = await _usage_charge_micro(
                 session,
-                model=billing_model,
-                action=generation.action,
-                actual_total_tokens=usage_tokens,
-                resolution=generation.resolution,
+                generation,
+                held=held,
+                usage_tokens=usage_tokens,
                 pricing_variant=pricing_variant,
+                billing_model=billing_model,
             )
             decision = "failure_usage_settle"
         except VideoBillingError:
-            actual_micro = max(held, int(generation.est_cost_micro or 0))
+            actual_micro = _default_video_charge_micro(generation, held)
             decision = "failure_pricing_missing_default_charge"
     elif upstream_billable is True:
-        actual_micro = max(held, int(generation.est_cost_micro or 0))
+        actual_micro = _default_video_charge_micro(generation, held)
         decision = "failure_billable_default_charge"
     else:
-        actual_micro = max(held, int(generation.est_cost_micro or 0))
+        actual_micro = _default_video_charge_micro(generation, held)
         decision = "unknown_default_charge"
 
     tx = await billing_core.settle(

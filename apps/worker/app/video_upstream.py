@@ -151,11 +151,18 @@ def _status(raw: Any) -> VideoProviderStatus:
         "failed": "failed",
         "failure": "failed",
         "error": "failed",
+        "rejected": "failed",
+        "reject": "failed",
+        "blocked": "failed",
+        "moderation_failed": "failed",
+        "content_filtered": "failed",
         "cancelled": "cancelled",
         "canceled": "cancelled",
         "expired": "expired",
     }
-    return mapping.get(value, "running")  # type: ignore[return-value]
+    if not value:
+        return "running"
+    return mapping.get(value, "failed")  # type: ignore[return-value]
 
 
 def _failure_class(payload: dict[str, Any]) -> str | None:
@@ -332,6 +339,83 @@ def _video_url(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _explicit_video_result_url(payload: dict[str, Any]) -> str | None:
+    raw = _nested_get(
+        payload,
+        ("content", "video_url"),
+        ("result", "video_url"),
+        ("result", "url"),
+        ("output", "video_url"),
+        ("output", "url"),
+        ("video_url",),
+        ("data", "video_url"),
+        ("data", "content", "video_url"),
+        ("data", "data", "video_url"),
+        ("data", "data", "content", "video_url"),
+        ("data", "data", "data", "video_url"),
+        ("data", "data", "data", "content", "video_url"),
+        ("data", "result_url"),
+        ("data", "data", "result_url"),
+        ("data", "data", "data", "result_url"),
+    )
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    for values in (
+        _nested_get(
+            payload,
+            ("video_urls",),
+            ("data", "video_urls"),
+            ("data", "data", "video_urls"),
+            ("result", "video_urls"),
+            ("output", "video_urls"),
+        ),
+        _nested_get(
+            payload,
+            ("data", "videos"),
+            ("data", "data", "videos"),
+            ("result", "videos"),
+            ("output", "videos"),
+        ),
+        _nested_get(
+            payload,
+            ("data", "outputs"),
+            ("data", "data", "outputs"),
+            ("result", "outputs"),
+            ("output", "outputs"),
+        ),
+    ):
+        if isinstance(values, list):
+            for item in values:
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+                if isinstance(item, dict):
+                    value = _nested_get(
+                        item, ("video_url",), ("url",), ("content", "video_url")
+                    )
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+    for results in (
+        payload.get("results"),
+        _nested_get(payload, ("data", "results"), ("data", "data", "results")),
+    ):
+        if isinstance(results, list):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                value = _nested_get(item, ("video_url",), ("url",))
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    content = payload.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            value = _nested_get(item, ("video_url",), ("video", "url"), ("url",))
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def _absolute_url(raw_url: str | None, base_url: str) -> str | None:
     if not isinstance(raw_url, str) or not raw_url.strip():
         return None
@@ -387,20 +471,16 @@ def _duration_usage_total_tokens(payload: dict[str, Any]) -> int | None:
         payload,
         ("usage", "duration"),
         ("data", "usage", "duration"),
+        ("data", "data", "usage", "duration"),
+        ("data", "data", "data", "usage", "duration"),
         ("result", "usage", "duration"),
         ("output", "usage", "duration"),
         ("usage", "output_video_duration"),
         ("data", "usage", "output_video_duration"),
+        ("data", "data", "usage", "output_video_duration"),
+        ("data", "data", "data", "usage", "output_video_duration"),
         ("result", "usage", "output_video_duration"),
         ("output", "usage", "output_video_duration"),
-        ("output_video_duration",),
-        ("data", "output_video_duration"),
-        ("result", "output_video_duration"),
-        ("output", "output_video_duration"),
-        ("duration",),
-        ("data", "duration"),
-        ("result", "duration"),
-        ("output", "duration"),
     )
     if isinstance(raw, bool) or raw is None:
         return None
@@ -440,6 +520,17 @@ def _image_data_url(data: bytes, mime: str | None) -> str:
 
 
 _OMNI_FALLBACK_IMAGE_MAX_BYTES = 64 * 1024 * 1024
+_SEEDANCE_INLINE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
+_VIDEO_FETCH_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_VIDEO_FETCH_MIN_MAGIC_BYTES = 12
+
+
+def _submit_headers(req: VideoSubmitRequest) -> dict[str, str]:
+    return {
+        "Idempotency-Key": req.task_id,
+        "X-Request-ID": req.task_id,
+        "X-Lumen-Task-ID": req.task_id,
+    }
 
 
 def _image_response_mime(response: httpx.Response, fallback: str | None) -> str | None:
@@ -456,6 +547,75 @@ def _image_response_mime(response: httpx.Response, fallback: str | None) -> str 
             status_code=response.status_code,
         )
     return fallback_value or None
+
+
+def _looks_like_iso_bmff_video(data: bytes) -> bool:
+    return len(data) >= _VIDEO_FETCH_MIN_MAGIC_BYTES and data[4:8] == b"ftyp"
+
+
+def _validate_video_response_bytes(data: bytes, content_type: str) -> None:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type.startswith("video/"):
+        return
+    if media_type in {"application/octet-stream", "binary/octet-stream", ""}:
+        if _looks_like_iso_bmff_video(data):
+            return
+    raise VideoUpstreamError(
+        "video fetch response was not a video",
+        error_code="fetch_failed",
+        status_code=502,
+        raw={"content_type": media_type or None},
+    )
+
+
+async def _fetch_video_url_bytes(video_url: str) -> bytes:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=settings.upstream_connect_timeout_s,
+            read=settings.upstream_read_timeout_s,
+            write=settings.upstream_write_timeout_s,
+            pool=30.0,
+        ),
+        follow_redirects=True,
+    ) as client:
+        async with client.stream("GET", video_url) as response:
+            if response.status_code >= 400:
+                raise VideoUpstreamError(
+                    f"video fetch failed status={response.status_code}",
+                    error_code="fetch_failed",
+                    status_code=response.status_code,
+                )
+            content_length = response.headers.get("content-length")
+            if content_length:
+                parsed_length = _int_or_none(content_length)
+                if parsed_length is not None and parsed_length > _VIDEO_FETCH_MAX_BYTES:
+                    raise VideoUpstreamError(
+                        "video fetch response exceeds maximum size",
+                        error_code="fetch_failed",
+                        status_code=413,
+                    )
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > _VIDEO_FETCH_MAX_BYTES:
+                    raise VideoUpstreamError(
+                        "video fetch response exceeds maximum size",
+                        error_code="fetch_failed",
+                        status_code=413,
+                    )
+                chunks.append(bytes(chunk))
+            data = b"".join(chunks)
+            if not data:
+                raise VideoUpstreamError(
+                    "video fetch response was empty",
+                    error_code="fetch_failed",
+                    status_code=response.status_code,
+                )
+            _validate_video_response_bytes(data, response.headers.get("content-type", ""))
+            return data
 
 
 async def _fetch_image_url_as_data_url(
@@ -557,6 +717,12 @@ def _seedance_content(
                     "missing input image bytes",
                     error_code="invalid_input",
                     status_code=422,
+                )
+            if len(req.input_image_bytes) > _SEEDANCE_INLINE_IMAGE_MAX_BYTES:
+                raise VideoUpstreamError(
+                    "input image is too large for inline video submission",
+                    error_code="invalid_input",
+                    status_code=413,
                 )
             image_url = _image_data_url(req.input_image_bytes, req.input_image_mime)
         content.append(
@@ -660,7 +826,11 @@ class VolcanoSeedanceAdapter:
         if req.callback_url:
             body["callback_url"] = req.callback_url
         async with self._client() as client:
-            response = await client.post("/contents/generations/tasks", json=body)
+            response = await client.post(
+                "/contents/generations/tasks",
+                json=body,
+                headers=_submit_headers(req),
+            )
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("submit", response.status_code, raw)
@@ -697,23 +867,7 @@ class VolcanoSeedanceAdapter:
         )
 
     async def fetch_result(self, video_url: str) -> bytes:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=settings.upstream_connect_timeout_s,
-                read=settings.upstream_read_timeout_s,
-                write=settings.upstream_write_timeout_s,
-                pool=30.0,
-            ),
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(video_url)
-        if response.status_code >= 400:
-            raise VideoUpstreamError(
-                f"video fetch failed status={response.status_code}",
-                error_code="fetch_failed",
-                status_code=response.status_code,
-            )
-        return bytes(response.content)
+        return await _fetch_video_url_bytes(video_url)
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
         async with self._client() as client:
@@ -759,7 +913,11 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
             "metadata": metadata,
         }
         async with self._client() as client:
-            response = await client.post(self._path("video/generations"), json=body)
+            response = await client.post(
+                self._path("video/generations"),
+                json=body,
+                headers=_submit_headers(req),
+            )
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("submit", response.status_code, raw)
@@ -799,7 +957,9 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
         async with self._client() as client:
-            response = await client.delete(self._path(f"videos/{provider_task_id}"))
+            response = await client.delete(
+                self._path(f"video/generations/{provider_task_id}")
+            )
         raw = _response_json(response)
         if response.status_code in {404, 410}:
             return CancelResult(accepted=False, raw=raw)
@@ -809,7 +969,7 @@ class VolcanoThirdPartySeedanceAdapter(VolcanoSeedanceAdapter):
 
 
 class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
-    """Third-party unified video gateways using /v1/video/create."""
+    """Third-party unified video gateways using /v1/video/generations."""
 
     def _client_base_url(self) -> str:
         return _collapse_url_path_slashes(self.provider.base_url)
@@ -819,6 +979,18 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
         if base_path.endswith("/v1"):
             return suffix
         return f"v1/{suffix}"
+
+    def _is_invalid_path_error(self, exc: VideoUpstreamError) -> bool:
+        if exc.status_code not in {404, 405}:
+            return False
+        messages = [
+            str(exc),
+            _nested_get(exc.raw, ("error", "message"), ("message",), ("text",)),
+        ]
+        return any(
+            isinstance(message, str) and "invalid url" in message.lower()
+            for message in messages
+        )
 
     def _media_url(self, item: VideoReferenceMedia, *, field: str) -> str:
         if item.kind != "image":
@@ -979,9 +1151,11 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             body["images"] = images
         return body
 
-    async def _post_submit_body(self, body: dict[str, Any]) -> SubmitResult:
+    async def _post_submit_body(
+        self, path: str, body: dict[str, Any], req: VideoSubmitRequest
+    ) -> SubmitResult:
         async with self._client() as client:
-            response = await client.post(self._path("video/create"), json=body)
+            response = await client.post(path, json=body, headers=_submit_headers(req))
         raw = _response_json(response)
         if response.status_code >= 400:
             raise _http_error("submit", response.status_code, raw)
@@ -996,7 +1170,7 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
         return SubmitResult(provider_task_id=provider_task_id, raw=raw)
 
     def _should_retry_with_data_urls(self, exc: VideoUpstreamError) -> bool:
-        if exc.error_code != "invalid_input":
+        if exc.error_code != "invalid_input" or exc.status_code in {404, 405}:
             return False
         messages = [
             str(exc),
@@ -1008,11 +1182,18 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
         )
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
+        submit_path = self._path("video/generations")
         images = self._images(req)
         body = self._submit_body(req, images=images)
         try:
-            return await self._post_submit_body(body)
+            return await self._post_submit_body(submit_path, body, req)
         except VideoUpstreamError as exc:
+            if self._is_invalid_path_error(exc):
+                submit_path = self._path("video/create")
+                try:
+                    return await self._post_submit_body(submit_path, body, req)
+                except VideoUpstreamError as legacy_exc:
+                    exc = legacy_exc
             if not self._should_retry_with_data_urls(exc):
                 raise
             try:
@@ -1022,18 +1203,29 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
             if fallback_images == images:
                 raise exc
             return await self._post_submit_body(
-                self._submit_body(req, images=fallback_images)
+                submit_path,
+                self._submit_body(req, images=fallback_images),
+                req,
             )
 
     async def poll(self, provider_task_id: str) -> PollResult:
         async with self._client() as client:
             response = await client.get(
-                self._path("video/query"),
-                params={"id": provider_task_id},
+                self._path(f"video/generations/{provider_task_id}")
             )
         raw = _response_json(response)
         if response.status_code >= 400:
-            raise _http_error("poll", response.status_code, raw)
+            exc = _http_error("poll", response.status_code, raw)
+            if not self._is_invalid_path_error(exc):
+                raise exc
+            async with self._client() as client:
+                response = await client.get(
+                    self._path("video/query"),
+                    params={"id": provider_task_id},
+                )
+            raw = _response_json(response)
+            if response.status_code >= 400:
+                raise _http_error("poll", response.status_code, raw)
         status = _status(
             _nested_get(
                 raw,
@@ -1060,8 +1252,13 @@ class UnifiedVideoCreateAdapter(VolcanoSeedanceAdapter):
         )
         upstream_billable = _billable(raw)
         video_url = _absolute_url(_video_url(raw), self._client_base_url())
-        if status == "running" and video_url:
+        explicit_video_url = _absolute_url(
+            _explicit_video_result_url(raw),
+            self._client_base_url(),
+        )
+        if status == "running" and explicit_video_url:
             status = "succeeded"
+            video_url = explicit_video_url
         return PollResult(
             status=status,
             progress=progress,
@@ -1178,6 +1375,7 @@ class DashScopeHappyHorseAdapter:
             response = await client.post(
                 "/api/v1/services/aigc/video-generation/video-synthesis",
                 json=body,
+                headers=_submit_headers(req),
             )
         raw = _response_json(response)
         if response.status_code >= 400:
@@ -1216,23 +1414,7 @@ class DashScopeHappyHorseAdapter:
         )
 
     async def fetch_result(self, video_url: str) -> bytes:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=settings.upstream_connect_timeout_s,
-                read=settings.upstream_read_timeout_s,
-                write=settings.upstream_write_timeout_s,
-                pool=30.0,
-            ),
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(video_url)
-        if response.status_code >= 400:
-            raise VideoUpstreamError(
-                f"video fetch failed status={response.status_code}",
-                error_code="fetch_failed",
-                status_code=response.status_code,
-            )
-        return bytes(response.content)
+        return await _fetch_video_url_bytes(video_url)
 
     async def cancel(self, provider_task_id: str) -> CancelResult | None:
         # DashScope's documented async task API does not expose a portable
@@ -1306,24 +1488,41 @@ def _http_error(
     phase: str, status_code: int, raw: dict[str, Any]
 ) -> VideoUpstreamError:
     code = "upstream_unknown"
+    message = _nested_get(raw, ("error", "message"), ("message",), ("text",))
+    if not isinstance(message, str) or not message:
+        message = f"video upstream {phase} failed status={status_code}"
     if status_code in {401, 403}:
         code = "upstream_auth_error"
     elif status_code == 408 or status_code == 504:
         code = "upstream_timeout"
     elif status_code == 429:
         code = "capacity"
+    elif phase == "poll" and status_code == 404:
+        code = "upstream_not_ready"
+    elif _is_upstream_model_unavailable_message(message):
+        code = "provider_unavailable"
     elif 400 <= status_code < 500:
         code = "invalid_input"
     elif status_code >= 500:
         code = "provider_error"
-    message = _nested_get(raw, ("error", "message"), ("message",), ("text",))
-    if not isinstance(message, str) or not message:
-        message = f"video upstream {phase} failed status={status_code}"
     return VideoUpstreamError(
         message,
         error_code=code,
         status_code=status_code,
         raw=raw,
+    )
+
+
+def _is_upstream_model_unavailable_message(message: str) -> bool:
+    value = message.strip().lower()
+    return any(
+        marker in value
+        for marker in (
+            "model_not_found",
+            "no available channel for model",
+            "不是 gemini 原生 api 格式的有效 gemini 模型",
+            "not a valid gemini model",
+        )
     )
 
 

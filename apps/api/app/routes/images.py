@@ -15,7 +15,7 @@ import logging
 import os
 import secrets
 import stat
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Iterator
 
@@ -79,6 +79,8 @@ from ..video_reference_images import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
 
 _LINK_UNSUPPORTED_ERRNOS = {
     errno.EPERM,
@@ -930,6 +932,43 @@ async def get_image_signed(
     )
 
 
+def _parse_video_reference_token_expiry(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _video_reference_token_is_valid(
+    metadata: dict[str, Any],
+    *,
+    token: str,
+    updated_at: datetime | None,
+) -> bool:
+    expected = metadata.get("video_reference_access_token")
+    if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
+        return False
+    expires_at = _parse_video_reference_token_expiry(
+        metadata.get("video_reference_access_token_expires_at")
+    )
+    now = datetime.now(timezone.utc)
+    if expires_at is not None:
+        return expires_at > now
+    if updated_at is None:
+        return False
+    fallback_updated_at = (
+        updated_at.replace(tzinfo=timezone.utc)
+        if updated_at.tzinfo is None
+        else updated_at.astimezone(timezone.utc)
+    )
+    return fallback_updated_at + _VIDEO_REFERENCE_ACCESS_TOKEN_TTL > now
+
+
 @router.get("/reference/{image_id}/binary")
 async def reference_image_binary(
     image_id: str,
@@ -949,8 +988,11 @@ async def reference_image_binary(
     if img is None:
         raise _http("not_found", "image not found", 404)
     metadata = img.metadata_jsonb or {}
-    expected = metadata.get("video_reference_access_token")
-    if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
+    if not _video_reference_token_is_valid(
+        metadata,
+        token=token,
+        updated_at=getattr(img, "updated_at", None),
+    ):
         raise _http("not_found", "image not found", 404)
     if variant:
         if variant != VIDEO_REFERENCE_IMAGE_KIND:

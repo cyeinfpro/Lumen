@@ -14,6 +14,7 @@ import os
 import secrets
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
 from urllib.parse import urlencode
@@ -52,6 +53,8 @@ from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 
 logger = logging.getLogger(__name__)
+
+_VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
 
 router = APIRouter(
     prefix="/prompts",
@@ -429,12 +432,30 @@ def _append_video_context_line(lines: list[str], key: str, value: Any) -> None:
 def _video_reference_public_url(video: Video, public_base_url: str) -> tuple[str, bool]:
     metadata = dict(video.metadata_jsonb or {})
     token = metadata.get("reference_access_token")
+    expires_raw = metadata.get("reference_access_token_expires_at")
+    expires_at = None
+    if isinstance(expires_raw, str) and expires_raw.strip():
+        with suppress(ValueError):
+            expires_at = datetime.fromisoformat(expires_raw)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            else:
+                expires_at = expires_at.astimezone(timezone.utc)
     changed = False
-    if not isinstance(token, str) or not token:
+    if (
+        not isinstance(token, str)
+        or not token
+        or expires_at is None
+        or expires_at <= datetime.now(timezone.utc)
+    ):
         token = secrets.token_urlsafe(32)
         metadata["reference_access_token"] = token
-        video.metadata_jsonb = metadata
         changed = True
+    metadata["reference_access_token_expires_at"] = (
+        datetime.now(timezone.utc) + _VIDEO_REFERENCE_ACCESS_TOKEN_TTL
+    ).isoformat()
+    video.metadata_jsonb = metadata
+    changed = True
     query = urlencode({"token": token})
     return (
         f"{public_base_url.rstrip('/')}/api/videos/reference/{video.id}/binary?{query}",

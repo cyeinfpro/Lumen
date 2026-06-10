@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import httpx
 
 from app.tasks.video_generation import (
@@ -8,6 +10,7 @@ from app.tasks.video_generation import (
     _video_exception_code,
     _video_exception_message,
 )
+from app.tasks import video_generation
 from app.video_upstream import VideoUpstreamError
 
 
@@ -46,6 +49,16 @@ def test_retryable_video_upstream_errors_are_transient_only() -> None:
     )
     assert (
         _is_retryable_video_exception(
+            VideoUpstreamError(
+                "not visible yet",
+                error_code="upstream_not_ready",
+                status_code=404,
+            )
+        )
+        is True
+    )
+    assert (
+        _is_retryable_video_exception(
             VideoUpstreamError("bad response", error_code="bad_response")
         )
         is False
@@ -60,3 +73,17 @@ def test_submit_retry_delays_are_bounded() -> None:
         60,
         60,
     ]
+
+
+def test_video_poll_deadline_continues_polling_submitted_tasks() -> None:
+    source = inspect.getsource(video_generation.run_video_poll)
+
+    assert "deadline_expired_polling_continues" in source
+    assert 'raw={"deadline_expired": True}' not in source
+
+
+def test_reconcile_expires_overdue_tasks_without_provider_task_id() -> None:
+    source = inspect.getsource(video_generation.reconcile_video_tasks)
+
+    assert "_mark_pre_submit_expired" in source
+    assert "reconcile_deadline_expired_before_submit" in source

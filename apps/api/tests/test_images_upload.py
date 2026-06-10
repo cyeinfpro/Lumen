@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import io
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -312,6 +313,7 @@ async def test_reference_image_binary_serves_video_reference_variant(
         mime="image/png",
         sha256="orig-sha",
         deleted_at=None,
+        updated_at=datetime.now(timezone.utc),
     )
     try:
         response = await images.reference_image_binary(
