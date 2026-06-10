@@ -4,7 +4,8 @@
 // - apparel_model_showcase → ApparelWorkflowDetail
 // - poster_design          → PosterWorkflowDetail
 
-import { use } from "react";
+import { useRouter } from "next/navigation";
+import { use, useEffect } from "react";
 
 import { ApparelWorkflowDetail, PosterWorkflowDetail } from "@/components/ui/projects";
 import { Spinner } from "@/components/ui/primitives/Spinner";
@@ -22,6 +23,13 @@ export default function ProjectDetailPage({
 function ProjectDispatcher({ projectId }: { projectId: string }) {
   const query = useWorkflowQuery(projectId);
   const workflow = query.data;
+  const router = useRouter();
+
+  useEffect(() => {
+    if (workflow?.type === "storyboard") {
+      router.replace(`/projects/storyboard/${projectId}`);
+    }
+  }, [projectId, router, workflow?.type]);
 
   if (!workflow && query.isLoading) {
     return (
@@ -38,6 +46,10 @@ function ProjectDispatcher({ projectId }: { projectId: string }) {
 
   if (workflow?.type === "poster_design") {
     return <PosterWorkflowDetail projectId={projectId} />;
+  }
+
+  if (workflow?.type === "storyboard") {
+    return null;
   }
 
   // 默认 / apparel_model_showcase 走原详情组件，保持现有行为不变

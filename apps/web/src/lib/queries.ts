@@ -24,21 +24,31 @@ import {
   createInviteLink,
   createMultiShare,
   createShare,
+  createStoryboard,
+  createStoryboardAsset,
+  createStoryboardShot,
   createSystemPrompt,
   createApparelModelLibraryItem,
   deleteConversation,
+  deleteStoryboard,
+  deleteStoryboardAsset,
+  deleteStoryboardShot,
   deleteApparelModelLibraryItems,
   deleteApparelModelLibraryJob,
   deleteApparelModelLibraryItem,
   deleteMyAccount,
   deleteSystemPrompt,
   deleteWorkflow,
+  generateAllStoryboardKeyframes,
   generateApparelModelLibrary,
+  generateStoryboardAsset,
+  generateStoryboardKeyframe,
   getApparelModelLibraryJobs,
   getMyUsage,
   getPublicInvite,
   getPublicShare,
   getWorkflow,
+  getStoryboard,
   getSystemSettings,
   listApparelModelLibrary,
   listAdminRequestEvents,
@@ -46,17 +56,25 @@ import {
   listAllowedEmails,
   listConversations,
   listWorkflows,
+  listStoryboards,
   listInviteLinks,
   listMessages,
   listMySessions,
   listMyShares,
   listSystemPrompts,
   patchConversation,
+  patchStoryboard,
+  patchStoryboardAsset,
+  patchStoryboardShot,
   patchSystemPrompt,
   patchWorkflow,
   patchProviderEnabled,
   approveModelCandidate,
   approveProductAnalysis,
+  approveStoryboardAsset,
+  approveStoryboardKeyframe,
+  approveStoryboardShot,
+  assembleStoryboard,
   completeWorkflowDelivery,
   createAccessoryPreviews,
   createApparelWorkflow,
@@ -67,11 +85,13 @@ import {
   saveModelCandidateToLibrary,
   selectApparelModelLibraryItem,
   reopenModelSelection,
+  rebuildStoryboardShots,
   reviseWorkflowImage,
   removeAllowedEmail,
   revokeInviteLink,
   revokeMySession,
   revokeShare,
+  moveStoryboardShot,
   setDefaultSystemPrompt,
   getAdminModels,
   getProviders,
@@ -123,6 +143,16 @@ import {
   type MessageListResponse,
   type PatchConversationIn,
   type PatchWorkflowIn,
+  type StoryboardAssetCreateIn,
+  type StoryboardAssetPatchIn,
+  type StoryboardCreateIn,
+  type StoryboardGenerateIn,
+  type StoryboardListResponse,
+  type StoryboardPatchIn,
+  type StoryboardRun,
+  type StoryboardShotCreateIn,
+  type StoryboardShotPatchIn,
+  type StoryboardSubmitShotIn,
   type CreateSystemPromptIn,
   type PatchSystemPromptIn,
   type ModelCandidatesIn,
@@ -150,6 +180,8 @@ import {
   type PosterMastersCreateIn,
   type PosterRendersCreateIn,
   type PosterReviseIn,
+  submitAllStoryboardShots,
+  submitStoryboardShot,
 } from "./apiClient";
 import type {
   AdminUserOut,
@@ -225,6 +257,9 @@ export const qk = {
   workflows: (params?: { type?: string; limit?: number }) =>
     ["workflows", params ?? {}] as const,
   workflow: (id: string) => ["workflows", id] as const,
+  storyboards: (params?: { cursor?: string | null; limit?: number }) =>
+    ["storyboards", params ?? {}] as const,
+  storyboard: (id: string) => ["storyboards", id] as const,
   apparelModelLibrary: (params?: {
     age_segment?: ModelLibraryAgeSegment;
     source?: "all" | ModelLibrarySource;
@@ -1217,6 +1252,341 @@ export function useDeleteWorkflowMutation(
       options?.onSuccess?.(data, vars, onMutateResult, ctx);
     },
   });
+}
+
+export function useStoryboardsQuery(
+  params: { cursor?: string | null; limit?: number } = {},
+  options?: Omit<UseQueryOptions<StoryboardListResponse>, "queryKey" | "queryFn">,
+) {
+  return useQuery<StoryboardListResponse>({
+    queryKey: qk.storyboards(params),
+    queryFn: () => listStoryboards(params),
+    staleTime: 10_000,
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? [];
+      return items.some((item) => item.status !== "completed") ? 30_000 : false;
+    },
+    refetchOnWindowFocus: true,
+    ...options,
+  });
+}
+
+export function useStoryboardQuery(
+  id: string | null | undefined,
+  options?: Omit<UseQueryOptions<StoryboardRun>, "queryKey" | "queryFn">,
+) {
+  return useQuery<StoryboardRun>({
+    queryKey: qk.storyboard(id ?? ""),
+    queryFn: () => getStoryboard(id as string),
+    enabled: typeof id === "string" && id.length > 0,
+    staleTime: 5_000,
+    refetchInterval: (query) => {
+      const item = query.state.data;
+      if (!item) return false;
+      const hasActiveAsset = item.assets.some((asset) => asset.status === "generating");
+      const hasActiveShot = item.shots.some((shot) =>
+        ["keyframe_generating", "generating"].includes(shot.status),
+      );
+      const hasAssembly = item.assembly?.status === "compositing";
+      return hasActiveAsset || hasActiveShot || hasAssembly ? 5_000 : false;
+    },
+    refetchOnWindowFocus: true,
+    ...options,
+  });
+}
+
+function useStoryboardRunMutation<TVars>(
+  storyboardId: string,
+  mutationFn: (vars: TVars) => Promise<StoryboardRun>,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, TVars>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<StoryboardRun, Error, TVars>({
+    mutationFn,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.storyboard(data.id), data);
+      qc.invalidateQueries({ queryKey: ["storyboards"] });
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+    onSettled: (data, error, vars, onMutateResult, ctx) => {
+      qc.invalidateQueries({ queryKey: qk.storyboard(storyboardId) });
+      options?.onSettled?.(data, error, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useCreateStoryboardMutation(
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, StoryboardCreateIn>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<StoryboardRun, Error, StoryboardCreateIn>({
+    mutationFn: createStoryboard,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.setQueryData(qk.storyboard(data.id), data);
+      qc.invalidateQueries({ queryKey: ["storyboards"] });
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function useDeleteStoryboardMutation(
+  options?: Omit<UseMutationOptions<{ ok: boolean }, Error, string>, "mutationFn">,
+) {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: deleteStoryboard,
+    ...options,
+    onSuccess: (data, vars, onMutateResult, ctx) => {
+      qc.removeQueries({ queryKey: qk.storyboard(vars) });
+      qc.invalidateQueries({ queryKey: ["storyboards"] });
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      options?.onSuccess?.(data, vars, onMutateResult, ctx);
+    },
+  });
+}
+
+export function usePatchStoryboardMutation(
+  storyboardId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardPatchIn>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => patchStoryboard(storyboardId, body),
+    options,
+  );
+}
+
+export function useCreateStoryboardAssetMutation(
+  storyboardId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardAssetCreateIn>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => createStoryboardAsset(storyboardId, body),
+    options,
+  );
+}
+
+export function usePatchStoryboardAssetMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardAssetPatchIn>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => patchStoryboardAsset(storyboardId, stepId, body),
+    options,
+  );
+}
+
+export function useGenerateStoryboardAssetMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardGenerateIn | void>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => generateStoryboardAsset(storyboardId, stepId, body || {}),
+    options,
+  );
+}
+
+export function useApproveStoryboardAssetMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => approveStoryboardAsset(storyboardId, stepId),
+    options,
+  );
+}
+
+export function useDeleteStoryboardAssetMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => deleteStoryboardAsset(storyboardId, stepId),
+    options,
+  );
+}
+
+export function useRebuildStoryboardShotsMutation(
+  storyboardId: string,
+  options?: Omit<
+    UseMutationOptions<
+      StoryboardRun,
+      Error,
+      { shots?: StoryboardShotCreateIn[] | null; replace?: boolean } | void
+    >,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => rebuildStoryboardShots(storyboardId, body || {}),
+    options,
+  );
+}
+
+export function useCreateStoryboardShotMutation(
+  storyboardId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardShotCreateIn>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => createStoryboardShot(storyboardId, body),
+    options,
+  );
+}
+
+export function usePatchStoryboardShotMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardShotPatchIn>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => patchStoryboardShot(storyboardId, stepId, body),
+    options,
+  );
+}
+
+export function useApproveStoryboardShotMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => approveStoryboardShot(storyboardId, stepId),
+    options,
+  );
+}
+
+export function useMoveStoryboardShotMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, -1 | 1>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (direction) => moveStoryboardShot(storyboardId, stepId, direction),
+    options,
+  );
+}
+
+export function useDeleteStoryboardShotMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => deleteStoryboardShot(storyboardId, stepId),
+    options,
+  );
+}
+
+export function useGenerateStoryboardKeyframeMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardGenerateIn | void>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => generateStoryboardKeyframe(storyboardId, stepId, body || {}),
+    options,
+  );
+}
+
+export function useGenerateAllStoryboardKeyframesMutation(
+  storyboardId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => generateAllStoryboardKeyframes(storyboardId),
+    options,
+  );
+}
+
+export function useApproveStoryboardKeyframeMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => approveStoryboardKeyframe(storyboardId, stepId),
+    options,
+  );
+}
+
+export function useSubmitStoryboardShotMutation(
+  storyboardId: string,
+  stepId: string,
+  options?: Omit<
+    UseMutationOptions<StoryboardRun, Error, StoryboardSubmitShotIn | void>,
+    "mutationFn"
+  >,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    (body) => submitStoryboardShot(storyboardId, stepId, body || {}),
+    options,
+  );
+}
+
+export function useSubmitAllStoryboardShotsMutation(
+  storyboardId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => submitAllStoryboardShots(storyboardId),
+    options,
+  );
+}
+
+export function useAssembleStoryboardMutation(
+  storyboardId: string,
+  options?: Omit<UseMutationOptions<StoryboardRun, Error, void>, "mutationFn">,
+) {
+  return useStoryboardRunMutation(
+    storyboardId,
+    () => assembleStoryboard(storyboardId),
+    options,
+  );
 }
 
 export function useApproveProductAnalysisMutation(

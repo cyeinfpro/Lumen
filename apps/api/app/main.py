@@ -580,9 +580,11 @@ def _include_core_routers(target: FastAPI) -> None:
 def _include_desktop_routers(target: FastAPI) -> None:
     from .routes import desktop as desktop_router  # noqa: E402
     from .routes import memories as memories_router  # noqa: E402
+    from .routes import storyboards  # noqa: E402
 
     target.include_router(desktop_router.router)
     _include_core_routers(target)
+    target.include_router(storyboards.router)
     target.include_router(memories_router.router)
 
 
@@ -595,7 +597,7 @@ def _include_docker_routers(target: FastAPI) -> None:
     from .routes import admin_storage as admin_storage_router  # noqa: E402
     from .routes import admin_telegram as admin_telegram_router  # noqa: E402
     from .routes import admin_update as admin_update_router  # noqa: E402
-    from .routes import auth, workflows  # noqa: E402
+    from .routes import auth, storyboards, workflows  # noqa: E402
     from .routes import billing as billing_router  # noqa: E402
     from .routes import byok as byok_router  # noqa: E402
     from .routes import invites as invites_router  # noqa: E402
@@ -609,6 +611,7 @@ def _include_docker_routers(target: FastAPI) -> None:
     target.include_router(auth.router, prefix="/auth", tags=["auth"])
     _include_core_routers(target)
     target.include_router(workflows.router)
+    target.include_router(storyboards.router)
     target.include_router(poster_styles_router.router)
     target.include_router(admin_router.router)
     target.include_router(admin_backups_router.router)

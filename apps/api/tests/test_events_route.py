@@ -63,6 +63,18 @@ def test_replay_payload_filter_matches_requested_channels() -> None:
         user_channel=user_channel,
         envelope_channel="conv:conv-2",
     )
+    assert events._replay_payload_matches_channels(
+        {"storyboard_run_id": "storyboard-1"},
+        requested_channels={"storyboard:storyboard-1"},
+        include_user_channel=False,
+        user_channel=user_channel,
+    )
+    assert not events._replay_payload_matches_channels(
+        {"storyboard_run_id": "storyboard-2"},
+        requested_channels={"storyboard:storyboard-1"},
+        include_user_channel=False,
+        user_channel=user_channel,
+    )
 
 
 @pytest.mark.asyncio
@@ -272,6 +284,41 @@ async def test_validate_channels_batches_owned_task_queries() -> None:
         "completions",
         "video_generations",
     ]
+
+
+@pytest.mark.asyncio
+async def test_validate_channels_accepts_owned_storyboard_run() -> None:
+    class Result:
+        def __init__(self, rows: list[str]) -> None:
+            self.rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self) -> list[str]:
+            return self.rows
+
+    class Db:
+        def __init__(self) -> None:
+            self.tables: list[str] = []
+
+        async def execute(self, statement):
+            sql = str(statement)
+            if "FROM workflow_runs" in sql:
+                self.tables.append("workflow_runs")
+                return Result(["storyboard-1"])
+            return Result([])
+
+    db = Db()
+
+    clean = await events._validate_channels(  # noqa: SLF001
+        ["user:user-1", "storyboard:storyboard-1"],
+        "user-1",
+        db,  # type: ignore[arg-type]
+    )
+
+    assert clean == ["user:user-1", "storyboard:storyboard-1"]
+    assert db.tables == ["workflow_runs"]
 
 
 @pytest.mark.asyncio

@@ -74,17 +74,18 @@ const FEATURES = [
   },
   {
     title: "分镜制作",
-    en: "视频高级模式",
-    description: "在视频页的高级模式里，把想法扩写成脚本，批准人物/场景/道具设定，再按分镜图生成视频片段。",
-    flow: "想法 → 锁定脚本 → 批准设定 → 分镜图 → 图生视频",
+    en: "视频分镜工作流",
+    description: "把想法扩写成可恢复的分镜项目，管理设定图、分镜图、视频段和最终成片。",
+    flow: "想法 → 脚本 → 设定 → 分镜图 → 视频 → 成片",
     input: "想法 / 脚本 / 参考素材",
-    output: "一致性分镜图与逐镜头视频",
+    output: "一致性分镜图、逐镜头视频与成片",
     eta: "按镜头数",
-    primaryHref: "/video",
-    primaryLabel: "打开视频页",
+    primaryHref: "/projects/storyboard",
+    primaryLabel: "打开分镜项目",
     icon: Film,
     available: true,
     badge: "高级",
+    workflowType: "storyboard",
   },
 ] as const;
 
@@ -232,7 +233,7 @@ function FeatureCard({
     "secondaryHref" in feature && feature.secondaryHref
       ? feature.secondaryHref
       : recentProject
-        ? `/projects/${recentProject.id}`
+        ? projectHref(recentProject)
         : "#recent-projects";
   const secondaryLabel =
     "secondaryLabel" in feature && feature.secondaryLabel
@@ -520,7 +521,7 @@ function RecentProjectRow({ item }: { item: WorkflowRunListItem }) {
         </div>
       </div>
       <Link
-        href={`/projects/${item.id}`}
+        href={projectHref(item)}
         className="inline-flex min-h-9 items-center justify-center gap-1.5 border border-[var(--border)] px-3 text-[12px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)]"
       >
         {item.status === "completed" ? "查看交付" : "继续项目"}
@@ -541,5 +542,15 @@ function workflowTypeInfo(type: string): {
   if (type === "apparel_model_showcase") {
     return { label: "服饰", fallbackTitle: "服饰模特图", Icon: Shirt };
   }
+  if (type === "storyboard") {
+    return { label: "分镜", fallbackTitle: "分镜项目", Icon: Film };
+  }
   return { label: "项目", fallbackTitle: "项目", Icon: Palette };
+}
+
+function projectHref(item: WorkflowRunListItem): string {
+  if (item.type === "storyboard") {
+    return `/projects/storyboard/${item.id}`;
+  }
+  return `/projects/${item.id}`;
 }

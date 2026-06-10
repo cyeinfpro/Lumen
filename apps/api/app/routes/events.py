@@ -26,7 +26,13 @@ from lumen_core.constants import (
     EVENTS_STREAM_MAXLEN,
     EVENTS_STREAM_PREFIX,
 )
-from lumen_core.models import Completion, Conversation, Generation, VideoGeneration
+from lumen_core.models import (
+    Completion,
+    Conversation,
+    Generation,
+    VideoGeneration,
+    WorkflowRun,
+)
 
 from ..db import get_db
 from ..deps import CurrentUser
@@ -111,6 +117,7 @@ async def _validate_channels(
     parsed: list[tuple[str, str, str]] = []
     conv_refs: set[str] = set()
     task_refs: set[str] = set()
+    storyboard_refs: set[str] = set()
 
     for raw in channels:
         ch = raw.strip()
@@ -127,6 +134,9 @@ async def _validate_channels(
         elif prefix == "task":
             parsed.append((ch, prefix, ref))
             task_refs.add(ref)
+        elif prefix == "storyboard":
+            parsed.append((ch, prefix, ref))
+            storyboard_refs.add(ref)
         else:
             # unknown channel prefix — drop silently
             continue
@@ -166,6 +176,18 @@ async def _validate_channels(
         )
         owned_tasks.update(video_rows.scalars().all())
 
+    owned_storyboards: set[str] = set()
+    if storyboard_refs:
+        storyboard_rows = await db.execute(
+            select(WorkflowRun.id).where(
+                WorkflowRun.id.in_(storyboard_refs),
+                WorkflowRun.user_id == user_id,
+                WorkflowRun.type == "storyboard",
+                WorkflowRun.deleted_at.is_(None),
+            )
+        )
+        owned_storyboards = set(storyboard_rows.scalars().all())
+
     clean: list[str] = []
     for ch, prefix, ref in parsed:
         if prefix == "user":
@@ -177,6 +199,10 @@ async def _validate_channels(
         elif prefix == "task":
             if ref not in owned_tasks:
                 raise _http("forbidden_channel", f"task {ref} not owned", 403)
+            clean.append(ch)
+        elif prefix == "storyboard":
+            if ref not in owned_storyboards:
+                raise _http("forbidden_channel", f"storyboard {ref} not owned", 403)
             clean.append(ch)
     return clean
 
@@ -314,6 +340,10 @@ def _event_channels_from_payload(payload: dict) -> set[str]:
     if isinstance(conv_id, str) and conv_id:
         channels.add(f"conv:{conv_id}")
     channels.update(f"task:{task_id}" for task_id in _task_ids_from_payload(payload))
+    for key in ("storyboard_id", "storyboard_run_id", "workflow_run_id", "run_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            channels.add(f"storyboard:{value}")
     return channels
 
 
@@ -332,7 +362,7 @@ def _replay_payload_matches_channels(
             return True
         if envelope_channel == user_channel:
             return include_user_channel and user_channel in requested_channels
-        if envelope_channel.startswith(("conv:", "task:")):
+        if envelope_channel.startswith(("conv:", "task:", "storyboard:")):
             return False
     if not isinstance(payload, dict):
         return include_user_channel and user_channel in requested_channels

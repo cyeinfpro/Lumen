@@ -31,6 +31,7 @@ from .tasks import context_summary as context_summary_tasks
 from .tasks import generation as generation_tasks
 from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
+from .tasks import storyboard_assembly as storyboard_assembly_tasks
 from .tasks import video_generation as video_generation_tasks
 from .upstream import close_client
 
@@ -91,6 +92,7 @@ class WorkerSettings:
         generation_tasks.run_generation,
         video_generation_tasks.run_video_generation,
         video_generation_tasks.run_video_poll,
+        storyboard_assembly_tasks.run_storyboard_assembly,
         completion_tasks.run_completion,
         outbox_tasks.publish_outbox,
         auto_title_tasks.auto_title_conversation,

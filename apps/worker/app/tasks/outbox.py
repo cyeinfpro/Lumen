@@ -170,6 +170,7 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                         "generation",
                         "completion",
                         "video_generation",
+                        "storyboard_assembly",
                     }:
                         logger.warning(
                             "outbox event invalid id=%s kind=%s payload=%s",
@@ -191,6 +192,7 @@ async def _process_outbox_batch(redis: Any, cutoff: datetime, limit: int) -> int
                         "generation": "run_generation",
                         "completion": "run_completion",
                         "video_generation": "run_video_generation",
+                        "storyboard_assembly": "run_storyboard_assembly",
                     }[ev_kind]
                     dedupe_key = f"{_OUTBOX_ENQUEUE_DEDUPE_PREFIX}{ev_id}"
 
