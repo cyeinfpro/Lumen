@@ -1506,6 +1506,7 @@ async def _create_video_generation_record(
     request: Request | None = None,
     input_image_snapshot: tuple[str | None, str | None, str | None] | None = None,
     reference_media_snapshot: list[dict[str, Any]] | None = None,
+    workflow_metadata: dict[str, Any] | None = None,
 ) -> VideoGenerationOut:
     provider, estimates = await _require_video_create_ready(db, body)
     requires_public_media = _provider_requires_public_media(provider)
@@ -1623,6 +1624,20 @@ async def _create_video_generation_record(
 
     now = datetime.now(timezone.utc)
     request_fingerprint = _request_fingerprint(body)
+    upstream_request = {
+        "model": body.model,
+        "requested_model": body.model,
+        "billing_model": billing_model,
+        "provider_name": provider.name,
+        "provider_kind": provider.kind,
+        "upstream_model": upstream_model,
+        "input_image_url": input_image_url,
+        "reference_media": reference_snapshots,
+        "pricing_variant": pricing_variant,
+    }
+    if workflow_metadata:
+        upstream_request.update(workflow_metadata)
+
     vg = VideoGeneration(
         id=new_uuid7(),
         user_id=user.id,
@@ -1641,17 +1656,7 @@ async def _create_video_generation_record(
         generate_audio=body.generate_audio,
         seed=body.seed,
         watermark=body.watermark,
-        upstream_request={
-            "model": body.model,
-            "requested_model": body.model,
-            "billing_model": billing_model,
-            "provider_name": provider.name,
-            "provider_kind": provider.kind,
-            "upstream_model": upstream_model,
-            "input_image_url": input_image_url,
-            "reference_media": reference_snapshots,
-            "pricing_variant": pricing_variant,
-        },
+        upstream_request=upstream_request,
         diagnostics={
             "request_fingerprint": request_fingerprint,
             "reference_media_count": len(reference_snapshots),

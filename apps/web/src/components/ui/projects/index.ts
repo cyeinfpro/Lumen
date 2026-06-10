@@ -8,3 +8,4 @@ export { ApparelWorkflowNewPage } from "./ApparelWorkflowNewPage";
 export { ApparelWorkflowDetail } from "./ApparelWorkflowDetail";
 export { PosterWorkflowNewPage } from "./PosterWorkflowNewPage";
 export { PosterWorkflowDetail } from "./PosterWorkflowDetail";
+export { StoryboardDetailPage, StoryboardIndexPage } from "./storyboard";
