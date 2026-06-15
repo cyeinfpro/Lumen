@@ -113,9 +113,11 @@ async def get_settings_view(db: AsyncSession) -> list[SystemSettingItem]:
             else None
         )
         # has_value: DB 非空 OR env 非空
-        has_value = bool((db_val is not None and db_val != "")) or bool(
-            env_val is not None and env_val != ""
-        ) or bool(desktop_val)
+        has_value = (
+            bool((db_val is not None and db_val != ""))
+            or bool(env_val is not None and env_val != "")
+            or bool(desktop_val)
+        )
         # value 显示：DB 优先；敏感字段 mask 为 None
         if spec.sensitive:
             display_val: str | None = None
@@ -136,9 +138,7 @@ async def get_settings_view(db: AsyncSession) -> list[SystemSettingItem]:
     return items
 
 
-async def update_settings(
-    db: AsyncSession, items: Iterable[tuple[str, str]]
-) -> None:
+async def update_settings(db: AsyncSession, items: Iterable[tuple[str, str]]) -> None:
     """批量 upsert：value="" 表示删除该 key。
 
     type-check 失败应在调用方先做（route 层），这里假设输入合法 key。
@@ -161,9 +161,7 @@ async def update_settings(
             continue
 
         existing = (
-            await db.execute(
-                select(SystemSetting).where(SystemSetting.key == key)
-            )
+            await db.execute(select(SystemSetting).where(SystemSetting.key == key))
         ).scalar_one_or_none()
         if existing is None:
             db.add(SystemSetting(key=key, value=value))
@@ -206,16 +204,16 @@ async def migrate_image_primary_route(db: AsyncSession) -> bool:
         )
     else:
         try:
-            db.add(SystemSetting(key="image.channel", value=channel))
-            db.add(SystemSetting(key="image.engine", value=engine))
-            await db.flush()
+            async with db.begin_nested():
+                db.add(SystemSetting(key="image.channel", value=channel))
+                db.add(SystemSetting(key="image.engine", value=engine))
+                await db.flush()
         except IntegrityError:
             # Why: align sqlite to the postgres on_conflict_do_nothing semantics
             # — a unique-key conflict means the migration target row already
             # exists, which is the post-condition we want. Treat skip as success
             # so the caller does not need branchy "did this actually do work"
             # logic; the early guard above already filters the no-op case.
-            await db.rollback()
             return True
     logger.info(
         "migrated image.primary_route=%s -> channel=%s engine=%s",
@@ -234,9 +232,7 @@ async def migrate_provider_purposes(db: AsyncSession) -> bool:
     unrelated provider field.
     """
     row = (
-        await db.execute(
-            select(SystemSetting).where(SystemSetting.key == "providers")
-        )
+        await db.execute(select(SystemSetting).where(SystemSetting.key == "providers"))
     ).scalar_one_or_none()
     if row is None or not row.value:
         return False

@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from fastapi import Request
 
 from app.routes import admin_backups, admin_release, admin_update
 from app.services import update_check
@@ -111,6 +113,94 @@ def test_update_runner_env_forces_target_tag_and_version() -> None:
     assert "LUMEN_VERSION=1.2.4" in lines
     assert admin_update._version_from_update_tag("v1.2.4") == "1.2.4"
     assert admin_update._version_from_update_tag("main") is None
+
+
+def _admin_update_request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/admin/update",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed_target_tag", [None, "v1.2.4"])
+async def test_trigger_update_requires_confirmed_target_tag_match(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    confirmed_target_tag: str | None,
+) -> None:
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    (script_dir / "update.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(admin_update.settings, "lumen_scripts_dir", str(script_dir))
+    monkeypatch.setattr(admin_update, "_read_marker", lambda: None)
+    monkeypatch.setattr(admin_update, "_maintenance_marker_busy", lambda: False)
+    audits: list[dict[str, Any]] = []
+
+    async def fake_resolve_update_proxy(_db: Any) -> tuple[None, None]:
+        return None, None
+
+    async def fake_update_channel(_db: Any) -> str:
+        return "stable"
+
+    async def fake_update_allow_prerelease(_db: Any) -> bool:
+        return False
+
+    async def fake_update_check_ttl(_db: Any) -> int:
+        return 0
+
+    async def fake_audit(_request, _admin, *, event_type: str, details: dict[str, Any]):
+        audits.append({"event_type": event_type, "details": details})
+
+    class CheckService:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def check(self, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(resolved_image_tag="v1.2.3")
+
+    monkeypatch.setattr(admin_update, "_resolve_update_proxy", fake_resolve_update_proxy)
+    monkeypatch.setattr(admin_update, "_update_channel", fake_update_channel)
+    monkeypatch.setattr(
+        admin_update,
+        "_update_allow_prerelease",
+        fake_update_allow_prerelease,
+    )
+    monkeypatch.setattr(admin_update, "_update_check_ttl", fake_update_check_ttl)
+    monkeypatch.setattr(admin_update, "write_admin_audit_isolated", fake_audit)
+    monkeypatch.setattr(admin_update, "UpdateCheckService", CheckService)
+
+    body = admin_update.UpdateTriggerIn(
+        confirm_update=True,
+        confirmed_target_tag=confirmed_target_tag,
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await admin_update.trigger_update(
+            _admin_update_request(),
+            SimpleNamespace(id="admin-1", email="admin@example.com"),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            body,
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 403
+    assert excinfo.value.detail["error"]["code"] == "update_confirmation_required"
+    assert audits == [
+        {
+            "event_type": "admin.update.confirmation_required",
+            "details": {
+                "target_tag": "v1.2.3",
+                "confirmed_target_tag": confirmed_target_tag,
+                "force_redeploy": False,
+                "channel": "stable",
+            },
+        }
+    ]
 
 
 def test_update_step_fail_lines_are_reported_as_failed_done_steps() -> None:

@@ -823,10 +823,13 @@ async def password_reset_confirm(
         redis, f"rl:pwd_reset_confirm:ip:{require_client_ip(request)}"
     )
     key = _password_reset_key(token)
+    await _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER.check(
+        redis, f"rl:pwd_reset_confirm:token:{hash_token(token)}"
+    )
     try:
-        raw_user_id = _redis_text(await redis.getdel(key))
+        raw_user_id = _redis_text(await redis.get(key))
     except Exception as exc:
-        logger.error("password_reset_token_consume_failed", exc_info=True)
+        logger.error("password_reset_token_read_failed", exc_info=True)
         raise _bad(
             "reset_unavailable",
             "password reset is temporarily unavailable",
@@ -837,6 +840,17 @@ async def password_reset_confirm(
     await _PASSWORD_RESET_CONFIRM_USER_LIMITER.check(
         redis, f"rl:pwd_reset_confirm:user:{raw_user_id}"
     )
+    try:
+        consumed_user_id = _redis_text(await redis.getdel(key))
+    except Exception as exc:
+        logger.error("password_reset_token_consume_failed", exc_info=True)
+        raise _bad(
+            "reset_unavailable",
+            "password reset is temporarily unavailable",
+            503,
+        ) from exc
+    if consumed_user_id != raw_user_id:
+        raise _bad("invalid_token", "reset token is invalid or expired", 400)
 
     user = (
         await db.execute(select(User).where(User.id == raw_user_id).with_for_update())

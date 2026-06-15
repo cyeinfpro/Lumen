@@ -279,17 +279,23 @@ def test_update_preflight_matches_byok_dev_fallback_policy() -> None:
     assert "dev|development|local|test)" in text
 
 
-def test_web_port_defaults_to_public_bind_and_install_preserves_explicit_override() -> (
+def test_web_port_defaults_to_loopback_and_public_bind_is_explicit_opt_in() -> (
     None
 ):
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    public_dns_compose = (ROOT / "docker-compose.public-dns.yml").read_text(
+        encoding="utf-8"
+    )
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     install = INSTALL.read_text(encoding="utf-8")
-    assert '"${WEB_BIND_HOST:-0.0.0.0}:3000:3000"' in compose
-    assert "WEB_BIND_HOST=0.0.0.0" in env_example
+    assert '"${WEB_BIND_HOST:-127.0.0.1}:3000:3000"' in compose
+    assert "WEB_BIND_HOST=127.0.0.1" in env_example
+    assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' not in compose
+    assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' in public_dns_compose
     assert "LUMEN_WEB_BIND_HOST" in install
-    assert 'env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"' in install
-    assert "WEB_BIND_HOST 是旧默认 127.0.0.1" in install
+    assert "LUMEN_EXPOSE_WEB_DIRECTLY" in install
+    assert 'env_file_set "${shared_env}" WEB_BIND_HOST "127.0.0.1"' in install
+    assert "WEB_BIND_HOST 是旧公开默认值 0.0.0.0" in install
 
 
 def test_workflow_actions_are_sha_pinned() -> None:
@@ -553,17 +559,79 @@ def test_update_preserves_web_bind_and_proxy_env() -> None:
     assert 'emit_info check reason "missing_shared_env"' in update
     assert 'emit_info check reason "target_tag_empty"' in update
     assert (
-        'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "0.0.0.0"'
+        'lumen_set_env_value_in_file "${SHARED_ENV}" WEB_BIND_HOST "127.0.0.1"'
         in update
     )
-    assert "Web 将监听所有网卡 3000" in update
-    assert "WEB_BIND_HOST 是旧默认 127.0.0.1" in update
+    assert "Web 仅监听本机回环" in update
+    assert "WEB_BIND_HOST 是旧公开默认值 0.0.0.0" in update
+    assert "LUMEN_EXPOSE_WEB_DIRECTLY" in update
     assert (
         'emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"' in update
     )
     assert "LUMEN_HTTP_PROXY HTTPS_PROXY HTTP_PROXY" in lib
     assert 'export HTTP_PROXY="${proxy_url}"' in lib
     assert 'export HTTPS_PROXY="${proxy_url}"' in lib
+    assert "lumen_verify_image_signature_if_required" in lib
+    assert "LUMEN_VERIFY_IMAGE_SIGNATURES=1" in lib
+    assert "cosign verify" in lib
+    assert "lumen_record_image_digest" in lib
+    assert "LUMEN_IMAGE_DIGEST_LOCK_FILE" in lib
+    assert "拒绝执行未校验的 docker compose pull" in lib
+
+
+def test_signature_verification_fails_closed_when_compose_images_cannot_be_enumerated(
+    tmp_path: Path,
+) -> None:
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    log = tmp_path / "docker.log"
+    fake_docker = fakebin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "${TEST_DOCKER_LOG:?}"
+has_compose=0
+has_config=0
+has_images=0
+for arg in "$@"; do
+  [ "$arg" = "compose" ] && has_compose=1
+  [ "$arg" = "config" ] && has_config=1
+  [ "$arg" = "--images" ] && has_images=1
+done
+if [ "$has_compose" = "1" ] && [ "$has_config" = "1" ] && [ "$has_images" = "1" ]; then
+  exit 2
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+
+    env = script_env()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "TEST_DOCKER_LOG": str(log),
+            "LUMEN_VERIFY_IMAGE_SIGNATURES": "1",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            f". {shlex.quote(str(LIB))}; lumen_compose_pull_per_image {shlex.quote(str(tmp_path))}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "拒绝执行未校验的 docker compose pull" in result.stderr
+    docker_log = log.read_text(encoding="utf-8")
+    assert "config --images" in docker_log
+    assert "pull" not in docker_log
 
 
 def test_lumen_configure_proxy_env_reads_shared_env(tmp_path: Path) -> None:
@@ -2185,6 +2253,9 @@ def test_docker_release_workflow_builds_amd64_and_arm64() -> None:
     assert "type=semver,pattern=v{{version}}" in workflow
     assert "type=semver,pattern=v{{major}}.{{minor}}" in workflow
     assert "type=semver,pattern=v{{major}}" in workflow
+    assert "go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1" in workflow
+    assert "cosign sign --yes" in workflow
+    assert "id-token: write" in workflow
     assert "cp .env.example .env" in workflow
     assert "Compose config" in workflow
     assert "Image start smoke" in workflow

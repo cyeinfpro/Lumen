@@ -1160,6 +1160,8 @@ async def _probe_one(
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_PROBE_TIMEOUT_S),
             proxy=proxy_url,
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
             resp = await client.post(url, json=body, headers=headers)
         latency = int((time.monotonic() - t0) * 1000)

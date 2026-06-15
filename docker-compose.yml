@@ -202,11 +202,6 @@ services:
       <<: *app-runtime-env
       LUMEN_WORKER_HEALTH_INTERVAL: "${LUMEN_WORKER_HEALTH_INTERVAL:-30}"
       LUMEN_WORKER_HEALTH_KEY: "${LUMEN_WORKER_HEALTH_KEY:-arq:queue:health-check}"
-    # Why: docker 内置 DNS 在部分跨境链路冷查较慢；默认给公共解析器，
-    # 但允许企业/国内网络按主机情况覆盖。
-    dns:
-      - "${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"
-      - "${LUMEN_WORKER_DNS_SECONDARY:-8.8.8.8}"
     restart: unless-stopped
     stop_signal: SIGTERM
     # 4K long task envelope: arq 1800s task timeout + 30s buffer; do not shorten (see §8.5).
@@ -269,7 +264,7 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "${WEB_BIND_HOST:-0.0.0.0}:3000:3000"
+      - "${WEB_BIND_HOST:-127.0.0.1}:3000:3000"
     networks:
       - lumen_backend
     healthcheck:

@@ -225,6 +225,23 @@ jobs:
             LUMEN_REVISION=${{ github.sha }}
             LUMEN_CREATED=${{ steps.meta-vars.outputs.build_time }}
 
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Sign pushed tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          while IFS= read -r image; do
+            [ -n "${image}" ] || continue
+            cosign sign --yes "${image}"
+          done <<< "${{ steps.meta.outputs.tags }}"
+
   build-web:
     name: Build & push lumen-web (${{ matrix.platform.tag }})
     runs-on: ${{ matrix.platform.runs_on }}
@@ -313,6 +330,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -359,6 +377,23 @@ jobs:
       - name: Inspect manifest
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lumen-web:${{ steps.meta.outputs.version }}
+
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.1
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Sign lumen-web manifest tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          while IFS= read -r image; do
+            [ -n "${image}" ] || continue
+            cosign sign --yes "${image}"
+          done <<< "${{ steps.meta.outputs.tags }}"
 
   release:
     name: Publish GitHub Release

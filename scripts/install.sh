@@ -634,6 +634,13 @@ env_file_get() {
     lumen_read_dotenv_value "$1" "$2"
 }
 
+lumen_env_truthy() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 generate_hex_secret() {
     local bytes="${1:-32}"
     openssl rand -hex "${bytes}"
@@ -1511,15 +1518,20 @@ prepare_env_file() {
     env_file_set "${shared_env}" LUMEN_APP_UID        "${LUMEN_APP_UID}"
     env_file_set "${shared_env}" LUMEN_APP_GID        "${LUMEN_APP_GID}"
     env_file_set "${shared_env}" LUMEN_APP_STORAGE_GID "${LUMEN_APP_STORAGE_GID}"
-    local current_web_bind_host
+    local current_web_bind_host current_expose_web_directly
     current_web_bind_host="$(env_file_get WEB_BIND_HOST "${shared_env}")"
+    current_expose_web_directly="$(env_file_get LUMEN_EXPOSE_WEB_DIRECTLY "${shared_env}")"
     if [ -n "${LUMEN_WEB_BIND_HOST:-}" ]; then
         env_file_set "${shared_env}" WEB_BIND_HOST "${LUMEN_WEB_BIND_HOST}"
-    elif [ -z "${current_web_bind_host}" ] || [ "${current_web_bind_host}" = "127.0.0.1" ]; then
-        if [ "${current_web_bind_host}" = "127.0.0.1" ]; then
-            log_warn "WEB_BIND_HOST 是旧默认 127.0.0.1，改为 0.0.0.0；如需反代-only，请设置 LUMEN_WEB_BIND_HOST=127.0.0.1。"
-        fi
+    elif lumen_env_truthy "${LUMEN_EXPOSE_WEB_DIRECTLY:-}" || lumen_env_truthy "${current_expose_web_directly}"; then
+        env_file_set "${shared_env}" LUMEN_EXPOSE_WEB_DIRECTLY "1"
         env_file_set "${shared_env}" WEB_BIND_HOST "0.0.0.0"
+        log_warn "LUMEN_EXPOSE_WEB_DIRECTLY=1：Web 将监听所有网卡 3000，请确认防火墙与生产 APP_ENV。"
+    elif [ -z "${current_web_bind_host}" ] || [ "${current_web_bind_host}" = "0.0.0.0" ]; then
+        if [ "${current_web_bind_host}" = "0.0.0.0" ]; then
+            log_warn "WEB_BIND_HOST 是旧公开默认值 0.0.0.0，改为 127.0.0.1；如需直连公网，请设置 LUMEN_EXPOSE_WEB_DIRECTLY=1。"
+        fi
+        env_file_set "${shared_env}" WEB_BIND_HOST "127.0.0.1"
     fi
 
     # 创建 release/.env -> ../../shared/.env 的相对 symlink
@@ -2064,13 +2076,21 @@ print_summary() {
     local image_tag web_bind_host
     image_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
     web_bind_host="$(env_file_get WEB_BIND_HOST "${shared_env}")"
-    web_bind_host="${web_bind_host:-0.0.0.0}"
+    web_bind_host="${web_bind_host:-127.0.0.1}"
+    local browser_url browser_note
+    if [ "${web_bind_host}" = "0.0.0.0" ]; then
+        browser_url="http://<服务器IP>:3000/"
+        browser_note="云安全组需放行 TCP 3000；建议生产使用反代"
+    else
+        browser_url="http://127.0.0.1:3000/"
+        browser_note="默认仅本机可访问；公网访问请配置 nginx/Caddy 反代"
+    fi
     cat <<EOF
 
   ${LUMEN_C_BOLD}Lumen 安装完成（Docker Compose 全栈）${LUMEN_C_RESET}
 
   Web 监听 ......... ${web_bind_host}:3000
-  浏览器访问 ....... http://<服务器IP>:3000/（云安全组需放行 TCP 3000）
+  浏览器访问 ....... ${browser_url}（${browser_note}）
   API 健康检查 ..... http://127.0.0.1:8000/healthz
   管理员邮箱 ....... ${INSTALL_ADMIN_EMAIL:-（已存在或非交互模式未设置）}
   Provider 配置 .... 登录后 → 右上角「管理 → 上游 Provider」

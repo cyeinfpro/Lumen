@@ -716,6 +716,9 @@ def test_bug_audit_infra_scripts_parse_with_bash_n() -> None:
 
 def test_compose_healthchecks_are_local_and_hardened() -> None:
     compose = COMPOSE.read_text(encoding="utf-8")
+    public_dns_compose = (ROOT / "docker-compose.public-dns.yml").read_text(
+        encoding="utf-8"
+    )
     bluegreen = BLUEGREEN_COMPOSE.read_text(encoding="utf-8")
 
     assert "ulimits:" in compose
@@ -734,8 +737,10 @@ def test_compose_healthchecks_are_local_and_hardened() -> None:
     assert "redis_client.get(key)" in compose
     assert 'needle = b"\\x00-m\\x00app.main\\x00"' in compose
     assert 'redis.from_url(os.environ["REDIS_URL"]).ping()' in compose
-    assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' in compose
-    assert '"${LUMEN_WORKER_DNS_SECONDARY:-8.8.8.8}"' in compose
+    assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' not in compose
+    assert '"${LUMEN_WORKER_DNS_SECONDARY:-8.8.8.8}"' not in compose
+    assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' in public_dns_compose
+    assert '"${LUMEN_WORKER_DNS_SECONDARY:-8.8.8.8}"' in public_dns_compose
 
     assert "api-green:" in bluegreen
     assert "init: true" in bluegreen

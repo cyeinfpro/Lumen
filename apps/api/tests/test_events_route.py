@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from app.routes import events
 
@@ -21,6 +21,101 @@ def _request() -> Request:
             "client": ("127.0.0.1", 12345),
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_sse_connection_slot_limits_and_releases() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.tokens: dict[str, float] = {}
+            self.expire_calls = 0
+
+        async def eval(self, script: str, _numkeys: int, key: str, *args: Any) -> int:
+            assert key == "sse:connections:user-1"
+            if "zcard" in script and "zadd" in script:
+                now = float(args[0])
+                ttl = int(args[1])
+                limit = int(args[2])
+                expires_at = float(args[3])
+                token = str(args[4])
+                assert ttl == 90
+                self.tokens = {
+                    current_token: expires
+                    for current_token, expires in self.tokens.items()
+                    if expires > now
+                }
+                self.expire_calls += 1
+                if len(self.tokens) >= limit:
+                    return 0
+                self.tokens[token] = expires_at
+                return 1
+            if "zrem" in script:
+                token = str(args[0])
+                self.tokens.pop(token, None)
+                if self.tokens:
+                    self.expire_calls += 1
+                return 1
+            raise AssertionError(f"unexpected script: {script}")
+
+    redis = Redis()
+
+    slot = await events._acquire_sse_connection_slot(redis, "user-1", limit=1)
+    assert slot is not None
+    assert slot[0] == "sse:connections:user-1"
+    assert len(redis.tokens) == 1
+    assert redis.expire_calls == 1
+
+    with pytest.raises(HTTPException) as excinfo:
+        await events._acquire_sse_connection_slot(redis, "user-1", limit=1)
+
+    assert excinfo.value.status_code == 429
+    assert len(redis.tokens) == 1
+
+    await events._release_sse_connection_slot(redis, slot)
+
+    assert redis.tokens == {}
+
+
+@pytest.mark.asyncio
+async def test_sse_connection_slot_refreshes_only_its_own_token() -> None:
+    class Redis:
+        def __init__(self) -> None:
+            self.tokens: dict[str, float] = {"other": time.time() + 60}
+
+        async def eval(self, script: str, _numkeys: int, key: str, *args: Any) -> int:
+            assert key == "sse:connections:user-1"
+            if "zscore" in script:
+                now = float(args[0])
+                token = str(args[2])
+                expires_at = float(args[3])
+                self.tokens = {
+                    current_token: expires
+                    for current_token, expires in self.tokens.items()
+                    if expires > now
+                }
+                if token not in self.tokens:
+                    return 0
+                self.tokens[token] = expires_at
+                return 1
+            if "zrem" in script:
+                self.tokens.pop(str(args[0]), None)
+                return 1
+            raise AssertionError(f"unexpected script: {script}")
+
+    redis = Redis()
+
+    await events._refresh_sse_connection_slot(
+        redis,
+        ("sse:connections:user-1", "missing"),
+    )
+
+    assert set(redis.tokens) == {"other"}
+
+    redis.tokens["mine"] = time.time() + 1
+    await events._refresh_sse_connection_slot(redis, ("sse:connections:user-1", "mine"))
+
+    assert set(redis.tokens) == {"other", "mine"}
+    assert redis.tokens["mine"] > time.time() + 80
 
 
 def test_replay_payload_filter_matches_requested_channels() -> None:

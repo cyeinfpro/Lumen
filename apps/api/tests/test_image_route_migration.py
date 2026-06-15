@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.runtime_settings import (
     image_primary_route_to_parts,
@@ -19,9 +20,13 @@ class _Rows:
 
 
 class _FakeDb:
-    def __init__(self, rows: list[tuple[str, str]]) -> None:
+    def __init__(
+        self, rows: list[tuple[str, str]], *, flush_error: Exception | None = None
+    ) -> None:
         self.rows = rows
+        self.flush_error = flush_error
         self.added: list[SimpleNamespace] = []
+        self.rolled_back = False
 
     async def execute(self, _stmt: object) -> _Rows:
         return _Rows(self.rows)
@@ -33,7 +38,22 @@ class _FakeDb:
         self.added.append(SimpleNamespace(key=obj.key, value=obj.value))
 
     async def flush(self) -> None:
+        if self.flush_error is not None:
+            raise self.flush_error
         return None
+
+    def begin_nested(self):
+        class _Savepoint:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *_exc_info):
+                return False
+
+        return _Savepoint()
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
 
 
 @pytest.mark.parametrize(
@@ -76,3 +96,18 @@ async def test_migrate_image_primary_route_is_idempotent_when_new_key_exists() -
 
     assert changed is False
     assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_migrate_image_primary_route_conflict_does_not_rollback_outer_txn() -> (
+    None
+):
+    db = _FakeDb(
+        [("image.primary_route", "image_jobs")],
+        flush_error=IntegrityError("insert", {}, Exception("duplicate")),
+    )
+
+    changed = await migrate_image_primary_route(db)  # type: ignore[arg-type]
+
+    assert changed is True
+    assert db.rolled_back is False

@@ -2635,6 +2635,8 @@ export interface AdminUpdateTriggerIn {
   target_tag?: string | null;
   force_redeploy?: boolean;
   channel?: string | null;
+  confirm_update?: boolean;
+  confirmed_target_tag?: string | null;
 }
 
 export interface AdminRollbackOut {

@@ -46,6 +46,8 @@ _COMPACTION_EVENT = "context.compaction"
 _COMPACTION_CHANNEL_PREFIX = "lumen:events:conversation:"
 _COMPACTION_MERGE_WINDOW_SECONDS = 0.2
 MAX_SSE_CHANNELS = 64
+SSE_CONNECTION_LIMIT = 8
+SSE_CONNECTION_TTL_SECONDS = 90
 # 15s 注释级 keepalive 让 nginx / 浏览器知道连接活；
 # 60s 内若没有任何 upstream 数据再补一个 JSON `idle` 心跳，
 # 让前端区分 “连接活但上游空闲” vs “上游真的有事件”。
@@ -105,6 +107,104 @@ def _http(
     if extra:
         error.update(extra)
     return HTTPException(status_code=http, detail={"error": error})
+
+
+def _sse_connection_key(user_id: str) -> str:
+    return f"sse:connections:{user_id}"
+
+
+SseConnectionSlot = tuple[str, str]
+
+
+async def _acquire_sse_connection_slot(
+    redis,
+    user_id: str,
+    *,
+    limit: int = SSE_CONNECTION_LIMIT,
+    ttl_seconds: int = SSE_CONNECTION_TTL_SECONDS,
+) -> SseConnectionSlot | None:
+    key = _sse_connection_key(user_id)
+    token = uuid.uuid4().hex
+    now = time.time()
+    expires_at = now + ttl_seconds
+    script = (
+        "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); "
+        "local count = redis.call('zcard', KEYS[1]); "
+        "if count >= tonumber(ARGV[3]) then "
+        "redis.call('expire', KEYS[1], ARGV[2]); "
+        "return 0; "
+        "end; "
+        "redis.call('zadd', KEYS[1], ARGV[4], ARGV[5]); "
+        "redis.call('expire', KEYS[1], ARGV[2]); "
+        "return 1"
+    )
+    try:
+        acquired = int(
+            await redis.eval(
+                script,
+                1,
+                key,
+                now,
+                ttl_seconds,
+                limit,
+                expires_at,
+                token,
+            )
+        )
+        if acquired != 1:
+            raise _http(
+                "too_many_sse_connections",
+                "too many open event streams for this user",
+                429,
+                {"limit": limit},
+            )
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning("sse connection limiter unavailable", exc_info=True)
+        return None
+    return key, token
+
+
+async def _refresh_sse_connection_slot(
+    redis,
+    slot: SseConnectionSlot,
+    *,
+    ttl_seconds: int = SSE_CONNECTION_TTL_SECONDS,
+) -> None:
+    key, token = slot
+    now = time.time()
+    expires_at = now + ttl_seconds
+    script = (
+        "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); "
+        "if redis.call('zscore', KEYS[1], ARGV[3]) then "
+        "redis.call('zadd', KEYS[1], ARGV[4], ARGV[3]); "
+        "redis.call('expire', KEYS[1], ARGV[2]); "
+        "return 1; "
+        "end; "
+        "return 0"
+    )
+    try:
+        await redis.eval(script, 1, key, now, ttl_seconds, token, expires_at)
+    except Exception:  # noqa: BLE001
+        logger.warning("sse connection limiter refresh failed", exc_info=True)
+
+
+async def _release_sse_connection_slot(redis, slot: SseConnectionSlot) -> None:
+    key, token = slot
+    script = (
+        "redis.call('zrem', KEYS[1], ARGV[1]); "
+        "if redis.call('zcard', KEYS[1]) == 0 then "
+        "redis.call('del', KEYS[1]); "
+        "else "
+        "redis.call('expire', KEYS[1], ARGV[2]); "
+        "end; "
+        "return 1"
+    )
+    try:
+        await redis.eval(script, 1, key, token, SSE_CONNECTION_TTL_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.warning("sse connection limiter release failed", exc_info=True)
 
 
 async def _validate_channels(
@@ -533,8 +633,18 @@ async def events(
     last_event_id = _sanitize_last_event_id(last_event_id)
     stream_key = f"{EVENTS_STREAM_PREFIX}{user.id}"
     redis = get_redis()
+    connection_slot_key = await _acquire_sse_connection_slot(redis, user.id)
 
     async def gen() -> AsyncIterator[dict]:
+        slot_released = False
+
+        async def release_slot_once() -> None:
+            nonlocal slot_released
+            if connection_slot_key is None or slot_released:
+                return
+            slot_released = True
+            await _release_sse_connection_slot(redis, connection_slot_key)
+
         # 1) Replay from per-user stream since last_event_id (if provided).
         # GEN-P0-7: `last_event_id` 必须是之前 XREAD 返回的原生 stream ID
         # (`ms-seq`)，这样 XREAD 从它严格之后继续；绝不本地生成假 ID。
@@ -582,6 +692,7 @@ async def events(
                 exc_info=True,
             )
             await pubsub.aclose()
+            await release_slot_once()
             raise
 
         last_keepalive = time.monotonic()
@@ -739,6 +850,8 @@ async def events(
                 now = time.monotonic()
                 if now - last_keepalive >= _KEEPALIVE_INTERVAL_SECONDS:
                     last_keepalive = now
+                    if connection_slot_key is not None:
+                        await _refresh_sse_connection_slot(redis, connection_slot_key)
                     yield {"event": "keepalive", "data": "{}"}
 
                 # idle 心跳：60s 内 upstream 无任何数据时，发一个 JSON `idle` 事件，
@@ -764,5 +877,6 @@ async def events(
             except Exception:
                 logger.warning("sse pubsub unsubscribe failed", exc_info=True)
             await pubsub.aclose()
+            await release_slot_once()
 
     return EventSourceResponse(gen())

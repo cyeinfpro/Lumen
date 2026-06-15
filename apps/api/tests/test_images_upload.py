@@ -81,6 +81,117 @@ def test_storage_path_rejects_traversal(tmp_path: Path) -> None:
         settings.storage_root = old
 
 
+def test_storage_free_space_guard_rejects_low_disk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = settings.storage_root
+    settings.storage_root = str(tmp_path)
+    monkeypatch.setenv("LUMEN_MIN_STORAGE_FREE_BYTES", "1000")
+    monkeypatch.setattr(
+        images.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=1000),
+    )
+    try:
+        images._ensure_storage_free_space(0)
+        with pytest.raises(Exception) as excinfo:
+            images._ensure_storage_free_space(1)
+        assert getattr(excinfo.value, "status_code", None) == 507
+    finally:
+        settings.storage_root = old
+
+
+@pytest.mark.asyncio
+async def test_sweep_orphan_image_files_dry_run_and_delete(tmp_path: Path) -> None:
+    kept = tmp_path / "u" / "user-1" / "uploads" / "img-1.png"
+    kept_variant = tmp_path / "u" / "user-1" / "uploads" / "img-1.display2048.webp"
+    kept_ref = tmp_path / "u" / "user-1" / "uploads" / "img-1.ref.webp"
+    orphan = tmp_path / "u" / "user-1" / "uploads" / "orphan.webp"
+    generated_orphan = tmp_path / "u" / "user-1" / "g" / "gen-1" / "orig.png"
+    video = tmp_path / "u" / "user-1" / "vref" / "video-1" / "original.mp4"
+    workflow = tmp_path / "workflows" / "run-1" / "artifact.json"
+    for path in (
+        kept,
+        kept_variant,
+        kept_ref,
+        orphan,
+        generated_orphan,
+        video,
+        workflow,
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"image")
+
+    class _RowsResult:
+        def __init__(self, rows=None, values=None):
+            self.rows = rows or []
+            self.values = values or []
+
+        def all(self):
+            return self.rows
+
+        def scalars(self):
+            class _ScalarList:
+                def __init__(self, values):
+                    self.values = values
+
+                def all(self):
+                    return self.values
+
+            return _ScalarList(self.values)
+
+    class _SweepDb:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, _stmt):
+            self.calls += 1
+            if self.calls % 2 == 1:
+                return _RowsResult(
+                    rows=[
+                        (
+                            "u/user-1/uploads/img-1.png",
+                            {
+                                "normalized_ref": {
+                                    "storage_key": "u/user-1/uploads/img-1.ref.webp"
+                                }
+                            },
+                        )
+                    ]
+                )
+            return _RowsResult(values=["u/user-1/uploads/img-1.display2048.webp"])
+
+    db = _SweepDb()
+    dry_run = await images.sweep_orphan_image_files(
+        db,  # type: ignore[arg-type]
+        storage_root=str(tmp_path),
+        dry_run=True,
+    )
+    assert dry_run["orphans"] == [
+        "u/user-1/uploads/orphan.webp",
+        "u/user-1/g/gen-1/orig.png",
+    ]
+    assert orphan.exists()
+    assert generated_orphan.exists()
+    assert video.exists()
+    assert workflow.exists()
+
+    deleted = await images.sweep_orphan_image_files(
+        db,  # type: ignore[arg-type]
+        storage_root=str(tmp_path),
+        dry_run=False,
+    )
+    assert deleted["deleted"] == 2
+    assert not orphan.exists()
+    assert not generated_orphan.exists()
+    assert kept.exists()
+    assert kept_variant.exists()
+    assert kept_ref.exists()
+    assert video.exists()
+    assert workflow.exists()
+
+
 def test_upload_write_is_atomic_and_rejects_conflict(tmp_path: Path) -> None:
     path = tmp_path / "image.png"
 
